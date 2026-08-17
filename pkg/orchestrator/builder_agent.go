@@ -411,6 +411,12 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		if err == nil {
 			return resp, nil
 		}
+		// A provider may return billable content alongside a stream or
+		// transport error. Let Controller persist/account that fragment before
+		// deciding whether the turn is incomplete; never discard it here.
+		if resp != nil {
+			return resp, fmt.Errorf("model call failed after partial response: %w", err)
+		}
 		if a.toolRegistry != nil && isToolUnsupportedError(err) {
 			// The model rejected the tool schema outright: retry this round
 			// once with tools off instead of failing the turn.

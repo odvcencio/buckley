@@ -403,12 +403,13 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:       agentloop.New(coordinatorGovernorConfig(maxIterations)),
-		FinalizeOnStop: true,
-		BuildRequest:   buildRequest,
-		CallModel:      callModel,
-		DispatchTools:  dispatchTools,
-		History:        history,
+		Governor:          agentloop.New(coordinatorGovernorConfig(maxIterations)),
+		FinalizeOnStop:    true,
+		LifecycleObserver: telemetry.NewAgentLoopObserver(r.telemetry),
+		BuildRequest:      buildRequest,
+		CallModel:         callModel,
+		DispatchTools:     dispatchTools,
+		History:           history,
 	})
 	if err != nil {
 		return &answer, err

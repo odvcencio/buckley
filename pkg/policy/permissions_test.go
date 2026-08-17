@@ -32,7 +32,7 @@ func TestMatchGlobPath(t *testing.T) {
 	}
 }
 
-func TestEvaluatePermissionLayers_FirstMatchPerLayer(t *testing.T) {
+func TestEvaluatePermissionLayers_SafetyActionBeatsEarlierAllow(t *testing.T) {
 	layer := PermissionLayer{
 		Name: "test",
 		Rules: []PermissionRule{
@@ -42,8 +42,8 @@ func TestEvaluatePermissionLayers_FirstMatchPerLayer(t *testing.T) {
 	}
 	req := PermissionRequest{Tool: "read_file", Category: "file_read", Arg: "build/output.log"}
 	dec := EvaluatePermissionLayers(req, layer)
-	if !dec.Matched || dec.Action != PermissionAllow {
-		t.Fatalf("expected first rule (allow) to win within a layer, got %+v", dec)
+	if !dec.Matched || dec.Action != PermissionDeny {
+		t.Fatalf("expected safety deny to win within a layer, got %+v", dec)
 	}
 }
 
@@ -102,6 +102,40 @@ func TestEvaluatePermissionLayers_LayerPriorityWhenNoDeny(t *testing.T) {
 	}
 }
 
+func TestEvaluatePermissionLayers_AllowCannotAuthorizeControlText(t *testing.T) {
+	allow := PermissionLayer{
+		Name:  "caller",
+		Rules: []PermissionRule{{Tool: "run_shell", ArgPattern: "go test *", Action: PermissionAllow}},
+	}
+	for _, value := range []string{
+		"go test ./...\nrm -rf /",
+		"go test ./...\rrm -rf /",
+		"go test ./...\x00rm -rf /",
+		"go test ./...; rm -rf /",
+		"go test ./... && rm -rf /",
+		"go test ./... || rm -rf /",
+	} {
+		t.Run(value, func(t *testing.T) {
+			dec := EvaluatePermissionLayers(PermissionRequest{Tool: "run_shell", Category: "shell", Arg: value}, allow)
+			if dec.Matched {
+				t.Fatalf("broad allow matched control-separated command: %+v", dec)
+			}
+		})
+	}
+}
+
+func TestEvaluatePermissionLayers_ExplicitControlAllowRemainsPossible(t *testing.T) {
+	value := "go test ./...\nrm -rf ./tmp"
+	allow := PermissionLayer{
+		Name:  "caller",
+		Rules: []PermissionRule{{Tool: "run_shell", ArgPattern: "go test *\nrm -rf *", Action: PermissionAllow}},
+	}
+	dec := EvaluatePermissionLayers(PermissionRequest{Tool: "run_shell", Category: "shell", Arg: value}, allow)
+	if !dec.Matched || dec.Action != PermissionAllow {
+		t.Fatalf("explicitly typed control allow did not match: %+v", dec)
+	}
+}
+
 func TestEvaluatePermissionLayers_NoMatchAnyLayer(t *testing.T) {
 	req := PermissionRequest{Tool: "read_file", Category: "file_read", Arg: "README.md"}
 	dec := EvaluatePermissionLayers(req, PermissionLayer{Name: "empty"})
@@ -147,5 +181,27 @@ func TestMatchArg_ShellCommandGlob(t *testing.T) {
 	}
 	if matchArg(req, "*wget*") {
 		t.Fatal("expected shell command glob not to match unrelated pattern")
+	}
+}
+
+func TestMatchGlob_WildcardsSpanControlSeparatedText(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		value   string
+		want    bool
+	}{
+		{name: "line feed", pattern: "*rm -rf*", value: "rm -rf /outside\n:", want: true},
+		{name: "carriage return", pattern: "*rm -rf*", value: "prefix\rrm -rf /outside", want: true},
+		{name: "nul", pattern: "*rm -rf*", value: "prefix\x00rm -rf /outside", want: true},
+		{name: "question wildcard line feed", pattern: "before?after", value: "before\nafter", want: true},
+		{name: "unrelated across line feed", pattern: "*git push*", value: "rm -rf /outside\n:", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchGlob(tt.pattern, tt.value); got != tt.want {
+				t.Fatalf("matchGlob(%q, %q) = %t, want %t", tt.pattern, tt.value, got, tt.want)
+			}
+		})
 	}
 }

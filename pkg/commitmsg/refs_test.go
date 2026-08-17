@@ -1,6 +1,9 @@
 package commitmsg
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNeutralizeCloseDirectives(t *testing.T) {
 	cases := []struct {
@@ -66,5 +69,42 @@ func TestIssueRefLine(t *testing.T) {
 		if got := IssueRefLine(tc.in); got != tc.want {
 			t.Errorf("IssueRefLine(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+	if got := IssueRefLine("#14\nCloses #99"); got != "" {
+		t.Fatalf("unsafe issue reference should be rejected, got %q", got)
+	}
+}
+
+func TestAppendChangeMetadataIsOpaqueAndIdempotent(t *testing.T) {
+	metadata := ChangeMetadata{
+		Digest:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Files:       4,
+		Insertions:  28,
+		Deletions:   9,
+		BinaryFiles: 1,
+	}
+	message := "fix(review): preserve evidence\n\n- Keep the staged change identity stable\n"
+
+	got := AppendChangeMetadata(message, metadata)
+	if got != "fix(review): preserve evidence\n\n- Keep the staged change identity stable\n\n"+
+		"Buckley-Change-Hash: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"+
+		"Buckley-Change-Stats: files=4 insertions=28 deletions=9 binaries=1\n" {
+		t.Fatalf("unexpected metadata rendering:\n%s", got)
+	}
+	if strings.Contains(got, "review") == false {
+		t.Fatal("expected ordinary commit prose to remain")
+	}
+	if strings.Contains(got, "pkg/") || strings.Contains(got, "staged change identity") == false {
+		t.Fatal("metadata unexpectedly discarded or exposed implementation details")
+	}
+	if twice := AppendChangeMetadata(got, metadata); twice != got {
+		t.Fatalf("metadata append is not idempotent:\nfirst:\n%s\nsecond:\n%s", got, twice)
+	}
+}
+
+func TestAppendChangeMetadataRejectsInvalidDigest(t *testing.T) {
+	metadata := ChangeMetadata{Digest: "sha256:not-a-digest", Files: 1}
+	if got := AppendChangeMetadata("fix: safe", metadata); got != "fix: safe\n" {
+		t.Fatalf("invalid metadata should be ignored, got %q", got)
 	}
 }

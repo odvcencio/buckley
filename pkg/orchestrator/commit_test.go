@@ -1,9 +1,13 @@
 package orchestrator
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/config"
 )
 
@@ -179,4 +183,59 @@ func TestNewCommitGenerator(t *testing.T) {
 	if cg.cfg != cfg {
 		t.Error("expected config to be set")
 	}
+}
+
+func TestCommitGeneratorGetDiffDoesNotStageUnrelatedWorktreeChanges(t *testing.T) {
+	dir := t.TempDir()
+	orchestratorGit(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orchestratorGit(t, dir, "add", "tracked.txt")
+	orchestratorGit(t, dir, "-c", "user.email=buckley@example.test", "-c", "user.name=Buckley", "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(dir, "unreviewed.txt"), []byte("must remain unstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if _, err := (&CommitGenerator{}).getDiff(); err == nil {
+		t.Fatal("getDiff succeeded with no staged changes")
+	}
+	if staged := orchestratorGit(t, dir, "diff", "--cached", "--name-only"); strings.TrimSpace(staged) != "" {
+		t.Fatalf("getDiff staged unrelated worktree changes: %q", staged)
+	}
+}
+
+func TestCommitGeneratorFormatCommitMessageIncludesOpaqueMetadata(t *testing.T) {
+	commit := &CommitInfo{
+		Type:    "update",
+		Subject: "refresh review workflow",
+		Body:    "Keep the generated commit bound to the staged review.",
+		ChangeMetadata: commitmsg.ChangeMetadata{
+			Digest:     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Files:      3,
+			Insertions: 7,
+			Deletions:  2,
+		},
+	}
+
+	message := (&CommitGenerator{}).FormatCommitMessage(commit)
+	if !strings.Contains(message, "Buckley-Change-Hash: sha256:") || !strings.Contains(message, "Buckley-Change-Stats: files=3 insertions=7 deletions=2 binaries=0") {
+		t.Fatalf("formatted commit omitted opaque metadata: %q", message)
+	}
+	for _, forbidden := range []string{"tracked.go", "source text", "pkg/"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("formatted commit leaked specific change detail %q: %q", forbidden, message)
+		}
+	}
+}
+
+func orchestratorGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+	return string(output)
 }

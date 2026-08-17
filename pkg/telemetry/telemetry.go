@@ -88,7 +88,24 @@ const (
 	// Machine review events.
 	EventMachineReview    EventType = "machine.review"
 	EventMachineIteration EventType = "machine.iteration"
-	EventDebug            EventType = "debug"
+
+	// Agent-loop lifecycle events are the live, metadata-only projection of
+	// pkg/agentloop.Controller transitions. Durable bodies remain in the
+	// runledger/evidence stores; these events are for TUI, GoSX, and ACP views.
+	EventAgentTurnStarted    EventType = "agent.turn.started"
+	EventAgentAttemptStarted EventType = "agent.turn.attempt.started"
+	EventAgentAttemptEnded   EventType = "agent.turn.attempt.ended"
+	EventAgentStepStarted    EventType = "agent.step.started"
+	EventAgentModelRequest   EventType = "agent.model.request"
+	EventAgentModelResponse  EventType = "agent.model.response"
+	EventAgentModelError     EventType = "agent.model.error"
+	EventAgentToolCall       EventType = "agent.tool.call"
+	EventAgentToolStarted    EventType = "agent.tool.started"
+	EventAgentToolResult     EventType = "agent.tool.result"
+	EventAgentToolError      EventType = "agent.tool.error"
+	EventAgentTurnStopping   EventType = "agent.turn.stopping"
+	EventAgentTurnEnded      EventType = "agent.turn.ended"
+	EventDebug               EventType = "debug"
 )
 
 // Event describes workflow telemetry that UIs and IPC clients can consume.
@@ -113,7 +130,9 @@ func NewHub() *Hub {
 	return &Hub{subscribers: make(map[chan Event]struct{})}
 }
 
-// Publish notifies all subscribers of an event. Non-blocking; drops if buffer full.
+// Publish notifies all subscribers on a best-effort basis. It never blocks the
+// workflow: an event is dropped when a subscriber buffer is full or Close wins
+// a race with an in-flight publication.
 func (h *Hub) Publish(event Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -154,7 +173,8 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	return ch, unsubscribe
 }
 
-// Close unsubscribes all listeners and prevents future publications.
+// Close unsubscribes all listeners and prevents future publications. The hub
+// does not drain or acknowledge delivery, so shutdown may drop racing events.
 func (h *Hub) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()

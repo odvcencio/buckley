@@ -6,8 +6,24 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/fluffyui/backend/sim"
 )
+
+type subagentCommandProbeTool struct {
+	called bool
+}
+
+func (t *subagentCommandProbeTool) Name() string        { return "spawn_subagent" }
+func (t *subagentCommandProbeTool) Description() string { return "test probe" }
+func (t *subagentCommandProbeTool) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{}
+}
+func (t *subagentCommandProbeTool) Execute(map[string]any) (*builtin.Result, error) {
+	t.called = true
+	return &builtin.Result{Success: true}, nil
+}
 
 func TestParseSubagentCommand(t *testing.T) {
 	tests := []struct {
@@ -56,5 +72,31 @@ func TestFormatSubagentCommandResult_GroupAndList(t *testing.T) {
 	}})
 	if !ok || !strings.Contains(list, "run-1 [running] reviewer — inspect") {
 		t.Fatalf("list result = %q, %v", list, ok)
+	}
+}
+
+func TestHandleSubagentCommand_UsesGovernedRegistry(t *testing.T) {
+	app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+	if err != nil {
+		t.Fatalf("NewWidgetApp: %v", err)
+	}
+	t.Cleanup(app.finalizeBackend)
+	registry := tool.NewEmptyRegistry()
+	probe := &subagentCommandProbeTool{}
+	registry.Register(probe)
+	hookCalled := false
+	registry.Hooks().RegisterPreHook("spawn_subagent", func(*tool.ExecutionContext) tool.HookResult {
+		hookCalled = true
+		return tool.HookResult{Abort: true, AbortReason: "governed denial"}
+	})
+	controller := &Controller{
+		app:            app,
+		sessions:       []*SessionState{{ToolRegistry: registry}},
+		currentSession: 0,
+	}
+
+	controller.handleSubagentCommand([]string{"list"})
+	if !hookCalled || probe.called {
+		t.Fatalf("registry governance hook=%v underlying tool called=%v", hookCalled, probe.called)
 	}
 }

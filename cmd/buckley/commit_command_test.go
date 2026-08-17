@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
@@ -41,6 +44,9 @@ func TestParseCommitCommandOptions(t *testing.T) {
 	if !opts.compactOutput {
 		t.Fatal("compactOutput = false, want true")
 	}
+	if !opts.contextTrailer {
+		t.Fatal("contextTrailer = false, want true by default")
+	}
 	if opts.useGraft {
 		t.Fatal("useGraft = true, want false")
 	}
@@ -61,6 +67,38 @@ func TestParseCommitCommandOptions(t *testing.T) {
 	}
 	if len(opts.filesToStage) != 1 || opts.filesToStage[0] != "a/file.go" {
 		t.Fatalf("filesToStage = %#v, want [a/file.go]", opts.filesToStage)
+	}
+}
+
+func TestParseCommitCommandOptionsCanDisableContextTrailer(t *testing.T) {
+	t.Setenv(envCommitBackend, "codex")
+	opts, err := parseCommitCommandOptions([]string{"-context-trailer=false"})
+	if err != nil {
+		t.Fatalf("parseCommitCommandOptions() error = %v", err)
+	}
+	if opts.contextTrailer {
+		t.Fatal("contextTrailer = true, want false")
+	}
+}
+
+func TestCollectStagedChangeMetadataIsOpaque(t *testing.T) {
+	repo := setupTwoAreaRepo(t)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	metadata, err := collectStagedChangeMetadata(nil)
+	if err != nil {
+		t.Fatalf("collectStagedChangeMetadata: %v", err)
+	}
+	if !metadata.Valid() || metadata.Files != 2 || metadata.Insertions != 2 || metadata.Deletions != 0 {
+		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
+	trailer := commitmsg.AppendChangeMetadata("add: staged files\n", metadata)
+	if strings.Contains(trailer, "a/file.go") || strings.Contains(trailer, "package a") {
+		t.Fatalf("metadata leaked staged details: %q", trailer)
 	}
 }
 

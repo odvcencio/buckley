@@ -35,6 +35,8 @@ type BranchContext struct {
 	Scope             string
 	IncludesUnstaged  bool
 	IncludesUntracked bool
+	UntrackedFiles    []string
+	ExcludedUntracked []string
 	Files             []FileChange
 	Stats             DiffStats
 	Diff              string
@@ -55,6 +57,9 @@ type ProjectContext struct {
 	HeadCommit        string
 	Tree              string
 	TrackedFiles      []string
+	UntrackedFiles    []string
+	IncludesUntracked bool
+	ExcludedUntracked []string
 	GoMod             string
 	PackageJSON       string
 	ReadmeMD          string
@@ -97,10 +102,14 @@ type BranchContextOptions struct {
 	BaseBranch     string
 	Scope          string
 	// CapturedUntracked is immutable worktree evidence supplied by the review
-	// snapshot. When UntrackedPaths is non-empty, nil asks direct callers to
-	// capture it; non-nil (even empty) prevents a second live read from
-	// diverging from verification.
+	// snapshot. A non-nil slice (including empty) is authoritative and prevents
+	// a second live read from diverging from verification. When it is nil and
+	// UntrackedPaths is non-empty, direct callers capture the explicit allowlist.
 	CapturedUntracked []model.ReviewUntrackedFile
+	// CapturedExcludedUntracked records repository-relative paths rejected by
+	// automatic snapshot filtering so prompts can disclose the boundary without
+	// exposing file contents.
+	CapturedExcludedUntracked []string
 }
 
 // DefaultBranchContextOptions returns sensible defaults.
@@ -130,6 +139,47 @@ func DefaultProjectContextOptions() ProjectContextOptions {
 		IncludeAgents: true,
 		IncludeCanopy: true,
 	}
+}
+
+// resolveBranchUntrackedEvidence returns one immutable untracked boundary for
+// the whole context assembly. A non-nil CapturedUntracked slice is authoritative
+// even when empty; this is how callers prevent a second live read after the
+// snapshot has already decided which paths are safe to expose.
+func resolveBranchUntrackedEvidence(opts BranchContextOptions, root string) ([]model.ReviewUntrackedFile, []string, bool, error) {
+	if opts.CapturedUntracked != nil {
+		if len(opts.UntrackedPaths) > 0 {
+			if err := validateCapturedReviewUntracked(opts.UntrackedPaths, opts.CapturedUntracked); err != nil {
+				return nil, nil, false, err
+			}
+		}
+		return opts.CapturedUntracked, append([]string(nil), opts.CapturedExcludedUntracked...), true, nil
+	}
+	if len(opts.UntrackedPaths) == 0 {
+		return nil, nil, false, nil
+	}
+	captureCtx := opts.Context
+	if captureCtx == nil {
+		captureCtx = context.Background()
+	}
+	untracked, err := model.CaptureReviewUntrackedFiles(captureCtx, root, opts.UntrackedPaths)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("capture reviewable untracked files: %w", err)
+	}
+	return untracked, nil, true, nil
+}
+
+func setBranchUntrackedBoundary(ctx *BranchContext, files []model.ReviewUntrackedFile, excluded []string, enabled bool) {
+	if ctx == nil {
+		return
+	}
+	ctx.IncludesUntracked = enabled
+	ctx.UntrackedFiles = ctx.UntrackedFiles[:0]
+	for _, file := range files {
+		ctx.UntrackedFiles = append(ctx.UntrackedFiles, file.Path)
+	}
+	ctx.ExcludedUntracked = append(ctx.ExcludedUntracked[:0], excluded...)
+	sort.Strings(ctx.UntrackedFiles)
+	sort.Strings(ctx.ExcludedUntracked)
 }
 
 // AssembleBranchContext gathers context for branch review.
@@ -191,17 +241,31 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	}
 
 	if ctx.Scope == ReviewScopeChanges {
+		untracked, excluded, includesUntracked, err := resolveBranchUntrackedEvidence(opts, ctx.RepoRoot)
+		if err != nil {
+			return nil, nil, err
+		}
+		setBranchUntrackedBoundary(ctx, untracked, excluded, includesUntracked)
+
 		nameStatus, err := localNameStatus(ctx.RepoRoot, opts.IncludeUnstaged)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get local changed files: %w", err)
 		}
+		nameStatus = appendReviewUntrackedNameStatus(nameStatus, untracked)
 		ctx.Files = parseNameStatus(nameStatus)
 		audit.Add("changed files", reviewEstimateTokens(nameStatus))
 
-		diff, rawTruncated, err := localDiff(ctx.RepoRoot, opts.MaxDiffBytes, opts.IncludeUnstaged)
+		diffBytes := opts.MaxDiffBytes
+		if len(untracked) > 0 {
+			// Append immutable untracked patches before prioritization so the
+			// shared diff budget accounts for tracked and new files together.
+			diffBytes = 0
+		}
+		diff, rawTruncated, err := localDiff(ctx.RepoRoot, diffBytes, opts.IncludeUnstaged)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get local diff: %w", err)
 		}
+		diff = appendReviewUntrackedDiff(diff, untracked)
 		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
 		ctx.Diff = diffRes.Context
 		ctx.DiffTruncated = rawTruncated || diffRes.Truncated
@@ -213,6 +277,10 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 
 		ctx.Stats = getLocalDiffStats(ctx.RepoRoot, opts.IncludeUnstaged)
+		for _, file := range untracked {
+			ctx.Stats.Insertions += file.Insertions
+		}
+		ctx.Stats.Files = len(ctx.Files)
 	} else {
 		nameStatus, err := reviewGitOutputAt(ctx.RepoRoot, "diff", "--name-status", ctx.BaseCommit+"..."+ctx.HeadCommit, "--")
 		if err != nil {
@@ -247,23 +315,14 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		}
 
 		if ctx.Scope == ReviewScopeWorktree {
-			// Worktree review always includes staged changes. Untracked text is
-			// included only after a separate, explicit caller opt-in.
-			var untracked []model.ReviewUntrackedFile
-			if len(opts.UntrackedPaths) > 0 {
-				if opts.CapturedUntracked != nil {
-					untracked = opts.CapturedUntracked
-					if err := validateCapturedReviewUntracked(opts.UntrackedPaths, untracked); err != nil {
-						return nil, nil, err
-					}
-				} else {
-					untracked, err = model.CaptureReviewUntrackedFiles(context.Background(), ctx.RepoRoot, opts.UntrackedPaths)
-					if err != nil {
-						return nil, nil, fmt.Errorf("capture reviewable untracked files: %w", err)
-					}
-				}
-				ctx.IncludesUntracked = true
+			// Worktree review always includes staged changes. Safe untracked
+			// evidence is supplied by the immutable snapshot when enabled, or is
+			// captured from an explicit allowlist for direct callers.
+			untracked, excluded, includesUntracked, err := resolveBranchUntrackedEvidence(opts, ctx.RepoRoot)
+			if err != nil {
+				return nil, nil, err
 			}
+			setBranchUntrackedBoundary(ctx, untracked, excluded, includesUntracked)
 			localStatus, err := localNameStatus(ctx.RepoRoot, opts.IncludeUnstaged)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to get worktree changed files: %w", err)
@@ -466,7 +525,7 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 	}
 	sb.WriteString("- **Verification Identity**: use only the captured commit content and supplied diff; never resolve live branch refs\n")
 	if ctx.IncludesUntracked {
-		sb.WriteString("- **Included Local State**: explicitly opted-in filtered untracked text files (contents may still contain secrets)\n")
+		sb.WriteString("- **Included Local State**: explicitly opted-in filtered untracked text files (or automatic safe capture for this review mode; contents may still contain secrets)\n")
 		sb.WriteString("- **Excluded Local State**: ignored, known secret-like, binary, symlink/non-regular untracked files; untracked AGENTS.md; and Git index-hidden assume-unchanged/skip-worktree edits\n")
 	} else {
 		sb.WriteString("- **Excluded Local State**: untracked files and Git index-hidden assume-unchanged/skip-worktree edits\n")
@@ -494,6 +553,27 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 		changedPaths = append(changedPaths, file.Path)
 	}
 	appendReviewVerificationTargets(&sb, changedPaths, ctx.AgentsMD)
+
+	if len(ctx.UntrackedFiles) > 0 || len(ctx.ExcludedUntracked) > 0 {
+		sb.WriteString("## Worktree Boundary Inventory\n\n")
+		sb.WriteString("These paths were captured or rejected by the immutable local-state boundary. Do not infer that an excluded path was inspected.\n\n")
+		if len(ctx.UntrackedFiles) > 0 {
+			sb.WriteString("### Included untracked text files\n\n```text\n")
+			for _, path := range ctx.UntrackedFiles {
+				sb.WriteString(path)
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("```\n\n")
+		}
+		if len(ctx.ExcludedUntracked) > 0 {
+			sb.WriteString("### Excluded untracked paths\n\n```text\n")
+			for _, path := range ctx.ExcludedUntracked {
+				sb.WriteString(path)
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("```\n\n")
+		}
+	}
 
 	if ctx.CanopyReview != "" {
 		sb.WriteString("## Primary Structural Review (Canopy)\n\n")
@@ -545,7 +625,14 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 	sb.WriteString("- **Root**: `.` (captured repository root; use repository-relative paths)\n")
 	sb.WriteString(fmt.Sprintf("- **Branch**: %s\n", ctx.Branch))
 	sb.WriteString(fmt.Sprintf("- **Head Commit**: `%s` (immutable)\n", ctx.HeadCommit))
-	sb.WriteString("- **Snapshot**: Git-visible tracked files only; untracked and index-hidden paths are intentionally excluded\n")
+	if ctx.IncludesUntracked {
+		sb.WriteString("- **Snapshot**: captured tracked worktree plus filtered non-ignored untracked text files; ignored and unsafe local state remains excluded\n")
+		if len(ctx.ExcludedUntracked) > 0 {
+			sb.WriteString(fmt.Sprintf("- **Excluded Local State**: %d untracked paths rejected by the review boundary; see the explicit inventory below\n", len(ctx.ExcludedUntracked)))
+		}
+	} else {
+		sb.WriteString("- **Snapshot**: Git-visible tracked files only; untracked and index-hidden paths are intentionally excluded\n")
+	}
 	if ctx.ContextIncomplete {
 		sb.WriteString("- **Context Completeness**: INCOMPLETE — tracked metadata was unavailable or truncated\n")
 	}
@@ -564,6 +651,27 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 		sb.WriteString("```text\n")
 		sb.WriteString(inventory)
 		sb.WriteString("\n```\n\n")
+	}
+
+	if len(ctx.UntrackedFiles) > 0 || len(ctx.ExcludedUntracked) > 0 {
+		sb.WriteString("## Worktree Boundary Inventory\n\n")
+		sb.WriteString("These paths are part of the immutable review boundary or were deliberately excluded by its safety policy. Do not infer that an excluded path was inspected.\n\n")
+		if len(ctx.UntrackedFiles) > 0 {
+			sb.WriteString("### Included untracked text files\n\n```text\n")
+			for _, path := range ctx.UntrackedFiles {
+				sb.WriteString(path)
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("```\n\n")
+		}
+		if len(ctx.ExcludedUntracked) > 0 {
+			sb.WriteString("### Excluded untracked paths\n\n```text\n")
+			for _, path := range ctx.ExcludedUntracked {
+				sb.WriteString(path)
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("```\n\n")
+		}
 	}
 
 	if ctx.CanopySummary != "" {

@@ -248,8 +248,13 @@ func (c *Conversation) Clear() {
 // estimateTokens provides a rough token estimate
 // In Phase 3, this will be replaced with accurate tiktoken counting
 func estimateTokens(text string) int {
-	// Rough estimate: ~4 characters per token
-	return len(text) / 4
+	// Rough estimate: ~4 characters per token. Preserve a token for any
+	// non-empty value so short messages do not disappear when the optional
+	// tokenizer cannot load in an offline review sandbox.
+	if text == "" {
+		return 0
+	}
+	return (len(text) + 3) / 4
 }
 
 // estimateToolCallTokens estimates tokens for tool calls

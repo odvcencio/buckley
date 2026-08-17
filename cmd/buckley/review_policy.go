@@ -26,10 +26,63 @@ const (
 	qwenFocusedReasoning        = 2048
 	qwenStandardReasoning       = 3072
 	qwenBroadReasoning          = 4096
+	deepSeekV4ProReviewModel    = "deepseek/deepseek-v4-pro-0813"
+	deepSeekFocusedReasoning    = 3072
+	deepSeekStandardReasoning   = 6144
+	deepSeekBroadReasoning      = 8192
+	deepSeekReviewExploration   = 90 * time.Second
+	deepSeekSupportingContext   = 32_000
 	// Project reports carry a complete inventory, coverage ledger, and action
 	// evidence. The runner clamps this to the provider's advertised maximum.
 	projectReviewOutputTokenBudget = 32768
 )
+
+// reviewDepth controls how much evidence a review is expected to collect
+// before it synthesizes a verdict. Spot is the compatibility/default mode;
+// the other modes add explicit falsification and verification obligations.
+type reviewDepth string
+
+const (
+	reviewDepthSpot     reviewDepth = "spot"
+	reviewDepthBalanced reviewDepth = "balanced"
+	reviewDepthInDepth  reviewDepth = "in-depth"
+)
+
+func parseReviewDepth(value string) (reviewDepth, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "spot", "quick", "fast":
+		return reviewDepthSpot, nil
+	case "balanced", "standard", "normal", "investigate":
+		return reviewDepthBalanced, nil
+	case "in-depth", "in_depth", "deep", "detailed", "exhaustive":
+		return reviewDepthInDepth, nil
+	default:
+		return "", fmt.Errorf("invalid review depth %q (want spot, balanced, or in-depth)", value)
+	}
+}
+
+func normalizedReviewDepth(value reviewDepth) reviewDepth {
+	depth, err := parseReviewDepth(string(value))
+	if err != nil {
+		return reviewDepthSpot
+	}
+	return depth
+}
+
+func reviewDepthNeedsVerification(depth string) bool {
+	return normalizedReviewDepth(reviewDepth(depth)) != reviewDepthSpot
+}
+
+func reviewDepthLabel(depth reviewDepth) string {
+	switch normalizedReviewDepth(depth) {
+	case reviewDepthBalanced:
+		return "BALANCED"
+	case reviewDepthInDepth:
+		return "IN-DEPTH"
+	default:
+		return "SPOT"
+	}
+}
 
 type reviewExecutionPlan struct {
 	sizeClass            string
@@ -211,6 +264,32 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 			opts.criticExploration = qwenCriticExploration
 		}
 	}
+	if isDeepSeekV4ProReviewModel(opts.modelID) {
+		if opts.adaptiveReasoning {
+			opts.reasoningMaxTokens = deepSeekReviewReasoningForSize(plan.sizeClass)
+		} else {
+			opts.reasoningMaxTokens = deepSeekReviewReasoningForEffort(opts.reasoningEffort)
+		}
+		if opts.explorationTimeout > 0 && opts.explorationTimeout < deepSeekReviewExploration {
+			opts.explorationTimeout = deepSeekReviewExploration
+		}
+	}
+	// In-depth is the completion-first mode. It removes generated plan caps,
+	// while preserving any operator/configured limits explicitly supplied by
+	// the caller. The outer timeout and runtime emergency fuses remain active.
+	if normalizedReviewDepth(opts.depth) == reviewDepthInDepth {
+		if !opts.maxIterationsExplicit {
+			opts.maxIterations = 0
+		}
+		if !opts.maxToolCallsExplicit {
+			opts.maxToolCalls = 0
+		}
+		opts.maxVerificationCalls = 0
+		opts.explorationTimeout = 0
+		opts.criticMaxIterations = 0
+		opts.criticMaxToolCalls = 0
+		opts.criticExploration = 0
+	}
 	return opts
 }
 
@@ -238,8 +317,38 @@ func isQwenReviewModel(modelID string) bool {
 	modelID = strings.ToLower(strings.TrimSpace(modelID))
 	return modelID == "qwen/qwen3.7-plus" ||
 		strings.HasSuffix(modelID, "/qwen3.7-plus") ||
+		modelID == "qwen/qwen3.7-flash" ||
+		strings.HasSuffix(modelID, "/qwen3.7-flash") ||
 		modelID == "qwen/qwen3.8-max" ||
 		strings.HasSuffix(modelID, "/qwen3.8-max")
+}
+
+func isDeepSeekV4ProReviewModel(modelID string) bool {
+	return strings.EqualFold(strings.TrimSpace(modelID), deepSeekV4ProReviewModel)
+}
+
+func deepSeekReviewReasoningForSize(sizeClass string) int {
+	switch strings.ToLower(strings.TrimSpace(sizeClass)) {
+	case "focused":
+		return deepSeekFocusedReasoning
+	case "broad", "project":
+		return deepSeekBroadReasoning
+	default:
+		return deepSeekStandardReasoning
+	}
+}
+
+func deepSeekReviewReasoningForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return 1024
+	case "low":
+		return 2048
+	case "high", "xhigh":
+		return deepSeekBroadReasoning
+	default:
+		return 4096
+	}
 }
 
 func qwenReviewReasoningForSize(sizeClass string) int {
@@ -285,7 +394,7 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 	if opts.maxVerificationCalls > 0 {
 		verificationLimit = fmt.Sprintf("%d verification calls", opts.maxVerificationCalls)
 	}
-	return prompt + fmt.Sprintf(`
+	profile := prompt + fmt.Sprintf(`
 
 ## Qwen Review Profile
 
@@ -310,11 +419,21 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 		int(opts.synthesisLead/time.Second),
 		reviewOutputBudgetText(opts),
 	)
+	if normalizedReviewDepth(opts.depth) == reviewDepthInDepth {
+		profile += `
+
+## Qwen In-Depth Output Checklist
+
+- Before the final answer, perform at least one real ` + "`run_verification`" + ` call when that tool is available.
+- The final answer must contain the literal headings ` + "`## Evidence Collected`" + `, ` + "`## Verification Ledger`" + `, and ` + "`## Coverage`" + `, plus ` + "`Completeness: COMPLETE`" + `. Never omit these headings to save tokens; a partial declaration is rejected.
+`
+	}
+	return profile
 }
 
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
 	if isQwenReviewModel(opts.modelID) {
-		return appendQwenReviewExecutionPlan(prompt, opts)
+		return appendReviewDepthInstructions(appendQwenReviewExecutionPlan(prompt, opts), opts)
 	}
 	turnLimit := "There is no hard per-review model-turn cap; continue until the review is complete or normal timeout/safety controls apply."
 	if opts.maxIterations > 0 {
@@ -332,7 +451,7 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 	if opts.maxVerificationCalls > 0 {
 		verificationLimit = fmt.Sprintf("Use at most %d verification calls.", opts.maxVerificationCalls)
 	}
-	return prompt + fmt.Sprintf(`
+	planPrompt := prompt + fmt.Sprintf(`
 
 ## Bounded Review Plan
 
@@ -402,6 +521,57 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 		explorationLimit,
 		int(opts.synthesisLead/time.Second),
 	)
+	if isDeepSeekV4ProReviewModel(opts.modelID) {
+		planPrompt += `
+
+## DeepSeek V4 Pro Profile
+
+- Use the structured tool-call channel exclusively. Never encode a tool invocation as XML, pseudo-tags, or assistant prose; if a tool result is needed, issue the real tool call.
+- When ` + "`exec_program`" + ` is offered, prefer one read-only code-mode program for broad inventory, joins, and cross-references, then use narrow tool calls for follow-up evidence. Never assume code mode exists when it is not offered.
+- Treat the Canopy inventory as a table of contents, not as proof. Follow important call sites and lifecycle edges into source, and keep a compact evidence ledger while exploring.
+- Prefer one high-signal search or verification call over repeated equivalent calls. Preserve exact paths, symbols, commands, and result states for the final review.
+- Before synthesis, check that every requested review surface has either direct evidence or an explicit ` + "`UNAVAILABLE`" + ` explanation. Do not infer approval from an empty or truncated tool response.
+`
+	}
+	return appendReviewDepthInstructions(planPrompt, opts)
+}
+
+// appendReviewDepthInstructions is deliberately layered after the provider
+// profile. That keeps DeepSeek/Qwen compact profiles intact while giving all
+// models the same observable depth contract.
+func appendReviewDepthInstructions(prompt string, opts automatedReviewOptions) string {
+	switch normalizedReviewDepth(opts.depth) {
+	case reviewDepthBalanced:
+		return prompt + `
+
+## Review Depth: BALANCED INVESTIGATION
+
+- Use two passes: first map the relevant state and call sites, then falsify the highest-risk hypotheses.
+- For every proposed finding, trace the changed behavior through its definition, callers, configuration, failure path, and the nearest relevant test or executable check.
+- Make the focused verification attempts required by the captured repository gate. If a required gate is unavailable, retry or let the harness fail closed; never emit a caveated completion.
+- Keep a compact verification ledger in the final review. Every finding must point to a ledger entry marked ` + "`SUPPORTED`" + `, ` + "`DISPROVED`" + `, or ` + "`UNAVAILABLE`" + `.
+- Cover the complete balanced scope: every changed file plus its direct callers, configuration gates, failure path, and nearest relevant test. Generated/vendor/build output may be excluded only when it is explicitly outside that scope.
+- End with ` + "`Completeness: COMPLETE`" + `. If this scope cannot be completed, continue gathering evidence or let the harness fail the pass; do not emit a partial review.
+`
+	case reviewDepthInDepth:
+		return prompt + `
+
+## Review Depth: IN-DEPTH INVESTIGATION
+
+- Treat this as an exhaustive repository, changeset, or PR investigation. Do not sample important source, tests, configuration, documentation, CI, persistence, concurrency, security, or provider-routing paths. Generated/vendor/build output is the only exclusion class, and it must be identified explicitly.
+- Start from the supplied Canopy/table-of-contents evidence, then expand important symbols into callers, callees, state transitions, fast paths, and bypasses. Use code mode (` + "`exec_program`" + ` when offered) for broad read-only joins and paginated file/search tools for exact evidence.
+- Maintain a coverage ledger while exploring. A large file must be read in pages; never treat truncated tool output as a complete read.
+- For each material hypothesis, perform a focused falsification pass and every ` + "`run_verification`" + ` attempt required by the repository gate. Record the exact command, target, exit/status, and evidence conclusion. If a required check is unavailable, retry or let the harness fail closed rather than emitting a caveat.
+- Trace every important change through producer/consumer boundaries, caches, dispatch gates, retries, persistence, and error/cancellation paths. Prefer executable evidence over source-shape heuristics.
+- Before synthesis, run a separate adversarial pass for missed findings and stale assumptions. Do not promote an unresolved or unavailable check into a finding.
+- The final review must include ` + "`## Evidence Collected`" + `, ` + "`## Verification Ledger`" + `, and ` + "`## Coverage`" + ` sections with ` + "`Completeness: COMPLETE`" + `. If the deadline prevents complete coverage, do not emit a review; the harness will retry or fail closed.
+`
+	default:
+		// Spot is the compatibility/default profile. The existing provider
+		// prompts already describe its fast evidence-first behavior; avoid
+		// spending extra context tokens restating it for every review.
+		return prompt
+	}
 }
 
 func reviewOutputBudgetText(opts automatedReviewOptions) string {

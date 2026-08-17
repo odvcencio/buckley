@@ -84,7 +84,7 @@ func (s *Store) CreateSession(session *Session) error {
 		}
 
 		// Only retry on SQLITE_BUSY/LOCKED errors
-		if isBusyError(err) {
+		if IsSQLiteBusyError(err) {
 			if attempt < maxRetries {
 				delay := baseDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
 				time.Sleep(delay)
@@ -374,7 +374,7 @@ func (s *Store) UpdateSessionStats(sessionID string, messageCount, totalTokens i
 		}
 
 		// Only retry on SQLITE_BUSY/LOCKED errors
-		if isBusyError(err) {
+		if IsSQLiteBusyError(err) {
 			if attempt < maxRetries {
 				delay := baseDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
 				time.Sleep(delay)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -38,8 +39,8 @@ type goalTurnEngine struct {
 	cfg         *config.Config
 	mgr         *model.Manager
 	registry    *tool.Registry
-	ledger      runledger.Store
-	stepJournal runledger.StepJournal
+	ledger      goalLedger
+	stepJournal agentloop.DurableStepJournal
 	evidence    evidence.Store
 	engine      *rules.Engine
 	workDir     string
@@ -51,16 +52,20 @@ type goalTurnEngine struct {
 	codeMode bool
 }
 
-func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Registry, ledger runledger.Store, ev evidence.Store, workDir, sessionID string) *goalTurnEngine {
+type goalLedger interface {
+	runledger.Store
+	agentloop.DurableStepJournal
+}
+
+func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Registry, ledger goalLedger, ev evidence.Store, workDir, sessionID string) (*goalTurnEngine, error) {
+	if ledger == nil || reflect.ValueOf(ledger).Kind() == reflect.Ptr && reflect.ValueOf(ledger).IsNil() {
+		return nil, fmt.Errorf("goal engine: durable ledger is required")
+	}
 	engine, err := rules.NewDefaultEngine()
 	if err != nil {
 		engine = nil
 	}
-	var stepJournal runledger.StepJournal
-	if journal, ok := ledger.(runledger.StepJournal); ok {
-		stepJournal = journal
-	}
-	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, ledger: ledger, stepJournal: stepJournal, evidence: ev, engine: engine, workDir: workDir, sessionID: sessionID}
+	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, ledger: ledger, stepJournal: ledger, evidence: ev, engine: engine, workDir: workDir, sessionID: sessionID}, nil
 }
 
 // codeModeTools is the narrow pool a code-mode turn offers: the program
@@ -78,7 +83,10 @@ type goalTurnState struct {
 
 // RunTurn implements goalloop.TurnEngine.
 func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext) (goalloop.TurnOutcome, error) {
-	modelID := model.ResolvePhaseModel(e.cfg, e.mgr, e.engine, "execution", "")
+	modelID, err := model.ResolvePhaseModelRequired(e.cfg, e.mgr, e.engine, "execution", "")
+	if err != nil {
+		return goalloop.TurnOutcome{}, err
+	}
 	state := &goalTurnState{}
 	messages := []model.Message{
 		{Role: "system", Content: goalTurnSystemPrompt(task, e.codeMode)},

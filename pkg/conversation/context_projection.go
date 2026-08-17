@@ -21,6 +21,14 @@ type ContextProjectionStats struct {
 	Emergency       bool
 	Scale           float64
 
+	// ToolResultsCompacted and ToolBytesCompacted describe selective dynamic
+	// pruning of older completed tool results. The durable transcript is never
+	// changed; these counts describe only this provider-facing projection.
+	ToolResultsCompacted  int
+	ToolBytesCompacted    int
+	ReasoningBytesRemoved int
+	HistoryCollapsed      bool
+
 	// ContinuationActive is true when this projection pinned the prefix of
 	// history an active provider continuation window represents (decision
 	// 0001), suspending reasoning stripping and pruning for that prefix.
@@ -71,7 +79,7 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 		opts.PinnedFromIndex = pinnedFromIndex
 		stats.BudgetTokens = opts.MaxBytes / 4
 		projected := CompactModelMessages(messages, opts)
-		return finishProjectionStats(projected, req, stats)
+		return finishProjectionStats(messages, projected, req, stats)
 	}
 
 	messageBudget, requestBudget := projectionTokenBudget(req, originalEstimate, contextWindow, scale)
@@ -83,7 +91,7 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 	opts := adaptiveContextOptions(contextWindow, messageBudget, scale)
 	opts.PinnedFromIndex = pinnedFromIndex
 	projected := packProjectionToRequestBudget(messages, req, requestBudget, opts)
-	return finishProjectionStats(projected, req, stats)
+	return finishProjectionStats(messages, projected, req, stats)
 }
 
 // packProjectionToRequestBudget finds the least destructive byte budget whose
@@ -199,9 +207,14 @@ func adaptiveContextOptions(contextWindow, messageBudget int, scale float64) Eff
 	opts.MaxBytes = maxProjectionInt(4*1024, messageBudget*4)
 	opts.RecentMessages = clampProjectionInt(contextWindow/4096, 24, 192)
 	opts.KeepReasoningRecent = clampProjectionInt(opts.RecentMessages/4, 8, 32)
-	opts.OldToolBytes = clampProjectionInt(contextWindow/64, opts.OldToolBytes, 8*1024)
-	opts.OldToolArgumentBytes = clampProjectionInt(contextWindow/256, opts.OldToolArgumentBytes, 4*1024)
-	opts.OldAssistantBytes = clampProjectionInt(contextWindow/48, opts.OldAssistantBytes, 10*1024)
+	// Use a context-scaled protected envelope instead of OpenCode's fixed
+	// 20K/40K token thresholds. At 128K this preserves roughly 2K tokens per
+	// older tool result; at larger windows it grows with the model while the
+	// request budget remains the final authority. This keeps DeepSeek's broad
+	// context useful without allowing one noisy result to dominate a request.
+	opts.OldToolBytes = clampProjectionInt(contextWindow/16, opts.OldToolBytes, 64*1024)
+	opts.OldToolArgumentBytes = clampProjectionInt(contextWindow/128, opts.OldToolArgumentBytes, 16*1024)
+	opts.OldAssistantBytes = clampProjectionInt(contextWindow/32, opts.OldAssistantBytes, 24*1024)
 
 	if scale < 0.75 {
 		opts.RecentMessages = maxProjectionInt(12, int(float64(opts.RecentMessages)*scale))
@@ -213,16 +226,47 @@ func adaptiveContextOptions(contextWindow, messageBudget int, scale float64) Eff
 	return opts
 }
 
-func finishProjectionStats(projected []model.Message, req model.ChatRequest, stats ContextProjectionStats) ([]model.Message, ContextProjectionStats) {
+func finishProjectionStats(original, projected []model.Message, req model.ChatRequest, stats ContextProjectionStats) ([]model.Message, ContextProjectionStats) {
 	projectedReq := req
 	projectedReq.Messages = projected
 	stats.ProjectedTokens = model.EstimateRequestTokens(projectedReq).Total
 	stats.ProjectedBytes = modelMessagesBytes(projected)
 	stats.MessagesAfter = len(projected)
+	stats.ToolResultsCompacted, stats.ToolBytesCompacted, stats.ReasoningBytesRemoved = projectionReductions(original, projected)
+	stats.HistoryCollapsed = len(projected) != len(original)
 	stats.Compacted = stats.MessagesAfter != stats.MessagesBefore ||
 		stats.ProjectedBytes < stats.OriginalBytes ||
 		stats.ProjectedTokens < stats.OriginalTokens
 	return projected, stats
+}
+
+// projectionReductions reports only reductions that can be paired by message
+// index. A collapsed historical prefix is reported separately because its
+// replacement summary is intentionally not a one-to-one message mapping.
+func projectionReductions(original, projected []model.Message) (toolResults, toolBytes, reasoningBytes int) {
+	limit := len(original)
+	if len(projected) < limit {
+		limit = len(projected)
+	}
+	for i := 0; i < limit; i++ {
+		before, after := original[i], projected[i]
+		if before.Role == "tool" && after.Role == "tool" {
+			beforeBytes := len(GetContentAsString(before.Content))
+			afterBytes := len(GetContentAsString(after.Content))
+			if afterBytes < beforeBytes {
+				toolResults++
+				toolBytes += beforeBytes - afterBytes
+			}
+		}
+		if before.Role == "assistant" && after.Role == "assistant" {
+			beforeBytes := len(before.Reasoning)
+			afterBytes := len(after.Reasoning)
+			if afterBytes < beforeBytes {
+				reasoningBytes += beforeBytes - afterBytes
+			}
+		}
+	}
+	return toolResults, toolBytes, reasoningBytes
 }
 
 func cloneProjectionMessages(messages []model.Message) []model.Message {

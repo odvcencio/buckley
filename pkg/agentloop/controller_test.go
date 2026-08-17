@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
 )
@@ -78,6 +80,363 @@ func TestController_NormalCompletionNoToolCalls(t *testing.T) {
 	}
 	if len(history.messages) != 1 || history.messages[0].Role != "assistant" {
 		t.Fatalf("expected exactly the final assistant message appended, got %+v", history.messages)
+	}
+}
+
+func TestController_PreservesBillablePartialResponseWhenProviderFails(t *testing.T) {
+	providerErr := errors.New("stream interrupted after provider emitted content")
+	ctrl, err := NewController(ControllerConfig{
+		MaxCostUSD: 1,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("partial answer", model.Usage{PromptTokens: 400, CompletionTokens: 200, TotalTokens: 600}), providerErr
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", err)
+	}
+	if result == nil || !result.Partial || result.CompletionStatus != CompletionIncomplete {
+		t.Fatalf("result = %+v, want an explicit incomplete partial result", result)
+	}
+	if result.Content != "partial answer" || result.Usage.TotalTokens != 600 || result.CostUSD != 0.6 {
+		t.Fatalf("partial accounting = content %q usage=%+v cost=%v", result.Content, result.Usage, result.CostUSD)
+	}
+	if result.Termination.ProviderError != providerErr.Error() || incomplete.ProviderError != providerErr.Error() {
+		t.Fatalf("provider error was not retained: termination=%+v incomplete=%+v", result.Termination, incomplete)
+	}
+}
+
+func TestController_ProviderErrorProjectionIsBoundedWhileRawCauseRemainsWrapped(t *testing.T) {
+	secret := "sk-" + strings.Repeat("a", 30)
+	providerErr := errors.New("provider failed " + secret + " " + strings.Repeat("x", modelstep.MaxPersistedErrorRunes+100))
+	wantProjection := modelstep.NormalizeError(providerErr)
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("partial answer", model.Usage{TotalTokens: 1}), providerErr
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, runErr := ctrl.Run(t.Context())
+	var incomplete *IncompleteTurnError
+	if !errors.Is(runErr, providerErr) || !errors.As(runErr, &incomplete) {
+		t.Fatalf("Run error = %v, want raw cause and incomplete projection", runErr)
+	}
+	if result.Termination.ProviderError != wantProjection || incomplete.ProviderError != wantProjection {
+		t.Fatalf("provider projection result=%q incomplete=%q want=%q", result.Termination.ProviderError, incomplete.ProviderError, wantProjection)
+	}
+	if strings.Contains(result.Termination.ProviderError, secret) || len([]rune(result.Termination.ProviderError)) > modelstep.MaxPersistedErrorRunes {
+		t.Fatalf("unsafe provider projection: %q", result.Termination.ProviderError)
+	}
+}
+
+func TestController_AccountingFailureIsNotProviderPartial(t *testing.T) {
+	history := &recordingHistory{}
+	pricingErr := errors.New("catalog price unavailable after response")
+	ctrl, err := NewController(ControllerConfig{
+		CostForUsage: func(model.Usage) (float64, error) {
+			return 0, pricingErr
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("must not become a partial answer", model.Usage{TotalTokens: 77}), nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, runErr := ctrl.Run(context.Background())
+	if runErr == nil || !strings.Contains(runErr.Error(), pricingErr.Error()) {
+		t.Fatalf("Run error = %v, want pricing failure", runErr)
+	}
+	if result == nil || result.Partial || result.FinishReason == FinishReasonModelError || result.Termination.Kind != "cost_accounting" {
+		t.Fatalf("result = %+v, want non-provider accounting failure", result)
+	}
+	if result.Termination.ProviderError != "" || result.Message.Content != nil || result.Content != "" || len(history.messages) != 0 {
+		t.Fatalf("accounting failure leaked provider projection: result=%+v history=%+v", result, history.messages)
+	}
+	if result.Usage.TotalTokens != 77 || result.CostUSD != 0 {
+		t.Fatalf("accounting = usage=%+v cost=%v", result.Usage, result.CostUSD)
+	}
+}
+
+func TestController_ProviderPartialKeepsAccountingFailureDistinct(t *testing.T) {
+	providerErr := errors.New("provider stream interrupted")
+	pricingErr := errors.New("catalog price unavailable")
+	ctrl, err := NewController(ControllerConfig{
+		CostForUsage: func(model.Usage) (float64, error) {
+			return 0, pricingErr
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("usable provider fragment", model.Usage{TotalTokens: 88}), providerErr
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, runErr := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) || !errors.Is(runErr, providerErr) {
+		t.Fatalf("Run error = %v, want provider and incomplete causes", runErr)
+	}
+	if !strings.Contains(runErr.Error(), pricingErr.Error()) {
+		t.Fatalf("Run error = %v, want accounting cause", runErr)
+	}
+	if result == nil || !result.Partial || result.Content != "usable provider fragment" || result.Termination.Kind != "cost_accounting" {
+		t.Fatalf("result = %+v, want preserved provider fragment with accounting termination", result)
+	}
+	if result.Termination.ProviderError != providerErr.Error() || incomplete.ProviderError != providerErr.Error() {
+		t.Fatalf("provider error was conflated: termination=%+v incomplete=%+v", result.Termination, incomplete)
+	}
+}
+
+func TestController_ReplaysBillablePartialResponseWithoutProviderRetry(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	providerCalls := 0
+	build := func(context.Context, int) (model.ChatRequest, error) {
+		return model.ChatRequest{Model: "test-model"}, nil
+	}
+	config := ControllerConfig{
+		MaxCostUSD: 1,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: build,
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			return textResponse("durable partial", model.Usage{TotalTokens: 500}), errors.New("provider stream ended")
+		}),
+		RunLedger: ledger, Evidence: ev, StepJournal: ledger,
+		RunID: runID, SessionID: "durable-test", TaskID: "partial", TurnID: "partial-turn",
+	}
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController first: %v", err)
+	}
+	if _, err := first.Run(context.Background()); err == nil {
+		t.Fatal("first Run unexpectedly succeeded")
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls after first run = %d, want 1", providerCalls)
+	}
+
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		providerCalls++
+		return nil, errors.New("replay must not call provider")
+	})
+	second, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController second: %v", err)
+	}
+	result, err := second.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("replay error = %v, want IncompleteTurnError", err)
+	}
+	if providerCalls != 1 || result == nil || !result.Partial || result.Content != "durable partial" || result.CostUSD != 0.5 {
+		t.Fatalf("replay provider_calls=%d result=%+v", providerCalls, result)
+	}
+}
+
+func TestController_LifecycleObserverIsOrderedRedactedAndIsolated(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		events []LifecycleEvent
+		calls  int
+	)
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			calls++
+			if calls == 1 {
+				return toolCallResponse("call-1", "search_text", `{"query":"needle"}`, model.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}), nil
+			}
+			return textResponse("grounded answer", model.Usage{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "evidence", Success: true}}, nil
+		}),
+		LifecycleObserver: func(event LifecycleEvent) {
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+			// A broken renderer must not abort or alter the agent turn.
+			if event.Type == LifecycleModelRequest {
+				panic("renderer failure")
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := result.RequireConclusive(); err != nil {
+		t.Fatalf("RequireConclusive: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]LifecycleEvent(nil), events...)
+	mu.Unlock()
+	if len(got) < 10 {
+		t.Fatalf("lifecycle events = %d, want turn, model, tool, and end transitions: %+v", len(got), got)
+	}
+	if got[0].Type != LifecycleTurnStart || got[len(got)-1].Type != LifecycleTurnEnd {
+		t.Fatalf("lifecycle boundary = %q ... %q, want %q ... %q", got[0].Type, got[len(got)-1].Type, LifecycleTurnStart, LifecycleTurnEnd)
+	}
+	seen := map[LifecycleEventType]bool{}
+	for i, event := range got {
+		if event.Sequence != uint64(i+1) {
+			t.Fatalf("event %d sequence = %d, want %d", i, event.Sequence, i+1)
+		}
+		seen[event.Type] = true
+		if event.Type == LifecycleToolCall && event.ToolName != "search_text" {
+			t.Fatalf("tool projection = %+v", event)
+		}
+		// LifecycleEvent has no content, arguments, or prompt fields by design;
+		// this assertion also proves the model's grounded text never enters the
+		// live projection.
+		if len(event.EvidenceIDs) != 0 {
+			t.Fatalf("unexpected evidence IDs without an evidence store: %+v", event)
+		}
+	}
+	for _, want := range []LifecycleEventType{
+		LifecycleStepStart,
+		LifecycleModelRequest,
+		LifecycleModelResponse,
+		LifecycleToolCall,
+		LifecycleToolStart,
+		LifecycleToolResult,
+	} {
+		if !seen[want] {
+			t.Fatalf("missing lifecycle event %q in %+v", want, got)
+		}
+	}
+}
+
+func TestController_DeferredLifecycleUsesRunAttemptsWithinOneLogicalTurn(t *testing.T) {
+	var events []LifecycleEvent
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			return textResponse(fmt.Sprintf("candidate %d", modelCalls), model.Usage{TotalTokens: 1}), nil
+		}),
+		TurnID:                "stable-logical-turn",
+		DeferLifecycleTurnEnd: true,
+		LifecycleObserver: func(event LifecycleEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	first, err := ctrl.Run(t.Context())
+	if err != nil || first.CompletionStatus != CompletionConclusive {
+		t.Fatalf("first Run = %+v, %v", first, err)
+	}
+	for _, event := range events {
+		if event.Type == LifecycleTurnEnd {
+			t.Fatalf("intermediate Run emitted logical completion: %+v", events)
+		}
+	}
+	second, err := ctrl.Run(t.Context())
+	if err != nil || second.CompletionStatus != CompletionConclusive {
+		t.Fatalf("second Run = %+v, %v", second, err)
+	}
+	ctrl.CompleteLifecycleTurn(second, nil)
+	ctrl.CompleteLifecycleTurn(second, nil)
+
+	counts := map[LifecycleEventType]int{}
+	for index, event := range events {
+		counts[event.Type]++
+		if event.Sequence != uint64(index+1) || event.TurnID != "stable-logical-turn" {
+			t.Fatalf("event[%d] correlation/order = %+v", index, event)
+		}
+		if event.Type == LifecycleAttemptStart || event.Type == LifecycleAttemptEnd {
+			if event.RunAttempt < 1 || event.RunAttempt > 2 || event.Continuation != (event.RunAttempt == 2) {
+				t.Fatalf("attempt projection = %+v", event)
+			}
+		}
+	}
+	if counts[LifecycleTurnStart] != 1 || counts[LifecycleAttemptStart] != 2 || counts[LifecycleAttemptEnd] != 2 || counts[LifecycleTurnEnd] != 1 {
+		t.Fatalf("lifecycle counts = %+v events=%+v", counts, events)
+	}
+	last := events[len(events)-1]
+	if last.Type != LifecycleTurnEnd || last.Status != string(CompletionConclusive) || last.RunAttempt != 2 || !last.Continuation {
+		t.Fatalf("logical completion = %+v", last)
+	}
+}
+
+func TestController_DefaultLifecycleDoesNotEmitRunAttempts(t *testing.T) {
+	var events []LifecycleEvent
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			return textResponse(fmt.Sprintf("answer %d", modelCalls), model.Usage{TotalTokens: 1}), nil
+		}),
+		LifecycleObserver: func(event LifecycleEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	for run := 1; run <= 2; run++ {
+		result, err := ctrl.Run(t.Context())
+		if err != nil || result.CompletionStatus != CompletionConclusive {
+			t.Fatalf("Run %d = %+v, %v", run, result, err)
+		}
+	}
+
+	counts := map[LifecycleEventType]int{}
+	for _, event := range events {
+		counts[event.Type]++
+		if event.Type == LifecycleAttemptStart || event.Type == LifecycleAttemptEnd {
+			t.Fatalf("default lifecycle emitted opt-in attempt event: %+v", event)
+		}
+		if event.RunAttempt != 0 || event.Continuation {
+			t.Fatalf("default lifecycle gained attempt metadata: %+v", event)
+		}
+	}
+	if counts[LifecycleTurnStart] != 2 || counts[LifecycleTurnEnd] != 2 {
+		t.Fatalf("default lifecycle boundaries = %+v events=%+v", counts, events)
 	}
 }
 
@@ -382,6 +741,205 @@ func TestController_FinalizationFailureIsExplicitlyIncomplete(t *testing.T) {
 	}
 }
 
+func TestController_FinalizationPreservesPartialResponseAccountingAndProjection(t *testing.T) {
+	history := &recordingHistory{}
+	providerErr := errors.New("final synthesis stream interrupted")
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1}),
+		FinalizeOnStop: true,
+		MaxCostUSD:     2,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{TotalTokens: 100}), nil
+			}
+			return textResponse("partial final synthesis", model.Usage{TotalTokens: 200}), providerErr
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "evidence survives", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, runErr := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", runErr)
+	}
+	if result == nil || !result.Partial || result.CompletionStatus != CompletionIncomplete {
+		t.Fatalf("result = %+v, want an incomplete partial finalization", result)
+	}
+	if result.Content != "partial final synthesis" || model.ExtractTextContentOrEmpty(result.Message.Content) != "partial final synthesis" {
+		t.Fatalf("partial projection = content %q message=%q", result.Content, model.ExtractTextContentOrEmpty(result.Message.Content))
+	}
+	if result.Usage.TotalTokens != 300 || math.Abs(result.CostUSD-0.3) > 1e-12 {
+		t.Fatalf("partial accounting = usage=%+v cost=%v", result.Usage, result.CostUSD)
+	}
+	if result.Termination.ProviderError != providerErr.Error() || incomplete.ProviderError != providerErr.Error() {
+		t.Fatalf("provider error was not retained: termination=%+v incomplete=%+v", result.Termination, incomplete)
+	}
+	if !strings.Contains(result.Termination.FinalizationError, providerErr.Error()) {
+		t.Fatalf("finalization error = %q, want provider detail", result.Termination.FinalizationError)
+	}
+	if !result.Termination.FinalizationAttempted || modelCalls != 2 {
+		t.Fatalf("termination=%+v model_calls=%d", result.Termination, modelCalls)
+	}
+	if len(history.messages) != 2 || history.messages[0].Role != "assistant" || len(history.messages[0].ToolCalls) != 1 || history.messages[1].Role != "tool" {
+		t.Fatalf("partial finalization appended an inappropriate history message: %+v", history.messages)
+	}
+}
+
+func TestController_FinalizationAccountingFailureIsNotProviderPartial(t *testing.T) {
+	history := &recordingHistory{}
+	pricingErr := errors.New("final synthesis price unavailable")
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1}),
+		FinalizeOnStop: true,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			if usage.TotalTokens == 200 {
+				return 0, pricingErr
+			}
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{TotalTokens: 100}), nil
+			}
+			return textResponse("must not become a partial final answer", model.Usage{TotalTokens: 200}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "preserved evidence", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, runErr := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", runErr)
+	}
+	if result == nil || result.Partial || result.CompletionStatus != CompletionIncomplete || result.Termination.ProviderError != "" {
+		t.Fatalf("result = %+v, want non-provider finalization failure", result)
+	}
+	if !strings.Contains(result.Termination.FinalizationError, pricingErr.Error()) || incomplete.ProviderError != "" {
+		t.Fatalf("termination=%+v incomplete=%+v", result.Termination, incomplete)
+	}
+	if strings.Contains(result.Content, "must not become") || result.Message.Content != nil || len(history.messages) != 2 {
+		t.Fatalf("accounting failure leaked final response: result=%+v history=%+v", result, history.messages)
+	}
+	if result.Usage.TotalTokens != 300 || math.Abs(result.CostUSD-0.1) > 1e-12 || modelCalls != 2 {
+		t.Fatalf("accounting result=%+v model_calls=%d", result, modelCalls)
+	}
+}
+
+func TestController_ReplaysPartialFinalizationWithoutProviderRetry(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	providerCalls := 0
+	secret := "sk-" + strings.Repeat("a", 30)
+	rawProviderError := "final synthesis stream ended " + secret + " " + strings.Repeat("x", modelstep.MaxPersistedErrorRunes+100)
+	persistedProviderError := modelstep.NormalizeErrorText(rawProviderError)
+	build := func(context.Context, int) (model.ChatRequest, error) {
+		return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+	}
+	config := ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1}),
+		FinalizeOnStop: true,
+		MaxCostUSD:     2,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: build,
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			if providerCalls == 1 {
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{TotalTokens: 100}), nil
+			}
+			return textResponse("durable partial finalization", model.Usage{TotalTokens: 200}), errors.New(rawProviderError)
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "durable evidence", Success: true}}, nil
+		}),
+		RunLedger: ledger, Evidence: ev, StepJournal: ledger,
+		RunID: runID, SessionID: "durable-test", TaskID: "finalization", TurnID: "finalization-turn",
+	}
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController first: %v", err)
+	}
+	if _, err := first.Run(context.Background()); err == nil {
+		t.Fatal("first Run unexpectedly succeeded")
+	}
+	if providerCalls != 2 {
+		t.Fatalf("provider calls after first run = %d, want 2", providerCalls)
+	}
+	// A fresh Governor represents a process restart; the durable step journal,
+	// rather than the in-memory round counter, supplies replay identity.
+	config.Governor = New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1})
+
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		providerCalls++
+		return nil, errors.New("replay must not call provider")
+	})
+	config.DispatchTools = ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+		return nil, errors.New("replay must not dispatch tool")
+	})
+	second, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController second: %v", err)
+	}
+	result, runErr := second.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) {
+		t.Fatalf("replay error = %v, want IncompleteTurnError", runErr)
+	}
+	if providerCalls != 2 || result == nil || !result.Partial || result.Content != "durable partial finalization" || result.Usage.TotalTokens != 300 || math.Abs(result.CostUSD-0.3) > 1e-12 {
+		t.Fatalf("replay provider_calls=%d result=%+v", providerCalls, result)
+	}
+	if result.Termination.ProviderError != persistedProviderError || incomplete.ProviderError != persistedProviderError {
+		t.Fatalf("replay provider error = termination=%+v incomplete=%+v", result.Termination, incomplete)
+	}
+	events, err := ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFinalizationFailure := false
+	for _, event := range events {
+		for _, key := range []string{"error", "provider_error", "reason", "pricing_error"} {
+			value, _ := event.Payload[key].(string)
+			if strings.Contains(value, secret) || len([]rune(value)) > modelstep.MaxPersistedErrorRunes {
+				t.Fatalf("event %s leaked or exceeded bound in %s: %q", event.Type, key, value)
+			}
+		}
+		if event.Type == runledger.EventControllerDecision && event.Payload["kind"] == "finalization_failed" {
+			foundFinalizationFailure = true
+			if reason, _ := event.Payload["reason"].(string); reason == "" || !strings.Contains(reason, "[REDACTED]") {
+				t.Fatalf("finalization failure reason = %q", reason)
+			}
+		}
+	}
+	if !foundFinalizationFailure {
+		t.Fatal("missing normalized finalization_failed decision")
+	}
+}
+
 func TestController_EmptyChoicesAfterToolEvidenceUsesFinalization(t *testing.T) {
 	history := &recordingHistory{}
 	modelCalls := 0
@@ -585,7 +1143,7 @@ func TestController_OverCeilingFirstResponseCannotDispatchTools(t *testing.T) {
 	if modelCalls != 1 || dispatchCalls != 0 || len(history.messages) != 0 {
 		t.Fatalf("model_calls=%d dispatch_calls=%d history=%+v", modelCalls, dispatchCalls, history.messages)
 	}
-	if result.CompletionStatus != CompletionIncomplete || result.Termination.Kind != "cost_limit" || result.CostUSD != 2 {
+	if result.CompletionStatus != CompletionIncomplete || result.Termination.Kind != "cost_limit" || result.CostUSD != 2 || result.Partial || result.Termination.ProviderError != "" {
 		t.Fatalf("result = %+v", result)
 	}
 	if !strings.Contains(result.Termination.Reason, "content and tool calls were rejected") {
@@ -639,8 +1197,11 @@ func TestController_OverCeilingFinalizationResponseIsRejected(t *testing.T) {
 	if len(history.messages) != 2 {
 		t.Fatalf("history has %d messages, want only assistant tool call and tool result: %+v", len(history.messages), history.messages)
 	}
-	if result.CompletionStatus != CompletionIncomplete || !result.Termination.FinalizationAttempted || result.CostUSD != 1.1 {
+	if result.CompletionStatus != CompletionIncomplete || !result.Termination.FinalizationAttempted || result.CostUSD != 1.1 || result.Partial || result.Termination.ProviderError != "" {
 		t.Fatalf("result = %+v", result)
+	}
+	if result.Message.Content != nil || strings.Contains(result.Content, "must not be accepted") {
+		t.Fatalf("over-ceiling finalization leaked rejected content: %+v", result)
 	}
 	if !strings.Contains(result.Termination.FinalizationError, "exceeding the explicit") {
 		t.Fatalf("finalization error = %q", result.Termination.FinalizationError)

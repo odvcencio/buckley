@@ -274,11 +274,13 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	// Check if file exists for diff summary
-	oldContent := ""
-	existingFile, err := os.ReadFile(absPath)
-	if err == nil {
-		oldContent = string(existingFile)
+	// Check existence independently of readability so an existing file that
+	// is writable but not readable is still reported as modified. Treat any
+	// stat error other than not-exist as existing/unknown; do not silently
+	// label an uncertain target as newly created.
+	fileExists := true
+	if _, statErr := os.Stat(absPath); statErr != nil && os.IsNotExist(statErr) {
+		fileExists = false
 	}
 
 	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
@@ -289,7 +291,7 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	lines := strings.Split(content, "\n")
-	isNew := oldContent == ""
+	isNew := !fileExists
 
 	result := &Result{
 		Success: true,

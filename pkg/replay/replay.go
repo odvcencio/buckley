@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/runledger"
 )
@@ -34,16 +35,17 @@ type Issue struct {
 // Report is the read-only result of verifying a run's event, step, and
 // evidence relationships.
 type Report struct {
-	SchemaVersion string  `json:"schema_version"`
-	RunID         string  `json:"run_id"`
-	RunStatus     string  `json:"run_status"`
-	Valid         bool    `json:"valid"`
-	EventCount    int     `json:"event_count"`
-	TaskCount     int     `json:"task_count"`
-	StepCount     int     `json:"step_count"`
-	EvidenceCount int     `json:"evidence_count"`
-	SequenceGaps  []int64 `json:"sequence_gaps,omitempty"`
-	Issues        []Issue `json:"issues,omitempty"`
+	SchemaVersion           string  `json:"schema_version"`
+	RunID                   string  `json:"run_id"`
+	RunStatus               string  `json:"run_status"`
+	Valid                   bool    `json:"valid"`
+	StepEnumerationComplete bool    `json:"step_enumeration_complete"`
+	EventCount              int     `json:"event_count"`
+	TaskCount               int     `json:"task_count"`
+	StepCount               int     `json:"step_count"`
+	EvidenceCount           int     `json:"evidence_count"`
+	SequenceGaps            []int64 `json:"sequence_gaps,omitempty"`
+	Issues                  []Issue `json:"issues,omitempty"`
 }
 
 // Verify loads only durable records and validates their replay contract. It
@@ -85,9 +87,30 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 		}
 	}
 
+	var enumeratedSteps []runledger.ExecutionStep
+	enumeratedStepByID := map[string]runledger.ExecutionStep{}
+	if journal != nil {
+		if enumerator, ok := journal.(runledger.StepEnumerator); ok {
+			steps, enumerateErr := enumerator.ListSteps(ctx, runID)
+			if enumerateErr != nil {
+				report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_enumeration_failed", Message: enumerateErr.Error()})
+			} else {
+				report.StepEnumerationComplete = true
+				for _, step := range steps {
+					enumeratedSteps = append(enumeratedSteps, step)
+					enumeratedStepByID[step.StepID] = step
+				}
+			}
+		} else {
+			report.Issues = append(report.Issues, Issue{Severity: SeverityWarning, Code: "step_enumeration_unavailable", Message: "step journal cannot enumerate execution steps; verification is partial"})
+		}
+	}
+
 	seenEventIDs := map[string]bool{}
 	stepIDs := map[string]bool{}
 	evidenceIDs := map[string]bool{}
+	validatedModelSteps := map[string]bool{}
+	blockedMarkers := map[string]modelstep.BlockedMarker{}
 	for _, event := range events {
 		if event.ID != "" && seenEventIDs[event.ID] {
 			report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "duplicate_event_id", Message: fmt.Sprintf("event ID %s appears more than once", event.ID), Sequence: event.Sequence})
@@ -107,23 +130,119 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 		for _, id := range eventEvidenceIDs(event) {
 			evidenceIDs[id] = true
 		}
+		retryBlocked := event.Type == runledger.EventModelRequestReplayed && payloadBool(event.Payload, "retry_blocked")
+		if payloadBool(event.Payload, "retry_blocked") && event.Type != runledger.EventModelRequestReplayed {
+			report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "retry_blocked_shape", Message: "retry_blocked is only valid on model.request_replayed", Sequence: event.Sequence, StepID: stepID})
+		}
+
 		// Only step-bearing events fail closed on missing output evidence.
 		// Legacy events already carry a legacy_step_event warning and must
-		// keep old ledgers inspectable.
-		if requiresOutputEvidence(event.Type) && stepID != "" && payloadEvidenceID(event) == "" {
+		// keep old ledgers inspectable. A retry-blocked model replay may have
+		// no response evidence when the evidence write itself failed.
+		if requiresOutputEvidence(event.Type) && !retryBlocked && stepID != "" && payloadEvidenceID(event) == "" {
 			report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "missing_output_evidence", Message: "completed replayable step has no output evidence", Sequence: event.Sequence, StepID: stepID})
 		}
 
 		if journal != nil && stepID != "" {
-			step, err := journal.GetStep(ctx, runID, stepID)
+			var step runledger.ExecutionStep
+			var err error
+			if report.StepEnumerationComplete {
+				var found bool
+				step, found = enumeratedStepByID[stepID]
+				if !found {
+					err = runledger.ErrStepNotFound
+				}
+			} else {
+				step, err = journal.GetStep(ctx, runID, stepID)
+			}
 			if err != nil {
 				report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "missing_step_record", Message: err.Error(), Sequence: event.Sequence, StepID: stepID})
-			} else if requiresOutputEvidence(event.Type) && step.Status != runledger.StepCompleted {
+			} else {
+				if eventDigest := payloadString(event.Payload, "input_digest"); eventDigest != step.InputDigest {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_input_digest_mismatch", Message: "event input digest does not match the execution step", Sequence: event.Sequence, StepID: stepID})
+				}
+				attempt, ok := payloadInteger(event.Payload, "attempt")
+				if !ok || attempt <= 0 {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "missing_step_attempt", Message: "step event has no valid attempt", Sequence: event.Sequence, StepID: stepID})
+				} else if attempt > step.Attempt {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_attempt_mismatch", Message: "event attempt is newer than the durable execution step", Sequence: event.Sequence, StepID: stepID})
+				} else if requiresCurrentAttempt(event.Type) && attempt != step.Attempt {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_attempt_mismatch", Message: "event attempt does not match the execution step", Sequence: event.Sequence, StepID: stepID})
+				}
+				if requiresOutputEvidence(event.Type) || retryBlocked {
+					issueCode := "step_output_evidence_mismatch"
+					if retryBlocked {
+						issueCode = "retry_blocked_evidence"
+					}
+					if validationErr := validateEventOutputEvidence(ctx, evidenceStore, event, step); validationErr != nil {
+						report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: issueCode, Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
+					}
+				}
+				if step.Kind == "model" && !validatedModelSteps[stepID] {
+					validatedModelSteps[stepID] = true
+					switch {
+					case step.Status == runledger.StepBlocked && strings.HasPrefix(step.Error, modelstep.BlockedMarkerPrefix):
+						issueCode := "blocked_model_record"
+						if retryBlocked {
+							issueCode = "retry_blocked_record"
+						}
+						marker, validationErr := modelstep.ValidateBlockedStep(step)
+						if validationErr == nil {
+							blockedMarkers[stepID] = marker
+							if marker.ResponseEvidenceID != "" {
+								evidenceIDs[marker.ResponseEvidenceID] = true
+								if evidenceStore != nil {
+									object, loadErr := evidenceStore.Get(ctx, marker.ResponseEvidenceID)
+									if loadErr != nil {
+										validationErr = loadErr
+									} else if _, replayErr := modelstep.ValidateBlockedReplay(step, &object); replayErr != nil {
+										validationErr = replayErr
+									}
+								}
+							}
+						}
+						if validationErr != nil {
+							report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: issueCode, Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
+						}
+					case step.Status == runledger.StepCompleted && step.OutputEvidenceID != "":
+						evidenceIDs[step.OutputEvidenceID] = true
+						if evidenceStore != nil {
+							object, loadErr := evidenceStore.Get(ctx, step.OutputEvidenceID)
+							if loadErr != nil {
+								report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "model_response_record", Message: loadErr.Error(), Sequence: event.Sequence, StepID: stepID})
+							} else if _, validationErr := modelstep.ValidateResponseEvidence(step.OutputEvidenceID, step.OutputDigest, object); validationErr != nil {
+								report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "model_response_record", Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
+							}
+						}
+					}
+				}
+			}
+			if err == nil && retryBlocked {
+				marker, markerOK := blockedMarkers[stepID]
+				if markerOK && payloadString(event.Payload, "provider_error") != marker.ProviderError {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "retry_blocked_record", Message: "retry-blocked event provider error does not match the blocked marker", Sequence: event.Sequence, StepID: stepID})
+				}
+				if !markerOK && (step.Status != runledger.StepBlocked || !strings.HasPrefix(step.Error, modelstep.BlockedMarkerPrefix)) {
+					report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "retry_blocked_record", Message: "retry-blocked replay does not reference a versioned blocked model record", Sequence: event.Sequence, StepID: stepID})
+				}
+			} else if err == nil && requiresOutputEvidence(event.Type) && step.Status != runledger.StepCompleted {
 				report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_status_mismatch", Message: fmt.Sprintf("event says completed but step status is %s", step.Status), Sequence: event.Sequence, StepID: stepID})
 			}
 		}
 	}
 
+	for _, step := range enumeratedSteps {
+		stepID := step.StepID
+		if !stepIDs[stepID] {
+			report.Issues = append(report.Issues, Issue{
+				Severity: SeverityError,
+				Code:     "orphan_step_record",
+				Message:  fmt.Sprintf("execution step has status %q and dispatch state %q but no ledger event", step.Status, step.DispatchState),
+				StepID:   stepID,
+			})
+		}
+		stepIDs[stepID] = true
+	}
 	report.StepCount = len(stepIDs)
 	report.EvidenceCount = len(evidenceIDs)
 	if evidenceStore != nil {
@@ -177,12 +296,47 @@ func requiresOutputEvidence(eventType string) bool {
 	}
 }
 
+func requiresCurrentAttempt(eventType string) bool {
+	switch eventType {
+	case runledger.EventModelRequestCompleted, runledger.EventModelRequestReplayed,
+		runledger.EventToolCompleted, runledger.EventToolReplayed:
+		return true
+	default:
+		return false
+	}
+}
+
 func payloadString(payload map[string]any, key string) string {
 	if payload == nil {
 		return ""
 	}
 	value, _ := payload[key].(string)
 	return strings.TrimSpace(value)
+}
+
+func payloadBool(payload map[string]any, key string) bool {
+	if payload == nil {
+		return false
+	}
+	value, _ := payload[key].(bool)
+	return value
+}
+
+func payloadInteger(payload map[string]any, key string) (int, bool) {
+	if payload == nil {
+		return 0, false
+	}
+	switch value := payload[key].(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), int64(int(value)) == value
+	case float64:
+		integer := int(value)
+		return integer, float64(integer) == value
+	default:
+		return 0, false
+	}
 }
 
 func payloadEvidenceID(event runledger.Event) string {
@@ -195,6 +349,34 @@ func payloadEvidenceID(event runledger.Event) string {
 		return event.EvidenceIDs[0]
 	}
 	return ""
+}
+
+func validateEventOutputEvidence(ctx context.Context, evidenceStore evidence.Store, event runledger.Event, step runledger.ExecutionStep) error {
+	eventEvidenceID := payloadEvidenceID(event)
+	if eventEvidenceID != step.OutputEvidenceID {
+		return fmt.Errorf("event output evidence %q does not match execution step output evidence %q", eventEvidenceID, step.OutputEvidenceID)
+	}
+	for _, key := range []string{"response_evidence_id", "output_evidence_id", "evidence_id"} {
+		if id := payloadString(event.Payload, key); id != "" && id != step.OutputEvidenceID {
+			return fmt.Errorf("event %s %q does not match execution step output evidence %q", key, id, step.OutputEvidenceID)
+		}
+	}
+	for _, id := range event.EvidenceIDs {
+		if step.OutputEvidenceID == "" || id != step.OutputEvidenceID {
+			return fmt.Errorf("event evidence %q does not match execution step output evidence %q", id, step.OutputEvidenceID)
+		}
+	}
+	if eventEvidenceID == "" || evidenceStore == nil {
+		return nil
+	}
+	object, err := evidenceStore.Get(ctx, eventEvidenceID)
+	if err != nil {
+		return nil
+	}
+	if object.ID != step.OutputEvidenceID || object.ContentSHA256 != step.OutputDigest {
+		return fmt.Errorf("event output evidence identity does not match the execution step output digest")
+	}
+	return nil
 }
 
 func eventEvidenceIDs(event runledger.Event) []string {

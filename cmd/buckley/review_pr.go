@@ -48,6 +48,7 @@ type reviewPRCommandOptions struct {
 	forceSinglePass      bool
 	forceShards          int
 	concurrency          int
+	depth                reviewDepth
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -66,6 +67,8 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
+	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
+	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
 	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
 	shards := fs.Int("shards", 0, "force fan-out into exactly this many shards, for testing (0 = derive from content)")
 	concurrency := fs.Int("concurrency", defaultShardConcurrency, "maximum number of shards reviewed at once")
@@ -81,6 +84,25 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	}
 	if *noBudget && *budgetUSD > 0 {
 		return reviewPRCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
+	}
+	depthWasSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "depth" {
+			depthWasSet = true
+		}
+	})
+	if *inDepth && depthWasSet {
+		parsed, err := parseReviewDepth(*depthFlag)
+		if err != nil || parsed != reviewDepthSpot {
+			return reviewPRCommandOptions{}, fmt.Errorf("--in-depth cannot be combined with --depth %q", *depthFlag)
+		}
+		*depthFlag = string(reviewDepthInDepth)
+	} else if *inDepth {
+		*depthFlag = string(reviewDepthInDepth)
+	}
+	depth, err := parseReviewDepth(*depthFlag)
+	if err != nil {
+		return reviewPRCommandOptions{}, err
 	}
 
 	if fs.NArg() != 1 || fs.Arg(0) == "" {
@@ -105,6 +127,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		forceSinglePass:      *singlePass,
 		forceShards:          *shards,
 		concurrency:          *concurrency,
+		depth:                depth,
 	}, nil
 }
 
@@ -148,7 +171,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts",
+	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts", "depth",
 		"shards", "concurrency":
 		return true
 	default:
@@ -204,11 +227,14 @@ func runReviewPRCommand(args []string) error {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
 		termOut.Dim("Reviewing PR: %s", opts.prRef)
+		termOut.Dim("Review depth: %s", reviewDepthLabel(opts.depth))
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
 		maxIterations:              opts.maxTurns,
+		maxIterationsExplicit:      opts.maxTurns > 0,
 		maxToolCalls:               opts.maxToolCalls,
+		maxToolCallsExplicit:       opts.maxToolCalls > 0,
 		maxRetries:                 opts.maxRetries,
 		maxDiffBytes:               opts.maxDiff,
 		maxSupportingContextTokens: opts.maxSupportingContext,
@@ -217,6 +243,7 @@ func runReviewPRCommand(args []string) error {
 		forceSinglePass:            opts.forceSinglePass,
 		forceShards:                opts.forceShards,
 		concurrency:                opts.concurrency,
+		depth:                      opts.depth,
 	})
 	if opts.post {
 		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
@@ -231,6 +258,7 @@ func runReviewPRCommand(args []string) error {
 				Model:           plan.modelID,
 				ReasoningEffort: plan.reasoningEffort,
 				SizeClass:       plan.sizeClass,
+				Depth:           reviewDepthLabel(plan.depth),
 				BudgetUSD:       plan.maxCostUSD,
 			})
 		}
@@ -244,16 +272,10 @@ func runReviewPRCommand(args []string) error {
 		if !quietMode && result != nil {
 			printReviewAttemptCounts(result)
 		}
-		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
-			return reviewErr
-		}
-		if err := writePRReviewOutput(opts.outputFile, result.reviewText, prInfo); err != nil {
-			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
-		}
-		if opts.showCost && result.trace != nil {
+		if opts.showCost && result != nil && result.trace != nil {
 			printReviewCost(result.trace, runtime.ledger)
 		}
-		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
+		return reviewCommandFailure(reviewErr, result)
 	}
 
 	if result.reviewText == "" {
@@ -326,7 +348,9 @@ const defaultShardConcurrency = 4
 
 type automatedReviewOptions struct {
 	maxIterations              int
+	maxIterationsExplicit      bool
 	maxToolCalls               int
+	maxToolCallsExplicit       bool
 	maxVerificationCalls       int
 	maxRetries                 int
 	maxDiffBytes               int
@@ -348,6 +372,7 @@ type automatedReviewOptions struct {
 	reasoningEffort            string
 	reasoningMaxTokens         int
 	maxOutputTokens            int
+	depth                      reviewDepth
 	adaptiveCodexModel         bool
 	adaptiveReasoning          bool
 	engine                     *rules.Engine
@@ -418,13 +443,16 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 	}
 	opts := automatedReviewOptions{
 		maxIterations:              cfg.Buckbot.MaxReviewIterations,
+		maxIterationsExplicit:      cfg.Buckbot.MaxReviewIterations > 0,
 		maxToolCalls:               cfg.Buckbot.MaxToolCalls,
+		maxToolCallsExplicit:       cfg.Buckbot.MaxToolCalls > 0,
 		maxRetries:                 cfg.Buckbot.MaxValidationAttempts,
 		maxDiffBytes:               cfg.Buckbot.MaxDiffBytes,
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
 		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
 		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
 		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
+		depth:                      reviewDepthSpot,
 		postingGate:                buckbotPostingGateConfig(cfg.Buckbot),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
@@ -437,9 +465,17 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOptions) automatedReviewOptions {
 	if overrides.maxIterations > 0 {
 		defaults.maxIterations = overrides.maxIterations
+		defaults.maxIterationsExplicit = true
+	}
+	if overrides.maxIterationsExplicit {
+		defaults.maxIterationsExplicit = true
 	}
 	if overrides.maxToolCalls > 0 {
 		defaults.maxToolCalls = overrides.maxToolCalls
+		defaults.maxToolCallsExplicit = true
+	}
+	if overrides.maxToolCallsExplicit {
+		defaults.maxToolCallsExplicit = true
 	}
 	if overrides.maxRetries > 0 {
 		defaults.maxRetries = overrides.maxRetries
@@ -468,6 +504,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	if overrides.concurrency > 0 {
 		defaults.concurrency = overrides.concurrency
 	}
+	if overrides.depth != "" {
+		defaults.depth = normalizedReviewDepth(overrides.depth)
+	}
 	if overrides.costPerMillionTokens > 0 {
 		defaults.costPerMillionTokens = overrides.costPerMillionTokens
 	}
@@ -480,6 +519,16 @@ func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider
 		providers = append(providers, commands.NewWorkflowRiskContextProvider())
 	}
 	return providers
+}
+
+func reviewSupportingContextBudget(modelID string, requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	if isDeepSeekV4ProReviewModel(modelID) {
+		return deepSeekSupportingContext
+	}
+	return 0
 }
 
 // runPRReviewWithOptions reviews prRef. willPost tells the posting-size gate
@@ -499,8 +548,8 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
 	}
-	if opts.maxSupportingContextTokens > 0 {
-		contextOpts.MaxSupportingContextTokens = opts.maxSupportingContextTokens
+	if supportingContext := reviewSupportingContextBudget(opts.modelID, opts.maxSupportingContextTokens); supportingContext > 0 {
+		contextOpts.MaxSupportingContextTokens = supportingContext
 	}
 	prCtx, audit, err := commands.AssemblePRContextWithOptions(prRef, contextOpts)
 	if err != nil {
@@ -538,7 +587,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 			return nil, prCtx.PR, fmt.Errorf("prepare posted review: %w", err)
 		}
 	}
-	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", opts.sizeClass, opts.reasoningEffort))
+	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(opts.depth), opts.sizeClass, opts.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
 	reviewDef := commands.ReviewPRDef{
 		ChangedFiles:                prCtx.Files,
@@ -549,6 +598,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
 		MaxIterations:               opts.maxIterations,
 		ApprovalCritic:              opts.approvalCritic,
+		Depth:                       string(opts.depth),
 	}
 	opts = boundPRApprovalCritic(opts, reviewDef)
 	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
@@ -685,7 +735,7 @@ func runPRReviewSharded(
 			return nil, prCtx.PR, fmt.Errorf("prepare posted review: %w", err)
 		}
 	}
-	spinner.SetMessage(fmt.Sprintf("Running %d-shard review with %s reasoning...", len(shards.Shards), opts.reasoningEffort))
+	spinner.SetMessage(fmt.Sprintf("Running %s %d-shard review with %s reasoning...", reviewDepthLabel(opts.depth), len(shards.Shards), opts.reasoningEffort))
 
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
@@ -697,6 +747,7 @@ func runPRReviewSharded(
 			CIStatus:          prCtx.PR.CIStatus,
 			CIProvenance:      prCtx.CIProvenance,
 			MaxIterations:     opts.maxIterations,
+			Depth:             string(shardOpts.depth),
 		}
 		if primary {
 			reviewDef.RequiresFeedbackDisposition = prCtx.HasReviewFeedback()

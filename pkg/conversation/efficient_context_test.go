@@ -160,6 +160,46 @@ func TestCompactModelMessages_DeduplicatesOldToolResults(t *testing.T) {
 	}
 }
 
+func TestCompactModelMessages_DeduplicatesRepeatedToolArgumentsNotDifferentReads(t *testing.T) {
+	messages := []model.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []model.ToolCall{{
+				ID: "call-old", Type: "function",
+				Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"same.go"}`},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call-old", Name: "read_file", Content: "old result"},
+		{
+			Role: "assistant",
+			ToolCalls: []model.ToolCall{{
+				ID: "call-different", Type: "function",
+				Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"different.go"}`},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call-different", Name: "read_file", Content: "old result"},
+		{
+			Role: "assistant",
+			ToolCalls: []model.ToolCall{{
+				ID: "call-new", Type: "function",
+				Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"same.go"}`},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call-new", Name: "read_file", Content: "new result"},
+	}
+
+	projected := CompactModelMessages(messages, EfficientContextOptions{
+		RecentMessages: 1, OldToolBytes: 256, OldToolArgumentBytes: 256,
+		OldAssistantBytes: 256, KeepReasoningRecent: 1, MaxBytes: 1 << 20,
+	})
+	if got := projected[1].Content.(string); !strings.Contains(got, "duplicate read_file result omitted") {
+		t.Fatalf("repeated operation was not deduplicated: %q", got)
+	}
+	if got := projected[3].Content.(string); got != "old result" && strings.Contains(got, "duplicate") {
+		t.Fatalf("different read was incorrectly deduplicated: %q", got)
+	}
+}
+
 func TestCompactModelMessages_UnansweredToolCallReasoningSurvivesAggressiveCompaction(t *testing.T) {
 	messages := []model.Message{
 		{Role: "user", Content: "investigate the failure"},

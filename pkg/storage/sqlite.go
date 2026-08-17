@@ -12,8 +12,7 @@ import (
 	"sync"
 	"time"
 
-	sqlite "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed schema.sql
@@ -62,12 +61,14 @@ func New(dbPath string) (*Store, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
 
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+	if err := EnableSQLiteWAL(db); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
 	// Run migrations
 	if err := runMigrations(db); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
@@ -158,8 +159,8 @@ func (s *Store) notify(event Event) {
 }
 
 // migrations is the ordered list of all migrations
-var migrations = []Migration{
-	{1, "initial_schema", func(db *sql.DB) error { return nil }}, // Base schema from schemaSQL
+var migrations = []SQLiteMigration{
+	{1, "initial_schema", func(db MigrationDB) error { return nil }}, // Base schema from schemaSQL
 	{2, "session_columns", ensureSessionSchema},
 	{3, "message_columns", ensureMessagesSchema},
 	{4, "memories_columns", ensureMemoriesSchema},
@@ -184,7 +185,7 @@ func sqliteTimestamp(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func normalizeLegacyTimestamps(db *sql.DB) error {
+func normalizeLegacyTimestamps(db MigrationDB) error {
 	for _, target := range []struct{ table, column string }{
 		{"sessions", "created_at"}, {"sessions", "last_active"},
 		{"sessions", "completed_at"},
@@ -194,6 +195,11 @@ func normalizeLegacyTimestamps(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("read legacy %s.%s: %w", target.table, target.column, err)
 		}
+		type timestampRow struct {
+			id  int64
+			raw string
+		}
+		var values []timestampRow
 		for rows.Next() {
 			var id int64
 			var raw string
@@ -201,23 +207,27 @@ func normalizeLegacyTimestamps(db *sql.DB) error {
 				_ = rows.Close()
 				return fmt.Errorf("scan legacy %s.%s: %w", target.table, target.column, err)
 			}
-			if parsed := parseSQLiteTimestamp(raw); !parsed.IsZero() && raw != sqliteTimestamp(parsed) {
-				if _, err := db.Exec("UPDATE "+target.table+" SET "+target.column+" = ? WHERE rowid = ?", sqliteTimestamp(parsed), id); err != nil {
-					_ = rows.Close()
-					return fmt.Errorf("normalize %s.%s: %w", target.table, target.column, err)
-				}
-			}
+			values = append(values, timestampRow{id: id, raw: raw})
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		_ = rows.Close()
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, value := range values {
+			if parsed := parseSQLiteTimestamp(value.raw); !parsed.IsZero() && value.raw != sqliteTimestamp(parsed) {
+				if _, err := db.Exec("UPDATE "+target.table+" SET "+target.column+" = ? WHERE rowid = ?", sqliteTimestamp(parsed), value.id); err != nil {
+					return fmt.Errorf("normalize %s.%s: %w", target.table, target.column, err)
+				}
+			}
+		}
 	}
 	return nil
 }
 
-func ensureIPCEventsSchema(db *sql.DB) error {
+func ensureIPCEventsSchema(db MigrationDB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ipc_events (
 		event_id TEXT PRIMARY KEY,
 		session_id TEXT,
@@ -233,7 +243,7 @@ func ensureIPCEventsSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureProviderThreadsSchema(db *sql.DB) error {
+func ensureProviderThreadsSchema(db MigrationDB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS provider_threads (
 		session_id TEXT NOT NULL,
 		provider_id TEXT NOT NULL,
@@ -248,7 +258,7 @@ func ensureProviderThreadsSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureProviderContinuationsSchema(db *sql.DB) error {
+func ensureProviderContinuationsSchema(db MigrationDB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS provider_continuations (
 		session_id TEXT NOT NULL,
 		provider_id TEXT NOT NULL,
@@ -264,7 +274,7 @@ func ensureProviderContinuationsSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureModelBehaviorProfilesSchema(db *sql.DB) error {
+func ensureModelBehaviorProfilesSchema(db MigrationDB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_behavior_profiles (
 		model_id TEXT NOT NULL,
 		profile_version TEXT NOT NULL,
@@ -284,26 +294,23 @@ func ensureModelBehaviorProfilesSchema(db *sql.DB) error {
 
 // runMigrations runs the schema migrations with version tracking
 func runMigrations(db *sql.DB) error {
-	// Run pre-schema migrations to add any missing columns to existing tables.
-	// This must happen BEFORE applying the base schema because schema.sql
-	// may contain indexes that reference columns added by migrations.
-	if err := runPreSchemaMigrations(db); err != nil {
-		return fmt.Errorf("pre-schema migrations: %w", err)
-	}
-
-	// Now apply the base schema (idempotent via CREATE TABLE IF NOT EXISTS)
-	if _, err := db.Exec(schemaSQL); err != nil {
-		return fmt.Errorf("apply base schema: %w", err)
-	}
-
-	// Apply any pending migrations, tracked in schema_migrations.
-	return Migrate(db, "schema_migrations", migrations)
+	return MigrateSQLiteWithSetup(db, "schema_migrations", migrations, func(migrationDB MigrationDB) error {
+		// Legacy column repair must precede base schema because schema.sql has
+		// indexes over columns older databases may not yet carry.
+		if err := runPreSchemaMigrations(migrationDB); err != nil {
+			return fmt.Errorf("pre-schema migrations: %w", err)
+		}
+		if _, err := migrationDB.Exec(schemaSQL); err != nil {
+			return fmt.Errorf("apply base schema: %w", err)
+		}
+		return nil
+	})
 }
 
 // runPreSchemaMigrations adds missing columns to existing tables before the
 // base schema is applied. This prevents failures when schema.sql references
 // columns that don't exist in old databases.
-func runPreSchemaMigrations(db *sql.DB) error {
+func runPreSchemaMigrations(db MigrationDB) error {
 	// Check if sessions table exists and add missing columns
 	if tableExists(db, "sessions") {
 		if err := ensureSessionSchema(db); err != nil {
@@ -327,7 +334,7 @@ func runPreSchemaMigrations(db *sql.DB) error {
 }
 
 // tableExists checks if a table exists in the database
-func tableExists(db *sql.DB, tableName string) bool {
+func tableExists(db MigrationDB, tableName string) bool {
 	var count int
 	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&count)
 	return err == nil && count > 0
@@ -386,7 +393,7 @@ func (s *Store) GetMigrationHistory() ([]struct {
 	return history, nil
 }
 
-func ensureSessionSchema(db *sql.DB) error {
+func ensureSessionSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(sessions)`)
 	if err != nil {
 		return fmt.Errorf("session pragma: %w", err)
@@ -452,7 +459,7 @@ func ensureSessionSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureSessionsPrincipalSchema(db *sql.DB) error {
+func ensureSessionsPrincipalSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(sessions)`)
 	if err != nil {
 		return fmt.Errorf("session pragma: %w", err)
@@ -487,14 +494,14 @@ func ensureSessionsPrincipalSchema(db *sql.DB) error {
 	return nil
 }
 
-func backfillSessionsPrincipal(db *sql.DB) error {
+func backfillSessionsPrincipal(db MigrationDB) error {
 	if _, err := db.Exec(`UPDATE sessions SET principal = 'anonymous' WHERE principal IS NULL OR TRIM(principal) = ''`); err != nil {
 		return fmt.Errorf("backfill sessions principal: %w", err)
 	}
 	return nil
 }
 
-func ensureMessagesSchema(db *sql.DB) error {
+func ensureMessagesSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
 		return fmt.Errorf("messages pragma: %w", err)
@@ -561,16 +568,4 @@ func ensureMessagesSchema(db *sql.DB) error {
 		}
 	}
 	return nil
-}
-
-func isBusyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) {
-		code := sqliteErr.Code()
-		return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
-	}
-	return false
 }

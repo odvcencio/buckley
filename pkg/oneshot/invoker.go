@@ -127,6 +127,31 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 	// Make request
 	resp, err := inv.client.ChatCompletion(ctx, req)
 	if err != nil {
+		if resp != nil {
+			tokens := transparency.TokenUsage{Input: resp.Usage.PromptTokens, Output: resp.Usage.CompletionTokens}
+			result := &Result{}
+			if len(resp.Choices) > 0 {
+				choice := resp.Choices[0]
+				if choice.Message.Reasoning != "" {
+					builder.WithReasoning(choice.Message.Reasoning)
+					tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
+				}
+				if len(choice.Message.ToolCalls) > 0 {
+					calls := make([]tools.ToolCall, 0, len(choice.Message.ToolCalls))
+					for _, tc := range choice.Message.ToolCalls {
+						calls = append(calls, tools.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: json.RawMessage(tc.Function.Arguments)})
+					}
+					result.ToolCall = &calls[0]
+					builder.WithToolCalls(calls)
+				} else if content := model.ExtractTextContentOrEmpty(choice.Message.Content); content != "" {
+					result.TextContent = content
+					builder.WithContent(content)
+				}
+			}
+			builder.WithError(err)
+			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
+			return result, trace, fmt.Errorf("model request failed after partial response: %w", err)
+		}
 		builder.WithError(err)
 		trace := builder.Build()
 		return nil, trace, fmt.Errorf("model request failed: %w", err)
@@ -257,10 +282,42 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 
 			acc.Add(chunk)
 
-		case err := <-errChan:
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
 			if err != nil {
+				msg := acc.FinalizeWithTokenParsing()
+				usage := acc.Usage()
+				if msg.Reasoning != "" {
+					builder.WithReasoning(msg.Reasoning)
+				}
+				partialContent := model.ExtractTextContentOrEmpty(msg.Content)
+				if partialContent != "" {
+					builder.WithContent(partialContent)
+				}
+				if len(msg.ToolCalls) > 0 {
+					partialCalls := make([]tools.ToolCall, 0, len(msg.ToolCalls))
+					for _, tc := range msg.ToolCalls {
+						partialCalls = append(partialCalls, tools.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: json.RawMessage(tc.Function.Arguments)})
+					}
+					builder.WithToolCalls(partialCalls)
+				}
+				var tokens transparency.TokenUsage
+				if usage != nil {
+					tokens.Input = usage.PromptTokens
+					tokens.Output = usage.CompletionTokens
+				}
+				cost := inv.pricing.Calculate(tokens)
 				builder.WithError(err)
-				trace := builder.Build()
+				trace := builder.Complete(tokens, cost)
+				if inv.ledger != nil {
+					inv.ledger.Record(transparency.CostEntry{Model: inv.model, Tokens: tokens, Cost: cost, Latency: trace.Duration, InvocationID: traceID})
+				}
+				if partialContent != "" || msg.Reasoning != "" || len(msg.ToolCalls) > 0 || usage != nil {
+					return &Result{TextContent: partialContent}, trace, fmt.Errorf("model request failed after partial response: %w", err)
+				}
 				return nil, trace, fmt.Errorf("model request failed: %w", err)
 			}
 		}
@@ -355,6 +412,24 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 	// Make request
 	resp, err := inv.client.ChatCompletion(ctx, req)
 	if err != nil {
+		if resp != nil {
+			tokens := transparency.TokenUsage{Input: resp.Usage.PromptTokens, Output: resp.Usage.CompletionTokens}
+			content := ""
+			if len(resp.Choices) > 0 {
+				choice := resp.Choices[0]
+				if choice.Message.Reasoning != "" {
+					builder.WithReasoning(choice.Message.Reasoning)
+					tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
+				}
+				content = model.ExtractTextContentOrEmpty(choice.Message.Content)
+				if content != "" {
+					builder.WithContent(content)
+				}
+			}
+			builder.WithError(err)
+			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
+			return content, trace, fmt.Errorf("model request failed after partial response: %w", err)
+		}
 		builder.WithError(err)
 		trace := builder.Build()
 		return "", trace, fmt.Errorf("model request failed: %w", err)
@@ -542,16 +617,18 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		resp, err := inv.client.ChatCompletion(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		totalTokens.Input += resp.Usage.PromptTokens
-		totalTokens.Output += resp.Usage.CompletionTokens
-		if len(resp.Choices) > 0 {
-			if reasoning := resp.Choices[0].Message.Reasoning; reasoning != "" {
-				builder.WithReasoning(reasoning)
-				totalTokens.Reasoning += estimateTokens(reasoning)
+		if resp != nil {
+			totalTokens.Input += resp.Usage.PromptTokens
+			totalTokens.Output += resp.Usage.CompletionTokens
+			if len(resp.Choices) > 0 {
+				if reasoning := resp.Choices[0].Message.Reasoning; reasoning != "" {
+					builder.WithReasoning(reasoning)
+					totalTokens.Reasoning += estimateTokens(reasoning)
+				}
 			}
+		}
+		if err != nil {
+			return resp, err
 		}
 		return resp, nil
 	})

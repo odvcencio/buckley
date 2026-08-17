@@ -98,6 +98,7 @@ func (r *Runner) Run(ctx context.Context, opts ContextOptions) (*RunResult, erro
 		result.Error = fmt.Errorf("unmarshal tool call: %w", err)
 		return result, nil
 	}
+	commit.Normalize()
 
 	// 6. Validate the result
 	if err := commit.Validate(); err != nil {

@@ -1,14 +1,13 @@
 package storage
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
 )
 
-func ensureEmbeddingsSchema(db *sql.DB) error {
+func ensureEmbeddingsSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(embeddings)`)
 	if err != nil {
 		return fmt.Errorf("embeddings pragma: %w", err)
@@ -60,33 +59,21 @@ func ensureEmbeddingsSchema(db *sql.DB) error {
 	return nil
 }
 
-func migrateLegacyEmbeddings(db *sql.DB, hasFilePath, hasSourceMod bool) (err error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin embeddings migration: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
-		}
-	}()
-
+func migrateLegacyEmbeddings(db MigrationDB, hasFilePath, hasSourceMod bool) error {
 	if !hasFilePath {
-		if _, err = tx.Exec(`ALTER TABLE embeddings ADD COLUMN file_path TEXT`); err != nil {
+		if _, err := db.Exec(`ALTER TABLE embeddings ADD COLUMN file_path TEXT`); err != nil {
 			return fmt.Errorf("add embeddings.file_path: %w", err)
 		}
-		if _, err = tx.Exec(`UPDATE embeddings SET file_path = 'legacy/' || id WHERE file_path IS NULL OR file_path = ''`); err != nil {
+		if _, err := db.Exec(`UPDATE embeddings SET file_path = 'legacy/' || id WHERE file_path IS NULL OR file_path = ''`); err != nil {
 			return fmt.Errorf("backfill embeddings.file_path: %w", err)
 		}
 	}
 
 	if !hasSourceMod {
-		if _, err = tx.Exec(`ALTER TABLE embeddings ADD COLUMN source_mod_time TIMESTAMP`); err != nil {
+		if _, err := db.Exec(`ALTER TABLE embeddings ADD COLUMN source_mod_time TIMESTAMP`); err != nil {
 			return fmt.Errorf("add embeddings.source_mod_time: %w", err)
 		}
-		if _, err = tx.Exec(`UPDATE embeddings SET source_mod_time = created_at WHERE source_mod_time IS NULL`); err != nil {
+		if _, err := db.Exec(`UPDATE embeddings SET source_mod_time = created_at WHERE source_mod_time IS NULL`); err != nil {
 			return fmt.Errorf("backfill embeddings.source_mod_time: %w", err)
 		}
 	}

@@ -70,3 +70,24 @@ func containsReviewProvider(names []string, want string) bool {
 	}
 	return false
 }
+
+func TestQwenFlashUsesInDepthOutputChecklist(t *testing.T) {
+	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+		depth:              reviewDepthInDepth,
+		sizeClass:          "project",
+		modelID:            "qwen/qwen3.7-flash",
+		reasoningMaxTokens: qwenBroadReasoning,
+	})
+	for _, want := range []string{
+		"## Qwen Review Profile",
+		"## Qwen In-Depth Output Checklist",
+		"at least one real `run_verification` call",
+		"## Verification Ledger",
+		"## Coverage",
+		"Completeness: COMPLETE",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("Qwen Flash in-depth prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}

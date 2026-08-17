@@ -44,20 +44,12 @@ func CaptureReviewUntrackedFiles(ctx context.Context, root string, allowlistedPa
 		return nil, fmt.Errorf("at least one untracked review path must be explicitly allowlisted")
 	}
 
-	output, err := reviewSnapshotGitBytes(ctx, root, "ls-files", "--others", "--exclude-standard", "-z", "--")
+	allPaths, err := enumerateReviewUntrackedPaths(ctx, root)
 	if err != nil {
-		return nil, fmt.Errorf("enumerate reviewable untracked files: %w", err)
+		return nil, err
 	}
-
-	paths := make([]string, 0)
-	for _, raw := range bytes.Split(output, []byte{0}) {
-		if len(raw) == 0 {
-			continue
-		}
-		path := filepath.ToSlash(filepath.Clean(filepath.FromSlash(string(raw))))
-		if path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
-			return nil, fmt.Errorf("unsafe untracked review path %q", string(raw))
-		}
+	paths := make([]string, 0, len(allowed))
+	for _, path := range allPaths {
 		if _, ok := allowed[path]; ok {
 			paths = append(paths, path)
 		}
@@ -77,66 +69,137 @@ func CaptureReviewUntrackedFiles(ctx context.Context, root string, allowlistedPa
 		sort.Strings(missing)
 		return nil, fmt.Errorf("allowlisted untracked review paths are not non-ignored untracked files: %s", strings.Join(missing, ", "))
 	}
+	files, _, err := captureReviewUntrackedPaths(ctx, root, paths, false)
+	return files, err
+}
+
+// CaptureReviewableUntrackedFiles captures every non-ignored untracked file
+// that passes the review boundary. Unsafe names, secrets, binary/control
+// content, empty files, and files that exceed the snapshot budget are
+// excluded and returned separately so callers can disclose the boundary.
+func CaptureReviewableUntrackedFiles(ctx context.Context, root string) ([]ReviewUntrackedFile, []string, error) {
+	paths, err := enumerateReviewUntrackedPaths(ctx, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return captureReviewUntrackedPaths(ctx, root, paths, true)
+}
+
+func enumerateReviewUntrackedPaths(ctx context.Context, root string) ([]string, error) {
+	output, err := reviewSnapshotGitBytes(ctx, root, "ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return nil, fmt.Errorf("enumerate reviewable untracked files: %w", err)
+	}
+	paths := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, raw := range bytes.Split(output, []byte{0}) {
+		if len(raw) == 0 {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Clean(filepath.FromSlash(string(raw))))
+		if path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+			return nil, fmt.Errorf("unsafe untracked review path %q", string(raw))
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func captureReviewUntrackedPaths(ctx context.Context, root string, paths []string, skipUnsafe bool) ([]ReviewUntrackedFile, []string, error) {
 	sourceRoot, err := os.OpenRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("open untracked review root: %w", err)
+		return nil, nil, fmt.Errorf("open untracked review root: %w", err)
 	}
 	defer func() { _ = sourceRoot.Close() }()
 	capturedRoot, err := os.MkdirTemp("", "buckley-review-untracked-*")
 	if err != nil {
-		return nil, fmt.Errorf("create untracked review capture: %w", err)
+		return nil, nil, fmt.Errorf("create untracked review capture: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(capturedRoot) }()
 
 	files := make([]ReviewUntrackedFile, 0, len(paths))
+	excluded := make([]string, 0)
 	patchBytes := 0
 	for _, path := range paths {
 		if excludeReviewUntrackedPath(path) {
-			return nil, fmt.Errorf("allowlisted untracked review path %q is excluded by the safety policy", path)
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("allowlisted untracked review path %q is excluded by the safety policy", path)
 		}
 
 		rootPath := filepath.FromSlash(path)
 		info, err := sourceRoot.Lstat(rootPath)
 		if err != nil {
-			return nil, fmt.Errorf("inspect untracked review file %q: %w", path, err)
+			if skipUnsafe && os.IsNotExist(err) {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("inspect untracked review file %q: %w", path, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("allowlisted untracked review path %q is not a regular file", path)
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("allowlisted untracked review path %q is not a regular file", path)
 		}
 		if info.Size() > int64(MaxReviewSnapshotPatchBytes-patchBytes) {
-			return nil, fmt.Errorf("reviewable untracked files exceed %d-byte snapshot limit", MaxReviewSnapshotPatchBytes)
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("reviewable untracked files exceed %d-byte snapshot limit", MaxReviewSnapshotPatchBytes)
 		}
 
 		content, err := readStableReviewUntrackedFile(sourceRoot, rootPath, info)
 		if err != nil {
-			return nil, fmt.Errorf("read untracked review file %q: %w", path, err)
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("read untracked review file %q: %w", path, err)
 		}
-		if len(content) == 0 || reviewUntrackedBinary(content) {
-			return nil, fmt.Errorf("allowlisted untracked review path %q is empty, binary, or contains unsafe control bytes", path)
+		if len(content) == 0 || reviewUntrackedBinary(content) || (skipUnsafe && reviewUntrackedSecretContent(content)) {
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("allowlisted untracked review path %q is empty, binary, or contains unsafe control bytes", path)
 		}
 		capturedPath := filepath.Join(capturedRoot, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(capturedPath), 0o700); err != nil {
-			return nil, fmt.Errorf("prepare untracked review file %q: %w", path, err)
+			return nil, nil, fmt.Errorf("prepare untracked review file %q: %w", path, err)
 		}
 		mode := os.FileMode(0o600)
 		if info.Mode().Perm()&0o111 != 0 {
 			mode = 0o700
 		}
 		if err := os.WriteFile(capturedPath, content, mode); err != nil {
-			return nil, fmt.Errorf("freeze untracked review file %q: %w", path, err)
+			return nil, nil, fmt.Errorf("freeze untracked review file %q: %w", path, err)
 		}
 
 		patch, err := reviewUntrackedPatch(ctx, capturedRoot, path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(patch) == 0 {
-			return nil, fmt.Errorf("allowlisted untracked review path %q produced no review patch", path)
+			return nil, nil, fmt.Errorf("allowlisted untracked review path %q produced no review patch", path)
+		}
+		if patchBytes+len(patch) > MaxReviewSnapshotPatchBytes {
+			if skipUnsafe {
+				excluded = append(excluded, path)
+				continue
+			}
+			return nil, nil, fmt.Errorf("reviewable untracked files exceed %d-byte snapshot limit", MaxReviewSnapshotPatchBytes)
 		}
 		patchBytes += len(patch)
-		if patchBytes > MaxReviewSnapshotPatchBytes {
-			return nil, fmt.Errorf("reviewable untracked files exceed %d-byte snapshot limit", MaxReviewSnapshotPatchBytes)
-		}
 
 		insertions := bytes.Count(content, []byte{'\n'})
 		if content[len(content)-1] != '\n' {
@@ -148,7 +211,7 @@ func CaptureReviewUntrackedFiles(ctx context.Context, root string, allowlistedPa
 			Insertions: insertions,
 		})
 	}
-	return files, nil
+	return files, excluded, nil
 }
 
 func normalizeReviewUntrackedAllowlist(paths []string) (map[string]struct{}, error) {
@@ -213,6 +276,33 @@ func reviewUntrackedBinary(content []byte) bool {
 	}
 	for _, b := range content {
 		if (b < 0x20 && b != '\n' && b != '\r' && b != '\t') || b == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// reviewUntrackedSecretContent is deliberately conservative and only applies
+// to automatic project capture. Explicit branch allowlists retain the prior
+// behavior because they represent an operator-selected disclosure decision.
+func reviewUntrackedSecretContent(content []byte) bool {
+	text := strings.ToLower(string(content))
+	for _, marker := range []string{
+		"-----begin private key-----",
+		"aws_secret_access_key=",
+		"aws_secret_access_key:",
+		"github_pat_",
+		"ghp_",
+		"xoxb-",
+		"xoxp-",
+		"authorization: bearer ",
+		"x-api-key:",
+		"api_key=",
+		"api-key=",
+		"access_token=",
+		"client_secret=",
+	} {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}

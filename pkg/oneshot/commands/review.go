@@ -21,6 +21,7 @@ type ReviewBranchDef struct {
 	ChangedFiles      []string
 	ContextIncomplete bool
 	ApprovalCritic    bool
+	Depth             string
 }
 
 func (ReviewBranchDef) Name() string { return "review" }
@@ -49,6 +50,9 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 	if err := validateFinalReviewResult(review); err != nil {
 		return err
 	}
+	if err := validateReviewDepthOutput(review.Review, d.Depth, false); err != nil {
+		return err
+	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:      d.ChangedFiles,
 		ContextIncomplete: d.ContextIncomplete,
@@ -56,7 +60,10 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 }
 
 func (d ReviewBranchDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
-	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
+	if err := validateReviewExecutionEvidenceWithCoverage(result, execution, d.ChangedFiles, reviewDepthNeedsVerification(d.Depth)); err != nil {
+		return err
+	}
+	return requireReviewDepthVerification(d.Depth, execution)
 }
 
 func (d ReviewBranchDef) RequiresApprovalCritic(result any) bool {
@@ -75,7 +82,9 @@ func (d ReviewBranchDef) BuildApprovalCriticPrompt(originalPrompt string, primar
 // Project reviews are deadline-bounded and governor-protected, but do not
 // impose a fixed model-turn ceiling: the agent must be able to expand from
 // the Canopy TOC into complete repository coverage.
-type ReviewProjectDef struct{}
+type ReviewProjectDef struct {
+	Depth string
+}
 
 func (ReviewProjectDef) Name() string { return "review-project" }
 
@@ -83,8 +92,12 @@ func (ReviewProjectDef) SystemPrompt() string {
 	return prompts.ReviewProjectPrompt(time.Now())
 }
 
-func (ReviewProjectDef) AllowedTools() []string {
-	return reviewInspectionTools()
+func (d ReviewProjectDef) AllowedTools() []string {
+	tools := reviewInspectionTools()
+	if reviewDepthNeedsVerification(d.Depth) {
+		tools = append(tools, "run_verification")
+	}
+	return tools
 }
 
 func (ReviewProjectDef) MaxAgentIterations() int { return 0 }
@@ -100,7 +113,7 @@ func (ReviewProjectDef) ParseResult(response string) (any, error) {
 // a broad architecture/recommendations format rather than the merge-gate
 // schema, so it must never smuggle an approval verdict past the branch/PR
 // evidence and critic requirements.
-func (ReviewProjectDef) ValidateResult(result any) error {
+func (d ReviewProjectDef) ValidateResult(result any) error {
 	review, ok := result.(*ReviewAgentResult)
 	if !ok {
 		return fmt.Errorf("unexpected project review result type %T", result)
@@ -112,13 +125,20 @@ func (ReviewProjectDef) ValidateResult(result any) error {
 	if !strings.Contains(text, "## Evidence Collected") && !strings.Contains(text, "## Evidence Sampled") {
 		return fmt.Errorf("project review must include evidence and coverage ledgers")
 	}
-	if !strings.Contains(text, "## Coverage") || !strings.Contains(text, "**Completeness**:") {
+	if !strings.Contains(text, "## Coverage") || !reviewCompletenessMarkerRE.MatchString(text) {
 		return fmt.Errorf("project review must include a coverage ledger with completeness")
 	}
-	if !strings.Contains(text, "COMPLETE") && !strings.Contains(text, "PARTIAL") {
-		return fmt.Errorf("project review coverage must declare COMPLETE or PARTIAL")
+	if reviewDepthNeedsVerification(d.Depth) && !strings.Contains(text, "## Verification Ledger") {
+		return fmt.Errorf("%s project review must include a verification ledger", strings.ToUpper(strings.TrimSpace(d.Depth)))
+	}
+	if err := validateReviewDepthOutput(text, d.Depth, true); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (d ReviewProjectDef) ValidateAgentExecution(_ any, execution *oneshot.AgentResult) error {
+	return requireReviewDepthVerification(d.Depth, execution)
 }
 
 // ReviewPRDef implements oneshot.AgentDefinition for PR review.
@@ -131,6 +151,7 @@ type ReviewPRDef struct {
 	RequiredFeedbackIDs         []string
 	MaxIterations               int
 	ApprovalCritic              bool
+	Depth                       string
 }
 
 func (ReviewPRDef) Name() string { return "review-pr" }
@@ -197,6 +218,9 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 	if err := validateFinalReviewResult(review); err != nil {
 		return err
 	}
+	if err := validateReviewDepthOutput(review.Review, d.Depth, false); err != nil {
+		return err
+	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:                d.ChangedFiles,
 		ContextIncomplete:           d.ContextIncomplete,
@@ -213,6 +237,7 @@ var (
 	finalReviewSummaryHeadingRE  = regexp.MustCompile(`^##[ \t]+Summary[ \t]*$`)
 	finalReviewLevelTwoHeadingRE = regexp.MustCompile(`^##(?:[ \t]+.*)?[ \t]*$`)
 	finalReviewATXHeadingRE      = regexp.MustCompile(`^#{1,6}(?:[ \t]+.*)?[ \t]*$`)
+	reviewCompletenessMarkerRE   = regexp.MustCompile(`(?im)^\s*(?:[-*]\s+)?(?:(?:#{2,6})\s+)?(?:\*\*)?Completeness(?:\*\*)?\s*:\s*(COMPLETE|PARTIAL)\b`)
 )
 
 func parseFinalReviewResult(response string) (*ReviewAgentResult, error) {
@@ -396,14 +421,71 @@ func reviewFenceMarker(line string) string {
 
 func (d ReviewPRDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
 	review, ok := result.(*ReviewAgentResult)
-	if ok && review.Parsed != nil && review.Parsed.Approved &&
-		d.authoritativeRemoteCIPasses() {
+	if ok && review.Parsed != nil && review.Parsed.Approved && d.authoritativeRemoteCIPasses() {
 		return nil
 	}
-	return validateReviewExecutionEvidence(result, execution, d.ChangedFiles)
+	if err := validateReviewExecutionEvidenceWithCoverage(result, execution, d.ChangedFiles, reviewDepthNeedsVerification(d.Depth)); err != nil {
+		return err
+	}
+	if d.authoritativeRemoteCIPasses() {
+		return nil
+	}
+	return requireReviewDepthVerification(d.Depth, execution)
+}
+
+func reviewDepthNeedsVerification(depth string) bool {
+	switch strings.ToLower(strings.TrimSpace(depth)) {
+	case "balanced", "standard", "normal", "investigate", "in-depth", "in_depth", "deep", "detailed", "exhaustive":
+		return true
+	default:
+		return false
+	}
+}
+
+// validateReviewDepthOutput turns depth from a prompt hint into an observable
+// completion contract. Every depth has a complete scope; deeper modes add
+// structural and verification ledgers, but none may return a partial report
+// and call it a finished review.
+func validateReviewDepthOutput(review, depth string, project bool) error {
+	depth = strings.ToLower(strings.TrimSpace(depth))
+	deep := reviewDepthNeedsVerification(depth)
+	if project || deep {
+		if deep && !project && !strings.Contains(review, "## Structural Impact") {
+			return fmt.Errorf("%s review must include a Structural Impact section", strings.ToUpper(depth))
+		}
+		if deep && !strings.Contains(review, "## Verification Ledger") {
+			return fmt.Errorf("%s review must include a Verification Ledger section", strings.ToUpper(depth))
+		}
+		if !strings.Contains(review, "## Evidence Collected") && !strings.Contains(review, "## Evidence Sampled") {
+			return fmt.Errorf("%s review must include an Evidence Collected section", strings.ToUpper(depth))
+		}
+		match := reviewCompletenessMarkerRE.FindStringSubmatch(review)
+		if len(match) < 2 || !strings.EqualFold(match[1], "COMPLETE") {
+			return fmt.Errorf("%s review must declare Completeness: COMPLETE; partial reviews are not emitted", strings.ToUpper(depth))
+		}
+	}
+	return nil
+}
+
+func requireReviewDepthVerification(depth string, execution *oneshot.AgentResult) error {
+	if !reviewDepthNeedsVerification(depth) {
+		return nil
+	}
+	if execution != nil {
+		for _, call := range execution.ToolCalls {
+			if call.Name == "run_verification" && !strings.HasPrefix(strings.TrimSpace(call.ID), "host-evidence-") {
+				return nil
+			}
+		}
+	}
+	return oneshot.RequireAgentExecutionEvidence(fmt.Errorf("%s review requires at least one model-directed run_verification attempt", strings.ToUpper(strings.TrimSpace(depth))))
 }
 
 func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult, changedFiles []string) error {
+	return validateReviewExecutionEvidenceWithCoverage(result, execution, changedFiles, false)
+}
+
+func validateReviewExecutionEvidenceWithCoverage(result any, execution *oneshot.AgentResult, changedFiles []string, requireCoverage bool) error {
 	review, ok := result.(*ReviewAgentResult)
 	if !ok || review.Parsed == nil {
 		return nil
@@ -414,7 +496,7 @@ func validateReviewExecutionEvidence(result any, execution *oneshot.AgentResult,
 	if err := validateReportedHostVerification(review.Parsed, execution); err != nil {
 		return err
 	}
-	if !review.Parsed.Approved {
+	if !review.Parsed.Approved && !requireCoverage {
 		return nil
 	}
 	if reviewChangedFilesDocumentationOnly(changedFiles) {

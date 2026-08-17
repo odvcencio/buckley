@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/terminal"
@@ -50,20 +53,21 @@ type commitRunner interface {
 }
 
 type commitCommandOptions struct {
-	dryRun        bool
-	yes           bool
-	push          bool
-	verbose       bool
-	trace         bool
-	showCost      bool
-	compactOutput bool
-	useGraft      bool
-	model         string
-	backend       string
-	timeout       time.Duration
-	paths         []string
-	exclusive     bool
-	filesToStage  []string
+	dryRun         bool
+	yes            bool
+	push           bool
+	verbose        bool
+	trace          bool
+	showCost       bool
+	compactOutput  bool
+	contextTrailer bool
+	useGraft       bool
+	model          string
+	backend        string
+	timeout        time.Duration
+	paths          []string
+	exclusive      bool
+	filesToStage   []string
 }
 
 type commitCommandRuntime struct {
@@ -113,6 +117,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	graftMode := fs.Bool("graft", false, "use graft commit/push instead of git")
 	trace := fs.Bool("trace", false, "show context audit and reasoning trace after completion")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
+	contextTrailer := fs.Bool("context-trailer", true, "append an opaque change digest and aggregate stats trailer")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or models.utility.commit for API backend)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
@@ -129,20 +134,21 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	}
 
 	opts := commitCommandOptions{
-		dryRun:        *dryRun,
-		yes:           *yes,
-		push:          *pushFlag,
-		verbose:       *verbose,
-		trace:         *trace,
-		showCost:      *showCost,
-		compactOutput: *minimalOutput || *minAlias || oneshotMinimalOutputEnabled(),
-		useGraft:      *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1",
-		model:         *modelFlag,
-		backend:       backend,
-		timeout:       *timeout,
-		paths:         append([]string(nil), pathsFlag...),
-		exclusive:     *exclusive,
-		filesToStage:  fs.Args(),
+		dryRun:         *dryRun,
+		yes:            *yes,
+		push:           *pushFlag,
+		verbose:        *verbose,
+		trace:          *trace,
+		showCost:       *showCost,
+		compactOutput:  *minimalOutput || *minAlias || oneshotMinimalOutputEnabled(),
+		contextTrailer: *contextTrailer,
+		useGraft:       *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1",
+		model:          *modelFlag,
+		backend:        backend,
+		timeout:        *timeout,
+		paths:          append([]string(nil), pathsFlag...),
+		exclusive:      *exclusive,
+		filesToStage:   fs.Args(),
 	}
 	return opts, nil
 }
@@ -156,6 +162,12 @@ func runCommitCommand(args []string) error {
 
 	if err := prepareCommitIndex(opts); err != nil {
 		return err
+	}
+
+	metadata, err := collectStagedChangeMetadata(opts.paths)
+	if err != nil {
+		printStagedIndexOnError()
+		return fmt.Errorf("capture staged change identity: %w", err)
 	}
 
 	runtime, cleanup, err := newCommitCommandRuntime(opts)
@@ -177,7 +189,7 @@ func runCommitCommand(args []string) error {
 		return err
 	}
 
-	message, err := renderCommitGenerationResult(opts, result, runtime.ledger)
+	message, err := renderCommitGenerationResult(opts, result, runtime.ledger, metadataForOutput(metadata, opts.contextTrailer))
 	if err != nil {
 		printStagedIndexOnError()
 		return err
@@ -187,12 +199,12 @@ func runCommitCommand(args []string) error {
 		return nil
 	}
 
-	message, err = confirmCommitMessage(opts, message, runtime.runner, ctx, runtime.ledger)
+	message, err = confirmCommitMessage(opts, message, runtime.runner, ctx, runtime.ledger, metadataForOutput(metadata, opts.contextTrailer))
 	if err != nil {
 		return err
 	}
 
-	if err := createCommit(message, opts.compactOutput, opts.useGraft, opts.paths); err != nil {
+	if err := createCommitWithMetadata(message, opts.compactOutput, opts.useGraft, opts.paths, metadata, opts.contextTrailer); err != nil {
 		printStagedIndexOnError()
 		return err
 	}
@@ -319,7 +331,7 @@ func runCommitGeneration(ctx context.Context, runner commitRunner) (*commitRunRe
 	return result, nil
 }
 
-func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunResult, ledger *transparency.CostLedger) (string, error) {
+func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunResult, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, error) {
 	if (opts.verbose || opts.trace) && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
@@ -334,7 +346,7 @@ func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunRe
 		return "", fmt.Errorf("no commit generated")
 	}
 
-	message := result.Commit.Format()
+	message := commitmsg.AppendChangeMetadata(result.Commit.Format(), metadata)
 	printCommitMessage(message)
 	if opts.showCost && result.Trace != nil {
 		printCost(result.Trace, ledger)
@@ -342,7 +354,7 @@ func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunRe
 	return message, nil
 }
 
-func confirmCommitMessage(opts commitCommandOptions, message string, runner commitRunner, ctx context.Context, ledger *transparency.CostLedger) (string, error) {
+func confirmCommitMessage(opts commitCommandOptions, message string, runner commitRunner, ctx context.Context, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, error) {
 	if opts.yes {
 		return message, nil
 	}
@@ -351,7 +363,7 @@ func confirmCommitMessage(opts commitCommandOptions, message string, runner comm
 	}
 
 	for {
-		action, newMessage := handleCommitPrompt(message, runner, ctx, opts.showCost, ledger)
+		action, newMessage := handleCommitPrompt(message, runner, ctx, opts.showCost, ledger, metadata)
 		switch action {
 		case "commit":
 			return newMessage, nil
@@ -366,7 +378,7 @@ func confirmCommitMessage(opts commitCommandOptions, message string, runner comm
 
 // handleCommitPrompt shows an interactive prompt with options to commit, regenerate, edit, or abort.
 // Returns the action taken and the (possibly modified) message.
-func handleCommitPrompt(message string, runner commitRunner, ctx context.Context, showCost bool, ledger *transparency.CostLedger) (string, string) {
+func handleCommitPrompt(message string, runner commitRunner, ctx context.Context, showCost bool, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, string) {
 	fmt.Print("\n[y] Commit  [r] Regenerate  [e] Edit  [n] Abort: ")
 	var response string
 	fmt.Scanln(&response)
@@ -404,7 +416,7 @@ func handleCommitPrompt(message string, runner commitRunner, ctx context.Context
 			printCost(result.Trace, ledger)
 		}
 
-		return "regenerate", result.Commit.Format()
+		return "regenerate", commitmsg.AppendChangeMetadata(result.Commit.Format(), metadata)
 
 	case "e", "edit":
 		// Open message in editor
@@ -718,9 +730,31 @@ func stageForGraft(compactOutput bool) error {
 	return cmd.Run()
 }
 
+// createCommit preserves the legacy test/helper surface. The command path
+// uses createCommitWithMetadata so the index cannot change between generation
+// and the actual commit.
 func createCommit(message string, compactOutput bool, useGraft bool, paths []string) error {
+	return createCommitWithMetadata(message, compactOutput, useGraft, paths, commitmsg.ChangeMetadata{}, false)
+}
+
+func createCommitWithMetadata(message string, compactOutput bool, useGraft bool, paths []string, expected commitmsg.ChangeMetadata, addTrailer bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if expected.Valid() {
+		actual, err := collectStagedChangeMetadata(paths)
+		if err != nil {
+			return fmt.Errorf("recheck staged change identity: %w", err)
+		}
+		if actual != expected {
+			return fmt.Errorf("staged changes changed after message generation; regenerate the commit message")
+		}
+	} else if addTrailer {
+		return fmt.Errorf("cannot append context trailer without valid staged metadata")
+	}
+	if addTrailer {
+		message = commitmsg.AppendChangeMetadata(message, expected)
+	}
 
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
@@ -815,6 +849,83 @@ func createCommit(message string, compactOutput bool, useGraft bool, paths []str
 	}
 
 	return nil
+}
+
+func metadataForOutput(metadata commitmsg.ChangeMetadata, enabled bool) commitmsg.ChangeMetadata {
+	if !enabled {
+		return commitmsg.ChangeMetadata{}
+	}
+	return metadata
+}
+
+// collectStagedChangeMetadata hashes the exact staged diff and records only
+// aggregate counts. It never returns paths or source content to the caller.
+func collectStagedChangeMetadata(paths []string) (commitmsg.ChangeMetadata, error) {
+	args := []string{"diff", "--cached", "--binary", "--no-ext-diff", "--no-color"}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
+
+	cmd := exec.Command("git", args...)
+	hash := sha256.New()
+	cmd.Stdout = hash
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return commitmsg.ChangeMetadata{}, fmt.Errorf("git diff: %w: %s", err, detail)
+		}
+		return commitmsg.ChangeMetadata{}, fmt.Errorf("git diff: %w", err)
+	}
+
+	numstatArgs := []string{"diff", "--cached", "--numstat"}
+	if len(paths) > 0 {
+		numstatArgs = append(numstatArgs, "--")
+		numstatArgs = append(numstatArgs, paths...)
+	}
+	numstat := exec.Command("git", numstatArgs...)
+	output, err := numstat.Output()
+	if err != nil {
+		return commitmsg.ChangeMetadata{}, fmt.Errorf("git numstat: %w", err)
+	}
+
+	metadata := commitmsg.ChangeMetadata{Digest: fmt.Sprintf("sha256:%x", hash.Sum(nil))}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		metadata.Files++
+		insertions, okInsertions := parseCommitNumstat(parts[0])
+		deletions, okDeletions := parseCommitNumstat(parts[1])
+		if !okInsertions || !okDeletions {
+			metadata.BinaryFiles++
+			continue
+		}
+		metadata.Insertions += insertions
+		metadata.Deletions += deletions
+	}
+	if metadata.Files == 0 {
+		return commitmsg.ChangeMetadata{}, fmt.Errorf("staged diff is empty")
+	}
+	return metadata, nil
+}
+
+func parseCommitNumstat(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "-" || value == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func currentHeadHash(ctx context.Context, useGraft bool) string {

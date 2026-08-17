@@ -193,7 +193,10 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 		resp, err := e.modelManager.ChatCompletion(ctx, req)
 		if err != nil {
-			return nil, err
+			// Preserve a response returned with a provider/transport error;
+			// Controller will account and expose it as an incomplete partial
+			// result rather than reporting a bare failure.
+			return resp, err
 		}
 		if resp == nil || len(resp.Choices) == 0 {
 			return resp, nil

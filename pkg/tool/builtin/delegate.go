@@ -28,6 +28,11 @@ func delegationCheck(toolName string) error {
 	return guard.CheckAndRecord(toolName)
 }
 
+func delegationCheckWithOptions(toolName string, opts DelegationCheckOptions) error {
+	guard := GetDelegationGuard()
+	return guard.CheckAndRecordWithOptions(toolName, opts)
+}
+
 func splitOneShotOutput(output string) (string, map[string]any) {
 	output = strings.TrimSpace(output)
 	if output == "" {
@@ -601,15 +606,31 @@ func (t *SubagentTool) Execute(params map[string]any) (*Result, error) {
 	return t.ExecuteWithContext(context.Background(), params)
 }
 
+type userInitiatedSubagentCommandKey struct{}
+
+// WithUserInitiatedSubagentCommand marks a trusted, explicit human control
+// request. The private key cannot be forged through tool parameters; callers
+// still execute through the registry and all of its middleware.
+func WithUserInitiatedSubagentCommand(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, userInitiatedSubagentCommandKey{}, true)
+}
+
 func (t *SubagentTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
-	return t.executeWithContext(ctx, params, false)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	userInitiated, _ := ctx.Value(userInitiatedSubagentCommandKey{}).(bool)
+	return t.executeWithContext(ctx, params, userInitiated)
 }
 
 // ExecuteUserCommand runs an explicit human control request. It bypasses only
 // the model anti-recursion cooldown; coordinator admission, concurrency,
 // workspace claims, and child execution policy remain in force.
 func (t *SubagentTool) ExecuteUserCommand(ctx context.Context, params map[string]any) (*Result, error) {
-	return t.executeWithContext(ctx, params, true)
+	return t.ExecuteWithContext(WithUserInitiatedSubagentCommand(ctx), params)
 }
 
 func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string]any, userInitiated bool) (*Result, error) {
@@ -858,10 +879,10 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 	if err != nil {
 		return &Result{Success: false, Error: "max_cost_usd " + err.Error()}, nil
 	}
-	if !userInitiated {
-		if err := delegationCheck("spawn_subagent"); err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
+	if err := delegationCheckWithOptions("spawn_subagent", DelegationCheckOptions{
+		SkipSameToolCooldown: userInitiated,
+	}); err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
 	}
 	guard := GetDelegationGuard()
 	timeout := parseInt(params["timeout_seconds"], 0)

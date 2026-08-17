@@ -127,7 +127,7 @@ func New(dbPath string, opts ...Option) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
 
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+	if err := storage.EnableSQLiteWAL(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("evidence: enable WAL mode: %w", err)
 	}
@@ -467,15 +467,6 @@ func isUniqueConstraintError(err error) bool {
 	return false
 }
 
-func isBusyError(err error) bool {
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) {
-		code := sqliteErr.Code()
-		return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
-	}
-	return false
-}
-
 func sqliteFilePathFromDSN(dsn string) (string, bool) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" || dsn == ":memory:" {
@@ -521,13 +512,14 @@ func ensurePrivateSQLiteFile(path string) error {
 	return f.Close()
 }
 
-// migrations is the ordered list of schema steps applied via storage.Migrate.
-var migrations = []storage.Migration{
+// migrations is the ordered list of schema steps applied under one serialized
+// SQLite migration owner.
+var migrations = []storage.SQLiteMigration{
 	{Version: 1, Name: "evidence_objects", Apply: createEvidenceObjectsTable},
 	{Version: 2, Name: "evidence_pins", Apply: createEvidencePinsTable},
 }
 
-func createEvidenceObjectsTable(db *sql.DB) error {
+func createEvidenceObjectsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS evidence_objects (
 			evidence_id TEXT PRIMARY KEY,
@@ -557,7 +549,7 @@ func createEvidenceObjectsTable(db *sql.DB) error {
 	return nil
 }
 
-func createEvidencePinsTable(db *sql.DB) error {
+func createEvidencePinsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS evidence_pins (
 			evidence_id TEXT NOT NULL,
@@ -573,10 +565,10 @@ func createEvidencePinsTable(db *sql.DB) error {
 	return nil
 }
 
-// runMigrations applies pending schema migrations via the shared
-// storage.Migrate runner, tracked in evidence_schema_migrations (named
+// runMigrations applies pending schema migrations via the shared serialized
+// SQLite runner, tracked in evidence_schema_migrations (named
 // distinctly from pkg/storage's schema_migrations table so the two packages
 // can safely share one SQLite file once wiring lands).
 func runMigrations(db *sql.DB) error {
-	return storage.Migrate(db, "evidence_schema_migrations", migrations)
+	return storage.MigrateSQLite(db, "evidence_schema_migrations", migrations)
 }

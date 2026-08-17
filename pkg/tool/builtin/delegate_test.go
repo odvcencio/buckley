@@ -21,6 +21,18 @@ func (f builtinSubagentRunnerFunc) Run(ctx context.Context, request subagent.Req
 	return f(ctx, request, started)
 }
 
+func installDelegationGuardForTest(t *testing.T) *DelegationGuard {
+	t.Helper()
+	guard := &DelegationGuard{
+		delegationTimes: make([]time.Time, 0),
+		lastDelegation:  make(map[string]time.Time),
+	}
+	previous := globalDelegationGuard
+	globalDelegationGuard = guard
+	t.Cleanup(func() { globalDelegationGuard = previous })
+	return guard
+}
+
 func TestSubagentCommandArgs_GenericProfileIsScopedAndCleanedUp(t *testing.T) {
 	args, cleanup, err := subagentCommandArgs(subagent.Request{Task: "inspect this"})
 	if err != nil {
@@ -894,10 +906,85 @@ func TestSubagentTool_UserSpawnBypassesModelCooldown(t *testing.T) {
 	}), 2)
 	t.Cleanup(func() { _ = manager.Close() })
 	tool := &SubagentTool{manager: manager}
+	guard := installDelegationGuardForTest(t)
 	for _, task := range []string{"first explicit task", "second explicit task"} {
 		result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{"action": "spawn", "initial_task": task})
 		if err != nil || !result.Success {
 			t.Fatalf("explicit spawn %q: result=%+v err=%v", task, result, err)
 		}
+	}
+	guard.mu.Lock()
+	delegations := len(guard.delegationTimes)
+	_, recordedTool := guard.lastDelegation["spawn_subagent"]
+	guard.mu.Unlock()
+	if delegations != 2 || !recordedTool {
+		t.Fatalf("trusted spawns were not recorded: count=%d tool=%v", delegations, recordedTool)
+	}
+
+	result, err := tool.Execute(map[string]any{"action": "spawn", "initial_task": "model cooldown check"})
+	if err != nil {
+		t.Fatalf("model spawn: %v", err)
+	}
+	if result.Success || !strings.Contains(result.Error, "cooldown active") {
+		t.Fatalf("unmarked spawn bypassed cooldown: %+v", result)
+	}
+}
+
+func TestSubagentTool_UserSpawnStillEnforcesDelegationDepth(t *testing.T) {
+	t.Setenv(DelegationDepthEnvVar, "3")
+	guard := installDelegationGuardForTest(t)
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(context.Context, subagent.Request, func(int)) (string, error) {
+		t.Fatal("depth-rejected invocation reached child runner")
+		return "", nil
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+
+	result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{
+		"action": "spawn", "initial_task": "must respect depth",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteUserCommand: %v", err)
+	}
+	if result.Success || !strings.Contains(result.Error, "depth limit exceeded") {
+		t.Fatalf("depth-limited trusted spawn = %+v", result)
+	}
+	guard.mu.Lock()
+	recorded := len(guard.delegationTimes)
+	guard.mu.Unlock()
+	if recorded != 0 {
+		t.Fatalf("depth-rejected spawn recorded %d uses", recorded)
+	}
+}
+
+func TestSubagentTool_UserSpawnStillEnforcesRollingRate(t *testing.T) {
+	t.Setenv(DelegationDepthEnvVar, "0")
+	guard := installDelegationGuardForTest(t)
+	now := time.Now()
+	guard.delegationTimes = make([]time.Time, MaxDelegationsPerWindow)
+	for i := range guard.delegationTimes {
+		guard.delegationTimes[i] = now
+	}
+	manager := subagent.NewManager(builtinSubagentRunnerFunc(func(context.Context, subagent.Request, func(int)) (string, error) {
+		t.Fatal("rate-rejected invocation reached child runner")
+		return "", nil
+	}), 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := &SubagentTool{manager: manager}
+
+	result, err := tool.ExecuteUserCommand(context.Background(), map[string]any{
+		"action": "spawn", "initial_task": "must respect rolling rate",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteUserCommand: %v", err)
+	}
+	if result.Success || !strings.Contains(result.Error, "rate limit exceeded") {
+		t.Fatalf("rate-limited trusted spawn = %+v", result)
+	}
+	guard.mu.Lock()
+	recorded := len(guard.delegationTimes)
+	guard.mu.Unlock()
+	if recorded != MaxDelegationsPerWindow {
+		t.Fatalf("rate-rejected spawn changed usage count to %d", recorded)
 	}
 }

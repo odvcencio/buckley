@@ -2,7 +2,10 @@ package model
 
 import "context"
 
-// CompletionClient can perform a non-streaming chat completion.
+// CompletionClient can perform a non-streaming chat completion. A provider
+// response may be non-nil alongside an error when it emitted billable usage
+// or content before failing; callers must preserve and account for that
+// response instead of retrying the logical request blindly.
 type CompletionClient interface {
 	ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }

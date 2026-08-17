@@ -734,10 +734,15 @@ func (r *Runner) persistFinalAssistantMessage(content, reasoning string, reasoni
 // pre-engine loop had no cross-turn round budget either.
 func (r *Runner) newTurnController() (*agentloop.Controller, error) {
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:       agentloop.New(agentloop.DefaultConfig()),
-		FinalizeOnStop: true,
+		Governor:          agentloop.New(agentloop.DefaultConfig()),
+		FinalizeOnStop:    true,
+		LifecycleObserver: telemetry.NewAgentLoopObserver(r.telemetry),
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return r.buildRawChatRequest(r.resolveExecutionModel()), nil
+			modelID, err := model.ResolvePhaseModelRequired(r.config, r.modelManager, r.rulesEngine, "execution", r.modelOverride)
+			if err != nil {
+				return model.ChatRequest{}, err
+			}
+			return r.buildRawChatRequest(modelID), nil
 		},
 		CallModel:     agentloop.ModelCallerFunc(r.callModel),
 		DispatchTools: agentloop.ToolDispatcherFunc(r.dispatchToolCalls),
@@ -888,6 +893,13 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 	if useContinuation && r.continuation != nil {
 		resp, err = r.continuation.Call(ctx, req)
 		if err != nil {
+			if resp != nil {
+				// The provider may have emitted billable material before the
+				// continuation failed. Returning it with the error lets the
+				// shared Controller preserve the partial result instead of
+				// retrying the logical request and risking duplicate spend.
+				return resp, err
+			}
 			r.continuation.Reset()
 			resp, err = r.modelManager.ChatCompletion(ctx, req)
 			continuationStatus = "reset"
@@ -2037,10 +2049,7 @@ func (r *Runner) resolveExecutionModel() string {
 	if r == nil {
 		return ""
 	}
-	if resolved := model.ResolvePhaseModel(r.config, r.modelManager, r.rulesEngine, "execution", r.modelOverride); strings.TrimSpace(resolved) != "" {
-		return resolved
-	}
-	return "openai/gpt-4o"
+	return strings.TrimSpace(model.ResolvePhaseModel(r.config, r.modelManager, r.rulesEngine, "execution", r.modelOverride))
 }
 
 type toolRiskAssessment struct {

@@ -158,15 +158,36 @@ Buckbot is the general-purpose review runtime used by `buckley buckbot`,
 
 ```yaml
 buckbot:
-  model: openai/gpt-5.6-luna-pro
+  model: deepseek/deepseek-v4-pro-0813
   critic_model: qwen/qwen3.8-max
   reasoning: auto
+  openrouter_privacy_fallback: zdr_then_data_collection_deny
   per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
   monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
   max_review_iterations: 0 # adaptive
   max_tool_calls: 0         # 0 means unlimited; set for expensive-model experiments
   max_validation_attempts: 2
 ```
+
+The default Buckbot model is DeepSeek V4 Pro 0813 through OpenRouter. The
+OpenRouter account or guardrail must permit an eligible DeepSeek endpoint;
+Buckley fails closed with the provider's privacy/guardrail error when no such
+endpoint is available.
+
+`openrouter_privacy_fallback: zdr_then_data_collection_deny` is an explicit
+opt-in compatibility mode. Buckley first requests a ZDR endpoint. If OpenRouter
+returns its policy-filtered 404 before inference, Buckley retries once with
+`provider.data_collection: deny`. This is not equivalent to ZDR and should not
+be used when strict zero retention is mandatory. The retry never occurs for a
+request that already supplied an explicit privacy policy.
+
+Requests outside a Buckbot runtime do not add `provider.zdr` or
+`provider.data_collection: deny`. OpenRouter account and guardrail policies still apply and
+cannot be relaxed by a request. If OpenRouter returns `404` with “no endpoints
+available” and mentions guardrails or data policy, check Settings → Privacy and
+Guardrails for ZDR, data-collection, provider, and model allowlists. A model
+with no ZDR-compatible endpoint cannot run while the account enforces ZDR;
+choose a compatible model or change that account policy deliberately.
 
 Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project

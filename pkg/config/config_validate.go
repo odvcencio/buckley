@@ -33,6 +33,7 @@ var configValidators = []func(*Config) error{
 	func(c *Config) error { return c.Hooks.Validate() },
 	validateMemoryLimits,
 	validateAgentCostLimits,
+	validateBuckbotPrivacyFallback,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -290,6 +291,16 @@ func validateAgentCostLimits(c *Config) error {
 	return nil
 }
 
+func validateBuckbotPrivacyFallback(c *Config) error {
+	value := strings.ToLower(strings.TrimSpace(c.Buckbot.OpenRouterPrivacyFallback))
+	switch value {
+	case "", "none", "off", "disabled", "zdr_then_data_collection_deny":
+		return nil
+	default:
+		return fmt.Errorf("buckbot.openrouter_privacy_fallback has unsupported value %q", c.Buckbot.OpenRouterPrivacyFallback)
+	}
+}
+
 // ValidationWarnings returns non-fatal warnings about the configuration.
 // These don't prevent operation but indicate potential security or usability issues.
 func (c *Config) ValidationWarnings() []string {
@@ -297,19 +308,19 @@ func (c *Config) ValidationWarnings() []string {
 
 	// Warn about API keys stored in config (prefer env vars)
 	if c.Providers.OpenRouter.APIKey != "" && os.Getenv("OPENROUTER_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: OpenRouter API key is stored in config file. Consider using OPENROUTER_API_KEY environment variable instead.")
+		warnings = append(warnings, "SECURITY: OpenRouter API key is loaded from a configuration file. Consider using OPENROUTER_API_KEY environment variable instead.")
 	}
 	if c.Providers.OpenAI.APIKey != "" && os.Getenv("OPENAI_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: OpenAI API key is stored in config file. Consider using OPENAI_API_KEY environment variable instead.")
+		warnings = append(warnings, "SECURITY: OpenAI API key is loaded from a configuration file. Consider using OPENAI_API_KEY environment variable instead.")
 	}
 	if c.Providers.Anthropic.APIKey != "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: Anthropic API key is stored in config file. Consider using ANTHROPIC_API_KEY environment variable instead.")
+		warnings = append(warnings, "SECURITY: Anthropic API key is loaded from a configuration file. Consider using ANTHROPIC_API_KEY environment variable instead.")
 	}
 	if c.Providers.Google.APIKey != "" && os.Getenv("GOOGLE_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: Google API key is stored in config file. Consider using GOOGLE_API_KEY environment variable instead.")
+		warnings = append(warnings, "SECURITY: Google API key is loaded from a configuration file. Consider using GOOGLE_API_KEY environment variable instead.")
 	}
 	if c.Providers.LiteLLM.APIKey != "" && os.Getenv("BUCKLEY_LITELLM_API_KEY") == "" && os.Getenv("LITELLM_API_KEY") == "" {
-		warnings = append(warnings, "SECURITY: LiteLLM API key is stored in config file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")
+		warnings = append(warnings, "SECURITY: LiteLLM API key is loaded from a configuration file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")
 	}
 
 	// Warn about basic auth password in config

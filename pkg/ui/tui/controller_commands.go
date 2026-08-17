@@ -130,7 +130,7 @@ func (c *Controller) showContextReport() {
 	sess := c.sessions[c.currentSession]
 	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", "")
 	if strings.TrimSpace(modelID) == "" {
-		modelID = "openai/gpt-4o"
+		modelID = "<unresolved>"
 	}
 	projectLoaded := c.projectCtx != nil && c.projectCtx.Loaded
 	projectBytes := 0

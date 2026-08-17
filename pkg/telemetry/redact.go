@@ -1,8 +1,11 @@
 package telemetry
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -22,6 +25,16 @@ var sensitiveKeyFragments = []string{
 	"authorization", "credential", "cookie", "private_key", "access_key",
 }
 
+var (
+	// credentialAssignmentRE covers both shell-style assignments and common
+	// log/JSON forms. It intentionally preserves the field name and delimiter
+	// so a safe diagnostic still tells the operator which credential class was
+	// present without exposing the value.
+	credentialAssignmentRE = regexp.MustCompile(`(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|credential|cookie|private[_-]?key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
+	bearerCredentialRE     = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	urlCredentialRE        = regexp.MustCompile(`(?i)(://)([^/\s:@]+):([^@\s/]+)@`)
+)
+
 // SensitiveKey reports whether a field name looks like it holds a secret.
 func SensitiveKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
@@ -34,6 +47,50 @@ func SensitiveKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// NormalizeText converts malformed UTF-8 to the replacement rune before a
+// value reaches a telemetry payload. This is deliberately a small helper so
+// every producer can apply the same wire-safe normalization.
+func NormalizeText(text string) string {
+	return strings.ToValidUTF8(text, "\uFFFD")
+}
+
+// RedactCredentials removes credential-looking values from free-form text.
+// Key-based redaction remains the primary path for structured values, but
+// shell commands and process output are unstructured and often carry tokens
+// in headers or assignments instead of JSON fields.
+func RedactCredentials(text string) string {
+	text = NormalizeText(text)
+	text = credentialAssignmentRE.ReplaceAllString(text, `${1}${2}[REDACTED]`)
+	text = bearerCredentialRE.ReplaceAllString(text, "Bearer [REDACTED]")
+	text = urlCredentialRE.ReplaceAllString(text, `${1}[REDACTED]@`)
+	return text
+}
+
+// FingerprintText returns a stable short fingerprint for correlation of opaque
+// telemetry values. Credentials are redacted before hashing, but the digest is
+// deterministic: equal fingerprints expose equality of normalized, redacted
+// inputs (subject to collisions) and may enable guessing of low-entropy text.
+// It is not an authentication or secrecy primitive; callers must withhold the
+// source value independently.
+func FingerprintText(text string) string {
+	clean := RedactCredentials(text)
+	hash := sha256.Sum256([]byte(clean))
+	return hex.EncodeToString(hash[:8])
+}
+
+// OpaqueTextSummary is a deliberately safe projection for arbitrary command,
+// path, and output text. It preserves only a category, normalized byte size,
+// and redacted fingerprint so the UI can correlate activity without receiving
+// the source text.
+func OpaqueTextSummary(text, category string) string {
+	clean := RedactCredentials(text)
+	category = strings.TrimSpace(category)
+	if category == "" {
+		category = "text"
+	}
+	return fmt.Sprintf("%s (%d bytes, sha256:%s)", category, len(clean), FingerprintText(clean))
 }
 
 // SanitizeValue walks value recursively, redacting anything held under a
@@ -64,10 +121,12 @@ func SanitizeValue(value any, key string, limit int) any {
 		return out
 	case []string:
 		out := make([]string, len(typed))
-		copy(out, typed)
+		for i, item := range typed {
+			out[i] = BoundText(RedactCredentials(item), limit, "value")
+		}
 		return out
 	case string:
-		return BoundText(typed, limit, "value")
+		return BoundText(RedactCredentials(typed), limit, "value")
 	default:
 		return typed
 	}
@@ -107,7 +166,7 @@ func normalizeForTelemetry(value any) (any, bool) {
 // sensitive-looking keys, and re-encodes the result. Plain text has no
 // key/value structure to redact against, so it is only bounded.
 func SanitizeText(text string, limit int) string {
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(NormalizeText(text))
 	if text == "" {
 		return text
 	}
@@ -116,18 +175,18 @@ func SanitizeText(text string, limit int) string {
 	if err := json.Unmarshal([]byte(text), &parsed); err == nil {
 		clean := SanitizeValue(parsed, "", limit)
 		if encoded, err := json.Marshal(clean); err == nil {
-			return BoundText(string(encoded), limit, "value")
+			return BoundText(RedactCredentials(string(encoded)), limit, "value")
 		}
 	}
 
-	return BoundText(text, limit, "value")
+	return BoundText(RedactCredentials(text), limit, "value")
 }
 
 // BoundText truncates content to at most limit bytes, backing off cut
 // points to UTF-8 rune boundaries so a truncated payload is always valid
 // UTF-8, and reports the true number of omitted bytes.
 func BoundText(content string, limit int, label string) string {
-	content = strings.TrimSpace(content)
+	content = strings.TrimSpace(NormalizeText(content))
 	if limit <= 0 || len(content) <= limit {
 		return content
 	}

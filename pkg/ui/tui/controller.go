@@ -21,6 +21,7 @@ import (
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/policy"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -56,6 +57,7 @@ type Controller struct {
 
 	// Event bridge for sidebar updates
 	telemetryBridge *TelemetryUIBridge
+	approvalRouter  *tuiApprovalRouter
 
 	// State
 	workDir             string
@@ -114,6 +116,12 @@ type SessionState struct {
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.
 	continuation *model.ContinuationCoordinator
+
+	// permissionBroker is the session-local interactive approval bridge used
+	// by the registry's governed permission middleware.
+	permissionBroker *tuiApprovalBroker
+	permissionsReady bool
+	parkedDecisions  *policy.ParkedDecisionLog
 
 	// undoStack holds applied turns eligible for /undo, oldest first.
 	// redoStack holds turns /undo removed, most recently undone last, so
@@ -303,6 +311,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		currentSession:      currentIdx,
 		runLedger:           cfg.RunLedger,
 		subagentEvidence:    cfg.SubagentEvidence,
+		approvalRouter:      newTUIApprovalRouter(),
 	}
 	for _, session := range projectSessions {
 		configureSessionSubagentPolicy(session, evaluator)
@@ -329,6 +338,11 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	)
 	app.SetInterruptCallback(ctrl.cancelCurrentStream)
 	app.SetSessionNavCallback(ctrl.handleSessionNodeSelected)
+	app.SetApprovalCallback(ctrl.handleApproval)
+	app.SetModelPickerActionCallback(ctrl.handleModelPickerAction)
+	for _, session := range projectSessions {
+		ctrl.configureSessionPermissions(session)
+	}
 
 	ctrl.refreshSessionNav()
 
@@ -346,6 +360,60 @@ func configureSessionSubagentPolicy(session *SessionState, evaluator types.RuleE
 	if subagents, ok := candidate.(*builtin.SubagentTool); ok {
 		subagents.SetEvaluator(evaluator)
 	}
+}
+
+// configureSessionPermissions installs the same layered posture/project/user
+// permission middleware used by headless sessions, with the TUI's bounded
+// approval broker as the interactive Ask surface.
+func (c *Controller) configureSessionPermissions(sess *SessionState) {
+	if c == nil || sess == nil || sess.ToolRegistry == nil || sess.permissionsReady {
+		return
+	}
+	posture := policy.PostureInteractive
+	var postureCfg config.PostureConfig
+	var permissions config.PermissionsConfig
+	if c.cfg != nil {
+		posture = policy.SelectPosture(c.cfg.Postures.Default)
+		postureCfg = c.cfg.Postures.Layers[posture]
+		permissions = c.cfg.Permissions
+	}
+	workspaceRoot := strings.TrimSpace(c.workDir)
+	if c.cfg != nil && strings.TrimSpace(c.cfg.Sandbox.WorkspacePath) != "" {
+		configuredRoot := strings.TrimSpace(c.cfg.Sandbox.WorkspacePath)
+		if !filepath.IsAbs(configuredRoot) {
+			configuredRoot = filepath.Join(workspaceRoot, configuredRoot)
+		}
+		workspaceRoot = configuredRoot
+	}
+	if c.approvalRouter == nil {
+		c.approvalRouter = newTUIApprovalRouter()
+	}
+	broker := newTUIApprovalBroker(sess.ID, c.approvalRouter)
+	broker.bindApp(c.app)
+	sess.permissionBroker = broker
+	sess.parkedDecisions = policy.NewParkedDecisionLog()
+	sess.ToolRegistry.Use(tool.NewPermissionMiddleware(&tool.PermissionGate{
+		Layers: []policy.PermissionLayer{
+			{Name: "posture:" + posture, Rules: postureCfg.Rules},
+			{Name: "project", Rules: permissions.Project},
+			{Name: "user", Rules: permissions.User},
+		},
+		WorkspaceRoot:    workspaceRoot,
+		Posture:          posture,
+		ParkAskDecisions: postureCfg.ParkAskDecisions,
+		Evaluator:        c.evaluator,
+		ParkedSink:       sess.parkedDecisions,
+		ApprovalHandler:  broker.Request,
+		RequireApproval:  true,
+	}))
+	sess.permissionsReady = true
+}
+
+func (c *Controller) handleApproval(requestID string, approved, alwaysAllow bool) {
+	if c == nil || c.approvalRouter == nil {
+		return
+	}
+	c.approvalRouter.resolve(requestID, approved, alwaysAllow)
 }
 
 func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*SessionState, int, error) {
@@ -439,7 +507,13 @@ func (c *Controller) Run() error {
 	}
 	defer func() {
 		for _, sess := range c.sessions {
-			if sess != nil && sess.HookCloser != nil {
+			if sess == nil {
+				continue
+			}
+			if sess.permissionBroker != nil {
+				sess.permissionBroker.close()
+			}
+			if sess.HookCloser != nil {
 				_ = sess.HookCloser.Close()
 			}
 		}
@@ -684,13 +758,7 @@ func (c *Controller) showModelPickerLocked() {
 		return
 	}
 
-	c.app.ShowModelPicker(items, func(item widgets.PaletteItem) {
-		modelID := item.ID
-		if id, ok := item.Data.(string); ok && strings.TrimSpace(id) != "" {
-			modelID = id
-		}
-		c.setExecutionModel(modelID)
-	})
+	c.app.ShowModelPicker(items, ModelPickerActionSelectExecution)
 }
 
 func (c *Controller) showLiveModelPicker() {
@@ -778,16 +846,22 @@ func (c *Controller) showModelCuratePickerLocked() {
 		return
 	}
 
-	c.app.ShowModelPicker(items, func(item widgets.PaletteItem) {
-		modelID := item.ID
-		if id, ok := item.Data.(string); ok && strings.TrimSpace(id) != "" {
-			modelID = id
-		}
-		changed := c.toggleCuratedModel(modelID)
-		if changed {
+	c.app.ShowModelPicker(items, ModelPickerActionToggleCurated)
+}
+
+func (c *Controller) handleModelPickerAction(action ModelPickerAction, itemID string, data any) {
+	modelID := itemID
+	if id, ok := data.(string); ok && strings.TrimSpace(id) != "" {
+		modelID = id
+	}
+	switch action {
+	case ModelPickerActionSelectExecution:
+		c.setExecutionModel(modelID)
+	case ModelPickerActionToggleCurated:
+		if c.toggleCuratedModel(modelID) {
 			c.app.AddMessage("Curated models updated. Use /model curate save to persist.", "system")
 		}
-	})
+	}
 }
 
 func (c *Controller) toggleCuratedModel(modelID string) bool {
@@ -1114,6 +1188,7 @@ func (c *Controller) newSession() {
 		return
 	}
 	configureSessionSubagentPolicy(newSess, c.evaluator)
+	c.configureSessionPermissions(newSess)
 	c.sessions = append([]*SessionState{newSess}, c.sessions...)
 	c.currentSession = 0
 	c.conversation = newSess.Conversation
@@ -1424,6 +1499,7 @@ func (c *Controller) resumeSession(reference string) {
 		return
 	}
 	configureSessionSubagentPolicy(sess, c.evaluator)
+	c.configureSessionPermissions(sess)
 	c.sessions = append([]*SessionState{sess}, c.sessions...)
 	c.currentSession = 0
 	c.switchToSessionLocked(0)
@@ -1514,6 +1590,9 @@ func (c *Controller) Stop() {
 	for _, sess := range c.sessions {
 		if sess.Cancel != nil {
 			sess.Cancel()
+		}
+		if sess.permissionBroker != nil {
+			sess.permissionBroker.close()
 		}
 		if sess.ToolRegistry != nil {
 			_ = sess.ToolRegistry.Close()
@@ -1666,11 +1745,10 @@ func formatSkillList(registry *skill.Registry) string {
 }
 
 func activateSessionSkill(sess *SessionState, name string) (string, error) {
-	tool := &builtin.SkillActivationTool{
-		Registry:     sess.SkillRegistry,
-		Conversation: sess.SkillState,
+	if sess == nil || sess.ToolRegistry == nil {
+		return "", fmt.Errorf("Error activating skill %q: tool registry unavailable", name)
 	}
-	result, err := tool.Execute(map[string]any{
+	result, err := sess.ToolRegistry.ExecuteWithContext(context.Background(), "activate_skill", map[string]any{
 		"action": "activate",
 		"skill":  name,
 		"scope":  "user request",

@@ -303,3 +303,81 @@ func TestSQLiteStore_ConcurrentWriters(t *testing.T) {
 		t.Fatalf("expected exactly one row for raced content after concurrent writes, got %d", count)
 	}
 }
+
+func TestSQLiteStore_MigrationsSerializeConcurrentOpeners(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "concurrent-evidence.db")
+	blobRoot := filepath.Join(dir, "blobs")
+	const openers = 24
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	var wg sync.WaitGroup
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			store, err := New(dbPath, WithBlobRoot(blobRoot))
+			if err == nil {
+				err = store.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent New: %v", err)
+		}
+	}
+	store, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var versions int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM evidence_schema_migrations`).Scan(&versions); err != nil || versions != len(migrations) {
+		t.Fatalf("migration versions=%d err=%v, want %d", versions, err, len(migrations))
+	}
+	var mode string
+	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal mode=%q err=%v, want wal", mode, err)
+	}
+}
+
+func TestSQLiteStore_MigrationsRecoverAppliedSchemaWithoutVersionRows(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "partial-evidence.db")
+	blobRoot := filepath.Join(dir, "blobs")
+	store, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM evidence_schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatalf("recover partially recorded schema: %v", err)
+	}
+	defer reopened.Close()
+	var versions, objectsTables, dedupIndexes int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM evidence_schema_migrations`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'evidence_objects'`).Scan(&objectsTables); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_evidence_dedup'`).Scan(&dedupIndexes); err != nil {
+		t.Fatal(err)
+	}
+	if versions != len(migrations) || objectsTables != 1 || dedupIndexes != 1 {
+		t.Fatalf("versions=%d objects=%d dedup_indexes=%d, want %d/1/1", versions, objectsTables, dedupIndexes, len(migrations))
+	}
+}

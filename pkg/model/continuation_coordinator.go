@@ -156,6 +156,12 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 	resp, err := cc.manager.ChatCompletionWithContinuation(ctx, prepared)
 	if err != nil {
 		cc.Reset()
+		if resp != nil && resp.Response != nil {
+			// Preserve billable material returned alongside a continuation
+			// failure. Callers must surface/account it rather than retrying
+			// the logical request through a fresh provider call.
+			return resp.Response, err
+		}
 		return nil, err
 	}
 	if err := cc.cursor.Commit(req, resp); err != nil {

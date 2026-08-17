@@ -29,6 +29,7 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		"-max-diff-bytes", "80000",
 		"-max-context-tokens", "9000",
 		"-max-validation-attempts", "2",
+		"-depth", "balanced",
 		"https://github.com/owner/repo/pull/123",
 	})
 	if err != nil {
@@ -60,8 +61,36 @@ func TestParseReviewPRCommandOptions(t *testing.T) {
 		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d/%d, want $0.25/3/17/80000/9000/2",
 			opts.budgetUSD, opts.maxTurns, opts.maxToolCalls, opts.maxDiff, opts.maxSupportingContext, opts.maxRetries)
 	}
+	if opts.depth != reviewDepthBalanced {
+		t.Fatalf("depth = %q, want balanced", opts.depth)
+	}
 	if opts.prRef != "https://github.com/owner/repo/pull/123" {
 		t.Fatalf("prRef = %q, want PR URL", opts.prRef)
+	}
+}
+
+func TestParseReviewPRCommandOptionsDepthModes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want reviewDepth
+	}{
+		{name: "default spot", args: []string{"123"}, want: reviewDepthSpot},
+		{name: "detailed alias after ref", args: []string{"123", "--depth", "detailed"}, want: reviewDepthInDepth},
+		{name: "in depth shorthand", args: []string{"--in-depth", "123"}, want: reviewDepthInDepth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts, err := parseReviewPRCommandOptions(test.args)
+			if err != nil {
+				t.Fatalf("parseReviewPRCommandOptions() error = %v", err)
+			}
+			if opts.depth != test.want {
+				t.Fatalf("depth = %q, want %q", opts.depth, test.want)
+			}
+		})
+	}
+	if _, err := parseReviewPRCommandOptions([]string{"123", "--depth", "bogus"}); err == nil {
+		t.Fatal("unknown review depth unexpectedly accepted")
 	}
 }
 

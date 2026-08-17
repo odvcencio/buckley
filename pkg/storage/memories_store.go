@@ -1,12 +1,11 @@
 package storage
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 )
 
-func ensureMemoriesSchema(db *sql.DB) error {
+func ensureMemoriesSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(memories)`)
 	if err != nil {
 		return fmt.Errorf("memories pragma: %w", err)

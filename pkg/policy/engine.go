@@ -342,8 +342,9 @@ func matchesCondition(call ToolCall, condition string) bool {
 
 // matchGlob matches a glob pattern against a string
 func matchGlob(pattern, s string) bool {
-	// Convert glob to regex
-	regexPattern := "^" + regexp.QuoteMeta(pattern) + "$"
+	// Convert glob to a dotall regex so wildcards retain glob semantics across
+	// internal command separators such as CR/LF and other control text.
+	regexPattern := "(?s)^" + regexp.QuoteMeta(pattern) + "$"
 	regexPattern = strings.ReplaceAll(regexPattern, "\\*", ".*")
 	regexPattern = strings.ReplaceAll(regexPattern, "\\?", ".")
 

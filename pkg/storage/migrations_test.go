@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -114,5 +116,97 @@ func TestMigrationsApplyInOrder(t *testing.T) {
 		if history[i].Version <= history[i-1].Version {
 			t.Errorf("migrations not in order: version %d came after %d", history[i].Version, history[i-1].Version)
 		}
+	}
+}
+
+func TestMigrationsSerializeConcurrentStoreOpeners(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "concurrent-storage.db")
+	const openers = 24
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	var wg sync.WaitGroup
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			store, err := New(dbPath)
+			if err == nil {
+				err = store.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent New: %v", err)
+		}
+	}
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	history, err := store.GetMigrationHistory()
+	if err != nil || len(history) != len(migrations) {
+		t.Fatalf("history count=%d err=%v, want %d", len(history), err, len(migrations))
+	}
+	var mode string
+	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal mode=%q err=%v, want wal", mode, err)
+	}
+}
+
+func TestMigrationsRecoverFullyAppliedSchemaWithoutVersionRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "partial-storage.db")
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version >= 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("recover partially recorded schema: %v", err)
+	}
+	defer reopened.Close()
+	history, err := reopened.GetMigrationHistory()
+	if err != nil || len(history) != len(migrations) {
+		t.Fatalf("history count=%d err=%v, want %d", len(history), err, len(migrations))
+	}
+	rows, err := reopened.db.Query(`PRAGMA table_info(sessions)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principalColumns := 0
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		if name == "principal" {
+			principalColumns++
+		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var projectIndexes int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_memories_project'`).Scan(&projectIndexes); err != nil {
+		t.Fatal(err)
+	}
+	if principalColumns != 1 || projectIndexes != 1 {
+		t.Fatalf("principal columns=%d project indexes=%d, want 1/1", principalColumns, projectIndexes)
 	}
 }

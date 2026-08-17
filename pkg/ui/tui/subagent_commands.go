@@ -94,17 +94,12 @@ func (c *Controller) handleSubagentCommand(args []string) {
 		c.app.AddMessage("Subagent controls are unavailable in this session.", "system")
 		return
 	}
-	candidate, ok := sess.ToolRegistry.Get("spawn_subagent")
-	if !ok {
+	if _, ok := sess.ToolRegistry.Get("spawn_subagent"); !ok {
 		c.app.AddMessage("Subagent controls are unavailable in this session.", "system")
 		return
 	}
-	tool, ok := candidate.(*builtin.SubagentTool)
-	if !ok {
-		c.app.AddMessage("Subagent controls are unavailable in this session.", "system")
-		return
-	}
-	result, err := tool.ExecuteUserCommand(context.Background(), command.params)
+	ctx := builtin.WithUserInitiatedSubagentCommand(context.Background())
+	result, err := sess.ToolRegistry.ExecuteWithContext(ctx, "spawn_subagent", command.params)
 	if err != nil {
 		c.app.AddMessage("Subagent command failed: "+err.Error(), "system")
 		return

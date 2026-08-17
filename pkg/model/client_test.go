@@ -328,6 +328,9 @@ func TestClient_ChatCompletion(t *testing.T) {
 				if r.Header.Get("X-OpenRouter-Experimental-Metadata") != "enabled" {
 					t.Errorf("X-OpenRouter-Experimental-Metadata = %q, want enabled", r.Header.Get("X-OpenRouter-Experimental-Metadata"))
 				}
+				if r.Header.Get("X-OpenRouter-Metadata") != "enabled" {
+					t.Errorf("X-OpenRouter-Metadata = %q, want enabled", r.Header.Get("X-OpenRouter-Metadata"))
+				}
 
 				w.WriteHeader(tt.statusCode)
 				w.Write([]byte(tt.response))
@@ -1145,7 +1148,7 @@ func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *tes
 		w.Header().Set("Retry-After", "1")
 		w.Header().Set("X-Request-ID", "req-123")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error","type":"provider_error","code":429,"metadata":{"provider_name":"Moonshot AI","raw":"{\"error\":{\"message\":\"capacity limited\"}}"}}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error","type":"provider_error","code":429,"metadata":{"provider_name":"Moonshot AI","raw":"{\"error\":{\"message\":\"capacity limited\"}}"}},"openrouter_metadata":{"pipeline":[{"stage":"data_policy","action":"block"}]}}`))
 	}))
 	defer server.Close()
 
@@ -1167,7 +1170,7 @@ func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *tes
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("errors.As(APIError) failed for %T: %v", err, err)
 	}
-	if apiErr.Provider != "Moonshot AI" || apiErr.Details != "capacity limited" || apiErr.RequestID != "req-123" || apiErr.RetryAfter != time.Second {
+	if apiErr.Provider != "Moonshot AI" || !strings.Contains(apiErr.Details, "capacity limited") || !strings.Contains(apiErr.Details, "openrouter_metadata") || apiErr.RequestID != "req-123" || apiErr.RetryAfter != time.Second {
 		t.Fatalf("APIError metadata = %+v", apiErr)
 	}
 	for _, want := range []string{"after 1 attempts", "Moonshot AI", "capacity limited", "req-123", "retry after: 1s"} {

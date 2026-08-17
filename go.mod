@@ -7,6 +7,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/alpkeskin/gotoon v0.1.1
+	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/creack/pty v1.1.24
 	github.com/dapr/durabletask-go v0.12.3

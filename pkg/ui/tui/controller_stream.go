@@ -15,6 +15,16 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 
 	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
+	if strings.TrimSpace(modelID) == "" {
+		c.app.RemoveThinkingIndicator()
+		c.finishTurnUndo(sess, turnBoundary)
+		_, err := model.ResolvePhaseModelRequired(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)
+		if err == nil {
+			err = fmt.Errorf("no execution model resolved; configure a model before sending a message")
+		}
+		c.handleStreamError(ctx, err)
+		return
+	}
 	result, err := c.runToolLoop(ctx, sess, modelID)
 	c.app.RemoveThinkingIndicator()
 	c.finishTurnUndo(sess, turnBoundary)
@@ -54,11 +64,7 @@ func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) str
 }
 
 func (c *Controller) resolveExecutionModel() string {
-	modelID := model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)
-	if modelID == "" {
-		return "openai/gpt-4o"
-	}
-	return modelID
+	return strings.TrimSpace(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride))
 }
 
 func (c *Controller) handleStreamError(ctx context.Context, err error) bool {

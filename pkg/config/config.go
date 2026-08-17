@@ -17,7 +17,7 @@ const (
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
 	defaultOpenRouterCommitModel  = "qwen/qwen3.7-flash"
 	legacyOpenRouterCommitModel   = "qwen/qwen3.7-plus"
-	defaultBuckbotModel           = "openai/gpt-5.6-luna-pro"
+	defaultBuckbotModel           = "deepseek/deepseek-v4-pro-0813"
 	defaultBuckbotCriticModel     = "qwen/qwen3.8-max"
 	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
 	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
@@ -968,6 +968,10 @@ type BuckbotConfig struct {
 	Model       string `yaml:"model"`
 	CriticModel string `yaml:"critic_model"`
 	Reasoning   string `yaml:"reasoning"`
+	// OpenRouterPrivacyFallback is opt-in because falling back from ZDR to
+	// data_collection=deny deliberately relaxes a strict ZDR requirement.
+	// Supported value: zdr_then_data_collection_deny.
+	OpenRouterPrivacyFallback string `yaml:"openrouter_privacy_fallback"`
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.
 	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`

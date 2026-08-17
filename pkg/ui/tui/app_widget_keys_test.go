@@ -27,7 +27,7 @@ func TestWidgetAppCtrlCClearsInputBeforeQuit(t *testing.T) {
 			quitCount++
 		},
 	})
-	app.running = true
+	app.runState.Store(widgetAppRunning)
 	app.inputArea.SetText("pending prompt")
 
 	if !app.handleKeyMsg(KeyMsg{Key: int(terminal.KeyCtrlC)}) {
@@ -49,7 +49,7 @@ func TestWidgetAppCtrlCClearsInputBeforeQuit(t *testing.T) {
 	if quitCount != 1 {
 		t.Fatalf("quit count = %d, want 1 after second Ctrl+C", quitCount)
 	}
-	if app.running {
+	if app.isRunning() {
 		t.Fatal("app should no longer be running after confirmed quit")
 	}
 }
@@ -57,7 +57,7 @@ func TestWidgetAppCtrlCClearsInputBeforeQuit(t *testing.T) {
 func TestWidgetAppCtrlCInterruptsActiveProcess(t *testing.T) {
 	interrupts := 0
 	app := newKeyTestWidgetApp(t, WidgetAppConfig{})
-	app.running = true
+	app.runState.Store(widgetAppRunning)
 	app.processActive = true
 	app.SetInterruptCallback(func() { interrupts++ })
 

@@ -610,7 +610,11 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("HTTP-Referer", "https://github.com/odvcencio/buckley")
 	req.Header.Set("X-Title", "Buckley")
+	// Keep the legacy experimental header for older routers while also asking
+	// current OpenRouter deployments to return guardrail/routing metadata in
+	// blocked responses. This is diagnostic only; it does not alter routing.
 	req.Header.Set("X-OpenRouter-Experimental-Metadata", "enabled")
+	req.Header.Set("X-OpenRouter-Metadata", "enabled")
 }
 
 // parseError parses an error response and wraps it with additional context
@@ -661,6 +665,15 @@ func (c *Client) parseError(resp *http.Response) error {
 		message = resp.Status
 	}
 	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
+	if len(errResp.OpenRouterMetadata) > 0 && !bytes.Equal(bytes.TrimSpace(errResp.OpenRouterMetadata), []byte("null")) {
+		metadata := boundedErrorDetail(string(errResp.OpenRouterMetadata))
+		if metadata != "" {
+			if details != "" {
+				details += "; "
+			}
+			details += "openrouter_metadata: " + metadata
+		}
+	}
 	if provider == "" {
 		provider = metadataProvider
 	}

@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/runledger"
 )
@@ -51,6 +53,13 @@ func (c *Controller) recordJSONEvidence(ctx context.Context, kind evidence.Kind,
 	body, err := json.Marshal(value)
 	if err != nil {
 		return "", "", fmt.Errorf("agentloop: marshal %s evidence: %w", kind, err)
+	}
+	return c.recordEvidenceBody(ctx, kind, body, stepID, metadata)
+}
+
+func (c *Controller) recordEvidenceBody(ctx context.Context, kind evidence.Kind, body []byte, stepID string, metadata map[string]any) (string, string, error) {
+	if c == nil || c.cfg.Evidence == nil {
+		return "", "", nil
 	}
 	obj, err := c.cfg.Evidence.Put(ctx, evidence.Object{
 		Kind:       kind,
@@ -112,6 +121,14 @@ func (c *Controller) beginStep(ctx context.Context, stepID, kind, inputDigest st
 	}
 	got, replay, err := c.cfg.StepJournal.BeginStep(ctx, step)
 	if err != nil {
+		var recovery *runledger.StepRecoveryError
+		if errors.As(err, &recovery) && recovery.Action == runledger.StepRecoveryResume {
+			reclaimed, reclaimErr := c.cfg.StepJournal.ReclaimStep(ctx, got, time.Now().UTC())
+			if reclaimErr != nil {
+				return runledger.ExecutionStep{}, false, fmt.Errorf("agentloop: resume %s step: %w", stepID, reclaimErr)
+			}
+			return reclaimed, false, nil
+		}
 		return runledger.ExecutionStep{}, false, fmt.Errorf("agentloop: begin %s step: %w", stepID, err)
 	}
 	return got, replay, nil
@@ -121,8 +138,32 @@ func (c *Controller) completeStep(ctx context.Context, step runledger.ExecutionS
 	if c.cfg.StepJournal == nil {
 		return nil
 	}
-	if err := c.cfg.StepJournal.CompleteStep(ctx, step.RunID, step.StepID, evidenceID, outputDigest, time.Now().UTC()); err != nil {
+	if err := c.cfg.StepJournal.CompleteStepAttempt(ctx, step, evidenceID, outputDigest, time.Now().UTC()); err != nil {
 		return fmt.Errorf("agentloop: complete %s step: %w", step.StepID, err)
+	}
+	return nil
+}
+
+func (c *Controller) markStepDispatched(ctx context.Context, step runledger.ExecutionStep) error {
+	if c == nil || c.cfg.StepJournal == nil {
+		return nil
+	}
+	if err := c.cfg.StepJournal.MarkStepDispatched(ctx, step, time.Now().UTC()); err != nil {
+		return fmt.Errorf("agentloop: mark %s step dispatched: %w", step.StepID, err)
+	}
+	return nil
+}
+
+func (c *Controller) blockDispatchedStep(ctx context.Context, step runledger.ExecutionStep, failure error, evidenceID, outputDigest string) error {
+	if c == nil || c.cfg.StepJournal == nil || step.StepID == "" {
+		return nil
+	}
+	message := "external effect outcome requires reconciliation"
+	if failure != nil {
+		message = modelstep.NormalizeError(failure)
+	}
+	if err := c.cfg.StepJournal.BlockStep(ctx, step, message, evidenceID, outputDigest, time.Now().UTC()); err != nil {
+		return fmt.Errorf("agentloop: block dispatched %s step: %w", step.StepID, err)
 	}
 	return nil
 }
@@ -133,9 +174,9 @@ func (c *Controller) failStep(ctx context.Context, step runledger.ExecutionStep,
 	}
 	message := "step failed"
 	if failure != nil {
-		message = failure.Error()
+		message = modelstep.NormalizeError(failure)
 	}
-	_ = c.cfg.StepJournal.FailStep(ctx, step.RunID, step.StepID, message, time.Now().UTC())
+	_ = c.cfg.StepJournal.FailStepAttempt(ctx, step, message, time.Now().UTC())
 }
 
 func evidenceMetadata(c *Controller, stepID string, metadata map[string]any) map[string]any {

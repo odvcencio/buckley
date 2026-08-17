@@ -206,7 +206,7 @@ func (s *Store) ListScratchpadEntriesByType(ctx context.Context, entryType strin
 	return entries, rows.Err()
 }
 
-func ensureScratchpadSchema(db *sql.DB) error {
+func ensureScratchpadSchema(db MigrationDB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS rlm_scratchpad_entries (
 			key TEXT PRIMARY KEY,

@@ -101,6 +101,23 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 
 	protectedReasoning := unansweredToolCallIndices(result)
 
+	// DCP-style deduplication is keyed by the operation (tool + arguments),
+	// not by output text. Two different reads can legitimately return the same
+	// bytes; only a repeated operation is safe to replace with its newest
+	// result. Tool messages without a matching assistant call fall back to
+	// output identity for backwards-compatible transcripts.
+	toolCallSignatures := make(map[string]string)
+	for _, msg := range result {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, call := range msg.ToolCalls {
+			if call.ID == "" {
+				continue
+			}
+			toolCallSignatures[call.ID] = call.Function.Name + "\x00" + call.Function.Arguments
+		}
+	}
 	seenToolResults := make(map[[32]byte]int)
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
@@ -113,7 +130,11 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		var hasToolDigest bool
 		if msg.Role == "tool" {
 			if content, ok := msg.Content.(string); ok && content != "" {
-				toolDigest = sha256.Sum256([]byte(msg.Name + "\x00" + content))
+				identity := msg.Name + "\x00" + content
+				if signature, ok := toolCallSignatures[msg.ToolCallID]; ok {
+					identity = signature
+				}
+				toolDigest = sha256.Sum256([]byte(identity))
 				hasToolDigest = true
 			}
 		}

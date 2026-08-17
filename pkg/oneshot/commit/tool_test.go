@@ -49,6 +49,9 @@ func TestGenerateCommitToolSchema(t *testing.T) {
 	if body.Type != "array" {
 		t.Errorf("expected body type 'array', got %q", body.Type)
 	}
+	if _, ok := props["breaking_reason"]; !ok {
+		t.Error("expected breaking_reason field")
+	}
 }
 
 func TestCommitResultHeader(t *testing.T) {
@@ -120,10 +123,11 @@ func TestCommitResultFormat(t *testing.T) {
 
 func TestCommitResultFormatWithBreaking(t *testing.T) {
 	result := CommitResult{
-		Action:   "remove",
-		Subject:  "deprecated API endpoints",
-		Body:     []string{"Remove v1 endpoints"},
-		Breaking: true,
+		Action:         "remove",
+		Subject:        "deprecated API endpoints",
+		Body:           []string{"Remove v1 endpoints"},
+		Breaking:       true,
+		BreakingReason: "Consumers must migrate before upgrading",
 	}
 
 	formatted := result.Format()
@@ -227,6 +231,16 @@ func TestCommitResultValidate(t *testing.T) {
 				Subject: "feature",
 				Body:    []string{},
 			},
+			wantErr: true,
+		},
+		{
+			name:    "unknown action",
+			result:  CommitResult{Action: "ship", Subject: "feature", Body: []string{"Publish feature"}},
+			wantErr: true,
+		},
+		{
+			name:    "invalid issue",
+			result:  CommitResult{Action: "fix", Subject: "feature", Body: []string{"Explain feature"}, Issues: []string{"1\nCloses #2"}},
 			wantErr: true,
 		},
 	}

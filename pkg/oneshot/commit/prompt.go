@@ -117,6 +117,7 @@ Use the generate_commit tool to produce your response. The tool expects:
 - scope: Optional component/area (e.g., "api", "ui", "config")
 - subject: Short summary, imperative mood, no period
 - body: Bullet points explaining WHAT changed and WHY
+- breaking_reason: If breaking is true, briefly explain the compatibility impact
 
 CRITICAL: The full header line (action + scope + subject) MUST be <= 72 characters.
 Calculate your budget: "action(scope): " uses characters, so adjust subject length.
@@ -127,8 +128,9 @@ Examples:
 
 Guidelines:
 - Focus on the "what" and "why", not the "how"
-- Be specific but concise
+- Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
 - Match body detail to change size
 - Group related changes into single bullets
-- Use imperative mood ("Add feature" not "Added feature")`
+- Use imperative mood ("Add feature" not "Added feature")
+- If breaking is true, include a useful breaking_reason instead of repeating the subject`
 }

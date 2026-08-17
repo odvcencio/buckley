@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/skill"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
@@ -113,9 +114,12 @@ func TestActivateSessionSkill_ActivatesAndInjectsContent(t *testing.T) {
 	state := skill.NewRuntimeState(func(content string) {
 		injected = append(injected, content)
 	})
+	toolRegistry := tool.NewEmptyRegistry()
+	toolRegistry.Register(&builtin.SkillActivationTool{Registry: registry, Conversation: state})
 	sess := &SessionState{
 		SkillRegistry: registry,
 		SkillState:    state,
+		ToolRegistry:  toolRegistry,
 	}
 
 	content, err := activateSessionSkill(sess, "daily-driver")
@@ -139,5 +143,28 @@ func TestActivateSessionSkill_ActivatesAndInjectsContent(t *testing.T) {
 	}
 	if !strings.Contains(injected[0], "# Skill Activated: daily-driver") {
 		t.Fatalf("injected message missing skill header:\n%s", injected[0])
+	}
+}
+
+func TestActivateSessionSkill_UsesGovernedRegistry(t *testing.T) {
+	skills := skill.NewRegistry()
+	if err := skills.Register(&skill.Skill{Name: "guarded", Description: "Guarded skill", Content: "must not activate"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	state := skill.NewRuntimeState(func(string) {})
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&builtin.SkillActivationTool{Registry: skills, Conversation: state})
+	hookCalled := false
+	registry.Hooks().RegisterPreHook("activate_skill", func(*tool.ExecutionContext) tool.HookResult {
+		hookCalled = true
+		return tool.HookResult{Abort: true, AbortReason: "governed denial"}
+	})
+
+	_, err := activateSessionSkill(&SessionState{ToolRegistry: registry, SkillRegistry: skills, SkillState: state}, "guarded")
+	if err == nil || !strings.Contains(err.Error(), "governed denial") {
+		t.Fatalf("activation error = %v, want governed denial", err)
+	}
+	if !hookCalled || skills.IsActive("guarded") {
+		t.Fatalf("registry governance hook=%v active=%v", hookCalled, skills.IsActive("guarded"))
 	}
 }

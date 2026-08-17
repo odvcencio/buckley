@@ -77,6 +77,26 @@ func TestAPIError_Error(t *testing.T) {
 	}
 }
 
+func TestAPIError_ErrorExplainsOpenRouterPolicyFiltering(t *testing.T) {
+	err := (&APIError{
+		StatusCode: 404,
+		Message:    "No endpoints available matching your guardrail restrictions and data policy",
+	}).Error()
+	if !strings.Contains(err, "OpenRouter filtered every eligible endpoint") {
+		t.Fatalf("policy-filtered error omitted remediation: %q", err)
+	}
+	if !strings.Contains(err, "Settings > Privacy and Guardrails") {
+		t.Fatalf("policy-filtered error omitted account guidance: %q", err)
+	}
+}
+
+func TestAPIError_ErrorDoesNotMisclassifyOrdinaryNotFound(t *testing.T) {
+	err := (&APIError{StatusCode: 404, Message: "model not found"}).Error()
+	if strings.Contains(err, "Settings > Privacy and Guardrails") {
+		t.Fatalf("ordinary not-found error received policy guidance: %q", err)
+	}
+}
+
 func TestModelPricing_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name               string

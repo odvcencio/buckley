@@ -2,6 +2,7 @@ package runledger
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -983,5 +984,108 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 	if len(runs) != 1 {
 		t.Fatalf("expected run to survive reopen with idempotent migrations, got %d runs", len(runs))
+	}
+}
+
+func TestMigrationsSerializeConcurrentOpeners(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "concurrent-migrations.db")
+	const openers = 24
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	var wg sync.WaitGroup
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			store, err := New(dbPath)
+			if err == nil {
+				err = store.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent NewWithDB: %v", err)
+		}
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var versions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM runledger_schema_migrations`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != len(migrations) {
+		t.Fatalf("migration versions=%d, want %d", versions, len(migrations))
+	}
+	var mode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal mode=%q err=%v, want wal", mode, err)
+	}
+}
+
+func TestMigrationsRecoverPartiallyAppliedAlter(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		fromVersion int
+		table       string
+		column      string
+	}{
+		{name: "v10 metric idempotency", fromVersion: 10, table: "agent_metric_samples", column: "idempotency_key"},
+		{name: "v12 claim generation", fromVersion: 12, table: "execution_steps", column: "claim_generation"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "partial-migration.db")
+			store, err := New(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`DELETE FROM runledger_schema_migrations WHERE version >= ?`, tt.fromVersion); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, err := New(dbPath)
+			if err != nil {
+				t.Fatalf("reopen partially applied migration: %v", err)
+			}
+			defer reopened.Close()
+			rows, err := reopened.db.Query(`PRAGMA table_info(` + tt.table + `)`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matches := 0
+			for rows.Next() {
+				var cid, notNull, primaryKey int
+				var name, columnType string
+				var defaultValue sql.NullString
+				if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+					_ = rows.Close()
+					t.Fatal(err)
+				}
+				if name == tt.column {
+					matches++
+				}
+			}
+			if err := rows.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if matches != 1 {
+				t.Fatalf("column %s.%s count=%d, want 1", tt.table, tt.column, matches)
+			}
+			var recorded int
+			if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM runledger_schema_migrations WHERE version = ?`, tt.fromVersion).Scan(&recorded); err != nil || recorded != 1 {
+				t.Fatalf("migration %d record=%d err=%v", tt.fromVersion, recorded, err)
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -16,6 +17,26 @@ func TestResolvePhaseModel_UsesExplicitOverride(t *testing.T) {
 	got := ResolvePhaseModel(cfg, nil, nil, "execution", "anthropic/claude-3.5-sonnet")
 	if got != "anthropic/claude-3.5-sonnet" {
 		t.Fatalf("ResolvePhaseModel() = %q, want explicit override", got)
+	}
+}
+
+func TestResolvePhaseModelRequired_FailsClosedWhenUnresolved(t *testing.T) {
+	_, err := ResolvePhaseModelRequired(nil, nil, nil, "execution", "")
+	if err == nil {
+		t.Fatal("ResolvePhaseModelRequired() error = nil, want unresolved-model error")
+	}
+	if got := err.Error(); !strings.Contains(got, "will not substitute another model") {
+		t.Fatalf("ResolvePhaseModelRequired() error = %q, want no-substitution explanation", got)
+	}
+}
+
+func TestResolvePhaseModelRequired_UsesExplicitOverride(t *testing.T) {
+	got, err := ResolvePhaseModelRequired(nil, nil, nil, "execution", "deepseek/deepseek-v4-pro-0813")
+	if err != nil {
+		t.Fatalf("ResolvePhaseModelRequired() error = %v", err)
+	}
+	if got != "deepseek/deepseek-v4-pro-0813" {
+		t.Fatalf("ResolvePhaseModelRequired() = %q, want explicit model", got)
 	}
 }
 

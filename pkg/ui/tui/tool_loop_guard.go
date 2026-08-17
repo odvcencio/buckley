@@ -98,6 +98,12 @@ func contextProjectionStatus(stats conversation.ContextProjectionStats) string {
 		} else {
 			label += " compacted"
 		}
+		if stats.ToolResultsCompacted > 0 {
+			label += fmt.Sprintf(", pruned %d tool result(s)", stats.ToolResultsCompacted)
+		}
+		if stats.HistoryCollapsed {
+			label += ", history folded"
+		}
 	}
 	if stats.ContinuationActive {
 		continuationLabel := "continuation: reset"

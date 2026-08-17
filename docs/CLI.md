@@ -142,7 +142,16 @@ buckley commit [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Show generated commit message without committing |
-| `--no-verify` | Skip pre-commit hooks |
+| `--yes` | Skip confirmation and create the commit |
+| `--push=false` | Create the commit without pushing the current branch |
+| `--paths <path>` | Commit only matching staged paths; repeatable |
+| `--exclusive` | With `--paths`, reject staged files outside the selected paths |
+| `--context-trailer=false` | Omit the privacy-preserving change digest and aggregate stats trailers |
+| `--minimal-output` | Minimize terminal output |
+| `--trace` | Show context audit and model reasoning after generation |
+| `--model <id>` | Override the commit-message model |
+| `--backend <api|codex|claude>` | Select the one-shot backend |
+| `--timeout <duration>` | Bound message generation (default `2m`) |
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_COMMIT` - Override model for commit generation
@@ -151,9 +160,17 @@ buckley commit [OPTIONS]
 **Example:**
 ```bash
 git add -p                    # Stage changes
-buckley commit                # Generate and create commit
+buckley commit                # Generate, confirm, create, and push
 buckley commit --dry-run      # Preview commit message
+buckley commit --yes --push=false  # Create without confirmation or push
 ```
+
+Generated commits include `Buckley-Change-Hash` and `Buckley-Change-Stats`
+trailers by default. The hash binds the message to the exact staged diff; the
+stats record only aggregate file and line counts. No paths, filenames, or diff
+content are stored in these trailers. Buckley rechecks the staged diff before
+committing and aborts if it changed after message generation. Disable the
+trailers with `--context-trailer=false`; the staged-diff recheck still runs.
 
 ### pr
 
@@ -187,10 +204,23 @@ Buckbot is Buckley's general-purpose review agent. It uses the same governed
 review runtime as `review` and `review-pr`, while making the review intent
 explicit in scripts, CI, and team workflows.
 
+Unless overridden with `--model` or `BUCKLEY_MODEL_REVIEW`, Buckbot uses
+`deepseek/deepseek-v4-pro-0813` through OpenRouter. The account's privacy and
+guardrail settings must allow a matching endpoint.
+
+If the configured Buckbot policy is
+`openrouter_privacy_fallback: zdr_then_data_collection_deny`, Buckley tries a
+ZDR route first and retries one policy-filtered 404 with
+`data_collection: deny`. This makes DeepSeek usable when it has no ZDR route,
+but it is not equivalent to ZDR; leave the setting disabled for strict
+zero-retention reviews.
+
 ```bash
 buckley buckbot                         # review current local scope
 buckley buckbot --scope branch          # review the current branch
 buckley buckbot repo                    # advisory repository-wide assessment
+buckley buckbot repo --depth balanced   # evidence map plus targeted falsification
+buckley buckbot repo --depth in-depth   # exhaustive coverage and verification
 buckley buckbot pr 123                  # review a GitHub PR without posting
 buckley buckbot pr 123 --post           # explicitly post that PR review
 buckley buckbot --max-tool-calls 12      # opt into an experimental tool cap
@@ -200,16 +230,31 @@ buckley buckbot --max-tool-calls 12      # opt into an experimental tool cap
 repository-wide, advisory-only, and cannot issue an approval verdict. Posting
 to GitHub is never implicit: it requires `--post` on a PR review.
 
-Repository reviews start with a complete Git-visible tracked-file inventory and
-an abridged Canopy structural map. The map is a navigable table of contents:
+Repository reviews start with a complete Git-visible tracked-file inventory,
+plus a filtered immutable capture of safe non-ignored untracked text files in
+project/worktree reviews. The map is a navigable table of contents:
 it includes repository metrics, complexity hotspots, major call sites, and
 direct caller/callee edges for important flows, along with call-graph and parse
 health. The model must expand that map into a coverage ledger for every
 tracked source, test, configuration, and documentation area. Long files are
-read in explicit pages, so a large file is not silently discarded. The report
-declares `COMPLETE` or `PARTIAL` coverage and lists every deferred or excluded
-path. Project reviews default to a 20-minute wall-clock window; use
-`--timeout 45m` (or another explicit duration) for a larger repository.
+read in explicit pages, so a large file is not silently discarded. A report is
+emitted only when it declares `COMPLETE` coverage; a timed-out or incomplete
+pass is discarded rather than presented as a caveated review. Project reviews default to a 20-minute wall-clock window; use
+`--timeout 45m` (or another explicit duration) for a larger repository. The
+snapshot boundary excludes ignored paths, agent instructions, secret-like
+paths/content, symlinks, binary/control content, and oversized files; excluded
+paths are listed in the review rather than silently treated as inspected.
+
+Every review surface supports three depth modes. `--depth spot` is the fast
+health scan and is the default for compatibility. `--depth balanced` performs
+a map-then-falsify pass and requires a model-directed verification attempt when
+a repository gate exists. `--depth in-depth` removes generated turn/tool
+ceilings (explicit operator caps still win), expands important call and state
+paths, runs an adversarial pass, and requires a coverage plus verification
+ledger. `--in-depth` is a shorthand for `--depth in-depth`; `standard`,
+`detailed`, and `exhaustive` are accepted aliases for the corresponding modes.
+No-test gates are typed as not applicable; required unavailable evidence fails
+the pass instead of being silently counted as passing evidence.
 
 Buckbot is uncapped by default: a model is allowed to finish its review rather
 than being truncated by an automatic dollar ceiling. Use `--budget <USD>` only

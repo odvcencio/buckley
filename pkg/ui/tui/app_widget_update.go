@@ -15,7 +15,7 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ResizeMsg:
 		return a.handleResizeMsg(m)
 	case StreamChunk:
-		a.coalescer.Add(m.SessionID, m.Text)
+		a.coalescer.AddStream(m.SessionID, m.Generation, m.Text)
 		return false
 	case StreamFlush:
 		return a.handleStreamFlushMsg(m)
@@ -43,7 +43,7 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ThinkingMsg:
 		return a.handleThinkingMsg(m)
 	case ModelPickerMsg:
-		a.showModelPicker(m.Items, m.OnSelect)
+		a.showModelPicker(m.Items, m.Action)
 		return true
 	case SetActivitiesMsg:
 		a.applySetActivities(m.Records)
@@ -51,14 +51,30 @@ func (a *WidgetApp) update(msg Message) bool {
 	case SessionNavMsg:
 		a.sidebar.SetSessionNodes(m.Nodes)
 		return true
+	case deliveryOverloadMsg:
+		a.markOverloadDiagnosticDelivered()
+		a.chatView.AddMessage(eventOverloadDiagnostic, "system")
+		a.updateScrollStatus()
+		return true
+	case streamOverloadMsg:
+		a.chatView.AddMessage(streamOverloadDiagnostic, "system")
+		a.updateScrollStatus()
+		return true
+	case streamBoundaryRejectedMsg:
+		return a.handleStreamBoundaryRejectedMsg(m)
 	case RefreshMsg:
 		return true
 	case QuitMsg:
 		a.Quit()
 		return false
 	case ApprovalRequestMsg:
+		if !a.approvalOutstanding(m.ID) {
+			return false
+		}
 		a.showApprovalDialog(m)
 		return true
+	case approvalCancelledMsg:
+		return a.removeApprovalDialog(m.RequestID)
 	case MouseMsg:
 		return a.handleMouseMsg(m)
 	case PasteMsg:
@@ -87,8 +103,26 @@ func (a *WidgetApp) handleStreamFlushMsg(m StreamFlush) bool {
 }
 
 func (a *WidgetApp) handleStreamDoneMsg(m StreamDone) bool {
-	a.coalescer.Flush(m.SessionID)
-	a.coalescer.Clear(m.SessionID)
+	if a.coalescer != nil {
+		a.coalescer.ClearStream(m.SessionID, m.Generation)
+	}
+	return true
+}
+
+func (a *WidgetApp) handleStreamBoundaryRejectedMsg(m streamBoundaryRejectedMsg) bool {
+	if a.coalescer != nil {
+		a.coalescer.ClearRejectedStream(m.Fingerprint, m.Generation)
+	}
+	a.streamMu.Lock()
+	for sessionID, generation := range a.streamGenerations {
+		if generation == m.Generation && streamFingerprint(sessionID) == m.Fingerprint {
+			delete(a.streamGenerations, sessionID)
+			a.streamGenerationBytes -= len(sessionID)
+		}
+	}
+	a.streamMu.Unlock()
+	a.chatView.AddMessage(streamIncompleteDiagnostic, "system")
+	a.updateScrollStatus()
 	return true
 }
 

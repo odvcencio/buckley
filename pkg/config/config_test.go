@@ -20,7 +20,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Models.Review != "z-ai/glm-5.2" {
 		t.Fatalf("expected default review model to be z-ai/glm-5.2, got %s", cfg.Models.Review)
 	}
-	if cfg.Buckbot.Model != "openai/gpt-5.6-luna-pro" ||
+	if cfg.Providers.ModelRouting["deepseek/"] != "openrouter" {
+		t.Fatalf("expected DeepSeek models to route through OpenRouter, got %q", cfg.Providers.ModelRouting["deepseek/"])
+	}
+	if cfg.Buckbot.Model != "deepseek/deepseek-v4-pro-0813" ||
 		cfg.Buckbot.CriticModel != "qwen/qwen3.8-max" ||
 		cfg.Buckbot.Reasoning != "auto" ||
 		cfg.Buckbot.PerReviewBudgetUSD != 0 ||

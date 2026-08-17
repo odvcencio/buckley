@@ -37,6 +37,12 @@ type DelegationGuard struct {
 	lastDelegation map[string]time.Time
 }
 
+// DelegationCheckOptions narrows exceptions to individual guard checks.
+// Depth and rolling-rate limits are never optional.
+type DelegationCheckOptions struct {
+	SkipSameToolCooldown bool
+}
+
 // Global guard instance
 var globalDelegationGuard = &DelegationGuard{
 	delegationTimes: make([]time.Time, 0),
@@ -186,6 +192,12 @@ func (g *DelegationGuard) ConfigureCommand(cmd *exec.Cmd) {
 
 // CheckAndRecord performs the full delegation check and records it if allowed
 func (g *DelegationGuard) CheckAndRecord(toolName string) error {
+	return g.CheckAndRecordWithOptions(toolName, DelegationCheckOptions{})
+}
+
+// CheckAndRecordWithOptions performs the delegation checks and records every
+// admitted use. A trusted human action may skip only the same-tool cooldown.
+func (g *DelegationGuard) CheckAndRecordWithOptions(toolName string, opts DelegationCheckOptions) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -213,7 +225,7 @@ func (g *DelegationGuard) CheckAndRecord(toolName string) error {
 			MaxDelegationsPerWindow, DelegationRateWindow)
 	}
 
-	if lastTime, ok := g.lastDelegation[toolName]; ok {
+	if lastTime, ok := g.lastDelegation[toolName]; ok && !opts.SkipSameToolCooldown {
 		elapsed := now.Sub(lastTime)
 		if elapsed < DelegationCooldown {
 			remaining := DelegationCooldown - elapsed

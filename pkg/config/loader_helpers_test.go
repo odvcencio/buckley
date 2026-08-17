@@ -69,6 +69,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 	override := &Config{Buckbot: BuckbotConfig{
 		CriticModel:                "z-ai/glm-5.2",
 		Reasoning:                  "medium",
+		OpenRouterPrivacyFallback:  "zdr_then_data_collection_deny",
 		MaxValidationAttempts:      1,
 		MaxToolCalls:               11,
 		MaxDiffBytes:               60_000,
@@ -78,6 +79,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 		"buckbot": map[string]any{
 			"critic_model":                  "z-ai/glm-5.2",
 			"reasoning":                     "medium",
+			"openrouter_privacy_fallback":   "zdr_then_data_collection_deny",
 			"max_validation_attempts":       1,
 			"max_tool_calls":                11,
 			"max_diff_bytes":                60_000,
@@ -89,6 +91,7 @@ func TestMergeConfigsRespectsBuckbotEfficiencyOverrides(t *testing.T) {
 
 	if base.Buckbot.CriticModel != "z-ai/glm-5.2" ||
 		base.Buckbot.Reasoning != "medium" ||
+		base.Buckbot.OpenRouterPrivacyFallback != "zdr_then_data_collection_deny" ||
 		base.Buckbot.MaxValidationAttempts != 1 ||
 		base.Buckbot.MaxToolCalls != 11 ||
 		base.Buckbot.MaxDiffBytes != 60_000 ||

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,6 +38,9 @@ type CommitInfo struct {
 	Issues   []string // related issue numbers
 	Files    []string // files changed
 	Diff     string   // git diff output
+	// ChangeMetadata binds a generated message to the exact staged diff while
+	// keeping paths and source text out of commit history.
+	ChangeMetadata commitmsg.ChangeMetadata
 }
 
 var commitSystemPrompt = `You are a git commit message generator using action(scope): summary format.
@@ -100,6 +104,7 @@ func (cg *CommitGenerator) Generate(task *Task) (*CommitInfo, error) {
 		stats.Files = len(files)
 	}
 	detail := commitMessageDetailForStats(stats)
+	metadata := changeMetadataForDiff(diff, stats)
 
 	// Generate commit message
 	prompt := cg.buildCommitPrompt(task, diff, files, stats, detail)
@@ -137,6 +142,7 @@ func (cg *CommitGenerator) Generate(task *Task) (*CommitInfo, error) {
 
 	commit.Files = files
 	commit.Diff = diff
+	commit.ChangeMetadata = metadata
 
 	return commit, nil
 }
@@ -398,14 +404,10 @@ func extractJSON(text string) string {
 }
 
 func (cg *CommitGenerator) getDiff() (string, error) {
-	// Stage all changes automatically
-	addCmd := exec.Command("git", "add", "-A")
-	if err := addCmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to stage changes: %w", err)
-	}
-
-	// Get diff of staged changes
-	cmd := exec.Command("git", "diff", "--staged")
+	// Read only the caller's staged index. Automatically staging the whole
+	// worktree can silently include unrelated or secret local edits in a
+	// generated commit.
+	cmd := exec.Command("git", "diff", "--cached", "--binary", "--no-ext-diff", "--no-color")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -413,7 +415,7 @@ func (cg *CommitGenerator) getDiff() (string, error) {
 
 	diff := string(output)
 	if diff == "" {
-		return "", fmt.Errorf("no changes to commit after staging")
+		return "", fmt.Errorf("no staged changes to commit")
 	}
 
 	return diff, nil
@@ -481,6 +483,9 @@ func parseNumstatField(field string) (int, bool) {
 }
 
 func (cg *CommitGenerator) FormatCommitMessage(commit *CommitInfo) string {
+	if commit == nil {
+		return ""
+	}
 	var b strings.Builder
 
 	// First line: action(scope): summary
@@ -517,15 +522,32 @@ func (cg *CommitGenerator) FormatCommitMessage(commit *CommitInfo) string {
 		}
 	}
 
-	return b.String()
+	return commitmsg.AppendChangeMetadata(b.String(), commit.ChangeMetadata)
 }
 
 func (cg *CommitGenerator) Commit(commit *CommitInfo) error {
+	if commit == nil {
+		return fmt.Errorf("commit cannot be nil")
+	}
 	// Stage files
 	for _, file := range commit.Files {
-		cmd := exec.Command("git", "add", file)
+		cmd := exec.Command("git", "add", "--", file)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to stage %s: %w", file, err)
+		}
+	}
+	if commit.ChangeMetadata.Valid() {
+		currentDiff, err := cg.getDiff()
+		if err != nil {
+			return fmt.Errorf("recheck staged changes: %w", err)
+		}
+		currentStats, err := cg.getDiffStats()
+		if err != nil {
+			return fmt.Errorf("recheck staged change stats: %w", err)
+		}
+		current := changeMetadataForDiff(currentDiff, currentStats)
+		if current != commit.ChangeMetadata {
+			return fmt.Errorf("staged changes changed after commit message generation; regenerate the commit message")
 		}
 	}
 
@@ -549,6 +571,17 @@ func (cg *CommitGenerator) Commit(commit *CommitInfo) error {
 	}
 
 	return nil
+}
+
+func changeMetadataForDiff(diff string, stats diffStats) commitmsg.ChangeMetadata {
+	digest := sha256.Sum256([]byte(diff))
+	return commitmsg.ChangeMetadata{
+		Digest:      fmt.Sprintf("sha256:%x", digest),
+		Files:       stats.Files,
+		Insertions:  stats.Insertions,
+		Deletions:   stats.Deletions,
+		BinaryFiles: stats.BinaryFiles,
+	}
 }
 
 // getUtilityModel returns the configured utility model for commit messages

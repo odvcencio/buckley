@@ -17,17 +17,17 @@ const (
 // bash commands run outside the workspace.
 func BuiltinDefaultRules() []PermissionRule {
 	return []PermissionRule{
-		{Tool: "*", ArgPattern: "**/.env", Action: PermissionDeny},
-		{Tool: "*", ArgPattern: "**/.env.*", Action: PermissionDeny},
-		{Tool: "*", ArgPattern: "**/*credentials*", Action: PermissionDeny},
-		{Tool: "*", ArgPattern: "**/id_rsa*", Action: PermissionDeny},
-		{Tool: "run_shell", ArgPattern: "*rm -rf*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_shell", ArgPattern: "*rm -r -f*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_shell", ArgPattern: "*git push*--force*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_shell", ArgPattern: "*git push*-f*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_shell", ArgPattern: "*curl*|*sh*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_shell", ArgPattern: "*curl*|*bash*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
-		{Tool: "run_code", ArgPattern: "*rm -rf*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.deny-dotenv", Tool: "*", ArgPattern: "**/.env", Action: PermissionDeny},
+		{ID: "builtin.deny-dotenv-variant", Tool: "*", ArgPattern: "**/.env.*", Action: PermissionDeny},
+		{ID: "builtin.deny-credentials", Tool: "*", ArgPattern: "**/*credentials*", Action: PermissionDeny},
+		{ID: "builtin.deny-id-rsa", Tool: "*", ArgPattern: "**/id_rsa*", Action: PermissionDeny},
+		{ID: "builtin.ask-shell-rm-rf", Tool: "run_shell", ArgPattern: "*rm -rf*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-shell-rm-r-f", Tool: "run_shell", ArgPattern: "*rm -r -f*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-shell-force-push-long", Tool: "run_shell", ArgPattern: "*git push*--force*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-shell-force-push-short", Tool: "run_shell", ArgPattern: "*git push*-f*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-shell-curl-sh", Tool: "run_shell", ArgPattern: "*curl*|*sh*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-shell-curl-bash", Tool: "run_shell", ArgPattern: "*curl*|*bash*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
+		{ID: "builtin.ask-code-rm-rf", Tool: "run_code", ArgPattern: "*rm -rf*", Action: PermissionAsk, OutsideWorkspaceOnly: true},
 	}
 }
 
@@ -69,9 +69,27 @@ func EvaluateBuiltinDefaultsArbiter(evaluator types.RuleEvaluator, req Permissio
 	if action == "" {
 		return PermissionDecision{}, true
 	}
+	ruleID, _ := result.Params["rule_id"].(string)
+	toolPattern, _ := result.Params["tool_pattern"].(string)
+	argPattern, _ := result.Params["arg_pattern"].(string)
+	outsideWorkspaceOnly, _ := result.Params["outside_workspace_only"].(bool)
+	// A matched outcome without its stable rule identity is unsafe for
+	// scoped approval caching: two unrelated asks could otherwise collapse
+	// into the same empty rule scope. Treat incomplete outcomes as an
+	// unavailable strategy and use the Go rules, which carry the metadata.
+	if ruleID == "" || toolPattern == "" || argPattern == "" {
+		return PermissionDecision{}, false
+	}
 	return PermissionDecision{
-		Action:  PermissionAction(action),
-		Layer:   "built-in defaults (arbiter)",
+		Action: PermissionAction(action),
+		Layer:  "built-in defaults (arbiter)",
+		Rule: PermissionRule{
+			ID:                   ruleID,
+			Tool:                 toolPattern,
+			ArgPattern:           argPattern,
+			Action:               PermissionAction(action),
+			OutsideWorkspaceOnly: outsideWorkspaceOnly,
+		},
 		Matched: true,
 	}, true
 }
@@ -95,35 +113,17 @@ func EvaluateBuiltinDefaults(evaluator types.RuleEvaluator, req PermissionReques
 // EvaluatePermissionLayers apply across every layer, built-in defaults
 // included.
 func EvaluatePermissionLayersWithBuiltins(evaluator types.RuleEvaluator, req PermissionRequest, layers ...PermissionLayer) PermissionDecision {
-	var firstMatch PermissionDecision
-	haveFirstMatch := false
-
-	for _, layer := range layers {
-		dec, matched := evaluateLayer(req, layer)
-		if !matched {
-			continue
-		}
-		if dec.Action == PermissionDeny {
-			return dec
-		}
-		if !haveFirstMatch {
-			firstMatch = dec
-			haveFirstMatch = true
-		}
+	// Evaluate caller layers with the same severity composition as the public
+	// layer evaluator, then compose the built-in layer as the lowest-priority
+	// source. Safety actions from either side still outrank an allow, so a
+	// caller's broad allow cannot suppress a built-in ask/park/deny.
+	dec := EvaluatePermissionLayers(req, layers...)
+	builtinDec := EvaluateBuiltinDefaults(evaluator, req)
+	if !builtinDec.Matched {
+		return dec
 	}
-
-	if builtinDec := EvaluateBuiltinDefaults(evaluator, req); builtinDec.Matched {
-		if builtinDec.Action == PermissionDeny {
-			return builtinDec
-		}
-		if !haveFirstMatch {
-			firstMatch = builtinDec
-			haveFirstMatch = true
-		}
+	if !dec.Matched || PermissionActionSeverity(builtinDec.Action) > PermissionActionSeverity(dec.Action) {
+		return builtinDec
 	}
-
-	if !haveFirstMatch {
-		return PermissionDecision{}
-	}
-	return firstMatch
+	return dec
 }

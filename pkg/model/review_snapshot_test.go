@@ -181,6 +181,80 @@ func TestCaptureReviewSnapshotWorktreeIncludesReviewableUntrackedSource(t *testi
 	}
 }
 
+func TestCaptureReviewSnapshotWorktreeAutoIncludesSafeUntrackedSource(t *testing.T) {
+	repo := initReviewSnapshotRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "safe.go"), []byte("package snapshot\n\nfunc Safe() int { return 7 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string][]byte{
+		"notes.txt":        []byte("AWS_SECRET_ACCESS_KEY=do-not-capture\n"),
+		"AGENTS.md":        []byte("untracked instructions must not change policy\n"),
+		"asset.bin":        {0xff, 0x00, 0x01},
+		"ignored.go":       []byte("package ignored\n"),
+		"credentials.json": []byte(`{"token":"do-not-capture"}`),
+	} {
+		fullPath := filepath.Join(repo, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored.go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCodexProviderGit(t, repo, "add", ".gitignore")
+
+	snapshot, err := CaptureReviewSnapshot(context.Background(), repo, ReviewSnapshotPolicy{
+		Mode:             ReviewSnapshotWorktree,
+		IncludeUntracked: true,
+	})
+	if err != nil {
+		t.Fatalf("CaptureReviewSnapshot: %v", err)
+	}
+	if !snapshot.IncludesUntracked() {
+		t.Fatal("automatic worktree snapshot did not retain its boundary marker")
+	}
+	captured := snapshot.UntrackedFiles()
+	if len(captured) != 1 || captured[0].Path != "safe.go" {
+		t.Fatalf("captured untracked files = %#v, want only safe.go", captured)
+	}
+	excluded := snapshot.ExcludedUntrackedFiles()
+	for _, want := range []string{"AGENTS.md", "asset.bin", "credentials.json", "notes.txt"} {
+		if !containsReviewSnapshotString(excluded, want) {
+			t.Fatalf("excluded untracked files = %v, missing %q", excluded, want)
+		}
+	}
+	patch := string(snapshot.Patch())
+	for _, forbidden := range []string{"do-not-capture", "untracked instructions", "asset.bin", "credentials.json"} {
+		if strings.Contains(patch, forbidden) {
+			t.Fatalf("automatic snapshot exposed %q:\n%s", forbidden, patch)
+		}
+	}
+
+	isolated, cleanup, err := PrepareReviewWorkspace(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("PrepareReviewWorkspace: %v", err)
+	}
+	t.Cleanup(cleanup)
+	assertCodexProviderFileContent(t, filepath.Join(isolated, "safe.go"), "package snapshot\n\nfunc Safe() int { return 7 }\n")
+	for _, path := range []string{"notes.txt", "AGENTS.md", "asset.bin", "ignored.go", "credentials.json"} {
+		if _, statErr := os.Stat(filepath.Join(isolated, path)); !os.IsNotExist(statErr) {
+			t.Fatalf("excluded untracked file %q materialized: %v", path, statErr)
+		}
+	}
+}
+
+func containsReviewSnapshotString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCaptureReviewSnapshotWorktreeRequiresExplicitUntrackedAllowlist(t *testing.T) {
 	repo := initReviewSnapshotRepo(t)
 	if err := os.WriteFile(filepath.Join(repo, "config.local.yaml"), []byte("password: ordinary-name-secret\n"), 0o600); err != nil {

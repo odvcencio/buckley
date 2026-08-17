@@ -14,9 +14,6 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	sqlite "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
-
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -62,6 +59,11 @@ type SQLiteStore struct {
 }
 
 var _ Store = (*SQLiteStore)(nil)
+var _ StepJournal = (*SQLiteStore)(nil)
+var _ StepEnumerator = (*SQLiteStore)(nil)
+var _ BlockingStepJournal = (*SQLiteStore)(nil)
+var _ DispatchStepJournal = (*SQLiteStore)(nil)
+var _ FencedStepJournal = (*SQLiteStore)(nil)
 
 // New creates a SQLiteStore backed by SQLite at dbPath, initializing WAL
 // mode, foreign keys, and the run ledger schema.
@@ -100,7 +102,7 @@ func New(dbPath string) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
 
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+	if err := storage.EnableSQLiteWAL(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("runledger: enable WAL mode: %w", err)
 	}
@@ -322,7 +324,7 @@ func (s *SQLiteStore) appendWithBusyRetry(ctx context.Context, event Event, payl
 		if err == nil {
 			return appended, inserted, nil
 		}
-		if !isBusyError(err) {
+		if !storage.IsSQLiteBusyError(err) {
 			if ctx.Err() != nil {
 				return Event{}, false, fmt.Errorf("runledger: append retry interrupted: %w", ctx.Err())
 			}
@@ -442,11 +444,11 @@ func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, 
 	return event, true, nil
 }
 
-// BeginStep implements StepJournal. A completed logical step is immutable
-// from the replay perspective: callers receive it with replay=true and use
-// its recorded evidence instead of executing the side effect again. Failed
-// and interrupted steps advance their attempt count while retaining the
-// stable StepID and idempotency key.
+// BeginStep implements StepJournal. Completed and blocked logical steps are
+// immutable from the replay perspective: callers receive them with replay=true
+// instead of executing the side effect again. Failed steps advance their
+// attempt count while retaining the stable StepID and idempotency key; an
+// existing started attempt remains owned and fails closed as in progress.
 func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (ExecutionStep, bool, error) {
 	if step.IdempotencyKey == "" {
 		step.IdempotencyKey = step.StepID
@@ -461,126 +463,238 @@ func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (Execut
 		step.StartedAt = time.Now().UTC()
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO execution_steps (
+			run_id, task_id, step_id, kind, idempotency_key, status, attempt,
+			claim_generation, input_digest, dispatch_state, started_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, step_id) DO NOTHING
+	`, step.RunID, nullableStr(step.TaskID), step.StepID, step.Kind, step.IdempotencyKey,
+		StepStarted, step.Attempt, 1, nullableStr(step.InputDigest), StepDispatchClaimed, sqliteTimestamp(step.StartedAt))
 	if err != nil {
-		return ExecutionStep{}, false, fmt.Errorf("runledger: begin execution step: %w", err)
+		return ExecutionStep{}, false, fmt.Errorf("runledger: insert execution step %s: %w", step.StepID, err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return ExecutionStep{}, false, fmt.Errorf("runledger: inspect inserted execution step %s: %w", step.StepID, err)
+	}
+	if inserted == 1 {
+		step.Status = StepStarted
+		step.ClaimGeneration = 1
+		step.DispatchState = StepDispatchClaimed
+		return step, false, nil
+	}
 
-	existing, err := scanExecutionStep(tx.QueryRowContext(ctx, `
-		SELECT run_id, task_id, step_id, kind, idempotency_key, status, attempt,
-		       input_digest, output_digest, output_evidence_id, error_text,
-		       started_at, completed_at
-		FROM execution_steps WHERE run_id = ? AND step_id = ?
-	`, step.RunID, step.StepID))
-	if err != nil && !errors.Is(err, ErrStepNotFound) {
-		return ExecutionStep{}, false, fmt.Errorf("runledger: read execution step %s: %w", step.StepID, err)
-	}
-	if err == nil {
+	for {
+		existing, err := s.GetStep(ctx, step.RunID, step.StepID)
+		if err != nil {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: read execution step %s: %w", step.StepID, err)
+		}
 		if existing.IdempotencyKey != step.IdempotencyKey {
 			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s idempotency key changed", step.StepID)
+		}
+		if existing.Kind != step.Kind {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s kind changed", step.StepID)
 		}
 		if existing.InputDigest != "" && step.InputDigest != "" && existing.InputDigest != step.InputDigest {
 			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s input digest changed", step.StepID)
 		}
-		if existing.Status == StepCompleted {
-			if err := tx.Commit(); err != nil {
-				return ExecutionStep{}, false, fmt.Errorf("runledger: commit completed execution step: %w", err)
-			}
+		if existing.InputDigest != "" && strings.TrimSpace(step.InputDigest) == "" {
+			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s input digest is required to resume", step.StepID)
+		}
+		switch existing.Status {
+		case StepCompleted, StepBlocked:
 			return existing, true, nil
+		case StepStarted:
+			return existing, false, RecoveryErrorForStep(existing)
+		case StepFailed:
+			if strings.TrimSpace(step.InputDigest) == "" {
+				return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s input digest is required to retry a failed step", step.StepID)
+			}
+			res, err := s.db.ExecContext(ctx, `
+				UPDATE execution_steps
+				SET status = ?, attempt = attempt + 1, claim_generation = claim_generation + 1,
+				    input_digest = ?, output_digest = NULL,
+				    output_evidence_id = NULL, error_text = NULL, dispatch_state = ?,
+				    started_at = ?, completed_at = NULL
+				WHERE run_id = ? AND step_id = ? AND status = ? AND attempt = ? AND claim_generation = ?
+			`, StepStarted, nullableStr(step.InputDigest), StepDispatchClaimed, sqliteTimestamp(step.StartedAt),
+				existing.RunID, existing.StepID, StepFailed, existing.Attempt, existing.ClaimGeneration)
+			if err != nil {
+				return ExecutionStep{}, false, fmt.Errorf("runledger: restart execution step %s: %w", step.StepID, err)
+			}
+			updated, err := res.RowsAffected()
+			if err != nil {
+				return ExecutionStep{}, false, fmt.Errorf("runledger: inspect restarted execution step %s: %w", step.StepID, err)
+			}
+			if updated == 0 {
+				continue
+			}
+			existing.Attempt++
+			existing.ClaimGeneration++
+			existing.Status = StepStarted
+			existing.InputDigest = step.InputDigest
+			existing.OutputDigest = ""
+			existing.OutputEvidenceID = ""
+			existing.Error = ""
+			existing.DispatchState = StepDispatchClaimed
+			existing.StartedAt = step.StartedAt
+			existing.CompletedAt = nil
+			return existing, false, nil
+		default:
+			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s has unknown status %q", step.StepID, existing.Status)
 		}
-
-		existing.Attempt++
-		existing.Status = StepStarted
-		existing.InputDigest = step.InputDigest
-		existing.OutputDigest = ""
-		existing.OutputEvidenceID = ""
-		existing.Error = ""
-		existing.StartedAt = step.StartedAt
-		existing.CompletedAt = nil
-		_, err = tx.ExecContext(ctx, `
-			UPDATE execution_steps
-			SET status = ?, attempt = ?, input_digest = ?, output_digest = NULL,
-			    output_evidence_id = NULL, error_text = NULL, started_at = ?, completed_at = NULL
-			WHERE run_id = ? AND step_id = ?
-		`, existing.Status, existing.Attempt, nullableStr(existing.InputDigest), sqliteTimestamp(existing.StartedAt),
-			existing.RunID, existing.StepID)
-		if err != nil {
-			return ExecutionStep{}, false, fmt.Errorf("runledger: restart execution step %s: %w", step.StepID, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return ExecutionStep{}, false, fmt.Errorf("runledger: commit execution step %s: %w", step.StepID, err)
-		}
-		return existing, false, nil
 	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO execution_steps (
-			run_id, task_id, step_id, kind, idempotency_key, status, attempt,
-			input_digest, started_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, step.RunID, nullableStr(step.TaskID), step.StepID, step.Kind, step.IdempotencyKey,
-		StepStarted, step.Attempt, nullableStr(step.InputDigest), sqliteTimestamp(step.StartedAt))
-	if err != nil {
-		return ExecutionStep{}, false, fmt.Errorf("runledger: insert execution step %s: %w", step.StepID, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ExecutionStep{}, false, fmt.Errorf("runledger: commit execution step %s: %w", step.StepID, err)
-	}
-	step.Status = StepStarted
-	return step, false, nil
 }
 
 // CompleteStep implements StepJournal.
 func (s *SQLiteStore) CompleteStep(ctx context.Context, runID, stepID, outputEvidenceID, outputDigest string, completedAt time.Time) error {
-	if runID == "" || stepID == "" {
-		return fmt.Errorf("runledger: run_id and step_id are required to complete an execution step")
-	}
-	if completedAt.IsZero() {
-		completedAt = time.Now().UTC()
-	}
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE execution_steps
-		SET status = ?, output_evidence_id = ?, output_digest = ?, error_text = NULL, completed_at = ?
-		WHERE run_id = ? AND step_id = ?
-	`, StepCompleted, nullableStr(outputEvidenceID), nullableStr(outputDigest), sqliteTimestamp(completedAt), runID, stepID)
+	step, err := s.GetStep(ctx, runID, stepID)
 	if err != nil {
-		return fmt.Errorf("runledger: complete execution step %s: %w", stepID, err)
+		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("runledger: complete execution step %s: %w", stepID, err)
+	if step.Attempt != 1 || step.ClaimGeneration != 1 {
+		return fmt.Errorf("%w: step %s is attempt %d claim %d", ErrStepAttemptRequired, stepID, step.Attempt, step.ClaimGeneration)
 	}
-	if n == 0 {
-		return ErrStepNotFound
-	}
-	return nil
+	return s.CompleteStepAttempt(ctx, step, outputEvidenceID, outputDigest, completedAt)
 }
 
 // FailStep implements StepJournal.
 func (s *SQLiteStore) FailStep(ctx context.Context, runID, stepID, failure string, completedAt time.Time) error {
-	if runID == "" || stepID == "" {
-		return fmt.Errorf("runledger: run_id and step_id are required to fail an execution step")
+	step, err := s.GetStep(ctx, runID, stepID)
+	if err != nil {
+		return err
+	}
+	if step.Attempt != 1 || step.ClaimGeneration != 1 {
+		return fmt.Errorf("%w: step %s is attempt %d claim %d", ErrStepAttemptRequired, stepID, step.Attempt, step.ClaimGeneration)
+	}
+	return s.FailStepAttempt(ctx, step, failure, completedAt)
+}
+
+// CompleteStepAttempt implements BlockingStepJournal.
+func (s *SQLiteStore) CompleteStepAttempt(ctx context.Context, step ExecutionStep, outputEvidenceID, outputDigest string, completedAt time.Time) error {
+	return s.transitionStep(ctx, step, StepCompleted, "", outputEvidenceID, outputDigest, completedAt)
+}
+
+// FailStepAttempt implements BlockingStepJournal.
+func (s *SQLiteStore) FailStepAttempt(ctx context.Context, step ExecutionStep, failure string, completedAt time.Time) error {
+	return s.transitionStep(ctx, step, StepFailed, failure, "", "", completedAt)
+}
+
+// BlockStep implements BlockingStepJournal.
+func (s *SQLiteStore) BlockStep(ctx context.Context, step ExecutionStep, failure, outputEvidenceID, outputDigest string, completedAt time.Time) error {
+	if strings.TrimSpace(failure) == "" {
+		return fmt.Errorf("runledger: failure is required to block an execution step")
+	}
+	return s.transitionStep(ctx, step, StepBlocked, failure, outputEvidenceID, outputDigest, completedAt)
+}
+
+// MarkStepDispatched implements DispatchStepJournal.
+func (s *SQLiteStore) MarkStepDispatched(ctx context.Context, step ExecutionStep, dispatchedAt time.Time) error {
+	if step.RunID == "" || step.StepID == "" {
+		return fmt.Errorf("runledger: run_id and step_id are required to mark an execution step dispatched")
+	}
+	if step.Attempt <= 0 {
+		return fmt.Errorf("runledger: a positive attempt is required for execution step %s", step.StepID)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE execution_steps
+		SET dispatch_state = ?
+		WHERE run_id = ? AND step_id = ? AND status = ? AND attempt = ? AND claim_generation = ?
+		  AND dispatch_state = ?
+	`, StepDispatchDispatched, step.RunID, step.StepID, StepStarted, step.Attempt, step.ClaimGeneration, StepDispatchClaimed)
+	if err != nil {
+		return fmt.Errorf("runledger: mark execution step %s dispatched: %w", step.StepID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("runledger: inspect execution step %s dispatch mark: %w", step.StepID, err)
+	}
+	if n == 1 {
+		return nil
+	}
+	existing, err := s.GetStep(ctx, step.RunID, step.StepID)
+	if err != nil {
+		return err
+	}
+	if existing.Status == StepStarted && existing.Attempt == step.Attempt && existing.ClaimGeneration == step.ClaimGeneration && existing.DispatchState == StepDispatchDispatched {
+		return nil
+	}
+	return fmt.Errorf("%w: step %s attempt %d is %s attempt %d with dispatch state %q", ErrStepTransitionConflict, step.StepID, step.Attempt, existing.Status, existing.Attempt, existing.DispatchState)
+}
+
+// ReclaimStep implements FencedStepJournal.
+func (s *SQLiteStore) ReclaimStep(ctx context.Context, step ExecutionStep, reclaimedAt time.Time) (ExecutionStep, error) {
+	if step.RunID == "" || step.StepID == "" || step.Attempt <= 0 || step.ClaimGeneration <= 0 {
+		return ExecutionStep{}, fmt.Errorf("runledger: complete step identity is required to reclaim %s", step.StepID)
+	}
+	if reclaimedAt.IsZero() {
+		reclaimedAt = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE execution_steps
+		SET claim_generation = claim_generation + 1, started_at = ?
+		WHERE run_id = ? AND step_id = ? AND status = ? AND attempt = ?
+		  AND claim_generation = ? AND dispatch_state = ?
+	`, sqliteTimestamp(reclaimedAt), step.RunID, step.StepID, StepStarted, step.Attempt, step.ClaimGeneration, StepDispatchClaimed)
+	if err != nil {
+		return ExecutionStep{}, fmt.Errorf("runledger: reclaim execution step %s: %w", step.StepID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return ExecutionStep{}, fmt.Errorf("runledger: inspect execution step %s reclaim: %w", step.StepID, err)
+	}
+	if n != 1 {
+		existing, loadErr := s.GetStep(ctx, step.RunID, step.StepID)
+		if loadErr != nil {
+			return ExecutionStep{}, loadErr
+		}
+		return ExecutionStep{}, fmt.Errorf("%w: step %s attempt %d claim %d is %s attempt %d claim %d with dispatch state %q", ErrStepTransitionConflict, step.StepID, step.Attempt, step.ClaimGeneration, existing.Status, existing.Attempt, existing.ClaimGeneration, existing.DispatchState)
+	}
+	step.ClaimGeneration++
+	step.StartedAt = reclaimedAt
+	return step, nil
+}
+
+func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, status, failure, outputEvidenceID, outputDigest string, completedAt time.Time) error {
+	if step.RunID == "" || step.StepID == "" {
+		return fmt.Errorf("runledger: run_id and step_id are required for an execution step transition")
+	}
+	if step.Attempt <= 0 {
+		return fmt.Errorf("runledger: a positive attempt is required for execution step %s", step.StepID)
 	}
 	if completedAt.IsZero() {
 		completedAt = time.Now().UTC()
 	}
-	res, err := s.db.ExecContext(ctx, `
+	query := `
 		UPDATE execution_steps
-		SET status = ?, error_text = ?, completed_at = ?
-		WHERE run_id = ? AND step_id = ?
-	`, StepFailed, nullableStr(failure), sqliteTimestamp(completedAt), runID, stepID)
+		SET status = ?, output_evidence_id = ?, output_digest = ?, error_text = ?, completed_at = ?
+		WHERE run_id = ? AND step_id = ? AND status = ? AND attempt = ? AND claim_generation = ?`
+	args := []any{status, nullableStr(outputEvidenceID), nullableStr(outputDigest), nullableStr(failure), sqliteTimestamp(completedAt),
+		step.RunID, step.StepID, StepStarted, step.Attempt, step.ClaimGeneration}
+	if status == StepFailed {
+		query += ` AND dispatch_state = ?`
+		args = append(args, StepDispatchClaimed)
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("runledger: fail execution step %s: %w", stepID, err)
+		return fmt.Errorf("runledger: transition execution step %s to %s: %w", step.StepID, status, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("runledger: fail execution step %s: %w", stepID, err)
+		return fmt.Errorf("runledger: inspect execution step %s transition to %s: %w", step.StepID, status, err)
 	}
-	if n == 0 {
-		return ErrStepNotFound
+	if n == 1 {
+		return nil
 	}
-	return nil
+	existing, err := s.GetStep(ctx, step.RunID, step.StepID)
+	if err != nil {
+		return err
+	}
+	if existing.Status == status && existing.Attempt == step.Attempt && existing.ClaimGeneration == step.ClaimGeneration && existing.Error == failure && existing.OutputEvidenceID == outputEvidenceID && existing.OutputDigest == outputDigest {
+		return nil
+	}
+	return fmt.Errorf("%w: step %s attempt %d is %s attempt %d", ErrStepTransitionConflict, step.StepID, step.Attempt, existing.Status, existing.Attempt)
 }
 
 // GetStep implements StepJournal.
@@ -590,10 +704,40 @@ func (s *SQLiteStore) GetStep(ctx context.Context, runID, stepID string) (Execut
 	}
 	return scanExecutionStep(s.db.QueryRowContext(ctx, `
 		SELECT run_id, task_id, step_id, kind, idempotency_key, status, attempt,
-		       input_digest, output_digest, output_evidence_id, error_text,
+		       claim_generation, input_digest, output_digest, output_evidence_id, error_text, dispatch_state,
 		       started_at, completed_at
 		FROM execution_steps WHERE run_id = ? AND step_id = ?
 	`, runID, stepID))
+}
+
+// ListSteps implements StepEnumerator. Results are stable by logical step ID
+// so replay reports and tests do not depend on SQLite's row order.
+func (s *SQLiteStore) ListSteps(ctx context.Context, runID string) ([]ExecutionStep, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, fmt.Errorf("runledger: run_id is required to list execution steps")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT run_id, task_id, step_id, kind, idempotency_key, status, attempt,
+		       claim_generation, input_digest, output_digest, output_evidence_id, error_text, dispatch_state,
+		       started_at, completed_at
+		FROM execution_steps WHERE run_id = ? ORDER BY step_id
+	`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("runledger: list execution steps: %w", err)
+	}
+	defer rows.Close()
+	var steps []ExecutionStep
+	for rows.Next() {
+		step, scanErr := scanExecutionStep(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		steps = append(steps, step)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("runledger: iterate execution steps: %w", err)
+	}
+	return steps, nil
 }
 
 type executionStepScanner interface {
@@ -609,11 +753,12 @@ func scanExecutionStep(row executionStepScanner) (ExecutionStep, error) {
 		outputDigest   sql.NullString
 		outputEvidence sql.NullString
 		failure        sql.NullString
+		dispatchState  sql.NullString
 		startedAtRaw   string
 		completedRaw   sql.NullString
 	)
-	err := row.Scan(&step.RunID, &taskID, &step.StepID, &step.Kind, &idempotency, &step.Status, &step.Attempt,
-		&inputDigest, &outputDigest, &outputEvidence, &failure, &startedAtRaw, &completedRaw)
+	err := row.Scan(&step.RunID, &taskID, &step.StepID, &step.Kind, &idempotency, &step.Status, &step.Attempt, &step.ClaimGeneration,
+		&inputDigest, &outputDigest, &outputEvidence, &failure, &dispatchState, &startedAtRaw, &completedRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ExecutionStep{}, ErrStepNotFound
 	}
@@ -626,6 +771,7 @@ func scanExecutionStep(row executionStepScanner) (ExecutionStep, error) {
 	step.OutputDigest = outputDigest.String
 	step.OutputEvidenceID = outputEvidence.String
 	step.Error = failure.String
+	step.DispatchState = dispatchState.String
 	step.StartedAt = parseSQLiteTimestamp(startedAtRaw)
 	if completedRaw.Valid && completedRaw.String != "" {
 		completed := parseSQLiteTimestamp(completedRaw.String)
@@ -1142,15 +1288,6 @@ func parseSQLiteTimestamp(raw string) time.Time {
 	return time.Time{}
 }
 
-func isBusyError(err error) bool {
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) {
-		primaryCode := sqliteErr.Code() & 0xff
-		return primaryCode == sqlite3.SQLITE_BUSY || primaryCode == sqlite3.SQLITE_LOCKED
-	}
-	return false
-}
-
 func sqliteFilePathFromDSN(dsn string) (string, bool) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" || dsn == ":memory:" {
@@ -1197,7 +1334,7 @@ func ensurePrivateSQLiteFile(path string) error {
 }
 
 // migrations is the ordered list of schema steps applied via storage.Migrate.
-var migrations = []storage.Migration{
+var migrations = []storage.SQLiteMigration{
 	{Version: 1, Name: "agent_runs", Apply: createAgentRunsTable},
 	{Version: 2, Name: "run_events", Apply: createRunEventsTable},
 	{Version: 3, Name: "context_receipts", Apply: createContextReceiptsTable},
@@ -1208,9 +1345,11 @@ var migrations = []storage.Migration{
 	{Version: 8, Name: "execution_steps", Apply: createExecutionStepsTable},
 	{Version: 9, Name: "agent_claims", Apply: createAgentClaimsTable},
 	{Version: 10, Name: "metric_idempotency", Apply: addMetricIdempotency},
+	{Version: 11, Name: "execution_step_dispatch_state", Apply: addExecutionStepDispatchState},
+	{Version: 12, Name: "execution_step_claim_generation", Apply: addExecutionStepClaimGeneration},
 }
 
-func createAgentRunsTable(db *sql.DB) error {
+func createAgentRunsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS agent_runs (
 			run_id TEXT PRIMARY KEY,
@@ -1237,7 +1376,7 @@ func createAgentRunsTable(db *sql.DB) error {
 	return nil
 }
 
-func createRunEventsTable(db *sql.DB) error {
+func createRunEventsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS run_events (
 			event_id TEXT PRIMARY KEY,
@@ -1268,7 +1407,7 @@ func createRunEventsTable(db *sql.DB) error {
 	return nil
 }
 
-func createContextReceiptsTable(db *sql.DB) error {
+func createContextReceiptsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS context_receipts (
 			receipt_id TEXT PRIMARY KEY,
@@ -1295,7 +1434,7 @@ func createContextReceiptsTable(db *sql.DB) error {
 	return nil
 }
 
-func createContextReceiptItemsTable(db *sql.DB) error {
+func createContextReceiptItemsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS context_receipt_items (
 			receipt_id TEXT NOT NULL,
@@ -1324,7 +1463,7 @@ func createContextReceiptItemsTable(db *sql.DB) error {
 	return nil
 }
 
-func createContextUsageTable(db *sql.DB) error {
+func createContextUsageTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS context_usage (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1346,7 +1485,7 @@ func createContextUsageTable(db *sql.DB) error {
 	return nil
 }
 
-func createTaskCheckpointsTable(db *sql.DB) error {
+func createTaskCheckpointsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS task_checkpoints (
 			checkpoint_id TEXT PRIMARY KEY,
@@ -1371,7 +1510,7 @@ func createTaskCheckpointsTable(db *sql.DB) error {
 	return nil
 }
 
-func createAgentMetricSamplesTable(db *sql.DB) error {
+func createAgentMetricSamplesTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS agent_metric_samples (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1392,9 +1531,15 @@ func createAgentMetricSamplesTable(db *sql.DB) error {
 	return nil
 }
 
-func addMetricIdempotency(db *sql.DB) error {
-	if _, err := db.Exec(`ALTER TABLE agent_metric_samples ADD COLUMN idempotency_key TEXT`); err != nil {
-		return fmt.Errorf("add metric idempotency key: %w", err)
+func addMetricIdempotency(db storage.MigrationDB) error {
+	exists, err := sqliteColumnExists(db, "agent_metric_samples", "idempotency_key")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE agent_metric_samples ADD COLUMN idempotency_key TEXT`); err != nil {
+			return fmt.Errorf("add metric idempotency key: %w", err)
+		}
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_metrics_idempotency ON agent_metric_samples(run_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''`); err != nil {
 		return fmt.Errorf("create metric idempotency index: %w", err)
@@ -1402,7 +1547,7 @@ func addMetricIdempotency(db *sql.DB) error {
 	return nil
 }
 
-func createExecutionStepsTable(db *sql.DB) error {
+func createExecutionStepsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS execution_steps (
 			run_id TEXT NOT NULL,
@@ -1412,10 +1557,12 @@ func createExecutionStepsTable(db *sql.DB) error {
 			idempotency_key TEXT NOT NULL,
 			status TEXT NOT NULL,
 			attempt INTEGER NOT NULL,
+			claim_generation INTEGER NOT NULL DEFAULT 1,
 			input_digest TEXT,
 			output_digest TEXT,
 			output_evidence_id TEXT,
 			error_text TEXT,
+			dispatch_state TEXT,
 			started_at TIMESTAMP NOT NULL,
 			completed_at TIMESTAMP,
 			PRIMARY KEY(run_id, step_id),
@@ -1431,7 +1578,57 @@ func createExecutionStepsTable(db *sql.DB) error {
 	return nil
 }
 
-func createAgentClaimsTable(db *sql.DB) error {
+func addExecutionStepDispatchState(db storage.MigrationDB) error {
+	exists, err := sqliteColumnExists(db, "execution_steps", "dispatch_state")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE execution_steps ADD COLUMN dispatch_state TEXT`); err != nil {
+			return fmt.Errorf("add execution step dispatch state: %w", err)
+		}
+	}
+	return nil
+}
+
+func addExecutionStepClaimGeneration(db storage.MigrationDB) error {
+	exists, err := sqliteColumnExists(db, "execution_steps", "claim_generation")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE execution_steps ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("add execution step claim generation: %w", err)
+		}
+	}
+	return nil
+}
+
+func sqliteColumnExists(db storage.MigrationDB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("scan %s columns: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	return false, nil
+}
+
+func createAgentClaimsTable(db storage.MigrationDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS agent_claim_locks (
 			lock_key TEXT PRIMARY KEY,
@@ -1465,5 +1662,5 @@ func createAgentClaimsTable(db *sql.DB) error {
 // distinctly from pkg/storage's and pkg/evidence's own migration-tracking
 // tables so all three can safely share one SQLite file once wiring lands).
 func runMigrations(db *sql.DB) error {
-	return storage.Migrate(db, "runledger_schema_migrations", migrations)
+	return storage.MigrateSQLite(db, "runledger_schema_migrations", migrations)
 }

@@ -30,9 +30,9 @@ const (
 	// changes visible to Git. Untracked files and paths hidden with Git index
 	// assume-unchanged/skip-worktree flags are intentionally excluded.
 	ReviewSnapshotTrackedWorktree ReviewSnapshotMode = "tracked-worktree"
-	// ReviewSnapshotWorktree adds explicitly allowlisted, reviewable untracked
-	// text files to the tracked worktree snapshot. Sensitive-looking paths,
-	// binary files, symlinks, and untracked agent instructions remain excluded.
+	// ReviewSnapshotWorktree adds reviewable untracked text files to the tracked
+	// worktree snapshot. Callers may supply an explicit allowlist or set
+	// ReviewSnapshotPolicy.IncludeUntracked for automatic safe discovery.
 	ReviewSnapshotWorktree ReviewSnapshotMode = "worktree"
 )
 
@@ -47,19 +47,25 @@ type ReviewSnapshotPolicy struct {
 	// UntrackedPaths is the explicit repository-relative allowlist required by
 	// ReviewSnapshotWorktree. It is ignored by modes that exclude untracked data.
 	UntrackedPaths []string
+	// IncludeUntracked discovers every non-ignored untracked text file that
+	// passes the review boundary. Unsafe names, secrets, binary/control content,
+	// and oversized files are disclosed as excluded snapshot state.
+	IncludeUntracked bool
 }
 
 // ReviewSnapshot is an immutable, content-addressed verification descriptor.
 // Accessors return values (and a defensive patch copy) so retries cannot alter
 // the state later phases will materialize.
 type ReviewSnapshot struct {
-	mode            ReviewSnapshotMode
-	repositoryRoot  string
-	relativeWorkDir string
-	commit          string
-	patch           []byte
-	untracked       []ReviewUntrackedFile
-	id              string
+	mode              ReviewSnapshotMode
+	repositoryRoot    string
+	relativeWorkDir   string
+	commit            string
+	patch             []byte
+	untracked         []ReviewUntrackedFile
+	includeUntracked  bool
+	excludedUntracked []string
+	id                string
 }
 
 // NewReviewSnapshot validates and freezes a captured descriptor. workDir may
@@ -117,6 +123,12 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 	if !validReviewSnapshotMode(policy.Mode) {
 		return nil, fmt.Errorf("invalid review snapshot mode %q", policy.Mode)
 	}
+	if policy.IncludeUntracked && policy.Mode != ReviewSnapshotWorktree {
+		return nil, fmt.Errorf("automatic untracked capture requires worktree snapshot mode")
+	}
+	if policy.IncludeUntracked && len(policy.UntrackedPaths) > 0 {
+		return nil, fmt.Errorf("automatic untracked capture cannot be combined with an explicit allowlist")
+	}
 	if strings.TrimSpace(workDir) == "" {
 		var err error
 		workDir, err = os.Getwd()
@@ -149,6 +161,7 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 
 	var patch []byte
 	var capturedUntracked []ReviewUntrackedFile
+	var excludedUntracked []string
 	switch policy.Mode {
 	case ReviewSnapshotHead:
 		// The commit itself is the complete snapshot.
@@ -159,13 +172,17 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 		patch, err = reviewSnapshotGitBytes(ctx, root,
 			"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", head, "--")
 	case ReviewSnapshotWorktree:
-		if len(policy.UntrackedPaths) == 0 {
+		if len(policy.UntrackedPaths) == 0 && !policy.IncludeUntracked {
 			return nil, fmt.Errorf("worktree review snapshot requires explicitly allowlisted untracked paths")
 		}
 		patch, err = reviewSnapshotGitBytes(ctx, root,
 			"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", head, "--")
 		if err == nil {
-			capturedUntracked, err = CaptureReviewUntrackedFiles(ctx, root, policy.UntrackedPaths)
+			if policy.IncludeUntracked {
+				capturedUntracked, excludedUntracked, err = CaptureReviewableUntrackedFiles(ctx, root)
+			} else {
+				capturedUntracked, err = CaptureReviewUntrackedFiles(ctx, root, policy.UntrackedPaths)
+			}
 			for _, file := range capturedUntracked {
 				patch = append(patch, file.Patch...)
 			}
@@ -190,6 +207,10 @@ func CaptureReviewSnapshot(ctx context.Context, workDir string, policy ReviewSna
 	}
 	if policy.Mode == ReviewSnapshotWorktree {
 		snapshot.untracked = cloneReviewUntrackedFiles(capturedUntracked)
+		snapshot.includeUntracked = true
+		snapshot.excludedUntracked = append([]string(nil), excludedUntracked...)
+		sort.Strings(snapshot.excludedUntracked)
+		snapshot.id = reviewSnapshotID(snapshot)
 	}
 	return snapshot, nil
 }
@@ -245,6 +266,14 @@ func reviewSnapshotID(snapshot *ReviewSnapshot) string {
 		_, _ = hash.Write([]byte(value))
 		_, _ = hash.Write([]byte{0})
 	}
+	if snapshot.includeUntracked {
+		_, _ = hash.Write([]byte("include-untracked"))
+		_, _ = hash.Write([]byte{0})
+	}
+	for _, path := range snapshot.excludedUntracked {
+		_, _ = hash.Write([]byte(path))
+		_, _ = hash.Write([]byte{0})
+	}
 	_, _ = hash.Write(snapshot.patch)
 	return hex.EncodeToString(hash.Sum(nil))
 }
@@ -292,6 +321,23 @@ func (s *ReviewSnapshot) UntrackedFiles() []ReviewUntrackedFile {
 		return nil
 	}
 	return cloneReviewUntrackedFiles(s.untracked)
+}
+
+// IncludesUntracked reports whether the immutable snapshot was captured with
+// the worktree's reviewable untracked boundary enabled, even when no safe
+// untracked files were present.
+func (s *ReviewSnapshot) IncludesUntracked() bool {
+	return s != nil && s.mode == ReviewSnapshotWorktree && s.includeUntracked
+}
+
+// ExcludedUntrackedFiles returns repository-relative paths intentionally left
+// outside an automatic untracked capture because the review boundary rejected
+// them. The result is defensive and sorted.
+func (s *ReviewSnapshot) ExcludedUntrackedFiles() []string {
+	if s == nil || !s.IncludesUntracked() {
+		return nil
+	}
+	return append([]string(nil), s.excludedUntracked...)
 }
 
 func (s *ReviewSnapshot) ID() string {

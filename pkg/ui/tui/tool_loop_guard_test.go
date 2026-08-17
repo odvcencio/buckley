@@ -113,8 +113,10 @@ func TestContextProjectionStatus(t *testing.T) {
 	}
 	got := contextProjectionStatus(conversation.ContextProjectionStats{
 		Compacted: true, OriginalTokens: 120_000, ProjectedTokens: 60_000,
+		ToolResultsCompacted: 3, HistoryCollapsed: true,
 	})
-	if !strings.Contains(got, "120.0k→60.0k") || !strings.Contains(got, "compacted") {
+	if !strings.Contains(got, "120.0k→60.0k") || !strings.Contains(got, "compacted") ||
+		!strings.Contains(got, "pruned 3 tool result(s)") || !strings.Contains(got, "history folded") {
 		t.Fatalf("projection status = %q", got)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	stdruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"m31labs.dev/buckley/pkg/ui/filepicker"
@@ -48,9 +49,11 @@ func expandFromZero(widget runtime.Widget) runtime.FlexChild {
 
 // WidgetApp is the main TUI application using the widget tree architecture.
 type WidgetApp struct {
-	screen  *runtime.Screen
-	backend backend.Backend
-	running bool
+	screen   *runtime.Screen
+	backend  backend.Backend
+	runState atomic.Uint32
+	finiOnce sync.Once
+	quitOnce sync.Once
 
 	// Widget tree
 	header        *widgets.Header
@@ -76,8 +79,15 @@ type WidgetApp struct {
 	filePicker *filepicker.FilePicker
 
 	// Message loop
-	messages  chan Message
-	coalescer *Coalescer
+	messages              chan Message
+	delivery              eventDeliveryQueue
+	coalescer             *Coalescer
+	streamMu              sync.Mutex
+	streamGenerations     map[string]uint64
+	streamSequence        atomic.Uint64
+	streamGenerationBytes int
+	approvalLayerMu       sync.Mutex
+	approvalLayers        map[string]*widgets.ApprovalWidget
 
 	// Frame timing
 	frameTicker *time.Ticker
@@ -116,16 +126,23 @@ type WidgetApp struct {
 	cursorFG            backend.Color
 
 	// Callbacks
-	onSubmit           func(text string)
-	onQuit             func()
-	onFileSelect       func(path string)
-	onShellCmd         func(cmd string) string
-	onNextSession      func()
-	onPrevSession      func()
-	onCycleVariant     func()
-	onCycleRecentModel func()
-	onApproval         func(requestID string, approved, alwaysAllow bool)
-	onInterrupt        func()
+	onSubmit            func(text string)
+	onQuit              func()
+	onFileSelect        func(path string)
+	onShellCmd          func(cmd string) string
+	onNextSession       func()
+	onPrevSession       func()
+	onCycleVariant      func()
+	onCycleRecentModel  func()
+	onApproval          func(requestID string, approved, alwaysAllow bool)
+	onInterrupt         func()
+	modelPickerMu       sync.Mutex
+	modelPickerSequence atomic.Uint64
+	modelPickerToken    uint64
+	modelPickerAction   ModelPickerAction
+	modelPickerLayer    *modelPickerOverlay
+	modelPickerPending  *ModelPickerMsg
+	onModelPickerAction func(action ModelPickerAction, id string, data any)
 
 	// Configuration
 	theme       *theme.Theme
@@ -321,6 +338,9 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		onSubmit:             cfg.OnSubmit,
 		onQuit:               cfg.OnQuit,
 		messages:             make(chan Message, 256),
+		delivery:             newEventDeliveryQueue(),
+		streamGenerations:    make(map[string]uint64),
+		approvalLayers:       make(map[string]*widgets.ApprovalWidget),
 		statusText:           "Ready",
 		cursorPulseStart:     time.Now(),
 		cursorPulsePeriod:    2600 * time.Millisecond,
@@ -329,7 +349,7 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 	}
 
 	// Create coalescer for smooth streaming
-	app.coalescer = NewCoalescer(DefaultCoalescerConfig(), app.Post)
+	app.coalescer = NewCoalescer(DefaultCoalescerConfig(), app.postCoalescerPublication)
 	app.initSoftCursor()
 	app.applyScrollStatus(chatView.ScrollPosition())
 
@@ -425,6 +445,11 @@ func (a *WidgetApp) showFilePicker() {
 
 // showApprovalDialog creates and displays an approval dialog.
 func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
+	a.approvalLayerMu.Lock()
+	defer a.approvalLayerMu.Unlock()
+	if a.delivery.closed.Load() || !a.approvalOutstanding(msg.ID) {
+		return
+	}
 	// Convert message diff lines to widget diff lines
 	diffLines := make([]widgets.DiffLine, len(msg.DiffLines))
 	for i, line := range msg.DiffLines {
@@ -459,7 +484,73 @@ func (a *WidgetApp) showApprovalDialog(msg ApprovalRequestMsg) {
 
 	// Push as modal overlay
 	a.screen.PushLayer(approvalWidget, true)
+	a.approvalLayers[msg.ID] = approvalWidget
 	a.dirty = true
+}
+
+func (a *WidgetApp) forgetApprovalDialog(requestID string) {
+	if a == nil || requestID == "" {
+		return
+	}
+	a.approvalLayerMu.Lock()
+	delete(a.approvalLayers, requestID)
+	a.approvalLayerMu.Unlock()
+}
+
+func (a *WidgetApp) removeApprovalDialog(requestID string) bool {
+	if a == nil || requestID == "" {
+		return false
+	}
+	a.approvalLayerMu.Lock()
+	layer := a.approvalLayers[requestID]
+	if layer != nil {
+		delete(a.approvalLayers, requestID)
+	}
+	removed := layer != nil && a.removeExactLayer(layer)
+	a.approvalLayerMu.Unlock()
+	if removed {
+		a.handleModelPickerOverlayPopped()
+		a.dirty = true
+	}
+	return removed
+}
+
+// removeExactLayer rotates layer values toward the removed slot, preserving
+// every unrelated overlay's root, focus scope, order, and mounted lifecycle.
+// PopLayer therefore unmounts only the requested target.
+func (a *WidgetApp) removeExactLayer(root runtime.Widget) bool {
+	if a == nil || root == nil {
+		return false
+	}
+	target := -1
+	top := a.screen.LayerCount() - 1
+	for i := 1; i <= top; i++ {
+		if layer := a.screen.Layer(i); layer != nil && layer.Root == root {
+			target = i
+			break
+		}
+	}
+	if target < 0 {
+		return false
+	}
+	if target == top {
+		return a.screen.PopLayer()
+	}
+	removed := *a.screen.Layer(target)
+	for i := target; i < top; i++ {
+		*a.screen.Layer(i) = *a.screen.Layer(i + 1)
+	}
+	*a.screen.Layer(top) = removed
+	return a.screen.PopLayer()
+}
+
+func (a *WidgetApp) closeApprovalLayerState() {
+	if a == nil {
+		return
+	}
+	a.approvalLayerMu.Lock()
+	clear(a.approvalLayers)
+	a.approvalLayerMu.Unlock()
 }
 
 // showCommandPalette creates and displays the command palette overlay.
@@ -587,19 +678,75 @@ func (a *WidgetApp) showSlashCommandPalette() {
 	a.dirty = true
 }
 
-// ShowModelPicker displays a model picker overlay.
-func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
-	a.Post(ModelPickerMsg{Items: items, OnSelect: onSelect})
+// ShowModelPicker displays a model picker overlay with a bounded typed action.
+func (a *WidgetApp) ShowModelPicker(items []widgets.PaletteItem, action ModelPickerAction) {
+	a.Post(ModelPickerMsg{Items: items, Action: action})
 }
 
-func (a *WidgetApp) showModelPicker(items []widgets.PaletteItem, onSelect func(item widgets.PaletteItem)) {
+type modelPickerSelectionData struct {
+	token uint64
+	data  any
+}
+
+type modelPickerPopOverlay struct {
+	token uint64
+}
+
+func (modelPickerPopOverlay) Command() {}
+
+type modelPickerOverlay struct {
+	*widgets.PaletteWidget
+	token uint64
+}
+
+func (m *modelPickerOverlay) HandleMessage(msg runtime.Message) runtime.HandleResult {
+	result := m.PaletteWidget.HandleMessage(msg)
+	for i, command := range result.Commands {
+		switch typed := command.(type) {
+		case runtime.PaletteSelected:
+			typed.Data = modelPickerSelectionData{token: m.token, data: typed.Data}
+			result.Commands[i] = typed
+		case runtime.PopOverlay:
+			result.Commands[i] = modelPickerPopOverlay{token: m.token}
+		}
+	}
+	return result
+}
+
+func (a *WidgetApp) showModelPicker(items []widgets.PaletteItem, action ModelPickerAction) {
+	a.modelPickerMu.Lock()
+	defer a.modelPickerMu.Unlock()
+	if a.delivery.closed.Load() {
+		return
+	}
+	if a.modelPickerToken != 0 {
+		if !a.modelPickerLayerPresentLocked() {
+			a.clearActiveModelPickerLocked()
+		} else if !a.modelPickerIsTopLayerLocked() {
+			pending := ModelPickerMsg{Items: items, Action: action}
+			a.modelPickerPending = &pending
+			return
+		} else if !a.screen.PopLayer() {
+			pending := ModelPickerMsg{Items: items, Action: action}
+			a.modelPickerPending = &pending
+			return
+		} else {
+			a.clearActiveModelPickerLocked()
+		}
+	}
+	a.modelPickerPending = nil
+	a.pushModelPickerLocked(items, action)
+}
+
+func (a *WidgetApp) pushModelPickerLocked(items []widgets.PaletteItem, action ModelPickerAction) {
+	token := a.modelPickerSequence.Add(1)
+	if token == 0 {
+		token = a.modelPickerSequence.Add(1)
+	}
 	palette := widgets.NewPaletteWidget("Models")
 	palette.SetPlaceholder("search models...")
 	palette.SetMaxVisible(16)
 	palette.SetItems(items)
-	if onSelect != nil {
-		palette.SetOnSelect(onSelect)
-	}
 	palette.SetStyles(
 		themeToBackendStyle(a.theme.Surface),
 		themeToBackendStyle(a.theme.Border),
@@ -610,9 +757,111 @@ func (a *WidgetApp) showModelPicker(items []widgets.PaletteItem, onSelect func(i
 		themeToBackendStyle(a.theme.TextSecondary),
 	)
 	palette.Focus()
+	overlay := &modelPickerOverlay{PaletteWidget: palette, token: token}
 
-	a.screen.PushLayer(palette, true)
+	a.modelPickerToken = token
+	a.modelPickerAction = action
+	a.modelPickerLayer = overlay
+	a.screen.PushLayer(overlay, true)
 	a.dirty = true
+}
+
+func (a *WidgetApp) modelPickerLayerPresentLocked() bool {
+	if a.modelPickerLayer == nil {
+		return false
+	}
+	for i := 1; i < a.screen.LayerCount(); i++ {
+		if layer := a.screen.Layer(i); layer != nil && layer.Root == a.modelPickerLayer {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *WidgetApp) modelPickerIsTopLayerLocked() bool {
+	top := a.screen.TopLayer()
+	return top != nil && top.Root == a.modelPickerLayer
+}
+
+func (a *WidgetApp) clearActiveModelPickerLocked() {
+	a.modelPickerToken = 0
+	a.modelPickerAction = ModelPickerActionNone
+	a.modelPickerLayer = nil
+}
+
+func (a *WidgetApp) applyPendingModelPickerLocked() {
+	if a.modelPickerPending == nil || a.delivery.closed.Load() {
+		return
+	}
+	if a.modelPickerToken != 0 {
+		if !a.modelPickerLayerPresentLocked() {
+			a.clearActiveModelPickerLocked()
+		} else if !a.modelPickerIsTopLayerLocked() || !a.screen.PopLayer() {
+			return
+		} else {
+			a.clearActiveModelPickerLocked()
+		}
+	}
+	if a.screen.OverlayCount() != 0 {
+		return
+	}
+	pending := *a.modelPickerPending
+	a.modelPickerPending = nil
+	a.pushModelPickerLocked(pending.Items, pending.Action)
+}
+
+func (a *WidgetApp) handleModelPickerOverlayPopped() {
+	if a == nil {
+		return
+	}
+	a.modelPickerMu.Lock()
+	defer a.modelPickerMu.Unlock()
+	if a.modelPickerToken != 0 && !a.modelPickerLayerPresentLocked() {
+		a.clearActiveModelPickerLocked()
+	}
+	a.applyPendingModelPickerLocked()
+}
+
+func (a *WidgetApp) handleModelPickerPopOverlay(token uint64) {
+	if a == nil {
+		return
+	}
+	a.modelPickerMu.Lock()
+	defer a.modelPickerMu.Unlock()
+	if token == 0 || token != a.modelPickerToken || !a.modelPickerIsTopLayerLocked() {
+		return
+	}
+	if !a.screen.PopLayer() {
+		return
+	}
+	a.clearActiveModelPickerLocked()
+	a.applyPendingModelPickerLocked()
+}
+
+func (a *WidgetApp) closeModelPickerState() {
+	if a == nil {
+		return
+	}
+	a.modelPickerMu.Lock()
+	a.clearActiveModelPickerLocked()
+	a.modelPickerPending = nil
+	a.onModelPickerAction = nil
+	a.modelPickerMu.Unlock()
+}
+
+func (a *WidgetApp) consumeModelPickerAction(token uint64) (ModelPickerAction, func(ModelPickerAction, string, any), bool) {
+	a.modelPickerMu.Lock()
+	defer a.modelPickerMu.Unlock()
+	if token == 0 || token != a.modelPickerToken {
+		return ModelPickerActionNone, nil, false
+	}
+	action := a.modelPickerAction
+	if action == ModelPickerActionNone {
+		return ModelPickerActionNone, nil, false
+	}
+	callback := a.onModelPickerAction
+	a.modelPickerAction = ModelPickerActionNone
+	return action, callback, true
 }
 
 // handleSubmit processes input submission based on mode.
@@ -647,21 +896,27 @@ func (a *WidgetApp) handleSubmit(text string, mode widgets.InputMode) {
 	a.inputArea.Clear()
 }
 
-// Post sends a message to the event loop.
-// Safe to call from any goroutine.
-func (a *WidgetApp) Post(msg Message) {
-	select {
-	case a.messages <- msg:
-	default:
-		// Channel full - drop message
-	}
-}
-
 // Run starts the TUI event loop.
 func (a *WidgetApp) Run() error {
-	defer a.backend.Fini()
+	if a.delivery.closed.Load() {
+		return fmt.Errorf("tui app is closed")
+	}
+	if !a.runState.CompareAndSwap(widgetAppNew, widgetAppRunning) {
+		return fmt.Errorf("tui app can only be run once")
+	}
+	// Quit may win immediately after the first closed check. In that case it
+	// leaves finalization to the Run owner that acquired widgetAppRunning.
+	if a.delivery.closed.Load() || a.runState.Load() != widgetAppRunning {
+		a.runState.Store(widgetAppStopped)
+		a.finalizeBackend()
+		return fmt.Errorf("tui app is closed")
+	}
+	defer func() {
+		a.runState.Store(widgetAppStopped)
+		a.closeEventDelivery()
+		a.finalizeBackend()
+	}()
 
-	a.running = true
 	a.dirty = true
 
 	// Frame ticker for 60 FPS rendering
@@ -672,22 +927,23 @@ func (a *WidgetApp) Run() error {
 	go a.pollEvents()
 
 	// Main event loop
-	for a.running {
+	for a.isRunning() {
+		if a.processReadyFrame() {
+			continue
+		}
+
 		select {
 		case msg := <-a.messages:
-			if a.update(msg) {
-				a.dirty = true
+			a.processMessage(msg)
+			if a.isRunning() {
+				a.drainEventWork(eventWorkBudget - 1)
 			}
 
+		case <-a.delivery.wake:
+			a.drainEventWork(eventWorkBudget)
+
 		case now := <-a.frameTicker.C:
-			a.coalescer.Tick()
-			if a.updateAnimations(now) {
-				a.dirty = true
-			}
-			if a.dirty {
-				a.render()
-				a.dirty = false
-			}
+			a.processFrameTick(now)
 		}
 	}
 
@@ -696,7 +952,7 @@ func (a *WidgetApp) Run() error {
 
 // pollEvents reads terminal events and posts them as messages.
 func (a *WidgetApp) pollEvents() {
-	for a.running {
+	for !a.delivery.closed.Load() {
 		ev := a.backend.PollEvent()
 		if ev == nil {
 			continue
@@ -964,12 +1220,20 @@ func (a *WidgetApp) handleCommand(cmd runtime.Command) {
 			a.onFileSelect(c.Path)
 		}
 	case widgets.ApprovalResponse:
-		// Notify callback with approval decision
-		if a.onApproval != nil {
-			a.onApproval(c.RequestID, c.Approved, c.AlwaysAllow)
-		}
+		a.forgetApprovalDialog(c.RequestID)
+		a.resolveApproval(c.RequestID, c.Approved, c.AlwaysAllow)
 	case runtime.PaletteSelected:
+		if selection, ok := c.Data.(modelPickerSelectionData); ok {
+			if action, callback, matches := a.consumeModelPickerAction(selection.token); matches && callback != nil {
+				callback(action, c.ID, selection.data)
+			}
+			return
+		}
 		a.handlePaletteCommand(c.ID)
+	case runtime.PopOverlay:
+		a.handleModelPickerOverlayPopped()
+	case modelPickerPopOverlay:
+		a.handleModelPickerPopOverlay(c.token)
 	case runtime.Quit:
 		a.Quit()
 	case runtime.Submit:
@@ -1079,10 +1343,27 @@ func (a *WidgetApp) prefillInput(text string) {
 
 // Quit stops the application.
 func (a *WidgetApp) Quit() {
-	a.running = false
-	if a.onQuit != nil {
-		a.onQuit()
+	previous := a.runState.Swap(widgetAppStopped)
+	a.closeEventDelivery()
+	if previous == widgetAppNew {
+		a.finalizeBackend()
 	}
+	a.quitOnce.Do(func() {
+		if a.onQuit != nil {
+			a.onQuit()
+		}
+	})
+}
+
+func (a *WidgetApp) isRunning() bool {
+	return a != nil && a.runState.Load() == widgetAppRunning
+}
+
+func (a *WidgetApp) finalizeBackend() {
+	if a == nil {
+		return
+	}
+	a.finiOnce.Do(a.backend.Fini)
 }
 
 // render draws the UI to the backend using partial redraws.
@@ -1186,12 +1467,80 @@ func (a *WidgetApp) ReplaceLastMessage(content string) {
 
 // StreamChunk sends a streaming chunk through the coalescer.
 func (a *WidgetApp) StreamChunk(sessionID, text string) {
-	a.Post(StreamChunk{SessionID: sessionID, Text: text})
+	if a == nil {
+		return
+	}
+	if a.delivery.closed.Load() {
+		a.recordPostAfterClose()
+		return
+	}
+	if len(sessionID) > coalescerBufferMaxBytes {
+		a.postEvent(streamOverloadMsg{})
+		return
+	}
+	sessionID = strings.Clone(sessionID)
+	a.streamMu.Lock()
+	if a.delivery.closed.Load() {
+		a.streamMu.Unlock()
+		a.recordPostAfterClose()
+		return
+	}
+	generation, ok := a.streamGenerationLocked(sessionID)
+	if !ok {
+		a.streamMu.Unlock()
+		a.postEvent(streamOverloadMsg{})
+		return
+	}
+	a.Post(StreamChunk{SessionID: sessionID, Generation: generation, Text: text})
+	a.streamMu.Unlock()
 }
 
 // StreamEnd signals the end of a streaming session.
 func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
-	a.Post(StreamDone{SessionID: sessionID, FullText: fullText})
+	if a == nil {
+		return
+	}
+	if a.delivery.closed.Load() {
+		a.recordPostAfterClose()
+		return
+	}
+	if len(sessionID) > coalescerBufferMaxBytes {
+		a.postEvent(streamOverloadMsg{})
+		return
+	}
+	sessionID = strings.Clone(sessionID)
+	a.streamMu.Lock()
+	if a.delivery.closed.Load() {
+		a.streamMu.Unlock()
+		a.recordPostAfterClose()
+		return
+	}
+	generation, ok := a.streamGenerationLocked(sessionID)
+	if !ok {
+		a.streamMu.Unlock()
+		a.postEvent(streamOverloadMsg{})
+		return
+	}
+	delete(a.streamGenerations, sessionID)
+	a.streamGenerationBytes -= len(sessionID)
+	a.Post(StreamDone{SessionID: sessionID, Generation: generation, FullText: fullText})
+	a.streamMu.Unlock()
+}
+
+func (a *WidgetApp) streamGenerationLocked(sessionID string) (uint64, bool) {
+	generation := a.streamGenerations[sessionID]
+	if generation == 0 {
+		if len(a.streamGenerations) >= coalescerBufferMaxCount || a.streamGenerationBytes+len(sessionID) > coalescerBufferMaxBytes {
+			return 0, false
+		}
+		generation = a.streamSequence.Add(1)
+		if generation == 0 {
+			generation = a.streamSequence.Add(1)
+		}
+		a.streamGenerations[sessionID] = generation
+		a.streamGenerationBytes += len(sessionID)
+	}
+	return generation, true
 }
 
 // SetStatus updates status. Thread-safe via message passing.
@@ -1273,10 +1622,18 @@ func (a *WidgetApp) SetApprovalCallback(onApproval func(requestID string, approv
 	a.onApproval = onApproval
 }
 
+// SetModelPickerActionCallback installs the long-lived typed picker handler.
+// Per-request closures are never retained in the event queue.
+func (a *WidgetApp) SetModelPickerActionCallback(callback func(ModelPickerAction, string, any)) {
+	a.modelPickerMu.Lock()
+	a.onModelPickerAction = callback
+	a.modelPickerMu.Unlock()
+}
+
 // RequestApproval displays an approval dialog for a tool operation.
 // The callback set via SetApprovalCallback will be called with the decision.
-func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) {
-	a.Post(req)
+func (a *WidgetApp) RequestApproval(req ApprovalRequestMsg) bool {
+	return a.postApprovalRequest(req)
 }
 
 // toggleSidebar toggles the navigator visibility and rebuilds the layout.

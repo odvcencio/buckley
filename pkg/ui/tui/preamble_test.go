@@ -21,7 +21,7 @@ import (
 // two-round turn (preamble text, then a tool call, then a final answer)
 // through a real multi-request SSE server and proves the preamble survives
 // end to end: it is persisted alongside the tool-call message instead of
-// the old hardcoded "", it renders as its own streamed transcript bubble,
+// the old hardcoded "", it renders as its own coalesced transcript bubble,
 // and -- the wire-history consequence that makes preservation meaningful --
 // the SECOND request's message history actually carries it back to the
 // model.
@@ -148,7 +148,7 @@ func TestRunToolLoopPreservesPreambleAcrossToolCallAndWireHistory(t *testing.T) 
 			if v.Source == "assistant" && v.Content == "" {
 				seeds++
 			}
-		case StreamChunk:
+		case StreamFlush:
 			streamedText.WriteString(v.Text)
 		}
 	}

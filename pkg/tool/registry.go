@@ -28,6 +28,7 @@ type Registry struct {
 	sandbox          SandboxExecutor
 	telemetryHub     *telemetry.Hub
 	telemetrySession string
+	telemetryPublish func(telemetry.Event)
 
 	missionStore           *mission.Store
 	missionSession         string

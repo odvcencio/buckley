@@ -50,8 +50,30 @@ func TestProjectModelMessagesForRequest_CompactsNearWindowLimit(t *testing.T) {
 	if stats.ProjectedTokens >= stats.OriginalTokens {
 		t.Fatalf("projected tokens = %d, original = %d", stats.ProjectedTokens, stats.OriginalTokens)
 	}
+	if stats.ToolResultsCompacted == 0 || stats.ToolBytesCompacted == 0 {
+		t.Fatalf("projection did not report selective tool pruning: %+v", stats)
+	}
 	if projected[len(projected)-1].Content != messages[len(messages)-1].Content {
 		t.Fatal("immediate evidence tail should stay exact")
+	}
+}
+
+func TestProjectModelMessagesForRequest_LongWindowUsesScaledToolEnvelope(t *testing.T) {
+	messages := make([]model.Message, 25+32)
+	for i := 0; i < 25; i++ {
+		messages[i] = model.Message{Role: "tool", Name: "exec_program", Content: fmt.Sprintf("evidence-%d %s", i, strings.Repeat("evidence ", 2_500))}
+	}
+	for i := 45; i < len(messages); i++ {
+		messages[i] = model.Message{Role: "assistant", Content: "recent review state"}
+	}
+
+	projected, stats := ProjectModelMessagesForRequest(messages, model.ChatRequest{MaxTokens: 2048}, 128*1024, 1)
+	if !stats.Compacted || stats.ToolResultsCompacted == 0 {
+		t.Fatalf("expected selectively compacted tool results: %+v", stats)
+	}
+	content, ok := projected[0].Content.(string)
+	if !ok || len(content) <= 2_000 {
+		t.Fatalf("long-window tool result was pruned too aggressively: %d bytes", len(content))
 	}
 }
 

@@ -96,7 +96,10 @@ func runGoalWorker(args []string) error {
 	tool.ApplyToolMiddlewareConfig(registry, cfg)
 	registry.ConfigureContainers(cfg, workDir)
 	registry.SetWorkDir(workDir)
-	engine := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-worker")
+	engine, err := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-worker")
+	if err != nil {
+		return err
+	}
 
 	loop, err := goalloop.New(goalloop.Config{
 		Ledger:      stores.ledger,
@@ -395,7 +398,10 @@ func runGoalRun(args []string) error {
 			}
 			registry.Register(execTool)
 		}
-		turnEngine := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-cli")
+		turnEngine, err := newGoalTurnEngine(cfg, mgr, registry, stores.ledger, stores.evidence, workDir, "goal-cli")
+		if err != nil {
+			return err
+		}
 		turnEngine.codeMode = *execProgram
 		engine = turnEngine
 	}

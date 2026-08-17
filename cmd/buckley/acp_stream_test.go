@@ -222,8 +222,8 @@ func TestStreamACPTurn_PreservesPartialContentAfterInterruptedStream(t *testing.
 	msg, _, err := streamACPTurn(context.Background(), mgr, model.ChatRequest{
 		Model: "gpt-4o", Messages: []model.Message{{Role: "user", Content: "hi"}},
 	}, nil)
-	if msg.Content != nil {
-		t.Fatalf("message content = %v, want no completed message", msg.Content)
+	if got := model.ExtractTextContentOrEmpty(msg.Content); got != "partial answer" {
+		t.Fatalf("message content = %q, want preserved partial answer", got)
 	}
 	var partial *partialStreamTurnError
 	if !errors.As(err, &partial) {
@@ -231,6 +231,9 @@ func TestStreamACPTurn_PreservesPartialContentAfterInterruptedStream(t *testing.
 	}
 	if partial.text != "partial answer" {
 		t.Fatalf("partial text = %q, want assistant content only", partial.text)
+	}
+	if got := model.ExtractTextContentOrEmpty(partial.turn.Message.Content); got != "partial answer" {
+		t.Fatalf("partial turn content = %q, want preserved assistant content", got)
 	}
 	if strings.Contains(partial.text, "private reasoning") {
 		t.Fatalf("partial text leaked reasoning: %q", partial.text)

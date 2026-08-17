@@ -50,8 +50,8 @@ func newStreamIntegrationConfig(baseURL string) *config.Config {
 
 // TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender drives one
 // interactive turn through a real multi-chunk SSE response and asserts: the
-// transcript receives the text incrementally via StreamChunk (not one
-// discrete AddMessage at the end), the streamed text concatenates to
+// transcript receives the text through the coalescer (not one discrete
+// AddMessage at the end), the flushed stream text concatenates to
 // exactly the persisted final content, and the final answer is never also
 // posted as a second, discrete AddMessage (no double-render).
 func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
@@ -113,9 +113,9 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 			if v.Source == "assistant" && v.Content != "" {
 				discreteFinal++
 			}
-		case StreamChunk:
+		case StreamFlush:
 			if v.SessionID != sess.ID {
-				t.Fatalf("StreamChunk session id = %q, want %q", v.SessionID, sess.ID)
+				t.Fatalf("StreamFlush session id = %q, want %q", v.SessionID, sess.ID)
 			}
 			streamedText.WriteString(v.Text)
 		case StreamDone:
@@ -140,7 +140,7 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 // TestRunToolLoopContinuationDoesNotStream proves the continuation
 // (non-streaming ChatCompletionWithContinuation) path keeps today's
 // behavior: the final answer is rendered as a single discrete AddMessage,
-// never through StreamChunk, since callToolLoopTurn calls the coordinator
+// never through StreamFlush, since callToolLoopTurn calls the coordinator
 // directly instead of the streaming client for an eligible turn.
 func TestRunToolLoopContinuationDoesNotStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -192,21 +192,21 @@ func TestRunToolLoopContinuationDoesNotStream(t *testing.T) {
 	ctrl.renderStreamResponse(result)
 
 	discreteFinal := 0
-	sawStreamChunk := false
+	sawStreamFlush := false
 	for _, m := range drainAllMessages(app) {
 		switch v := m.(type) {
 		case AddMessageMsg:
 			if v.Source == "assistant" && v.Content == result.Text {
 				discreteFinal++
 			}
-		case StreamChunk:
-			sawStreamChunk = true
+		case StreamFlush:
+			sawStreamFlush = true
 		}
 	}
 	if discreteFinal != 1 {
 		t.Fatalf("expected exactly one discrete AddMessage for the non-streamed continuation answer, got %d", discreteFinal)
 	}
-	if sawStreamChunk {
-		t.Fatal("continuation path must not emit StreamChunk")
+	if sawStreamFlush {
+		t.Fatal("continuation path must not emit StreamFlush")
 	}
 }

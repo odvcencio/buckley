@@ -1,5 +1,9 @@
 outcome PermissionOutcome {
     action: string
+    rule_id: string
+    tool_pattern: string
+    arg_pattern: string
+    outside_workspace_only: bool
 }
 
 // Mirrors policy.BuiltinDefaultRules() (pkg/policy/builtin_defaults.go).
@@ -10,42 +14,131 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         arg matches "(^|/)\.env$"
     } then DenyDotEnv {
         action: "deny",
+        rule_id: "builtin.deny-dotenv",
+        tool_pattern: "*",
+        arg_pattern: "**/.env",
+        outside_workspace_only: false,
     }
 
     when {
         arg matches "(^|/)\.env\.[^/]*$"
     } then DenyDotEnvVariant {
         action: "deny",
+        rule_id: "builtin.deny-dotenv-variant",
+        tool_pattern: "*",
+        arg_pattern: "**/.env.*",
+        outside_workspace_only: false,
     }
 
     when {
         arg matches "(^|/)[^/]*credentials[^/]*$"
     } then DenyCredentials {
         action: "deny",
+        rule_id: "builtin.deny-credentials",
+        tool_pattern: "*",
+        arg_pattern: "**/*credentials*",
+        outside_workspace_only: false,
     }
 
     when {
         arg matches "(^|/)id_rsa[^/]*$"
     } then DenyIDRSA {
         action: "deny",
+        rule_id: "builtin.deny-id-rsa",
+        tool_pattern: "*",
+        arg_pattern: "**/id_rsa*",
+        outside_workspace_only: false,
     }
 
     when {
-        (tool == "run_shell" or tool == "run_code")
+        tool == "run_shell"
         and workspace_relative == false
-        and (
-            arg matches "rm -rf"
-            or arg matches "rm -r -f"
-            or arg matches "git push.*--force"
-            or arg matches "git push.*-f"
-            or arg matches "curl.*\|.*sh"
-            or arg matches "curl.*\|.*bash"
-        )
-    } then AskDestructiveBash {
+        and arg matches "rm -rf"
+    } then AskShellRmRf {
         action: "ask",
+        rule_id: "builtin.ask-shell-rm-rf",
+        tool_pattern: "run_shell",
+        arg_pattern: "*rm -rf*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_shell"
+        and workspace_relative == false
+        and arg matches "rm -r -f"
+    } then AskShellRmRF {
+        action: "ask",
+        rule_id: "builtin.ask-shell-rm-r-f",
+        tool_pattern: "run_shell",
+        arg_pattern: "*rm -r -f*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_shell"
+        and workspace_relative == false
+        and arg matches "(?s)git push.*--force"
+    } then AskShellForcePushLong {
+        action: "ask",
+        rule_id: "builtin.ask-shell-force-push-long",
+        tool_pattern: "run_shell",
+        arg_pattern: "*git push*--force*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_shell"
+        and workspace_relative == false
+        and arg matches "(?s)git push.*-f"
+    } then AskShellForcePushShort {
+        action: "ask",
+        rule_id: "builtin.ask-shell-force-push-short",
+        tool_pattern: "run_shell",
+        arg_pattern: "*git push*-f*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_shell"
+        and workspace_relative == false
+        and arg matches "(?s)curl.*\|.*sh"
+    } then AskShellCurlSh {
+        action: "ask",
+        rule_id: "builtin.ask-shell-curl-sh",
+        tool_pattern: "run_shell",
+        arg_pattern: "*curl*|*sh*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_shell"
+        and workspace_relative == false
+        and arg matches "(?s)curl.*\|.*bash"
+    } then AskShellCurlBash {
+        action: "ask",
+        rule_id: "builtin.ask-shell-curl-bash",
+        tool_pattern: "run_shell",
+        arg_pattern: "*curl*|*bash*",
+        outside_workspace_only: true,
+    }
+
+    when {
+        tool == "run_code"
+        and workspace_relative == false
+        and arg matches "rm -rf"
+    } then AskCodeRmRf {
+        action: "ask",
+        rule_id: "builtin.ask-code-rm-rf",
+        tool_pattern: "run_code",
+        arg_pattern: "*rm -rf*",
+        outside_workspace_only: true,
     }
 
     else NoMatch {
         action: "",
+        rule_id: "",
+        tool_pattern: "",
+        arg_pattern: "",
+        outside_workspace_only: false,
     }
 }

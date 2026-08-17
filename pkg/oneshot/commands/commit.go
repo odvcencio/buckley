@@ -11,24 +11,20 @@ import (
 )
 
 // commitActions are the allowed action verbs for commits.
-var commitActions = []string{
-	"add", "fix", "update", "refactor", "remove", "improve",
-	"rename", "move", "revert", "merge", "bump", "release",
-	"format", "optimize", "simplify", "extract", "inline",
-	"document", "test", "build", "ci",
-}
+var commitActions = commitmsg.AllowedActions
 
 // CommitDefinition implements oneshot.Definition for commit message generation.
 type CommitDefinition struct{}
 
 // CommitResult is the strongly-typed result of generate_commit.
 type CommitResult struct {
-	Action   string   `json:"action"`
-	Scope    string   `json:"scope,omitempty"`
-	Subject  string   `json:"subject"`
-	Body     []string `json:"body"`
-	Breaking bool     `json:"breaking,omitempty"`
-	Issues   []string `json:"issues,omitempty"`
+	Action         string   `json:"action"`
+	Scope          string   `json:"scope,omitempty"`
+	Subject        string   `json:"subject"`
+	Body           []string `json:"body"`
+	Breaking       bool     `json:"breaking,omitempty"`
+	BreakingReason string   `json:"breaking_reason,omitempty"`
+	Issues         []string `json:"issues,omitempty"`
 }
 
 // Header formats the commit header line.
@@ -45,20 +41,41 @@ func (cr CommitResult) Header() string {
 // directives, and body bullets are sanitized for stray close keywords.
 // See pkg/commitmsg for why.
 func (cr CommitResult) Format() string {
+	cr.Action = commitmsg.NormalizeAction(cr.Action)
+	cr.Scope = strings.TrimSpace(cr.Scope)
+	cr.Subject = strings.TrimSpace(cr.Subject)
 	msg := cr.Header() + "\n\n"
 	for _, bullet := range cr.Body {
-		msg += "- " + commitmsg.NeutralizeCloseDirectives(trimBulletMarker(bullet)) + "\n"
+		bullet = commitmsg.NormalizeBullet(bullet)
+		if bullet == "" {
+			continue
+		}
+		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
 	}
 	if cr.Breaking {
-		msg += "\nBREAKING CHANGE: " + cr.Subject + "\n"
+		msg += "\nBREAKING CHANGE: " + breakingDescription(cr.BreakingReason, cr.Subject, cr.Body) + "\n"
 	}
 	if len(cr.Issues) > 0 {
 		msg += "\n"
 		for _, issue := range cr.Issues {
-			msg += commitmsg.IssueRefLine(issue) + "\n"
+			if line := commitmsg.IssueRefLine(issue); line != "" {
+				msg += line + "\n"
+			}
 		}
 	}
 	return msg
+}
+
+func breakingDescription(reason, subject string, body []string) string {
+	if reason = commitmsg.NormalizeBullet(reason); reason != "" {
+		return commitmsg.NeutralizeCloseDirectives(reason)
+	}
+	for _, bullet := range body {
+		if bullet = commitmsg.NormalizeBullet(bullet); bullet != "" {
+			return commitmsg.NeutralizeCloseDirectives(bullet)
+		}
+	}
+	return strings.TrimSpace(subject)
 }
 
 func (CommitDefinition) Name() string { return "commit" }
@@ -78,7 +95,7 @@ func (CommitDefinition) Tool() tools.Definition {
 				),
 				"subject": {
 					Type:        "string",
-					Description: "Short summary of the change, imperative mood, no period, max 50 chars",
+					Description: "Short summary of the change, imperative mood, no period; keep the full header within 72 characters",
 					MaxLength:   72,
 				},
 				"body": tools.ArrayProperty(
@@ -87,6 +104,9 @@ func (CommitDefinition) Tool() tools.Definition {
 				),
 				"breaking": tools.BoolProperty(
 					"Whether this commit introduces a breaking change",
+				),
+				"breaking_reason": tools.StringProperty(
+					"If breaking is true, briefly describe the compatibility impact",
 				),
 				"issues": tools.ArrayProperty(
 					"Issue numbers this change RELATES TO, without # prefix. Rendered as "+
@@ -116,13 +136,15 @@ Use the generate_commit tool to produce your response. The tool expects:
 - scope: Optional component/area (e.g., "api", "ui", "config")
 - subject: Short summary, imperative mood, no period, ~50 chars
 - body: Bullet points explaining WHAT changed and WHY
+- breaking_reason: If breaking is true, briefly explain the compatibility impact
 
 Guidelines:
 - Focus on the "what" and "why", not the "how"
-- Be specific but concise
+- Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
 - Match body detail to change size
 - Group related changes into single bullets
-- Use imperative mood ("Add feature" not "Added feature")`
+- Use imperative mood ("Add feature" not "Added feature")
+- If breaking is true, include a useful breaking_reason instead of repeating the subject`
 }
 
 func (CommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
@@ -154,16 +176,7 @@ func (CommitDefinition) Validate(result json.RawMessage) error {
 	if err := json.Unmarshal(result, &cr); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
-	if cr.Action == "" {
-		return fmt.Errorf("action is required")
-	}
-	if cr.Subject == "" {
-		return fmt.Errorf("subject is required")
-	}
-	if len(cr.Body) == 0 {
-		return fmt.Errorf("body requires at least one bullet")
-	}
-	return nil
+	return commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues)
 }
 
 func (CommitDefinition) Unmarshal(result json.RawMessage) (any, error) {
@@ -171,5 +184,19 @@ func (CommitDefinition) Unmarshal(result json.RawMessage) (any, error) {
 	if err := json.Unmarshal(result, &cr); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
+	cr.Action = commitmsg.NormalizeAction(cr.Action)
+	cr.Scope = strings.TrimSpace(cr.Scope)
+	cr.Subject = strings.TrimSpace(cr.Subject)
+	cr.BreakingReason = commitmsg.NormalizeBullet(cr.BreakingReason)
+	for i, bullet := range cr.Body {
+		cr.Body[i] = commitmsg.NormalizeBullet(bullet)
+	}
+	issues := cr.Issues[:0]
+	for _, issue := range cr.Issues {
+		if normalized := commitmsg.NormalizeIssueRef(issue); normalized != "" {
+			issues = append(issues, normalized)
+		}
+	}
+	cr.Issues = issues
 	return &cr, nil
 }

@@ -43,6 +43,25 @@ func TestDefaultProjectContextOptions(t *testing.T) {
 	assert.True(t, opts.IncludeCanopy)
 }
 
+func TestBuildProjectPromptDisclosesAutomaticUntrackedBoundary(t *testing.T) {
+	prompt := BuildProjectPrompt(&ProjectContext{
+		Branch:            "main",
+		HeadCommit:        "abc123",
+		IncludesUntracked: true,
+		UntrackedFiles:    []string{"pkg/new.go"},
+		ExcludedUntracked: []string{".env", "AGENTS.md"},
+	})
+	for _, want := range []string{
+		"filtered non-ignored untracked text files",
+		"pkg/new.go",
+		".env",
+		"AGENTS.md",
+		"Do not infer that an excluded path was inspected",
+	} {
+		assert.Contains(t, prompt, want)
+	}
+}
+
 func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	want := []string{"exec_program", "read_file", "find_files", "search_text", "run_verification"}
 	definitions := []struct {
@@ -56,6 +75,8 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	assert.Equal(t, []string{"exec_program", "read_file", "find_files", "search_text"}, projectTools)
 	assert.NotContains(t, projectTools, "run_verification")
 	assert.Equal(t, 0, (ReviewProjectDef{}).MaxAgentIterations())
+	assert.Contains(t, (ReviewProjectDef{Depth: "balanced"}).AllowedTools(), "run_verification")
+	assert.Contains(t, (ReviewProjectDef{Depth: "in-depth"}).AllowedTools(), "run_verification")
 
 	for _, definition := range definitions {
 		t.Run(definition.name, func(t *testing.T) {
@@ -68,6 +89,20 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 
 	assert.Contains(t, (FixFindingDef{}).AllowedTools(), "run_shell")
 	assert.Contains(t, (FixFindingDef{}).AllowedTools(), "write_file")
+}
+
+func TestReviewDepthRequiresModelVerificationEvidence(t *testing.T) {
+	validProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
+	balanced := ReviewProjectDef{Depth: "balanced"}
+	assert.NoError(t, balanced.ValidateResult(validProject))
+	qwenStyleProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n### Completeness: PARTIAL — deferred paths are disclosed\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
+	assert.ErrorContains(t, balanced.ValidateResult(qwenStyleProject), "Completeness: COMPLETE")
+	assert.True(t, oneshot.IsAgentExecutionEvidenceRequired(balanced.ValidateAgentExecution(validProject, nil)))
+	assert.NoError(t, balanced.ValidateAgentExecution(validProject, &oneshot.AgentResult{ToolCalls: []oneshot.AgentToolCall{{ID: "call-1", Name: "run_verification"}}}))
+
+	spot := ReviewProjectDef{}
+	assert.NoError(t, spot.ValidateAgentExecution(&ReviewAgentResult{}, nil))
+	assert.NotContains(t, spot.AllowedTools(), "run_verification")
 }
 
 func TestDiffStats_TotalChanges(t *testing.T) {
@@ -361,7 +396,7 @@ func TestBuildProjectFileInventoryMarksPromptSizeTruncation(t *testing.T) {
 
 func TestReviewProjectDefRequiresCoverageLedger(t *testing.T) {
 	def := ReviewProjectDef{}
-	valid := &ReviewAgentResult{Review: "## Evidence Collected\n- files\n\n## Coverage\n- **Completeness**: PARTIAL — deadline\n"}
+	valid := &ReviewAgentResult{Review: "## Evidence Collected\n- files\n\n## Coverage\n- **Completeness**: COMPLETE — all project paths inspected\n"}
 	assert.NoError(t, def.ValidateResult(valid))
 
 	missing := &ReviewAgentResult{Review: "## Project Health\n- okay\n"}
@@ -1811,6 +1846,23 @@ func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
 	assert.ErrorContains(t, err, "unexpected pkg/ratchet.go.bak")
 }
 
+func TestReviewCoverageLedgerAllowsCompleteDirectoryGroups(t *testing.T) {
+	def := ReviewPRDef{ChangedFiles: []string{"pkg/feature/a.go", "pkg/feature/b_test.go", "README.md"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
+	review := completeReviewWithCoverage(
+		"- **File**: `pkg/feature/**` — reviewed both feature files and their shared contract.\n" +
+			"- **File**: `README.md` — reviewed the changed documentation claim.\n" + "- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+			"- **Verification**: focused checks passed.")
+	result, err := def.ParseResult(review)
+	assert.NoError(t, err)
+	assert.NoError(t, def.ValidateResult(result))
+
+	overlapping := completeReviewWithCoverage(
+		"- **File**: `pkg/**` — reviewed the package tree.\n" + "- **File**: `pkg/feature/a.go` — reviewed the exact file again.\n" + "- **File**: `README.md` — reviewed the changed documentation claim.\n" + "- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" + "- **Verification**: focused checks passed.")
+	result, err = def.ParseResult(overlapping)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "duplicate pkg/feature/a.go")
+}
+
 func TestReviewCoverageLedgerRequiresExplicitFeedbackDisposition(t *testing.T) {
 	def := ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go"},
@@ -2477,6 +2529,59 @@ func TestWorktreeScopeExcludesUntrackedTextByDefault(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Excluded Local State**: untracked files") {
 		t.Fatalf("default worktree prompt did not disclose untracked exclusion:\n%s", prompt)
+	}
+}
+
+func TestChangesScopeUsesCapturedAutomaticUntrackedEvidence(t *testing.T) {
+	dir := t.TempDir()
+	gitInCmd(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("package snapshot\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInCmd(t, dir, "add", "tracked.go")
+	gitInCmd(t, dir, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(dir, "new.go"), []byte("package snapshot\n\nfunc Value() int { return 42 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := model.CaptureReviewSnapshot(context.Background(), dir, model.ReviewSnapshotPolicy{
+		Mode:             model.ReviewSnapshotWorktree,
+		IncludeUntracked: true,
+	})
+	if err != nil {
+		t.Fatalf("CaptureReviewSnapshot: %v", err)
+	}
+	if len(snapshot.UntrackedFiles()) != 1 || snapshot.UntrackedFiles()[0].Path != "new.go" {
+		t.Fatalf("automatic snapshot files = %#v, want new.go", snapshot.UntrackedFiles())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.go"), []byte("package snapshot\n\nfunc Value() int { return 99 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	ctx, _, err := AssembleBranchContext(BranchContextOptions{
+		Context:                   context.Background(),
+		MaxDiffBytes:              20_000,
+		IncludeUnstaged:           true,
+		BaseBranch:                "HEAD",
+		Scope:                     ReviewScopeChanges,
+		CapturedUntracked:         snapshot.UntrackedFiles(),
+		CapturedExcludedUntracked: snapshot.ExcludedUntrackedFiles(),
+	})
+	if err != nil {
+		t.Fatalf("AssembleBranchContext: %v", err)
+	}
+	if !ctx.IncludesUntracked || len(ctx.UntrackedFiles) != 1 || ctx.UntrackedFiles[0] != "new.go" {
+		t.Fatalf("changes boundary = enabled:%v files:%v", ctx.IncludesUntracked, ctx.UntrackedFiles)
+	}
+	if len(ctx.Files) != 1 || ctx.Files[0] != (FileChange{Status: "A", Path: "new.go"}) {
+		t.Fatalf("changes file inventory = %#v, want captured new.go", ctx.Files)
+	}
+	if !strings.Contains(ctx.Diff, "return 42") || strings.Contains(ctx.Diff, "return 99") {
+		t.Fatalf("changes context diverged from immutable untracked snapshot:\n%s", ctx.Diff)
+	}
+	if !strings.Contains(BuildBranchPrompt(ctx), "new.go") {
+		t.Fatalf("changes prompt omitted captured untracked inventory")
 	}
 }
 

@@ -215,8 +215,18 @@ func TestRunACPLoop_ControllerCrossRoundInvariants(t *testing.T) {
 	conv := conversation.New("session-1")
 	conv.AddUserMessage("use the stub probe")
 	collector := &collectingStream{}
+	var lifecycleMu sync.Mutex
+	var lifecycleEvents []agentloop.LifecycleEvent
 
-	text, err := runACPLoop(context.Background(), cfg, mgr, conv, registry, nil, engine, "gpt-4o", "", "session-1", nil, func(string, ...interface{}) {}, collector.fn)
+	text, err := runACPLoopWithLimits(context.Background(), cfg, mgr, conv, registry, nil, engine, "gpt-4o", "", "session-1", nil, func(string, ...interface{}) {}, collector.fn, acpLoopLimits{
+		LifecycleSessionID: "acp-session-lineage-1",
+		TurnID:             "acp-turn-generation-1",
+		LifecycleObserver: func(event agentloop.LifecycleEvent) {
+			lifecycleMu.Lock()
+			lifecycleEvents = append(lifecycleEvents, event)
+			lifecycleMu.Unlock()
+		},
+	})
 	if err != nil {
 		t.Fatalf("runACPLoop: %v", err)
 	}
@@ -273,6 +283,53 @@ func TestRunACPLoop_ControllerCrossRoundInvariants(t *testing.T) {
 	}
 	if len(usageUpdates) != 2 || usageUpdates[0] != 120 || usageUpdates[1] != 210 {
 		t.Fatalf("usage updates = %v, want [120 210]", usageUpdates)
+	}
+
+	lifecycleMu.Lock()
+	events := append([]agentloop.LifecycleEvent(nil), lifecycleEvents...)
+	lifecycleMu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("lifecycle events = nil")
+	}
+	if events[0].Sequence != 1 {
+		t.Fatalf("first lifecycle sequence = %d, want 1", events[0].Sequence)
+	}
+	firstIndex := map[agentloop.LifecycleEventType]int{}
+	var previous uint64
+	for index, event := range events {
+		if event.Sequence <= previous {
+			t.Fatalf("lifecycle sequence[%d] = %d after %d: %+v", index, event.Sequence, previous, events)
+		}
+		previous = event.Sequence
+		if event.SessionID != "acp-session-lineage-1" || event.TurnID != "acp-turn-generation-1" {
+			t.Fatalf("lifecycle correlation[%d] = session %q turn %q", index, event.SessionID, event.TurnID)
+		}
+		if _, exists := firstIndex[event.Type]; !exists {
+			firstIndex[event.Type] = index
+		}
+	}
+	for before, after := range map[agentloop.LifecycleEventType]agentloop.LifecycleEventType{
+		agentloop.LifecycleTurnStart:     agentloop.LifecycleModelRequest,
+		agentloop.LifecycleModelRequest:  agentloop.LifecycleModelResponse,
+		agentloop.LifecycleModelResponse: agentloop.LifecycleToolCall,
+		agentloop.LifecycleToolCall:      agentloop.LifecycleToolStart,
+		agentloop.LifecycleToolStart:     agentloop.LifecycleToolResult,
+		agentloop.LifecycleToolResult:    agentloop.LifecycleTurnEnd,
+	} {
+		beforeIndex, beforeOK := firstIndex[before]
+		afterIndex, afterOK := firstIndex[after]
+		if !beforeOK || !afterOK || beforeIndex >= afterIndex {
+			t.Fatalf("lifecycle order %q (%d,%v) before %q (%d,%v): %+v", before, beforeIndex, beforeOK, after, afterIndex, afterOK, events)
+		}
+	}
+	serializedLifecycle, err := json.Marshal(events)
+	if err != nil {
+		t.Fatalf("marshal lifecycle events: %v", err)
+	}
+	for _, content := range []string{"use the stub probe", "\"query\"", "probe-ok", "done: 7"} {
+		if strings.Contains(string(serializedLifecycle), content) {
+			t.Fatalf("lifecycle events leaked content %q: %s", content, serializedLifecycle)
+		}
 	}
 }
 
@@ -693,8 +750,174 @@ func TestRunACPLoop_CostBoundUsesOpenAIWireAllowance(t *testing.T) {
 	if !streamOptions.IncludeUsage {
 		t.Fatalf("stream_options.include_usage = false, want authoritative usage-only terminal chunk")
 	}
-	if got := strings.Join(collector.messageChunks(), ""); got != "bounded" {
-		t.Fatalf("accepted bounded output = %q, want released exactly once after validation", got)
+	chunks := collector.messageChunks()
+	if len(chunks) != 1 || chunks[0] != "bounded" {
+		t.Fatalf("accepted bounded output chunks = %#v, want released exactly once after validation", chunks)
+	}
+}
+
+func TestRunACPLoop_CostBoundFlushesOnlyAcceptedNoToolCandidateOnce(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempt := requests.Add(1)
+		content := "I'll inspect the workspace first."
+		if attempt == 2 {
+			content = "accepted final answer"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-%d\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n", attempt, content)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("rules.NewDefaultEngine: %v", err)
+	}
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&acpProbeTool{})
+	conv := conversation.New("session-cost-accepted-final")
+	conv.AddUserMessage("inspect and answer")
+	collector := &collectingStream{}
+	var lifecycleEvents []agentloop.LifecycleEvent
+
+	text, err := runACPLoopWithLimits(
+		context.Background(), cfg, mgr, conv, registry, nil, engine,
+		"gpt-4o", "", "session-cost-accepted-final", nil, func(string, ...interface{}) {},
+		collector.fn, acpLoopLimits{
+			MaxCostUSD:         0.25,
+			MaxModelRequests:   2,
+			LifecycleSessionID: "stable-acp-session",
+			TurnID:             "stable-acp-turn",
+			LifecycleObserver: func(event agentloop.LifecycleEvent) {
+				lifecycleEvents = append(lifecycleEvents, event)
+			},
+		},
+	)
+	if err != nil || text != "accepted final answer" || requests.Load() != 2 {
+		t.Fatalf("runACPLoopWithLimits = %q, %v requests=%d", text, err, requests.Load())
+	}
+	chunks := collector.messageChunks()
+	if len(chunks) != 1 || chunks[0] != "accepted final answer" {
+		t.Fatalf("deferred message chunks = %#v, want accepted candidate exactly once", chunks)
+	}
+	counts := map[agentloop.LifecycleEventType]int{}
+	for _, event := range lifecycleEvents {
+		counts[event.Type]++
+		if event.SessionID != "stable-acp-session" || event.TurnID != "stable-acp-turn" {
+			t.Fatalf("lifecycle correlation = %+v", event)
+		}
+	}
+	if counts[agentloop.LifecycleTurnStart] != 1 || counts[agentloop.LifecycleAttemptStart] != 2 || counts[agentloop.LifecycleAttemptEnd] != 2 || counts[agentloop.LifecycleTurnEnd] != 1 {
+		t.Fatalf("logical-turn lifecycle counts = %+v events=%+v", counts, lifecycleEvents)
+	}
+}
+
+func TestRunACPLoop_CostBoundFlushesAcceptedToolCandidateOnce(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempt := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempt == 1 {
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-tool","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"accepted tool prelude","tool_calls":[{"index":0,"id":"call-cost-tool","type":"function","function":{"name":"stub_probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`+
+				"\n\ndata: [DONE]\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "data: "+
+			`{"id":"chatcmpl-final","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"accepted final answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":3,"total_tokens":23}}`+
+			"\n\ndata: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("rules.NewDefaultEngine: %v", err)
+	}
+	probe := &acpProbeTool{}
+	registry := tool.NewEmptyRegistry()
+	registry.Register(probe)
+	conv := conversation.New("session-cost-accepted-tool")
+	conv.AddUserMessage("use the probe and answer")
+	collector := &collectingStream{}
+
+	text, err := runACPLoopWithLimits(
+		context.Background(), cfg, mgr, conv, registry, nil, engine,
+		"gpt-4o", "", "session-cost-accepted-tool", nil, func(string, ...interface{}) {},
+		collector.fn, acpLoopLimits{MaxCostUSD: 0.25, MaxModelRequests: 2},
+	)
+	if err != nil || text != "accepted final answer" || requests.Load() != 2 || probe.callCount() != 1 {
+		t.Fatalf("runACPLoopWithLimits = %q, %v requests=%d probe_calls=%d", text, err, requests.Load(), probe.callCount())
+	}
+	chunks := collector.messageChunks()
+	if len(chunks) != 2 || chunks[0] != "accepted tool prelude" || chunks[1] != "accepted final answer" {
+		t.Fatalf("accepted model chunks = %#v, want each candidate released exactly once", chunks)
+	}
+	usageUpdates := 0
+	for _, update := range collector.updates {
+		if update.SessionUpdate == acp.SessionUpdateUsageUpdate {
+			usageUpdates++
+		}
+	}
+	if usageUpdates != 2 {
+		t.Fatalf("usage updates = %d, want one per accepted candidate", usageUpdates)
+	}
+}
+
+func TestFlushPendingACPModelDelivery_ReentrantStreamCannotDuplicate(t *testing.T) {
+	usage := model.Usage{TotalTokens: 7}
+	state := &acpLoopState{
+		contextWindow:       128,
+		pendingModelUpdates: []acp.SessionUpdate{acp.NewAgentMessageChunk("once")},
+		pendingModelUsage:   &usage,
+	}
+	var updates []acp.SessionUpdate
+	var stream acp.StreamFunc
+	stream = func(update acp.SessionUpdate) error {
+		updates = append(updates, update)
+		flushPendingACPModelDelivery(stream, state)
+		return nil
+	}
+
+	flushPendingACPModelDelivery(stream, state)
+	flushPendingACPModelDelivery(stream, state)
+
+	messageUpdates := 0
+	usageUpdates := 0
+	for _, update := range updates {
+		switch update.SessionUpdate {
+		case acp.SessionUpdateAgentMessageChunk:
+			messageUpdates++
+		case acp.SessionUpdateUsageUpdate:
+			usageUpdates++
+		}
+	}
+	if messageUpdates != 1 || usageUpdates != 1 || len(updates) != 2 {
+		t.Fatalf("reentrant delivery duplicated updates: messages=%d usage=%d all=%+v", messageUpdates, usageUpdates, updates)
+	}
+	if len(state.pendingModelUpdates) != 0 || state.pendingModelUsage != nil {
+		t.Fatalf("pending ownership was not cleared: %+v", state)
 	}
 }
 

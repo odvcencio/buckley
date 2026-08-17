@@ -219,6 +219,55 @@ func TestCreateCommitNoPaths(t *testing.T) {
 	}
 }
 
+func TestCreateCommitWithMetadataRejectsChangedIndex(t *testing.T) {
+	repo := setupTwoAreaRepo(t)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	metadata, err := collectStagedChangeMetadata(nil)
+	if err != nil {
+		t.Fatalf("collectStagedChangeMetadata: %v", err)
+	}
+	before := gitOutputInDir(t, repo, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "a", "file.go"), []byte("package a\n\n// changed after generation\n"), 0o644); err != nil {
+		t.Fatalf("mutate file: %v", err)
+	}
+	runGit(t, repo, "add", "a/file.go")
+	if err := createCommitWithMetadata("fix: stale message\n\n- should not commit\n", true, false, nil, metadata, true); err == nil {
+		t.Fatal("expected changed staged index to reject the commit")
+	}
+	if got := gitOutputInDir(t, repo, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("changed staged index should not commit: before=%s after=%s", before, got)
+	}
+}
+
+func TestCreateCommitWithMetadataAddsTrailers(t *testing.T) {
+	repo := setupTwoAreaRepo(t)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	metadata, err := collectStagedChangeMetadata(nil)
+	if err != nil {
+		t.Fatalf("collectStagedChangeMetadata: %v", err)
+	}
+	if err := createCommitWithMetadata("add: staged files\n\n- Record the change\n", true, false, nil, metadata, true); err != nil {
+		t.Fatalf("createCommitWithMetadata: %v", err)
+	}
+	message := gitOutputInDir(t, repo, "show", "-s", "--format=%B", "HEAD")
+	if !strings.Contains(message, "Buckley-Change-Hash: "+metadata.Digest) {
+		t.Fatalf("commit message missing digest trailer:\n%s", message)
+	}
+	if !strings.Contains(message, "Buckley-Change-Stats: files=2 insertions=2 deletions=0 binaries=0") {
+		t.Fatalf("commit message missing stats trailer:\n%s", message)
+	}
+}
+
 // TestExclusivePathCheckBlocksWhenOutsiders verifies that stagedFilesOutsidePaths
 // detects files outside the scope (simulates --exclusive logic).
 func TestExclusivePathCheckBlocksWhenOutsiders(t *testing.T) {

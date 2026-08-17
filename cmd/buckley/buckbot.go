@@ -28,6 +28,7 @@ type buckbotReviewIntake struct {
 	Model           string
 	ReasoningEffort string
 	SizeClass       string
+	Depth           string
 	BudgetUSD       float64
 }
 
@@ -90,12 +91,15 @@ func printBuckbotUsage() {
 	fmt.Println("  buckley buckbot")
 	fmt.Println("  buckley buckbot --scope branch")
 	fmt.Println("  buckley buckbot repo --model codex/auto")
+	fmt.Println("  buckley buckbot repo --depth balanced")
+	fmt.Println("  buckley buckbot repo --depth in-depth --timeout 45m")
 	fmt.Println("  buckley buckbot --max-tool-calls 12")
 	fmt.Println("  buckley buckbot pr 123")
 	fmt.Println("  buckley buckbot pr 123 --post")
 	fmt.Println()
 	fmt.Println("Reviews have no default dollar cap. Use --budget <USD> for an explicit cap or --no-budget to bypass a configured cap.")
 	fmt.Println("Reviews have no default tool-call cap. Use --max-tool-calls <N> for an explicit experimental cap.")
+	fmt.Println("Depth modes: spot (fast), balanced (map + falsify), in-depth (exhaustive coverage + verification).")
 	fmt.Println("Posting is always explicit: use --post only for a PR review you want Buckbot to write to GitHub.")
 }
 
@@ -635,6 +639,9 @@ func formatBuckbotReviewIntake(marker, headSHA string, intake buckbotReviewIntak
 	}
 	if sizeClass := strings.TrimSpace(intake.SizeClass); sizeClass != "" {
 		details = append(details, strings.ToLower(sizeClass)+" review")
+	}
+	if depth := strings.TrimSpace(intake.Depth); depth != "" {
+		details = append(details, strings.ToLower(depth)+" depth")
 	}
 	if effort := strings.TrimSpace(intake.ReasoningEffort); effort != "" {
 		details = append(details, strings.ToLower(effort)+" reasoning")

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -460,12 +462,15 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 	providerCalls := 0
 	priceCalls := 0
 	dispatchCalls := 0
+	secret := "sk-" + strings.Repeat("p", 30)
+	rawPricingError := "catalog price unavailable " + secret + " " + strings.Repeat("x", modelstep.MaxPersistedErrorRunes+100)
+	persistedPricingError := modelstep.NormalizeErrorText("agentloop: price model usage: " + rawPricingError)
 	config := ControllerConfig{
 		MaxCostUSD: 1,
 		CostForUsage: func(usage model.Usage) (float64, error) {
 			priceCalls++
 			if usage.TotalTokens == 321 && usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
-				return 0, testingError("catalog price unavailable after response")
+				return 0, testingError(rawPricingError)
 			}
 			return float64(usage.TotalTokens) / 1_000_000, nil
 		},
@@ -500,6 +505,9 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 	if providerCalls != 1 || dispatchCalls != 0 || priceCalls == 0 || firstResult.Usage.TotalTokens != 321 {
 		t.Fatalf("first result=%+v provider_calls=%d dispatch_calls=%d price_calls=%d", firstResult, providerCalls, dispatchCalls, priceCalls)
 	}
+	if firstResult.Partial || firstResult.Termination.ProviderError != "" || firstResult.Termination.Kind != "cost_limit" {
+		t.Fatalf("pricing failure was mislabeled as provider partial: %+v", firstResult)
+	}
 	stepID := StableStepID(runID, config.TaskID, config.TurnID, 1, "model", 0)
 	step, err := ledger.GetStep(ctx, runID, stepID)
 	if err != nil {
@@ -507,6 +515,17 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 	}
 	if step.Status != runledger.StepCompleted || step.OutputEvidenceID == "" {
 		t.Fatalf("pricing-error step=%+v, want completed response evidence", step)
+	}
+	object, err := ev.Get(ctx, step.OutputEvidenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := modelstep.ValidateResponseEvidence(step.OutputEvidenceID, step.OutputDigest, object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PricingError != persistedPricingError || strings.Contains(decoded.PricingError, secret) || len([]rune(decoded.PricingError)) > modelstep.MaxPersistedErrorRunes {
+		t.Fatalf("persisted pricing error = %q", decoded.PricingError)
 	}
 
 	replayPriceCalls := 0
@@ -529,8 +548,527 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 	if providerCalls != 1 || dispatchCalls != 0 || replayPriceCalls != 0 || replayResult.Usage.TotalTokens != 321 {
 		t.Fatalf("replay result=%+v provider_calls=%d dispatch_calls=%d price_calls=%d", replayResult, providerCalls, dispatchCalls, replayPriceCalls)
 	}
-	if replayResult.Termination.Kind != "cost_limit" || !strings.Contains(replayResult.Termination.Reason, "catalog price unavailable") {
+	if replayResult.Termination.Kind != "cost_limit" || !strings.Contains(replayResult.Termination.Reason, persistedPricingError) {
 		t.Fatalf("replay result=%+v", replayResult)
+	}
+	if replayResult.Partial || replayResult.Termination.ProviderError != "" {
+		t.Fatalf("replayed pricing failure was mislabeled as provider partial: %+v", replayResult)
+	}
+}
+
+func TestController_ProviderPartialDurabilityFailureBlocksBillableRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		failEvidence      bool
+		wantReplayContent bool
+	}{
+		{name: "response evidence write", failEvidence: true},
+		{name: "step completion", wantReplayContent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, ev, runID := newDurableControllerStores(t)
+			ctx := t.Context()
+			secret := "sk-" + strings.Repeat("a", 30)
+			providerErr := errors.New("provider stream failed " + secret + " " + strings.Repeat("x", blockedModelStepErrorRunes+100))
+			persistedProviderError := modelstep.NormalizeError(providerErr)
+			durabilityErr := errors.New("durability unavailable after response")
+			providerCalls := 0
+
+			var evidenceStore evidence.Store = ev
+			var stepJournal DurableStepJournal = ledger
+			if tt.failEvidence {
+				evidenceStore = &modelResponseFailingEvidenceStore{Store: ev, failure: durabilityErr}
+			} else {
+				stepJournal = &failingCompleteStepJournal{BlockingStepJournal: ledger, failure: durabilityErr}
+			}
+			config := ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return model.ChatRequest{Model: "test-model"}, nil
+				},
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					providerCalls++
+					return textResponse("partial response before durability failure", model.Usage{TotalTokens: 123}), providerErr
+				}),
+				CostForUsage: func(model.Usage) (float64, error) { return 0.42, nil },
+				RunLedger:    ledger,
+				Evidence:     evidenceStore,
+				StepJournal:  stepJournal,
+				RunID:        runID,
+				SessionID:    "durable-test",
+				TaskID:       "task-partial-durability-" + strings.ReplaceAll(tt.name, " ", "-"),
+				TurnID:       "partial-durability-turn-" + strings.ReplaceAll(tt.name, " ", "-"),
+			}
+			first, err := NewController(config)
+			if err != nil {
+				t.Fatalf("NewController first: %v", err)
+			}
+			firstResult, firstErr := first.Run(ctx)
+			var incomplete *IncompleteTurnError
+			if !errors.As(firstErr, &incomplete) || !errors.Is(firstErr, providerErr) || !errors.Is(firstErr, durabilityErr) {
+				t.Fatalf("first error = %v, want incomplete, provider, and durability causes", firstErr)
+			}
+			if firstResult == nil || !firstResult.Partial || firstResult.Content != "partial response before durability failure" || firstResult.Termination.ProviderError != persistedProviderError {
+				t.Fatalf("first result = %+v", firstResult)
+			}
+			stepID := StableStepID(runID, config.TaskID, config.TurnID, 1, "model", 0)
+			step, err := ledger.GetStep(ctx, runID, stepID)
+			if err != nil {
+				t.Fatalf("GetStep first: %v", err)
+			}
+			if step.Status != runledger.StepBlocked || step.Attempt != 1 || !strings.HasPrefix(step.Error, blockedModelStepErrorPrefix) {
+				t.Fatalf("retry block step = %+v", step)
+			}
+			if strings.Contains(step.Error, secret) || !strings.Contains(step.Error, persistedProviderError) {
+				t.Fatalf("retry block persisted unsafe provider error: %q", step.Error)
+			}
+
+			config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+				providerCalls++
+				return nil, errors.New("blocked retry must not call provider")
+			})
+			replay, err := NewController(config)
+			if err != nil {
+				t.Fatalf("NewController replay: %v", err)
+			}
+			replayResult, replayErr := replay.Run(ctx)
+			if !errors.As(replayErr, &incomplete) {
+				t.Fatalf("replay error = %v, want IncompleteTurnError", replayErr)
+			}
+			if providerCalls != 1 || replayResult == nil || !replayResult.Partial || replayResult.Termination.ProviderError != persistedProviderError {
+				t.Fatalf("replay provider_calls=%d result=%+v", providerCalls, replayResult)
+			}
+			if tt.wantReplayContent && (replayResult.Content != "partial response before durability failure" || replayResult.Usage.TotalTokens != 123 || replayResult.CostUSD != 0.42) {
+				t.Fatalf("replayed projection = %+v", replayResult)
+			}
+			events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				providerProjection, _ := event.Payload["provider_error"].(string)
+				if providerProjection != "" && providerProjection != persistedProviderError {
+					t.Fatalf("event provider error = %q, want normalized projection", providerProjection)
+				}
+				if strings.Contains(providerProjection, secret) {
+					t.Fatalf("event leaked provider secret: %q", providerProjection)
+				}
+			}
+			step, err = ledger.GetStep(ctx, runID, stepID)
+			if err != nil {
+				t.Fatalf("GetStep replay: %v", err)
+			}
+			if step.Attempt != 1 || step.Status != runledger.StepBlocked {
+				t.Fatalf("blocked retry advanced step: %+v", step)
+			}
+		})
+	}
+}
+
+func TestController_ProviderPartialUsesPrimaryTerminalBlockedStep(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		failEvidence      bool
+		wantReplayContent bool
+	}{
+		{name: "without response evidence", failEvidence: true},
+		{name: "with response evidence", wantReplayContent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, ev, runID := newDurableControllerStores(t)
+			ctx := t.Context()
+			providerErr := errors.New("provider stream failed after response")
+			durabilityErr := errors.New("response completion persistence failed")
+			providerCalls := 0
+
+			journal := &trackingBlockingJournal{
+				BlockingStepJournal: ledger,
+			}
+			var evidenceStore evidence.Store = ev
+			if tt.failEvidence {
+				evidenceStore = &modelResponseFailingEvidenceStore{Store: ev, failure: durabilityErr}
+			} else {
+				journal.completeFailure = durabilityErr
+			}
+			config := ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return model.ChatRequest{Model: "test-model"}, nil
+				},
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					providerCalls++
+					return textResponse("partial response before terminal block", model.Usage{TotalTokens: 123}), providerErr
+				}),
+				RunLedger:   ledger,
+				Evidence:    evidenceStore,
+				StepJournal: journal,
+				RunID:       runID,
+				SessionID:   "durable-test",
+				TaskID:      "task-terminal-block-" + strings.ReplaceAll(tt.name, " ", "-"),
+				TurnID:      "terminal-block-turn-" + strings.ReplaceAll(tt.name, " ", "-"),
+			}
+			first, err := NewController(config)
+			if err != nil {
+				t.Fatalf("NewController first: %v", err)
+			}
+			firstResult, firstErr := first.Run(ctx)
+			var incomplete *IncompleteTurnError
+			if !errors.As(firstErr, &incomplete) || !errors.Is(firstErr, providerErr) || !errors.Is(firstErr, durabilityErr) {
+				t.Fatalf("first error = %v, want incomplete, provider, and durability causes", firstErr)
+			}
+			if firstResult == nil || !firstResult.Partial || firstResult.Content != "partial response before terminal block" || firstResult.Termination.ProviderError != providerErr.Error() {
+				t.Fatalf("first result = %+v", firstResult)
+			}
+			wantCompleteCalls := 1
+			if tt.failEvidence {
+				wantCompleteCalls = 0
+			}
+			if journal.completeCalls != wantCompleteCalls || journal.blockCalls != 1 {
+				t.Fatalf("journal calls complete=%d block=%d", journal.completeCalls, journal.blockCalls)
+			}
+
+			stepID := StableStepID(runID, config.TaskID, config.TurnID, 1, "model", 0)
+			step, err := ledger.GetStep(ctx, runID, stepID)
+			if err != nil {
+				t.Fatalf("GetStep first: %v", err)
+			}
+			if step.Status != runledger.StepBlocked || step.Attempt != 1 || !strings.HasPrefix(step.Error, blockedModelStepErrorPrefix) {
+				t.Fatalf("terminal retry block step = %+v", step)
+			}
+			if (step.OutputEvidenceID != "") != tt.wantReplayContent {
+				t.Fatalf("terminal retry block evidence = %q, want_present=%v", step.OutputEvidenceID, tt.wantReplayContent)
+			}
+			var record blockedModelStepRecord
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(step.Error, blockedModelStepErrorPrefix)), &record); err != nil {
+				t.Fatalf("decode terminal retry block: %v", err)
+			}
+			if record.ProviderError != providerErr.Error() || !strings.Contains(record.DurabilityError, durabilityErr.Error()) {
+				t.Fatalf("terminal retry block record = %+v", record)
+			}
+
+			config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+				providerCalls++
+				return nil, errors.New("terminally blocked retry must not call provider")
+			})
+			replay, err := NewController(config)
+			if err != nil {
+				t.Fatalf("NewController replay: %v", err)
+			}
+			replayResult, replayErr := replay.Run(ctx)
+			if !errors.As(replayErr, &incomplete) || !strings.Contains(replayErr.Error(), providerErr.Error()) || !strings.Contains(replayErr.Error(), durabilityErr.Error()) {
+				t.Fatalf("replay error = %v, want incomplete and all persisted causes", replayErr)
+			}
+			if providerCalls != 1 || replayResult == nil || !replayResult.Partial || replayResult.Termination.ProviderError != providerErr.Error() {
+				t.Fatalf("replay provider_calls=%d result=%+v", providerCalls, replayResult)
+			}
+			if tt.wantReplayContent && replayResult.Content != "partial response before terminal block" {
+				t.Fatalf("replayed content = %q", replayResult.Content)
+			}
+			if journal.completeCalls != wantCompleteCalls || journal.blockCalls != 1 {
+				t.Fatalf("replay mutated journal calls complete=%d block=%d", journal.completeCalls, journal.blockCalls)
+			}
+			step, err = ledger.GetStep(ctx, runID, stepID)
+			if err != nil {
+				t.Fatalf("GetStep replay: %v", err)
+			}
+			if step.Status != runledger.StepBlocked || step.Attempt != 1 {
+				t.Fatalf("terminal retry block advanced: %+v", step)
+			}
+		})
+	}
+}
+
+func TestBoundedModelStepError_RedactsAndBounds(t *testing.T) {
+	secret := "sk-" + strings.Repeat("a", 24)
+	got := boundedModelStepError(errors.New(secret + strings.Repeat("x", blockedModelStepErrorRunes+100)))
+	if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("bounded error did not redact secret: %q", got)
+	}
+	if len([]rune(got)) > blockedModelStepErrorRunes {
+		t.Fatalf("bounded error has %d runes", len([]rune(got)))
+	}
+}
+
+func TestController_ConcurrentRunsDoNotDuplicateProviderCall(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var providerCalls atomic.Int32
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			if providerCalls.Add(1) == 1 {
+				close(entered)
+				<-release
+			}
+			return textResponse("one provider response", model.Usage{TotalTokens: 1}), nil
+		}),
+		RunLedger: ledger, Evidence: ev, StepJournal: ledger,
+		RunID: runID, SessionID: "durable-test", TaskID: "task-concurrent", TurnID: "turn-concurrent",
+	}
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		result *Result
+		err    error
+	}
+	firstDone := make(chan outcome, 1)
+	go func() {
+		result, err := first.Run(ctx)
+		firstDone <- outcome{result: result, err: err}
+	}()
+	<-entered
+	secondResult, secondErr := second.Run(ctx)
+	if !errors.Is(secondErr, runledger.ErrStepInProgress) {
+		t.Fatalf("concurrent Run result=%+v error=%v, want step in progress", secondResult, secondErr)
+	}
+	close(release)
+	firstOutcome := <-firstDone
+	if firstOutcome.err != nil || firstOutcome.result == nil || firstOutcome.result.Content != "one provider response" {
+		t.Fatalf("first Run result=%+v error=%v", firstOutcome.result, firstOutcome.err)
+	}
+	if got := providerCalls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+}
+
+func TestController_ReclaimsPredispatchClaimWithNewFence(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+	req := model.ChatRequest{Model: "test-model"}
+	inputDigest, err := jsonDigest(ProjectForContinuation(req, 0, nil, "", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID := StableStepID(runID, "task-reclaim", "turn-reclaim", 1, "model", 0)
+	deadOwner, _, err := ledger.BeginStep(ctx, runledger.ExecutionStep{RunID: runID, TaskID: "task-reclaim", StepID: stepID, Kind: "model", InputDigest: inputDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var providerCalls atomic.Int32
+	controller, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) { return req, nil },
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls.Add(1)
+			return textResponse("resumed safely", model.Usage{TotalTokens: 1}), nil
+		}),
+		RunLedger: ledger, Evidence: ev, StepJournal: ledger,
+		RunID: runID, SessionID: "durable-test", TaskID: "task-reclaim", TurnID: "turn-reclaim",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := controller.Run(ctx)
+	if err != nil || result == nil || result.Content != "resumed safely" || providerCalls.Load() != 1 {
+		t.Fatalf("Run result=%+v provider_calls=%d err=%v", result, providerCalls.Load(), err)
+	}
+	got, err := ledger.GetStep(ctx, runID, stepID)
+	if err != nil || got.Status != runledger.StepCompleted || got.ClaimGeneration != deadOwner.ClaimGeneration+1 {
+		t.Fatalf("reclaimed step=%+v err=%v", got, err)
+	}
+	if err := ledger.MarkStepDispatched(ctx, deadOwner, time.Now().UTC()); !errors.Is(err, runledger.ErrStepTransitionConflict) {
+		t.Fatalf("dead owner dispatch error = %v", err)
+	}
+}
+
+func TestController_SuccessfulProviderPostDispatchFailuresBlockRestart(t *testing.T) {
+	for _, failurePoint := range []string{"response encoding", "evidence write", "step completion"} {
+		t.Run(failurePoint, func(t *testing.T) {
+			ledger, ev, runID := newDurableControllerStores(t)
+			ctx := t.Context()
+			failure := errors.New(failurePoint + " failed")
+			response := textResponse("already purchased", model.Usage{TotalTokens: 9})
+			var evidenceStore evidence.Store = ev
+			var journal DurableStepJournal = ledger
+			switch failurePoint {
+			case "response encoding":
+				response.Usage.CompletionTokenDetails = &model.CompletionTokenDetails{ReasoningTokens: -1}
+			case "evidence write":
+				evidenceStore = &modelResponseFailingEvidenceStore{Store: ev, failure: failure}
+			case "step completion":
+				journal = &failingCompleteStepJournal{BlockingStepJournal: ledger, failure: failure}
+			}
+			var providerCalls atomic.Int32
+			config := ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return model.ChatRequest{Model: "test-model"}, nil
+				},
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					providerCalls.Add(1)
+					return response, nil
+				}),
+				RunLedger: ledger, Evidence: evidenceStore, StepJournal: journal,
+				RunID: runID, SessionID: "durable-test", TaskID: "task-post-dispatch-" + strings.ReplaceAll(failurePoint, " ", "-"), TurnID: "turn-post-dispatch",
+			}
+			first, err := NewController(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := first.Run(ctx); err == nil {
+				t.Fatal("first Run succeeded despite post-dispatch persistence failure")
+			}
+			stepID := StableStepID(runID, config.TaskID, config.TurnID, 1, "model", 0)
+			step, err := ledger.GetStep(ctx, runID, stepID)
+			if err != nil || step.Status != runledger.StepBlocked || step.DispatchState != runledger.StepDispatchDispatched {
+				t.Fatalf("blocked step=%+v err=%v", step, err)
+			}
+
+			config.Evidence = ev
+			config.StepJournal = ledger
+			config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+				providerCalls.Add(1)
+				return textResponse("duplicate", model.Usage{}), nil
+			})
+			restart, err := NewController(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, restartErr := restart.Run(ctx)
+			var recovery *runledger.StepRecoveryError
+			if !errors.As(restartErr, &recovery) || recovery.Action != runledger.StepRecoveryRerun {
+				t.Fatalf("restart error = %v, want reconciliation/rerun", restartErr)
+			}
+			if providerCalls.Load() != 1 {
+				t.Fatalf("provider calls = %d, want 1", providerCalls.Load())
+			}
+		})
+	}
+}
+
+func TestController_InspectsBlockedStatusReturnedByBeginStep(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+	req := model.ChatRequest{Model: "test-model"}
+	inputDigest, err := jsonDigest(ProjectForContinuation(req, 0, nil, "", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID := StableStepID(runID, "task-begin-blocked", "turn-begin-blocked", 1, "model", 0)
+	step, _, err := ledger.BeginStep(ctx, runledger.ExecutionStep{RunID: runID, TaskID: "task-begin-blocked", StepID: stepID, Kind: "model", InputDigest: inputDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := blockedModelStepRecord{Version: modelstep.BlockedMarkerVersion, Incomplete: true, ProviderError: "provider failed", DurabilityError: "response persistence failed"}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.BlockStep(ctx, step, blockedModelStepErrorPrefix+string(encoded), "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	journal := &hideFirstGetStepJournal{BlockingStepJournal: ledger}
+	var providerCalls atomic.Int32
+	controller, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) { return req, nil },
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls.Add(1)
+			return nil, errors.New("provider must not run")
+		}),
+		RunLedger: ledger, Evidence: ev, StepJournal: journal,
+		RunID: runID, SessionID: "durable-test", TaskID: "task-begin-blocked", TurnID: "turn-begin-blocked",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := controller.Run(ctx)
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) || result == nil || !result.Partial || result.Termination.ProviderError != record.ProviderError {
+		t.Fatalf("Run result=%+v error=%v", result, runErr)
+	}
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+}
+
+func TestController_BlockedReplayValidatesMarkerAndEvidenceIntegrity(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		corrupt   string
+		wantError string
+	}{
+		{name: "marker evidence mismatch", corrupt: "marker", wantError: "does not match the execution step"},
+		{name: "content digest mismatch", corrupt: "digest", wantError: "digest mismatch"},
+		{name: "response shape mismatch", corrupt: "shape", wantError: "conclusive model response evidence"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, ev, runID := newDurableControllerStores(t)
+			ctx := t.Context()
+			req := model.ChatRequest{Model: "test-model"}
+			inputDigest, err := jsonDigest(ProjectForContinuation(req, 0, nil, "", false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerError := "provider failed after partial response"
+			envelope := modelResponseEvidenceEnvelope{
+				Version:  modelResponseEvidenceVersion,
+				Response: textResponse("untrusted partial", model.Usage{TotalTokens: 99}),
+				Partial:  true, ProviderError: providerError,
+			}
+			if tt.corrupt == "shape" {
+				envelope.Partial = false
+			}
+			body, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj, err := ev.Put(ctx, evidence.Object{Kind: evidence.KindModelResponse, MediaType: "application/json", InlineBody: body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stepID := StableStepID(runID, "task-integrity", "turn-"+tt.corrupt, 1, "model", 0)
+			step, _, err := ledger.BeginStep(ctx, runledger.ExecutionStep{RunID: runID, TaskID: "task-integrity", StepID: stepID, Kind: "model", InputDigest: inputDigest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidenceID, outputDigest := obj.ID, obj.ContentSHA256
+			record := blockedModelStepRecord{Version: modelstep.BlockedMarkerVersion, Incomplete: true, ProviderError: providerError, DurabilityError: "response persistence failed", ResponseEvidenceID: evidenceID, OutputDigest: outputDigest}
+			if tt.corrupt == "marker" {
+				record.ResponseEvidenceID = "ev_marker_mismatch"
+			}
+			if tt.corrupt == "digest" {
+				outputDigest = strings.Repeat("0", 64)
+				record.OutputDigest = outputDigest
+			}
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ledger.BlockStep(ctx, step, blockedModelStepErrorPrefix+string(encoded), evidenceID, outputDigest, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			var providerCalls atomic.Int32
+			var pricingCalls atomic.Int32
+			controller, err := NewController(ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) { return req, nil },
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					providerCalls.Add(1)
+					return nil, errors.New("provider must not run")
+				}),
+				CostForUsage: func(model.Usage) (float64, error) { pricingCalls.Add(1); return 1, nil },
+				RunLedger:    ledger, Evidence: ev, StepJournal: ledger,
+				RunID: runID, SessionID: "durable-test", TaskID: "task-integrity", TurnID: "turn-" + tt.corrupt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, runErr := controller.Run(ctx)
+			if runErr == nil || !strings.Contains(runErr.Error(), tt.wantError) || result == nil {
+				t.Fatalf("Run result=%+v error=%v", result, runErr)
+			}
+			if tt.corrupt != "marker" && (!result.Partial || result.Termination.ProviderError != providerError) {
+				t.Fatalf("Run result=%+v error=%v, want preserved validated provider projection", result, runErr)
+			}
+			if providerCalls.Load() != 0 || pricingCalls.Load() != 0 || result.Usage.TotalTokens != 0 {
+				t.Fatalf("provider=%d pricing=%d usage=%+v", providerCalls.Load(), pricingCalls.Load(), result.Usage)
+			}
+		})
 	}
 }
 
@@ -596,7 +1134,7 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	}
 }
 
-func TestController_DispatchErrorPersistsSuccessfulPrefixForRetry(t *testing.T) {
+func TestController_DispatchErrorBlocksAmbiguousSuffixUntilRerun(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := context.Background()
 	firstCtx, cancelFirst := context.WithCancel(ctx)
@@ -632,12 +1170,6 @@ func TestController_DispatchErrorPersistsSuccessfulPrefixForRetry(t *testing.T) 
 				modifyingExecutions++
 				cancelFirst()
 				return []ToolOutcome{{Content: "write committed", Success: true, EffectClass: "modifying"}}, context.Canceled
-			case 2:
-				if len(calls) != 1 || calls[0].ID != "inspect-2" {
-					t.Fatalf("retry dispatch calls = %+v, want only unresolved suffix", calls)
-				}
-				suffixExecutions++
-				return []ToolOutcome{{Content: "new state", Success: true, EffectClass: "readonly"}}, nil
 			default:
 				t.Fatalf("unexpected dispatch attempt %d with calls %+v", dispatchAttempts, calls)
 				return nil, nil
@@ -673,26 +1205,24 @@ func TestController_DispatchErrorPersistsSuccessfulPrefixForRetry(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetStep suffix: %v", err)
 	}
-	if suffix.Status != runledger.StepFailed {
-		t.Fatalf("suffix step = %+v, want failed unresolved call", suffix)
+	if suffix.Status != runledger.StepBlocked || suffix.DispatchState != runledger.StepDispatchDispatched {
+		t.Fatalf("suffix step = %+v, want blocked dispatched call", suffix)
 	}
 
 	second, err := NewController(config)
 	if err != nil {
 		t.Fatalf("NewController retry: %v", err)
 	}
-	result, err := second.Run(ctx)
-	if err != nil {
-		t.Fatalf("retry Run: %v", err)
+	_, err = second.Run(ctx)
+	var recovery *runledger.StepRecoveryError
+	if !errors.As(err, &recovery) || recovery.Action != runledger.StepRecoveryRerun {
+		t.Fatalf("retry error = %v, want explicit rerun recovery", err)
 	}
-	if got, _ := result.Message.Content.(string); got != "completed after retry" {
-		t.Fatalf("retry result = %q, want completed after retry", got)
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want original model request only", providerCalls)
 	}
-	if providerCalls != 2 {
-		t.Fatalf("provider calls = %d, want first tool round plus retry terminal round", providerCalls)
-	}
-	if dispatchAttempts != 2 || modifyingExecutions != 1 || suffixExecutions != 1 {
-		t.Fatalf("dispatch attempts = %d, modifying executions = %d, suffix executions = %d; want 2, 1, 1", dispatchAttempts, modifyingExecutions, suffixExecutions)
+	if dispatchAttempts != 1 || modifyingExecutions != 1 || suffixExecutions != 0 {
+		t.Fatalf("dispatch attempts = %d, modifying executions = %d, suffix executions = %d; want 1, 1, 0", dispatchAttempts, modifyingExecutions, suffixExecutions)
 	}
 	prefix, err = ledger.GetStep(ctx, runID, prefixStepID)
 	if err != nil {
@@ -702,11 +1232,8 @@ func TestController_DispatchErrorPersistsSuccessfulPrefixForRetry(t *testing.T) 
 		t.Fatalf("replayed prefix step = %+v, want immutable completed attempt 1", prefix)
 	}
 	suffix, err = ledger.GetStep(ctx, runID, suffixStepID)
-	if err != nil {
-		t.Fatalf("GetStep completed suffix: %v", err)
-	}
-	if suffix.Status != runledger.StepCompleted || suffix.Attempt != 2 {
-		t.Fatalf("retried suffix step = %+v, want completed attempt 2", suffix)
+	if err != nil || suffix.Status != runledger.StepBlocked || suffix.Attempt != 1 {
+		t.Fatalf("blocked suffix step = %+v, err=%v", suffix, err)
 	}
 }
 
@@ -847,3 +1374,80 @@ type testError string
 func (e testError) Error() string { return string(e) }
 
 func testingError(message string) error { return testError(message) }
+
+type hideFirstGetStepJournal struct {
+	runledger.BlockingStepJournal
+	getCalls atomic.Int32
+}
+
+func (j *hideFirstGetStepJournal) GetStep(ctx context.Context, runID, stepID string) (runledger.ExecutionStep, error) {
+	if j.getCalls.Add(1) == 1 {
+		return runledger.ExecutionStep{}, runledger.ErrStepNotFound
+	}
+	return j.BlockingStepJournal.GetStep(ctx, runID, stepID)
+}
+
+func (j *hideFirstGetStepJournal) MarkStepDispatched(ctx context.Context, step runledger.ExecutionStep, at time.Time) error {
+	return j.BlockingStepJournal.(runledger.DispatchStepJournal).MarkStepDispatched(ctx, step, at)
+}
+
+func (j *hideFirstGetStepJournal) ReclaimStep(ctx context.Context, step runledger.ExecutionStep, at time.Time) (runledger.ExecutionStep, error) {
+	return j.BlockingStepJournal.(runledger.FencedStepJournal).ReclaimStep(ctx, step, at)
+}
+
+type modelResponseFailingEvidenceStore struct {
+	evidence.Store
+	failure error
+}
+
+func (s *modelResponseFailingEvidenceStore) Put(ctx context.Context, object evidence.Object) (evidence.Object, error) {
+	if object.Kind == evidence.KindModelResponse {
+		return evidence.Object{}, s.failure
+	}
+	return s.Store.Put(ctx, object)
+}
+
+type failingCompleteStepJournal struct {
+	runledger.BlockingStepJournal
+	failure error
+}
+
+func (j *failingCompleteStepJournal) CompleteStepAttempt(context.Context, runledger.ExecutionStep, string, string, time.Time) error {
+	return j.failure
+}
+
+func (j *failingCompleteStepJournal) MarkStepDispatched(ctx context.Context, step runledger.ExecutionStep, at time.Time) error {
+	return j.BlockingStepJournal.(runledger.DispatchStepJournal).MarkStepDispatched(ctx, step, at)
+}
+
+func (j *failingCompleteStepJournal) ReclaimStep(ctx context.Context, step runledger.ExecutionStep, at time.Time) (runledger.ExecutionStep, error) {
+	return j.BlockingStepJournal.(runledger.FencedStepJournal).ReclaimStep(ctx, step, at)
+}
+
+type trackingBlockingJournal struct {
+	runledger.BlockingStepJournal
+	completeFailure error
+	completeCalls   int
+	blockCalls      int
+}
+
+func (j *trackingBlockingJournal) CompleteStepAttempt(ctx context.Context, step runledger.ExecutionStep, evidenceID, outputDigest string, completedAt time.Time) error {
+	j.completeCalls++
+	if j.completeFailure != nil {
+		return j.completeFailure
+	}
+	return j.BlockingStepJournal.CompleteStepAttempt(ctx, step, evidenceID, outputDigest, completedAt)
+}
+
+func (j *trackingBlockingJournal) BlockStep(ctx context.Context, step runledger.ExecutionStep, failure, evidenceID, outputDigest string, completedAt time.Time) error {
+	j.blockCalls++
+	return j.BlockingStepJournal.BlockStep(ctx, step, failure, evidenceID, outputDigest, completedAt)
+}
+
+func (j *trackingBlockingJournal) MarkStepDispatched(ctx context.Context, step runledger.ExecutionStep, at time.Time) error {
+	return j.BlockingStepJournal.(runledger.DispatchStepJournal).MarkStepDispatched(ctx, step, at)
+}
+
+func (j *trackingBlockingJournal) ReclaimStep(ctx context.Context, step runledger.ExecutionStep, at time.Time) (runledger.ExecutionStep, error) {
+	return j.BlockingStepJournal.(runledger.FencedStepJournal).ReclaimStep(ctx, step, at)
+}

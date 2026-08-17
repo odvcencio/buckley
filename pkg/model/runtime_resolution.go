@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -27,6 +28,22 @@ func ResolvePhaseModel(cfg *config.Config, checker ReasoningChecker, engine *rul
 		return resolved
 	}
 	return strings.TrimSpace(defaultModelForPhase(cfg, phase))
+}
+
+// ResolvePhaseModelRequired resolves a phase without silently substituting an
+// unrelated provider or model. Callers that are about to dispatch a request
+// should use this form so an incomplete configuration is visible to the
+// operator instead of becoming an unexpected bill or a misleading trace.
+func ResolvePhaseModelRequired(cfg *config.Config, checker ReasoningChecker, engine *rules.Engine, phase, override string) (string, error) {
+	modelID := strings.TrimSpace(ResolvePhaseModel(cfg, checker, engine, phase, override))
+	if modelID == "" {
+		phase = strings.TrimSpace(phase)
+		if phase == "" {
+			phase = "execution"
+		}
+		return "", fmt.Errorf("no model resolved for %s phase; configure models.%s or pass an explicit model override; Buckley will not substitute another model", phase, phase)
+	}
+	return modelID, nil
 }
 
 // ResolveReasoningEffort determines the reasoning effort for a phase/model pair.

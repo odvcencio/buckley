@@ -554,7 +554,7 @@ func (s *Store) CountPendingApprovals(sessionID string) (int, error) {
 	return count, nil
 }
 
-func ensurePendingApprovalsSchema(db *sql.DB) error {
+func ensurePendingApprovalsSchema(db MigrationDB) error {
 	rows, err := db.Query(`PRAGMA table_info(pending_approvals)`)
 	if err != nil {
 		return fmt.Errorf("pending approvals pragma: %w", err)

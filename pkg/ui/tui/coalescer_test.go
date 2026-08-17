@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -378,5 +380,200 @@ func TestCoalescer_AddToNewBuffer(t *testing.T) {
 	flush := received[0].(StreamFlush)
 	if flush.Text != "abcde" {
 		t.Errorf("expected 'abcde', got '%s'", flush.Text)
+	}
+}
+
+func TestCoalescer_BlockedPublisherKeepsPublicationMemoryBoundedAndOrdered(t *testing.T) {
+	var messages []Message
+	var messagesMu sync.Mutex
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var blockFirst sync.Once
+	c := NewCoalescer(CoalescerConfig{MaxChars: 1, MaxWait: time.Hour}, func(msg Message) {
+		blockFirst.Do(func() {
+			close(started)
+			<-release
+		})
+		messagesMu.Lock()
+		messages = append(messages, msg)
+		messagesMu.Unlock()
+	})
+
+	publisherDone := make(chan struct{})
+	go func() {
+		c.AddStream("session", 1, "first")
+		close(publisherDone)
+	}()
+	<-started
+	for i := 0; i < coalescerPendingMaxCount*2; i++ {
+		c.AddStream("session", 1, "x")
+	}
+	c.FlushAndPostStream("session", 1, StreamDone{SessionID: "session", Generation: 1})
+
+	snapshot := c.Snapshot()
+	if snapshot.PendingCount+snapshot.InFlightCount > coalescerPendingMaxCount {
+		t.Fatalf("publication count exceeded cap: %+v", snapshot)
+	}
+	if snapshot.PendingBytes+snapshot.InFlightBytes > coalescerPendingMaxBytes {
+		t.Fatalf("publication bytes exceeded cap: %+v", snapshot)
+	}
+	if !snapshot.Overloaded || snapshot.Rejected == 0 || snapshot.DiagnosticsQueued != 1 {
+		t.Fatalf("publication overload was not observable: %+v", snapshot)
+	}
+
+	close(release)
+	select {
+	case <-publisherDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher did not drain after callback release")
+	}
+	messagesMu.Lock()
+	defer messagesMu.Unlock()
+	diagnosticIndex, terminalIndex := -1, -1
+	for i, msg := range messages {
+		switch msg.(type) {
+		case streamOverloadMsg:
+			diagnosticIndex = i
+		case StreamDone, streamBoundaryRejectedMsg:
+			terminalIndex = i
+		}
+	}
+	if diagnosticIndex < 0 || terminalIndex <= diagnosticIndex {
+		t.Fatalf("publication order diagnostic=%d terminal=%d (messages=%d)", diagnosticIndex, terminalIndex, len(messages))
+	}
+}
+
+func TestCoalescer_ExactBoundaryCapKeepsDiagnosticAndTerminalRejection(t *testing.T) {
+	var messages []Message
+	var messagesMu sync.Mutex
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var blockFirst sync.Once
+	c := NewCoalescer(DefaultCoalescerConfig(), func(msg Message) {
+		blockFirst.Do(func() {
+			close(started)
+			<-release
+		})
+		messagesMu.Lock()
+		messages = append(messages, msg)
+		messagesMu.Unlock()
+	})
+
+	publisherDone := make(chan struct{})
+	go func() {
+		c.FlushAndPostStream("boundary-000", 1, StreamDone{SessionID: "boundary-000", Generation: 1})
+		close(publisherDone)
+	}()
+	<-started
+	for i := 1; i < coalescerPendingMaxCount; i++ {
+		sessionID := fmt.Sprintf("boundary-%03d", i)
+		c.FlushAndPostStream(sessionID, 1, StreamDone{SessionID: sessionID, Generation: 1})
+	}
+	snapshot := c.Snapshot()
+	if snapshot.PendingCount+snapshot.InFlightCount != coalescerPendingMaxCount {
+		t.Fatalf("boundary publication count = %+v", snapshot)
+	}
+	if snapshot.DiagnosticsQueued != 1 || snapshot.RejectedBoundaries != coalescerBoundaryReserve ||
+		snapshot.BoundarySignals != coalescerBoundaryMarkerMaxCount || snapshot.Evicted != 0 {
+		t.Fatalf("boundary saturation snapshot = %+v", snapshot)
+	}
+
+	close(release)
+	select {
+	case <-publisherDone:
+	case <-time.After(time.Second):
+		t.Fatal("boundary publisher did not drain")
+	}
+	messagesMu.Lock()
+	defer messagesMu.Unlock()
+	if len(messages) != coalescerPendingMaxCount {
+		t.Fatalf("published %d messages, want %d", len(messages), coalescerPendingMaxCount)
+	}
+	diagnosticIndex := -1
+	rejections := make(map[streamBoundaryKey]int)
+	for i, msg := range messages {
+		switch m := msg.(type) {
+		case streamOverloadMsg:
+			diagnosticIndex = i
+		case StreamDone:
+			if m.SessionID >= "boundary-239" {
+				t.Fatalf("saturated boundary %q was published instead of rejected", m.SessionID)
+			}
+		case streamBoundaryRejectedMsg:
+			if i <= diagnosticIndex {
+				t.Fatalf("boundary rejection index %d preceded diagnostic %d", i, diagnosticIndex)
+			}
+			rejections[streamBoundaryKey{fingerprint: m.Fingerprint, generation: m.Generation}]++
+		}
+	}
+	if diagnosticIndex < 0 || len(rejections) != coalescerBoundaryMarkerMaxCount {
+		t.Fatalf("boundary ordering diagnostic=%d correlated=%d", diagnosticIndex, len(rejections))
+	}
+	for i := coalescerPendingMaxCount - coalescerBoundaryReserve; i < coalescerPendingMaxCount-1; i++ {
+		key := streamBoundaryKey{
+			fingerprint: streamFingerprint(fmt.Sprintf("boundary-%03d", i)),
+			generation:  1,
+		}
+		if rejections[key] != 1 {
+			t.Fatalf("boundary-%03d correlated marker count = %d, want 1", i, rejections[key])
+		}
+	}
+}
+
+func TestCoalescer_DiagnosticLatchRequiresSuccessfulEnqueue(t *testing.T) {
+	c := NewCoalescer(DefaultCoalescerConfig(), nil)
+	event := coalescerPublication{msg: StreamDone{}, bytes: eventMessageBaseBytes, boundary: true}
+	c.mu.Lock()
+	for i := 0; i < coalescerPendingMaxCount; i++ {
+		c.pending = append(c.pending, event)
+		c.pendingBytes += event.bytes
+	}
+	started := c.enterOverloadLocked()
+	diagnosticSet := c.diagnosticSet
+	c.mu.Unlock()
+	if started || diagnosticSet {
+		t.Fatalf("failed diagnostic enqueue started=%v latched=%v", started, diagnosticSet)
+	}
+	if got := c.Snapshot().DiagnosticsRejected; got != 1 {
+		t.Fatalf("diagnostic rejection count = %d, want 1", got)
+	}
+}
+
+func TestCoalescer_UniqueBelowThresholdBuffersStayBoundedWhilePublisherBlocked(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var blockFirst sync.Once
+	c := NewCoalescer(CoalescerConfig{MaxChars: 128, MaxWait: time.Hour}, func(Message) {
+		blockFirst.Do(func() {
+			close(started)
+			<-release
+		})
+	})
+	publisherDone := make(chan struct{})
+	go func() {
+		c.AddStream("publisher", 1, strings.Repeat("p", 128))
+		close(publisherDone)
+	}()
+	<-started
+	for i := 0; i < coalescerBufferMaxCount*2; i++ {
+		c.AddStream(fmt.Sprintf("buffer-%03d", i), 1, "x")
+	}
+	snapshot := c.Snapshot()
+	if snapshot.BufferedStreams > coalescerBufferMaxCount || snapshot.BufferBytes > coalescerBufferMaxBytes {
+		t.Fatalf("buffer cap exceeded: %+v", snapshot)
+	}
+	if snapshot.RejectedBuffers == 0 || snapshot.DiagnosticsQueued != 1 {
+		t.Fatalf("buffer overload was not observable: %+v", snapshot)
+	}
+	c.Close()
+	afterClose := c.Snapshot()
+	if afterClose.BufferedStreams != 0 || afterClose.BufferBytes != 0 || afterClose.PendingCount != 0 {
+		t.Fatalf("Close retained coalescer payloads: %+v", afterClose)
+	}
+	close(release)
+	select {
+	case <-publisherDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked publisher did not return after release")
 	}
 }

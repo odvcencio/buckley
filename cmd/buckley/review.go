@@ -39,6 +39,7 @@ type reviewCommandOptions struct {
 	maxToolCalls    int
 	maxDiff         int
 	maxRetries      int
+	depth           reviewDepth
 }
 
 type reviewCommandRuntime struct {
@@ -114,6 +115,8 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
+	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
+	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
 
 	if err := fs.Parse(args); err != nil {
 		return reviewCommandOptions{}, err
@@ -136,6 +139,25 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	if *noBudget && *budgetUSD > 0 {
 		return reviewCommandOptions{}, fmt.Errorf("--no-budget cannot be combined with --budget")
 	}
+	depthWasSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "depth" {
+			depthWasSet = true
+		}
+	})
+	if *inDepth && depthWasSet {
+		parsed, err := parseReviewDepth(*depthFlag)
+		if err != nil || parsed != reviewDepthSpot {
+			return reviewCommandOptions{}, fmt.Errorf("--in-depth cannot be combined with --depth %q", *depthFlag)
+		}
+		*depthFlag = string(reviewDepthInDepth)
+	} else if *inDepth {
+		*depthFlag = string(reviewDepthInDepth)
+	}
+	depth, err := parseReviewDepth(*depthFlag)
+	if err != nil {
+		return reviewCommandOptions{}, err
+	}
 
 	opts := reviewCommandOptions{
 		projectMode:     *projectMode,
@@ -156,6 +178,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		maxToolCalls:    *maxToolCalls,
 		maxDiff:         *maxDiff,
 		maxRetries:      *maxRetries,
+		depth:           depth,
 	}
 	if *noInteractive {
 		opts.interactive = false
@@ -205,15 +228,19 @@ func runReviewCommand(args []string) error {
 		} else if runtime.reasoningEffort != "" {
 			termOut.Dim("Reasoning effort: %s", runtime.reasoningEffort)
 		}
+		termOut.Dim("Review depth: %s", reviewDepthLabel(opts.depth))
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
-		maxIterations:   opts.maxTurns,
-		maxToolCalls:    opts.maxToolCalls,
-		maxRetries:      opts.maxRetries,
-		maxDiffBytes:    opts.maxDiff,
-		maxCostUSD:      opts.budgetUSD,
-		clearCostBudget: opts.noBudget,
+		maxIterations:         opts.maxTurns,
+		maxIterationsExplicit: opts.maxTurns > 0,
+		maxToolCalls:          opts.maxToolCalls,
+		maxToolCallsExplicit:  opts.maxToolCalls > 0,
+		maxRetries:            opts.maxRetries,
+		maxDiffBytes:          opts.maxDiff,
+		maxCostUSD:            opts.budgetUSD,
+		clearCostBudget:       opts.noBudget,
+		depth:                 opts.depth,
 	})
 	result, reviewErr := runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 
@@ -224,16 +251,10 @@ func runReviewCommand(args []string) error {
 		if !quietMode && result != nil {
 			printReviewAttemptCounts(result)
 		}
-		if result == nil || !result.incomplete || strings.TrimSpace(result.reviewText) == "" {
-			return reviewErr
-		}
-		if err := writeReviewOutput(opts.outputFile, result.reviewText); err != nil {
-			return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
-		}
-		if opts.showCost && result.trace != nil {
+		if opts.showCost && result != nil && result.trace != nil {
 			printReviewCost(result.trace, runtime.ledger)
 		}
-		return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(opts.outputFile))
+		return reviewCommandFailure(reviewErr, result)
 	}
 
 	if result.reviewText == "" {
@@ -262,6 +283,16 @@ func runReviewCommand(args []string) error {
 	}
 
 	return nil
+}
+
+// reviewCommandFailure keeps incomplete model output out of the review
+// channel. A rejected pass may retain diagnostics for telemetry, but it is
+// never written or printed as a caveated review artifact.
+func reviewCommandFailure(reviewErr error, result *reviewCommandResult) error {
+	if result != nil && result.incomplete {
+		return fmt.Errorf("%w; incomplete review discarded; no review was emitted", reviewErr)
+	}
+	return reviewErr
 }
 
 func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
@@ -302,6 +333,13 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
+	}
+	privacyFallback, err := model.ParseOpenRouterPrivacyFallback(cfg.Buckbot.OpenRouterPrivacyFallback)
+	if err != nil {
+		return nil, err
+	}
+	if err := mgr.SetOpenRouterPrivacyFallback(privacyFallback); err != nil {
+		return nil, fmt.Errorf("configure OpenRouter privacy fallback: %w", err)
 	}
 	reasoningEffort := resolveReviewReasoningEffort(cfg, mgr, modelID, reviewReasoningOverride())
 	arbEngine, err := rules.NewDefaultEngine()
@@ -454,7 +492,10 @@ func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framewo
 func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
 	spinner := newReviewProgress("Analyzing project...")
 	spinner.Start()
-	policy := model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
+	policy := model.ReviewSnapshotPolicy{
+		Mode:             model.ReviewSnapshotWorktree,
+		IncludeUntracked: true,
+	}
 	snapshot, err := model.CaptureReviewSnapshot(ctx, "", policy)
 	if err != nil {
 		spinner.StopWithError(err.Error())
@@ -474,6 +515,11 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		spinner.StopWithError(err.Error())
 		return nil, err
 	}
+	projectCtx.IncludesUntracked = snapshot.IncludesUntracked()
+	for _, file := range snapshot.UntrackedFiles() {
+		projectCtx.UntrackedFiles = append(projectCtx.UntrackedFiles, file.Path)
+	}
+	projectCtx.ExcludedUntracked = snapshot.ExcludedUntrackedFiles()
 	if err := verifyReviewSnapshotStable(ctx, snapshot, policy); err != nil {
 		spinner.StopWithError(err.Error())
 		return nil, err
@@ -494,10 +540,15 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		explorationTimeout:   0,
 		synthesisLead:        90 * time.Second,
 	}
+	if reviewDepthNeedsVerification(string(reviewPolicy.depth)) {
+		// Detailed modes own their verification loop. Leave it uncapped unless
+		// the operator supplied an explicit tool-call ceiling.
+		plan.maxVerificationCalls = 0
+	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
-	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
-	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{}, oneshot.AgentRunOpts{
+	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{Depth: string(reviewPolicy.depth)}, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
@@ -550,7 +601,11 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		contextOpts.MaxDiffBytes = reviewPolicy.maxDiffBytes
 	}
 	if snapshot != nil && policy.Mode == model.ReviewSnapshotWorktree {
-		contextOpts.CapturedUntracked = snapshot.UntrackedFiles()
+		// Preserve the snapshot's non-nil empty slice as an authoritative
+		// capture. This prevents context assembly from falling back to a live
+		// filesystem read when no safe untracked files were found.
+		contextOpts.CapturedUntracked = append([]model.ReviewUntrackedFile{}, snapshot.UntrackedFiles()...)
+		contextOpts.CapturedExcludedUntracked = append([]string{}, snapshot.ExcludedUntrackedFiles()...)
 	}
 
 	branchCtx, audit, err := commands.AssembleBranchContext(contextOpts)
@@ -580,12 +635,13 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	changedFiles := reviewChangedFilePaths(branchCtx.Files)
 	reviewPolicy = reviewPolicy.withVerificationTargetBudget(changedFiles)
-	spinner.SetMessage(fmt.Sprintf("Running %s review with %s reasoning...", reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
+	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
 	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
 	reviewDef := commands.ReviewBranchDef{
 		ChangedFiles:      changedFiles,
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 		ApprovalCritic:    reviewPolicy.approvalCritic,
+		Depth:             string(reviewPolicy.depth),
 	}
 	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
@@ -628,10 +684,14 @@ func branchReviewSnapshotPolicy(scope string, includeUnstaged bool, untrackedPat
 		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead}
 	}
 	if includeUnstaged {
-		if scope == commands.ReviewScopeWorktree && len(untrackedPaths) > 0 {
+		if len(untrackedPaths) > 0 {
 			return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotWorktree, UntrackedPaths: append([]string(nil), untrackedPaths...)}
 		}
-		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotTrackedWorktree}
+		// The worktree boundary filters unsafe/secret-like files before they
+		// enter the immutable snapshot. Changes and worktree reviews should
+		// therefore see safe new files by default instead of falsely reporting
+		// them as missing from the review.
+		return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotWorktree, IncludeUntracked: true}
 	}
 	return model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotIndex}
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -404,9 +405,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		engine = nil
 	}
 
-	resolvedModel := model.ResolvePhaseModel(cfg, mgr, engine, "execution", modelOverride)
-	if resolvedModel == "" {
-		resolvedModel = "openai/gpt-4o"
+	resolvedModel, err := model.ResolvePhaseModelRequired(cfg, mgr, engine, "execution", modelOverride)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
 	}
 
 	if !quietMode {
@@ -1209,6 +1211,14 @@ func runConfigCheck() error {
 	}
 	fmt.Println()
 
+	// Load and validate config before reporting credentials. OpenRouter can be
+	// supplied by ~/.buckley/config.env, so checking only process env would
+	// incorrectly report the configured review provider as missing.
+	cfg, err := config.Load()
+	if err != nil {
+		return withExitCode(err, 2)
+	}
+
 	// Check API keys
 	fmt.Println("API keys:")
 	providers := []struct {
@@ -1221,22 +1231,27 @@ func runConfigCheck() error {
 		{"Google", "GOOGLE_API_KEY"},
 	}
 
-	hasProvider := false
-	for _, p := range providers {
-		if key := os.Getenv(p.envVar); key != "" {
-			fmt.Printf("  ✓ %s: configured\n", p.name)
-			hasProvider = true
-		} else {
-			fmt.Printf("  - %s: not set\n", p.name)
-		}
+	ready := make(map[string]bool)
+	for _, provider := range cfg.Providers.ReadyProviders() {
+		ready[provider] = true
 	}
-
-	// Check config.env fallback
-	if !hasProvider {
-		if key := checkConfigEnvFile(); key != "" {
-			fmt.Printf("  ✓ OpenRouter: found in ~/.buckley/config.env\n")
-			hasProvider = true
+	for _, p := range providers {
+		if !ready[strings.ToLower(p.name)] {
+			fmt.Printf("  - %s: not configured\n", p.name)
+			continue
 		}
+		source := "environment"
+		if p.name == "OpenRouter" && os.Getenv(p.envVar) == "" {
+			if checkConfigEnvFile() != "" {
+				source = "~/.buckley/config.env"
+			} else {
+				source = "config.yaml"
+			}
+		} else {
+			fmt.Printf("  ✓ %s: configured (%s)\n", p.name, source)
+			continue
+		}
+		fmt.Printf("  ✓ %s: configured (%s)\n", p.name, source)
 	}
 	fmt.Println()
 
@@ -1248,12 +1263,6 @@ func runConfigCheck() error {
 		fmt.Println("  ✗ git: not found (required)")
 	}
 	fmt.Println()
-
-	// Load and validate config
-	cfg, err := config.Load()
-	if err != nil {
-		return withExitCode(err, 2)
-	}
 
 	// Show validation warnings
 	warnings := cfg.ValidationWarnings()
@@ -1292,6 +1301,17 @@ func runConfigShow() error {
 	fmt.Printf("  Execution: %s\n", cfg.Models.Execution)
 	fmt.Printf("  Review:    %s\n", cfg.Models.Review)
 	fmt.Println()
+	fmt.Printf("Buckbot:\n")
+	fmt.Printf("  Review model: %s\n", cfg.Buckbot.Model)
+	fmt.Printf("  Critic model: %s\n", cfg.Buckbot.CriticModel)
+	privacyFallback := strings.TrimSpace(cfg.Buckbot.OpenRouterPrivacyFallback)
+	if privacyFallback == "" {
+		privacyFallback = "disabled"
+	}
+	fmt.Printf("  OpenRouter privacy fallback: %s\n", privacyFallback)
+	fmt.Printf("  Review budget: %s\n", configBudgetSummary(cfg.Buckbot.PerReviewBudgetUSD))
+	fmt.Printf("  Tool-call cap: %s\n", configLimitSummary(cfg.Buckbot.MaxToolCalls))
+	fmt.Println()
 	fmt.Printf("Orchestrator:\n")
 	fmt.Printf("  Trust level: %s\n", cfg.Orchestrator.TrustLevel)
 	fmt.Printf("  Auto workflow: %v\n", cfg.Orchestrator.AutoWorkflow)
@@ -1304,6 +1324,20 @@ func runConfigShow() error {
 		fmt.Printf("  ✓ %s\n", p)
 	}
 	return nil
+}
+
+func configBudgetSummary(value float64) string {
+	if value <= 0 {
+		return "uncapped"
+	}
+	return fmt.Sprintf("$%.2f", value)
+}
+
+func configLimitSummary(value int) string {
+	if value <= 0 {
+		return "unlimited"
+	}
+	return strconv.Itoa(value)
 }
 
 func runConfigPath() error {

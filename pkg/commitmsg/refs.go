@@ -38,9 +38,9 @@ func NeutralizeCloseDirectives(s string) string {
 // reference-only form. The issue argument is the bare number, with or
 // without a leading "#". It never emits a close directive.
 func IssueRefLine(issue string) string {
-	n := issue
-	for len(n) > 0 && n[0] == '#' {
-		n = n[1:]
+	n := NormalizeIssueRef(issue)
+	if n == "" {
+		return ""
 	}
 	return "Refs #" + n
 }

@@ -170,6 +170,7 @@ Grading criteria:
 - **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — concrete source/test evidence for that one disposition
 - When feedback IDs are supplied, repeat the exact Feedback ledger entry once for EVERY supplied ID and no other IDs. Omit Feedback entries only when NONE_SUPPLIED.
 - **Verification**: exact focused commands or CI evidence used; say "not independently run" when applicable
+Completeness: COMPLETE
 
 ## Invariant Audit
 - List every cross-file/stateful invariant examined and the values compared
@@ -276,6 +277,7 @@ Two or three sentences on behavior and impact.
 - **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` or `+"`"+`NONE_SUPPLIED`+"`"+`
 - **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — evidence; repeat once for every supplied ID
 - **Verification**: exact commands, or "not independently run"
+Completeness: COMPLETE
 
 ## Invariant Audit
 Changed cross-file/stateful invariants and compared values; if none, state what was checked.
@@ -314,13 +316,13 @@ func reviewProjectDefault(now time.Time) string {
 
 Use the supplied Canopy TOC—metrics, major call sites, important-flow caller/callee edges, complexity hotspots, and parse health—as the starting map. It is not a sampling limit and it is not a substitute for inspecting the repository. Enumerate the complete tracked-file inventory, classify every path, and continue inspecting until every human-authored source, test, configuration, and documentation area has been covered. Use the TOC's file:line anchors to open the captured source, then use paginated read_file calls for long files and search_text/find_files to trace consumers and boundaries. Generated, vendored, and build-output files may be excluded only after they are identified and recorded as excluded with a reason.
 
-There is no per-review tool-call or model-turn cap by default. Continue evidence collection until coverage is complete or the caller's ordinary deadline/safety controls require synthesis. Maintain a coverage ledger in the final report and distinguish complete coverage from deadline-limited coverage. Every issue needs exact file:line evidence. This is advisory: never issue a merge approval verdict.
+There is no per-review tool-call or model-turn cap by default. Continue until coverage is complete; ordinary deadline or safety stops fail closed. Maintain a coverage ledger and cite exact file:line evidence. This is advisory: never issue a merge approval verdict.
 
 Return exactly:
 
 ## Project Health
 - **Overall**: GOOD|WATCH|POOR
-- **Confidence**: HIGH|MEDIUM|LOW — note Canopy availability and any deferred paths
+- **Confidence**: HIGH|MEDIUM|LOW — based on the complete captured repository and Canopy evidence
 - **Architecture**: one sentence
 - **Maintainability**: one sentence
 - **Delivery readiness**: one sentence
@@ -334,8 +336,8 @@ Return exactly:
 - **Inventory**: tracked paths enumerated and classified
 - **Inspected**: source, tests, configuration, documentation, and boundary areas actually read
 - **Excluded**: generated, vendored, binary, or build-output paths with reasons
-- **Deferred**: any paths not inspected before synthesis, or NONE
-- **Completeness**: COMPLETE or PARTIAL — explain the limiting deadline or unavailable evidence
+- **Deferred**: NONE — incomplete passes are rejected
+- **Completeness**: COMPLETE — incomplete passes are rejected
 
 ## Top Actions
 At most three items, ordered by risk/reward:

@@ -234,6 +234,49 @@ func TestReviewExecutionPlanRecognizesQwen38MaxProfile(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanRecognizesDeepSeekV4ProProfile(t *testing.T) {
+	options := automatedReviewOptions{
+		modelID:           deepSeekV4ProReviewModel,
+		adaptiveReasoning: true,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "project",
+		reasoningEffort:    "high",
+		reasoningMaxTokens: 1024,
+		explorationTimeout: 45 * time.Second,
+		maxOutputTokens:    projectReviewOutputTokenBudget,
+	})
+	if options.reasoningMaxTokens != deepSeekBroadReasoning {
+		t.Fatalf("DeepSeek V4 Pro reasoning budget = %d, want %d", options.reasoningMaxTokens, deepSeekBroadReasoning)
+	}
+	if options.explorationTimeout != deepSeekReviewExploration {
+		t.Fatalf("DeepSeek V4 Pro exploration timeout = %s, want %s", options.explorationTimeout, deepSeekReviewExploration)
+	}
+	prompt := appendReviewExecutionPlan("review this", options)
+	for _, fragment := range []string{
+		"DeepSeek V4 Pro Profile",
+		"structured tool-call channel exclusively",
+		"read-only code-mode program",
+		"Canopy inventory as a table of contents",
+		"`UNAVAILABLE`",
+	} {
+		if !strings.Contains(prompt, fragment) {
+			t.Fatalf("DeepSeek prompt missing %q:\n%s", fragment, prompt)
+		}
+	}
+}
+
+func TestDeepSeekV4ProSupportingContextBudget(t *testing.T) {
+	if got := reviewSupportingContextBudget(deepSeekV4ProReviewModel, 0); got != deepSeekSupportingContext {
+		t.Fatalf("DeepSeek default supporting context = %d, want %d", got, deepSeekSupportingContext)
+	}
+	if got := reviewSupportingContextBudget(deepSeekV4ProReviewModel, 9000); got != 9000 {
+		t.Fatalf("explicit supporting context = %d, want 9000", got)
+	}
+	if got := reviewSupportingContextBudget("deepseek/deepseek-v4-pro", 0); got != 0 {
+		t.Fatalf("near-match model received DeepSeek profile budget %d", got)
+	}
+}
+
 func TestReviewExecutionPlanAdaptsQwenReasoningBudget(t *testing.T) {
 	tests := []struct {
 		size string
@@ -427,6 +470,55 @@ func TestAppendQwenReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testi
 	}
 	if !strings.Contains(prompt, "no separate verification-call cap") {
 		t.Fatalf("Qwen prompt does not explain the default unlimited verification policy:\n%s", prompt)
+	}
+}
+
+func TestReviewDepthProfilesChangePromptAndGeneratedCaps(t *testing.T) {
+	balanced := appendReviewExecutionPlan("review this", automatedReviewOptions{
+		depth:                reviewDepthBalanced,
+		sizeClass:            "standard",
+		modelID:              "google/gemini-3.7-flash",
+		maxIterations:        5,
+		maxToolCalls:         12,
+		maxVerificationCalls: 1,
+	})
+	if !strings.Contains(balanced, "## Review Depth: BALANCED INVESTIGATION") ||
+		!strings.Contains(balanced, "map the relevant state and call sites") ||
+		!strings.Contains(balanced, "run_verification") {
+		t.Fatalf("balanced prompt omitted its evidence contract:\n%s", balanced)
+	}
+
+	deep := automatedReviewOptions{
+		depth:         reviewDepthInDepth,
+		maxIterations: 5,
+		maxToolCalls:  12,
+	}
+	deep = deep.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:            "standard",
+		maxIterations:        5,
+		maxToolCalls:         12,
+		maxVerificationCalls: 1,
+		explorationTimeout:   50 * time.Second,
+	})
+	if deep.maxIterations != 0 || deep.maxToolCalls != 0 || deep.maxVerificationCalls != 0 || deep.explorationTimeout != 0 {
+		t.Fatalf("in-depth retained generated caps: %#v", deep)
+	}
+	deepPrompt := appendReviewExecutionPlan("review this", deep)
+	for _, want := range []string{"## Review Depth: IN-DEPTH INVESTIGATION", "exhaustive repository", "## Verification Ledger", "adversarial pass"} {
+		if !strings.Contains(deepPrompt, want) {
+			t.Fatalf("in-depth prompt missing %q:\n%s", want, deepPrompt)
+		}
+	}
+
+	operatorBounded := (automatedReviewOptions{
+		depth:                 reviewDepthInDepth,
+		maxIterations:         3,
+		maxIterationsExplicit: true,
+		maxToolCalls:          4,
+		maxToolCallsExplicit:  true,
+	}).withExecutionPlan(reviewExecutionPlan{maxIterations: 9, maxToolCalls: 20, maxVerificationCalls: 1})
+	if operatorBounded.maxIterations != 3 || operatorBounded.maxToolCalls != 4 {
+		t.Fatalf("in-depth overrode explicit operator caps: %#v", operatorBounded)
 	}
 }
 

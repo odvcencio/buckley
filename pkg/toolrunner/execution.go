@@ -67,7 +67,21 @@ func (r *Runner) executeWithTools(ctx context.Context, req Request, tools []tool
 
 		finishReason, err := r.consumeToolCallStream(ctx, chunkChan, errChan, acc, thinkParser)
 		if err != nil {
+			result.FinishReason = finishReason
+			if usage := acc.Usage(); usage != nil {
+				result.Usage = model.AddUsage(result.Usage, *usage)
+			}
+			partial := acc.FinalizeWithTokenParsing()
+			if text := model.ExtractTextContentOrEmpty(partial.Content); text != "" {
+				result.Content = text
+			}
+			if partial.Reasoning != "" {
+				result.Reasoning = partial.Reasoning
+			}
 			r.notifyStreamError(err)
+			if result.Content != "" || result.Reasoning != "" || result.Usage.TotalTokens > 0 || len(partial.ToolCalls) > 0 {
+				return result, fmt.Errorf("streaming chat completion failed after partial response: %w", err)
+			}
 			return result, err
 		}
 
@@ -151,7 +165,11 @@ streamLoop:
 		select {
 		case <-ctx.Done():
 			return finishReason, ctx.Err()
-		case streamErr := <-errChan:
+		case streamErr, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
 			if streamErr != nil {
 				return finishReason, fmt.Errorf("streaming chat completion: %w", streamErr)
 			}
@@ -382,8 +400,8 @@ func (r *Runner) executeToolCallsParallel(ctx context.Context, calls []model.Too
 					}
 				}()
 				sem <- struct{}{}
+				defer func() { <-sem }()
 				record := r.executeSingleToolCall(ctx, calls[idx], toolMap)
-				<-sem
 				records[idx] = record
 			}()
 		}

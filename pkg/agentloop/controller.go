@@ -11,10 +11,35 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentloop/lifecycle"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
+)
+
+// Lifecycle aliases keep the controller API ergonomic while the contract
+// itself lives in a neutral subpackage so telemetry can consume it without an
+// import cycle through pkg/model.
+type LifecycleEvent = lifecycle.Event
+type LifecycleEventType = lifecycle.EventType
+type LifecycleObserver = lifecycle.Observer
+
+const (
+	LifecycleTurnStart     = lifecycle.TurnStart
+	LifecycleAttemptStart  = lifecycle.AttemptStart
+	LifecycleAttemptEnd    = lifecycle.AttemptEnd
+	LifecycleStepStart     = lifecycle.StepStart
+	LifecycleModelRequest  = lifecycle.ModelRequest
+	LifecycleModelResponse = lifecycle.ModelResponse
+	LifecycleModelError    = lifecycle.ModelError
+	LifecycleToolCall      = lifecycle.ToolCall
+	LifecycleToolStart     = lifecycle.ToolStart
+	LifecycleToolResult    = lifecycle.ToolResult
+	LifecycleToolError     = lifecycle.ToolError
+	LifecycleTurnStopping  = lifecycle.TurnStopping
+	LifecycleTurnEnd       = lifecycle.TurnEnd
 )
 
 // Controller is the shared turn engine (G6): one type that owns a full
@@ -34,6 +59,16 @@ type Controller struct {
 	cfg    ControllerConfig
 	runMu  sync.Mutex
 	totals controllerTotals
+	// lifecycleSeq is protected by runMu because Controller serializes all
+	// Run continuations. It gives live consumers a stable order even when a
+	// surface calls Run again for a nudge or capability retry.
+	lifecycleSeq uint64
+	// lifecycleTurnStarted/completed and runAttempts are protected by runMu.
+	// A caller-managed logical turn (ACP) can span several Run attempts while
+	// retaining one TurnID and exactly one turn/start + turn/end pair.
+	lifecycleTurnStarted   bool
+	lifecycleTurnCompleted bool
+	runAttempts            int
 }
 
 // controllerTotals is the turn-lifetime accounting owned by one Controller.
@@ -56,9 +91,12 @@ type controllerTotals struct {
 type RequestBuilder func(ctx context.Context, round int) (model.ChatRequest, error)
 
 // ModelCaller performs one model turn against an already-projected request.
-// useContinuation reports whether Controller resolved a provider
-// continuation window for this round (see ControllerConfig.Continuation);
-// implementations that do not use continuation can ignore it.
+// A caller may return a non-nil response alongside an error when the provider
+// emitted billable material before failing; Controller persists/accounts that
+// partial response and refuses to treat it as a fresh retry. useContinuation
+// reports whether Controller resolved a provider continuation window for this
+// round (see ControllerConfig.Continuation); implementations that do not use
+// continuation can ignore it.
 type ModelCaller interface {
 	Call(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error)
 }
@@ -150,6 +188,10 @@ const (
 	// FinishReasonInvalidCompletion means the provider returned a no-tool
 	// candidate that was empty, unreadable, or explicitly truncated.
 	FinishReasonInvalidCompletion = "invalid_completion"
+	// FinishReasonModelError means the provider failed after returning a
+	// response fragment. The fragment is preserved as an incomplete result;
+	// callers must not retry the logical step blindly.
+	FinishReasonModelError = "model_error"
 
 	partialDispatchJournalTimeout = 5 * time.Second
 	// fallbackCostBoundedOutputTokens is used only when neither the caller nor
@@ -184,6 +226,7 @@ type Termination struct {
 	Reason                string
 	FinalizationAttempted bool
 	FinalizationError     string
+	ProviderError         string
 }
 
 // IncompleteTurnError reports that Buckley preserved the turn's evidence but
@@ -192,6 +235,7 @@ type IncompleteTurnError struct {
 	FinishReason      string
 	Reason            string
 	FinalizationError string
+	ProviderError     string
 }
 
 func (e *IncompleteTurnError) Error() string {
@@ -205,6 +249,9 @@ func (e *IncompleteTurnError) Error() string {
 	message := "agentloop: incomplete turn: " + strings.TrimSuffix(reason, ".")
 	if detail := strings.TrimSpace(e.FinalizationError); detail != "" {
 		message += "; final synthesis failed: " + detail
+	}
+	if detail := strings.TrimSpace(e.ProviderError); detail != "" {
+		message += "; provider error: " + detail
 	}
 	return message
 }
@@ -250,6 +297,11 @@ type Result struct {
 	// (loop guard or step cap). Empty on a normal completion or an empty
 	// model response, since callers already differ on how to surface those.
 	Content string
+	// Partial is true when the provider returned usable material but the
+	// logical request failed before producing a conclusive turn. Message and
+	// Content then contain the preserved fragment; it must not be treated as a
+	// successful assistant answer or retried as a fresh provider call.
+	Partial bool
 	// Progress is the shared, provider-neutral operation projection for this
 	// run. It remains available even when the turn stops before a final model
 	// response so callers can report truthful partial work.
@@ -276,7 +328,15 @@ func (r *Result) RequireConclusive() error {
 		FinishReason:      r.FinishReason,
 		Reason:            r.Termination.Reason,
 		FinalizationError: r.Termination.FinalizationError,
+		ProviderError:     r.Termination.ProviderError,
 	}
+}
+
+// DurableStepJournal is the complete step-state port required by a durable
+// Controller. Its static shape prevents a partially capable journal from
+// reaching an external-effect boundary and failing only at runtime.
+type DurableStepJournal interface {
+	runledger.FencedStepJournal
 }
 
 // ControllerConfig wires one Controller instance.
@@ -368,11 +428,22 @@ type ControllerConfig struct {
 	// step must not be acknowledged without its result.
 	Evidence evidence.Store
 	// StepJournal, when set, records stable logical steps and reuses completed
-	// outputs instead of executing them again after a restart.
-	StepJournal runledger.StepJournal
-	RunID       string
-	SessionID   string
-	TaskID      string
+	// outputs instead of executing them again after a restart. Its composite
+	// type statically requires guarded transitions, dispatch marking, and claim
+	// fencing; nil explicitly selects non-durable controller execution.
+	StepJournal DurableStepJournal
+	// LifecycleObserver receives a redacted live projection of controller
+	// transitions. It is observe-only and best-effort; exact request/response
+	// bodies remain in Evidence and durable RunLedger records.
+	LifecycleObserver LifecycleObserver
+	// DeferLifecycleTurnEnd makes each Run emit attempt boundaries while the
+	// caller owns the logical turn boundary. Such callers must invoke
+	// CompleteLifecycleTurn exactly once after accepting or rejecting the
+	// overall turn. ACP uses this for nudge/continuation Run calls.
+	DeferLifecycleTurnEnd bool
+	RunID                 string
+	SessionID             string
+	TaskID                string
 	// TurnID is stable across retries of one goal-loop turn. It changes when
 	// the goal loop advances to a new checkpoint generation.
 	TurnID string
@@ -407,7 +478,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 // calls, appends history, accumulates usage, and consults the Governor,
 // once per round, until the model returns a response with no tool calls, an
 // empty response, a fatal error, or the Governor/step cap stops the loop.
-func (c *Controller) Run(ctx context.Context) (*Result, error) {
+func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 	if c == nil {
 		return nil, fmt.Errorf("agentloop: nil controller")
 	}
@@ -416,10 +487,45 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 	// both against the same unspent remainder.
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
+	if c.cfg.DeferLifecycleTurnEnd && c.lifecycleTurnCompleted {
+		return nil, fmt.Errorf("agentloop: logical turn is already complete")
+	}
 	if c.totals.startedAt.IsZero() {
 		c.totals.startedAt = time.Now()
 	}
-	result := &Result{
+	runAttempt := 0
+	continuation := false
+	if c.cfg.DeferLifecycleTurnEnd {
+		c.runAttempts++
+		runAttempt = c.runAttempts
+		continuation = runAttempt > 1
+	}
+	if !c.cfg.DeferLifecycleTurnEnd {
+		c.emitLifecycle(LifecycleEvent{
+			Type:      LifecycleTurnStart,
+			Timestamp: time.Now().UTC(),
+			Status:    string(CompletionIncomplete),
+		})
+	} else if !c.lifecycleTurnStarted {
+		c.emitLifecycle(LifecycleEvent{
+			Type:         LifecycleTurnStart,
+			Timestamp:    time.Now().UTC(),
+			Status:       string(CompletionIncomplete),
+			RunAttempt:   runAttempt,
+			Continuation: continuation,
+		})
+		c.lifecycleTurnStarted = true
+	}
+	if c.cfg.DeferLifecycleTurnEnd {
+		c.emitLifecycle(LifecycleEvent{
+			Type:         LifecycleAttemptStart,
+			Timestamp:    time.Now().UTC(),
+			Status:       string(CompletionIncomplete),
+			RunAttempt:   runAttempt,
+			Continuation: continuation,
+		})
+	}
+	result = &Result{
 		Usage:            cloneControllerUsage(c.totals.usage),
 		CostUSD:          c.totals.costUSD,
 		Rounds:           c.cfg.Governor.Rounds(),
@@ -437,6 +543,20 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 		c.totals.modelRequests = result.ModelRequests
 		c.totals.toolCalls = result.ToolCalls
 		c.totals.progress = result.Progress
+		end := LifecycleEvent{
+			Type:         LifecycleTurnEnd,
+			Timestamp:    time.Now().UTC(),
+			Status:       string(result.CompletionStatus),
+			FinishReason: result.FinishReason,
+			StopReason:   result.Termination.Kind,
+			Error:        lifecycleErrorProjection(result, runErr),
+		}
+		if c.cfg.DeferLifecycleTurnEnd {
+			end.Type = LifecycleAttemptEnd
+			end.RunAttempt = runAttempt
+			end.Continuation = continuation
+		}
+		c.emitLifecycle(end)
 	}()
 
 	for {
@@ -478,27 +598,59 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 			return c.finalizeStoppedTurn(ctx, result, result.Rounds)
 		}
 
-		roundResult, contextWindow, err := c.executeModelRound(ctx, result, result.Rounds)
-		if err != nil {
+		roundResult, contextWindow, roundErr := c.executeModelRound(ctx, result, result.Rounds)
+		var accountingErr error
+		if roundResult != nil && roundResult.response != nil {
+			accountingErr = c.addUsageCost(result, roundResult.response.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError)
+		}
+		providerPartial := roundResult != nil && roundResult.partial
+		providerError := ""
+		if providerPartial {
+			providerError = strings.TrimSpace(roundResult.providerError)
+		}
+		if accountingErr != nil {
 			var ceilingErr *costCeilingError
-			if errors.As(err, &ceilingErr) {
+			if errors.As(accountingErr, &ceilingErr) {
+				stopped, stopErr := c.stopForCostLimit(ctx, result, ceilingErr, result.Rounds)
+				if providerPartial {
+					stopped.Termination.ProviderError = providerError
+					if stopped.CompletionStatus != CompletionConclusive {
+						c.capturePartialResponse(stopped, roundResult.response)
+						stopErr = stopped.RequireConclusive()
+					}
+				}
+				if roundErr != nil && stopErr != nil {
+					return stopped, errors.Join(stopErr, roundErr, accountingErr)
+				}
+				return stopped, stopErr
+			}
+			result.CompletionStatus = CompletionIncomplete
+			result.Termination = Termination{Kind: "cost_accounting", Reason: accountingErr.Error(), ProviderError: providerError}
+			if providerPartial {
+				c.capturePartialResponse(result, roundResult.response)
+				return result, errors.Join(result.RequireConclusive(), roundErr, accountingErr)
+			}
+			return result, errors.Join(roundErr, accountingErr)
+		}
+		if providerPartial {
+			c.capturePartialResponse(result, roundResult.response)
+			result.CompletionStatus = CompletionIncomplete
+			reason := "the provider failed after returning a partial response"
+			result.FinishReason = FinishReasonModelError
+			result.Termination = Termination{Kind: FinishReasonModelError, Reason: reason, ProviderError: providerError}
+			c.recordDecision(ctx, FinishReasonModelError, reason)
+			return result, errors.Join(result.RequireConclusive(), roundErr)
+		}
+		if roundErr != nil {
+			var ceilingErr *costCeilingError
+			if errors.As(roundErr, &ceilingErr) {
 				return c.stopForCostLimit(ctx, result, ceilingErr, result.Rounds)
 			}
-			return result, err
+			return result, roundErr
 		}
 		var resp *model.ChatResponse
 		if roundResult != nil {
 			resp = roundResult.response
-		}
-		if resp != nil {
-			if err := c.addUsageCost(result, resp.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError); err != nil {
-				var ceilingErr *costCeilingError
-				if errors.As(err, &ceilingErr) {
-					return c.stopForCostLimit(ctx, result, ceilingErr, result.Rounds)
-				}
-				result.Termination = Termination{Kind: "cost_accounting", Reason: err.Error()}
-				return result, err
-			}
 		}
 		if resp == nil || len(resp.Choices) == 0 {
 			result.FinishReason = FinishReasonEmptyChoices
@@ -597,6 +749,60 @@ func (c *Controller) Run(ctx context.Context) (*Result, error) {
 	}
 }
 
+// CompleteLifecycleTurn closes a caller-managed logical turn. It is
+// idempotent and emits no duplicate turn/end event. Raw causes remain in
+// turnErr for errors.Is/errors.As; the live event receives only a bounded,
+// redacted projection.
+func (c *Controller) CompleteLifecycleTurn(result *Result, turnErr error) {
+	if c == nil || !c.cfg.DeferLifecycleTurnEnd {
+		return
+	}
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	if c.lifecycleTurnCompleted {
+		return
+	}
+	if !c.lifecycleTurnStarted {
+		c.emitLifecycle(LifecycleEvent{
+			Type:       LifecycleTurnStart,
+			Timestamp:  time.Now().UTC(),
+			Status:     string(CompletionIncomplete),
+			RunAttempt: c.runAttempts,
+		})
+		c.lifecycleTurnStarted = true
+	}
+	status := CompletionIncomplete
+	finishReason := ""
+	stopReason := ""
+	if result != nil {
+		if turnErr == nil {
+			status = result.CompletionStatus
+		}
+		finishReason = result.FinishReason
+		stopReason = result.Termination.Kind
+	}
+	c.emitLifecycle(LifecycleEvent{
+		Type:         LifecycleTurnEnd,
+		Timestamp:    time.Now().UTC(),
+		Status:       string(status),
+		FinishReason: finishReason,
+		StopReason:   stopReason,
+		Error:        lifecycleErrorProjection(result, turnErr),
+		RunAttempt:   c.runAttempts,
+		Continuation: c.runAttempts > 1,
+	})
+	c.lifecycleTurnCompleted = true
+}
+
+func lifecycleErrorProjection(result *Result, runErr error) string {
+	if result != nil {
+		if projection := modelstep.NormalizeErrorText(result.Termination.FinalizationError); projection != "" {
+			return projection
+		}
+	}
+	return modelstep.NormalizeError(runErr)
+}
+
 func cloneControllerUsage(usage model.Usage) model.Usage {
 	if usage.PromptTokensDetails != nil {
 		details := *usage.PromptTokensDetails
@@ -643,21 +849,50 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 	if err != nil {
 		return c.failFinalization(ctx, result, err)
 	}
-	roundResult, err := c.executePreparedModelRound(ctx, result, req, round, "finalize", false)
-	if err != nil {
-		return c.failFinalization(ctx, result, err)
-	}
+	roundResult, roundErr := c.executePreparedModelRound(ctx, result, req, round, "finalize", false)
 	var response *model.ChatResponse
 	if roundResult != nil {
 		response = roundResult.response
+	}
+	var accountingErr error
+	if roundResult != nil && response != nil {
+		accountingErr = c.addUsageCost(result, response.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError)
+	}
+	providerPartial := roundResult != nil && roundResult.partial
+	providerError := ""
+	if providerPartial {
+		c.capturePartialResponse(result, response)
+		result.CompletionStatus = CompletionIncomplete
+		providerError = strings.TrimSpace(roundResult.providerError)
+		result.Termination.ProviderError = providerError
+	}
+	if accountingErr != nil {
+		failure := errors.Join(roundErr, accountingErr)
+		failed, incompleteErr := c.failFinalization(ctx, result, failure)
+		if roundErr != nil {
+			return failed, errors.Join(incompleteErr, failure)
+		}
+		return failed, incompleteErr
+	}
+	if providerPartial {
+		if roundErr == nil {
+			if providerError != "" {
+				roundErr = errors.New(providerError)
+			} else {
+				roundErr = fmt.Errorf("the provider failed after returning a partial response")
+			}
+		}
+		failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
+		return failed, errors.Join(incompleteErr, roundErr)
+	}
+	if roundErr != nil {
+		failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
+		return failed, errors.Join(incompleteErr, roundErr)
 	}
 	if response == nil {
 		return c.failFinalization(ctx, result, fmt.Errorf("model returned no response choices"))
 	}
 
-	if err := c.addUsageCost(result, response.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError); err != nil {
-		return c.failFinalization(ctx, result, err)
-	}
 	if len(response.Choices) == 0 {
 		return c.failFinalization(ctx, result, fmt.Errorf("model returned no response choices"))
 	}
@@ -697,6 +932,33 @@ func validateTerminalCandidate(choice model.Choice) (string, error) {
 		return "", fmt.Errorf("model returned a final response without text")
 	}
 	return text, nil
+}
+
+// capturePartialResponse keeps the last provider material visible even when
+// the request cannot complete. It deliberately does not append history or
+// dispatch tool calls: a response that arrived with a transport/provider
+// error is evidence, not an accepted turn. A usage-only response still gets
+// an honest receipt so a billable request can never disappear as a bare error.
+func (c *Controller) capturePartialResponse(result *Result, response *model.ChatResponse) {
+	if result == nil {
+		return
+	}
+	result.Partial = true
+	if response == nil {
+		return
+	}
+	if len(response.Choices) > 0 {
+		result.Message = response.Choices[0].Message
+		if text, err := model.ExtractTextContent(response.Choices[0].Message.Content); err == nil && strings.TrimSpace(text) != "" {
+			result.Content = strings.TrimSpace(text)
+			return
+		}
+		if len(response.Choices[0].Message.ToolCalls) > 0 {
+			result.Content = fmt.Sprintf("Partial model response preserved with %d unexecuted tool call(s); the provider request failed before Buckley could safely continue.", len(response.Choices[0].Message.ToolCalls))
+			return
+		}
+	}
+	result.Content = fmt.Sprintf("The provider reported billable usage (%d token(s)) but returned no usable answer; Buckley preserved the raw response evidence.", response.Usage.TotalTokens)
 }
 
 func isTruncatedFinishReason(reason string) bool {
@@ -778,24 +1040,30 @@ type modelRoundResult struct {
 	chargedCostUSD float64
 	costRecorded   bool
 	pricingError   string
+	partial        bool
+	providerError  string
 }
 
 const (
-	modelResponseEvidenceVersion = "buckley.model-response/v1"
+	modelResponseEvidenceVersion = modelstep.ResponseVersion
 	modelResponseCostMetadataKey = "charged_cost_usd"
+	blockedModelStepErrorPrefix  = modelstep.BlockedMarkerPrefix
+	blockedModelStepErrorRunes   = modelstep.MaxPersistedErrorRunes
 )
 
 // modelResponseEvidenceEnvelope keeps the provider response and the original
 // usage-based charge calculated for that logical call in one content-addressed body.
 // Cost therefore participates in evidence identity instead of being lost when
 // the evidence store deduplicates equal response JSON with different metadata.
-type modelResponseEvidenceEnvelope struct {
-	Version        string              `json:"version"`
-	Response       *model.ChatResponse `json:"response"`
-	ChargedCostUSD float64             `json:"charged_cost_usd,omitempty"`
-	CostRecorded   bool                `json:"cost_recorded"`
-	PricingError   string              `json:"pricing_error,omitempty"`
-}
+type modelResponseEvidenceEnvelope = modelstep.ResponseEnvelope
+
+// blockedModelStepRecord is stored in ExecutionStep.Error only when a provider
+// returned a response and an error but Buckley could not finish journaling that
+// response. The marker makes the already billable logical call fail closed and
+// carries enough context to replay its response evidence when that evidence was
+// stored before the journal failed. Older records may use StepFailed; the
+// terminal fallback uses StepBlocked when writing that failure marker fails.
+type blockedModelStepRecord = modelstep.BlockedMarker
 
 // reserveModelRequest converts a provider-defined output default into an
 // explicit, priceable allowance and ensures the conservative request-admission
@@ -1277,8 +1545,8 @@ func (c *Controller) failFinalization(ctx context.Context, result *Result, cause
 		cause = fmt.Errorf("unknown finalization failure")
 	}
 	result.CompletionStatus = CompletionIncomplete
-	result.Termination.FinalizationError = cause.Error()
-	c.recordDecision(ctx, "finalization_failed", cause.Error())
+	result.Termination.FinalizationError = modelstep.NormalizeError(cause)
+	c.recordDecision(ctx, "finalization_failed", result.Termination.FinalizationError)
 	return result, result.RequireConclusive()
 }
 
@@ -1311,6 +1579,16 @@ func (c *Controller) executePreparedModelRound(ctx context.Context, result *Resu
 	if err != nil {
 		return nil, fmt.Errorf("agentloop: digest model request: %w", err)
 	}
+	blockedResult, blocked, err := c.replayBlockedModelStep(ctx, stepID, inputDigest, req.Model, round, stepKind)
+	if blocked {
+		if result != nil {
+			result.ModelRequests++
+		}
+		return blockedResult, err
+	}
+	if err != nil {
+		return nil, err
+	}
 	step, replay, err := c.beginStep(ctx, stepID, stepKind, inputDigest)
 	if err != nil {
 		return nil, err
@@ -1319,12 +1597,19 @@ func (c *Controller) executePreparedModelRound(ctx context.Context, result *Resu
 	planned["phase"] = stepKind
 	if replay {
 		if result != nil {
-			// Count the already-completed logical request against the same all-in
+			// Count the already-terminal logical request against the same all-in
 			// request contract, but do not reserve or dispatch it again.
 			result.ModelRequests++
 		}
-		roundResult, err := c.replayModelStep(ctx, stepID, step, planned)
-		return roundResult, err
+		switch step.Status {
+		case runledger.StepCompleted:
+			roundResult, err := c.replayModelStep(ctx, stepID, step, planned)
+			return roundResult, err
+		case runledger.StepBlocked:
+			return c.replayBlockedExecutionStep(ctx, step, inputDigest, req.Model, round, stepKind)
+		default:
+			return nil, fmt.Errorf("agentloop: model step %s returned replay for non-terminal status %q", stepID, step.Status)
+		}
 	}
 
 	req, reservation, err := c.reserveModelRequest(req, resultCostUSD(result))
@@ -1386,6 +1671,102 @@ func modelStepPayload(stepID string, attempt int, inputDigest, modelID string, r
 	return payload
 }
 
+func (c *Controller) replayBlockedModelStep(ctx context.Context, stepID, inputDigest, modelID string, round int, stepKind string) (*modelRoundResult, bool, error) {
+	if c == nil || c.cfg.StepJournal == nil {
+		return nil, false, nil
+	}
+	step, err := c.cfg.StepJournal.GetStep(ctx, c.cfg.RunID, stepID)
+	if errors.Is(err, runledger.ErrStepNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("agentloop: inspect model step %s before retry: %w", stepID, err)
+	}
+	if step.Status != runledger.StepBlocked {
+		return nil, false, nil
+	}
+	roundResult, replayErr := c.replayBlockedExecutionStep(ctx, step, inputDigest, modelID, round, stepKind)
+	return roundResult, true, replayErr
+}
+
+func (c *Controller) replayBlockedExecutionStep(ctx context.Context, step runledger.ExecutionStep, inputDigest, modelID string, round int, stepKind string) (*modelRoundResult, error) {
+	stepID := step.StepID
+	if step.InputDigest != "" && inputDigest != "" && step.InputDigest != inputDigest {
+		return nil, fmt.Errorf("agentloop: execution step %s input digest changed", stepID)
+	}
+	if !strings.HasPrefix(step.Error, blockedModelStepErrorPrefix) {
+		return nil, runledger.RecoveryErrorForStep(step)
+	}
+	marker, err := modelstep.ValidateBlockedStep(step)
+	if err != nil {
+		return nil, fmt.Errorf("agentloop: validate retry block for model step %s: %w", stepID, err)
+	}
+	roundResult := &modelRoundResult{
+		partial:       true,
+		providerError: marker.ProviderError,
+	}
+	replayErr := errors.Join(errors.New(marker.ProviderError), errors.New(marker.DurabilityError))
+	evidenceID := marker.ResponseEvidenceID
+	var object *evidence.Object
+	if evidenceID != "" {
+		if c.cfg.Evidence == nil {
+			return roundResult, errors.Join(replayErr, fmt.Errorf("agentloop: evidence store is required to replay %s", evidenceID))
+		} else {
+			obj, loadErr := c.cfg.Evidence.Get(ctx, evidenceID)
+			if loadErr != nil {
+				return roundResult, errors.Join(replayErr, fmt.Errorf("agentloop: load retry-blocked evidence %s: %w", evidenceID, loadErr))
+			}
+			object = &obj
+		}
+	}
+	blocked, err := modelstep.ValidateBlockedReplay(step, object)
+	if err != nil {
+		return roundResult, errors.Join(replayErr, fmt.Errorf("agentloop: validate retry-blocked model step %s: %w", stepID, err))
+	}
+	if blocked.Response != nil {
+		roundResult.response = blocked.Response.Response
+		roundResult.chargedCostUSD = blocked.Response.ChargedCostUSD
+		roundResult.costRecorded = blocked.Response.CostRecorded
+		roundResult.pricingError = blocked.Response.PricingError
+	}
+	payload := modelStepPayload(stepID, step.Attempt, inputDigest, modelID, round, "")
+	payload["phase"] = stepKind
+	payload["replayed"] = true
+	payload["retry_blocked"] = true
+	payload["provider_error"] = roundResult.providerError
+	if evidenceID != "" {
+		payload["response_evidence_id"] = evidenceID
+	}
+	c.recordEventWithEvidence(ctx, runledger.EventModelRequestReplayed, payload, evidenceIDs(evidenceID))
+	return roundResult, replayErr
+}
+
+func (c *Controller) blockModelStepRetry(ctx context.Context, step runledger.ExecutionStep, providerError string, durabilityErr error, responseEvidenceID, outputDigest string) error {
+	if c == nil || c.cfg.StepJournal == nil || providerError == "" {
+		return nil
+	}
+	record := blockedModelStepRecord{
+		Version:            modelstep.BlockedMarkerVersion,
+		Incomplete:         true,
+		ProviderError:      providerError,
+		DurabilityError:    modelstep.NormalizeError(durabilityErr),
+		ResponseEvidenceID: strings.TrimSpace(responseEvidenceID),
+		OutputDigest:       strings.TrimSpace(outputDigest),
+	}
+	failure, err := modelstep.EncodeBlockedMarker(record)
+	if err != nil {
+		return fmt.Errorf("agentloop: encode retry block for model step %s: %w", step.StepID, err)
+	}
+	if err := c.cfg.StepJournal.BlockStep(ctx, step, failure, record.ResponseEvidenceID, record.OutputDigest, time.Now().UTC()); err != nil {
+		return fmt.Errorf("agentloop: terminally block model step %s: %w", step.StepID, err)
+	}
+	return nil
+}
+
+func boundedModelStepError(err error) string {
+	return modelstep.NormalizeError(err)
+}
+
 func (c *Controller) replayModelStep(ctx context.Context, stepID string, step runledger.ExecutionStep, payload map[string]any) (*modelRoundResult, error) {
 	if step.OutputEvidenceID == "" {
 		return nil, fmt.Errorf("agentloop: completed model step %s has no response evidence", stepID)
@@ -1397,50 +1778,62 @@ func (c *Controller) replayModelStep(ctx context.Context, stepID string, step ru
 	if err != nil {
 		return nil, fmt.Errorf("agentloop: load replay evidence %s: %w", step.OutputEvidenceID, err)
 	}
-	response, chargedCostUSD, costRecorded, pricingError, err := decodeModelResponseEvidence(obj.InlineBody)
+	decoded, err := modelstep.ValidateResponseEvidence(step.OutputEvidenceID, step.OutputDigest, obj)
 	if err != nil {
-		return nil, fmt.Errorf("agentloop: decode replay evidence %s: %w", step.OutputEvidenceID, err)
+		return nil, fmt.Errorf("agentloop: validate replay evidence %s: %w", step.OutputEvidenceID, err)
 	}
 	payload["replayed"] = true
 	payload["response_evidence_id"] = step.OutputEvidenceID
-	if costRecorded {
-		payload[modelResponseCostMetadataKey] = chargedCostUSD
+	if decoded.CostRecorded {
+		payload[modelResponseCostMetadataKey] = decoded.ChargedCostUSD
 	}
 	c.recordEventWithEvidence(ctx, runledger.EventModelRequestReplayed, payload, []string{step.OutputEvidenceID})
-	return &modelRoundResult{response: response, chargedCostUSD: chargedCostUSD, costRecorded: costRecorded, pricingError: pricingError}, nil
+	return &modelRoundResult{
+		response:       decoded.Response,
+		chargedCostUSD: decoded.ChargedCostUSD,
+		costRecorded:   decoded.CostRecorded,
+		pricingError:   decoded.PricingError,
+		partial:        decoded.Partial,
+		providerError:  decoded.ProviderError,
+	}, nil
 }
 
 func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatRequest, step runledger.ExecutionStep, inputDigest string, planned map[string]any, round int, stepKind string, useContinuation bool) (*modelRoundResult, error) {
 	c.recordEvent(ctx, runledger.EventModelRequestPlanned, planned)
 	c.recordEvent(ctx, runledger.EventModelRequestStarted, planned)
-	response, err := c.cfg.CallModel.Call(ctx, req, useContinuation)
-	if err != nil {
-		c.failStep(ctx, step, err)
+	if err := c.markStepDispatched(ctx, step); err != nil {
+		return nil, err
+	}
+	response, callErr := c.cfg.CallModel.Call(ctx, req, useContinuation)
+	persistedProviderError := modelstep.NormalizeError(callErr)
+	if callErr != nil && response == nil {
+		blockErr := c.blockDispatchedStep(ctx, step, callErr, "", "")
 		failed := modelStepPayload(step.StepID, step.Attempt, inputDigest, req.Model, round, "")
 		failed["phase"] = stepKind
-		failed["error"] = err.Error()
+		failed["error"] = persistedProviderError
 		c.recordEvent(ctx, runledger.EventModelRequestFailed, failed)
-		return nil, err
+		return nil, errors.Join(callErr, blockErr)
 	}
 	if response == nil {
 		err := fmt.Errorf("agentloop: model caller returned a nil response")
-		c.failStep(ctx, step, err)
+		blockErr := c.blockDispatchedStep(ctx, step, err, "", "")
 		failed := modelStepPayload(step.StepID, step.Attempt, inputDigest, req.Model, round, "")
 		failed["phase"] = stepKind
 		failed["error"] = err.Error()
 		c.recordEvent(ctx, runledger.EventModelRequestFailed, failed)
-		return nil, err
+		return nil, errors.Join(err, blockErr)
 	}
 	chargedCostUSD := 0.0
 	costRecorded := false
 	pricingError := ""
 	if c.cfg.CostForUsage != nil {
-		chargedCostUSD, err = c.priceUsage(response.Usage)
-		if err != nil {
+		var priceErr error
+		chargedCostUSD, priceErr = c.priceUsage(response.Usage)
+		if priceErr != nil {
 			// The provider response already exists and may have incurred cost.
 			// Persist both it and the pricing failure as a completed logical step
 			// so retry fails closed without buying the response again.
-			pricingError = err.Error()
+			pricingError = modelstep.NormalizeError(priceErr)
 			chargedCostUSD = 0
 		} else {
 			costRecorded = true
@@ -1452,18 +1845,49 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 		ChargedCostUSD: chargedCostUSD,
 		CostRecorded:   costRecorded,
 		PricingError:   pricingError,
+		Partial:        callErr != nil,
 	}
-	responseEvidenceID, outputDigest, err := c.recordJSONEvidence(ctx, evidence.KindModelResponse, responseEnvelope, step.StepID, map[string]any{
+	if callErr != nil {
+		responseEnvelope.ProviderError = persistedProviderError
+	}
+	roundResult := &modelRoundResult{
+		response:       response,
+		chargedCostUSD: chargedCostUSD,
+		costRecorded:   costRecorded,
+		pricingError:   pricingError,
+		partial:        callErr != nil,
+	}
+	if callErr != nil {
+		// Keep callErr itself raw in the returned error chain for internal
+		// classification/retry logic. Result, lifecycle, durable, and ACP-facing
+		// projections receive only this bounded/redacted form.
+		roundResult.providerError = persistedProviderError
+	}
+	responseBody, err := modelstep.EncodeResponse(responseEnvelope)
+	if err != nil {
+		if callErr == nil {
+			return roundResult, errors.Join(err, c.blockDispatchedStep(ctx, step, err, "", ""))
+		}
+		blockErr := c.blockModelStepRetry(ctx, step, persistedProviderError, err, "", "")
+		return roundResult, errors.Join(callErr, err, blockErr)
+	}
+	responseEvidenceID, outputDigest, err := c.recordEvidenceBody(ctx, evidence.KindModelResponse, responseBody, step.StepID, map[string]any{
 		"round": round,
 		"model": req.Model,
 	})
 	if err != nil {
-		c.failStep(ctx, step, err)
-		return nil, err
+		if callErr == nil {
+			return roundResult, errors.Join(err, c.blockDispatchedStep(ctx, step, err, "", ""))
+		}
+		blockErr := c.blockModelStepRetry(ctx, step, persistedProviderError, err, responseEvidenceID, outputDigest)
+		return roundResult, errors.Join(callErr, err, blockErr)
 	}
 	if err := c.completeStep(ctx, step, responseEvidenceID, outputDigest); err != nil {
-		c.failStep(ctx, step, err)
-		return nil, err
+		if callErr == nil {
+			return roundResult, errors.Join(err, c.blockDispatchedStep(ctx, step, err, responseEvidenceID, outputDigest))
+		}
+		blockErr := c.blockModelStepRetry(ctx, step, persistedProviderError, err, responseEvidenceID, outputDigest)
+		return roundResult, errors.Join(callErr, err, blockErr)
 	}
 	completed := modelStepPayload(step.StepID, step.Attempt, inputDigest, req.Model, round, "")
 	completed["phase"] = stepKind
@@ -1475,44 +1899,19 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	if pricingError != "" {
 		completed["pricing_error"] = pricingError
 	}
+	if responseEnvelope.Partial {
+		completed["partial"] = true
+		completed["provider_error"] = responseEnvelope.ProviderError
+	}
 	if responseEvidenceID != "" {
 		completed["response_evidence_id"] = responseEvidenceID
 	}
-	c.recordEventWithEvidence(ctx, runledger.EventModelRequestCompleted, completed, evidenceIDs(responseEvidenceID))
-	return &modelRoundResult{response: response, chargedCostUSD: chargedCostUSD, costRecorded: costRecorded, pricingError: pricingError}, nil
-}
-
-func decodeModelResponseEvidence(body []byte) (*model.ChatResponse, float64, bool, string, error) {
-	var header struct {
-		Version string `json:"version"`
+	eventType := runledger.EventModelRequestCompleted
+	if responseEnvelope.Partial {
+		eventType = runledger.EventModelRequestFailed
 	}
-	if err := json.Unmarshal(body, &header); err != nil {
-		return nil, 0, false, "", err
-	}
-	if header.Version == "" {
-		// Backward compatibility for evidence written before the versioned body
-		// envelope. It remains usable on unbounded runs; an active cost ceiling
-		// fails closed in addUsageCost rather than repricing historical work.
-		legacy := &model.ChatResponse{}
-		if err := json.Unmarshal(body, legacy); err != nil {
-			return nil, 0, false, "", err
-		}
-		return legacy, 0, false, "", nil
-	}
-	if header.Version != modelResponseEvidenceVersion {
-		return nil, 0, false, "", fmt.Errorf("unsupported model response evidence version %q", header.Version)
-	}
-	var envelope modelResponseEvidenceEnvelope
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, 0, false, "", err
-	}
-	if envelope.Response == nil {
-		return nil, 0, false, "", fmt.Errorf("model response evidence envelope has no response")
-	}
-	if envelope.CostRecorded && (envelope.ChargedCostUSD < 0 || math.IsNaN(envelope.ChargedCostUSD) || math.IsInf(envelope.ChargedCostUSD, 0)) {
-		return nil, 0, false, "", fmt.Errorf("model response evidence has an invalid charged cost")
-	}
-	return envelope.Response, envelope.ChargedCostUSD, envelope.CostRecorded, envelope.PricingError, nil
+	c.recordEventWithEvidence(ctx, eventType, completed, evidenceIDs(responseEvidenceID))
+	return roundResult, callErr
 }
 
 // toolRoundState keeps the durable state for one batch of model-requested
@@ -1553,6 +1952,15 @@ func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCal
 		"round":      round,
 		"call_steps": state.records,
 	})
+	for index := range state.calls {
+		if state.replayed[index] {
+			if err := c.replayToolStep(ctx, state, index); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		c.recordEvent(ctx, runledger.EventToolStarted, state.records[index])
+	}
 	return state, nil
 }
 
@@ -1580,9 +1988,15 @@ func (c *Controller) prepareToolStep(ctx context.Context, state *toolRoundState,
 	}
 	state.records[index] = record
 	if replay {
-		return c.replayToolStep(ctx, state, index)
+		if step.Status == runledger.StepBlocked {
+			return runledger.RecoveryErrorForStep(step)
+		}
+		if step.Status != runledger.StepCompleted {
+			return fmt.Errorf("agentloop: tool step %s returned replay for terminal status %q", stepID, step.Status)
+		}
+		state.replayed[index] = true
+		return nil
 	}
-	c.recordEvent(ctx, runledger.EventToolStarted, record)
 	state.pendingCalls = append(state.pendingCalls, call)
 	state.pendingIndexes = append(state.pendingIndexes, index)
 	return nil
@@ -1611,6 +2025,11 @@ func (c *Controller) dispatchToolRound(ctx context.Context, state *toolRoundStat
 	if c.cfg.DispatchTools == nil {
 		return fmt.Errorf("agentloop: model requested tools but no ToolDispatcher is configured")
 	}
+	for _, index := range state.pendingIndexes {
+		if err := c.markStepDispatched(ctx, state.steps[index]); err != nil {
+			return err
+		}
+	}
 	pendingOutcomes, dispatchErr := c.cfg.DispatchTools.Dispatch(ctx, state.pendingCalls)
 	// Once Dispatch reports outcomes, external effects may already exist. Give
 	// their receipts a short cleanup window that cannot be cut off by a caller
@@ -1622,29 +2041,28 @@ func (c *Controller) dispatchToolRound(ctx context.Context, state *toolRoundStat
 		index := state.pendingIndexes[position]
 		state.outcomes[index] = pendingOutcomes[position]
 		if err := c.persistToolOutcome(journalCtx, state, round, index); err != nil {
-			c.failPendingToolSteps(journalCtx, state, position+1, err)
-			return err
+			return errors.Join(err, c.blockPendingToolSteps(journalCtx, state, position+1, err))
 		}
 	}
 	if dispatchErr != nil {
-		c.failPendingToolSteps(journalCtx, state, resolved, dispatchErr)
-		return dispatchErr
+		return errors.Join(dispatchErr, c.blockPendingToolSteps(journalCtx, state, resolved, dispatchErr))
 	}
 	if len(pendingOutcomes) != len(state.pendingIndexes) {
 		err := fmt.Errorf("agentloop: tool dispatcher returned %d outcomes for %d calls", len(pendingOutcomes), len(state.pendingIndexes))
-		c.failPendingToolSteps(journalCtx, state, resolved, err)
-		return err
+		return errors.Join(err, c.blockPendingToolSteps(journalCtx, state, resolved, err))
 	}
 	return nil
 }
 
-func (c *Controller) failPendingToolSteps(ctx context.Context, state *toolRoundState, start int, dispatchErr error) {
+func (c *Controller) blockPendingToolSteps(ctx context.Context, state *toolRoundState, start int, dispatchErr error) error {
+	var blockErrors []error
 	for _, index := range state.pendingIndexes[start:] {
-		c.failStep(ctx, state.steps[index], dispatchErr)
+		blockErrors = append(blockErrors, c.blockDispatchedStep(ctx, state.steps[index], dispatchErr, "", ""))
 		failed := state.records[index]
-		failed["error"] = dispatchErr.Error()
+		failed["error"] = modelstep.NormalizeError(dispatchErr)
 		c.recordEvent(ctx, runledger.EventToolFailed, failed)
 	}
+	return errors.Join(blockErrors...)
 }
 
 func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundState, round, index int) error {
@@ -1656,8 +2074,7 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 		"tool":  call.Function.Name,
 	})
 	if err != nil {
-		c.failStep(ctx, step, err)
-		return err
+		return errors.Join(err, c.blockDispatchedStep(ctx, step, err, "", ""))
 	}
 	record := state.records[index]
 	record["effect_class"] = outcome.EffectClass
@@ -1670,15 +2087,13 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	if outputEvidenceID != "" {
 		record["output_evidence_id"] = outputEvidenceID
 	}
+	if err := c.completeStep(ctx, step, outputEvidenceID, outputDigest); err != nil {
+		return errors.Join(err, c.blockDispatchedStep(ctx, step, err, outputEvidenceID, outputDigest))
+	}
 	if outcome.Success {
-		if err := c.completeStep(ctx, step, outputEvidenceID, outputDigest); err != nil {
-			c.failStep(ctx, step, err)
-			return err
-		}
 		c.recordEventWithEvidence(ctx, runledger.EventToolCompleted, record, evidenceIDs(outputEvidenceID))
 		return nil
 	}
-	c.failStep(ctx, step, fmt.Errorf("tool %s returned an unsuccessful result", call.Function.Name))
 	c.recordEventWithEvidence(ctx, runledger.EventToolFailed, record, evidenceIDs(outputEvidenceID))
 	return nil
 }
@@ -1776,12 +2191,18 @@ func (c *Controller) recordEvent(ctx context.Context, eventType string, payload 
 }
 
 func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType string, payload map[string]any, evidenceIDs []string) {
-	if c == nil || c.cfg.RunLedger == nil {
+	if c == nil {
+		return
+	}
+	payload = normalizedDurableEventPayload(payload)
+	timestamp := time.Now().UTC()
+	c.emitLifecycle(lifecycleEventFromLedger(c, eventType, timestamp, payload, evidenceIDs))
+	if c.cfg.RunLedger == nil {
 		return
 	}
 	_, _ = c.cfg.RunLedger.Append(ctx, runledger.Event{
 		Type:        eventType,
-		Timestamp:   time.Now(),
+		Timestamp:   timestamp,
 		SessionID:   c.cfg.SessionID,
 		RunID:       c.cfg.RunID,
 		TaskID:      c.cfg.TaskID,
@@ -1790,10 +2211,143 @@ func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType stri
 	})
 }
 
+func normalizedDurableEventPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		out[key] = value
+	}
+	for _, key := range []string{"error", "provider_error", "pricing_error", "reason"} {
+		if value, ok := out[key].(string); ok {
+			out[key] = modelstep.NormalizeErrorText(value)
+		}
+	}
+	return out
+}
+
+func (c *Controller) emitLifecycle(event LifecycleEvent) {
+	if c == nil || c.cfg.LifecycleObserver == nil {
+		return
+	}
+	c.lifecycleSeq++
+	event.Sequence = c.lifecycleSeq
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	event.RunID = c.cfg.RunID
+	event.SessionID = c.cfg.SessionID
+	event.TaskID = c.cfg.TaskID
+	event.TurnID = c.cfg.TurnID
+	event.EvidenceIDs = append([]string(nil), event.EvidenceIDs...)
+	observer := c.cfg.LifecycleObserver
+	// An observer is a live projection, not a part of the turn's correctness
+	// path. Contain both observer panics and accidental mutation of the event
+	// value so telemetry cannot alter the next transition.
+	func() {
+		defer func() { _ = recover() }()
+		observer(event)
+	}()
+}
+
+func lifecycleEventFromLedger(c *Controller, eventType string, timestamp time.Time, payload map[string]any, evidenceIDs []string) LifecycleEvent {
+	event := LifecycleEvent{
+		Type:        lifecycle.TypeForLedger(eventType),
+		Timestamp:   timestamp,
+		EvidenceIDs: append([]string(nil), evidenceIDs...),
+	}
+	if c != nil {
+		event.RunID = c.cfg.RunID
+		event.SessionID = c.cfg.SessionID
+		event.TaskID = c.cfg.TaskID
+		event.TurnID = c.cfg.TurnID
+	}
+	if payload == nil {
+		return event
+	}
+	event.StepID, _ = payloadString(payload, "step_id")
+	event.Phase, _ = payloadString(payload, "phase")
+	event.ModelID, _ = payloadString(payload, "model")
+	event.ToolName, _ = payloadString(payload, "tool")
+	event.ToolCallID, _ = payloadString(payload, "call_id")
+	if event.ToolName == "" {
+		if steps, ok := payload["call_steps"].([]map[string]any); ok && len(steps) > 0 {
+			event.ToolName, _ = payloadString(steps[0], "tool")
+			event.ToolCallID, _ = payloadString(steps[0], "call_id")
+		}
+	}
+	event.Error, _ = payloadString(payload, "error")
+	if event.Error == "" {
+		event.Error, _ = payloadString(payload, "pricing_error")
+	}
+	if event.Error == "" {
+		event.Error, _ = payloadString(payload, "provider_error")
+	}
+	// Controller decision reasons are intentionally free-form and can embed
+	// provider failures or finalization causes. The live lifecycle contract
+	// carries only the categorical decision kind; durable ledger records and
+	// the normal result/error path retain the reason.
+	event.StopReason, _ = payloadString(payload, "kind")
+	event.Round = payloadInt(payload, "round")
+	event.Attempt = payloadInt(payload, "attempt")
+	event.Replayed = payloadBool(payload, "replayed")
+	if success, ok := payload["success"].(bool); ok {
+		event.Success = &success
+	}
+	event.Usage.PromptTokens = payloadInt(payload, "prompt_tokens")
+	event.Usage.CompletionTokens = payloadInt(payload, "completion_tokens")
+	event.Usage.TotalTokens = event.Usage.PromptTokens + event.Usage.CompletionTokens
+	if event.CostUSD, _ = payloadFloat(payload, modelResponseCostMetadataKey); event.CostUSD < 0 {
+		event.CostUSD = 0
+	}
+	return event
+}
+
+func payloadString(payload map[string]any, key string) (string, bool) {
+	value, ok := payload[key].(string)
+	return strings.TrimSpace(value), ok
+}
+
+func payloadInt(payload map[string]any, key string) int {
+	switch value := payload[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
+}
+
+func payloadBool(payload map[string]any, key string) bool {
+	value, _ := payload[key].(bool)
+	return value
+}
+
+func payloadFloat(payload map[string]any, key string) (float64, bool) {
+	value, ok := payload[key].(float64)
+	if ok {
+		return value, true
+	}
+	switch typed := payload[key].(type) {
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	default:
+		return 0, false
+	}
+}
+
 func (c *Controller) recordDecision(ctx context.Context, kind, reason string) {
 	c.recordEvent(ctx, runledger.EventControllerDecision, map[string]any{
 		"kind":   kind,
-		"reason": reason,
+		"reason": modelstep.NormalizeErrorText(reason),
 	})
 }
 

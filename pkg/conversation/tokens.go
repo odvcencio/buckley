@@ -37,9 +37,14 @@ func CountTokens(text string) int {
 // This accounts for message formatting overhead
 func CountTokensForMessages(messages []Message) int {
 	if err := initTokenEncoder(); err != nil {
-		// Fallback to estimation
-		total := 0
+		// Fallback to the same conservative message envelope used by the
+		// tokenizer path. This keeps offline/sandbox evidence comparable to a
+		// network-enabled run instead of silently dropping role and framing
+		// overhead.
+		total := 2 // overall message-list framing
 		for _, msg := range messages {
+			total += 4 // per-message framing
+			total += estimateTokens(msg.Role)
 			total += estimateTokens(GetContentAsString(msg.Content))
 		}
 		return total

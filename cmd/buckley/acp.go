@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,13 +24,16 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/mcp"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/subagent"
+	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/buckley/pkg/types"
@@ -82,7 +86,7 @@ func runACPCommand(args []string) error {
 	var logger *os.File
 	if *logFile != "" {
 		var err error
-		logger, err = os.OpenFile(*logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		logger, err = os.OpenFile(*logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			return fmt.Errorf("open log file: %w", err)
 		}
@@ -104,6 +108,12 @@ func runACPCommand(args []string) error {
 	}
 	defer store.Close()
 
+	// ACP owns one process-lifetime telemetry hub. Controller lifecycle events
+	// are best-effort metadata projections; they are not ACP session updates.
+	telemetryHub := telemetry.NewHub()
+	defer telemetryHub.Close()
+	lifecycleObserver := telemetry.NewAgentLoopObserver(telemetryHub)
+
 	// Load project context
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -124,7 +134,7 @@ func runACPCommand(args []string) error {
 	// the time a prompt actually runs -- prompts only fire once agent.Serve
 	// is reading messages, well after this assignment completes.
 	var agent *acp.Agent
-	promptHandler, closeACPSessions := makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent)
+	promptHandler, closeACPSessions := makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent, lifecycleObserver)
 	// S5: every session that spawned its own MCP servers (via session/new's
 	// mcpServers) tears them down when this ACP connection ends -- Buckley
 	// does not implement session/close, so process/connection teardown is
@@ -232,6 +242,7 @@ func makePromptHandler(
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
 	agentRef **acp.Agent,
+	lifecycleObserver agentloop.LifecycleObserver,
 ) (handler func(context.Context, *acp.AgentSession, []acp.ContentBlock, acp.StreamFunc) (*acp.PromptResult, error), cleanup func()) {
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
@@ -281,11 +292,17 @@ func makePromptHandler(
 		// notifications while the model generates it (see streamACPTurn), so
 		// the returned text is not re-sent here -- doing so would duplicate
 		// every turn's content on the wire.
-		_, err := runACPLoop(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream)
+		turnID := state.nextLifecycleTurnID()
+		_, err := runACPLoopWithLimits(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream, acpLoopLimits{
+			LifecycleObserver:  lifecycleObserver,
+			LifecycleSessionID: state.lifecycleSessionID,
+			TurnID:             turnID,
+		})
 		if err != nil {
-			logf("prompt error: %v", err)
-			stream(acp.NewAgentMessageChunk(fmt.Sprintf("\n\nError: %v", err)))
-			return nil, err
+			projected := newACPProjectedError(err)
+			logACPProjectedPromptError(logf, projected)
+			stream(acp.NewAgentMessageChunk("\n\nError: " + projected.Error()))
+			return nil, projected
 		}
 
 		if state.skills != nil && len(state.skills.List()) != skillsBefore {
@@ -312,12 +329,14 @@ func makePromptHandler(
 }
 
 type acpSessionState struct {
-	mu         sync.Mutex
-	conv       *conversation.Conversation
-	registry   *tool.Registry
-	skills     *skill.Registry
-	skillState *skill.RuntimeState
-	engine     *rules.Engine
+	mu                      sync.Mutex
+	conv                    *conversation.Conversation
+	registry                *tool.Registry
+	skills                  *skill.Registry
+	skillState              *skill.RuntimeState
+	engine                  *rules.Engine
+	lifecycleSessionID      string
+	lifecycleTurnGeneration uint64
 	// workDir is the session's working directory, used to resolve tool-call
 	// locations and diff paths -- never the ACP process's own cwd, which may
 	// differ from the editor's session/new cwd (S2, S9).
@@ -327,6 +346,65 @@ type acpSessionState struct {
 	// (supported) MCP servers. Torn down by makePromptHandler's cleanup
 	// func when the ACP connection ends.
 	mcpManager *mcp.Manager
+}
+
+// nextLifecycleTurnID is called while the session mutex is held. A prompt's
+// controller and all of its continuation/nudge Run calls share this ID; the
+// next prompt advances the generation and therefore starts a new sequence
+// scope without losing the stable ACP session lineage.
+func (s *acpSessionState) nextLifecycleTurnID() string {
+	if s == nil {
+		return ""
+	}
+	s.lifecycleTurnGeneration++
+	return "turn_" + runledger.StableEventID(
+		"acp-lifecycle-turn",
+		s.lifecycleSessionID,
+		strconv.FormatUint(s.lifecycleTurnGeneration, 10),
+	)
+}
+
+func acpLifecycleSessionID(sessionID string) string {
+	return "acp_" + runledger.StableEventID("acp-lifecycle-session", sessionID)
+}
+
+// acpProjectedError keeps the raw cause available to in-process classifiers
+// while exposing only a bounded, redacted string at the ACP protocol boundary.
+type acpProjectedError struct {
+	cause      error
+	projection string
+}
+
+func newACPProjectedError(cause error) *acpProjectedError {
+	projection := modelstep.NormalizeError(cause)
+	if projection == "" {
+		projection = "request failed"
+	}
+	return &acpProjectedError{cause: cause, projection: projection}
+}
+
+func (e *acpProjectedError) Error() string {
+	if e == nil || e.projection == "" {
+		return "request failed"
+	}
+	return e.projection
+}
+
+func (e *acpProjectedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// logACPProjectedPromptError accepts only the already-sanitized boundary
+// value, so a caller cannot accidentally hand the debug logger a raw provider
+// chain containing credentials or an unbounded response body.
+func logACPProjectedPromptError(logf func(string, ...interface{}), projected *acpProjectedError) {
+	if logf == nil || projected == nil {
+		return
+	}
+	logf("prompt error: %s", projected.Error())
 }
 
 type acpEmbeddedResource struct {
@@ -455,13 +533,14 @@ func getACPSessionState(
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine, "", hyphaeProjectKnowledgeContext(cfg, workDir)))
 
 	state := &acpSessionState{
-		conv:       conv,
-		registry:   registry,
-		skills:     skills,
-		skillState: skillState,
-		engine:     engine,
-		workDir:    workDir,
-		mcpManager: mcpManager,
+		conv:               conv,
+		registry:           registry,
+		skills:             skills,
+		skillState:         skillState,
+		engine:             engine,
+		lifecycleSessionID: acpLifecycleSessionID(session.ID),
+		workDir:            workDir,
+		mcpManager:         mcpManager,
 	}
 	sessions[session.ID] = state
 	return state
@@ -926,10 +1005,10 @@ type acpLoopState struct {
 	// change mid-turn) and paired with each round's model.Usage to report
 	// usage_update as "tokens used out of this context window" (N1).
 	contextWindow int
-	// Cost-bounded turns hold provider deltas and usage until Controller calls
-	// History, which happens only after durable response pricing and terminal
-	// validation succeed. A rejected response is therefore never presented to
-	// the ACP client as accepted assistant output.
+	// Cost-bounded turns hold provider deltas and usage until either Controller
+	// accepts a tool-bearing assistant message or the ACP loop accepts a final
+	// no-tool candidate. A rejected/nudged response is never presented to the
+	// ACP client as accepted assistant output.
 	pendingModelUpdates []acp.SessionUpdate
 	pendingModelUsage   *model.Usage
 }
@@ -963,16 +1042,19 @@ func runACPLoop(
 }
 
 type acpLoopLimits struct {
-	StepCap           int
-	MaxToolCalls      int
-	MaxModelRequests  int
-	MaxElapsedSeconds int
-	MaxCostUSD        float64
-	RunID             string
-	ParentRunID       string
-	TaskID            string
-	ParentSessionID   string
-	ChildContract     bool
+	StepCap            int
+	MaxToolCalls       int
+	MaxModelRequests   int
+	MaxElapsedSeconds  int
+	MaxCostUSD         float64
+	LifecycleObserver  agentloop.LifecycleObserver
+	LifecycleSessionID string
+	TurnID             string
+	RunID              string
+	ParentRunID        string
+	TaskID             string
+	ParentSessionID    string
+	ChildContract      bool
 }
 
 // runACPLoopWithStepCap is the internal one-shot variant that applies a
@@ -1012,8 +1094,11 @@ func runACPLoopWithLimits(
 	logf func(string, ...interface{}),
 	stream acp.StreamFunc,
 	limits acpLoopLimits,
-) (string, error) {
-	modelID := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
+) (text string, runErr error) {
+	modelID, modelErr := resolveACPExecutionModel(cfg, mgr, engine, modelOverride)
+	if modelErr != nil {
+		return "", modelErr
+	}
 	childMailbox, mailboxPresent, err := subagent.OpenChildMailboxFromEnv()
 	if err != nil {
 		return "", err
@@ -1034,6 +1119,11 @@ func runACPLoopWithLimits(
 	if err != nil {
 		return "", err
 	}
+	var lifecycleResult *agentloop.Result
+	defer func() {
+		discardPendingACPModelDelivery(state)
+		ctrl.CompleteLifecycleTurn(lifecycleResult, runErr)
+	}()
 
 	nudgeCount := 0
 	unavailableToolMarkupNudgeCount := 0
@@ -1046,6 +1136,7 @@ func runACPLoopWithLimits(
 			return "", ctx.Err()
 		}
 		result, err := ctrl.Run(ctx)
+		lifecycleResult = result
 		if err != nil {
 			var incomplete *agentloop.IncompleteTurnError
 			if errors.As(err, &incomplete) && result != nil {
@@ -1118,20 +1209,21 @@ func runACPLoopWithLimits(
 		if strings.TrimSpace(text) == "" {
 			return "", fmt.Errorf("model returned an empty response")
 		}
+		flushPendingACPModelDelivery(stream, state)
 		sendACPPhaseUpdate(stream, state.lastPhase, "Finalizing response…")
 		conv.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
 		return text, nil
 	}
 }
 
-// partialStreamTurnError preserves only already-emitted assistant text when
-// an SSE connection ends after the provider has started its response. It
-// intentionally excludes reasoning and tool-call fragments: neither is a
-// completed user-facing answer and replaying a turn that may contain a tool
-// call is unsafe.
+// partialStreamTurnError preserves the accumulated stream when an SSE
+// connection ends after the provider has started its response. The complete
+// fragment is retained for evidence/accounting, while Controller still
+// refuses to append it to history or execute any unfinished tool calls.
 type partialStreamTurnError struct {
 	cause error
 	text  string
+	turn  acpStreamTurn
 }
 
 func (e *partialStreamTurnError) Error() string { return e.cause.Error() }
@@ -1193,9 +1285,6 @@ func newACPLoopController(
 		state.pendingModelUpdates = nil
 		state.pendingModelUsage = nil
 		turn, err := streamACPTurnWithDelivery(ctx, mgr, req, stream, limits.MaxCostUSD > 0)
-		if err != nil {
-			return nil, err
-		}
 		// N1: the round's usage is available right after the round
 		// completes -- report it immediately rather than waiting for the
 		// whole prompt turn to finish, so a multi-round tool turn shows
@@ -1212,6 +1301,16 @@ func newACPLoopController(
 		}
 		if turn.Usage != nil {
 			resp.Usage = *turn.Usage
+		}
+		if err != nil {
+			// A provider can charge for a stream that ends after emitting
+			// content, reasoning, tool fragments, or usage. Return the
+			// accumulated response alongside the error so Controller can
+			// persist/account it before surfacing an incomplete turn.
+			if acpStreamTurnHasMaterial(turn) {
+				return resp, err
+			}
+			return nil, err
 		}
 		return resp, nil
 	})
@@ -1230,20 +1329,19 @@ func newACPLoopController(
 	})
 
 	history := agentloop.HistorySinkFunc(func(msg model.Message) {
-		if len(state.pendingModelUpdates) > 0 || state.pendingModelUsage != nil {
-			flushACPStreamUpdates(stream, state.pendingModelUpdates)
-			sendACPUsageUpdate(stream, state.pendingModelUsage, state.contextWindow)
-			state.pendingModelUpdates = nil
-			state.pendingModelUsage = nil
-		}
 		switch {
 		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+			flushPendingACPModelDelivery(stream, state)
 			conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		case msg.Role == "tool":
 			conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
 		}
 	})
 
+	lifecycleSessionID := strings.TrimSpace(limits.LifecycleSessionID)
+	if lifecycleSessionID == "" {
+		lifecycleSessionID = strings.TrimSpace(sessionID)
+	}
 	controllerConfig := agentloop.ControllerConfig{
 		Governor:         newACPToolLoopGovernorWithLimits(cfg, limits),
 		StepCap:          limits.StepCap,
@@ -1265,9 +1363,12 @@ func newACPLoopController(
 			window, _ := mgr.GetContextLength(mid)
 			return window
 		},
-		RunID:     strings.TrimSpace(limits.RunID),
-		SessionID: strings.TrimSpace(sessionID),
-		TaskID:    strings.TrimSpace(limits.TaskID),
+		RunID:                 strings.TrimSpace(limits.RunID),
+		SessionID:             lifecycleSessionID,
+		TaskID:                strings.TrimSpace(limits.TaskID),
+		TurnID:                strings.TrimSpace(limits.TurnID),
+		LifecycleObserver:     limits.LifecycleObserver,
+		DeferLifecycleTurnEnd: true,
 	}
 	if limits.MaxCostUSD > 0 && mgr != nil {
 		controllerConfig.CostForUsage = func(usage model.Usage) (float64, error) {
@@ -1360,6 +1461,23 @@ type acpStreamTurn struct {
 	Updates      []acp.SessionUpdate
 }
 
+func acpStreamTurnHasMaterial(turn acpStreamTurn) bool {
+	if turn.Usage != nil {
+		return true
+	}
+	if strings.TrimSpace(model.ExtractTextContentOrEmpty(turn.Message.Content)) != "" || strings.TrimSpace(turn.Message.Reasoning) != "" {
+		return true
+	}
+	return len(turn.Message.ToolCalls) > 0 || len(turn.Message.ReasoningDetails) > 0
+}
+
+func usageValue(usage *model.Usage) model.Usage {
+	if usage == nil {
+		return model.Usage{}
+	}
+	return *usage
+}
+
 // streamACPTurnWithDelivery optionally defers assistant deltas so a caller can
 // release them only after the shared Controller accepts the response. Provider
 // finish_reason is retained alongside the accumulated message for conclusive
@@ -1382,6 +1500,10 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
+			turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
+			if acpStreamTurnHasMaterial(turn) {
+				return turn, &partialStreamTurnError{cause: ctx.Err(), text: model.ExtractTextContentOrEmpty(turn.Message.Content), turn: turn}
+			}
 			return acpStreamTurn{}, ctx.Err()
 		case chunk, ok := <-chunks:
 			if !ok {
@@ -1402,9 +1524,10 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 				continue
 			}
 			if err != nil {
-				partialText := model.ExtractTextContentOrEmpty(acc.Message().Content)
-				if strings.TrimSpace(partialText) != "" {
-					return acpStreamTurn{Usage: acc.Usage()}, &partialStreamTurnError{cause: err, text: partialText}
+				turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
+				partialText := model.ExtractTextContentOrEmpty(turn.Message.Content)
+				if acpStreamTurnHasMaterial(turn) {
+					return turn, &partialStreamTurnError{cause: err, text: partialText, turn: turn}
 				}
 				return acpStreamTurn{}, err
 			}
@@ -1412,7 +1535,12 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 	}
 
 	if !receivedChoice {
-		return acpStreamTurn{}, model.NoResponseChoicesError(req, &model.ChatResponse{Model: req.Model})
+		turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
+		noChoices := model.NoResponseChoicesError(req, &model.ChatResponse{Model: req.Model, Usage: usageValue(turn.Usage)})
+		if acpStreamTurnHasMaterial(turn) {
+			return turn, &partialStreamTurnError{cause: noChoices, text: model.ExtractTextContentOrEmpty(turn.Message.Content), turn: turn}
+		}
+		return acpStreamTurn{}, noChoices
 	}
 
 	msg := acc.Message()
@@ -1434,6 +1562,28 @@ func flushACPStreamUpdates(stream acp.StreamFunc, updates []acp.SessionUpdate) {
 	for _, update := range updates {
 		_ = stream(update)
 	}
+}
+
+func flushPendingACPModelDelivery(stream acp.StreamFunc, state *acpLoopState) {
+	if state == nil || (len(state.pendingModelUpdates) == 0 && state.pendingModelUsage == nil) {
+		return
+	}
+	updates := state.pendingModelUpdates
+	usage := state.pendingModelUsage
+	// Transfer ownership before invoking client callbacks. Re-entrancy or a
+	// repeated acceptance path therefore cannot emit the same model delta twice.
+	state.pendingModelUpdates = nil
+	state.pendingModelUsage = nil
+	flushACPStreamUpdates(stream, updates)
+	sendACPUsageUpdate(stream, usage, state.contextWindow)
+}
+
+func discardPendingACPModelDelivery(state *acpLoopState) {
+	if state == nil {
+		return
+	}
+	state.pendingModelUpdates = nil
+	state.pendingModelUsage = nil
 }
 
 // forwardACPStreamDelta streams one chunk's delta immediately: content as an
@@ -1488,12 +1638,8 @@ type acpToolTurn struct {
 	Enabled      bool
 }
 
-func resolveACPExecutionModel(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, modelOverride string) string {
-	modelID := model.ResolvePhaseModel(cfg, acpReasoningChecker(mgr), engine, "execution", modelOverride)
-	if modelID == "" {
-		return "openai/gpt-4o"
-	}
-	return modelID
+func resolveACPExecutionModel(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, modelOverride string) (string, error) {
+	return model.ResolvePhaseModelRequired(cfg, acpReasoningChecker(mgr), engine, "execution", modelOverride)
 }
 
 func acpReasoningChecker(mgr *model.Manager) model.ReasoningChecker {

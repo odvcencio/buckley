@@ -3,6 +3,7 @@ package commit
 
 import (
 	"log"
+	"strings"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
@@ -10,29 +11,7 @@ import (
 )
 
 // CommitActions are the allowed action verbs for commits.
-var CommitActions = []string{
-	"add",
-	"fix",
-	"update",
-	"refactor",
-	"remove",
-	"improve",
-	"rename",
-	"move",
-	"revert",
-	"merge",
-	"bump",
-	"release",
-	"format",
-	"optimize",
-	"simplify",
-	"extract",
-	"inline",
-	"document",
-	"test",
-	"build",
-	"ci",
-}
+var CommitActions = append([]string(nil), commitmsg.AllowedActions...)
 
 // GenerateCommitTool defines the structured contract for commit generation.
 // The model calls this tool with structured parameters - no text parsing needed.
@@ -60,6 +39,9 @@ var GenerateCommitTool = tools.Definition{
 			"breaking": tools.BoolProperty(
 				"Whether this commit introduces a breaking change",
 			),
+			"breaking_reason": tools.StringProperty(
+				"If breaking is true, briefly describe the compatibility impact",
+			),
 			"issues": tools.ArrayProperty(
 				"Issue numbers this change RELATES TO, without # prefix (e.g., '123', '456'). "+
 					"These are rendered as references ('Refs #N'), NOT as close directives — "+
@@ -75,12 +57,35 @@ var GenerateCommitTool = tools.Definition{
 // CommitResult is the strongly-typed result of generate_commit.
 // No parsing required - the model fills this structure directly.
 type CommitResult struct {
-	Action   string   `json:"action"`
-	Scope    string   `json:"scope,omitempty"`
-	Subject  string   `json:"subject"`
-	Body     []string `json:"body"`
-	Breaking bool     `json:"breaking,omitempty"`
-	Issues   []string `json:"issues,omitempty"`
+	Action         string   `json:"action"`
+	Scope          string   `json:"scope,omitempty"`
+	Subject        string   `json:"subject"`
+	Body           []string `json:"body"`
+	Breaking       bool     `json:"breaking,omitempty"`
+	BreakingReason string   `json:"breaking_reason,omitempty"`
+	Issues         []string `json:"issues,omitempty"`
+}
+
+// Normalize applies the canonical representation used by all commit
+// renderers. It is safe to call more than once.
+func (cr *CommitResult) Normalize() {
+	if cr == nil {
+		return
+	}
+	cr.Action = commitmsg.NormalizeAction(cr.Action)
+	cr.Scope = strings.TrimSpace(cr.Scope)
+	cr.Subject = strings.TrimSpace(cr.Subject)
+	cr.BreakingReason = commitmsg.NormalizeBullet(cr.BreakingReason)
+	for i, bullet := range cr.Body {
+		cr.Body[i] = commitmsg.NormalizeBullet(bullet)
+	}
+	issues := cr.Issues[:0]
+	for _, issue := range cr.Issues {
+		if normalized := commitmsg.NormalizeIssueRef(issue); normalized != "" {
+			issues = append(issues, normalized)
+		}
+	}
+	cr.Issues = issues
 }
 
 // Header formats the commit header line.
@@ -100,36 +105,48 @@ func (cr CommitResult) Header() string {
 // Body bullets are sanitized for the same reason, in case a close keyword
 // slips into free text. See pkg/commitmsg.
 func (cr CommitResult) Format() string {
+	cr.Normalize()
 	msg := cr.Header() + "\n\n"
 
 	for _, bullet := range cr.Body {
+		if bullet == "" {
+			continue
+		}
 		msg += "- " + commitmsg.NeutralizeCloseDirectives(bullet) + "\n"
 	}
 
 	if cr.Breaking {
-		msg += "\nBREAKING CHANGE: " + cr.Subject + "\n"
+		msg += "\nBREAKING CHANGE: " + breakingDescription(cr.BreakingReason, cr.Subject, cr.Body) + "\n"
 	}
 
 	if len(cr.Issues) > 0 {
 		msg += "\n"
 		for _, issue := range cr.Issues {
-			msg += commitmsg.IssueRefLine(issue) + "\n"
+			if line := commitmsg.IssueRefLine(issue); line != "" {
+				msg += line + "\n"
+			}
 		}
 	}
 
 	return msg
 }
 
+func breakingDescription(reason, subject string, body []string) string {
+	if reason = commitmsg.NormalizeBullet(reason); reason != "" {
+		return commitmsg.NeutralizeCloseDirectives(reason)
+	}
+	for _, bullet := range body {
+		if bullet != "" {
+			return commitmsg.NeutralizeCloseDirectives(bullet)
+		}
+	}
+	return strings.TrimSpace(subject)
+}
+
 // Validate checks if the result meets requirements.
 func (cr CommitResult) Validate() error {
-	if cr.Action == "" {
-		return &ValidationError{Field: "action", Message: "action is required"}
-	}
-	if cr.Subject == "" {
-		return &ValidationError{Field: "subject", Message: "subject is required"}
-	}
-	if len(cr.Body) == 0 {
-		return &ValidationError{Field: "body", Message: "body requires at least one bullet"}
+	if err := commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues); err != nil {
+		return &ValidationError{Field: "commit", Message: err.Error()}
 	}
 	return nil
 }

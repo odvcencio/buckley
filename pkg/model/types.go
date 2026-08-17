@@ -1186,7 +1186,8 @@ func (p *ModelPricing) UnmarshalJSON(data []byte) error {
 
 // ErrorResponse represents an API error response
 type ErrorResponse struct {
-	Error ErrorDetail `json:"error"`
+	Error              ErrorDetail     `json:"error"`
+	OpenRouterMetadata json.RawMessage `json:"openrouter_metadata,omitempty"`
 }
 
 // ErrorDetail contains error information
@@ -1260,7 +1261,24 @@ func (e *APIError) Error() string {
 	if e.Details != "" && e.Details != e.Message {
 		message += ": " + e.Details
 	}
+	if openRouterPolicyBlocked(e) {
+		message += "; OpenRouter filtered every eligible endpoint; check Settings > Privacy and Guardrails for ZDR, data-collection, provider, and model restrictions"
+	}
 	return message
+}
+
+func openRouterPolicyBlocked(e *APIError) bool {
+	if e == nil || e.StatusCode != 404 {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(e.Message + " " + e.Details))
+	if !strings.Contains(text, "no endpoint") && !strings.Contains(text, "no endpoints") {
+		return false
+	}
+	return strings.Contains(text, "guardrail") ||
+		strings.Contains(text, "data policy") ||
+		strings.Contains(text, "zero data retention") ||
+		strings.Contains(text, "zdr")
 }
 
 // IsRateLimitError returns true if this is a rate limit error

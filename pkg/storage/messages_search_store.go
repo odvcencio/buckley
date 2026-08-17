@@ -1,12 +1,11 @@
 package storage
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 )
 
-func ensureMessagesSearchSchema(db *sql.DB) error {
+func ensureMessagesSearchSchema(db MigrationDB) error {
 	cols, err := messageColumns(db)
 	if err != nil {
 		return err
@@ -29,7 +28,7 @@ func ensureMessagesSearchSchema(db *sql.DB) error {
 	return nil
 }
 
-func messageColumns(db *sql.DB) (map[string]bool, error) {
+func messageColumns(db MigrationDB) (map[string]bool, error) {
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
 		return nil, fmt.Errorf("messages pragma: %w", err)
@@ -57,7 +56,7 @@ func messageColumns(db *sql.DB) (map[string]bool, error) {
 	return cols, nil
 }
 
-func ensureMessagesFTS(db *sql.DB) error {
+func ensureMessagesFTS(db MigrationDB) error {
 	// Check if the FTS table already exists to avoid unnecessary rebuilds
 	var ftsExists bool
 	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='messages_fts'`).Scan(&ftsExists)

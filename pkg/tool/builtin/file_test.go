@@ -275,6 +275,62 @@ func TestWriteFileTool(t *testing.T) {
 		}
 	})
 
+	t.Run("overwrite existing empty file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "empty.txt")
+		if err := os.WriteFile(testFile, []byte{}, 0644); err != nil {
+			t.Fatalf("failed to create empty test file: %v", err)
+		}
+
+		result, err := tool.Execute(map[string]any{
+			"path":    testFile,
+			"content": "new content",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected success, got error: %s", result.Error)
+		}
+
+		if result.DisplayData == nil {
+			t.Fatal("expected DisplayData to be set")
+		}
+		if isNew, ok := result.DisplayData["is_new"].(bool); !ok || isNew {
+			t.Fatalf("expected is_new=false for overwritten empty file, got %v", result.DisplayData["is_new"])
+		}
+		if summary, _ := result.DisplayData["summary"].(string); !strings.Contains(summary, "Wrote") {
+			t.Fatalf("expected overwrite summary, got %q", summary)
+		}
+	})
+
+	t.Run("overwrite existing unreadable but writable file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "write-only.txt")
+		if err := os.WriteFile(testFile, []byte("old content"), 0222); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+		if _, err := os.ReadFile(testFile); err == nil {
+			_ = os.Chmod(testFile, 0644)
+			t.Skip("platform permits reading a write-only file")
+		}
+		t.Cleanup(func() { _ = os.Chmod(testFile, 0644) })
+
+		result, err := tool.Execute(map[string]any{
+			"path":    testFile,
+			"content": "new content",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected success, got error: %s", result.Error)
+		}
+		if isNew, ok := result.DisplayData["is_new"].(bool); !ok || isNew {
+			t.Fatalf("expected is_new=false for overwritten unreadable file, got %v", result.DisplayData["is_new"])
+		}
+	})
+
 	t.Run("write enforces max file size", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		testFile := filepath.Join(tmpDir, "new.txt")

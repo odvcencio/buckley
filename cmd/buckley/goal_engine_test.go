@@ -76,7 +76,29 @@ func newGoalEngineUnderTest(t *testing.T, responses []string) (*goalTurnEngine, 
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	return newGoalTurnEngine(cfg, mgr, tool.NewEmptyRegistry(), ledger, ev, dir, "goal-test"), ev
+	engine, err := newGoalTurnEngine(cfg, mgr, tool.NewEmptyRegistry(), ledger, ev, dir, "goal-test")
+	if err != nil {
+		t.Fatalf("newGoalTurnEngine: %v", err)
+	}
+	return engine, ev
+}
+
+func TestNewGoalTurnEngine_RejectsNilDurableLedgerAtWiring(t *testing.T) {
+	var typedNil *runledger.SQLiteStore
+	for _, tt := range []struct {
+		name   string
+		ledger goalLedger
+	}{
+		{name: "nil interface"},
+		{name: "typed nil", ledger: typedNil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, err := newGoalTurnEngine(nil, nil, nil, tt.ledger, nil, "", "")
+			if err == nil || !strings.Contains(err.Error(), "durable ledger is required") || engine != nil {
+				t.Fatalf("engine=%v error=%v, want wiring rejection before dispatch", engine, err)
+			}
+		})
+	}
 }
 
 // TestGoalTurnEngine_CompletionStoresEvidence locks the completion

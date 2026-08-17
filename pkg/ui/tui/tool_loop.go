@@ -11,6 +11,7 @@ import (
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
@@ -268,7 +269,7 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		}
 		resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
 		if err != nil {
-			return nil, err
+			return resp, err
 		}
 		if resp != nil && len(resp.Choices) > 0 {
 			resp.Choices[0].Message.ToolCalls = normalizeToolLoopCalls(sess.ToolRegistry, resp.Choices[0].Message.ToolCalls, allowedTools)
@@ -308,13 +309,14 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 	})
 
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:       state.governor,
-		Progress:       newInteractiveProgressController(c.cfg),
-		FinalizeOnStop: true,
-		BuildRequest:   buildRequest,
-		CallModel:      callModel,
-		DispatchTools:  dispatch,
-		History:        history,
+		Governor:          state.governor,
+		Progress:          newInteractiveProgressController(c.cfg),
+		FinalizeOnStop:    true,
+		LifecycleObserver: telemetry.NewAgentLoopObserver(c.telemetry),
+		BuildRequest:      buildRequest,
+		CallModel:         callModel,
+		DispatchTools:     dispatch,
+		History:           history,
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0
@@ -350,6 +352,12 @@ func (c *Controller) callToolLoopTurn(ctx context.Context, sess *SessionState, m
 	if err == nil {
 		state.projection.ContinuationHit = state.continuation.Hit()
 		return resp, nil
+	}
+	if resp != nil {
+		// Do not retry a continuation that returned billable material with
+		// an error; the shared Controller will preserve/account that partial
+		// response and mark the logical turn incomplete.
+		return resp, err
 	}
 
 	// Continuation broke; reset and retry once through the normal streaming
@@ -496,11 +504,38 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	var responseModel string
 	var finishReason string
 	receivedChoice := false
+	partialResponse := func() *model.ChatResponse {
+		message := accumulator.FinalizeWithTokenParsing()
+		if message.Role == "" {
+			message.Role = "assistant"
+		}
+		usage := model.Usage{}
+		if streamedUsage := accumulator.Usage(); streamedUsage != nil {
+			usage = *streamedUsage
+		}
+		return &model.ChatResponse{
+			ID:    responseID,
+			Model: responseModel,
+			Choices: []model.Choice{{
+				Message:      message,
+				FinishReason: finishReason,
+			}},
+			Usage: usage,
+		}
+	}
+	partialResponseIfObserved := func(err error) (*model.ChatResponse, error) {
+		resp := partialResponse()
+		message := resp.Choices[0].Message
+		if resp.Usage.TotalTokens > 0 || strings.TrimSpace(model.ExtractTextContentOrEmpty(message.Content)) != "" || strings.TrimSpace(message.Reasoning) != "" || len(message.ToolCalls) > 0 {
+			return resp, err
+		}
+		return nil, err
+	}
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
 			c.closeTextProgress(state, sess, "")
-			return nil, ctx.Err()
+			return partialResponseIfObserved(ctx.Err())
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
@@ -528,7 +563,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 			}
 			if err != nil {
 				c.closeTextProgress(state, sess, "")
-				return nil, err
+				return partialResponseIfObserved(err)
 			}
 		}
 	}
@@ -536,7 +571,8 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	message := accumulator.FinalizeWithTokenParsing()
 	c.closeTextProgress(state, sess, model.ExtractTextContentOrEmpty(message.Content))
 	if !receivedChoice {
-		return nil, model.NoResponseChoicesError(req, &model.ChatResponse{ID: responseID, Model: responseModel})
+		resp := partialResponse()
+		return resp, model.NoResponseChoicesError(req, resp)
 	}
 	if message.Role == "" {
 		message.Role = "assistant"
@@ -937,6 +973,9 @@ func toolResultProgressSummary(name string, result *builtin.Result, execErr erro
 		}
 		if detail == "" {
 			detail = "failed"
+		}
+		if parked, _ := result.Data["parked"].(bool); parked {
+			return "⏸ " + name + " — " + compactStatusText(detail, 200)
 		}
 		return "✗ " + name + " — " + compactStatusText(detail, 200)
 	}

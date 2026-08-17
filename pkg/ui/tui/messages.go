@@ -45,24 +45,27 @@ func (PasteMsg) isMessage() {}
 
 // StreamChunk delivers a piece of streaming content.
 type StreamChunk struct {
-	SessionID string
-	Text      string
+	SessionID  string
+	Generation uint64
+	Text       string
 }
 
 func (StreamChunk) isMessage() {}
 
 // StreamDone signals streaming completion.
 type StreamDone struct {
-	SessionID string
-	FullText  string
+	SessionID  string
+	Generation uint64
+	FullText   string
 }
 
 func (StreamDone) isMessage() {}
 
 // StreamFlush is sent by the coalescer to flush buffered content.
 type StreamFlush struct {
-	SessionID string
-	Text      string
+	SessionID  string
+	Generation uint64
+	Text       string
 }
 
 func (StreamFlush) isMessage() {}
@@ -176,10 +179,20 @@ type ThinkingMsg struct {
 
 func (ThinkingMsg) isMessage() {}
 
+// ModelPickerAction identifies the bounded production behavior selected by a
+// model picker. The queued message never retains an arbitrary callback.
+type ModelPickerAction uint8
+
+const (
+	ModelPickerActionNone ModelPickerAction = iota
+	ModelPickerActionSelectExecution
+	ModelPickerActionToggleCurated
+)
+
 // ModelPickerMsg opens a searchable model catalog overlay on the UI loop.
 type ModelPickerMsg struct {
-	Items    []widgets.PaletteItem
-	OnSelect func(item widgets.PaletteItem)
+	Items  []widgets.PaletteItem
+	Action ModelPickerAction
 }
 
 func (ModelPickerMsg) isMessage() {}
@@ -274,6 +287,12 @@ type ApprovalRequestMsg struct {
 }
 
 func (ApprovalRequestMsg) isMessage() {}
+
+type approvalCancelledMsg struct {
+	RequestID string
+}
+
+func (approvalCancelledMsg) isMessage() {}
 
 // DiffLine represents a single line in a diff preview.
 type DiffLine struct {

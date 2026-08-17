@@ -86,6 +86,7 @@ func TestParseReviewCommandOptions(t *testing.T) {
 		"-max-tool-calls", "17",
 		"-max-diff-bytes", "64000",
 		"-max-validation-attempts", "1",
+		"-depth", "balanced",
 	})
 	if err != nil {
 		t.Fatalf("parseReviewCommandOptions() error = %v", err)
@@ -130,6 +131,37 @@ func TestParseReviewCommandOptions(t *testing.T) {
 	if opts.budgetUSD != 0.20 || opts.maxTurns != 4 || opts.maxToolCalls != 17 || opts.maxDiff != 64_000 || opts.maxRetries != 1 {
 		t.Fatalf("budget controls = $%.2f/%d/%d/%d/%d, want $0.20/4/17/64000/1",
 			opts.budgetUSD, opts.maxTurns, opts.maxToolCalls, opts.maxDiff, opts.maxRetries)
+	}
+	if opts.depth != reviewDepthBalanced {
+		t.Fatalf("depth = %q, want balanced", opts.depth)
+	}
+}
+
+func TestParseReviewCommandOptionsDepthModes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want reviewDepth
+	}{
+		{name: "default spot", want: reviewDepthSpot},
+		{name: "standard alias", args: []string{"--depth", "standard"}, want: reviewDepthBalanced},
+		{name: "in depth alias", args: []string{"--in-depth"}, want: reviewDepthInDepth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts, err := parseReviewCommandOptions(test.args)
+			if err != nil {
+				t.Fatalf("parseReviewCommandOptions() error = %v", err)
+			}
+			if opts.depth != test.want {
+				t.Fatalf("depth = %q, want %q", opts.depth, test.want)
+			}
+		})
+	}
+	if _, err := parseReviewCommandOptions([]string{"--depth", "unknown"}); err == nil {
+		t.Fatal("unknown review depth unexpectedly accepted")
+	}
+	if _, err := parseReviewCommandOptions([]string{"--depth", "balanced", "--in-depth"}); err == nil {
+		t.Fatal("conflicting depth flags unexpectedly accepted")
 	}
 }
 
@@ -447,10 +479,10 @@ func TestBranchReviewSnapshotPolicyMatchesReviewScope(t *testing.T) {
 	}{
 		{name: "branch ignores local state", scope: commands.ReviewScopeBranch, includeUnstaged: true, want: model.ReviewSnapshotHead},
 		{name: "worktree staged only", scope: commands.ReviewScopeWorktree, includeUnstaged: false, want: model.ReviewSnapshotIndex},
-		{name: "worktree excludes untracked state by default", scope: commands.ReviewScopeWorktree, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+		{name: "worktree auto-captures safe untracked state", scope: commands.ReviewScopeWorktree, includeUnstaged: true, want: model.ReviewSnapshotWorktree},
 		{name: "worktree explicitly includes reviewable untracked state", scope: commands.ReviewScopeWorktree, includeUnstaged: true, untrackedPaths: []string{"new.go"}, want: model.ReviewSnapshotWorktree},
 		{name: "local changes staged only", scope: commands.ReviewScopeChanges, includeUnstaged: false, want: model.ReviewSnapshotIndex},
-		{name: "local changes include unstaged", scope: commands.ReviewScopeChanges, includeUnstaged: true, want: model.ReviewSnapshotTrackedWorktree},
+		{name: "local changes auto-capture safe untracked state", scope: commands.ReviewScopeChanges, includeUnstaged: true, want: model.ReviewSnapshotWorktree},
 	}
 
 	for _, tt := range tests {
@@ -459,8 +491,13 @@ func TestBranchReviewSnapshotPolicyMatchesReviewScope(t *testing.T) {
 			if got := policy.Mode; got != tt.want {
 				t.Fatalf("snapshot mode = %q, want %q", got, tt.want)
 			}
-			if tt.want == model.ReviewSnapshotWorktree && len(policy.UntrackedPaths) != 1 {
-				t.Fatalf("snapshot untracked allowlist = %v, want one path", policy.UntrackedPaths)
+			if tt.want == model.ReviewSnapshotWorktree {
+				if len(tt.untrackedPaths) > 0 && len(policy.UntrackedPaths) != 1 {
+					t.Fatalf("snapshot untracked allowlist = %v, want one path", policy.UntrackedPaths)
+				}
+				if len(tt.untrackedPaths) == 0 && !policy.IncludeUntracked {
+					t.Fatalf("snapshot policy IncludeUntracked = false, want automatic safe capture")
+				}
 			}
 		})
 	}
@@ -646,5 +683,22 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 	}
 	if strings.Contains(got.reviewText, "`host-evidence-2` `run_verification`: PASS") {
 		t.Fatal("incomplete salvage rendered typed NO_TEST_GATE as PASS")
+	}
+}
+
+func TestReviewCommandFailureDiscardsIncompleteReview(t *testing.T) {
+	sentinel := errors.New("schema validation failed")
+	err := reviewCommandFailure(sentinel, &reviewCommandResult{
+		reviewText: "## Grade: A\n\n## Summary\npartial",
+		incomplete: true,
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want wrapped validation error", err)
+	}
+	if !strings.Contains(err.Error(), "incomplete review discarded") || !strings.Contains(err.Error(), "no review was emitted") {
+		t.Fatalf("error = %v, want fail-closed output message", err)
+	}
+	if err := reviewCommandFailure(sentinel, &reviewCommandResult{}); !errors.Is(err, sentinel) || err.Error() != sentinel.Error() {
+		t.Fatalf("complete failure = %v, want original error", err)
 	}
 }

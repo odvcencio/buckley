@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ type stubProvider struct {
 	streamRequests []ChatRequest
 	streamPlans    []stubStreamPlan
 	response       *ChatResponse
+	responseErr    error
 	nilResponse    bool
 }
 
@@ -66,7 +68,7 @@ func (s *stubProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*Ch
 	}
 	if s.response != nil {
 		resp := *s.response
-		return &resp, nil
+		return &resp, s.responseErr
 	}
 	return &ChatResponse{
 		Model: req.Model,
@@ -75,6 +77,39 @@ func (s *stubProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*Ch
 			FinishReason: "stop",
 		}},
 	}, nil
+}
+
+func TestChatCompletionPreservesResponseAlongsideProviderError(t *testing.T) {
+	providerErr := errors.New("provider stream ended after output")
+	provider := &stubProvider{
+		id:      "openrouter",
+		catalog: ModelCatalog{Data: []ModelInfo{{ID: "deepseek/deepseek-v4-pro-0813", ContextLength: 128_000}}},
+		response: &ChatResponse{
+			Model:   "deepseek/deepseek-v4-pro-0813",
+			Choices: []Choice{{Message: Message{Content: "partial review"}}},
+			Usage:   Usage{TotalTokens: 42},
+		},
+		responseErr: providerErr,
+	}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"openrouter": provider},
+		providerOrder:  []string{"openrouter"},
+		catalog:        map[string]ModelInfo{"deepseek/deepseek-v4-pro-0813": provider.catalog.Data[0]},
+		providerModels: map[string][]string{"openrouter": {"deepseek/deepseek-v4-pro-0813"}},
+		modelProviders: map[string]string{"deepseek/deepseek-v4-pro-0813": "openrouter"},
+	}
+
+	resp, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"})
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("ChatCompletion error = %v, want provider error", err)
+	}
+	if resp == nil || len(resp.Choices) != 1 || resp.Choices[0].Message.Content != "partial review" {
+		t.Fatalf("ChatCompletion response = %#v, want preserved partial response", resp)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want no retry after partial response", len(provider.requests))
+	}
 }
 
 func TestChatCompletionRetriesAffordableOpenRouterOutputWithoutChangingModel(t *testing.T) {

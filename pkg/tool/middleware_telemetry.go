@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,15 +27,26 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				ctx.Params = params
 			}
 			if strings.TrimSpace(ctx.CallID) == "" {
-				ctx.CallID = toolCallIDFromParams(params)
+				ctx.CallID = toolCallIDSafely(params)
 			}
 			if ctx.StartTime.IsZero() {
 				ctx.StartTime = time.Now()
 			}
 
-			rich := touch.ExtractFromArgs(name, params)
-			metadata := withTelemetryArguments(ctx.Metadata, params)
-			r.publishToolEvent(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, metadata)
+			rich := extractTelemetryFieldsSafely(name, params)
+			metadata := telemetryArgumentsSafely(ctx.Metadata, params)
+			r.publishToolEventBestEffort(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, metadata)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panicErr := fmt.Errorf("tool %s panicked", name)
+					panicResult := &builtin.Result{Success: false, Error: panicErr.Error()}
+					completionMetadata := telemetryArgumentsSafely(ctx.Metadata, ctx.Params)
+					r.publishToolEventBestEffort(telemetry.EventToolFailed, ctx.CallID, name, rich, time.Now(), panicResult, panicErr, ctx.Attempt, completionMetadata)
+					// Preserve the registry's outer PanicRecovery behavior and
+					// return semantics after publishing the terminal event.
+					panic(recovered)
+				}
+			}()
 
 			execFn := func(p map[string]any) (*builtin.Result, error) {
 				ctx.Params = p
@@ -51,8 +63,41 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				res, err = execFn(params)
 			}
 
-			r.publishToolEvent(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, metadata)
+			completionMetadata := telemetryArgumentsSafely(ctx.Metadata, ctx.Params)
+			r.publishToolEventBestEffort(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, completionMetadata)
 			return res, err
 		}
 	}
+}
+
+func extractTelemetryFieldsSafely(name string, params map[string]any) (rich touch.RichFields) {
+	defer func() {
+		if recover() != nil {
+			rich = touch.RichFields{}
+		}
+	}()
+	return touch.ExtractFromArgs(name, params)
+}
+
+func telemetryArgumentsSafely(metadata map[string]any, params map[string]any) (out map[string]any) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	return withTelemetryArguments(metadata, params)
+}
+
+func toolCallIDSafely(params map[string]any) (callID string) {
+	defer func() {
+		if recover() != nil {
+			callID = toolCallIDFromParams(nil)
+		}
+	}()
+	return toolCallIDFromParams(params)
+}
+
+func bestEffortTelemetry(fn func()) {
+	defer func() { _ = recover() }()
+	fn()
 }

@@ -25,48 +25,67 @@ func (r *Registry) executeWithShellTelemetry(execFn func(map[string]any) (*built
 		}
 	}
 	start := time.Now()
-	r.publishShellEvent(telemetry.EventShellCommandStarted, map[string]any{
-		"command":     command,
-		"interactive": interactive,
+	bestEffortTelemetry(func() {
+		r.publishShellEvent(telemetry.EventShellCommandStarted, map[string]any{
+			"command":     command,
+			"interactive": interactive,
+		})
 	})
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			r.publishShellTerminalBestEffort(
+				telemetry.EventShellCommandFailed,
+				command,
+				interactive,
+				start,
+				nil,
+				fmt.Errorf("run_shell panicked"),
+			)
+			panic(recovered)
+		}
+	}()
 
 	res, err := execFn(params)
-	duration := time.Since(start)
-
-	payload := map[string]any{
-		"command":     command,
-		"duration_ms": duration.Milliseconds(),
-		"interactive": interactive,
-	}
-
-	if res != nil {
-		if exitCode, ok := res.Data["exit_code"]; ok {
-			payload["exit_code"] = exitCode
-		}
-		if note, ok := res.DisplayData["message"].(string); ok && note != "" {
-			payload["note"] = note
-		}
-		if stderr, ok := res.Data["stderr"].(string); ok && stderr != "" {
-			payload["stderr_preview"] = truncateForTelemetry(stderr)
-		}
-		if stdout, ok := res.Data["stdout"].(string); ok && stdout != "" {
-			payload["stdout_preview"] = truncateForTelemetry(stdout)
-		}
-		if res.Error != "" {
-			payload["error"] = res.Error
-		}
-	}
-
+	eventType := telemetry.EventShellCommandCompleted
 	if err != nil || (res != nil && !res.Success) {
+		eventType = telemetry.EventShellCommandFailed
+	}
+	r.publishShellTerminalBestEffort(eventType, command, interactive, start, res, err)
+
+	return res, err
+}
+
+func (r *Registry) publishShellTerminalBestEffort(eventType telemetry.EventType, command string, interactive bool, start time.Time, res *builtin.Result, err error) {
+	bestEffortTelemetry(func() {
+		payload := map[string]any{
+			"command":     command,
+			"duration_ms": time.Since(start).Milliseconds(),
+			"interactive": interactive,
+		}
+
+		if res != nil {
+			if exitCode, ok := res.Data["exit_code"]; ok {
+				payload["exit_code"] = exitCode
+			}
+			if note, ok := res.DisplayData["message"].(string); ok && note != "" {
+				payload["note"] = note
+			}
+			if stderr, ok := res.Data["stderr"].(string); ok && stderr != "" {
+				payload["stderr_preview"] = truncateForTelemetry(stderr)
+			}
+			if stdout, ok := res.Data["stdout"].(string); ok && stdout != "" {
+				payload["stdout_preview"] = truncateForTelemetry(stdout)
+			}
+			if res.Error != "" {
+				payload["error"] = res.Error
+			}
+		}
+
 		if err != nil {
 			payload["error"] = err.Error()
 		}
-		r.publishShellEvent(telemetry.EventShellCommandFailed, payload)
-	} else {
-		r.publishShellEvent(telemetry.EventShellCommandCompleted, payload)
-	}
-
-	return res, err
+		r.publishShellEvent(eventType, payload)
+	})
 }
 
 func (r *Registry) shouldGateChanges() bool {

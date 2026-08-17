@@ -867,13 +867,17 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 		if normalized == "" {
 			continue
 		}
-		if _, exists := actual[normalized]; exists {
-			duplicates = append(duplicates, normalized)
-			continue
-		}
-		actual[normalized] = struct{}{}
-		if _, exists := expected[normalized]; !exists {
+		covered := coverageEntryPaths(normalized, expected)
+		if len(covered) == 0 {
 			unexpected = append(unexpected, normalized)
+		} else {
+			for _, coveredPath := range covered {
+				if _, exists := actual[coveredPath]; exists {
+					duplicates = append(duplicates, coveredPath)
+					continue
+				}
+				actual[coveredPath] = struct{}{}
+			}
 		}
 		if strings.TrimSpace(entry.Evidence) == "" {
 			missingEvidence = append(missingEvidence, normalized)
@@ -908,6 +912,31 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// coverageEntryPaths expands an exact path or a directory coverage group to
+// the changed files it claims. Groups deliberately use only the conservative
+// `dir/**` form: validation still requires every changed file to be covered
+// exactly once, so this is output compression rather than a coverage escape.
+func coverageEntryPaths(pattern string, expected map[string]struct{}) []string {
+	if !strings.HasSuffix(pattern, "/**") {
+		if _, ok := expected[pattern]; !ok {
+			return nil
+		}
+		return []string{pattern}
+	}
+	prefix := strings.TrimSuffix(pattern, "/**")
+	if prefix == "" || prefix == "." {
+		return nil
+	}
+	var covered []string
+	for path := range expected {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			covered = append(covered, path)
+		}
+	}
+	sort.Strings(covered)
+	return covered
 }
 
 func validateFeedbackLedger(entries []FeedbackEntry, requiredIDs []string) error {
