@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-16
+
+### Added
+- Review depth modes. `--depth` selects `spot`, `balanced`, or `in-depth` for
+  review commands. Balanced mode maps repository state and runs verification.
+  In-depth mode adds exhaustive coverage and requires a structural impact
+  section and a verification ledger section before it reports an approval.
+- Opaque commit digests. Buckley records a SHA256 digest of the staged diff
+  with its insertion and deletion counts. It appends `Buckley-Change-Hash` and
+  `Buckley-Change-Stats` trailers so a reader can identify the exact staged
+  content a message describes.
+- OpenRouter privacy routing. The model manager requests a zero data retention
+  (ZDR) route first. When OpenRouter reports that its guardrails leave no
+  eligible endpoint, the manager retries once with a data-collection-deny
+  route.
+- Agent Client Protocol (ACP) lifecycle events with stable session lineage and
+  per-turn identifiers.
+- SQLite write-ahead log (WAL) configuration for the storage layer, with
+  migration coverage.
+
+### Changed
+- Tasks declare their tools explicitly. The orchestrator validator no longer
+  infers a tool set for a task that omits one.
+- Model resolution reports failure. Buckley no longer selects a default model
+  silently when the requested model does not resolve.
+- The goal engine requires a durable ledger when it is wired, instead of
+  deferring that check to the first run.
+- Buckley validates the staged index before it writes a commit. A message
+  generated against different content is rejected rather than applied.
+- Deferred model delivery flushes exactly once, after the Controller accepts
+  the response.
+- `config check` reports which `config.env` sources supplied each fallback
+  value.
+
+### Security
+- Buckley creates log files with 0600 permissions.
+
+
 ## [0.7.0] - 2026-08-13
 
 ### Added
