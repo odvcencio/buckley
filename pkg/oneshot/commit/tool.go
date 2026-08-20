@@ -29,7 +29,7 @@ var GenerateCommitTool = tools.Definition{
 			),
 			"subject": {
 				Type:        "string",
-				Description: "Short summary of the change, imperative mood, no period. The FULL header (action + scope + subject) must be <= 72 chars total, so budget accordingly (e.g., 'add(ui): ' is 9 chars, leaving 63 for subject)",
+				Description: "Short summary of the change, imperative mood, no period. Do not repeat the action, scope, or breaking marker prefix; action and scope belong only in the structured header. The FULL header (action + scope + subject) must be <= 72 chars total, so budget accordingly (e.g., 'add(ui): ' is 9 chars, leaving 63 for subject)",
 				MaxLength:   72,
 			},
 			"body": tools.ArrayProperty(

@@ -57,6 +57,7 @@ Use a clear action verb (e.g., add, fix, update, improve)
 
 Rules:
 - Summary: concise, no period, ~50 chars
+- The summary/subject is summary text only. Do not repeat the action, scope, or breaking marker prefix in it; action and scope belong only in the structured header (for example, use "avoid the panic", not "fix(ui): avoid the panic")
 - Body: REQUIRED. Explain what and why, not how. Prefer a bullet list and match detail to diff size.
 - Breaking changes: add BREAKING CHANGE: in footer
 - The "issues" field lists issues this change RELATES TO. They are rendered as

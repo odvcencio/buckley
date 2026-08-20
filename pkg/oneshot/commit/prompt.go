@@ -116,6 +116,7 @@ Use the generate_commit tool to produce your response. The tool expects:
 - action: The verb describing what this commit does (add, fix, update, refactor, etc.)
 - scope: Optional component/area (e.g., "api", "ui", "config")
 - subject: Short summary, imperative mood, no period
+- The subject/summary is summary text only. Do not repeat an action, scope, or breaking marker prefix in it; action and scope belong only in the structured header (for example, use "avoid the panic", not "fix(ui): avoid the panic")
 - body: Bullet points explaining WHAT changed and WHY
 - breaking_reason: If breaking is true, briefly explain the compatibility impact
 

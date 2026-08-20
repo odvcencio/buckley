@@ -1681,6 +1681,7 @@ Recent commit style for reference:
 Requirements:
 - Use conventional commit format: type(scope): description
 - Types: feat, fix, refactor, docs, test, chore, perf, style
+- Keep the description/subject as summary text only; do not repeat the type or scope prefix after the colon
 - First line under 72 chars
 - Be specific about what changed and why
 - Add body if changes are complex

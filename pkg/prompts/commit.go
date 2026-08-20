@@ -34,6 +34,7 @@ OUTPUT REQUIREMENTS (plain text only):
   - Use "!" ONLY for breaking changes. If you use "!", include a footer:
     BREAKING CHANGE: <explanation>
 - Summary rules:
+  - Do not repeat the action or scope prefix in the summary; action and scope belong only in the header (write "replace fixture", not "test: replace fixture").
   - The FULL header line (action + scope + summary) MUST be <= 72 characters total.
   - Budget accordingly: "refactor(execution): " is 21 chars, leaving 51 for summary.
   - Match the breadth of the diff (avoid overfitting to a single file when many change).

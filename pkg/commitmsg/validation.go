@@ -20,6 +20,15 @@ var AllowedActions = []string{
 	"document", "test", "build", "ci",
 }
 
+// structuredActionAliases contains legacy/conventional verbs that can still
+// appear in a generated header even though the current structured tool emits
+// the canonical actions above. They must be treated as prefixes when checking
+// that a model did not repeat the header inside the subject.
+var structuredActionAliases = []string{
+	"feat", "feature", "docs", "doc", "style", "perf", "performance",
+	"chore", "tests",
+}
+
 // NormalizeAction trims and lowercases an action while preserving unknown
 // values for validation diagnostics.
 func NormalizeAction(action string) string {
@@ -106,6 +115,9 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 	if utf8.RuneCountInString(header) > HeaderLimit {
 		return fmt.Errorf("header exceeds %d characters", HeaderLimit)
 	}
+	if hasRepeatedActionPrefix(subject) {
+		return fmt.Errorf("subject repeats an action/scope prefix; action and scope belong only in the structured header and the subject must not repeat them")
+	}
 
 	nonEmptyBody := 0
 	for _, bullet := range body {
@@ -134,4 +146,53 @@ func hasCommitControl(value string) bool {
 		}
 	}
 	return false
+}
+
+// hasRepeatedActionPrefix reports whether subject starts with a structured
+// action header prefix. The prefix check is deliberately vocabulary-bound so
+// ordinary colon prose such as "http:" and "10:30" remains valid.
+func hasRepeatedActionPrefix(subject string) bool {
+	subject = strings.TrimSpace(subject)
+	for _, action := range AllowedActions {
+		if hasActionHeaderPrefix(subject, action) {
+			return true
+		}
+	}
+	for _, action := range structuredActionAliases {
+		if hasActionHeaderPrefix(subject, action) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActionHeaderPrefix(subject, action string) bool {
+	if len(subject) <= len(action) || !strings.EqualFold(subject[:len(action)], action) {
+		return false
+	}
+
+	remainder := subject[len(action):]
+	if remainder[0] == '(' {
+		close := strings.IndexByte(remainder, ')')
+		if close < 2 || !validHeaderScope(remainder[1:close]) {
+			return false
+		}
+		remainder = remainder[close+1:]
+	}
+	if strings.HasPrefix(remainder, "!") {
+		remainder = remainder[1:]
+	}
+	return strings.HasPrefix(remainder, ":")
+}
+
+func validHeaderScope(scope string) bool {
+	if scope == "" || strings.TrimSpace(scope) != scope {
+		return false
+	}
+	for _, r := range scope {
+		if unicode.IsControl(r) || r == '(' || r == ')' || r == ':' {
+			return false
+		}
+	}
+	return true
 }

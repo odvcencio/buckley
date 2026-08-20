@@ -67,6 +67,7 @@ Closes #123
 
 **Subject line rules:**
 - Use imperative mood ("add" not "added" or "adds")
+- The header owns the type and scope; the subject must contain only the summary and must not repeat that prefix
 - Don't capitalize first letter
 - No period at the end
 - Max 50 characters
