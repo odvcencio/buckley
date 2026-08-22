@@ -121,8 +121,12 @@ func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *mod
 		if cfg != nil && mgr != nil {
 			reasoning = model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "execution")
 		}
+		client, err := oneshotClientForProvider(mgr, modelID, providerID)
+		if err != nil {
+			return nil, err
+		}
 		return oneshot.NewInvoker(oneshot.InvokerConfig{
-			Client:          mgr,
+			Client:          client,
 			Model:           modelID,
 			Provider:        providerID,
 			ReasoningEffort: reasoning,

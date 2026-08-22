@@ -76,6 +76,20 @@ func GetMetadata(t Tool) ToolMetadata {
 // below. run_code, for example, executes arbitrary Python/JS/Go/Bash and
 // must carry the same category and impact as run_shell.
 var toolMetadataOverrides = map[string]ToolMetadata{
+	// commit_changes is a git-category operation that modifies the repository
+	// and is expensive because Buckley's governed commit runtime calls the
+	// configured default commit model. The name gives inferMetadata's
+	// substring rules nothing to work with, and the tool cannot implement
+	// RichTool from inside pkg/tool/builtin without an import cycle, so its
+	// accurate metadata is pinned here declaratively (no init-time mutation).
+	"commit_changes": {
+		Category:     CategoryGit,
+		Intent:       "Creating scoped commit",
+		Summary:      "Governed commit created",
+		Impact:       ImpactModifying,
+		Cost:         CostExpensive,
+		ExampleUsage: `commit_changes {"paths": ["cmd/buckley/commit.go"]}`,
+	},
 	"run_code": {
 		Category: CategoryShell,
 		Impact:   ImpactDestructive, // executes arbitrary code, same as run_shell

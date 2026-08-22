@@ -41,6 +41,8 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.GitBlameTool{})
 	register(&builtin.ListMergeConflictsTool{})
 	register(&builtin.MarkResolvedTool{})
+	// Governed commit through Buckley's own commit runtime (no shell, no push)
+	register(&builtin.CommitChangesTool{})
 	register(&builtin.HeadlessBrowseTool{})
 	register(&builtin.BrowserStartTool{})
 	register(&builtin.BrowserNavigateTool{})
@@ -98,6 +100,9 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	// Note: TODO tool is registered separately with SetTodoStore()
 }
 
+// Note: commit_changes UI metadata is declared in the toolMetadataOverrides
+// map in metadata.go; there is no init-time mutation here.
+
 // applyDefaultKinds sets ACP tool_call kinds for built-in tools.
 func (r *Registry) applyDefaultKinds() {
 	for name, kind := range defaultToolKinds() {
@@ -140,6 +145,7 @@ func defaultToolKinds() map[string]string {
 		"git_blame":              "read",
 		"list_merge_conflicts":   "read",
 		"mark_conflict_resolved": "edit",
+		"commit_changes":         "execute",
 
 		// Code navigation
 		"find_symbol":            "search",
