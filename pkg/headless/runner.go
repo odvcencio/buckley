@@ -1044,7 +1044,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 						r.emitError("failed to log tool execution", logErr)
 					}
 				}
-				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false})
+				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false, Error: message})
 				continue
 			}
 		}
@@ -1087,7 +1087,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 						r.emitError("failed to log tool execution", logErr)
 					}
 				}
-				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false})
+				outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false, Error: message})
 				continue
 			}
 			decision = "approved"
@@ -1132,7 +1132,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 				r.emitError("failed to log tool execution", logErr)
 			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: errorResult, Success: false})
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: errorResult, Success: false, Error: err.Error()})
 			continue
 		}
 
@@ -1160,6 +1160,8 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 		outcomes = append(outcomes, agentloop.ToolOutcome{
 			Content:       resultContent,
 			Success:       result.Success,
+			Error:         result.Error,
+			Stderr:        builtinResultString(result, "stderr"),
 			YieldObserved: yield.Observed,
 			YieldCount:    yield.Count,
 			YieldUnit:     yield.Unit,
@@ -1167,6 +1169,14 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 	}
 
 	return outcomes, nil
+}
+
+func builtinResultString(result *builtin.Result, key string) string {
+	if result == nil || result.Data == nil {
+		return ""
+	}
+	value, _ := result.Data[key].(string)
+	return value
 }
 
 func (r *Runner) approvalAuditFields(approvalID string) (string, int) {

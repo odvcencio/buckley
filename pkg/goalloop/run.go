@@ -3,6 +3,7 @@ package goalloop
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -36,7 +37,9 @@ type driveState struct {
 	phase       string
 	// prematureCompletions counts completion claims the verification
 	// gate rejected; the second one parks the task instead of looping.
-	prematureCompletions int
+	prematureCompletions    int
+	lastEvidenceFingerprint string
+	noProgressTurns         int
 }
 
 func newDriveState(spec TaskSpec, resume *taskstate.ResumeContext) *driveState {
@@ -48,8 +51,31 @@ func newDriveState(spec TaskSpec, resume *taskstate.ResumeContext) *driveState {
 		d.nextActions = resume.State.NextActions
 		d.checks = resume.State.Checks
 		d.questions = resume.State.Questions
+		if resume.State.Harness != nil {
+			d.lastEvidenceFingerprint = resume.State.Harness.EvidenceFingerprint
+			d.noProgressTurns = resume.State.Harness.NoProgressTurns
+		}
 	}
 	return d
+}
+
+// observeHarnessProgress updates only deterministic loop state. Novel evidence
+// starts a new streak, identical read-only evidence extends it, and any
+// repository mutation resets it. A streak begins at one so the second
+// identical turn is the first actionable repeat.
+func (d *driveState) observeHarnessProgress(outcome TurnOutcome) {
+	fingerprint := strings.TrimSpace(outcome.EvidenceFingerprint)
+	if outcome.StateChanged {
+		d.lastEvidenceFingerprint = fingerprint
+		d.noProgressTurns = 0
+		return
+	}
+	if fingerprint == d.lastEvidenceFingerprint {
+		d.noProgressTurns++
+		return
+	}
+	d.lastEvidenceFingerprint = fingerprint
+	d.noProgressTurns = 1
 }
 
 // absorb folds one turn's outcome into the drive state.
@@ -165,6 +191,7 @@ func progressState(outcome TurnOutcome, goal Goal, spentUSD float64, drive *driv
 		StateChanged:     outcome.StateChanged,
 		TaskDone:         outcome.Completed,
 		VerificationDebt: float64(drive.debt()),
+		NoProgressTurns:  drive.noProgressTurns,
 	}
 	if goal.BudgetUSD > 0 {
 		state.BudgetSet = true
@@ -292,6 +319,10 @@ func (l *Loop) driveCheckpoint(taskID, status string, drive *driveState, blocker
 		Checks:      drive.checks,
 		Questions:   drive.questions,
 		Blocker:     blocker,
+		Harness: &taskstate.HarnessProgress{
+			EvidenceFingerprint: drive.lastEvidenceFingerprint,
+			NoProgressTurns:     drive.noProgressTurns,
+		},
 	}
 }
 

@@ -118,6 +118,11 @@ func (f ModelCallerFunc) Call(ctx context.Context, req model.ChatRequest, useCon
 type ToolOutcome struct {
 	Content string
 	Success bool
+	// Error and Stderr are bounded diagnostic projections for failed-event
+	// telemetry. Content remains the model-facing result and the evidence store
+	// retains the complete body.
+	Error  string
+	Stderr string
 	// EffectClass is an optional caller-provided effect classification such
 	// as readonly, modifying, destructive, or control. It is recorded with
 	// the durable step event so a future retry policy can be conservative.
@@ -2079,6 +2084,13 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	record := state.records[index]
 	record["effect_class"] = outcome.EffectClass
 	record["success"] = outcome.Success
+	if !outcome.Success {
+		errorText, stderr := normalizedToolFailure(outcome)
+		record["error"] = errorText
+		if stderr != "" {
+			record["stderr"] = stderr
+		}
+	}
 	record["yield_observed"] = outcome.YieldObserved
 	if outcome.YieldObserved {
 		record["yield_count"] = outcome.YieldCount
@@ -2096,6 +2108,29 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	}
 	c.recordEventWithEvidence(ctx, runledger.EventToolFailed, record, evidenceIDs(outputEvidenceID))
 	return nil
+}
+
+func normalizedToolFailure(outcome ToolOutcome) (string, string) {
+	errorText := strings.TrimSpace(outcome.Error)
+	stderr := strings.TrimSpace(outcome.Stderr)
+	if errorText == "" {
+		content := strings.TrimSpace(outcome.Content)
+		if strings.HasPrefix(strings.ToLower(content), "error:") {
+			errorText = strings.TrimSpace(content[len("error:"):])
+		} else {
+			for _, line := range strings.Split(content, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(strings.ToLower(line), "error:") {
+					errorText = strings.TrimSpace(line[len("error:"):])
+					break
+				}
+			}
+		}
+	}
+	if errorText == "" {
+		errorText = "tool reported an unsuccessful result"
+	}
+	return modelstep.NormalizeErrorText(errorText), modelstep.NormalizeErrorText(stderr)
 }
 
 func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState, progress *progressTracker) (Decision, error) {
@@ -2219,7 +2254,7 @@ func normalizedDurableEventPayload(payload map[string]any) map[string]any {
 	for key, value := range payload {
 		out[key] = value
 	}
-	for _, key := range []string{"error", "provider_error", "pricing_error", "reason"} {
+	for _, key := range []string{"error", "stderr", "provider_error", "pricing_error", "reason"} {
 		if value, ok := out[key].(string); ok {
 			out[key] = modelstep.NormalizeErrorText(value)
 		}
@@ -2278,6 +2313,7 @@ func lifecycleEventFromLedger(c *Controller, eventType string, timestamp time.Ti
 		}
 	}
 	event.Error, _ = payloadString(payload, "error")
+	event.Stderr, _ = payloadString(payload, "stderr")
 	if event.Error == "" {
 		event.Error, _ = payloadString(payload, "pricing_error")
 	}

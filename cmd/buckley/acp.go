@@ -1821,7 +1821,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
 			"error": err.Error(),
 		}, nil, workDir)
-		return agentloop.ToolOutcome{Content: toolText}
+		return agentloop.ToolOutcome{Content: toolText, Error: err.Error()}
 	}
 
 	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), index, total))
@@ -1832,7 +1832,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
 			"error": toolText,
 		}, nil, workDir)
-		return agentloop.ToolOutcome{Content: toolText}
+		return agentloop.ToolOutcome{Content: toolText, Error: toolText}
 	}
 
 	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
@@ -1842,7 +1842,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 			"error":  toolText,
 			"denied": true,
 		}, result, workDir)
-		return agentloop.ToolOutcome{Content: toolText}
+		return agentloop.ToolOutcome{Content: toolText, Error: toolText}
 	}
 
 	result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
@@ -1856,9 +1856,17 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		status = acp.ToolCallStatusFailed
 	}
 	sendACPToolCallUpdate(stream, tc, params, status, displayText, toolCallRawOutput(result, execErr), result, workDir)
+	errorText := ""
+	if execErr != nil {
+		errorText = execErr.Error()
+	} else if result != nil {
+		errorText = result.Error
+	}
 	return agentloop.ToolOutcome{
 		Content:       toolText,
 		Success:       execErr == nil && result != nil && result.Success,
+		Error:         errorText,
+		Stderr:        toolResultString(result, "stderr"),
 		YieldObserved: yield.Observed,
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,

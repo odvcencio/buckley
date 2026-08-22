@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
@@ -98,6 +99,21 @@ func TestNewGoalTurnEngine_RejectsNilDurableLedgerAtWiring(t *testing.T) {
 				t.Fatalf("engine=%v error=%v, want wiring rejection before dispatch", engine, err)
 			}
 		})
+	}
+}
+
+func TestGoalEvidenceFingerprintCanonicalizesArguments(t *testing.T) {
+	first := goalEvidencePart(model.ToolCall{Function: model.FunctionCall{
+		Name: "read_file", Arguments: `{"b":2,"a":1}`,
+	}}, agentloop.ToolOutcome{Content: "same evidence", Success: true})
+	second := goalEvidencePart(model.ToolCall{Function: model.FunctionCall{
+		Name: "read_file", Arguments: `{ "a": 1, "b": 2 }`,
+	}}, agentloop.ToolOutcome{Content: "same evidence", Success: true})
+	if got, want := goalEvidenceFingerprint([]string{first}), goalEvidenceFingerprint([]string{second}); got != want {
+		t.Fatalf("fingerprints differ: %q != %q", got, want)
+	}
+	if got := goalEvidenceFingerprint(nil); got != "" {
+		t.Fatalf("empty fingerprint = %q, want empty", got)
 	}
 }
 

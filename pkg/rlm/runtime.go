@@ -363,7 +363,7 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		toolResults := r.executeCoordinatorTools(ctx, registry, calls)
 		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
 		for i, tr := range toolResults {
-			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success}
+			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
 		}
 
 		if answer.TokensUsed >= maxTokens {
@@ -587,10 +587,15 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		res, err := registry.ExecuteWithContext(ctx, name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
+			result.Error = err.Error()
 			result.Success = false
 		} else {
 			result.Result = r.formatCoordinatorResult(res)
 			result.Success = res != nil && res.Success
+			if res != nil {
+				result.Error = res.Error
+				result.Stderr, _ = res.Data["stderr"].(string)
+			}
 		}
 		results = append(results, result)
 	}
@@ -644,6 +649,8 @@ type coordinatorToolResult struct {
 	ID      string
 	Name    string
 	Result  string
+	Error   string
+	Stderr  string
 	Success bool
 }
 

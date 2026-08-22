@@ -131,9 +131,13 @@ type TurnOutcome struct {
 	PromptTokens     int
 	CompletionTokens int
 	StateChanged     bool
-	Summary          string
-	NextActions      []taskstate.NextAction
-	Completed        bool
+	// EvidenceFingerprint deterministically identifies the ordered tool
+	// evidence observed during this turn. The durable loop compares it across
+	// checkpoints so restarting a worker cannot reset stagnation detection.
+	EvidenceFingerprint string
+	Summary             string
+	NextActions         []taskstate.NextAction
+	Completed           bool
 	// CompletedEvidenceID is required when Completed is set: the task's
 	// completion claim must be evidence-linked (spec decision 9).
 	CompletedEvidenceID string

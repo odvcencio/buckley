@@ -44,6 +44,8 @@ type DriveSnapshot struct {
 	Questions            []taskstate.Question          `json:"questions,omitempty"`
 	Phase                string                        `json:"phase,omitempty"`
 	PrematureCompletions int                           `json:"premature_completions,omitempty"`
+	EvidenceFingerprint  string                        `json:"evidence_fingerprint,omitempty"`
+	NoProgressTurns      int                           `json:"no_progress_turns,omitempty"`
 }
 
 func snapshotOf(d *driveState) DriveSnapshot {
@@ -54,6 +56,8 @@ func snapshotOf(d *driveState) DriveSnapshot {
 		Questions:            d.questions,
 		Phase:                d.phase,
 		PrematureCompletions: d.prematureCompletions,
+		EvidenceFingerprint:  d.lastEvidenceFingerprint,
+		NoProgressTurns:      d.noProgressTurns,
 	}
 }
 
@@ -63,12 +67,14 @@ func (s DriveSnapshot) driveState() *driveState {
 		phase = PhaseExecute
 	}
 	return &driveState{
-		summary:              s.Summary,
-		nextActions:          s.NextActions,
-		checks:               s.Checks,
-		questions:            s.Questions,
-		phase:                phase,
-		prematureCompletions: s.PrematureCompletions,
+		summary:                 s.Summary,
+		nextActions:             s.NextActions,
+		checks:                  s.Checks,
+		questions:               s.Questions,
+		phase:                   phase,
+		prematureCompletions:    s.PrematureCompletions,
+		lastEvidenceFingerprint: s.EvidenceFingerprint,
+		noProgressTurns:         s.NoProgressTurns,
 	}
 }
 
@@ -182,6 +188,7 @@ func (l *Loop) TurnStep(ctx context.Context, req TurnStepRequest) (TurnStepRespo
 	counters.SpentUSD = goalSpent
 	resp.Counters = counters
 
+	drive.observeHarnessProgress(outcome)
 	drive.absorb(outcome)
 	// A verify phase lasts one turn; the outcome's checks decide what
 	// happens next.

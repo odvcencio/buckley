@@ -1,6 +1,8 @@
 package review
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -402,6 +404,27 @@ func TestVerificationTools_Execute_ReadFile_PathRequired(t *testing.T) {
 	_, err := tools.Execute("read_file", []byte(`{}`))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "path is required")
+}
+
+func TestVerificationTools_ReadFileUsesBoundedPages(t *testing.T) {
+	root := t.TempDir()
+	lines := make([]string, 150)
+	for i := range lines {
+		lines[i] = "line"
+	}
+	if err := os.WriteFile(root+"/large.go", []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tools := NewVerificationTools(root)
+	got, err := tools.Execute("read_file", []byte(`{"path":"large.go"}`))
+	require.NoError(t, err)
+	assert.Contains(t, got, "lines 1-100 of 150")
+	assert.Contains(t, got, "Continue with start_line=101")
+	assert.NotContains(t, got, " 101:")
+
+	_, err = tools.Execute("read_file", []byte(`{"path":"large.go","start_line":1,"end_line":101}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most 100 lines")
 }
 
 func TestVerificationTools_Execute_SearchCode_PatternRequired(t *testing.T) {

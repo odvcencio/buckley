@@ -86,6 +86,68 @@ func TestController_ReplaysCompletedModelStepWithoutCallingProvider(t *testing.T
 	}
 }
 
+func TestController_FailedToolEventCarriesBoundedDiagnostics(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := context.Background()
+	modelCalls := 0
+	var toolError LifecycleEvent
+	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return toolCallResponse("call-failed", "run_shell", `{"command":"false"}`, model.Usage{}), nil
+			}
+			return textResponse("reported failure", model.Usage{}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{
+				Content: "Error: command failed",
+				Error:   "command failed with token " + secret,
+				Stderr:  "fatal stderr " + secret,
+			}}, nil
+		}),
+		LifecycleObserver: func(event LifecycleEvent) {
+			if event.Type == LifecycleToolError {
+				toolError = event
+			}
+		},
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      "task-failed-tool",
+		TurnID:      "task-failed-tool/cp-001/turn-000",
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if _, err := ctrl.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if toolError.ToolName != "run_shell" || toolError.ToolCallID != "call-failed" {
+		t.Fatalf("tool error identity = %+v", toolError)
+	}
+	if toolError.Error == "" || toolError.Stderr == "" || len(toolError.EvidenceIDs) != 1 {
+		t.Fatalf("tool error diagnostics = %+v, want error, stderr, and evidence", toolError)
+	}
+	if strings.Contains(toolError.Error, secret) || strings.Contains(toolError.Stderr, secret) {
+		t.Fatalf("tool error leaked secret: %+v", toolError)
+	}
+
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID, Types: []string{runledger.EventToolFailed}})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Payload["tool"] != "run_shell" || events[0].Payload["error"] == "" || events[0].Payload["stderr"] == "" {
+		t.Fatalf("failed tool ledger event = %+v", events)
+	}
+}
+
 func TestController_ReplaysOriginalChargedCostWithoutRepricing(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := t.Context()

@@ -444,6 +444,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 				outcomes = append(outcomes, agentloop.ToolOutcome{
 					Content: fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name),
 					Success: false,
+					Error:   fmt.Sprintf("tool %s not allowed by active skills", tc.Function.Name),
 				})
 				continue
 			}
@@ -452,7 +453,11 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: result, Success: success})
+			errorText := ""
+			if err != nil {
+				errorText = err.Error()
+			}
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: result, Success: success, Error: errorText})
 		}
 		return outcomes, nil
 	})
