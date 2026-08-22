@@ -1,0 +1,69 @@
+// Compaction model routing is deliberately fact-driven. The host is
+// responsible for deriving these facts from trusted price, workspace, and
+// privacy observations; a model cannot nominate itself as free.
+
+outcome CompactionModelRoute {
+    route: string
+    reason_code: string
+}
+
+strategy compaction_model_route returns CompactionModelRoute {
+    when {
+        fallback.configured != true
+    } then BlockMissingFallback {
+        route: "block",
+        reason_code: "commit_model_missing",
+    }
+
+    when {
+        campaign.requested != true
+    } then CommitByDefault {
+        route: "commit",
+        reason_code: "campaign_not_requested",
+    }
+
+    when {
+        campaign.price_verified != true
+    } then CommitOnUnverifiedPrice {
+        route: "commit",
+        reason_code: "free_price_unverified",
+    }
+
+    when {
+        campaign.price_evidence_fresh != true
+    } then CommitOnStalePrice {
+        route: "commit",
+        reason_code: "free_price_stale",
+    }
+
+    when {
+        workspace.oss_verified != true
+    } then CommitOutsideVerifiedOSS {
+        route: "commit",
+        reason_code: "workspace_not_verified_oss",
+    }
+
+    when {
+        privacy.allowed != true
+    } then CommitWhenPrivacyIneligible {
+        route: "commit",
+        reason_code: "privacy_policy_ineligible",
+    }
+
+    when {
+        campaign.requested == true
+        and campaign.price_verified == true
+        and campaign.price_evidence_fresh == true
+        and workspace.oss_verified == true
+        and privacy.allowed == true
+        and fallback.configured == true
+    } then UseVerifiedFreeCampaignModel {
+        route: "campaign",
+        reason_code: "verified_free_and_policy_eligible",
+    }
+
+    else CommitFailClosed {
+        route: "commit",
+        reason_code: "campaign_facts_incomplete",
+    }
+}

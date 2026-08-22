@@ -286,10 +286,15 @@ func (cm *CompactionManager) EstimateTokensSaved(conv *Conversation) int {
 	return tokensBefore - estimatedSummaryTokens
 }
 
-// getUtilityModel returns the configured utility model for compaction
+// getUtilityModel returns the configured compaction model. When no explicit
+// override exists, compaction follows the commit model so routine context
+// maintenance does not introduce a separate implicit provider route.
 func (cm *CompactionManager) getUtilityModel() string {
 	if cm.cfg != nil {
-		return cm.cfg.GetUtilityCompactionModel()
+		if modelID := strings.TrimSpace(cm.cfg.Models.Utility.Compaction); modelID != "" {
+			return modelID
+		}
+		return cm.cfg.GetUtilityCommitModel()
 	}
-	return config.DefaultUtilityModel
+	return config.DefaultCommitModel
 }

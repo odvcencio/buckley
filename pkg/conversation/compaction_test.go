@@ -396,6 +396,28 @@ func TestNewCompactionManager_ConfigurableTimeout(t *testing.T) {
 	}
 }
 
+func TestCompactionManager_GetUtilityModel_UsesCommitFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{name: "nil config", want: config.DefaultCommitModel},
+		{name: "empty config", cfg: &config.Config{}, want: config.DefaultCommitModel},
+		{name: "configured commit", cfg: &config.Config{Models: config.ModelConfig{Utility: config.UtilityModelConfig{Commit: "openai/commit-model"}}}, want: "openai/commit-model"},
+		{name: "explicit compaction override", cfg: &config.Config{Models: config.ModelConfig{Utility: config.UtilityModelConfig{Commit: "openai/commit-model", Compaction: "openai/summary-model"}}}, want: "openai/summary-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := NewCompactionManager(nil, tt.cfg)
+			if got := cm.getUtilityModel(); got != tt.want {
+				t.Fatalf("getUtilityModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldCompact_ConfigurableThreshold(t *testing.T) {
 	tests := []struct {
 		name       string

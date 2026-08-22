@@ -172,7 +172,7 @@ func DefaultConfig() *Config {
 			Utility: UtilityModelConfig{
 				Commit:     DefaultCommitModel,
 				PR:         DefaultUtilityModel,
-				Compaction: DefaultUtilityModel,
+				Compaction: DefaultCommitModel,
 				TodoPlan:   DefaultUtilityModel,
 			},
 		},
