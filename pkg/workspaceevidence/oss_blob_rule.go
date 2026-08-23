@@ -22,8 +22,9 @@ const (
 
 	maxOSSPromptPathBytes    = 4 << 10
 	maxOSSPromptPathDepth    = 64
-	ossBlobRuleVersion       = "buckley.workspaceevidence.oss-blob-rule.v1"
-	ossBlobRuleBindingDomain = "buckley.workspaceevidence.oss-blob-rule.binding.v1"
+	ossBlobRuleVersion       = "buckley.workspaceevidence.oss-blob-rule.v2"
+	ossBlobRuleBindingDomain = "buckley.workspaceevidence.oss-blob-rule.binding.v2"
+	ossLicenseRuleVersion    = "buckley.workspaceevidence.canonical-oss-license.v1"
 )
 
 var (
@@ -40,6 +41,8 @@ var (
 type OSSBlobRule struct {
 	self                *OSSBlobRule
 	evidence            RootLicenseBlobEvidence
+	licenseRuleVersion  string
+	licenseID           string
 	promptPath          string
 	promptMode          string
 	promptBlobOID       string
@@ -66,8 +69,9 @@ func MintTrackedPromptOSSBlobRule(ctx context.Context, evidence RootLicenseBlobE
 	if err := evidence.Revalidate(boundedCtx); err != nil {
 		return nil, nil, fmt.Errorf("revalidate root license for OSS blob rule: %w", err)
 	}
-	if !ossBlobRuleAllows(evidence) {
-		return nil, nil, ErrOSSBlobRuleDenied
+	licenseID, err := evaluateBoundOSSLicense(boundedCtx, evidence)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	entry, prompt, err := readCommittedOSSPrompt(boundedCtx, evidence, promptPath)
@@ -91,6 +95,8 @@ func MintTrackedPromptOSSBlobRule(ctx context.Context, evidence RootLicenseBlobE
 
 	rule := &OSSBlobRule{
 		evidence:            evidence,
+		licenseRuleVersion:  ossLicenseRuleVersion,
+		licenseID:           licenseID,
 		promptPath:          promptPath,
 		promptMode:          entry.mode,
 		promptBlobOID:       entry.oid,
@@ -127,7 +133,11 @@ func (r *OSSBlobRule) ClaimForDispatch(ctx context.Context, promptBytes []byte) 
 	if err := r.evidence.Revalidate(boundedCtx); err != nil {
 		return [sha256.Size]byte{}, fmt.Errorf("revalidate root license for OSS dispatch: %w", err)
 	}
-	if !ossBlobRuleAllows(r.evidence) {
+	licenseID, err := evaluateBoundOSSLicense(boundedCtx, r.evidence)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if r.licenseRuleVersion != ossLicenseRuleVersion || licenseID != r.licenseID {
 		return [sha256.Size]byte{}, ErrOSSBlobRuleDenied
 	}
 	entry, committedPrompt, err := readCommittedOSSPrompt(boundedCtx, r.evidence, r.promptPath)
@@ -141,6 +151,9 @@ func (r *OSSBlobRule) ClaimForDispatch(ctx context.Context, promptBytes []byte) 
 	}
 	if err := revalidateRepositoryIdentity(boundedCtx, r.evidence.repository); err != nil {
 		return [sha256.Size]byte{}, ErrEvidenceStale
+	}
+	if err := revalidateExactCleanOSSDispatchWorktree(boundedCtx, r.evidence); err != nil {
+		return [sha256.Size]byte{}, err
 	}
 	if !r.claimed.CompareAndSwap(false, true) {
 		return [sha256.Size]byte{}, ErrOSSBlobRuleSpent
@@ -164,16 +177,49 @@ func (*OSSBlobRule) UnmarshalJSON([]byte) error {
 	return ErrOSSBlobRuleLocalOnly
 }
 
-func ossBlobRuleAllows(evidence RootLicenseBlobEvidence) bool {
-	if evidence.hintVersion != SPDXHintClassifierVersion {
-		return false
+// evaluateBoundOSSLicense applies the OSS authority rule directly to the exact
+// committed license bytes. The evidence SPDX hint is deliberately ignored: it
+// remains diagnostic metadata and cannot grant authority.
+func evaluateBoundOSSLicense(ctx context.Context, evidence RootLicenseBlobEvidence) (string, error) {
+	content, err := readVerifiedGitObject(ctx, evidence.repository.root, "blob", evidence.blobOID, MaxLicenseBlobBytes, ErrOSSBlobRuleDenied)
+	if err != nil {
+		return "", fmt.Errorf("read committed license for OSS blob rule: %w", err)
 	}
-	switch evidence.detectedSPDXHint {
-	case "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT":
-		return true
-	default:
-		return false
+	contentSum := sha256.Sum256(content)
+	if subtle.ConstantTimeCompare([]byte(evidence.contentSHA256), []byte(hex.EncodeToString(contentSum[:]))) != 1 {
+		return "", ErrEvidenceStale
 	}
+	licenseID, allowed := evaluateCanonicalOSSLicense(content)
+	if !allowed {
+		return "", ErrOSSBlobRuleDenied
+	}
+	return licenseID, nil
+}
+
+// evaluateCanonicalOSSLicense is the versioned, deterministic OSS admission
+// policy. It intentionally recognizes only exact canonical Apache-2.0, MIT,
+// BSD-2-Clause, and BSD-3-Clause license forms.
+func evaluateCanonicalOSSLicense(content []byte) (string, bool) {
+	lines, normalized, err := normalizedLicenseText(content)
+	if err != nil {
+		return "", false
+	}
+	if normalized == collapseLicenseWhitespace(apache20CanonicalText) {
+		return "Apache-2.0", true
+	}
+	if body, ok := bodyAfterCopyright(lines, []string{"MIT License", "The MIT License (MIT)"}, false); ok &&
+		body == collapseLicenseWhitespace(mitCanonicalBody) {
+		return "MIT", true
+	}
+	if body, ok := bodyAfterCopyright(lines, []string{"BSD 2-Clause License"}, true); ok &&
+		body == collapseLicenseWhitespace(bsd2CanonicalBody) {
+		return "BSD-2-Clause", true
+	}
+	if body, ok := bodyAfterCopyright(lines, []string{"BSD 3-Clause License"}, true); ok &&
+		body == collapseLicenseWhitespace(bsd3CanonicalBody) {
+		return "BSD-3-Clause", true
+	}
+	return "", false
 }
 
 func canonicalOSSPromptPath(value string) (string, error) {
@@ -283,6 +329,7 @@ func committedTreeEntry(ctx context.Context, root, treeOID string, objectHashLen
 
 func validateOSSBlobRuleSeal(rule *OSSBlobRule) error {
 	if rule == nil || rule.self != rule || rule.claimed == nil || rule.runScope == ([sha256.Size]byte{}) ||
+		rule.licenseRuleVersion != ossLicenseRuleVersion || rule.licenseID == "" ||
 		rule.binding == ([sha256.Size]byte{}) || rule.binding != ossBlobRuleBinding(rule) {
 		return ErrOSSBlobRuleInvalid
 	}
@@ -305,6 +352,8 @@ func ossBlobRuleBinding(rule *OSSBlobRule) [sha256.Size]byte {
 	writeOSSBlobRuleField(hasher, "license-spdx-hint", []byte(rule.evidence.detectedSPDXHint))
 	writeOSSBlobRuleField(hasher, "license-hint-version", []byte(rule.evidence.hintVersion))
 	writeOSSBlobRuleField(hasher, "license-local-binding", []byte(rule.evidence.localBinding))
+	writeOSSBlobRuleField(hasher, "license-rule-version", []byte(rule.licenseRuleVersion))
+	writeOSSBlobRuleField(hasher, "license-id", []byte(rule.licenseID))
 	writeOSSBlobRuleField(hasher, "prompt-path", []byte(rule.promptPath))
 	writeOSSBlobRuleField(hasher, "prompt-mode", []byte(rule.promptMode))
 	writeOSSBlobRuleField(hasher, "prompt-blob", []byte(rule.promptBlobOID))

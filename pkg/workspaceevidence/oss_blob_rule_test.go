@@ -83,6 +83,32 @@ func TestMintTrackedPromptOSSBlobRule_RejectsUnknownLicense(t *testing.T) {
 	}
 }
 
+func TestMintTrackedPromptOSSBlobRule_TamperedHintCannotAuthorize(t *testing.T) {
+	_, _, evidence := newOSSBlobRuleTestRepo(
+		t,
+		"LICENSE",
+		"Copyright 2026 Buckley Test. All rights reserved.\n",
+		"task.md",
+		[]byte("Do not dispatch this.\n"),
+	)
+	// Even recomputing the private local binding cannot turn the diagnostic
+	// hint into authority because revalidation compares exact fresh evidence.
+	evidence.detectedSPDXHint = "MIT"
+	evidence.localBinding = rootLicenseEvidenceBinding(evidence)
+	if _, _, err := MintTrackedPromptOSSBlobRule(t.Context(), evidence, "task.md"); !errors.Is(err, ErrEvidenceStale) {
+		t.Fatalf("error = %v, want ErrEvidenceStale", err)
+	}
+}
+
+func TestEvaluateCanonicalOSSLicense_DoesNotUseEvidenceHint(t *testing.T) {
+	if got, ok := evaluateCanonicalOSSLicense([]byte(mitTestLicense())); !ok || got != "MIT" {
+		t.Fatalf("canonical MIT decision = %q, %v", got, ok)
+	}
+	if got, ok := evaluateCanonicalOSSLicense([]byte("not an OSS license\n")); ok || got != "" {
+		t.Fatalf("unknown license decision = %q, %v", got, ok)
+	}
+}
+
 func TestMintTrackedPromptOSSBlobRule_RejectsUnboundPaths(t *testing.T) {
 	root, _, evidence := newOSSBlobRuleTestRepo(
 		t,
@@ -278,6 +304,8 @@ func TestOSSBlobRule_BindingCoversEvidencePromptAndRunScope(t *testing.T) {
 		{name: "license hint", mutate: func(r *OSSBlobRule) { r.evidence.detectedSPDXHint = "Apache-2.0" }},
 		{name: "classifier version", mutate: func(r *OSSBlobRule) { r.evidence.hintVersion += "x" }},
 		{name: "license local binding", mutate: func(r *OSSBlobRule) { r.evidence.localBinding += "x" }},
+		{name: "license rule version", mutate: func(r *OSSBlobRule) { r.licenseRuleVersion += "x" }},
+		{name: "license id", mutate: func(r *OSSBlobRule) { r.licenseID = "Apache-2.0" }},
 		{name: "prompt path", mutate: func(r *OSSBlobRule) { r.promptPath += ".txt" }},
 		{name: "prompt mode", mutate: func(r *OSSBlobRule) { r.promptMode = "100755" }},
 		{name: "prompt blob", mutate: func(r *OSSBlobRule) { r.promptBlobOID = strings.Repeat("4", len(r.promptBlobOID)) }},

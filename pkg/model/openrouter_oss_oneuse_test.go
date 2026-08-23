@@ -93,6 +93,42 @@ func TestOneUseOSSOpenRouterClient_CompletePatchDispatchesOnce(t *testing.T) {
 	}
 }
 
+func TestOneUseOSSOpenRouterClient_WorktreeMutationStopsBeforeTransport(t *testing.T) {
+	prompt := []byte("return only a focused patch\n")
+	rule, boundPrompt, root := mintOSSOneUseTestRuleAtRoot(t, prompt)
+	governed, err := NewOneUseOSSOpenRouterClient("test-key", "", OxAlphaOpenRouterModelID, rule, boundPrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = governed.Close() })
+	governed.client.rateLimiter = nil
+	calls := &atomic.Int32{}
+	governed.client.ossHTTPClient.Transport = ossAdmissionRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return ossAdmissionResponse(req, http.StatusOK, `{"id":"ok","model":"stealth/ox-alpha","choices":[{"message":{"role":"assistant","content":"patch"},"finish_reason":"stop"}]}`), nil
+	})
+
+	dirtyPath := filepath.Join(root, "dispatch-race.txt")
+	if err := os.WriteFile(dirtyPath, []byte("untracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := governed.CompletePatch(t.Context()); !errors.Is(err, workspaceevidence.ErrEvidenceStale) {
+		t.Fatalf("CompletePatch() error = %v, want ErrEvidenceStale", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("transport calls after stale dispatch = %d, want 0", calls.Load())
+	}
+	if err := os.Remove(dirtyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := governed.CompletePatch(t.Context()); err != nil {
+		t.Fatalf("CompletePatch() after restoring exact clean worktree = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("transport calls after restored dispatch = %d, want 1", calls.Load())
+	}
+}
+
 func TestOneUseOSSOpenRouterClient_RetainsUnclaimedRule(t *testing.T) {
 	prompt := []byte("return only a focused patch\n")
 	rule, boundPrompt := mintOSSOneUseTestRule(t, prompt)
@@ -195,6 +231,12 @@ func countingOSSOneUseTransport(calls *atomic.Int32) http.RoundTripper {
 
 func mintOSSOneUseTestRule(t *testing.T, prompt []byte) (*workspaceevidence.OSSBlobRule, []byte) {
 	t.Helper()
+	rule, boundPrompt, _ := mintOSSOneUseTestRuleAtRoot(t, prompt)
+	return rule, boundPrompt
+}
+
+func mintOSSOneUseTestRuleAtRoot(t *testing.T, prompt []byte) (*workspaceevidence.OSSBlobRule, []byte, string) {
+	t.Helper()
 	root := t.TempDir()
 	ossOneUseGit(t, root, "init", "--quiet")
 	ossOneUseGit(t, root, "config", "user.name", "Buckley Test")
@@ -219,7 +261,7 @@ func mintOSSOneUseTestRule(t *testing.T, prompt []byte) (*workspaceevidence.OSSB
 	if err != nil {
 		t.Fatalf("MintTrackedPromptOSSBlobRule: %v", err)
 	}
-	return rule, boundPrompt
+	return rule, boundPrompt, root
 }
 
 func ossOneUseGit(t *testing.T, root string, args ...string) string {
