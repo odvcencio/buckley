@@ -1801,11 +1801,244 @@ func TestController_FinalizationEmptyChoicesStillAccountsUsageAndCost(t *testing
 	if !errors.As(runErr, &incomplete) {
 		t.Fatalf("Run error = %v, want incomplete", runErr)
 	}
-	if result.Usage.TotalTokens != 300 || math.Abs(result.CostUSD-0.3) > 1e-12 || modelCalls != 2 {
+	// Empty-choices finals retry up to maxFinalizationAttempts, and every
+	// attempt is billed: one tool round (100) plus three finals (200 each).
+	if result.Usage.TotalTokens != 700 || math.Abs(result.CostUSD-0.7) > 1e-12 || modelCalls != 1+maxFinalizationAttempts {
 		t.Fatalf("result=%+v model_calls=%d", result, modelCalls)
 	}
 	if !strings.Contains(result.Termination.FinalizationError, "no response choices") {
 		t.Fatalf("finalization error = %q", result.Termination.FinalizationError)
+	}
+}
+
+func TestController_EmptyFirstRoundRetriesWithNudge(t *testing.T) {
+	history := &recordingHistory{}
+	modelCalls := 0
+	sawNudge := false
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				// Reasoning-only first turn: tool-free, empty content.
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}}}, nil
+			}
+			for _, msg := range req.Messages {
+				if text, _ := model.ExtractTextContent(msg.Content); strings.Contains(text, "not usable") {
+					sawNudge = true
+				}
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "recovered answer"}}}}, nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return nil, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want recovery on retry", runErr)
+	}
+	if result.Content != "recovered answer" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 2 {
+		t.Fatalf("model_calls = %d, want 2", modelCalls)
+	}
+	if !sawNudge {
+		t.Fatal("retry request did not carry the corrective nudge")
+	}
+}
+
+func TestController_FinalizationRetriesEmptyFinalThenSucceeds(t *testing.T) {
+	history := &recordingHistory{}
+	modelCalls := 0
+	sawNudge := false
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
+			case 2:
+				// First final: well-formed transport, empty text.
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "   "}}}}, nil
+			default:
+				for _, msg := range req.Messages {
+					if text, _ := model.ExtractTextContent(msg.Content); strings.Contains(text, "not a usable final answer") {
+						sawNudge = true
+					}
+				}
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "final synthesis"}}}}, nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "evidence", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want success after retry", runErr)
+	}
+	if result.Content != "final synthesis" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 3 {
+		t.Fatalf("model_calls = %d, want 3 (tool round + empty final + retried final)", modelCalls)
+	}
+	if !sawNudge {
+		t.Fatal("retry request did not carry the corrective nudge")
+	}
+}
+
+// TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning covers
+// a model that leaves `content` empty on every tool-free reply but carries
+// its answer in `reasoning`. The first reply also has non-empty reasoning
+// text; the controller must NOT promote it early -- it should exhaust every
+// corrective retry first -- and only fall back to reasoning text once no
+// retries remain.
+func TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning(t *testing.T) {
+	store, err := runledger.New(t.TempDir() + "/ledger.db")
+	if err != nil {
+		t.Fatalf("runledger.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, runledger.AgentRun{SessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		RunLedger:      store,
+		RunID:          run.RunID,
+		SessionID:      "sess-1",
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			// Every attempt is tool-free with empty content; every attempt
+			// also carries reasoning text, so an early promotion (a bug)
+			// would return "reasoning attempt 1" instead of exhausting the
+			// two bounded retries first.
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
+				Role:      "assistant",
+				Content:   "",
+				Reasoning: fmt.Sprintf("reasoning attempt %d", modelCalls),
+			}}}}, nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return nil, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want reasoning fallback on the final retry", runErr)
+	}
+	// maxEmptyTerminalRetries=2, so 1 initial attempt + 2 retries = 3 calls.
+	if modelCalls != 3 {
+		t.Fatalf("model_calls = %d, want 3 (initial + 2 retries)", modelCalls)
+	}
+	if result.Content != "reasoning attempt 3" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v, want the final attempt's reasoning text", result)
+	}
+
+	events, err := store.ListEvents(ctx, runledger.EventQuery{RunID: run.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var sawFallbackDecision bool
+	for _, e := range events {
+		if e.Type != runledger.EventControllerDecision {
+			continue
+		}
+		if e.Payload["kind"] == "reasoning_fallback_final" {
+			sawFallbackDecision = true
+			if e.Payload["decision"] != "reasoning_fallback_final" {
+				t.Fatalf("decision event payload=%+v, want \"decision\" to mirror \"kind\" for audit rendering", e.Payload)
+			}
+		}
+	}
+	if !sawFallbackDecision {
+		t.Fatal("expected a reasoning_fallback_final controller.decision event on the ledger")
+	}
+}
+
+// TestController_FinalizationRetriesExhaustThenFallsBackToReasoning mirrors
+// the live-round case for finalizeStoppedTurn: every finalization attempt
+// returns empty content, and only the last carries reasoning_details text
+// (no plain `reasoning` field), so the fallback must also read
+// reasoning_details.
+func TestController_FinalizationRetriesExhaustThenFallsBackToReasoning(t *testing.T) {
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
+			case 4:
+				// maxFinalizationAttempts=3: the final finalization attempt
+				// (model call 4) carries the answer only in
+				// reasoning_details, with content still empty.
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
+					Role:             "assistant",
+					Content:          "",
+					ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "final reasoning answer"}},
+				}}}}, nil
+			default:
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}}}, nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "evidence", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want reasoning fallback on the final finalization attempt", runErr)
+	}
+	// 1 tool round + 3 finalization attempts (2 empty, 1 reasoning fallback).
+	if modelCalls != 4 {
+		t.Fatalf("model_calls = %d, want 4", modelCalls)
+	}
+	if result.Content != "final reasoning answer" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v, want the reasoning_details fallback text", result)
 	}
 }
 

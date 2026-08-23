@@ -645,6 +645,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		c.emitLifecycle(end)
 	}()
 
+	emptyTerminalRetries := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -761,6 +762,40 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		if len(msg.ToolCalls) == 0 {
 			text, candidateErr := validateTerminalCandidate(choice)
 			if candidateErr != nil {
+				// A tool-free reply with unusable text (empty, or truncated)
+				// on a live round gets a bounded corrective retry before the
+				// turn is surrendered. Some models emit reasoning-only turns
+				// with empty content; without this, such a turn dies on its
+				// first round with no work done.
+				if emptyTerminalRetries < maxEmptyTerminalRetries {
+					emptyTerminalRetries++
+					c.recordDecision(ctx, "empty_terminal_retry", candidateErr.Error())
+					if c.cfg.History != nil {
+						c.cfg.History.Append(model.Message{
+							Role: "user",
+							Content: "Your previous reply was not usable (" + candidateErr.Error() + "). " +
+								"Continue the task now: either call a tool, or reply with your complete answer as plain text. Do not send an empty message.",
+						})
+					}
+					continue
+				}
+				// No corrective retries left. Fall back to reasoning/thinking
+				// text rather than fail a turn that in fact carries a usable
+				// answer -- some reasoning-emitting models leave `content`
+				// empty and put their entire answer in `reasoning` (or
+				// `reasoning_details`). This only fires here, after the
+				// plain-text nudge already had its full bounded chance.
+				if fallback := reasoningFallbackText(msg); fallback != "" {
+					msg.Content = fallback
+					result.Message = msg
+					result.Content = fallback
+					result.CompletionStatus = CompletionConclusive
+					c.recordDecision(ctx, "reasoning_fallback_final", candidateErr.Error())
+					if c.cfg.History != nil {
+						c.cfg.History.Append(msg)
+					}
+					return result, nil
+				}
 				result.FinishReason = FinishReasonInvalidCompletion
 				result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
 				if c.cfg.Governor.ToolCalls() > 0 {
@@ -931,79 +966,136 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 		return c.failFinalization(ctx, result, fmt.Errorf("explicit $%.4f child limit left no spend allowance for final synthesis", c.cfg.MaxCostUSD))
 	}
 
-	req, err := c.buildFinalizationRequest(ctx, round, result.Termination.Reason)
-	if err != nil {
-		return c.failFinalization(ctx, result, err)
-	}
-	roundResult, roundErr := c.executePreparedModelRound(ctx, result, req, round, "finalize", false)
-	var response *model.ChatResponse
-	if roundResult != nil {
-		response = roundResult.response
-	}
-	var accountingErr error
-	if roundResult != nil && response != nil {
-		accountingErr = c.addUsageCost(result, response.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError)
-	}
-	providerPartial := roundResult != nil && roundResult.partial
-	providerError := ""
-	if providerPartial {
-		c.capturePartialResponse(result, response)
-		result.CompletionStatus = CompletionIncomplete
-		providerError = strings.TrimSpace(roundResult.providerError)
-		result.Termination.ProviderError = providerError
-	}
-	if accountingErr != nil {
-		failure := errors.Join(roundErr, accountingErr)
-		failed, incompleteErr := c.failFinalization(ctx, result, failure)
-		if roundErr != nil {
-			return failed, errors.Join(incompleteErr, failure)
-		}
-		return failed, incompleteErr
-	}
-	if providerPartial {
-		if roundErr == nil {
-			if providerError != "" {
-				roundErr = errors.New(providerError)
-			} else {
-				roundErr = fmt.Errorf("the provider failed after returning a partial response")
+	var malformedCause error
+	for attempt := 1; attempt <= maxFinalizationAttempts; attempt++ {
+		if attempt > 1 {
+			if c.cfg.MaxModelRequests > 0 && result.ModelRequests >= c.cfg.MaxModelRequests {
+				return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (request limit reached before a retry)", malformedCause))
+			}
+			if c.cfg.MaxCostUSD > 0 && result.CostUSD >= c.cfg.MaxCostUSD {
+				return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (spend limit reached before a retry)", malformedCause))
 			}
 		}
-		failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
-		return failed, errors.Join(incompleteErr, roundErr)
+		req, err := c.buildFinalizationRequest(ctx, round, result.Termination.Reason)
+		if err != nil {
+			return c.failFinalization(ctx, result, err)
+		}
+		if attempt > 1 && malformedCause != nil {
+			req.Messages = append(req.Messages, model.Message{
+				Role: "user",
+				Content: "Your previous reply was not a usable final answer (" + malformedCause.Error() + "). " +
+					"Reply now with plain text only: the complete final synthesis. Do not call tools. Do not return an empty message.",
+			})
+		}
+		roundResult, roundErr := c.executePreparedModelRound(ctx, result, req, round, "finalize", false)
+		var response *model.ChatResponse
+		if roundResult != nil {
+			response = roundResult.response
+		}
+		var accountingErr error
+		if roundResult != nil && response != nil {
+			accountingErr = c.addUsageCost(result, response.Usage, roundResult.chargedCostUSD, roundResult.costRecorded, roundResult.pricingError)
+		}
+		providerPartial := roundResult != nil && roundResult.partial
+		providerError := ""
+		if providerPartial {
+			c.capturePartialResponse(result, response)
+			result.CompletionStatus = CompletionIncomplete
+			providerError = strings.TrimSpace(roundResult.providerError)
+			result.Termination.ProviderError = providerError
+		}
+		if accountingErr != nil {
+			failure := errors.Join(roundErr, accountingErr)
+			failed, incompleteErr := c.failFinalization(ctx, result, failure)
+			if roundErr != nil {
+				return failed, errors.Join(incompleteErr, failure)
+			}
+			return failed, incompleteErr
+		}
+		if providerPartial {
+			if roundErr == nil {
+				if providerError != "" {
+					roundErr = errors.New(providerError)
+				} else {
+					roundErr = fmt.Errorf("the provider failed after returning a partial response")
+				}
+			}
+			failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
+			return failed, errors.Join(incompleteErr, roundErr)
+		}
+		if roundErr != nil {
+			failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
+			return failed, errors.Join(incompleteErr, roundErr)
+		}
+		// From here the provider round succeeded and was billed. A response
+		// that is well-formed transport-wise but unusable as a final answer
+		// (no choices, tool calls while tools were disabled, empty text) is
+		// retried with a corrective nudge instead of failing the turn.
+		malformedCause = nil
+		if response == nil || len(response.Choices) == 0 {
+			malformedCause = fmt.Errorf("model returned no response choices")
+		} else {
+			choice := response.Choices[0]
+			message := choice.Message
+			if len(message.ToolCalls) > 0 {
+				malformedCause = fmt.Errorf("model requested %d tool call(s) while tools were disabled", len(message.ToolCalls))
+			} else if text, err := validateTerminalCandidate(choice); err != nil {
+				malformedCause = err
+				// The corrective nudges above already gave the model every
+				// chance to answer in plain content. On the last attempt
+				// only, fall back to reasoning/thinking text rather than
+				// fail a turn that in fact carries a usable answer -- some
+				// reasoning-emitting models leave `content` empty and put
+				// their entire answer in `reasoning` (or
+				// `reasoning_details`).
+				if attempt == maxFinalizationAttempts {
+					if fallback := reasoningFallbackText(message); fallback != "" {
+						if message.Role == "" {
+							message.Role = "assistant"
+						}
+						message.Content = fallback
+						result.Message = message
+						result.Content = fallback
+						result.CompletionStatus = CompletionConclusive
+						c.recordDecision(ctx, "reasoning_fallback_final", malformedCause.Error())
+						if c.cfg.History != nil {
+							c.cfg.History.Append(message)
+						}
+						return result, nil
+					}
+				}
+			} else {
+				if message.Role == "" {
+					message.Role = "assistant"
+				}
+				result.Message = message
+				result.Content = text
+				result.CompletionStatus = CompletionConclusive
+				if c.cfg.History != nil {
+					c.cfg.History.Append(message)
+				}
+				c.recordDecision(ctx, "finalization_completed", result.Termination.Reason)
+				return result, nil
+			}
+		}
+		if attempt < maxFinalizationAttempts {
+			c.recordDecision(ctx, "finalization_retry", malformedCause.Error())
+			continue
+		}
 	}
-	if roundErr != nil {
-		failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
-		return failed, errors.Join(incompleteErr, roundErr)
-	}
-	if response == nil {
-		return c.failFinalization(ctx, result, fmt.Errorf("model returned no response choices"))
-	}
-
-	if len(response.Choices) == 0 {
-		return c.failFinalization(ctx, result, fmt.Errorf("model returned no response choices"))
-	}
-	choice := response.Choices[0]
-	message := choice.Message
-	if len(message.ToolCalls) > 0 {
-		return c.failFinalization(ctx, result, fmt.Errorf("model requested %d tool call(s) while tools were disabled", len(message.ToolCalls)))
-	}
-	text, err := validateTerminalCandidate(choice)
-	if err != nil {
-		return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", err))
-	}
-
-	if message.Role == "" {
-		message.Role = "assistant"
-	}
-	result.Message = message
-	result.Content = text
-	result.CompletionStatus = CompletionConclusive
-	if c.cfg.History != nil {
-		c.cfg.History.Append(message)
-	}
-	c.recordDecision(ctx, "finalization_completed", result.Termination.Reason)
-	return result, nil
+	return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", malformedCause))
 }
+
+// maxFinalizationAttempts bounds the corrective retries for a final synthesis
+// whose provider round succeeded but whose content was unusable (empty text,
+// tool calls while tools were disabled, or no choices). Transport, provider,
+// and accounting failures never retry here.
+const maxFinalizationAttempts = 3
+
+// maxEmptyTerminalRetries bounds the corrective retries when a live round
+// returns a tool-free reply with no usable text. Each retry appends a
+// corrective user message and consumes normal round budget.
+const maxEmptyTerminalRetries = 2
 
 func validateTerminalCandidate(choice model.Choice) (string, error) {
 	if isTruncatedFinishReason(choice.FinishReason) {
@@ -1018,6 +1110,29 @@ func validateTerminalCandidate(choice model.Choice) (string, error) {
 		return "", fmt.Errorf("model returned a final response without text")
 	}
 	return text, nil
+}
+
+// reasoningFallbackText returns a message's reasoning/thinking text, used as
+// a last-resort stand-in for an empty final answer once corrective retries
+// are exhausted. It checks the plain `reasoning` field first, falling back
+// to concatenating any `reasoning_details` text/summary blocks (OpenRouter's
+// structured reasoning format) when `reasoning` itself is empty. An empty
+// return means there is nothing to fall back to.
+func reasoningFallbackText(msg model.Message) string {
+	if text := strings.TrimSpace(msg.Reasoning); text != "" {
+		return text
+	}
+	parts := make([]string, 0, len(msg.ReasoningDetails))
+	for _, detail := range msg.ReasoningDetails {
+		if text := strings.TrimSpace(detail.Text); text != "" {
+			parts = append(parts, text)
+			continue
+		}
+		if text := strings.TrimSpace(detail.Summary); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
 // capturePartialResponse keeps the last provider material visible even when
@@ -2484,8 +2599,16 @@ func payloadFloat(payload map[string]any, key string) (float64, bool) {
 
 func (c *Controller) recordDecision(ctx context.Context, kind, reason string) {
 	c.recordEvent(ctx, runledger.EventControllerDecision, map[string]any{
-		"kind":   kind,
-		"reason": modelstep.NormalizeErrorText(reason),
+		// "kind" is the categorical decision kind consumed by the live
+		// lifecycle contract (see decodeEvent's StopReason mapping earlier
+		// in this file).
+		// "decision" mirrors it under the key name the durable audit
+		// renderer (`buckley goal audit`, cmd/buckley/goal.go) reads for its
+		// `decide <decision> <reason>` line; without it every Controller
+		// decision line has always printed "decide %!s(<nil>) <reason>".
+		"kind":     kind,
+		"decision": kind,
+		"reason":   modelstep.NormalizeErrorText(reason),
 	})
 }
 
