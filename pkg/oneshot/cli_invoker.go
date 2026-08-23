@@ -399,6 +399,14 @@ func formatCLIError(backend string, err error, output CLICommandResult) error {
 }
 
 func parseCLIJSON(stdout []byte) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(stdout)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if !json.Valid(trimmed) {
+			return nil, fmt.Errorf("invalid JSON event array")
+		}
+		return extractCLIEventArray(trimmed)
+	}
+
 	raw, err := extractJSONObject(stdout)
 	if err != nil {
 		return nil, err
@@ -410,13 +418,34 @@ func parseCLIJSON(stdout []byte) (json.RawMessage, error) {
 	return raw, nil
 }
 
+func extractCLIEventArray(raw json.RawMessage) (json.RawMessage, error) {
+	var events []json.RawMessage
+	if err := json.Unmarshal(raw, &events); err != nil {
+		return nil, fmt.Errorf("decode JSON event array: %w", err)
+	}
+
+	for i := len(events) - 1; i >= 0; i-- {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(events[i], &envelope); err != nil || envelope.Type != "result" {
+			continue
+		}
+		if nested, ok := unwrapCLIResult(events[i]); ok {
+			return nested, nil
+		}
+	}
+
+	return nil, fmt.Errorf("JSON event array contains no structured result object")
+}
+
 func unwrapCLIResult(raw json.RawMessage) (json.RawMessage, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, false
 	}
 
-	for _, key := range []string{"result", "content", "message", "output"} {
+	for _, key := range []string{"structured_output", "result", "content", "message", "output"} {
 		value, ok := obj[key]
 		if !ok {
 			continue

@@ -493,3 +493,46 @@ func schemaTypeIncludes(value any, want string) bool {
 	}
 	return false
 }
+func TestParseCLIJSONClaudeEventArrayPrefersStructuredOutput(t *testing.T) {
+	stdout := []byte(`[{"type":"system","message":{"ignore":true}},{"type":"result","result":"{\"title\":\"fallback\"}","structured_output":{"title":"preferred"}}]`)
+	raw, err := parseCLIJSON(stdout)
+	if err != nil {
+		t.Fatalf("parseCLIJSON: %v", err)
+	}
+	var payload struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Title != "preferred" {
+		t.Fatalf("title = %q, want preferred structured output", payload.Title)
+	}
+}
+
+func TestParseCLIJSONClaudeEventArrayFallsBackToResult(t *testing.T) {
+	stdout := []byte(`[{"type":"system"},{"type":"result","result":"{\"action\":\"commit\"}"}]`)
+	raw, err := parseCLIJSON(stdout)
+	if err != nil {
+		t.Fatalf("parseCLIJSON: %v", err)
+	}
+	var payload struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Action != "commit" {
+		t.Fatalf("action = %q, want commit", payload.Action)
+	}
+}
+
+func TestParseCLIJSONClaudeEventArrayRejectsEnvelopeObjects(t *testing.T) {
+	_, err := parseCLIJSON([]byte(`[{"type":"system"},{"type":"assistant","message":{"role":"assistant"}}]`))
+	if err == nil {
+		t.Fatal("expected event array without a result payload to fail")
+	}
+	if !strings.Contains(err.Error(), "no structured result object") {
+		t.Fatalf("error = %q", err)
+	}
+}
