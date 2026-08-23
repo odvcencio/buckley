@@ -194,3 +194,51 @@ func TestOxAlphaPatchText_RecoversReasoningDetails(t *testing.T) {
 		t.Fatalf("content = %q, want recovered reasoning details", content)
 	}
 }
+
+func TestValidatePatchResponse(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr bool
+	}{
+		{name: "applicable diff", content: applicableDiff},
+		{name: "fenced prose prefix", content: "```diff\n" + applicableDiff + "```\n", wantErr: true},
+		{name: "missing final newline", content: strings.TrimSuffix(applicableDiff, "\n"), wantErr: true},
+		{
+			name:    "truncated hunk",
+			content: strings.Replace(applicableDiff, "+return an applicable unified diff\n", "", 1),
+			wantErr: true,
+		},
+		{
+			name:    "wrong hunk counts",
+			content: strings.Replace(applicableDiff, "@@ -1 +1 @@", "@@ -1,2 +1,2 @@", 1),
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent context",
+			content: strings.Replace(applicableDiff, "-return a unified diff\n", "-absent line\n", 1),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := newTrackedPromptRepository(t)
+			err := validatePatchResponse(context.Background(), root, []byte(tc.content))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validatePatchResponse() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if status := runGitTest(t, root, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+				t.Fatalf("validator changed worktree: %q", status)
+			}
+		})
+	}
+}
+
+const applicableDiff = `diff --git a/.buckley/tasks/task.md b/.buckley/tasks/task.md
+--- a/.buckley/tasks/task.md
++++ b/.buckley/tasks/task.md
+@@ -1 +1 @@
+-return a unified diff
++return an applicable unified diff
+`
