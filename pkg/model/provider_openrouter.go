@@ -32,7 +32,8 @@ func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a standard completion.
 func (p *OpenRouterProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if err := validateModelDispatch(req, p.ID()); err != nil {
+	req.Stream = false
+	if _, err := validateOpenRouterOSSProviderRequest(req, p, false); err != nil {
 		return nil, err
 	}
 	return p.client.ChatCompletion(ctx, req)
@@ -40,7 +41,8 @@ func (p *OpenRouterProvider) ChatCompletion(ctx context.Context, req ChatRequest
 
 // ChatCompletionStream executes a streaming completion.
 func (p *OpenRouterProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	if err := validateModelDispatch(req, p.ID()); err != nil {
+	req.Stream = true
+	if _, err := validateOpenRouterOSSProviderRequest(req, p, true); err != nil {
 		return streamErrorChannels(err)
 	}
 	return p.client.ChatCompletionStream(ctx, req)

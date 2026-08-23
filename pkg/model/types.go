@@ -154,11 +154,6 @@ const (
 	RequestRetrySingleAttempt RequestRetryMode = "single_attempt"
 )
 
-// openRouterOSSAdmission is an opaque process-local capability. There is
-// intentionally no constructor in this change: non-ZDR OpenRouter dispatch
-// remains disabled until a trusted host admission path can mint one.
-type openRouterOSSAdmission struct{}
-
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
 	Model                string                  `json:"model"`
@@ -188,7 +183,8 @@ type ChatRequest struct {
 	PromptCache          *PromptCache            `json:"-"`
 	OpenRouterRetention  OpenRouterRetentionMode `json:"-"`
 	RetryMode            RequestRetryMode        `json:"-"`
-	openRouterAdmission  *openRouterOSSAdmission
+	openRouterAdmission  *openRouterOSSAdmission `json:"-"`
+	openRouterContext    [32]byte                `json:"-"`
 	// ReviewSnapshot pins native verification to the immutable Git state
 	// captured once for an entire review run. Native providers materialize it;
 	// API-backed review tools are bound to the same descriptor by the agent runner.

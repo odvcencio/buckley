@@ -161,6 +161,9 @@ func (p *OpenAIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a completion request via OpenAI.
 func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	req.Stream = false
 	// stream_options is a streaming-only OpenAI field. Cost-bounded request
 	// normalization includes it in the conservative admission envelope, but
@@ -171,6 +174,9 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 
 // ChatCompletionStream streams responses from OpenAI.
 func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	req.Stream = true
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)

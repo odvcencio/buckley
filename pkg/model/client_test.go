@@ -345,12 +345,12 @@ func TestClient_ChatCompletion(t *testing.T) {
 				MaxInterval:         2 * time.Millisecond,
 				Multiplier:          2,
 			})
-			req := ChatRequest{
+			req := strictZDRTestRequest(ChatRequest{
 				Model: "test/model",
 				Messages: []Message{
 					{Role: "user", Content: "Hello"},
 				},
-			}
+			})
 
 			ctx := context.Background()
 			resp, err := client.ChatCompletion(ctx, req)
@@ -449,11 +449,11 @@ func TestClient_ChatCompletionStream(t *testing.T) {
 				MaxInterval:         2 * time.Millisecond,
 				Multiplier:          2,
 			})
-			req := ChatRequest{
+			req := strictZDRTestRequest(ChatRequest{
 				Model:    "test/model",
 				Messages: []Message{{Role: "user", Content: "Hello"}},
 				Stream:   true,
-			}
+			})
 
 			ctx := context.Background()
 			chunkChan, errChan := client.ChatCompletionStream(ctx, req)
@@ -524,9 +524,9 @@ func TestClient_ChatCompletionStream_UsesExtendedRateLimitRetryBudget(t *testing
 		MaxInterval:         2 * time.Millisecond,
 		Multiplier:          2,
 	})
-	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+	chunks, errs := client.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
-	})
+	}))
 	var received int
 	for range chunks {
 		received++
@@ -563,9 +563,9 @@ func TestClient_ChatCompletionStream_RetriesInterruptedStreamBeforeEvents(t *tes
 		MaxInterval:         time.Millisecond,
 		Multiplier:          1,
 	})
-	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+	chunks, errs := client.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
-	})
+	}))
 
 	var received int
 	var streamErr error
@@ -613,9 +613,9 @@ func TestClient_ChatCompletionStream_DoesNotRetryAfterEmittingEvent(t *testing.T
 		MaxInterval:         time.Millisecond,
 		Multiplier:          1,
 	})
-	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+	chunks, errs := client.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
-	})
+	}))
 
 	var received int
 	var streamErr error
@@ -654,10 +654,10 @@ func TestClient_ChatCompletion_ContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL)
-	req := ChatRequest{
+	req := strictZDRTestRequest(ChatRequest{
 		Model:    "test/model",
 		Messages: []Message{{Role: "user", Content: "Hello"}},
-	}
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
@@ -915,7 +915,7 @@ func TestClient_RetryWaitDeadlinePreservesAPIError(t *testing.T) {
 	client := NewClient("test-key", server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := client.ChatCompletion(ctx, ChatRequest{Model: "test", Messages: []Message{{Role: "user", Content: "hello"}}})
+	_, err := client.ChatCompletion(ctx, strictZDRTestRequest(ChatRequest{Model: "test", Messages: []Message{{Role: "user", Content: "hello"}}}))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error=%v want context deadline", err)
 	}
@@ -1084,10 +1084,10 @@ func TestClient_ChatCompletion_Retry(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL)
-	req := ChatRequest{
+	req := strictZDRTestRequest(ChatRequest{
 		Model:    "test/model",
 		Messages: []Message{{Role: "user", Content: "test"}},
-	}
+	})
 
 	ctx := context.Background()
 	resp, err := client.ChatCompletion(ctx, req)
@@ -1132,9 +1132,9 @@ func TestClient_ChatCompletion_UsesExtendedRateLimitRetryBudget(t *testing.T) {
 		MaxInterval:         2 * time.Millisecond,
 		Multiplier:          2,
 	})
-	resp, err := client.ChatCompletion(context.Background(), ChatRequest{
+	resp, err := client.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("expected success after extended 429 retries, got %v", err)
 	}
@@ -1160,9 +1160,9 @@ func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *tes
 		MaxInterval:         time.Millisecond,
 		Multiplier:          2,
 	})
-	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+	_, err := client.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
-	})
+	}))
 	if err == nil {
 		t.Fatal("expected rate-limit error")
 	}

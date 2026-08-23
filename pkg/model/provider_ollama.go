@@ -105,6 +105,9 @@ func (p *OllamaProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a non-streaming chat request.
 func (p *OllamaProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	ollamaReq, err := p.buildRequest(req, false)
 	if err != nil {
 		return nil, err
@@ -156,6 +159,9 @@ func (p *OllamaProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 
 // ChatCompletionStream streams responses from Ollama.
 func (p *OllamaProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 

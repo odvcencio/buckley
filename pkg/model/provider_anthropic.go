@@ -109,6 +109,9 @@ func (p *AnthropicProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a non-streaming request.
 func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	anthReq, err := p.toAnthropicRequest(req, false)
 	if err != nil {
 		return nil, err
@@ -134,6 +137,9 @@ func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
 
 // ChatCompletionStream falls back to non-streaming implementation for now.
 func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)
 

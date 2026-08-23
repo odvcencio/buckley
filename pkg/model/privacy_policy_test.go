@@ -54,6 +54,7 @@ func strictZDRTestRequest(req ChatRequest) ChatRequest {
 	req.OpenRouterRetention = OpenRouterRetentionZDR
 	req.Provider = cloneAnyMap(req.Provider)
 	req.Provider["zdr"] = true
+	req.Provider["allow_fallbacks"] = false
 	return req
 }
 
@@ -522,11 +523,11 @@ func TestOpenRouterClientSingleAttemptStreamMakesOneHTTPPost(t *testing.T) {
 
 	client := NewClient("test-key", server.URL)
 	t.Cleanup(func() { _ = client.Close() })
-	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+	chunks, errs := client.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model:     "stealth/ox-alpha",
 		Messages:  []Message{{Role: "user", Content: "hello"}},
 		RetryMode: RequestRetrySingleAttempt,
-	})
+	}))
 	if err := awaitPrivacyTestStream(chunks, errs); err == nil {
 		t.Fatal("ChatCompletionStream() error = nil")
 	}
