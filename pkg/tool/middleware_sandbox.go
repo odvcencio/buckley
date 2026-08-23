@@ -98,6 +98,9 @@ func sandboxResultToBuiltin(r *SandboxResult) *builtin.Result {
 	if r.Killed {
 		data["killed"] = true
 	}
+	if r.OutputTruncated {
+		data["output_truncated"] = true
+	}
 
 	success := r.ExitCode == 0
 	result := &builtin.Result{

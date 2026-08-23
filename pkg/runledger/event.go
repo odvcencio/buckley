@@ -20,6 +20,11 @@ import (
 // SchemaVersion identifies the Event envelope's JSON shape.
 const SchemaVersion = "m31.run.event.v1"
 
+// DurableTurnReceiptSchemaV1 identifies the receipt-bearing durable.turn
+// payload written by the V3 turn activity. Receipt-less durable.turn events
+// predate this schema and remain readable as legacy audit facts.
+const DurableTurnReceiptSchemaV1 = "buckley.durable-turn-receipt.v1"
+
 // Event is one durably recorded, immutable fact about an agent run (section
 // 14.2). Once appended, an event is never mutated.
 type Event struct {
@@ -117,6 +122,11 @@ const (
 	// EventDurableApprovalResolved records how the wait ended:
 	// approved, denied, or timed_out.
 	EventDurableApprovalResolved = "durable.approval_resolved"
+	// EventDurableRetryWaiting records one stable retry timer identity. The
+	// workflow history owns timer scheduling; the ledger owns this audit fact.
+	EventDurableRetryWaiting = "durable.retry_waiting"
+	// EventDurableRetryResolved records one stable retry wake/readmission.
+	EventDurableRetryResolved = "durable.retry_resolved"
 
 	EventToolRequested         = "tool.requested"
 	EventToolStarted           = "tool.started"

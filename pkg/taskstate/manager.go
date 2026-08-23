@@ -17,6 +17,13 @@ type CheckpointLedger interface {
 	LatestTaskCheckpoint(ctx context.Context, taskID string) (runledger.TaskCheckpoint, error)
 }
 
+// ConditionalCheckpointLedger is the optional adapter boundary used by
+// durable wake/readmission. It appends only when the expected checkpoint is
+// still latest; applied=false is an ordinary compare-and-save conflict.
+type ConditionalCheckpointLedger interface {
+	CreateTaskCheckpointIfLatest(ctx context.Context, checkpoint runledger.TaskCheckpoint, expectedCheckpointID string, expectedVersion int) (saved runledger.TaskCheckpoint, applied bool, err error)
+}
+
 // EvidenceWriter is the slice of evidence.Store this package needs: the
 // rendered Markdown view persists as a checkpoint-kind evidence object,
 // which the ledger row then references by ID.
@@ -56,6 +63,73 @@ type SaveInput struct {
 // checkpoint evidence object, and records the ledger row. The returned
 // checkpoint carries the assigned version and checkpoint ID.
 func (m *Manager) Save(ctx context.Context, in SaveInput) (runledger.TaskCheckpoint, error) {
+	checkpoint, err := m.prepareCheckpoint(ctx, in)
+	if err != nil {
+		return runledger.TaskCheckpoint{}, err
+	}
+
+	parentID := ""
+	latest, err := m.ledger.LatestTaskCheckpoint(ctx, in.State.TaskID)
+	switch {
+	case err == nil:
+		parentID = latest.CheckpointID
+	case errors.Is(err, runledger.ErrNotFound):
+		// First checkpoint for this task: a genuine root.
+	default:
+		// A transient read error must fail the save; treating it as "no
+		// parent" would silently fork the version chain.
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: read latest checkpoint: %w", err)
+	}
+	checkpoint.ParentCheckpointID = parentID
+
+	saved, err := m.ledger.CreateTaskCheckpoint(ctx, checkpoint)
+	if err != nil {
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: record checkpoint: %w", err)
+	}
+	return saved, nil
+}
+
+// ErrCheckpointConflict reports that a conditional save's expected parent is
+// no longer latest. Callers may re-read to distinguish an idempotent successor
+// from a newer blocker or terminal state.
+var ErrCheckpointConflict = errors.New("taskstate: checkpoint compare-and-save conflict")
+
+// CheckpointExpectation names the exact latest checkpoint a conditional save
+// may extend. The zero value means an absent task checkpoint and can create a
+// root exactly once.
+type CheckpointExpectation struct {
+	CheckpointID string
+	Version      int
+}
+
+// SaveIfLatest persists a checkpoint only if expectation still names the
+// latest checkpoint. Save remains the explicit unconditional legacy API.
+func (m *Manager) SaveIfLatest(ctx context.Context, in SaveInput, expectation CheckpointExpectation) (runledger.TaskCheckpoint, error) {
+	rootExpectation := expectation.CheckpointID == "" && expectation.Version == 0
+	if !rootExpectation && (expectation.CheckpointID == "" || expectation.Version <= 0) {
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: expected checkpoint ID and positive version must be supplied together")
+	}
+	ledger, ok := m.ledger.(ConditionalCheckpointLedger)
+	if !ok {
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: checkpoint ledger does not support conditional saves")
+	}
+	checkpoint, err := m.prepareCheckpoint(ctx, in)
+	if err != nil {
+		return runledger.TaskCheckpoint{}, err
+	}
+	checkpoint.ParentCheckpointID = expectation.CheckpointID
+	checkpoint.Version = expectation.Version + 1
+	saved, applied, err := ledger.CreateTaskCheckpointIfLatest(ctx, checkpoint, expectation.CheckpointID, expectation.Version)
+	if err != nil {
+		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: record conditional checkpoint: %w", err)
+	}
+	if !applied {
+		return runledger.TaskCheckpoint{}, ErrCheckpointConflict
+	}
+	return saved, nil
+}
+
+func (m *Manager) prepareCheckpoint(ctx context.Context, in SaveInput) (runledger.TaskCheckpoint, error) {
 	if in.State.UpdatedAt.IsZero() {
 		in.State.UpdatedAt = time.Now().UTC()
 	}
@@ -85,21 +159,7 @@ func (m *Manager) Save(ctx context.Context, in SaveInput) (runledger.TaskCheckpo
 		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: store checkpoint evidence: %w", err)
 	}
 
-	parentID := ""
-	latest, err := m.ledger.LatestTaskCheckpoint(ctx, in.State.TaskID)
-	switch {
-	case err == nil:
-		parentID = latest.CheckpointID
-	case errors.Is(err, runledger.ErrNotFound):
-		// First checkpoint for this task: a genuine root.
-	default:
-		// A transient read error must fail the save; treating it as "no
-		// parent" would silently fork the version chain.
-		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: read latest checkpoint: %w", err)
-	}
-
-	saved, err := m.ledger.CreateTaskCheckpoint(ctx, runledger.TaskCheckpoint{
-		ParentCheckpointID: parentID,
+	return runledger.TaskCheckpoint{
 		TaskID:             in.State.TaskID,
 		SessionID:          in.SessionID,
 		RunID:              in.RunID,
@@ -108,11 +168,7 @@ func (m *Manager) Save(ctx context.Context, in SaveInput) (runledger.TaskCheckpo
 		Reason:             reason,
 		StateJSON:          stateJSON,
 		MarkdownEvidenceID: obj.ID,
-	})
-	if err != nil {
-		return runledger.TaskCheckpoint{}, fmt.Errorf("taskstate: record checkpoint: %w", err)
-	}
-	return saved, nil
+	}, nil
 }
 
 // ErrNoCheckpoint is returned by Resume when a task has no checkpoint yet.

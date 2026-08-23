@@ -33,17 +33,25 @@ const (
 	GoalWorkflowV2             = "buckley.goal.v2"
 	GoalWorkflowV3             = "buckley.goal.v3"
 	GoalWorkflowV4             = "buckley.goal.v4"
+	GoalWorkflowV5             = "buckley.goal.v5"
 	TaskWorkflowV1             = "buckley.task.v1"
 	TaskWorkflowV2             = "buckley.task.v2"
 	TaskWorkflowV3             = "buckley.task.v3"
+	TaskWorkflowV4             = "buckley.task.v4"
 	ActivityResumeSeed         = "buckley.resume_seed.v1"
 	ActivityNextTask           = "buckley.next_task.v1"
 	ActivityNextBatch          = "buckley.next_batch.v1"
+	ActivityNextBatchV2        = "buckley.next_batch.v2"
 	ActivityRunTurn            = "buckley.run_turn.v1"
 	ActivityRunTurnV2          = "buckley.run_turn.v2"
+	ActivityRunTurnV3          = "buckley.run_turn.v3"
 	ActivityRecordApprovalWait = "buckley.record_approval_wait.v1"
 	ActivityResolveApproval    = "buckley.resolve_approval.v1"
 	ActivityFinalizeGoal       = "buckley.finalize_goal.v1"
+	ActivityRecordRetryWaiting = "buckley.record_retry_waiting.v1"
+	ActivityWakeRetry          = "buckley.wake_retry.v1"
+	ActivityWakeRetryV2        = "buckley.wake_retry.v2"
+	ActivityResolveRetry       = "buckley.resolve_retry.v1"
 )
 
 // DefaultEndpoint is the conventional local Dapr gRPC endpoint.
@@ -140,7 +148,7 @@ func (b *Backend) Health(ctx context.Context) error {
 func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner) error {
 	registry := workflow.NewRegistry()
 	// Prior versions stay registered so in-flight instances keep their
-	// orchestration semantics (spec versioning rule); new goals start V4.
+	// orchestration semantics (spec versioning rule); new goals start V5.
 	if err := registry.AddWorkflowN(GoalWorkflowV1, goalWorkflow); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV1, err)
 	}
@@ -153,6 +161,9 @@ func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner)
 	if err := registry.AddWorkflowN(GoalWorkflowV4, goalWorkflowV4); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV4, err)
 	}
+	if err := registry.AddWorkflowN(GoalWorkflowV5, goalWorkflowV5); err != nil {
+		return fmt.Errorf("dapr: register %s: %w", GoalWorkflowV5, err)
+	}
 	if err := registry.AddWorkflowN(TaskWorkflowV1, taskWorkflow); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV1, err)
 	}
@@ -162,15 +173,24 @@ func (b *Backend) StartWorker(ctx context.Context, runner durability.TaskRunner)
 	if err := registry.AddWorkflowN(TaskWorkflowV3, taskWorkflowV3); err != nil {
 		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV3, err)
 	}
+	if err := registry.AddWorkflowN(TaskWorkflowV4, taskWorkflowV4); err != nil {
+		return fmt.Errorf("dapr: register %s: %w", TaskWorkflowV4, err)
+	}
 	activities := map[string]workflow.Activity{
 		ActivityResumeSeed:         resumeSeedActivity(runner),
 		ActivityNextTask:           nextTaskActivity(runner),
 		ActivityNextBatch:          nextBatchActivity(runner),
+		ActivityNextBatchV2:        nextBatchActivityV2(runner),
 		ActivityRunTurn:            runTurnActivity(runner),
 		ActivityRunTurnV2:          runTurnActivityV2(runner),
+		ActivityRunTurnV3:          runTurnActivityV3(runner),
 		ActivityRecordApprovalWait: recordApprovalWaitActivity(runner),
 		ActivityResolveApproval:    resolveApprovalActivity(runner),
 		ActivityFinalizeGoal:       finalizeGoalActivity(runner),
+		ActivityRecordRetryWaiting: recordRetryWaitingActivity(runner),
+		ActivityWakeRetry:          wakeRetryActivity(runner),
+		ActivityWakeRetryV2:        wakeRetryActivityV2(runner),
+		ActivityResolveRetry:       resolveRetryActivity(runner),
 	}
 	for name, activity := range activities {
 		if err := registry.AddActivityN(name, activity); err != nil {
@@ -284,7 +304,7 @@ func (b *Backend) StartGoal(ctx context.Context, start durability.GoalStart) (st
 	if strings.TrimSpace(canonical.WorkspaceRoot) == "" {
 		return "", fmt.Errorf("dapr: workspace root is required for run %s", start.RunID)
 	}
-	if _, scheduleErr := b.client.ScheduleWorkflow(ctx, GoalWorkflowV4,
+	if _, scheduleErr := b.client.ScheduleWorkflow(ctx, GoalWorkflowV5,
 		workflow.WithInstanceID(instanceID),
 		workflow.WithInput(canonical),
 	); scheduleErr == nil {
@@ -296,7 +316,7 @@ func (b *Backend) StartGoal(ctx context.Context, start durability.GoalStart) (st
 		metadata, err = b.client.FetchWorkflowMetadata(reconcileCtx, instanceID)
 		cancel()
 		if errors.Is(err, api.ErrInstanceNotFound) {
-			return "", fmt.Errorf("dapr: schedule %s as %s: %w", GoalWorkflowV4, instanceID, scheduleErr)
+			return "", fmt.Errorf("dapr: schedule %s as %s: %w", GoalWorkflowV5, instanceID, scheduleErr)
 		}
 		if err != nil {
 			return "", fmt.Errorf("dapr: reconcile schedule of %s after %v: %w", instanceID, scheduleErr, err)
@@ -352,12 +372,13 @@ func inspectGoalGeneration(metadata *workflow.WorkflowMetadata, instanceID strin
 
 	// Generation zero may be an attachable V1-V3 history. Those histories
 	// predate resumable V4 output and workspace input, so they remain
-	// observation-only and permissive. Every generated instance is V4.
-	if metadata.Name != GoalWorkflowV4 {
+	// observation-only and permissive. New generated instances are V5;
+	// completed V4 generations remain attachable.
+	if metadata.Name != GoalWorkflowV4 && metadata.Name != GoalWorkflowV5 {
 		if generation == 0 && !requireV4 {
 			return goalGenerationInspection{}, nil
 		}
-		return goalGenerationInspection{}, invalidWorkflowState(instanceID, fmt.Sprintf("workflow name is %q, want %q", metadata.Name, GoalWorkflowV4))
+		return goalGenerationInspection{}, invalidWorkflowState(instanceID, fmt.Sprintf("workflow name is %q, want %q or %q", metadata.Name, GoalWorkflowV4, GoalWorkflowV5))
 	}
 
 	stored, err := decodeGoalStart(metadata, instanceID)
@@ -442,7 +463,7 @@ func (b *Backend) WaitForGoal(ctx context.Context, instanceID string) (durabilit
 		InstanceID:    instanceID,
 		RuntimeStatus: runtimeStatusName(metadata),
 	}
-	if metadata.Name == GoalWorkflowV4 && metadata.RuntimeStatus == api.RUNTIME_STATUS_COMPLETED {
+	if (metadata.Name == GoalWorkflowV4 || metadata.Name == GoalWorkflowV5) && metadata.RuntimeStatus == api.RUNTIME_STATUS_COMPLETED {
 		decoded, decodeErr := decodeCompletedV4GoalResult(metadata, instanceID)
 		if decodeErr != nil {
 			return result, decodeErr

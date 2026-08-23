@@ -13,6 +13,9 @@ type SessionCommand struct {
 	ID        string `json:"commandId,omitempty"`
 	Type      string `json:"type"`
 	Content   string `json:"content"`
+	// AcceptedBy is authenticated adapter metadata and never part of the wire
+	// representation.
+	AcceptedBy string `json:"-"`
 }
 
 // EnsureID assigns the stable identity returned to clients and carried by

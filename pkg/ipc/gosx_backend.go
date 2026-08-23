@@ -1,20 +1,27 @@
 package ipc
 
 import (
+	"container/heap"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/agentspec"
 	"m31labs.dev/buckley/pkg/headless"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/ipc/gosxui"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
@@ -24,21 +31,50 @@ type gosxBackend struct {
 }
 
 func (s *Server) newGoSXUIHandler() http.Handler {
-	ui := gosxui.NewHandler(gosxBackend{server: s})
-	return s.authContextMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The login form intentionally uses a loopback query token so it can
-		// remain a native HTML form. Exchange it once for the same HTTP-only
-		// cookie used by the existing API clients, then all later GoSX actions
-		// stay on clean URLs and never need bearer-token JavaScript.
-		if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" && s.store != nil {
-			if principal := principalFromContext(r.Context()); principal != nil && principal.Name != "anonymous" {
-				if sessionToken, err := s.issueAuthSession(principal); err == nil {
-					s.setSessionCookie(w, r, sessionToken)
+	backend := gosxBackend{server: s}
+	ui := gosxui.NewHandler(backend)
+	handler := s.authContextMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			ui.ServeHTTP(w, r)
+			return
+		}
+
+		principal := principalFromContext(r.Context())
+		_, requestSessionActive := requestBrowserSessionValue(r)
+		if requestSessionActive {
+			sessionValue, _ := requestBrowserSessionValue(r)
+			requestSessionActive = s.activeBrowserSession(sessionValue, principal)
+		}
+		needsSession := principal != nil && principal.Name != "anonymous" && !requestSessionActive
+		if needsSession {
+			responseSession, responseHasSession := responseBrowserSessionValue(w)
+			if !responseHasSession || !s.activeBrowserSession(responseSession, principal) {
+				if s.store == nil {
+					http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
+					return
 				}
+				sessionToken, err := s.issueAuthSession(principal)
+				if err != nil {
+					http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				s.setSessionCookie(w, r, sessionToken)
 			}
+		}
+		if needsSession || browserQueryHasToken(r) {
+			http.Redirect(w, r, browserLocalRedirect(r), http.StatusSeeOther)
+			return
 		}
 		ui.ServeHTTP(w, r)
 	}))
+	handler = s.basicAuthMiddleware(handler)
+	handler = s.sessionMiddleware(handler)
+	handler = s.securityHeadersMiddleware(handler)
+	handler = s.corsMiddleware(handler)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func (b gosxBackend) Load(_ context.Context, r *http.Request) (gosxui.PageData, error) {
@@ -58,6 +94,7 @@ func (b gosxBackend) Load(_ context.Context, r *http.Request) (gosxui.PageData, 
 		CanOperate:    scopeAtLeast(principal.Scope, storage.TokenScopeOperator),
 		RequireToken:  s.cfg.RequireToken,
 		ProjectRoot:   s.projectRoot,
+		CSRFToken:     s.browserCSRFTokenForRequest(r),
 	}
 	if s.store == nil {
 		return data, fmt.Errorf("storage unavailable")
@@ -108,9 +145,30 @@ func (b gosxBackend) Load(_ context.Context, r *http.Request) (gosxui.PageData, 
 			data.Todos = todoViews(todos)
 		}
 		data.Approvals = b.pendingApprovals(data.Current.ID)
-		if data.CanWrite && s.runtimeTracker != nil {
-			data.AgentRuns = agentViews(s.runtimeTracker.GetAgentRuns(data.Current.ID))
+		var liveRuns []viewmodel.AgentRun
+		if s.runtimeTracker != nil {
+			liveRuns = s.runtimeTracker.GetAgentRuns(data.Current.ID)
 		}
+		durableRuns, durableErr := b.durableAgentRuns(r.Context(), data.Current.ID)
+		if durableErr != nil {
+			if data.Error == "" {
+				data.Error = fmt.Sprintf("load durable agent runs: %v", durableErr)
+			}
+			liveRuns = nil
+		} else {
+			canonicalLiveRuns, reconciledLiveRuns, reconcileErr := b.reconcileLiveAgentRuns(r.Context(), data.Current.ID, durableRuns, liveRuns)
+			if reconcileErr != nil {
+				if data.Error == "" {
+					data.Error = fmt.Sprintf("reconcile live agent runs: %v", reconcileErr)
+				}
+				liveRuns = nil
+			} else {
+				durableRuns = viewmodel.MergeAgentRuns(durableRuns, canonicalLiveRuns)
+				liveRuns = reconciledLiveRuns
+			}
+		}
+		mergedRuns := viewmodel.MergeAgentRuns(durableRuns, liveRuns)
+		data.AgentRuns = agentViews(boundAgentRuns(mergedRuns, gosxAgentRunLimit), s.hudTaskMarkerKey)
 		data.Refresh = isLiveSession(data.Current.Status) || len(data.Approvals) > 0
 	}
 
@@ -133,7 +191,8 @@ func (b gosxBackend) StartWork(_ context.Context, r *http.Request, req gosxui.St
 	if err != nil {
 		return "", err
 	}
-	if s.headlessRegistry == nil {
+	registry := s.getHeadlessRegistry()
+	if registry == nil {
 		return "", fmt.Errorf("headless sessions not enabled")
 	}
 	project, err := s.resolveAgentProjectPath(req.Project)
@@ -159,7 +218,7 @@ func (b gosxBackend) StartWork(_ context.Context, r *http.Request, req gosxui.St
 			create.Model = profileModel
 		}
 	}
-	info, err := s.headlessRegistry.CreateSession(create)
+	info, err := registry.CreateSession(create)
 	if err != nil {
 		return "", err
 	}
@@ -169,7 +228,7 @@ func (b gosxBackend) StartWork(_ context.Context, r *http.Request, req gosxui.St
 	return info.ID, nil
 }
 
-func (b gosxBackend) Dispatch(_ context.Context, r *http.Request, req gosxui.CommandRequest) error {
+func (b gosxBackend) Dispatch(ctx context.Context, r *http.Request, req gosxui.CommandRequest) error {
 	s := b.server
 	principal, err := b.member(r)
 	if err != nil {
@@ -189,7 +248,7 @@ func (b gosxBackend) Dispatch(_ context.Context, r *http.Request, req gosxui.Com
 	if session == nil || !principalCanAccessSession(principal, session) {
 		return fmt.Errorf("session not found")
 	}
-	if s.commandGW == nil {
+	if !commandTargetAvailable(s) {
 		return fmt.Errorf("commands not enabled")
 	}
 	typ := strings.TrimSpace(req.Type)
@@ -197,15 +256,42 @@ func (b gosxBackend) Dispatch(_ context.Context, r *http.Request, req gosxui.Com
 		typ = "input"
 	}
 	content := strings.TrimSpace(req.Content)
+	if strings.EqualFold(typ, "approval") {
+		typ = "approval"
+		approvalID := strings.TrimSpace(req.ApprovalID)
+		if approvalID == "" {
+			return fmt.Errorf("approval id required")
+		}
+		var approved bool
+		switch content {
+		case "approve":
+			approved = true
+		case "reject":
+			approved = false
+		default:
+			return fmt.Errorf("invalid approval decision")
+		}
+		payload, err := json.Marshal(headless.ApprovalResponse{ID: approvalID, Approved: approved})
+		if err != nil {
+			return fmt.Errorf("encode approval decision: %w", err)
+		}
+		content = string(payload)
+	}
 	if command.RequiresContent(typ) && content == "" {
 		return fmt.Errorf("content required")
 	}
 	if s.commandLimiter != nil && !s.commandLimiter.Allow(sessionID) {
 		return fmt.Errorf("rate limit exceeded")
 	}
-	cmd := command.SessionCommand{SessionID: sessionID, Type: typ, Content: content}
-	cmd.EnsureID()
-	if err := s.commandGW.Dispatch(cmd); err != nil {
+	cmd := command.SessionCommand{
+		SessionID: sessionID, Type: typ, Content: content,
+		AcceptedBy: strings.TrimSpace(principal.Name),
+	}
+	if _, err := s.dispatchCommandWithReceipt(ctx, &cmd, commandDispatchGateway); err != nil {
+		if isAuthoritativeCommandError(err) {
+			_, safeErr := commandAcceptanceHTTPError(err)
+			return safeErr
+		}
 		return fmt.Errorf("dispatch command: %w", err)
 	}
 	return nil
@@ -214,13 +300,13 @@ func (b gosxBackend) Dispatch(_ context.Context, r *http.Request, req gosxui.Com
 func (b gosxBackend) Logout(_ context.Context, r *http.Request, w http.ResponseWriter) error {
 	s := b.server
 	if s == nil {
-		return nil
+		return fmt.Errorf("ipc server unavailable")
 	}
 	if principalFromContext(r.Context()) == nil {
 		return fmt.Errorf("unauthorized")
 	}
-	if cookie, err := r.Cookie(sessionCookieName); err == nil {
-		s.revokeAuthSession(strings.TrimSpace(cookie.Value))
+	if err := s.revokeLogoutSessions(r); err != nil {
+		return fmt.Errorf("revoke browser logout sessions: %w", err)
 	}
 	s.clearSessionCookie(w, r)
 	return nil
@@ -238,10 +324,14 @@ func (b gosxBackend) member(r *http.Request) (*requestPrincipal, error) {
 }
 
 func (b gosxBackend) pendingApprovals(sessionID string) []gosxui.ApprovalView {
-	if b.server == nil || b.server.headlessRegistry == nil {
+	if b.server == nil {
 		return nil
 	}
-	runner, ok := b.server.headlessRegistry.GetSession(sessionID)
+	registry := b.server.getHeadlessRegistry()
+	if registry == nil {
+		return nil
+	}
+	runner, ok := registry.GetSession(sessionID)
 	if !ok || runner == nil {
 		return nil
 	}
@@ -331,25 +421,297 @@ func agentSpecViews(specs []agentspec.DiscoveredSpec) []gosxui.AgentSpecView {
 	return result
 }
 
-func agentViews(runs []viewmodel.AgentRun) []gosxui.AgentView {
+func agentViews(runs []viewmodel.AgentRun, taskMarkerKey [32]byte) []gosxui.AgentView {
 	if len(runs) == 0 {
 		return nil
 	}
 	result := make([]gosxui.AgentView, 0, len(runs))
 	for _, run := range runs {
 		result = append(result, gosxui.AgentView{
-			ID:              run.ID,
-			ParentID:        run.ParentID,
-			ParentSessionID: run.ParentSessionID,
-			Agent:           run.Agent,
-			Persona:         run.Persona,
-			Model:           run.Model,
-			Status:          run.Status,
-			Task:            run.Task,
-			Children:        agentViews(run.Children),
+			ID:              safeHUDIdentifier(run.ID, "run", 128),
+			ParentID:        safeHUDIdentifier(run.ParentID, "run", 128),
+			ParentSessionID: safeHUDIdentifier(run.ParentSessionID, "session", 128),
+			Agent:           safeHUDText(run.Agent, 128),
+			Persona:         safeHUDText(run.Persona, 128),
+			Model:           safeHUDText(run.Model, 128),
+			Status:          safeHUDAgentStatus(run.Status),
+			Task:            safeHUDAgentTask(run, taskMarkerKey),
+			Children:        agentViews(run.Children, taskMarkerKey),
 		})
 	}
 	return result
+}
+
+const gosxAgentRunLimit = 256
+
+func boundAgentRuns(runs []viewmodel.AgentRun, limit int) []viewmodel.AgentRun {
+	if limit <= 0 || len(runs) == 0 {
+		return nil
+	}
+	candidates := &agentRunPriorityQueue{}
+	heap.Init(candidates)
+	var selectCandidates func([]viewmodel.AgentRun)
+	selectCandidates = func(current []viewmodel.AgentRun) {
+		for _, run := range current {
+			children := run.Children
+			run.Children = nil
+			if strings.TrimSpace(run.ID) != "" {
+				if candidates.Len() < limit {
+					heap.Push(candidates, run)
+				} else if agentRunHigherPriority(run, (*candidates)[0]) {
+					heap.Pop(candidates)
+					heap.Push(candidates, run)
+				}
+			}
+			selectCandidates(children)
+		}
+	}
+	selectCandidates(runs)
+
+	// Retain the highest-value nodes, then rebuild the tree. When a retained
+	// child loses an older parent outside the window, the existing tree builder
+	// deterministically promotes it to a root while preserving ParentID as a
+	// breadcrumb instead of dropping the child.
+	return viewmodel.MergeAgentRuns([]viewmodel.AgentRun(*candidates), nil)
+}
+
+type agentRunPriorityQueue []viewmodel.AgentRun
+
+func (q agentRunPriorityQueue) Len() int      { return len(q) }
+func (q agentRunPriorityQueue) Swap(i, j int) { q[i], q[j] = q[j], q[i] }
+func (q agentRunPriorityQueue) Less(i, j int) bool {
+	return agentRunHigherPriority(q[j], q[i])
+}
+func (q *agentRunPriorityQueue) Push(value any) {
+	*q = append(*q, value.(viewmodel.AgentRun))
+}
+func (q *agentRunPriorityQueue) Pop() any {
+	old := *q
+	last := len(old) - 1
+	value := old[last]
+	*q = old[:last]
+	return value
+}
+
+func agentRunHigherPriority(left, right viewmodel.AgentRun) bool {
+	leftCurrent, rightCurrent := isCurrentAgentRun(left.Status), isCurrentAgentRun(right.Status)
+	if leftCurrent != rightCurrent {
+		return leftCurrent
+	}
+	leftTime, rightTime := agentRunActivityTime(left), agentRunActivityTime(right)
+	if !leftTime.Equal(rightTime) {
+		return leftTime.After(rightTime)
+	}
+	if !left.StartedAt.Equal(right.StartedAt) {
+		return left.StartedAt.After(right.StartedAt)
+	}
+	return left.ID < right.ID
+}
+
+func isCurrentAgentRun(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "queued", "pending", "running":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentRunActivityTime(run viewmodel.AgentRun) time.Time {
+	if !run.UpdatedAt.IsZero() {
+		return run.UpdatedAt
+	}
+	return run.StartedAt
+}
+
+func (b gosxBackend) durableAgentRuns(ctx context.Context, sessionID string) ([]viewmodel.AgentRun, error) {
+	if b.server == nil || strings.TrimSpace(sessionID) == "" {
+		return nil, nil
+	}
+	ledger := b.server.getDurableLedger()
+	if ledger == nil {
+		return nil, nil
+	}
+	runs, err := ledger.ListRuns(ctx, runledger.RunQuery{
+		SessionID: strings.TrimSpace(sessionID),
+		Limit:     gosxAgentRunLimit,
+		Order:     runledger.RunOrderNewestFirst,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]viewmodel.AgentRun, 0, len(runs))
+	for _, run := range runs {
+		result = append(result, durableAgentRunView(run))
+	}
+	return result, nil
+}
+
+func (b gosxBackend) reconcileLiveAgentRuns(ctx context.Context, sessionID string, durableRuns, liveRuns []viewmodel.AgentRun) ([]viewmodel.AgentRun, []viewmodel.AgentRun, error) {
+	liveRuns = boundAgentRuns(liveRuns, gosxAgentRunLimit)
+	if len(liveRuns) == 0 || b.server == nil {
+		return nil, liveRuns, nil
+	}
+	ledger := b.server.getDurableLedger()
+	if ledger == nil {
+		return nil, liveRuns, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	knownDurable := make(map[string]struct{}, gosxAgentRunLimit)
+	for _, run := range flattenAgentRuns(durableRuns) {
+		knownDurable[run.ID] = struct{}{}
+	}
+
+	canonical := make([]viewmodel.AgentRun, 0, len(liveRuns))
+	filteredLive := make([]viewmodel.AgentRun, 0, len(liveRuns))
+	for _, live := range flattenAgentRuns(liveRuns) {
+		if _, ok := knownDurable[live.ID]; ok {
+			filteredLive = append(filteredLive, live)
+			continue
+		}
+		run, err := ledger.GetRun(ctx, live.ID)
+		if errors.Is(err, runledger.ErrNotFound) {
+			filteredLive = append(filteredLive, live)
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if strings.TrimSpace(run.SessionID) != sessionID {
+			continue
+		}
+		canonical = append(canonical, durableAgentRunView(run))
+		filteredLive = append(filteredLive, live)
+	}
+	return canonical, filteredLive, nil
+}
+
+func flattenAgentRuns(runs []viewmodel.AgentRun) []viewmodel.AgentRun {
+	result := make([]viewmodel.AgentRun, 0, len(runs))
+	var flatten func([]viewmodel.AgentRun)
+	flatten = func(current []viewmodel.AgentRun) {
+		for _, run := range current {
+			children := run.Children
+			run.Children = nil
+			result = append(result, run)
+			flatten(children)
+		}
+	}
+	flatten(runs)
+	return result
+}
+
+func durableAgentRunView(run runledger.AgentRun) viewmodel.AgentRun {
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	if status == "canceled" {
+		status = "cancelled"
+	}
+	if status != "completed" && status != "failed" && status != "cancelled" && status != "blocked" {
+		// No local tracker after a daemon restart means the worker is detached;
+		// retain the run as resumable instead of claiming it is live.
+		status = "resumable"
+	}
+	updatedAt := run.StartedAt
+	if run.EndedAt != nil {
+		updatedAt = *run.EndedAt
+	}
+	return viewmodel.AgentRun{
+		ID:              run.RunID,
+		ParentID:        run.ParentRunID,
+		ParentSessionID: run.SessionID,
+		Agent:           firstNonEmptyAgentValue(run.AgentID, run.ProviderID, run.Backend),
+		Model:           run.ModelID,
+		Status:          status,
+		// TaskID is a safe identifier; task bodies remain in evidence and are
+		// intentionally not loaded into the HUD projection.
+		Task:      run.TaskID,
+		TaskIsID:  strings.TrimSpace(run.TaskID) != "",
+		StartedAt: run.StartedAt,
+		UpdatedAt: updatedAt,
+	}
+}
+
+func firstNonEmptyAgentValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func safeHUDIdentifier(value, kind string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	valid := utf8.RuneCountInString(value) <= maxRunes
+	for _, r := range value {
+		if !isHUDIdentifierRune(r) {
+			valid = false
+			break
+		}
+	}
+	if valid {
+		return value
+	}
+	digest := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%s-%x", kind, digest[:8])
+}
+
+func safeHUDAgentTask(run viewmodel.AgentRun, taskMarkerKey [32]byte) string {
+	value := strings.TrimSpace(run.Task)
+	if value == "" || strings.TrimSpace(run.ID) == "" || taskMarkerKey == ([32]byte{}) {
+		return ""
+	}
+	source := "body"
+	if run.TaskIsID {
+		source = "durable-id"
+	}
+	marker := hmac.New(sha256.New, taskMarkerKey[:])
+	_, _ = marker.Write([]byte("buckley.hud.task.v1\x00"))
+	_, _ = marker.Write([]byte(strings.TrimSpace(run.ParentSessionID)))
+	_, _ = marker.Write([]byte{'\x00'})
+	_, _ = marker.Write([]byte(strings.TrimSpace(run.ID)))
+	_, _ = marker.Write([]byte{'\x00'})
+	_, _ = marker.Write([]byte(source))
+	_, _ = marker.Write([]byte{'\x00'})
+	_, _ = marker.Write([]byte(value))
+	return fmt.Sprintf("task-%x", marker.Sum(nil)[:8])
+}
+
+func isHUDIdentifierRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.:/@", r)
+}
+
+func safeHUDText(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+	runes := []rune(value)
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+func safeHUDAgentStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "canceled" {
+		status = "cancelled"
+	}
+	switch status {
+	case "pending", "running", "resumable", "completed", "failed", "cancelled", "blocked":
+		return status
+	default:
+		return "unknown"
+	}
 }
 
 func modelViews(manager *model.Manager) []gosxui.ModelView {

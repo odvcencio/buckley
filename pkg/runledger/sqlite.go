@@ -3,6 +3,7 @@ package runledger
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -25,6 +27,7 @@ const (
 	appendBusyRetryWindow = 5 * time.Second
 	appendBusyBaseDelay   = 2 * time.Millisecond
 	appendBusyMaxDelay    = 50 * time.Millisecond
+	launchFKRestoreWindow = 2 * time.Second
 )
 
 // ErrRalphDualWriteFailed wraps a RalphSink error returned alongside a
@@ -51,6 +54,9 @@ var ErrRalphDualWriteFailed = errors.New("runledger: ralph dual-write failed")
 // pkg/storage's sessions table.
 type SQLiteStore struct {
 	db *sql.DB
+	// launchReservationNow is a package-private deterministic test seam. A nil
+	// value always samples SQLite time on the operation's pinned connection.
+	launchReservationNow func(context.Context, launchEnvelopeQueryer) (time.Time, error)
 
 	appendGate chan struct{}
 	mu         sync.RWMutex
@@ -120,15 +126,132 @@ func New(dbPath string) (*SQLiteStore, error) {
 // shared database connection (for example, one already holding
 // pkg/evidence's schema, which enables the application-level evidence
 // reference checks described on SQLiteStore) once wiring lands in a later
-// PR. The caller owns the connection's lifecycle and pragma configuration.
+// PR. The caller owns the connection's lifecycle and non-foreign-key pragma
+// configuration. NewWithDB probes foreign-key support before migrations and
+// restores the caller's setting; launch-envelope operations additionally
+// enable and verify it on the exact pooled connection used for each operation.
 func NewWithDB(db *sql.DB) (*SQLiteStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("runledger: db cannot be nil")
+	}
+	if err := enableAndVerifySQLiteForeignKeys(db); err != nil {
+		return nil, err
 	}
 	if err := runMigrations(db); err != nil {
 		return nil, fmt.Errorf("runledger: run migrations: %w", err)
 	}
 	return newSQLiteStore(db), nil
+}
+
+func enableAndVerifySQLiteForeignKeys(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := acquireLaunchForeignKeyConn(ctx, db)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+type launchForeignKeyConn struct {
+	*sql.Conn
+	original int
+}
+
+// acquireLaunchForeignKeyConn pins one pooled connection and verifies the
+// launch-envelope foreign-key invariant before returning it. Callers must keep
+// all v21 work on this exact connection and close it afterward. Close restores
+// the caller's original setting before the physical connection can reenter its
+// pool.
+func acquireLaunchForeignKeyConn(ctx context.Context, db *sql.DB) (*launchForeignKeyConn, error) {
+	if db == nil {
+		return nil, errors.New("runledger: SQLite database is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("runledger: acquire SQLite foreign-key connection: %w", err)
+	}
+	lease := &launchForeignKeyConn{Conn: conn}
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&lease.original); err != nil {
+		return nil, errors.Join(fmt.Errorf("runledger: read SQLite foreign-key setting: %w", err), discardLaunchForeignKeyConn(conn))
+	}
+	if lease.original != 0 && lease.original != 1 {
+		return nil, errors.Join(errors.New("runledger: SQLite foreign-key setting is invalid"), discardLaunchForeignKeyConn(conn))
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return nil, errors.Join(fmt.Errorf("runledger: enable SQLite foreign keys: %w", err), lease.Close())
+	}
+	var enabled int
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		return nil, errors.Join(fmt.Errorf("runledger: verify SQLite foreign keys: %w", err), lease.Close())
+	}
+	if enabled != 1 {
+		return nil, errors.Join(errors.New("runledger: SQLite foreign-key enforcement is unavailable"), lease.Close())
+	}
+	return lease, nil
+}
+
+func (c *launchForeignKeyConn) Close() error {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	conn := c.Conn
+	c.Conn = nil
+	ctx, cancel := context.WithTimeout(context.Background(), launchFKRestoreWindow)
+	defer cancel()
+	setting := "OFF"
+	if c.original == 1 {
+		setting = "ON"
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = `+setting); err != nil {
+		return errors.Join(fmt.Errorf("runledger: restore SQLite foreign-key setting: %w", err), discardLaunchForeignKeyConn(conn))
+	}
+	var restored int
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&restored); err != nil {
+		return errors.Join(fmt.Errorf("runledger: verify restored SQLite foreign-key setting: %w", err), discardLaunchForeignKeyConn(conn))
+	}
+	if restored != c.original {
+		return errors.Join(errors.New("runledger: restored SQLite foreign-key setting does not match"), discardLaunchForeignKeyConn(conn))
+	}
+	return conn.Close()
+}
+
+func (c *launchForeignKeyConn) discard() error {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	conn := c.Conn
+	c.Conn = nil
+	return discardLaunchForeignKeyConn(conn)
+}
+
+func closeLaunchForeignKeyConn(conn *launchForeignKeyConn, rollback bool) error {
+	if conn == nil || conn.Conn == nil {
+		return nil
+	}
+	if rollback {
+		ctx, cancel := context.WithTimeout(context.Background(), launchFKRestoreWindow)
+		_, err := conn.ExecContext(ctx, `ROLLBACK`)
+		cancel()
+		if err != nil {
+			return errors.Join(fmt.Errorf("runledger: rollback launch admission transaction: %w", err), conn.discard())
+		}
+	}
+	return conn.Close()
+}
+
+func discardLaunchForeignKeyConn(conn *sql.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	rawErr := conn.Raw(func(any) error { return driver.ErrBadConn })
+	if errors.Is(rawErr, driver.ErrBadConn) {
+		rawErr = nil
+	}
+	return errors.Join(rawErr, conn.Close())
 }
 
 func newSQLiteStore(db *sql.DB) *SQLiteStore {
@@ -158,9 +281,19 @@ func (s *SQLiteStore) SetLiveSink(sink LiveSink) {
 
 // SetRalphSink implements Store.
 func (s *SQLiteStore) SetRalphSink(sink RalphSink) {
+	if s == nil {
+		return
+	}
+	<-s.appendGate
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ralphSink = sink
+	s.mu.Unlock()
+	s.appendGate <- struct{}{}
+	if sink != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.drainRalphOutbox(ctx, sink, 64)
+	}
 }
 
 func (s *SQLiteStore) sinks() (LiveSink, RalphSink) {
@@ -171,6 +304,9 @@ func (s *SQLiteStore) sinks() (LiveSink, RalphSink) {
 
 // StartRun implements Store.
 func (s *SQLiteStore) StartRun(ctx context.Context, run AgentRun) (AgentRun, error) {
+	if reservedAgentIdentity(run.RunID) || reservedAgentIdentity(run.ParentRunID) {
+		return AgentRun{}, fmt.Errorf("%w: run_id=%q parent_run_id=%q", ErrReservedAgentIdentity, strings.TrimSpace(run.RunID), strings.TrimSpace(run.ParentRunID))
+	}
 	if run.RunID == "" {
 		run.RunID = "run_" + ulid.Make().String()
 	}
@@ -280,47 +416,42 @@ func (s *SQLiteStore) Append(ctx context.Context, event Event) (Event, error) {
 		return Event{}, fmt.Errorf("runledger: marshal receipt_ids: %w", err)
 	}
 
-	event, inserted, err := s.appendWithGate(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
+	liveSink, _ := s.sinks()
+	event, inserted, ralphSink, err := s.appendWithGate(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
 	if err != nil {
 		return Event{}, err
 	}
-	if !inserted {
-		return event, nil
+	if inserted {
+		notifyLiveSink(liveSink, event)
 	}
-
-	liveSink, ralphSink := s.sinks()
-	notifyLiveSink(liveSink, event)
-
-	var dualWriteErr error
-	if ralphSink != nil {
-		if err := ralphSink.WriteEvent(ctx, event); err != nil {
-			dualWriteErr = fmt.Errorf("%w: %v", ErrRalphDualWriteFailed, err)
-		}
+	if err := s.deliverRalphOutbox(ctx, event.ID, ralphSink); err != nil {
+		return event, err
 	}
-
-	return event, dualWriteErr
+	return event, nil
 }
 
-func (s *SQLiteStore) appendWithGate(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+func (s *SQLiteStore) appendWithGate(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, RalphSink, error) {
 	// SQLite permits only one writer. Serializing this store's appenders avoids
 	// wasteful read-to-write upgrade collisions on externally owned connections,
 	// while the retry below still covers writers using another store wrapper.
 	select {
 	case <-ctx.Done():
-		return Event{}, false, fmt.Errorf("runledger: append interrupted: %w", ctx.Err())
+		return Event{}, false, nil, fmt.Errorf("runledger: append interrupted: %w", ctx.Err())
 	case <-s.appendGate:
 	}
 	defer func() { s.appendGate <- struct{}{} }()
-	return s.appendWithBusyRetry(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
+	_, ralphSink := s.sinks()
+	appended, inserted, err := s.appendWithBusyRetry(ctx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON, ralphSink != nil)
+	return appended, inserted, ralphSink, err
 }
 
-func (s *SQLiteStore) appendWithBusyRetry(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+func (s *SQLiteStore) appendWithBusyRetry(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any, trackRalph bool) (Event, bool, error) {
 	retryCtx, cancel := context.WithTimeout(ctx, appendBusyRetryWindow)
 	defer cancel()
 
 	var lastBusyErr error
 	for attempt := 0; ; attempt++ {
-		appended, inserted, err := s.appendOnce(retryCtx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON)
+		appended, inserted, err := s.appendOnce(retryCtx, event, payloadJSON, evidenceIDsJSON, receiptIDsJSON, trackRalph)
 		if err == nil {
 			return appended, inserted, nil
 		}
@@ -367,7 +498,7 @@ func (s *SQLiteStore) appendWithBusyRetry(ctx context.Context, event Event, payl
 	}
 }
 
-func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any) (Event, bool, error) {
+func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, evidenceIDsJSON, receiptIDsJSON any, trackRalph bool) (Event, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Event{}, false, fmt.Errorf("runledger: begin append: %w", err)
@@ -409,6 +540,9 @@ func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, 
 			existingReceipts.String != nullableJSONText(receiptIDsJSON) || existingRedaction != event.Redaction {
 			return Event{}, false, fmt.Errorf("runledger: event id %s conflicts with an existing immutable event", event.ID)
 		}
+		if err := enqueueRalphOutboxTx(ctx, tx, event.ID, trackRalph); err != nil {
+			return Event{}, false, err
+		}
 		if err := tx.Commit(); err != nil {
 			return Event{}, false, fmt.Errorf("runledger: commit idempotent append: %w", err)
 		}
@@ -436,6 +570,9 @@ func (s *SQLiteStore) appendOnce(ctx context.Context, event Event, payloadJSON, 
 	if err != nil {
 		return Event{}, false, fmt.Errorf("runledger: insert event: %w", err)
 	}
+	if err := enqueueRalphOutboxTx(ctx, tx, event.ID, trackRalph); err != nil {
+		return Event{}, false, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return Event{}, false, fmt.Errorf("runledger: commit append: %w", err)
@@ -454,6 +591,9 @@ func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (Execut
 		step.IdempotencyKey = step.StepID
 	}
 	if err := validateExecutionStep(step); err != nil {
+		return ExecutionStep{}, false, err
+	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
 		return ExecutionStep{}, false, err
 	}
 	if step.Attempt <= 0 {
@@ -489,6 +629,9 @@ func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (Execut
 		existing, err := s.GetStep(ctx, step.RunID, step.StepID)
 		if err != nil {
 			return ExecutionStep{}, false, fmt.Errorf("runledger: read execution step %s: %w", step.StepID, err)
+		}
+		if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+			return ExecutionStep{}, false, err
 		}
 		if existing.IdempotencyKey != step.IdempotencyKey {
 			return ExecutionStep{}, false, fmt.Errorf("runledger: execution step %s idempotency key changed", step.StepID)
@@ -597,6 +740,9 @@ func (s *SQLiteStore) MarkStepDispatched(ctx context.Context, step ExecutionStep
 	if step.Attempt <= 0 {
 		return fmt.Errorf("runledger: a positive attempt is required for execution step %s", step.StepID)
 	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE execution_steps
 		SET dispatch_state = ?
@@ -613,6 +759,9 @@ func (s *SQLiteStore) MarkStepDispatched(ctx context.Context, step ExecutionStep
 	if n == 1 {
 		return nil
 	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+		return err
+	}
 	existing, err := s.GetStep(ctx, step.RunID, step.StepID)
 	if err != nil {
 		return err
@@ -627,6 +776,9 @@ func (s *SQLiteStore) MarkStepDispatched(ctx context.Context, step ExecutionStep
 func (s *SQLiteStore) ReclaimStep(ctx context.Context, step ExecutionStep, reclaimedAt time.Time) (ExecutionStep, error) {
 	if step.RunID == "" || step.StepID == "" || step.Attempt <= 0 || step.ClaimGeneration <= 0 {
 		return ExecutionStep{}, fmt.Errorf("runledger: complete step identity is required to reclaim %s", step.StepID)
+	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+		return ExecutionStep{}, err
 	}
 	if reclaimedAt.IsZero() {
 		reclaimedAt = time.Now().UTC()
@@ -645,6 +797,9 @@ func (s *SQLiteStore) ReclaimStep(ctx context.Context, step ExecutionStep, recla
 		return ExecutionStep{}, fmt.Errorf("runledger: inspect execution step %s reclaim: %w", step.StepID, err)
 	}
 	if n != 1 {
+		if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+			return ExecutionStep{}, err
+		}
 		existing, loadErr := s.GetStep(ctx, step.RunID, step.StepID)
 		if loadErr != nil {
 			return ExecutionStep{}, loadErr
@@ -662,6 +817,9 @@ func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, st
 	}
 	if step.Attempt <= 0 {
 		return fmt.Errorf("runledger: a positive attempt is required for execution step %s", step.StepID)
+	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+		return err
 	}
 	if completedAt.IsZero() {
 		completedAt = time.Now().UTC()
@@ -686,6 +844,9 @@ func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, st
 	}
 	if n == 1 {
 		return nil
+	}
+	if err := s.guardGenericLaunchStepMutation(ctx, step.RunID, step.StepID); err != nil {
+		return err
 	}
 	existing, err := s.GetStep(ctx, step.RunID, step.StepID)
 	if err != nil {
@@ -1272,6 +1433,10 @@ func sqliteTimestamp(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
+func sqliteLeaseTimestamp(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
 func parseSQLiteTimestamp(raw string) time.Time {
 	if raw == "" {
 		return time.Time{}
@@ -1347,6 +1512,32 @@ var migrations = []storage.SQLiteMigration{
 	{Version: 10, Name: "metric_idempotency", Apply: addMetricIdempotency},
 	{Version: 11, Name: "execution_step_dispatch_state", Apply: addExecutionStepDispatchState},
 	{Version: 12, Name: "execution_step_claim_generation", Apply: addExecutionStepClaimGeneration},
+	{Version: 13, Name: "agent_mailbox", Apply: createAgentMailboxTable},
+	{Version: 14, Name: "agent_run_attempts", Apply: createAgentRunAttemptsTable},
+	{Version: 15, Name: "agent_run_contracts", Apply: createAgentRunContractsTable},
+	{Version: 16, Name: "run_event_ralph_outbox", Apply: createRunEventRalphOutboxTable},
+	{Version: 17, Name: "operational_lease_timestamp_normalization", Apply: normalizeOperationalLeaseTimestamps},
+	{Version: 18, Name: "agent_mailbox_envelope_digest", Apply: addAgentMailboxEnvelopeDigest},
+	{Version: 19, Name: "agent_mailbox_envelope_digest_v2", Apply: refreshAgentMailboxEnvelopeDigests},
+	{Version: 20, Name: "agent_run_monitor_indexes", Apply: addAgentRunMonitorIndexes},
+	{Version: 21, Name: "launch_envelopes", Apply: createLaunchEnvelopesTable},
+	{Version: 22, Name: "launch_model_reservations", Apply: createLaunchReservationTables},
+}
+
+func addAgentRunMonitorIndexes(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_agent_runs_monitor_session
+			ON agent_runs(session_id, ` + runStartedAtEpochKey + `, ` + runStartedAtFractionKey + `, run_id);
+		CREATE INDEX IF NOT EXISTS idx_agent_runs_monitor_parent
+			ON agent_runs(session_id, parent_run_id, ` + runStartedAtEpochKey + `, ` + runStartedAtFractionKey + `, run_id);
+		DROP INDEX IF EXISTS idx_agent_mailbox_lease;
+		CREATE INDEX idx_agent_mailbox_lease
+			ON agent_mailbox(session_id, run_id, state, lease_expires_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create agent run monitor indexes: %w", err)
+	}
+	return nil
 }
 
 func createAgentRunsTable(db storage.MigrationDB) error {
@@ -1599,6 +1790,271 @@ func addExecutionStepClaimGeneration(db storage.MigrationDB) error {
 	if !exists {
 		if _, err := db.Exec(`ALTER TABLE execution_steps ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 1`); err != nil {
 			return fmt.Errorf("add execution step claim generation: %w", err)
+		}
+	}
+	return nil
+}
+
+func createAgentMailboxTable(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_identity
+			ON agent_runs(run_id, session_id);
+		CREATE TABLE IF NOT EXISTS agent_mailbox (
+			message_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			parent_run_id TEXT,
+			task_id TEXT,
+			turn_id TEXT,
+			idempotency_key TEXT NOT NULL,
+			correlation_id TEXT,
+			causation_id TEXT,
+			attempt_id TEXT,
+			lease_generation INTEGER NOT NULL DEFAULT 0,
+			source_attempt_id TEXT,
+			source_lease_generation INTEGER NOT NULL DEFAULT 0,
+			sequence INTEGER NOT NULL,
+			schema_version TEXT NOT NULL,
+			from_id TEXT,
+			to_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			content_ref TEXT NOT NULL,
+			content_digest TEXT NOT NULL,
+			envelope_digest TEXT NOT NULL,
+			media_type TEXT NOT NULL,
+			byte_count INTEGER NOT NULL,
+			preview TEXT,
+			state TEXT NOT NULL,
+			lease_owner TEXT,
+			lease_expires_at TIMESTAMP,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT,
+			created_at TIMESTAMP NOT NULL,
+			claimed_at TIMESTAMP,
+			processed_at TIMESTAMP,
+			dead_lettered_at TIMESTAMP,
+			CHECK (sequence > 0),
+			CHECK (lease_generation >= 0),
+			CHECK (source_lease_generation >= 0),
+			CHECK (length(envelope_digest) = 64),
+			CHECK (byte_count >= 0),
+			CHECK (state IN ('queued', 'claimed', 'processed', 'dead_letter')),
+			UNIQUE(session_id, run_id, idempotency_key),
+			UNIQUE(session_id, run_id, sequence),
+			FOREIGN KEY(run_id, session_id)
+				REFERENCES agent_runs(run_id, session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_agent_mailbox_ready
+			ON agent_mailbox(session_id, run_id, state, sequence);
+		CREATE INDEX IF NOT EXISTS idx_agent_mailbox_lease
+			ON agent_mailbox(session_id, run_id, state, lease_expires_at);
+		CREATE INDEX IF NOT EXISTS idx_agent_mailbox_identity
+			ON agent_mailbox(session_id, run_id, message_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("create agent_mailbox: %w", err)
+	}
+	return nil
+}
+
+func createAgentRunAttemptsTable(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_identity
+			ON agent_runs(run_id, session_id);
+		CREATE TABLE IF NOT EXISTS agent_run_attempts (
+			attempt_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			parent_run_id TEXT,
+			task_id TEXT,
+			turn_id TEXT,
+			lease_generation INTEGER NOT NULL,
+			pid INTEGER,
+			state TEXT NOT NULL,
+			attached_at TIMESTAMP NOT NULL,
+			heartbeat_at TIMESTAMP NOT NULL,
+			lease_expires_at TIMESTAMP NOT NULL,
+			detached_at TIMESTAMP,
+			detach_reason TEXT,
+			CHECK (lease_generation > 0),
+			CHECK (state IN ('attached', 'detached', 'expired')),
+			UNIQUE(session_id, run_id, lease_generation),
+			UNIQUE(session_id, run_id, attempt_id),
+			FOREIGN KEY(run_id, session_id)
+				REFERENCES agent_runs(run_id, session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_agent_attempts_current
+			ON agent_run_attempts(session_id, run_id, state, lease_generation DESC);
+		CREATE INDEX IF NOT EXISTS idx_agent_attempts_expiry
+			ON agent_run_attempts(state, lease_expires_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create agent_run_attempts: %w", err)
+	}
+	return nil
+}
+
+func createAgentRunContractsTable(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS agent_run_contracts (
+			run_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			input_digest TEXT NOT NULL,
+			task_evidence_id TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			CHECK (length(input_digest) BETWEEN 1 AND 128),
+			CHECK (length(task_evidence_id) BETWEEN 1 AND 256),
+			FOREIGN KEY(run_id, session_id)
+				REFERENCES agent_runs(run_id, session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_agent_run_contracts_session
+			ON agent_run_contracts(session_id, run_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("create agent_run_contracts: %w", err)
+	}
+	return nil
+}
+
+func createRunEventRalphOutboxTable(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS run_event_ralph_outbox (
+			event_id TEXT PRIMARY KEY,
+			state TEXT NOT NULL,
+			delivery_owner TEXT,
+			lease_expires_at TIMESTAMP,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			delivered_at TIMESTAMP,
+			CHECK (state IN ('pending', 'delivering', 'failed', 'delivered')),
+			CHECK (attempt_count >= 0),
+			FOREIGN KEY(event_id) REFERENCES run_events(event_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_run_event_ralph_ready
+			ON run_event_ralph_outbox(state, lease_expires_at, updated_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create run_event_ralph_outbox: %w", err)
+	}
+	return nil
+}
+
+func normalizeOperationalLeaseTimestamps(db storage.MigrationDB) error {
+	targets := []struct {
+		table, key string
+	}{
+		{table: "agent_mailbox", key: "message_id"},
+		{table: "agent_run_attempts", key: "attempt_id"},
+		{table: "run_event_ralph_outbox", key: "event_id"},
+	}
+	for _, target := range targets {
+		rows, err := db.Query(`SELECT ` + target.key + `, lease_expires_at FROM ` + target.table + ` WHERE lease_expires_at IS NOT NULL`)
+		if err != nil {
+			return fmt.Errorf("normalize %s lease timestamps: %w", target.table, err)
+		}
+		type leaseRow struct{ id, raw string }
+		var leases []leaseRow
+		for rows.Next() {
+			var lease leaseRow
+			if err := rows.Scan(&lease.id, &lease.raw); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan %s lease timestamp: %w", target.table, err)
+			}
+			leases = append(leases, lease)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate %s lease timestamps: %w", target.table, err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close %s lease timestamps: %w", target.table, err)
+		}
+		for _, lease := range leases {
+			parsed := parseSQLiteTimestamp(lease.raw)
+			if parsed.IsZero() {
+				return fmt.Errorf("normalize %s lease timestamp %q: invalid timestamp", target.table, lease.raw)
+			}
+			if _, err := db.Exec(`UPDATE `+target.table+` SET lease_expires_at = ? WHERE `+target.key+` = ?`, sqliteLeaseTimestamp(parsed), lease.id); err != nil {
+				return fmt.Errorf("update %s lease timestamp: %w", target.table, err)
+			}
+		}
+	}
+	return nil
+}
+
+func addAgentMailboxEnvelopeDigest(db storage.MigrationDB) error {
+	exists, err := sqliteColumnExists(db, "agent_mailbox", "envelope_digest")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE agent_mailbox ADD COLUMN envelope_digest TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add agent mailbox envelope digest: %w", err)
+		}
+	}
+	if err := backfillAgentMailboxEnvelopeDigests(db, `WHERE envelope_digest = ''`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TRIGGER IF NOT EXISTS trg_agent_mailbox_envelope_digest_insert
+		BEFORE INSERT ON agent_mailbox
+		WHEN length(NEW.envelope_digest) <> 64
+		BEGIN
+			SELECT RAISE(ABORT, 'agent_mailbox envelope_digest must be 64 bytes');
+		END;
+		CREATE TRIGGER IF NOT EXISTS trg_agent_mailbox_envelope_digest_update
+		BEFORE UPDATE OF envelope_digest ON agent_mailbox
+		WHEN length(NEW.envelope_digest) <> 64
+		BEGIN
+			SELECT RAISE(ABORT, 'agent_mailbox envelope_digest must be 64 bytes');
+		END;
+	`); err != nil {
+		return fmt.Errorf("constrain agent mailbox envelope digest: %w", err)
+	}
+	return nil
+}
+
+func refreshAgentMailboxEnvelopeDigests(db storage.MigrationDB) error {
+	return backfillAgentMailboxEnvelopeDigests(db, "")
+}
+
+func backfillAgentMailboxEnvelopeDigests(db storage.MigrationDB, where string) error {
+	rows, err := db.Query(`
+		SELECT message_id, schema_version, session_id, run_id, parent_run_id,
+			task_id, turn_id, idempotency_key, correlation_id, causation_id,
+			attempt_id, lease_generation, source_attempt_id, source_lease_generation,
+			sequence, from_id, to_id, kind, content_ref, content_digest,
+			envelope_digest, media_type, byte_count, preview, state,
+			lease_owner, lease_expires_at, attempt_count, last_error, created_at,
+			claimed_at, processed_at, dead_lettered_at
+		FROM agent_mailbox ` + where)
+	if err != nil {
+		return fmt.Errorf("list mailbox envelope digest backfill: %w", err)
+	}
+	var messages []agentcoord.Message
+	for rows.Next() {
+		message, scanErr := scanMailboxMessage(rows)
+		if scanErr != nil {
+			rows.Close()
+			return fmt.Errorf("scan mailbox envelope digest backfill: %w", scanErr)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate mailbox envelope digest backfill: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close mailbox envelope digest backfill: %w", err)
+	}
+	for _, message := range messages {
+		digest, err := mailboxEnvelopeDigest(message)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(`UPDATE agent_mailbox SET envelope_digest = ? WHERE message_id = ?`, digest, message.ID); err != nil {
+			return fmt.Errorf("backfill mailbox envelope digest: %w", err)
 		}
 	}
 	return nil

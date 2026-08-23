@@ -142,12 +142,22 @@ type EventQuery struct {
 	Limit  int
 }
 
+// RunOrder selects the deterministic chronological order for ListRuns.
+// The zero value preserves the historical oldest-first behavior.
+type RunOrder string
+
+const (
+	RunOrderOldestFirst RunOrder = ""
+	RunOrderNewestFirst RunOrder = "newest"
+)
+
 // RunQuery selects runs for ListRuns.
 type RunQuery struct {
 	SessionID   string
 	TaskID      string
 	ParentRunID string
 	Limit       int
+	Order       RunOrder
 }
 
 // LiveSink receives a best-effort, fire-and-forget copy of every

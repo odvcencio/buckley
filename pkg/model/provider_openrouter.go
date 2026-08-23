@@ -25,6 +25,22 @@ func (p *OpenRouterProvider) RefreshCatalog() (*ModelCatalog, error) {
 	return p.client.RefreshCatalog()
 }
 
+func (p *OpenRouterProvider) CatalogSourceURL() string {
+	if p == nil || p.client == nil {
+		return ""
+	}
+	return p.client.CatalogSourceURL()
+}
+
+func (*OpenRouterProvider) openRouterCatalogAuthority() {}
+
+func (p *OpenRouterProvider) refreshOfficialOpenRouterCatalog(ctx context.Context) (*officialCatalogObservation, error) {
+	if p == nil || p.client == nil {
+		return nil, context.Canceled
+	}
+	return p.client.refreshOfficialOpenRouterCatalog(ctx)
+}
+
 // GetModelInfo fetches info for the supplied model.
 func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 	return p.client.GetModelInfo(modelID)

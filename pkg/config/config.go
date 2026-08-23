@@ -160,6 +160,7 @@ type Config struct {
 	Input          InputConfig        `yaml:"input"`
 	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
 	Notify         NotifyConfig       `yaml:"notify"`
+	Launch         LaunchConfig       `yaml:"launch"`
 
 	// Context Fabric / durable agent runtime scaffolding. All flags default
 	// off or to current (legacy) behavior; no runtime code reads these yet.
@@ -168,6 +169,35 @@ type Config struct {
 	AdaptiveProtocol AdaptiveProtocolConfig `yaml:"adaptive_protocol"`
 	AgentOperations  AgentOperationsConfig  `yaml:"agent_operations"`
 	Metrics          MetricsConfig          `yaml:"metrics"`
+}
+
+// LaunchConfig contains operator-owned admission contracts for unattended
+// launches. Workspace project configuration is never consulted by the launch
+// operator loader.
+type LaunchConfig struct {
+	WorkerImage LaunchWorkerImageConfig `yaml:"worker_image"`
+}
+
+// LaunchWorkerImageConfig pins the exact locally installed worker image that
+// launch admission may create. Reference must be a canonical repo@sha256
+// value; ImageID, OS, and Architecture are compared with Docker's inspection
+// result before the workspace is mounted.
+type LaunchWorkerImageConfig struct {
+	Reference           string `yaml:"reference"`
+	ImageID             string `yaml:"image_id"`
+	OS                  string `yaml:"os"`
+	Architecture        string `yaml:"architecture"`
+	ModuleLockSHA256    string `yaml:"module_lock_sha256"`
+	ToolchainLockSHA256 string `yaml:"toolchain_lock_sha256"`
+	ArtifactDir         string `yaml:"artifact_dir"`
+}
+
+// LaunchOperatorConfig is the bounded projection consumed by launch
+// preflight. It deliberately excludes credentials and ordinary project
+// settings.
+type LaunchOperatorConfig struct {
+	WorkerImage LaunchWorkerImageConfig
+	Diagnostics DiagnosticsConfig
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -582,8 +612,35 @@ type SandboxConfig struct {
 type DockerSandboxConfig struct {
 	Enabled        bool   `yaml:"enabled" env:"BUCKLEY_DOCKER_SANDBOX_ENABLED"`
 	Image          string `yaml:"image" env:"BUCKLEY_DOCKER_SANDBOX_IMAGE"`
+	Binary         string `yaml:"binary"`
 	WorkspaceMount string `yaml:"workspace_mount"`
-	ReadOnlyRoot   bool   `yaml:"read_only_root"`
+	// ContainerUser pins the numeric UID:GID used by a trusted adapter. It is
+	// never loaded from project or operator configuration.
+	ContainerUser string `yaml:"-"`
+	ReadOnlyRoot  bool   `yaml:"read_only_root"`
+	// EphemeralHome mounts a private tmpfs home and points HOME/TMP variables
+	// at container-private storage. It is opt-in to preserve interactive
+	// sandbox behavior; strict launch profiles require it.
+	EphemeralHome bool `yaml:"ephemeral_home"`
+	// HideGitMetadata overlays the workspace .git entry inside the container.
+	// Strict launch profiles require it; generic sandboxes preserve their
+	// existing behavior unless explicitly enabled.
+	HideGitMetadata bool `yaml:"hide_git_metadata"`
+	// StrictCleanup propagates container removal failures and removes the
+	// container on command timeout. Strict launch profiles require it.
+	StrictCleanup bool `yaml:"strict_cleanup"`
+	// NeverPull requires Docker to use an already-present image. It is opt-in
+	// so generic interactive sandboxes retain their existing image behavior.
+	NeverPull bool `yaml:"never_pull"`
+	// Entrypoint optionally overrides the image entrypoint. Strict launch
+	// profiles use /bin/sleep so worker-image defaults cannot run on creation.
+	Entrypoint string `yaml:"entrypoint"`
+	// IsolatedClientEnv prevents ambient Docker context, credential, and socket
+	// variables from changing the daemon used by a strict launch profile.
+	IsolatedClientEnv bool `yaml:"isolated_client_env"`
+	// MaxOutputBytes bounds captured stdout and stderr together. Zero preserves
+	// the legacy unbounded behavior; strict launch profiles require a bound.
+	MaxOutputBytes int64 `yaml:"max_output_bytes"`
 	// NetworkEnabled (BUCKLEY_DOCKER_SANDBOX_NETWORK) is a *bool so a
 	// project config can distinguish "not set" from "set to false"; the
 	// generic dispatcher only supports value types, so this is handled by

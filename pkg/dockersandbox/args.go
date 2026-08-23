@@ -2,7 +2,9 @@ package dockersandbox
 
 import (
 	"fmt"
+	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -10,9 +12,23 @@ import (
 
 // buildCreateArgs constructs the docker create argument list for a hardened container.
 func buildCreateArgs(cfg config.DockerSandboxConfig, workspacePath, containerName string) []string {
+	return buildCreateArgsWithOwner(cfg, workspacePath, containerName, "", "")
+}
+
+func buildCreateArgsWithOwner(cfg config.DockerSandboxConfig, workspacePath, containerName, ownerLabel, ownerToken string) []string {
+	uid, gid := configuredContainerIdentity(cfg)
 	args := []string{
 		"create",
 		"--name", containerName,
+	}
+	if ownerLabel != "" && ownerToken != "" {
+		args = append(args, "--label", ownerLabel+"="+ownerToken)
+	}
+	if cfg.NeverPull {
+		args = append(args, "--pull", "never")
+	}
+	if entrypoint := strings.TrimSpace(cfg.Entrypoint); entrypoint != "" {
+		args = append(args, "--entrypoint", entrypoint)
 	}
 
 	if cfg.ReadOnlyRoot {
@@ -25,7 +41,15 @@ func buildCreateArgs(cfg config.DockerSandboxConfig, workspacePath, containerNam
 		mount = "/workspace"
 	}
 	if workspacePath != "" {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", workspacePath, mount))
+		args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,destination=%s", workspacePath, mount))
+		if cfg.HideGitMetadata {
+			gitPath := filepath.Join(workspacePath, ".git")
+			if info, err := os.Lstat(gitPath); err == nil && info.IsDir() {
+				args = append(args, "--mount", fmt.Sprintf("type=tmpfs,destination=%s/.git,tmpfs-mode=000", mount))
+			} else {
+				args = append(args, "--mount", fmt.Sprintf("type=bind,source=/dev/null,destination=%s/.git,readonly", mount))
+			}
+		}
 	}
 
 	// Writable tmpfs for /tmp
@@ -34,6 +58,19 @@ func buildCreateArgs(cfg config.DockerSandboxConfig, workspacePath, containerNam
 		tmpfsSize = "64m"
 	}
 	args = append(args, "--tmpfs", fmt.Sprintf("/tmp:size=%s", tmpfsSize))
+	if cfg.EphemeralHome {
+		homeOptions := fmt.Sprintf("/buckley-home:size=%s,mode=1777", tmpfsSize)
+		if uid != "" && gid != "" {
+			homeOptions = fmt.Sprintf("/buckley-home:size=%s,mode=0700,uid=%s,gid=%s", tmpfsSize, uid, gid)
+		}
+		args = append(args,
+			"--tmpfs", homeOptions,
+			"--env", "HOME=/buckley-home",
+			"--env", "TMPDIR=/tmp",
+			"--env", "TMP=/tmp",
+			"--env", "TEMP=/tmp",
+		)
+	}
 
 	// Network
 	if cfg.NetworkEnabled == nil || !*cfg.NetworkEnabled {
@@ -73,8 +110,8 @@ func buildCreateArgs(cfg config.DockerSandboxConfig, workspacePath, containerNam
 	}
 
 	// Match host UID/GID
-	if u, err := user.Current(); err == nil {
-		args = append(args, "--user", fmt.Sprintf("%s:%s", u.Uid, u.Gid))
+	if uid != "" && gid != "" {
+		args = append(args, "--user", fmt.Sprintf("%s:%s", uid, gid))
 	}
 
 	// Image + long-lived entrypoint
@@ -82,7 +119,27 @@ func buildCreateArgs(cfg config.DockerSandboxConfig, workspacePath, containerNam
 	if image == "" {
 		image = "ubuntu:24.04"
 	}
-	args = append(args, image, "sleep", "infinity")
+	args = append(args, image)
+	if strings.TrimSpace(cfg.Entrypoint) != "" {
+		args = append(args, "infinity")
+	} else {
+		args = append(args, "sleep", "infinity")
+	}
 
 	return args
+}
+
+func configuredContainerIdentity(cfg config.DockerSandboxConfig) (string, string) {
+	if cfg.ContainerUser != "" {
+		uid, gid, ok := strings.Cut(cfg.ContainerUser, ":")
+		if ok {
+			return uid, gid
+		}
+		return "", ""
+	}
+	current, err := user.Current()
+	if err != nil {
+		return "", ""
+	}
+	return current.Uid, current.Gid
 }

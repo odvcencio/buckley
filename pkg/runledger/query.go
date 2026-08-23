@@ -11,6 +11,17 @@ import (
 const runSelectColumns = `SELECT run_id, session_id, parent_run_id, task_id, agent_id, model_id,
 	provider_id, backend, status, started_at, ended_at, budget_json, outcome_json FROM agent_runs`
 
+// runStartedAtOrderKey converts every supported timestamp representation to
+// an epoch-second plus fractional-second pair. Existing databases may contain
+// RFC3339Nano values with variable fractional widths, where plain TEXT order
+// incorrectly places .12 before .1 in ascending order.
+const (
+	runStartedAtEpochKey    = `CAST(strftime('%s', started_at) AS INTEGER)`
+	runStartedAtFractionKey = `CASE WHEN substr(started_at, 20, 1) = '.'
+		THEN CAST('0.' || substr(started_at, 21) AS REAL)
+		ELSE 0 END`
+)
+
 // GetRun implements Store.
 func (s *SQLiteStore) GetRun(ctx context.Context, runID string) (AgentRun, error) {
 	row := s.db.QueryRowContext(ctx, runSelectColumns+" WHERE run_id = ?", runID)
@@ -33,7 +44,11 @@ func (s *SQLiteStore) ListRuns(ctx context.Context, q RunQuery) ([]AgentRun, err
 		clauses = append(clauses, "parent_run_id = ?")
 		args = append(args, q.ParentRunID)
 	}
-	query := runSelectColumns + " WHERE " + strings.Join(clauses, " AND ") + " ORDER BY started_at ASC"
+	order := runStartedAtEpochKey + " ASC, " + runStartedAtFractionKey + " ASC, run_id ASC"
+	if q.Order == RunOrderNewestFirst {
+		order = runStartedAtEpochKey + " DESC, " + runStartedAtFractionKey + " DESC, run_id DESC"
+	}
+	query := runSelectColumns + " WHERE " + strings.Join(clauses, " AND ") + " ORDER BY " + order
 	if q.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}

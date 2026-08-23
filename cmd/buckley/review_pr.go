@@ -594,6 +594,8 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
 		CIProvenance:                prCtx.CIProvenance,
+		CIAdmission:                 prCtx.CIAdmission,
+		CIAdmissionExpectation:      prCtx.CIAdmissionExpectation(),
 		RequiresFeedbackDisposition: prCtx.HasReviewFeedback(),
 		RequiredFeedbackIDs:         prCtx.RequiredFeedbackIDs(),
 		MaxIterations:               opts.maxIterations,
@@ -743,12 +745,14 @@ func runPRReviewSharded(
 		shardOpts := opts.withVerificationTargetBudget(shard.Files)
 		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts)
 		reviewDef := commands.ReviewPRDef{
-			ChangedFiles:      shard.Files,
-			ContextIncomplete: prCtx.HasIncompleteContext(),
-			CIStatus:          prCtx.PR.CIStatus,
-			CIProvenance:      prCtx.CIProvenance,
-			MaxIterations:     opts.maxIterations,
-			Depth:             string(shardOpts.depth),
+			ChangedFiles:           shard.Files,
+			ContextIncomplete:      prCtx.HasIncompleteContext(),
+			CIStatus:               prCtx.PR.CIStatus,
+			CIProvenance:           prCtx.CIProvenance,
+			CIAdmission:            prCtx.CIAdmission,
+			CIAdmissionExpectation: prCtx.CIAdmissionExpectation(),
+			MaxIterations:          opts.maxIterations,
+			Depth:                  string(shardOpts.depth),
 		}
 		if primary {
 			reviewDef.RequiresFeedbackDisposition = prCtx.HasReviewFeedback()

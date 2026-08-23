@@ -115,3 +115,109 @@ func TestGovernorCanonicalizesJSONEvidence(t *testing.T) {
 		t.Fatalf("decision = %+v, want canonical repeat warning", decision)
 	}
 }
+
+func TestGovernorBoundsReadOnlyDiscoveryAndResetsAfterChange(t *testing.T) {
+	config := DefaultConfig()
+	config.ReadOnlyWarningAt = 2
+	config.MaxReadOnlyCalls = 4
+	governor := New(config)
+
+	if got := governor.ObserveEffect("readonly", true); got.Stop || got.Nudge != "" {
+		t.Fatalf("first read = %+v, want no intervention", got)
+	}
+	if got := governor.ObserveEffect("readonly", true); got.Stop || got.Kind != "read_only_budget_warning" {
+		t.Fatalf("second read = %+v, want warning", got)
+	}
+	if got := governor.ObserveEffect("modifying", true); got.Stop || got.Nudge != "" {
+		t.Fatalf("modifying action = %+v, want reset", got)
+	}
+	for index := 1; index <= 4; index++ {
+		got := governor.ObserveEffect("readonly", true)
+		if index < 4 && got.Stop {
+			t.Fatalf("read %d stopped early: %+v", index, got)
+		}
+		if index == 4 && (!got.Stop || got.Kind != "read_only_budget") {
+			t.Fatalf("read %d = %+v, want read-only budget stop", index, got)
+		}
+	}
+}
+
+func TestGovernorFailedModificationDoesNotResetReadOnlyBudget(t *testing.T) {
+	config := DefaultConfig()
+	config.ReadOnlyWarningAt = 2
+	config.MaxReadOnlyCalls = 3
+	governor := New(config)
+
+	_ = governor.ObserveEffect("readonly", true)
+	if got := governor.ObserveEffect("modifying", false); got.Stop || got.Kind != "read_only_budget_warning" {
+		t.Fatalf("failed modification = %+v, want no-progress warning", got)
+	}
+	if got := governor.ObserveEffect("readonly", true); !got.Stop || got.Kind != "read_only_budget" {
+		t.Fatalf("next read = %+v, want read-only budget stop", got)
+	}
+}
+
+func TestGovernorObservedNoOpModificationDoesNotResetReadOnlyBudget(t *testing.T) {
+	config := DefaultConfig()
+	config.ReadOnlyWarningAt = 2
+	config.MaxReadOnlyCalls = 3
+	governor := New(config)
+
+	_ = governor.ObserveProgress("readonly", true, false, false)
+	if got := governor.ObserveProgress("destructive", true, true, false); got.Stop || got.Kind != "read_only_budget_warning" {
+		t.Fatalf("observed no-op shell = %+v, want no-progress warning", got)
+	}
+	if got := governor.ObserveProgress("modifying", true, true, true); got.Stop || got.Nudge != "" {
+		t.Fatalf("observed edit = %+v, want reset", got)
+	}
+	for index := 1; index <= 3; index++ {
+		got := governor.ObserveProgress("destructive", true, true, false)
+		if index < 3 && got.Stop {
+			t.Fatalf("no-op %d stopped early: %+v", index, got)
+		}
+		if index == 3 && (!got.Stop || got.Kind != "read_only_budget") {
+			t.Fatalf("no-op %d = %+v, want read-only budget stop", index, got)
+		}
+	}
+}
+
+func TestGovernorEscalatesFromCreativeCheckpointToActionBoundary(t *testing.T) {
+	config := DefaultConfig()
+	config.ReadOnlyWarningAt = 2
+	config.ReadOnlyActionAt = 4
+	config.MaxReadOnlyCalls = 6
+	governor := New(config)
+
+	for count := 1; count <= 5; count++ {
+		got := governor.ObserveProgress("readonly", true, false, false)
+		switch count {
+		case 2:
+			if got.Kind != "read_only_budget_warning" || !strings.Contains(got.Nudge, "creative latitude") {
+				t.Fatalf("checkpoint = %+v", got)
+			}
+		case 4:
+			if got.Kind != "read_only_action_required" || !strings.Contains(got.Nudge, "next tool work") {
+				t.Fatalf("action boundary = %+v", got)
+			}
+		default:
+			if got.Stop {
+				t.Fatalf("count %d stopped early: %+v", count, got)
+			}
+		}
+	}
+	if !governor.ActionRequired() {
+		t.Fatal("action boundary did not narrow the capability phase")
+	}
+	if got := governor.ObserveProgress("modifying", true, true, true); got.Stop {
+		t.Fatalf("observed change stopped: %+v", got)
+	}
+	if governor.ActionRequired() {
+		t.Fatal("observed change did not restore discovery capability")
+	}
+	for count := 1; count <= 5; count++ {
+		_ = governor.ObserveProgress("readonly", true, false, false)
+	}
+	if got := governor.ObserveProgress("readonly", true, false, false); !got.Stop || got.Kind != "read_only_budget" {
+		t.Fatalf("limit = %+v, want deterministic stop", got)
+	}
+}

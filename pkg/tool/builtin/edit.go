@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pmezard/go-difflib/difflib"
 )
 
 // EditFileTool performs targeted string replacement edits in a file
@@ -265,76 +267,17 @@ func generateDiff(path, oldContent, newContent string) *DiffInfo {
 
 // generateUnifiedDiff creates a unified diff format output
 func generateUnifiedDiff(path string, oldLines, newLines []string) string {
-	var diff strings.Builder
-
-	diff.WriteString(fmt.Sprintf("--- %s\n", path))
-	diff.WriteString(fmt.Sprintf("+++ %s\n", path))
-
-	// Find changed regions
-	i, j := 0, 0
-	for i < len(oldLines) || j < len(newLines) {
-		// Skip matching lines
-		for i < len(oldLines) && j < len(newLines) && oldLines[i] == newLines[j] {
-			i++
-			j++
-		}
-
-		if i >= len(oldLines) && j >= len(newLines) {
-			break
-		}
-
-		// Found a change region
-		startI, startJ := i, j
-
-		// Find extent of change
-		for i < len(oldLines) && (j >= len(newLines) || oldLines[i] != newLines[j]) {
-			if i < len(oldLines) && (j >= len(newLines) || !containsAt(newLines[j:], oldLines[i])) {
-				i++
-			} else {
-				break
-			}
-		}
-
-		for j < len(newLines) && (i >= len(oldLines) || newLines[j] != oldLines[i]) {
-			if j < len(newLines) && (i >= len(oldLines) || !containsAt(oldLines[i:], newLines[j])) {
-				j++
-			} else {
-				break
-			}
-		}
-
-		// Output the hunk
-		if startI < i || startJ < j {
-			// Context lines are tracked but not used in minimal diff output
-			// contextStart := startI - 3
-			// contextEnd := i + 3
-
-			diff.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
-				startI+1, i-startI,
-				startJ+1, j-startJ))
-
-			// Show removed lines
-			for k := startI; k < i; k++ {
-				diff.WriteString(fmt.Sprintf("-%s\n", oldLines[k]))
-			}
-
-			// Show added lines
-			for k := startJ; k < j; k++ {
-				diff.WriteString(fmt.Sprintf("+%s\n", newLines[k]))
-			}
-		}
+	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+		A:        difflib.SplitLines(strings.Join(oldLines, "\n")),
+		B:        difflib.SplitLines(strings.Join(newLines, "\n")),
+		FromFile: path,
+		ToFile:   path,
+		Context:  3,
+	})
+	if err != nil {
+		return fmt.Sprintf("--- %s\n+++ %s\n", path, path)
 	}
-
-	return diff.String()
-}
-
-func containsAt(lines []string, target string) bool {
-	for _, line := range lines {
-		if line == target {
-			return true
-		}
-	}
-	return false
+	return diff
 }
 
 func pluralize(count int) string {

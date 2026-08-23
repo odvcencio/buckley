@@ -17,7 +17,11 @@ func TestWebSessionsLifecycle(t *testing.T) {
 	sessionID := "web-sess-123"
 	principal := "user@example.com"
 	scope := "read:write"
-	tokenID := "token-456"
+	source, err := store.CreateAPIToken("web-session-source", principal, TokenScopeMember, "web-session-secret")
+	if err != nil {
+		t.Fatalf("failed to create source token: %v", err)
+	}
+	tokenID := source.ID
 	expires := time.Now().Add(1 * time.Hour)
 
 	// Create auth session
@@ -105,13 +109,13 @@ func TestCleanupExpiredAuthSessions(t *testing.T) {
 
 	// Create expired session
 	expiredID := "expired-sess"
-	if err := store.CreateAuthSession(expiredID, "user1", "read", "token1", now.Add(-1*time.Hour)); err != nil {
+	if err := store.CreateAuthSession(expiredID, "user1", "read", "", now.Add(-1*time.Hour)); err != nil {
 		t.Fatalf("failed to create expired session: %v", err)
 	}
 
 	// Create active session
 	activeID := "active-sess"
-	if err := store.CreateAuthSession(activeID, "user2", "write", "token2", now.Add(1*time.Hour)); err != nil {
+	if err := store.CreateAuthSession(activeID, "user2", "write", "", now.Add(1*time.Hour)); err != nil {
 		t.Fatalf("failed to create active session: %v", err)
 	}
 
@@ -174,14 +178,14 @@ func TestCountActiveAuthSessions(t *testing.T) {
 	// Create multiple sessions with different expiry times
 	for i := 0; i < 3; i++ {
 		id := "active-" + string(rune('0'+i))
-		if err := store.CreateAuthSession(id, "user", "read", "token", now.Add(1*time.Hour)); err != nil {
+		if err := store.CreateAuthSession(id, "user", "read", "", now.Add(1*time.Hour)); err != nil {
 			t.Fatalf("failed to create session %d: %v", i, err)
 		}
 	}
 
 	for i := 0; i < 2; i++ {
 		id := "expired-" + string(rune('0'+i))
-		if err := store.CreateAuthSession(id, "user", "read", "token", now.Add(-1*time.Hour)); err != nil {
+		if err := store.CreateAuthSession(id, "user", "read", "", now.Add(-1*time.Hour)); err != nil {
 			t.Fatalf("failed to create expired session %d: %v", i, err)
 		}
 	}
@@ -207,7 +211,11 @@ func TestWebSessionsWhitespace(t *testing.T) {
 	sessionID := "sess-123"
 	principal := "  user@example.com  "
 	scope := "  read:write  "
-	tokenID := "  token-456  "
+	source, err := store.CreateAPIToken("whitespace-source", "user@example.com", TokenScopeMember, "whitespace-secret")
+	if err != nil {
+		t.Fatalf("failed to create source token: %v", err)
+	}
+	tokenID := "  " + source.ID + "  "
 	expires := time.Now().Add(1 * time.Hour)
 
 	// Create session with whitespace
@@ -226,7 +234,7 @@ func TestWebSessionsWhitespace(t *testing.T) {
 	if sess.Scope != "read:write" {
 		t.Errorf("expected trimmed scope, got %q", sess.Scope)
 	}
-	if sess.TokenID != "token-456" {
+	if sess.TokenID != source.ID {
 		t.Errorf("expected trimmed tokenID, got %q", sess.TokenID)
 	}
 }

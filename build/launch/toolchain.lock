@@ -1,0 +1,22 @@
+{
+  "schema": "buckley.launch.toolchain.v1",
+  "platform": "linux/amd64",
+  "base_ref": "golang:1.26-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36",
+  "base_image_id": "sha256:df664c2b56a98910721a529a9a74e20181c607ac32528e758a1dcfd522a9f011",
+  "go_version": "1.26.6",
+  "tinygo_version": "0.41.1",
+  "tinygo_llvm_version": "20.1.1",
+  "tinygo_url": "https://github.com/tinygo-org/tinygo/releases/download/v0.41.1/tinygo0.41.1.linux-amd64.tar.gz",
+  "tinygo_sha256": "e156d1d93a376eef639a4143d13be07e8c463fb6cf2d7d447698ed4474d23e91",
+  "tinygo_license_url": "https://raw.githubusercontent.com/tinygo-org/tinygo/v0.41.1/LICENSE",
+  "tinygo_license_sha256": "4cb7d99a97ebd57584ea8398898c4b0bbbcb39662330712b43153efdad308766",
+  "dockerfile_frontend": "docker/dockerfile:1.12@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25",
+  "buildx_version": "v0.28.0",
+  "buildx_commit": "b1281b81bba797b21d9eaf256e6a13eb14419836",
+  "buildkit_version": "v0.24.0",
+  "buildkit_driver": "docker",
+  "source_date_epoch": 946684800,
+  "registry_ref": "docker.io/library/registry@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e",
+  "registry_version": "3.0.0",
+  "registry_license": "Apache-2.0"
+}

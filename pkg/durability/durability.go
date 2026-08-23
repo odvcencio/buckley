@@ -52,11 +52,31 @@ type NextBatchRequest struct {
 	MaxParallel int      `json:"max_parallel,omitempty"`
 }
 
+// NextBatchV2Request is used only by GoalWorkflowV5. ExcludedTaskIDs carries
+// tasks whose child exhausted its generation-wide retry budget, so a terminal
+// pull reports them incomplete instead of scheduling a fresh child workflow.
+type NextBatchV2Request struct {
+	RunID           string   `json:"run_id"`
+	Deferred        []string `json:"deferred,omitempty"`
+	ExcludedTaskIDs []string `json:"excluded_task_ids,omitempty"`
+	MaxParallel     int      `json:"max_parallel,omitempty"`
+}
+
 // NextBatchResponse lists tasks that may run concurrently. Done means
 // the queue is empty. A task with no claims always arrives alone.
 type NextBatchResponse struct {
 	Tasks []TaskClaim `json:"tasks,omitempty"`
 	Done  bool        `json:"done"`
+	// IncompleteTaskIDs is populated on a new-generation terminal pull so
+	// blocked, parked, or deferred tasks that were not selected into a child
+	// workflow still make incompleteness explicit in the goal result.
+	IncompleteTaskIDs []string `json:"incomplete_task_ids,omitempty"`
+}
+
+// NextBatchV2Runner is the GoalWorkflowV5 scheduler capability. The original
+// NextBatch method remains frozen for V1-V4 workflow histories.
+type NextBatchV2Runner interface {
+	NextBatchV2(ctx context.Context, req NextBatchV2Request) (NextBatchResponse, error)
 }
 
 // TurnRequest asks the host to run exactly one turn. Generation and
@@ -91,6 +111,27 @@ type TurnResponse struct {
 	TurnSpentUSD float64         `json:"turn_spent_usd,omitempty"`
 	Rounds       int             `json:"rounds,omitempty"`
 	ToolCalls    int             `json:"tool_calls,omitempty"`
+	// BlockerCategory and BlockerReasonCode are governed, bounded labels.
+	// They deliberately exclude the human blocker text and any provider
+	// response body from workflow history.
+	BlockerCategory   string `json:"blocker_category,omitempty"`
+	BlockerReasonCode string `json:"blocker_reason_code,omitempty"`
+	// RetryAfterUnixMS is an absolute UTC timestamp. RetryOrdinal is the
+	// one-based source-turn ordinal, which lets a workflow derive a stable
+	// wait identity without carrying a blocker body.
+	RetryAfterUnixMS int64 `json:"retry_after_unix_ms,omitempty"`
+	RetryOrdinal     int   `json:"retry_ordinal,omitempty"`
+	// WaitID is assigned by the V5 workflow from the workflow/task identity,
+	// monotonic wait ordinal, and the checkpoint-bound blocker identity. A
+	// TaskRunner-provided value is never trusted or copied into history.
+	WaitID string `json:"wait_id,omitempty"`
+	// ExpectedCheckpointID, ExpectedCheckpointVersion, and BlockerDigest bind a
+	// retry wake to the exact blocked checkpoint it observed. The digest is a
+	// SHA-256 of the blocker record; the blocker body itself stays out of
+	// workflow history.
+	ExpectedCheckpointID      string `json:"expected_checkpoint_id,omitempty"`
+	ExpectedCheckpointVersion int    `json:"expected_checkpoint_version,omitempty"`
+	BlockerDigest             string `json:"blocker_digest,omitempty"`
 }
 
 // TaskRunner is the activity host: it owns every Buckley side effect a
@@ -116,6 +157,60 @@ type TaskRunner interface {
 // through TaskRunner.RunTurn, preserving the pre-V4 public interface.
 type LegacyTaskRunner interface {
 	RunLegacyTurn(ctx context.Context, req TurnRequest) (TurnResponse, error)
+}
+
+// DurableTurnRunner is the V3 activity capability. It adds a whole-turn
+// receipt boundary without changing the V1/V2 activity contract used by
+// in-flight workflow histories.
+type DurableTurnRunner interface {
+	RunTurnV3(ctx context.Context, req TurnRequest) (TurnResponse, error)
+}
+
+// RetryWait is the compact, transport-neutral identity of one retry timer.
+// Dapr history stores only these bounded fields; Buckley's run ledger owns
+// the corresponding audit facts and the checkpoint remains the source of the
+// next drive snapshot.
+type RetryWait struct {
+	RunID                     string `json:"run_id"`
+	TaskID                    string `json:"task_id"`
+	WorkflowInstanceID        string `json:"workflow_instance_id"`
+	WaitID                    string `json:"wait_id"`
+	Category                  string `json:"category,omitempty"`
+	ReasonCode                string `json:"reason_code,omitempty"`
+	RetryAfterUnixMS          int64  `json:"retry_after_unix_ms"`
+	Ordinal                   int    `json:"ordinal"`
+	ExpectedCheckpointID      string `json:"expected_checkpoint_id"`
+	ExpectedCheckpointVersion int    `json:"expected_checkpoint_version"`
+	BlockerDigest             string `json:"blocker_digest"`
+}
+
+// RetryWaiter is an optional extension implemented by durable activity
+// hosts. Keeping it separate from TaskRunner preserves V1–V4 adapter source
+// compatibility while V5 can require explicit audit and wake semantics.
+type RetryWaiter interface {
+	RecordRetryWaiting(ctx context.Context, wait RetryWait) error
+	WakeRetry(ctx context.Context, wait RetryWait) error
+	ResolveRetry(ctx context.Context, wait RetryWait) error
+}
+
+// Retry wake dispositions are deliberately small workflow-history values.
+const (
+	RetryWakeApplied        = "applied"
+	RetryWakeAlreadyApplied = "already_applied"
+	RetryWakeStale          = "stale"
+)
+
+// RetryWakeResult reports whether the checkpoint-bound wake was applied,
+// replayed after activity-ack loss, or rejected as stale.
+type RetryWakeResult struct {
+	Disposition string `json:"disposition"`
+	TaskStatus  string `json:"task_status,omitempty"`
+}
+
+// RetryWakeResolver is the disposition-bearing wake capability used only by
+// TaskWorkflowV4. RetryWaiter.WakeRetry remains frozen for old registrations.
+type RetryWakeResolver interface {
+	WakeRetryV2(ctx context.Context, wait RetryWait) (RetryWakeResult, error)
 }
 
 // GoalFinalizer is the optional V4 lifecycle capability. Keeping it separate
@@ -198,11 +293,16 @@ type ApprovalResolution struct {
 
 // TaskOutcome summarizes one task workflow.
 type TaskOutcome struct {
-	TaskID   string  `json:"task_id"`
-	Status   string  `json:"status"`
-	Decision string  `json:"decision,omitempty"`
-	Turns    int     `json:"turns"`
-	SpentUSD float64 `json:"spent_usd"`
+	TaskID         string  `json:"task_id"`
+	Status         string  `json:"status"`
+	Decision       string  `json:"decision,omitempty"`
+	Turns          int     `json:"turns"`
+	SpentUSD       float64 `json:"spent_usd"`
+	RetryExhausted bool    `json:"retry_exhausted,omitempty"`
+	// GenerationDeferred means a checkpoint-bound retry wake was superseded
+	// by newer nonterminal state. GoalWorkflowV5 excludes the task for the
+	// rest of this generation so a new child cannot reset its retry budget.
+	GenerationDeferred bool `json:"generation_deferred,omitempty"`
 }
 
 // GoalResult is the goal workflow's output.

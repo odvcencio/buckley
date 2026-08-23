@@ -11,12 +11,14 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
+	"m31labs.dev/buckley/pkg/launchcontract"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
 // Goal-engine tool names. These two tools exist only inside goal turns:
@@ -26,6 +28,9 @@ import (
 const (
 	goalCompleteToolName = "goal_task_complete"
 	goalBlockedToolName  = "goal_task_blocked"
+	goalReadOnlyWarning  = 8
+	goalReadOnlyAction   = 12
+	goalReadOnlyLimit    = 16
 )
 
 // goalTurnEngine adapts the real model stack — model manager, governed
@@ -36,15 +41,16 @@ const (
 // backstop. Completion claims store their summary as an evidence object,
 // so the G7 verification gate has something real to reference.
 type goalTurnEngine struct {
-	cfg         *config.Config
-	mgr         *model.Manager
-	registry    *tool.Registry
-	ledger      goalLedger
-	stepJournal agentloop.DurableStepJournal
-	evidence    evidence.Store
-	engine      *rules.Engine
-	workDir     string
-	sessionID   string
+	cfg          *config.Config
+	mgr          *model.Manager
+	registry     *tool.Registry
+	ledger       goalLedger
+	stepJournal  agentloop.DurableStepJournal
+	evidence     evidence.Store
+	engine       *rules.Engine
+	policyEngine *rules.Engine
+	workDir      string
+	sessionID    string
 	// codeMode narrows the offered tool pool to the code-execution
 	// surface. The whole premise of code mode is that one programmable
 	// surface replaces a catalog of verbs; leaving the full catalog
@@ -61,17 +67,28 @@ func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Re
 	if ledger == nil || reflect.ValueOf(ledger).Kind() == reflect.Ptr && reflect.ValueOf(ledger).IsNil() {
 		return nil, fmt.Errorf("goal engine: durable ledger is required")
 	}
+	if mgr != nil {
+		// Durable goals own their lifetime through the run context and controller.
+		// A second provider HTTP deadline can discard a slow but healthy model
+		// response before the durable retry owner can checkpoint it.
+		mgr.SetRequestTimeout(0)
+	}
 	engine, err := rules.NewDefaultEngine()
 	if err != nil {
 		engine = nil
 	}
-	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, ledger: ledger, stepJournal: ledger, evidence: ev, engine: engine, workDir: workDir, sessionID: sessionID}, nil
+	policyEngine, err := rules.NewEngine()
+	if err != nil {
+		return nil, fmt.Errorf("goal engine: compile immutable model data policy: %w", err)
+	}
+	return &goalTurnEngine{cfg: cfg, mgr: mgr, registry: registry, ledger: ledger, stepJournal: ledger, evidence: ev, engine: engine, policyEngine: policyEngine, workDir: workDir, sessionID: sessionID}, nil
 }
 
 // codeModeTools is the narrow pool a code-mode turn offers: the program
-// surface, one escape hatch for actions programs cannot take (shell),
-// and the file editor, since exec programs are read-only by design.
-var codeModeTools = []string{"exec_program", "run_shell", "edit_file", "write_file"}
+// surface, escape hatches for actions programs cannot take (shell and the
+// governed commit runtime), and the file editor, since exec programs are
+// read-only by design.
+var codeModeTools = []string{"exec_program", "run_shell", "edit_file", "write_file", "commit_changes"}
 
 // goalTurnState collects what one turn's tool calls report.
 type goalTurnState struct {
@@ -83,13 +100,26 @@ type goalTurnState struct {
 
 // RunTurn implements goalloop.TurnEngine.
 func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext) (goalloop.TurnOutcome, error) {
-	modelID, err := model.ResolvePhaseModelRequired(e.cfg, e.mgr, e.engine, "execution", "")
+	modelID, err := model.ResolvePhaseModelRequired(e.cfg, e.mgr, e.engine, "execution", task.Goal.ModelRequest.Model)
 	if err != nil {
 		return goalloop.TurnOutcome{}, err
 	}
+	route, err := e.mgr.ResolveModelRoute(modelID)
+	if err != nil {
+		return goalloop.TurnOutcome{}, err
+	}
+	if task.Goal.ModelRequest.Model != "" && route.SelectedModel != task.Goal.ModelRequest.Model {
+		return goalloop.TurnOutcome{}, fmt.Errorf("goal model policy blocked: exact_model_route_changed")
+	}
+	providerID := route.ProviderID
+	if err := e.enforceGoalModelPolicy(ctx, task, providerID); err != nil {
+		return goalloop.TurnOutcome{}, err
+	}
 	state := &goalTurnState{}
+	orientationText := strings.Join(append([]string{task.Goal.Statement, task.Spec.Title, task.Spec.Description}, task.Goal.AcceptanceCriteria...), "\n")
+	orientation := workspaceevidence.InspectOrientation(e.workDir, task.Spec.Claims, orientationText).Render()
 	messages := []model.Message{
-		{Role: "system", Content: goalTurnSystemPrompt(task, e.codeMode)},
+		{Role: "system", Content: goalTurnSystemPrompt(task, e.codeMode, orientation)},
 		{Role: "user", Content: goalTurnUserPrompt(task)},
 	}
 
@@ -103,18 +133,42 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	}
 	tools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", allowed, 0)
 	tools = append(tools, goalCompleteToolSchema(), goalBlockedToolSchema())
+	actionTools := e.registry.ToOpenAIFunctionsGoverned(evaluator, "interactive", "coding", goalActionToolNames(e.registry, allowed), 0)
+	actionTools = append(actionTools, goalCompleteToolSchema(), goalBlockedToolSchema())
+
+	governorConfig := goalLoopGovernorConfig(e.cfg, task.Phase)
+	governor := agentloop.New(governorConfig)
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
-		return model.ChatRequest{
+		// Revalidate immediately before every provider request, not just once at
+		// turn entry: a tool round may have changed the workspace license.
+		if err := e.enforceGoalModelPolicy(ctx, task, providerID); err != nil {
+			return model.ChatRequest{}, err
+		}
+		requestTools := tools
+		if governor.ActionRequired() {
+			requestTools = actionTools
+		}
+		req := model.ChatRequest{
 			Model:      modelID,
 			Messages:   append([]model.Message(nil), messages...),
-			Tools:      tools,
+			Tools:      requestTools,
 			ToolChoice: "auto",
 			SessionID:  task.RunID,
-		}, nil
+		}
+		if err := e.applyGoalModelRequest(task.Goal.ModelRequest, route, &req); err != nil {
+			return model.ChatRequest{}, err
+		}
+		return req, nil
 	}
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
-		return e.mgr.ChatCompletion(ctx, req)
+		resp, err := e.mgr.ChatCompletionForRoute(ctx, req, route)
+		if resp != nil && task.Goal.ModelRequest.Model != "" && strings.TrimSpace(resp.Model) != task.Goal.ModelRequest.Model {
+			if err == nil {
+				err = fmt.Errorf("goal engine: provider response model does not match exact durable model")
+			}
+		}
+		return resp, err
 	})
 	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
@@ -136,13 +190,13 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		switch call.Function.Name {
 		case goalCompleteToolName:
 			state.completed = true
-			if params := toolCallParams(call); params != nil {
+			if params, _ := toolCallParams(call); params != nil {
 				if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
 					state.completedSummary = strings.TrimSpace(summary)
 				}
 			}
 		case goalBlockedToolName:
-			params := toolCallParams(call)
+			params, _ := toolCallParams(call)
 			reason, _ := params["reason"].(string)
 			if strings.TrimSpace(reason) == "" {
 				reason = "blocked without a stated reason"
@@ -150,7 +204,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 			needs, _ := params["needs"].(string)
 			state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
 		default:
-			if outcome.EffectClass != "" && outcome.EffectClass != string(tool.ImpactReadOnly) && outcome.EffectClass != "control" {
+			if outcome.StateObserved && outcome.StateChanged {
 				state.stateChanged = true
 			}
 		}
@@ -161,6 +215,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	})
 
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
+		Governor:           governor,
 		FinalizeOnStop:     true,
 		BuildRequest:       buildRequest,
 		CallModel:          callModel,
@@ -188,6 +243,9 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		return goalloop.TurnOutcome{}, err
 	}
 	if err := result.RequireConclusive(); err != nil {
+		return goalloop.TurnOutcome{}, err
+	}
+	if err := e.applyGoalConvergencePolicy(ctx, task, result, state); err != nil {
 		return goalloop.TurnOutcome{}, err
 	}
 
@@ -221,23 +279,119 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	return outcome, nil
 }
 
-func toolCallParams(call model.ToolCall) map[string]any {
-	params := map[string]any{}
-	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &params); err != nil {
-			return nil
+// goalLoopGovernorConfig uses the operator's distant emergency fuse for a
+// durable goal turn. The generic agent-loop defaults are intentionally much
+// smaller and are suitable for an interactive turn, but they can terminate a
+// healthy unattended implementation before its edit/test/repair cycle
+// converges. Repeat, cycle, and read-only-progress detection remain active.
+func goalLoopGovernorConfig(cfg *config.Config, phase string) agentloop.Config {
+	governorConfig := agentloop.DefaultConfig()
+	if cfg != nil {
+		if limit := cfg.AgentController.EmergencyFuse.ModelRequests; limit > 0 {
+			governorConfig.MaxRounds = limit
+		}
+		if limit := cfg.AgentController.EmergencyFuse.ToolExecutions; limit > 0 {
+			governorConfig.MaxToolCalls = limit
 		}
 	}
-	return params
+	if phase != goalloop.PhaseVerify {
+		governorConfig.ReadOnlyWarningAt = goalReadOnlyWarning
+		governorConfig.ReadOnlyActionAt = goalReadOnlyAction
+		governorConfig.MaxReadOnlyCalls = goalReadOnlyLimit
+	}
+	return governorConfig
+}
+
+// goalActionToolNames retains governed modifying capabilities while the
+// convergence governor requires action. It does not choose an implementation;
+// it temporarily removes discovery and destructive escape hatches. Normal
+// capabilities return immediately after an observed change.
+func goalActionToolNames(registry *tool.Registry, allowed []string) []string {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	names := make([]string, 0)
+	for _, registered := range registry.List() {
+		if len(allowedSet) > 0 {
+			if _, ok := allowedSet[registered.Name()]; !ok {
+				continue
+			}
+		}
+		if tool.GetMetadata(registered).Impact == tool.ImpactModifying {
+			names = append(names, registered.Name())
+		}
+	}
+	return names
+}
+
+func (e *goalTurnEngine) applyGoalModelRequest(contract goalloop.GoalModelRequest, route model.ModelRoute, req *model.ChatRequest) error {
+	if req == nil {
+		return fmt.Errorf("goal engine: model request is nil")
+	}
+	if err := contract.Validate(); err != nil {
+		return fmt.Errorf("goal engine: invalid durable model request: %w", err)
+	}
+
+	modelID := route.SelectedModel
+	effort := contract.ReasoningEffort
+	switch effort {
+	case "", "auto":
+		effort = model.ResolveReasoningEffort(e.cfg, e.mgr, e.engine, modelID, "execution")
+	case "off", "none":
+		effort = ""
+	}
+	if effort != "" {
+		req.Reasoning = &model.ReasoningConfig{Effort: effort}
+	}
+
+	providerID := route.ProviderID
+	exactModel := contract.Model != ""
+	retention := contract.EffectiveRetentionMode()
+	hasPrivacyPolicy := retention == goalloop.GoalRetentionZDR || retention == goalloop.GoalRetentionNonZDR || contract.OpenRouterDataCollection != ""
+	if hasPrivacyPolicy && providerID != "openrouter" {
+		return fmt.Errorf("goal engine: durable OpenRouter privacy policy cannot be applied to provider %q", providerID)
+	}
+	if providerID != "openrouter" {
+		return nil
+	}
+	if exactModel || hasPrivacyPolicy {
+		req.Provider = make(map[string]any, 3)
+	}
+	if exactModel {
+		// An intake-pinned model stays exact even if a later config adds a
+		// fallback chain for the same model ID.
+		req.Provider["allow_fallbacks"] = false
+	}
+	if retention == goalloop.GoalRetentionZDR {
+		req.Provider["zdr"] = true
+	}
+	if contract.OpenRouterDataCollection != "" {
+		req.Provider["data_collection"] = contract.OpenRouterDataCollection
+	}
+	return nil
+}
+
+func toolCallParams(call model.ToolCall) (map[string]any, error) {
+	params := map[string]any{}
+	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
+		if err := launchcontract.RejectDuplicateJSONKeys([]byte(raw)); err != nil {
+			return nil, fmt.Errorf("duplicate JSON fields; issue separate parallel tool calls, or use exec_program to compose multiple reads")
+		}
+		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+			return nil, fmt.Errorf("invalid JSON: %w", err)
+		}
+	}
+	return params, nil
 }
 
 // dispatchGoalTool executes one tool call: the two goal tools are
 // intercepted here, everything else goes through the governed registry.
 // State change tracks the registry's own impact classification.
 func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.TaskContext, call model.ToolCall, state *goalTurnState) agentloop.ToolOutcome {
-	params := toolCallParams(call)
-	if params == nil {
-		return agentloop.ToolOutcome{Content: "Error: invalid tool arguments"}
+	params, paramsErr := toolCallParams(call)
+	if paramsErr != nil {
+		return agentloop.ToolOutcome{Content: "Error: invalid tool arguments: " + paramsErr.Error()}
 	}
 
 	switch call.Function.Name {
@@ -271,16 +425,27 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 	effectClass := string(tool.ImpactDestructive)
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
 		effectClass = string(tool.GetMetadata(registered).Impact)
-		if tool.GetMetadata(registered).Impact != tool.ImpactReadOnly {
+	}
+	observeState := effectClass != string(tool.ImpactReadOnly) && effectClass != "control"
+	beforeState := ""
+	beforeErr := error(nil)
+	if observeState {
+		beforeState, beforeErr = workspaceevidence.GitStateFingerprint(ctx, e.workDir)
+	}
+	result, err := e.registry.ExecuteWithContext(ctx, call.Function.Name, params)
+	stateChanged := false
+	if observeState {
+		afterState, afterErr := workspaceevidence.GitStateFingerprint(ctx, e.workDir)
+		stateChanged = beforeErr == nil && afterErr == nil && beforeState != afterState
+		if stateChanged {
 			state.stateChanged = true
 		}
 	}
-	result, err := e.registry.ExecuteWithContext(ctx, call.Function.Name, params)
 	if err != nil {
-		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass}
+		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass, StateObserved: observeState, StateChanged: stateChanged}
 	}
 	if result == nil {
-		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass}
+		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass, StateObserved: observeState, StateChanged: stateChanged}
 	}
 	content := formatACPToolResult(result, nil)
 	yield := tool.ResultYieldForTool(call.Function.Name, result, nil)
@@ -288,6 +453,8 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 		Content:       content,
 		Success:       result.Success,
 		EffectClass:   effectClass,
+		StateObserved: observeState,
+		StateChanged:  stateChanged,
 		YieldObserved: yield.Observed,
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,
@@ -357,7 +524,7 @@ func intersectToolNames(base, narrow []string) []string {
 	return out
 }
 
-func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool) string {
+func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool, orientation ...string) string {
 	var b strings.Builder
 	b.WriteString("You are Buckley working one task of a durable goal. Use tools to do real work; do not describe work you have not done.\n\n")
 	fmt.Fprintf(&b, "Goal: %s\n", task.Goal.Statement)
@@ -365,12 +532,30 @@ func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool) string {
 	if task.Spec.Description != "" {
 		fmt.Fprintf(&b, "Details: %s\n", task.Spec.Description)
 	}
-	if len(task.Spec.AcceptanceCriteria) > 0 {
+	criteria := uniqueGoalPromptItems(task.Goal.AcceptanceCriteria, task.Spec.AcceptanceCriteria)
+	if len(criteria) > 0 {
 		b.WriteString("Acceptance criteria:\n")
-		for _, criterion := range task.Spec.AcceptanceCriteria {
+		for _, criterion := range criteria {
 			b.WriteString("- " + criterion + "\n")
 		}
 	}
+	if constraints := uniqueGoalPromptItems(task.Goal.Constraints); len(constraints) > 0 {
+		b.WriteString("Constraints:\n")
+		for _, constraint := range constraints {
+			b.WriteString("- " + constraint + "\n")
+		}
+	}
+	if claims := uniqueGoalPromptItems(task.Spec.Claims); len(claims) > 0 {
+		b.WriteString("Workspace claims:\n")
+		for _, claim := range claims {
+			b.WriteString("- " + claim + "\n")
+		}
+	}
+	if len(orientation) > 0 && strings.TrimSpace(orientation[0]) != "" {
+		b.WriteString("\n" + strings.TrimSpace(orientation[0]) + "\n")
+	}
+	b.WriteString("\nExecution contract: choose the design and implementation freely within the criteria and constraints. ")
+	b.WriteString("Use harness-provided orientation to skip redundant topology discovery. Evidence gathering must converge on an actionable change, factual completion, or concrete blocker; verification must use observable checks.\n")
 	if task.Phase == goalloop.PhaseVerify {
 		b.WriteString("\nThis is a VERIFY turn: run the cheapest checks that prove or disprove the work (build, tests, lint). Do not explore or edit beyond what verification needs.\n")
 	}
@@ -380,6 +565,25 @@ func goalTurnSystemPrompt(task goalloop.TaskContext, codeMode bool) string {
 	b.WriteString("\nWhen the task is genuinely done, call " + goalCompleteToolName + " with a short factual summary. ")
 	b.WriteString("If you cannot proceed without something you lack (credentials, a decision, missing state), call " + goalBlockedToolName + " instead of guessing.")
 	return b.String()
+}
+
+func uniqueGoalPromptItems(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	var items []string
+	for _, group := range groups {
+		for _, raw := range group {
+			item := strings.TrimSpace(raw)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func goalTurnUserPrompt(task goalloop.TaskContext) string {

@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/persona"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
 
@@ -18,6 +20,12 @@ type runnerFunc func(context.Context, Request, func(int)) (string, error)
 
 func (f runnerFunc) Run(ctx context.Context, request Request, started func(int)) (string, error) {
 	return f(ctx, request, started)
+}
+
+type typedNilRunner struct{}
+
+func (*typedNilRunner) Run(context.Context, Request, func(int)) (string, error) {
+	panic("typed-nil runner must not execute")
 }
 
 type interactiveRunnerFunc func(context.Context, Request, func(int), <-chan CommandDelivery) (string, error)
@@ -62,6 +70,232 @@ func TestManager_SpawnTracksParentAndCompletion(t *testing.T) {
 	}
 	if finished.State != StateCompleted || finished.ParentSessionID != "parent-1" || finished.Task != "inspect this" || finished.PID != 42 || finished.Output != "complete output" {
 		t.Fatalf("unexpected snapshot: %+v", finished)
+	}
+}
+
+func TestManager_TypedNilRunnerFailsClosed(t *testing.T) {
+	var runner *typedNilRunner
+	manager := NewManager(runner, 1)
+	if _, err := manager.SpawnWithOptions(SpawnOptions{Task: "do not execute"}); err == nil || !strings.Contains(err.Error(), "manager is unavailable") {
+		t.Fatalf("typed-nil runner spawn = %v", err)
+	}
+}
+
+func TestManager_HeartbeatJoinPrecedesTerminalClassification(t *testing.T) {
+	heartbeatEntered := make(chan struct{})
+	var heartbeatCalls atomic.Int32
+	manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+		<-heartbeatEntered
+		return "runner returned", nil
+	}), 1)
+	manager.SetHeartbeatObserver(func(ctx context.Context, _ Snapshot) error {
+		if heartbeatCalls.Add(1) == 1 {
+			return nil
+		}
+		close(heartbeatEntered)
+		<-ctx.Done()
+		return runledger.ErrAttachmentStale
+	}, time.Millisecond)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		ID: "run-heartbeat-barrier", SessionID: "session-heartbeat-barrier", Task: "race terminal heartbeat",
+		AttemptID: "attempt-heartbeat-barrier", LeaseGeneration: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.State != StateFailed || !strings.Contains(finished.Error, runledger.ErrAttachmentStale.Error()) {
+		t.Fatalf("terminal snapshot = %+v, want durability failure", finished)
+	}
+}
+
+func TestManager_InitialHeartbeatFailurePreventsRunnerLaunch(t *testing.T) {
+	var runnerCalls atomic.Int32
+	var terminalEvents atomic.Int32
+	manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+		runnerCalls.Add(1)
+		return "must not run", nil
+	}), 1)
+	manager.SetLifecycleObserver(func(snapshot Snapshot) {
+		if snapshotTerminal(snapshot.State) {
+			terminalEvents.Add(1)
+		}
+	})
+	manager.SetHeartbeatObserver(func(context.Context, Snapshot) error {
+		return runledger.ErrAttachmentExpired
+	}, time.Millisecond)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		ID: "run-initial-heartbeat", SessionID: "session-initial-heartbeat", Task: "fenced before launch",
+		AttemptID: "attempt-initial-heartbeat", LeaseGeneration: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerCalls.Load() != 0 {
+		t.Fatalf("runner calls = %d, want zero after initial renewal failure", runnerCalls.Load())
+	}
+	if terminalEvents.Load() != 1 {
+		t.Fatalf("terminal lifecycle callbacks = %d, want one", terminalEvents.Load())
+	}
+	if finished.State != StateFailed || !strings.Contains(finished.Error, runledger.ErrAttachmentExpired.Error()) {
+		t.Fatalf("terminal snapshot = %+v, want initial heartbeat failure", finished)
+	}
+}
+
+func TestManager_InitialHeartbeatDelayedPastIntervalWithEndedTaskDoesNotStartPeriodicLoop(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	current := &run{
+		ctx:    ctx,
+		cancel: cancel,
+		snapshot: Snapshot{
+			ID: "run-delayed-initial-heartbeat", SessionID: "session-delayed-initial-heartbeat",
+			AttemptID: "attempt-delayed-initial-heartbeat", LeaseGeneration: 1,
+			State: StateRunning,
+		},
+	}
+	var heartbeatCalls atomic.Int32
+	manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+		return "must not run", nil
+	}), 1)
+	manager.SetHeartbeatObserver(func(context.Context, Snapshot) error {
+		if heartbeatCalls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}, 2*time.Millisecond)
+
+	type heartbeatStart struct {
+		stop func() error
+		err  error
+	}
+	started := make(chan heartbeatStart, 1)
+	go func() {
+		stop, err := manager.startHeartbeat(current)
+		started <- heartbeatStart{stop: stop, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("initial heartbeat did not start")
+	}
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	close(release)
+
+	var result heartbeatStart
+	select {
+	case result = <-started:
+	case <-time.After(time.Second):
+		t.Fatal("initial heartbeat did not return")
+	}
+	if result.err != nil {
+		t.Fatalf("start heartbeat: %v", result.err)
+	}
+	// Deliberately delay Stop: an armed periodic loop would renew again here.
+	time.Sleep(10 * time.Millisecond)
+	if got := heartbeatCalls.Load(); got != 1 {
+		t.Fatalf("heartbeat calls = %d, want exactly one", got)
+	}
+	if err := result.stop(); err != nil {
+		t.Fatalf("stop heartbeat: %v", err)
+	}
+}
+
+func TestManager_TerminalHeartbeatCancellationPreservesRunnerClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		runnerErr error
+		wantState State
+	}{
+		{name: "completed", wantState: StateCompleted},
+		{name: "failed", runnerErr: errors.New("runner failed exactly"), wantState: StateFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			heartbeatEntered := make(chan struct{})
+			var heartbeatCalls atomic.Int32
+			manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+				<-heartbeatEntered
+				return "runner result", test.runnerErr
+			}), 1)
+			manager.SetHeartbeatObserver(func(ctx context.Context, _ Snapshot) error {
+				if heartbeatCalls.Add(1) == 1 {
+					return nil
+				}
+				close(heartbeatEntered)
+				<-ctx.Done()
+				return ctx.Err()
+			}, time.Millisecond)
+			t.Cleanup(func() { _ = manager.Close() })
+
+			spawned, err := manager.SpawnWithOptions(SpawnOptions{
+				ID: "run-terminal-cancel-" + test.name, SessionID: "session-terminal-cancel", Task: "classify runner",
+				AttemptID: "attempt-terminal-cancel-" + test.name, LeaseGeneration: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finished, err := manager.Wait(context.Background(), spawned.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finished.State != test.wantState {
+				t.Fatalf("terminal snapshot = %+v, want state %s", finished, test.wantState)
+			}
+			if test.runnerErr != nil && !strings.Contains(finished.Error, test.runnerErr.Error()) {
+				t.Fatalf("runner failure was replaced: %+v", finished)
+			}
+			if strings.Contains(finished.Error, context.Canceled.Error()) {
+				t.Fatalf("normal heartbeat stop overrode runner classification: %+v", finished)
+			}
+		})
+	}
+}
+
+func TestManager_IndependentRenewalDeadlineSurvivesTerminalStop(t *testing.T) {
+	failureInevitable := make(chan struct{})
+	var heartbeatCalls atomic.Int32
+	manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+		<-failureInevitable
+		return "runner completed", nil
+	}), 1)
+	manager.SetHeartbeatObserver(func(ctx context.Context, _ Snapshot) error {
+		if heartbeatCalls.Add(1) == 1 {
+			return nil
+		}
+		close(failureInevitable)
+		<-ctx.Done()
+		return context.DeadlineExceeded
+	}, time.Millisecond)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	spawned, err := manager.SpawnWithOptions(SpawnOptions{
+		ID: "run-renewal-deadline-race", SessionID: "session-renewal-deadline-race", Task: "preserve renewal failure",
+		AttemptID: "attempt-renewal-deadline-race", LeaseGeneration: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := manager.Wait(context.Background(), spawned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.State != StateFailed || !strings.Contains(finished.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("terminal snapshot = %+v, want substantive renewal deadline", finished)
 	}
 }
 

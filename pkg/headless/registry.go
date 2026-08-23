@@ -2,38 +2,45 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/giturl"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/session"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // CreateSessionRequest contains parameters for creating a headless session.
 type CreateSessionRequest struct {
-	Principal   string            `json:"-"`
-	Project     string            `json:"project"`
-	Branch      string            `json:"branch,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Agent       string            `json:"agent,omitempty"`
-	Subagent    string            `json:"subagent,omitempty"`
-	Prompt      string            `json:"prompt,omitempty"`
-	IdleTimeout string            `json:"idleTimeout,omitempty"`
-	Limits      *ResourceLimits   `json:"limits,omitempty"`
-	ToolPolicy  *ToolPolicy       `json:"toolPolicy,omitempty"`
+	Principal        string            `json:"-"`
+	Project          string            `json:"project"`
+	Branch           string            `json:"branch,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	Agent            string            `json:"agent,omitempty"`
+	Subagent         string            `json:"subagent,omitempty"`
+	Prompt           string            `json:"prompt,omitempty"`
+	InitialCommandID string            `json:"-"`
+	IdleTimeout      string            `json:"idleTimeout,omitempty"`
+	Limits           *ResourceLimits   `json:"limits,omitempty"`
+	ToolPolicy       *ToolPolicy       `json:"toolPolicy,omitempty"`
 
 	// AgentProfile is resolved by the authenticated IPC layer from the
 	// project-local agent catalog. It is intentionally not accepted from JSON
@@ -43,28 +50,42 @@ type CreateSessionRequest struct {
 
 // SessionInfo provides summary information about a headless session.
 type SessionInfo struct {
-	ID           string      `json:"id"`
-	Project      string      `json:"project"`
-	Branch       string      `json:"branch,omitempty"`
-	Model        string      `json:"model,omitempty"`
-	State        RunnerState `json:"state"`
-	CreatedAt    time.Time   `json:"createdAt"`
-	LastActive   time.Time   `json:"lastActive"`
-	WebSocketURL string      `json:"websocketUrl,omitempty"`
+	ID             string               `json:"id"`
+	Project        string               `json:"project"`
+	Branch         string               `json:"branch,omitempty"`
+	Model          string               `json:"model,omitempty"`
+	State          RunnerState          `json:"state"`
+	CreatedAt      time.Time            `json:"createdAt"`
+	LastActive     time.Time            `json:"lastActive"`
+	WebSocketURL   string               `json:"websocketUrl,omitempty"`
+	InitialReceipt *sessionexec.Receipt `json:"-"`
 }
 
 // Registry manages multiple headless session runners.
 type Registry struct {
 	mu sync.RWMutex
 
-	runners      map[string]*Runner
-	store        *storage.Store
-	modelManager *model.Manager
-	config       *config.Config
-	projectRoot  string
-	telemetry    *telemetry.Hub
-	emitter      EventEmitter
-	agentProfile string
+	runners        map[string]*Runner
+	pendingRunners map[string]*runnerReservation
+	store          *storage.Store
+	modelManager   *model.Manager
+	config         *config.Config
+	projectRoot    string
+	telemetry      *telemetry.Hub
+	emitter        EventEmitter
+	agentProfile   string
+	ledger         runledger.Store
+	evidence       evidence.Store
+	journal        sessionexec.Journal
+	durabilityErr  error
+	activeBuilds   int
+	lifecycle      registryLifecycleState
+	buildDrain     *sync.Cond
+	stopDone       chan struct{}
+	startOnce      sync.Once
+	cleanupWG      sync.WaitGroup
+	prepareHooks   configuredHookFactory
+	activateRunner func(*Runner) error
 
 	// Cleanup settings
 	cleanupInterval time.Duration
@@ -73,6 +94,33 @@ type Registry struct {
 }
 
 const defaultHeadlessMaxOutputBytes = 100_000
+
+type registryLifecycleState uint8
+
+const (
+	registryAccepting registryLifecycleState = iota
+	registryClosing
+	registryStopped
+)
+
+var errRegistryShuttingDown = errors.New("headless registry is shutting down")
+
+// ErrInitialCommandAcceptance identifies a failed durable initial command boundary.
+var ErrInitialCommandAcceptance = errors.New("accept initial prompt")
+
+type configuredHookPlan interface {
+	io.Closer
+	Activate() error
+}
+
+type configuredHookFactory func(*tool.Registry, bool, time.Duration) (configuredHookPlan, error)
+
+type runnerReservation struct {
+	done      chan struct{}
+	runner    *Runner
+	err       error
+	completed bool
+}
 
 // HandleSessionCommand satisfies the ipc/command.Handler interface.
 // It will lazily start a runner for an existing session if needed.
@@ -83,7 +131,8 @@ func (r *Registry) HandleSessionCommand(cmd command.SessionCommand) error {
 	if cmd.SessionID == "" {
 		return fmt.Errorf("session ID required")
 	}
-	return r.DispatchCommand(cmd)
+	_, err := r.AcceptCommand(context.Background(), cmd)
+	return err
 }
 
 // RegistryConfig configures the session registry.
@@ -95,6 +144,8 @@ type RegistryConfig struct {
 	Telemetry       *telemetry.Hub
 	Emitter         EventEmitter
 	AgentProfile    string
+	RunLedger       runledger.Store
+	EvidenceStore   evidence.Store
 	CleanupInterval time.Duration
 	MaxIdleTime     time.Duration
 }
@@ -110,9 +161,15 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 	if maxIdleTime <= 0 {
 		maxIdleTime = 30 * time.Minute
 	}
+	ledger, evidenceStore, durabilityErr := normalizeRegistryDurableStores(cfg.RunLedger, cfg.EvidenceStore)
+	var journal sessionexec.Journal
+	if durabilityErr == nil && ledger != nil && evidenceStore != nil && cfg.Store != nil {
+		journal = cfg.Store
+	}
 
 	r := &Registry{
 		runners:         make(map[string]*Runner),
+		pendingRunners:  make(map[string]*runnerReservation),
 		store:           cfg.Store,
 		modelManager:    cfg.ModelManager,
 		config:          cfg.Config,
@@ -120,41 +177,372 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 		telemetry:       cfg.Telemetry,
 		emitter:         cfg.Emitter,
 		agentProfile:    strings.TrimSpace(cfg.AgentProfile),
+		ledger:          ledger,
+		evidence:        evidenceStore,
+		journal:         journal,
+		durabilityErr:   durabilityErr,
 		cleanupInterval: cleanupInterval,
 		maxIdleTime:     maxIdleTime,
 		stopChan:        make(chan struct{}),
+		stopDone:        make(chan struct{}),
+		prepareHooks:    prepareConfiguredHooks,
+		activateRunner:  func(runner *Runner) error { return runner.activate() },
 	}
+	r.buildDrain = sync.NewCond(&r.mu)
 
 	return r
 }
 
+// SetDurableStores attaches the canonical run ledger and evidence stores to
+// sessions created by this registry. Both stores are required together so a
+// durable child can never be launched with an incomplete audit trail.
+func (r *Registry) SetDurableStores(ledger runledger.Store, store evidence.Store) error {
+	if r == nil {
+		return fmt.Errorf("headless registry unavailable")
+	}
+	ledger, store, err := normalizeRegistryDurableStores(ledger, store)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureLifecycleLocked()
+	if r.lifecycle != registryAccepting {
+		return errRegistryShuttingDown
+	}
+	var journal sessionexec.Journal
+	if ledger != nil && store != nil && r.store != nil {
+		journal = r.store
+	}
+	if r.durabilityErr == nil && sameRegistryDurableStores(r.ledger, r.evidence, ledger, store) {
+		r.journal = journal
+		return nil
+	}
+	if len(r.runners) > 0 || r.activeBuilds > 0 {
+		return fmt.Errorf("cannot change headless durability after runner creation has started")
+	}
+	r.ledger = ledger
+	r.evidence = store
+	r.journal = journal
+	r.durabilityErr = nil
+	return nil
+}
+
+func (r *Registry) beginRunnerBuild() (runledger.Store, evidence.Store, error) {
+	if r == nil {
+		return nil, nil, fmt.Errorf("headless registry unavailable")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureLifecycleLocked()
+	if r.lifecycle != registryAccepting {
+		return nil, nil, errRegistryShuttingDown
+	}
+	if r.durabilityErr != nil {
+		return nil, nil, r.durabilityErr
+	}
+	ledger, store, err := normalizeRegistryDurableStores(r.ledger, r.evidence)
+	if err != nil {
+		return nil, nil, err
+	}
+	r.activeBuilds++
+	return ledger, store, nil
+}
+
+func (r *Registry) finishRunnerBuild() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.activeBuilds > 0 {
+		r.activeBuilds--
+	}
+	if r.activeBuilds == 0 && r.buildDrain != nil {
+		r.buildDrain.Broadcast()
+	}
+	r.mu.Unlock()
+}
+
+func (r *Registry) reserveRunner(sessionID string) (*runnerReservation, *Runner, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureLifecycleLocked()
+	if r.lifecycle != registryAccepting {
+		return nil, nil, false, errRegistryShuttingDown
+	}
+	if runner := r.runners[sessionID]; runner != nil {
+		return nil, runner, false, nil
+	}
+	if reservation := r.pendingRunners[sessionID]; reservation != nil {
+		return reservation, nil, false, nil
+	}
+	reservation := &runnerReservation{done: make(chan struct{})}
+	r.pendingRunners[sessionID] = reservation
+	return reservation, nil, true, nil
+}
+
+func (r *Registry) reserveNewRunner(sessionID string) (*runnerReservation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureLifecycleLocked()
+	if r.lifecycle != registryAccepting {
+		return nil, errRegistryShuttingDown
+	}
+	if r.runners[sessionID] != nil {
+		return nil, fmt.Errorf("generated session ID already has an active runner: %s", sessionID)
+	}
+	if r.pendingRunners[sessionID] != nil {
+		return nil, fmt.Errorf("generated session ID already has a pending runner: %s", sessionID)
+	}
+	reservation := &runnerReservation{done: make(chan struct{})}
+	r.pendingRunners[sessionID] = reservation
+	return reservation, nil
+}
+
+func (r *Registry) waitRunnerReservation(reservation *runnerReservation) (*Runner, error) {
+	if reservation == nil {
+		return nil, fmt.Errorf("runner reservation unavailable")
+	}
+	<-reservation.done
+	r.mu.RLock()
+	accepting := r.lifecycle == registryAccepting
+	r.mu.RUnlock()
+	if !accepting {
+		return nil, errRegistryShuttingDown
+	}
+	if reservation.err != nil {
+		return nil, reservation.err
+	}
+	if reservation.runner == nil {
+		return nil, fmt.Errorf("runner reservation completed without a runner")
+	}
+	return reservation.runner, nil
+}
+
+func (r *Registry) completeRunnerReservation(sessionID string, reservation *runnerReservation, runner *Runner, err error) {
+	r.mu.Lock()
+	r.completeRunnerReservationLocked(sessionID, reservation, runner, err)
+	r.mu.Unlock()
+}
+
+func (r *Registry) completeRunnerReservationLocked(sessionID string, reservation *runnerReservation, runner *Runner, err error) {
+	if reservation == nil || reservation.completed {
+		return
+	}
+	reservation.runner = runner
+	reservation.err = err
+	reservation.completed = true
+	if r.pendingRunners[sessionID] == reservation {
+		delete(r.pendingRunners, sessionID)
+	}
+	close(reservation.done)
+}
+
+func (r *Registry) rollbackUnpublishedSession(sessionID string, runner *Runner, ledger runledger.Store, foregroundReady bool, cause error) error {
+	runner.disposeBeforeStart()
+	if foregroundReady && ledger != nil {
+		r.mu.RLock()
+		journal := r.journal
+		r.mu.RUnlock()
+		if journal == nil && r.store != nil {
+			journal = r.store
+		}
+		if journal == nil {
+			return fmt.Errorf("%w (retain unpublished session: durable command journal unavailable)", cause)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultDurableJournalOperationTTL)
+		_, quiesceErr := journal.QuiesceSession(ctx, sessionID, sessionexec.ExecutionModeDetached, "session_creation_rolled_back")
+		cancel()
+		if quiesceErr != nil {
+			return fmt.Errorf("%w (retain unpublished session after rollback quiesce failed: %v)", cause, quiesceErr)
+		}
+
+		endCtx, endCancel := context.WithTimeout(context.Background(), defaultDurableJournalOperationTTL)
+		endErr := ledger.EndRun(endCtx, sessionexec.RunIDForSession(sessionID), "cancelled", time.Now().UTC(), map[string]any{
+			"code": "session_creation_rolled_back",
+		})
+		endCancel()
+		if endErr != nil && !errors.Is(endErr, runledger.ErrNotFound) {
+			return fmt.Errorf("%w (retain unpublished session after foreground run cancellation failed: %v)", cause, endErr)
+		}
+	}
+	rollbackErr := r.store.DeleteSessionUnpublished(sessionID)
+	if rollbackErr != nil {
+		return fmt.Errorf("%w (rollback unpublished session: %v)", cause, rollbackErr)
+	}
+	return cause
+}
+
+func validateHeadlessExecutionState(journal sessionexec.Journal, sessionID string) error {
+	if journal == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDurableJournalOperationTTL)
+	state, err := journal.GetExecutionState(ctx, sessionID)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("read headless execution state: %w", err)
+	}
+	if state.Mode != sessionexec.ExecutionModeHeadless {
+		return fmt.Errorf("%w: mode %s", sessionexec.ErrSessionQuiesced, state.Mode)
+	}
+	return nil
+}
+
+func (r *Registry) ensureLifecycleLocked() {
+	if r.runners == nil {
+		r.runners = make(map[string]*Runner)
+	}
+	if r.pendingRunners == nil {
+		r.pendingRunners = make(map[string]*runnerReservation)
+	}
+	if r.stopChan == nil {
+		r.stopChan = make(chan struct{})
+	}
+	if r.stopDone == nil {
+		r.stopDone = make(chan struct{})
+	}
+	if r.buildDrain == nil {
+		r.buildDrain = sync.NewCond(&r.mu)
+	}
+	if r.prepareHooks == nil {
+		r.prepareHooks = prepareConfiguredHooks
+	}
+	if r.activateRunner == nil {
+		r.activateRunner = func(runner *Runner) error { return runner.activate() }
+	}
+}
+
+func (r *Registry) accepting() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	accepting := r.lifecycle == registryAccepting
+	r.mu.RUnlock()
+	return accepting
+}
+
+func sameRegistryDurableStores(currentLedger runledger.Store, currentEvidence evidence.Store, ledger runledger.Store, store evidence.Store) bool {
+	return sameRegistryStoreIdentity(currentLedger, ledger) && sameRegistryStoreIdentity(currentEvidence, store)
+}
+
+func sameRegistryStoreIdentity(left, right any) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftType, rightType := reflect.TypeOf(left), reflect.TypeOf(right)
+	if leftType != rightType || !leftType.Comparable() {
+		return false
+	}
+	return left == right
+}
+
+func normalizeRegistryDurableStores(ledger runledger.Store, store evidence.Store) (runledger.Store, evidence.Store, error) {
+	if isRegistryTypedNil(ledger) {
+		return nil, nil, fmt.Errorf("headless run ledger is typed nil")
+	}
+	if isRegistryTypedNil(store) {
+		return nil, nil, fmt.Errorf("headless evidence store is typed nil")
+	}
+	if (ledger == nil) != (store == nil) {
+		return nil, nil, fmt.Errorf("headless durability requires both run ledger and evidence stores")
+	}
+	return ledger, store, nil
+}
+
+func isRegistryTypedNil(value any) bool {
+	if value == nil {
+		return false
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
 // Start begins the registry's background cleanup goroutine.
 func (r *Registry) Start(ctx context.Context) {
-	go r.cleanupLoop(ctx)
+	if r == nil {
+		return
+	}
+	r.startOnce.Do(func() {
+		r.mu.Lock()
+		r.ensureLifecycleLocked()
+		start := r.lifecycle == registryAccepting
+		if start {
+			r.cleanupWG.Add(1)
+		}
+		r.mu.Unlock()
+		if !start {
+			return
+		}
+		go func() {
+			defer r.cleanupWG.Done()
+			r.cleanupLoop(ctx)
+		}()
+	})
 }
 
 // Stop shuts down all runners and stops the cleanup loop.
 func (r *Registry) Stop() {
-	close(r.stopChan)
-
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	r.ensureLifecycleLocked()
+	if r.lifecycle != registryAccepting {
+		done := r.stopDone
+		r.mu.Unlock()
+		<-done
+		return
+	}
+	r.lifecycle = registryClosing
+	close(r.stopChan)
+	for r.activeBuilds > 0 {
+		r.buildDrain.Wait()
+	}
+	runners := make([]*Runner, 0, len(r.runners))
 	for id, runner := range r.runners {
-		runner.Stop()
+		runners = append(runners, runner)
 		delete(r.runners, id)
 	}
+	r.mu.Unlock()
+
+	for _, runner := range runners {
+		runner.Stop()
+	}
+	r.cleanupWG.Wait()
+
+	r.mu.Lock()
+	r.lifecycle = registryStopped
+	close(r.stopDone)
+	r.mu.Unlock()
 }
 
 // CreateSession creates a new headless session.
 func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error) {
+	if r == nil {
+		return nil, fmt.Errorf("registry unavailable")
+	}
+	ledger, evidenceStore, err := r.beginRunnerBuild()
+	if err != nil {
+		return nil, err
+	}
+	defer r.finishRunnerBuild()
 	if r.store == nil {
 		return nil, fmt.Errorf("storage not configured")
 	}
 	if r.modelManager == nil {
 		return nil, fmt.Errorf("model manager not configured")
 	}
-
+	journal, stepJournal, err := r.resolveRunnerDurability(ledger, evidenceStore)
+	if err != nil {
+		return nil, err
+	}
 	if req.Limits != nil {
 		if strings.TrimSpace(req.Limits.CPU) != "" || strings.TrimSpace(req.Limits.Memory) != "" || strings.TrimSpace(req.Limits.Storage) != "" {
 			return nil, fmt.Errorf("resource limits cpu/memory/storage are not supported in this deployment (only timeoutSeconds is enforced)")
@@ -204,11 +592,10 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 		Status:      storage.SessionStatusActive,
 	}
 
-	if err := r.store.CreateSession(sess); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
+	tools, hooks, err := r.buildToolRegistry(sessionID, projectPath, ledger, evidenceStore)
+	if err != nil {
+		return nil, err
 	}
-
-	tools, hookCloser := r.buildToolRegistry(sessionID, projectPath)
 	if req.ToolPolicy != nil {
 		applyToolPolicy(tools, req.ToolPolicy)
 	}
@@ -229,50 +616,147 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	if agentProfile == "" {
 		agentProfile = r.agentProfile
 	}
-	runner, err := NewRunner(RunnerConfig{
-		Session:       sess,
-		ModelManager:  r.modelManager,
-		Tools:         tools,
-		Store:         r.store,
-		Config:        r.config,
-		Emitter:       r.emitter,
-		Telemetry:     r.telemetry,
-		IdleTimeout:   idleTimeout,
-		ModelOverride: modelID,
-		ToolPolicy:    req.ToolPolicy,
-		MaxRuntime:    maxRuntime,
-		AgentProfile:  agentProfile,
+	runner, err := newInertRunner(RunnerConfig{
+		Session:        sess,
+		ModelManager:   r.modelManager,
+		Tools:          tools,
+		Store:          r.store,
+		Config:         r.config,
+		Emitter:        r.emitter,
+		Telemetry:      r.telemetry,
+		IdleTimeout:    idleTimeout,
+		ModelOverride:  modelID,
+		ToolPolicy:     req.ToolPolicy,
+		MaxRuntime:     maxRuntime,
+		AgentProfile:   agentProfile,
+		CommandJournal: journal,
+		RunLedger:      ledger,
+		EvidenceStore:  evidenceStore,
+		StepJournal:    stepJournal,
 	})
 	if err != nil {
+		if hooks != nil {
+			_ = hooks.Close()
+		}
 		return nil, fmt.Errorf("create runner: %w", err)
 	}
-	runner.hookCloser = hookCloser
+	runner.hookCloser = hooks
 
-	// Register runner
+	reservation, err := r.reserveNewRunner(sessionID)
+	if err != nil {
+		runner.disposeBeforeStart()
+		return nil, err
+	}
+	foregroundReady := false
+	completeFailure := func(cause error, persisted bool) error {
+		if persisted {
+			cause = r.rollbackUnpublishedSession(sessionID, runner, ledger, foregroundReady, cause)
+		} else {
+			runner.disposeBeforeStart()
+		}
+		r.completeRunnerReservation(sessionID, reservation, nil, cause)
+		return cause
+	}
+
+	if !r.accepting() {
+		return nil, completeFailure(errRegistryShuttingDown, false)
+	}
+	if err := r.store.CreateSessionUnpublished(sess); err != nil {
+		return nil, completeFailure(fmt.Errorf("create session: %w", err), false)
+	}
+	if !r.accepting() {
+		return nil, completeFailure(errRegistryShuttingDown, true)
+	}
+	if err := validateHeadlessExecutionState(journal, sessionID); err != nil {
+		return nil, completeFailure(err, true)
+	}
+	var acceptedInitial *command.SessionCommand
+	var initialReceipt *sessionexec.Receipt
+	if journal != nil && strings.TrimSpace(req.Prompt) != "" {
+		initial := command.SessionCommand{
+			SessionID: sessionID, ID: strings.TrimSpace(req.InitialCommandID), Type: "input",
+			Content: req.Prompt, AcceptedBy: strings.TrimSpace(req.Principal),
+		}
+		initial.EnsureID()
+		receipt, err := runner.acceptDurableCommand(context.Background(), initial, false, true, false)
+		if err != nil {
+			return nil, completeFailure(fmt.Errorf("%w: %w", ErrInitialCommandAcceptance, err), true)
+		}
+		initial.ID = receipt.CommandID
+		initialReceipt = &receipt
+		if !receipt.Duplicate {
+			acceptedInitial = &initial
+		}
+	}
+	if hooks != nil {
+		if err := hooks.Activate(); err != nil {
+			return nil, completeFailure(fmt.Errorf("activate plugin hooks: %w", err), true)
+		}
+	}
+	if journal != nil {
+		if _, err := ensureForegroundRun(context.Background(), ledger, sessionID, modelID); err != nil {
+			return nil, completeFailure(err, true)
+		}
+		foregroundReady = true
+		if err := validateHeadlessExecutionState(journal, sessionID); err != nil {
+			return nil, completeFailure(err, true)
+		}
+	}
+
 	r.mu.Lock()
+	if r.lifecycle != registryAccepting {
+		r.mu.Unlock()
+		return nil, completeFailure(errRegistryShuttingDown, true)
+	}
+	if r.pendingRunners[sessionID] != reservation {
+		r.mu.Unlock()
+		return nil, completeFailure(fmt.Errorf("generated session runner reservation changed before publication: %s", sessionID), true)
+	}
+	if r.runners[sessionID] != nil {
+		r.mu.Unlock()
+		return nil, completeFailure(fmt.Errorf("generated session runner already exists before publication: %s", sessionID), true)
+	}
 	r.runners[sessionID] = runner
+	err = r.activateRunner(runner)
+	if err == nil {
+		r.store.PublishSessionCreated(sess)
+		r.completeRunnerReservationLocked(sessionID, reservation, runner, nil)
+	} else {
+		delete(r.runners, sessionID)
+	}
 	r.mu.Unlock()
+	if err != nil {
+		return nil, completeFailure(fmt.Errorf("activate runner: %w", err), true)
+	}
+	if journal != nil {
+		if acceptedInitial != nil {
+			runner.emitCommandEvent(EventCommandQueued, *acceptedInitial, nil)
+		}
+		runner.wakeDurableLanes()
+	}
 
-	// If initial prompt provided, process it asynchronously
-	if req.Prompt != "" {
-		go func() {
-			_ = runner.HandleSessionCommand(command.SessionCommand{
-				SessionID: sessionID,
-				Type:      "input",
-				Content:   req.Prompt,
-			})
-		}()
+	// Legacy sessions retain their historical asynchronous initial prompt.
+	if journal == nil && req.Prompt != "" {
+		initial := command.SessionCommand{
+			SessionID: sessionID, Type: "input", Content: req.Prompt,
+			AcceptedBy: strings.TrimSpace(req.Principal),
+		}
+		initial.EnsureID()
+		go func(cmd command.SessionCommand) {
+			_ = runner.HandleSessionCommand(cmd)
+		}(initial)
 	}
 
 	return &SessionInfo{
-		ID:           sessionID,
-		Project:      projectPath,
-		Branch:       gitBranch,
-		Model:        modelID,
-		State:        StateIdle,
-		CreatedAt:    sess.CreatedAt,
-		LastActive:   sess.LastActive,
-		WebSocketURL: fmt.Sprintf("/ws?session=%s", sessionID),
+		ID:             sessionID,
+		Project:        projectPath,
+		Branch:         gitBranch,
+		Model:          modelID,
+		State:          StateIdle,
+		CreatedAt:      sess.CreatedAt,
+		LastActive:     sess.LastActive,
+		WebSocketURL:   fmt.Sprintf("/ws?session=%s", sessionID),
+		InitialReceipt: initialReceipt,
 	}, nil
 }
 
@@ -281,26 +765,50 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 	if r == nil {
 		return nil, fmt.Errorf("registry unavailable")
 	}
+	ledger, evidenceStore, err := r.beginRunnerBuild()
+	if err != nil {
+		return nil, err
+	}
+	defer r.finishRunnerBuild()
 	if r.store == nil {
 		return nil, fmt.Errorf("storage not configured")
 	}
 	if r.modelManager == nil {
 		return nil, fmt.Errorf("model manager not configured")
 	}
+	journal, stepJournal, err := r.resolveRunnerDurability(ledger, evidenceStore)
+	if err != nil {
+		return nil, err
+	}
 	if sessionID == "" {
 		return nil, fmt.Errorf("session ID required")
 	}
 
-	if runner, ok := r.GetSession(sessionID); ok && runner != nil {
+	reservation, runner, owner, err := r.reserveRunner(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if runner != nil {
 		return runner, nil
+	}
+	if !owner {
+		return r.waitRunnerReservation(reservation)
 	}
 
 	sess, err := r.store.GetSession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("load session: %w", err)
+		err = fmt.Errorf("load session: %w", err)
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
 	}
 	if sess == nil {
-		return nil, fmt.Errorf("session not found: %s", sessionID)
+		err = fmt.Errorf("session not found: %s", sessionID)
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
+	}
+	if err := validateHeadlessExecutionState(journal, sessionID); err != nil {
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
 	}
 	project := sess.ProjectPath
 	if project == "" {
@@ -316,32 +824,98 @@ func (r *Registry) EnsureSession(sessionID string) (*Runner, error) {
 		}
 	}
 
-	tools, hookCloser := r.buildToolRegistry(sessionID, project)
-	runner, err := NewRunner(RunnerConfig{
-		Session:       sess,
-		ModelManager:  r.modelManager,
-		Tools:         tools,
-		Store:         r.store,
-		Config:        r.config,
-		Emitter:       r.emitter,
-		Telemetry:     r.telemetry,
-		IdleTimeout:   idleTimeout,
-		ModelOverride: modelID,
-		AgentProfile:  r.agentProfile,
+	tools, hooks, err := r.buildToolRegistry(sessionID, project, ledger, evidenceStore)
+	if err != nil {
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
+	}
+	runner, err = newInertRunner(RunnerConfig{
+		Session:        sess,
+		ModelManager:   r.modelManager,
+		Tools:          tools,
+		Store:          r.store,
+		Config:         r.config,
+		Emitter:        r.emitter,
+		Telemetry:      r.telemetry,
+		IdleTimeout:    idleTimeout,
+		ModelOverride:  modelID,
+		AgentProfile:   r.agentProfile,
+		CommandJournal: journal,
+		RunLedger:      ledger,
+		EvidenceStore:  evidenceStore,
+		StepJournal:    stepJournal,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create runner: %w", err)
+		if hooks != nil {
+			_ = hooks.Close()
+		}
+		err = fmt.Errorf("create runner: %w", err)
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
 	}
-	runner.hookCloser = hookCloser
+	runner.hookCloser = hooks
+
+	if !r.accepting() {
+		runner.disposeBeforeStart()
+		r.completeRunnerReservation(sessionID, reservation, nil, errRegistryShuttingDown)
+		return nil, errRegistryShuttingDown
+	}
+	if journal != nil {
+		if _, err := ensureForegroundRun(context.Background(), ledger, sessionID, modelID); err != nil {
+			runner.disposeBeforeStart()
+			r.completeRunnerReservation(sessionID, reservation, nil, err)
+			return nil, err
+		}
+	}
+	if hooks != nil {
+		if err := hooks.Activate(); err != nil {
+			runner.disposeBeforeStart()
+			err = fmt.Errorf("activate plugin hooks: %w", err)
+			r.completeRunnerReservation(sessionID, reservation, nil, err)
+			return nil, err
+		}
+	}
+	if err := validateHeadlessExecutionState(journal, sessionID); err != nil {
+		runner.disposeBeforeStart()
+		r.completeRunnerReservation(sessionID, reservation, nil, err)
+		return nil, err
+	}
 
 	r.mu.Lock()
+	if r.lifecycle != registryAccepting {
+		r.completeRunnerReservationLocked(sessionID, reservation, nil, errRegistryShuttingDown)
+		r.mu.Unlock()
+		runner.disposeBeforeStart()
+		return nil, errRegistryShuttingDown
+	}
+	if existing, ok := r.runners[sessionID]; ok && existing != nil {
+		r.completeRunnerReservationLocked(sessionID, reservation, existing, nil)
+		r.mu.Unlock()
+		runner.disposeBeforeStart()
+		return existing, nil
+	}
 	r.runners[sessionID] = runner
+	err = r.activateRunner(runner)
+	if err != nil {
+		delete(r.runners, sessionID)
+		err = fmt.Errorf("activate runner: %w", err)
+		r.completeRunnerReservationLocked(sessionID, reservation, nil, err)
+	} else {
+		r.completeRunnerReservationLocked(sessionID, reservation, runner, nil)
+	}
 	r.mu.Unlock()
+	if err != nil {
+		runner.disposeBeforeStart()
+		return nil, err
+	}
+	if journal != nil {
+		runner.wakeDurableLanes()
+	}
 
 	return runner, nil
 }
 
-func (r *Registry) buildToolRegistry(sessionID string, project string) (*tool.Registry, io.Closer) {
+func (r *Registry) buildToolRegistry(sessionID string, project string, ledger runledger.Store, evidenceStore evidence.Store) (*tool.Registry, configuredHookPlan, error) {
 	tools := tool.NewRegistry()
 	tool.ApplyToolMiddlewareConfig(tools, r.config)
 	if r.config == nil || r.config.ToolMiddleware.MaxResultBytes <= 0 {
@@ -354,32 +928,68 @@ func (r *Registry) buildToolRegistry(sessionID string, project string) (*tool.Re
 		tools.SetTodoStore(&todoStoreAdapter{store: r.store})
 		tools.EnableCodeIndex(r.store)
 	}
-	if r.telemetry != nil && strings.TrimSpace(sessionID) != "" {
-		tools.EnableTelemetry(r.telemetry, sessionID)
-	}
 	// Runner owns the durable approval gate for headless sessions. Installing
 	// the legacy Mission middleware here would create a second, client-invisible
 	// approval after Runner has already approved the same tool call.
 	if err := tools.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	var hooks io.Closer
+	if strings.TrimSpace(sessionID) != "" {
+		// Apply session lineage after plugin registration so a plugin cannot
+		// replace the configured builtin with an unscoped spawn tool.
+		tools.EnableTelemetry(r.telemetry, sessionID)
+	}
 	hooksEnabled := false
 	hooksTimeout := time.Duration(0)
 	if r.config != nil {
 		hooksEnabled = r.config.Hooks.Enabled
 		hooksTimeout = time.Duration(r.config.Hooks.DefaultTimeoutMs) * time.Millisecond
 	}
-	if hookCloser, hookErr := tools.EnableConfiguredHooks(hooksEnabled, hooksTimeout); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
-	} else if hookCloser != nil {
-		hooks = hookCloser
-	}
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 	}
 	tools.EnableDynamicDiscovery(nil)
-	return tools, hooks
+	if err := configureSubagentDurability(tools, ledger, evidenceStore); err != nil {
+		return nil, nil, err
+	}
+	prepareHooks := r.prepareHooks
+	if prepareHooks == nil {
+		prepareHooks = prepareConfiguredHooks
+	}
+	hooks, err := prepareHooks(tools, hooksEnabled, hooksTimeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("prepare plugin hooks: %w", err)
+	}
+	return tools, hooks, nil
+}
+
+func prepareConfiguredHooks(tools *tool.Registry, enabled bool, timeout time.Duration) (configuredHookPlan, error) {
+	if tools == nil {
+		return nil, fmt.Errorf("tool registry unavailable")
+	}
+	return tools.PrepareConfiguredHooks(enabled, timeout)
+}
+
+func configureSubagentDurability(tools *tool.Registry, ledger runledger.Store, store evidence.Store) error {
+	if (ledger == nil) != (store == nil) {
+		return fmt.Errorf("headless durability requires both run ledger and evidence stores")
+	}
+	if ledger == nil {
+		return nil
+	}
+	if tools == nil {
+		return fmt.Errorf("configure headless durability: tool registry unavailable")
+	}
+	candidate, ok := tools.Get("spawn_subagent")
+	if !ok {
+		return fmt.Errorf("configure headless durability: spawn_subagent tool unavailable")
+	}
+	subagents, ok := candidate.(*builtin.SubagentTool)
+	if !ok {
+		return fmt.Errorf("configure headless durability: spawn_subagent tool has unexpected type %T", candidate)
+	}
+	subagents.SetDurability(ledger, store)
+	return nil
 }
 
 func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
@@ -432,6 +1042,9 @@ func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
 func (r *Registry) GetSession(sessionID string) (*Runner, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.lifecycle != registryAccepting {
+		return nil, false
+	}
 	runner, ok := r.runners[sessionID]
 	return runner, ok
 }
@@ -481,19 +1094,8 @@ func (r *Registry) ListSessions() []SessionInfo {
 
 // RemoveSession stops and removes a session.
 func (r *Registry) RemoveSession(sessionID string) error {
-	r.mu.Lock()
-	runner, ok := r.runners[sessionID]
-	if ok {
-		delete(r.runners, sessionID)
-	}
-	r.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	runner.Stop()
-	return nil
+	_, err := r.removeSessionQuiesced(sessionID, sessionexec.ExecutionModeDetached, "session_detached")
+	return err
 }
 
 // RemoveSessionWithCleanup stops and removes a session, optionally deleting its managed workspace.
@@ -501,57 +1103,95 @@ func (r *Registry) RemoveSessionWithCleanup(sessionID string, cleanupWorkspace b
 	if !cleanupWorkspace {
 		return r.RemoveSession(sessionID)
 	}
-
-	r.mu.Lock()
-	runner, ok := r.runners[sessionID]
-	if ok {
-		delete(r.runners, sessionID)
+	sess, err := r.removeSessionQuiesced(sessionID, sessionexec.ExecutionModeDetached, "session_detached")
+	if err != nil {
+		return err
 	}
-	r.mu.Unlock()
-
-	if !ok || runner == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	sess := runner.session
-	runner.Stop()
-
 	if sess == nil {
 		return nil
 	}
 	return r.cleanupWorkspace(sess)
 }
 
+func (r *Registry) removeSessionQuiesced(sessionID string, mode sessionexec.ExecutionMode, reasonCode string) (*storage.Session, error) {
+	if r == nil {
+		return nil, fmt.Errorf("registry unavailable")
+	}
+	if r.store == nil {
+		return nil, fmt.Errorf("storage unavailable")
+	}
+	sess, err := r.store.GetSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load session: %w", err)
+	}
+	if sess == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	r.mu.RLock()
+	runner := r.runners[sessionID]
+	journal := r.journal
+	r.mu.RUnlock()
+	if journal == nil && runner == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	if journal != nil {
+		timeout := defaultDurableJournalOperationTTL
+		if runner != nil && runner.durableTiming.OperationTimeout > 0 {
+			timeout = runner.durableTiming.OperationTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		_, err := journal.QuiesceSession(ctx, sessionID, mode, reasonCode)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("quiesce headless session: %w", err)
+		}
+	}
+	if runner != nil {
+		r.mu.Lock()
+		if r.runners[sessionID] == runner {
+			delete(r.runners, sessionID)
+		}
+		r.mu.Unlock()
+		runner.Stop()
+	}
+	return sess, nil
+}
+
 // DispatchCommand dispatches a command to a session.
 func (r *Registry) DispatchCommand(cmd command.SessionCommand) error {
+	_, err := r.AcceptCommand(context.Background(), cmd)
+	return err
+}
+
+// AcceptCommand durably accepts a command before returning when the target
+// runner has foreground durability enabled. Legacy runners retain their
+// existing in-memory queue behavior.
+func (r *Registry) AcceptCommand(ctx context.Context, cmd command.SessionCommand) (sessionexec.Receipt, error) {
+	if r == nil {
+		return sessionexec.Receipt{}, fmt.Errorf("headless registry unavailable")
+	}
+	if strings.TrimSpace(cmd.SessionID) == "" {
+		return sessionexec.Receipt{}, fmt.Errorf("session ID required")
+	}
 	runner, ok := r.GetSession(cmd.SessionID)
 	if !ok || runner == nil {
 		var err error
 		runner, err = r.EnsureSession(cmd.SessionID)
 		if err != nil {
-			return err
+			return sessionexec.Receipt{}, err
 		}
 	}
-	return runner.HandleSessionCommand(cmd)
+	return runner.AcceptCommand(ctx, cmd)
 }
 
 // AdoptSession allows a TUI to take over a headless session.
 // Returns the session data for the TUI to continue with.
 func (r *Registry) AdoptSession(sessionID string) (*storage.Session, error) {
-	r.mu.Lock()
-	runner, ok := r.runners[sessionID]
-	if !ok {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("session not found: %s", sessionID)
+	sess, err := r.removeSessionQuiesced(sessionID, sessionexec.ExecutionModeAdopted, "session_adopted")
+	if err != nil {
+		return nil, err
 	}
-
-	// Stop the runner but keep session data
-	session := runner.session
-	runner.Stop()
-	delete(r.runners, sessionID)
-	r.mu.Unlock()
-
-	return session, nil
+	return sess, nil
 }
 
 // Count returns the number of active headless sessions.
@@ -578,21 +1218,32 @@ func (r *Registry) cleanupLoop(ctx context.Context) {
 }
 
 func (r *Registry) cleanupIdleSessions() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	var toRemove []string
+	r.mu.RLock()
+	snapshot := make(map[string]*Runner, len(r.runners))
 	for id, runner := range r.runners {
+		snapshot[id] = runner
+	}
+	r.mu.RUnlock()
+
+	candidates := make(map[string]*Runner)
+	for id, runner := range snapshot {
 		if runner.IsIdle() || runner.State() == StateStopped {
-			toRemove = append(toRemove, id)
+			candidates[id] = runner
 		}
 	}
 
-	for _, id := range toRemove {
-		if runner, ok := r.runners[id]; ok {
-			runner.Stop()
+	r.mu.Lock()
+	toRemove := make([]*Runner, 0, len(candidates))
+	for id, candidate := range candidates {
+		if r.runners[id] == candidate {
 			delete(r.runners, id)
+			toRemove = append(toRemove, candidate)
 		}
+	}
+	r.mu.Unlock()
+
+	for _, runner := range toRemove {
+		runner.Stop()
 	}
 }
 

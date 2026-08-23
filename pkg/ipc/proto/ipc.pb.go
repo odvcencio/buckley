@@ -197,7 +197,9 @@ type CommandRequest struct {
 	// Session-specific auth token
 	SessionToken string `protobuf:"bytes,4,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
 	// Target agent for host agent commands
-	AgentId       string `protobuf:"bytes,5,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	AgentId string `protobuf:"bytes,5,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	// Stable caller-provided identity for session commands.
+	CommandId     string `protobuf:"bytes,6,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -267,12 +269,20 @@ func (x *CommandRequest) GetAgentId() string {
 	return ""
 }
 
+func (x *CommandRequest) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
 type CommandResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "accepted", "rejected", "queued"
-	Status        string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	CommandId     string `protobuf:"bytes,3,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Status        string          `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string          `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	CommandId     string          `protobuf:"bytes,3,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Receipt       *CommandReceipt `protobuf:"bytes,4,opt,name=receipt,proto3" json:"receipt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -326,6 +336,13 @@ func (x *CommandResponse) GetCommandId() string {
 		return x.CommandId
 	}
 	return ""
+}
+
+func (x *CommandResponse) GetReceipt() *CommandReceipt {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
 }
 
 type ListSessionsRequest struct {
@@ -1425,10 +1442,11 @@ type HeadlessSession struct {
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// Container details (if running in k8s)
-	PodName       string `protobuf:"bytes,7,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
-	Namespace     string `protobuf:"bytes,8,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PodName        string          `protobuf:"bytes,7,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	Namespace      string          `protobuf:"bytes,8,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	InitialReceipt *CommandReceipt `protobuf:"bytes,9,opt,name=initial_receipt,json=initialReceipt,proto3" json:"initial_receipt,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HeadlessSession) Reset() {
@@ -1515,6 +1533,13 @@ func (x *HeadlessSession) GetNamespace() string {
 		return x.Namespace
 	}
 	return ""
+}
+
+func (x *HeadlessSession) GetInitialReceipt() *CommandReceipt {
+	if x != nil {
+		return x.InitialReceipt
+	}
+	return nil
 }
 
 type DeleteHeadlessRequest struct {
@@ -4766,6 +4791,1978 @@ func (x *VAPIDPublicKeyResponse) GetPublicKey() string {
 	return ""
 }
 
+type GetSessionExecutionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionExecutionRequest) Reset() {
+	*x = GetSessionExecutionRequest{}
+	mi := &file_ipc_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionExecutionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionExecutionRequest) ProtoMessage() {}
+
+func (x *GetSessionExecutionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionExecutionRequest.ProtoReflect.Descriptor instead.
+func (*GetSessionExecutionRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *GetSessionExecutionRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+type GetSessionExecutionResponse struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Execution     *SessionExecutionSnapshot `protobuf:"bytes,1,opt,name=execution,proto3" json:"execution,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionExecutionResponse) Reset() {
+	*x = GetSessionExecutionResponse{}
+	mi := &file_ipc_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionExecutionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionExecutionResponse) ProtoMessage() {}
+
+func (x *GetSessionExecutionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionExecutionResponse.ProtoReflect.Descriptor instead.
+func (*GetSessionExecutionResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *GetSessionExecutionResponse) GetExecution() *SessionExecutionSnapshot {
+	if x != nil {
+		return x.Execution
+	}
+	return nil
+}
+
+type ListSessionCommandsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	States        []string               `protobuf:"bytes,2,rep,name=states,proto3" json:"states,omitempty"`
+	AfterSequence int64                  `protobuf:"varint,3,opt,name=after_sequence,json=afterSequence,proto3" json:"after_sequence,omitempty"`
+	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionCommandsRequest) Reset() {
+	*x = ListSessionCommandsRequest{}
+	mi := &file_ipc_proto_msgTypes[66]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionCommandsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionCommandsRequest) ProtoMessage() {}
+
+func (x *ListSessionCommandsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[66]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionCommandsRequest.ProtoReflect.Descriptor instead.
+func (*ListSessionCommandsRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{66}
+}
+
+func (x *ListSessionCommandsRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ListSessionCommandsRequest) GetStates() []string {
+	if x != nil {
+		return x.States
+	}
+	return nil
+}
+
+func (x *ListSessionCommandsRequest) GetAfterSequence() int64 {
+	if x != nil {
+		return x.AfterSequence
+	}
+	return 0
+}
+
+func (x *ListSessionCommandsRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListSessionCommandsResponse struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Commands      []*SessionCommandStatus `protobuf:"bytes,1,rep,name=commands,proto3" json:"commands,omitempty"`
+	NextSequence  int64                   `protobuf:"varint,2,opt,name=next_sequence,json=nextSequence,proto3" json:"next_sequence,omitempty"`
+	HasMore       bool                    `protobuf:"varint,3,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionCommandsResponse) Reset() {
+	*x = ListSessionCommandsResponse{}
+	mi := &file_ipc_proto_msgTypes[67]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionCommandsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionCommandsResponse) ProtoMessage() {}
+
+func (x *ListSessionCommandsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[67]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionCommandsResponse.ProtoReflect.Descriptor instead.
+func (*ListSessionCommandsResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{67}
+}
+
+func (x *ListSessionCommandsResponse) GetCommands() []*SessionCommandStatus {
+	if x != nil {
+		return x.Commands
+	}
+	return nil
+}
+
+func (x *ListSessionCommandsResponse) GetNextSequence() int64 {
+	if x != nil {
+		return x.NextSequence
+	}
+	return 0
+}
+
+func (x *ListSessionCommandsResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+type GetSessionCommandRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	CommandId     string                 `protobuf:"bytes,2,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionCommandRequest) Reset() {
+	*x = GetSessionCommandRequest{}
+	mi := &file_ipc_proto_msgTypes[68]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionCommandRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionCommandRequest) ProtoMessage() {}
+
+func (x *GetSessionCommandRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[68]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionCommandRequest.ProtoReflect.Descriptor instead.
+func (*GetSessionCommandRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{68}
+}
+
+func (x *GetSessionCommandRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *GetSessionCommandRequest) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+type GetSessionCommandResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Command       *SessionCommandStatus  `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionCommandResponse) Reset() {
+	*x = GetSessionCommandResponse{}
+	mi := &file_ipc_proto_msgTypes[69]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionCommandResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionCommandResponse) ProtoMessage() {}
+
+func (x *GetSessionCommandResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[69]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionCommandResponse.ProtoReflect.Descriptor instead.
+func (*GetSessionCommandResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{69}
+}
+
+func (x *GetSessionCommandResponse) GetCommand() *SessionCommandStatus {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+type ListSessionRoutinesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ParentRunId   string                 `protobuf:"bytes,2,opt,name=parent_run_id,json=parentRunId,proto3" json:"parent_run_id,omitempty"`
+	BeforeCursor  string                 `protobuf:"bytes,3,opt,name=before_cursor,json=beforeCursor,proto3" json:"before_cursor,omitempty"`
+	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionRoutinesRequest) Reset() {
+	*x = ListSessionRoutinesRequest{}
+	mi := &file_ipc_proto_msgTypes[70]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionRoutinesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionRoutinesRequest) ProtoMessage() {}
+
+func (x *ListSessionRoutinesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[70]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionRoutinesRequest.ProtoReflect.Descriptor instead.
+func (*ListSessionRoutinesRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{70}
+}
+
+func (x *ListSessionRoutinesRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ListSessionRoutinesRequest) GetParentRunId() string {
+	if x != nil {
+		return x.ParentRunId
+	}
+	return ""
+}
+
+func (x *ListSessionRoutinesRequest) GetBeforeCursor() string {
+	if x != nil {
+		return x.BeforeCursor
+	}
+	return ""
+}
+
+func (x *ListSessionRoutinesRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListSessionRoutinesResponse struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Routines      []*SessionRoutineStatus `protobuf:"bytes,1,rep,name=routines,proto3" json:"routines,omitempty"`
+	NextCursor    string                  `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	HasMore       bool                    `protobuf:"varint,3,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionRoutinesResponse) Reset() {
+	*x = ListSessionRoutinesResponse{}
+	mi := &file_ipc_proto_msgTypes[71]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionRoutinesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionRoutinesResponse) ProtoMessage() {}
+
+func (x *ListSessionRoutinesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[71]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionRoutinesResponse.ProtoReflect.Descriptor instead.
+func (*ListSessionRoutinesResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{71}
+}
+
+func (x *ListSessionRoutinesResponse) GetRoutines() []*SessionRoutineStatus {
+	if x != nil {
+		return x.Routines
+	}
+	return nil
+}
+
+func (x *ListSessionRoutinesResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+func (x *ListSessionRoutinesResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+type GetSessionRoutineRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId         string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionRoutineRequest) Reset() {
+	*x = GetSessionRoutineRequest{}
+	mi := &file_ipc_proto_msgTypes[72]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionRoutineRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionRoutineRequest) ProtoMessage() {}
+
+func (x *GetSessionRoutineRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[72]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionRoutineRequest.ProtoReflect.Descriptor instead.
+func (*GetSessionRoutineRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{72}
+}
+
+func (x *GetSessionRoutineRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *GetSessionRoutineRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+type GetSessionRoutineResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Routine       *SessionRoutineStatus  `protobuf:"bytes,1,opt,name=routine,proto3" json:"routine,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionRoutineResponse) Reset() {
+	*x = GetSessionRoutineResponse{}
+	mi := &file_ipc_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionRoutineResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionRoutineResponse) ProtoMessage() {}
+
+func (x *GetSessionRoutineResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionRoutineResponse.ProtoReflect.Descriptor instead.
+func (*GetSessionRoutineResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{73}
+}
+
+func (x *GetSessionRoutineResponse) GetRoutine() *SessionRoutineStatus {
+	if x != nil {
+		return x.Routine
+	}
+	return nil
+}
+
+type ListRoutineMailboxRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId         string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	States        []string               `protobuf:"bytes,3,rep,name=states,proto3" json:"states,omitempty"`
+	AfterSequence int64                  `protobuf:"varint,4,opt,name=after_sequence,json=afterSequence,proto3" json:"after_sequence,omitempty"`
+	Limit         int32                  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRoutineMailboxRequest) Reset() {
+	*x = ListRoutineMailboxRequest{}
+	mi := &file_ipc_proto_msgTypes[74]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRoutineMailboxRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRoutineMailboxRequest) ProtoMessage() {}
+
+func (x *ListRoutineMailboxRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[74]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRoutineMailboxRequest.ProtoReflect.Descriptor instead.
+func (*ListRoutineMailboxRequest) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{74}
+}
+
+func (x *ListRoutineMailboxRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ListRoutineMailboxRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ListRoutineMailboxRequest) GetStates() []string {
+	if x != nil {
+		return x.States
+	}
+	return nil
+}
+
+func (x *ListRoutineMailboxRequest) GetAfterSequence() int64 {
+	if x != nil {
+		return x.AfterSequence
+	}
+	return 0
+}
+
+func (x *ListRoutineMailboxRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListRoutineMailboxResponse struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Messages      []*RoutineMailboxStatus `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
+	NextSequence  int64                   `protobuf:"varint,2,opt,name=next_sequence,json=nextSequence,proto3" json:"next_sequence,omitempty"`
+	HasMore       bool                    `protobuf:"varint,3,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRoutineMailboxResponse) Reset() {
+	*x = ListRoutineMailboxResponse{}
+	mi := &file_ipc_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRoutineMailboxResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRoutineMailboxResponse) ProtoMessage() {}
+
+func (x *ListRoutineMailboxResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRoutineMailboxResponse.ProtoReflect.Descriptor instead.
+func (*ListRoutineMailboxResponse) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{75}
+}
+
+func (x *ListRoutineMailboxResponse) GetMessages() []*RoutineMailboxStatus {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
+}
+
+func (x *ListRoutineMailboxResponse) GetNextSequence() int64 {
+	if x != nil {
+		return x.NextSequence
+	}
+	return 0
+}
+
+func (x *ListRoutineMailboxResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+type SessionExecutionSnapshot struct {
+	state                     protoimpl.MessageState  `protogen:"open.v1"`
+	SessionId                 string                  `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Initialized               bool                    `protobuf:"varint,2,opt,name=initialized,proto3" json:"initialized,omitempty"`
+	State                     *SessionExecutionState  `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	CommandSummary            *SessionCommandSummary  `protobuf:"bytes,4,opt,name=command_summary,json=commandSummary,proto3" json:"command_summary,omitempty"`
+	EffectSummary             *SessionEffectSummary   `protobuf:"bytes,5,opt,name=effect_summary,json=effectSummary,proto3" json:"effect_summary,omitempty"`
+	AttentionEffects          []*SessionEffectStatus  `protobuf:"bytes,6,rep,name=attention_effects,json=attentionEffects,proto3" json:"attention_effects,omitempty"`
+	AttentionEffectsTruncated bool                    `protobuf:"varint,7,opt,name=attention_effects_truncated,json=attentionEffectsTruncated,proto3" json:"attention_effects_truncated,omitempty"`
+	RecentCommands            []*SessionCommandStatus `protobuf:"bytes,8,rep,name=recent_commands,json=recentCommands,proto3" json:"recent_commands,omitempty"`
+	ObservedAt                *timestamppb.Timestamp  `protobuf:"bytes,9,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *SessionExecutionSnapshot) Reset() {
+	*x = SessionExecutionSnapshot{}
+	mi := &file_ipc_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionExecutionSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionExecutionSnapshot) ProtoMessage() {}
+
+func (x *SessionExecutionSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionExecutionSnapshot.ProtoReflect.Descriptor instead.
+func (*SessionExecutionSnapshot) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *SessionExecutionSnapshot) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionExecutionSnapshot) GetInitialized() bool {
+	if x != nil {
+		return x.Initialized
+	}
+	return false
+}
+
+func (x *SessionExecutionSnapshot) GetState() *SessionExecutionState {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
+func (x *SessionExecutionSnapshot) GetCommandSummary() *SessionCommandSummary {
+	if x != nil {
+		return x.CommandSummary
+	}
+	return nil
+}
+
+func (x *SessionExecutionSnapshot) GetEffectSummary() *SessionEffectSummary {
+	if x != nil {
+		return x.EffectSummary
+	}
+	return nil
+}
+
+func (x *SessionExecutionSnapshot) GetAttentionEffects() []*SessionEffectStatus {
+	if x != nil {
+		return x.AttentionEffects
+	}
+	return nil
+}
+
+func (x *SessionExecutionSnapshot) GetAttentionEffectsTruncated() bool {
+	if x != nil {
+		return x.AttentionEffectsTruncated
+	}
+	return false
+}
+
+func (x *SessionExecutionSnapshot) GetRecentCommands() []*SessionCommandStatus {
+	if x != nil {
+		return x.RecentCommands
+	}
+	return nil
+}
+
+func (x *SessionExecutionSnapshot) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+type SessionExecutionState struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
+	Generation    int64                  `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	ReasonCode    string                 `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionExecutionState) Reset() {
+	*x = SessionExecutionState{}
+	mi := &file_ipc_proto_msgTypes[77]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionExecutionState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionExecutionState) ProtoMessage() {}
+
+func (x *SessionExecutionState) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[77]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionExecutionState.ProtoReflect.Descriptor instead.
+func (*SessionExecutionState) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{77}
+}
+
+func (x *SessionExecutionState) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionExecutionState) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *SessionExecutionState) GetGeneration() int64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *SessionExecutionState) GetReasonCode() string {
+	if x != nil {
+		return x.ReasonCode
+	}
+	return ""
+}
+
+func (x *SessionExecutionState) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+type SessionCommandSummary struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SessionId      string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Total          int64                  `protobuf:"varint,2,opt,name=total,proto3" json:"total,omitempty"`
+	Accepted       int64                  `protobuf:"varint,3,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Running        int64                  `protobuf:"varint,4,opt,name=running,proto3" json:"running,omitempty"`
+	Succeeded      int64                  `protobuf:"varint,5,opt,name=succeeded,proto3" json:"succeeded,omitempty"`
+	Failed         int64                  `protobuf:"varint,6,opt,name=failed,proto3" json:"failed,omitempty"`
+	Blocked        int64                  `protobuf:"varint,7,opt,name=blocked,proto3" json:"blocked,omitempty"`
+	Interrupted    int64                  `protobuf:"varint,8,opt,name=interrupted,proto3" json:"interrupted,omitempty"`
+	Cancelled      int64                  `protobuf:"varint,9,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	WorkPending    int64                  `protobuf:"varint,10,opt,name=work_pending,json=workPending,proto3" json:"work_pending,omitempty"`
+	ControlPending int64                  `protobuf:"varint,11,opt,name=control_pending,json=controlPending,proto3" json:"control_pending,omitempty"`
+	LastSequence   int64                  `protobuf:"varint,12,opt,name=last_sequence,json=lastSequence,proto3" json:"last_sequence,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SessionCommandSummary) Reset() {
+	*x = SessionCommandSummary{}
+	mi := &file_ipc_proto_msgTypes[78]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionCommandSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionCommandSummary) ProtoMessage() {}
+
+func (x *SessionCommandSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[78]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionCommandSummary.ProtoReflect.Descriptor instead.
+func (*SessionCommandSummary) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{78}
+}
+
+func (x *SessionCommandSummary) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionCommandSummary) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetAccepted() int64 {
+	if x != nil {
+		return x.Accepted
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetRunning() int64 {
+	if x != nil {
+		return x.Running
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetSucceeded() int64 {
+	if x != nil {
+		return x.Succeeded
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetFailed() int64 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetBlocked() int64 {
+	if x != nil {
+		return x.Blocked
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetInterrupted() int64 {
+	if x != nil {
+		return x.Interrupted
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetCancelled() int64 {
+	if x != nil {
+		return x.Cancelled
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetWorkPending() int64 {
+	if x != nil {
+		return x.WorkPending
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetControlPending() int64 {
+	if x != nil {
+		return x.ControlPending
+	}
+	return 0
+}
+
+func (x *SessionCommandSummary) GetLastSequence() int64 {
+	if x != nil {
+		return x.LastSequence
+	}
+	return 0
+}
+
+type SessionEffectSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Total         int64                  `protobuf:"varint,1,opt,name=total,proto3" json:"total,omitempty"`
+	Active        int64                  `protobuf:"varint,2,opt,name=active,proto3" json:"active,omitempty"`
+	Ambiguous     int64                  `protobuf:"varint,3,opt,name=ambiguous,proto3" json:"ambiguous,omitempty"`
+	Ended         int64                  `protobuf:"varint,4,opt,name=ended,proto3" json:"ended,omitempty"`
+	Resolved      int64                  `protobuf:"varint,5,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionEffectSummary) Reset() {
+	*x = SessionEffectSummary{}
+	mi := &file_ipc_proto_msgTypes[79]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionEffectSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionEffectSummary) ProtoMessage() {}
+
+func (x *SessionEffectSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[79]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionEffectSummary.ProtoReflect.Descriptor instead.
+func (*SessionEffectSummary) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{79}
+}
+
+func (x *SessionEffectSummary) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *SessionEffectSummary) GetActive() int64 {
+	if x != nil {
+		return x.Active
+	}
+	return 0
+}
+
+func (x *SessionEffectSummary) GetAmbiguous() int64 {
+	if x != nil {
+		return x.Ambiguous
+	}
+	return 0
+}
+
+func (x *SessionEffectSummary) GetEnded() int64 {
+	if x != nil {
+		return x.Ended
+	}
+	return 0
+}
+
+func (x *SessionEffectSummary) GetResolved() int64 {
+	if x != nil {
+		return x.Resolved
+	}
+	return 0
+}
+
+type SessionEffectStatus struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SessionId         string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	CommandId         string                 `protobuf:"bytes,2,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	CommandGeneration int64                  `protobuf:"varint,3,opt,name=command_generation,json=commandGeneration,proto3" json:"command_generation,omitempty"`
+	EffectId          string                 `protobuf:"bytes,4,opt,name=effect_id,json=effectId,proto3" json:"effect_id,omitempty"`
+	Kind              string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	State             string                 `protobuf:"bytes,6,opt,name=state,proto3" json:"state,omitempty"`
+	CreatedAt         *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	ExpiresAt         *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	AmbiguousAt       *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=ambiguous_at,json=ambiguousAt,proto3" json:"ambiguous_at,omitempty"`
+	EndedAt           *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	ResolvedAt        *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=resolved_at,json=resolvedAt,proto3" json:"resolved_at,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SessionEffectStatus) Reset() {
+	*x = SessionEffectStatus{}
+	mi := &file_ipc_proto_msgTypes[80]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionEffectStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionEffectStatus) ProtoMessage() {}
+
+func (x *SessionEffectStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[80]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionEffectStatus.ProtoReflect.Descriptor instead.
+func (*SessionEffectStatus) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{80}
+}
+
+func (x *SessionEffectStatus) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionEffectStatus) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *SessionEffectStatus) GetCommandGeneration() int64 {
+	if x != nil {
+		return x.CommandGeneration
+	}
+	return 0
+}
+
+func (x *SessionEffectStatus) GetEffectId() string {
+	if x != nil {
+		return x.EffectId
+	}
+	return ""
+}
+
+func (x *SessionEffectStatus) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *SessionEffectStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *SessionEffectStatus) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *SessionEffectStatus) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *SessionEffectStatus) GetAmbiguousAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AmbiguousAt
+	}
+	return nil
+}
+
+func (x *SessionEffectStatus) GetEndedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.EndedAt
+	}
+	return nil
+}
+
+func (x *SessionEffectStatus) GetResolvedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ResolvedAt
+	}
+	return nil
+}
+
+type SessionCommandStatus struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	SessionId        string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId            string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	TaskId           string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	CommandId        string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	TurnId           string                 `protobuf:"bytes,5,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	Generation       int64                  `protobuf:"varint,6,opt,name=generation,proto3" json:"generation,omitempty"`
+	Sequence         int64                  `protobuf:"varint,7,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Type             string                 `protobuf:"bytes,8,opt,name=type,proto3" json:"type,omitempty"`
+	Lane             string                 `protobuf:"bytes,9,opt,name=lane,proto3" json:"lane,omitempty"`
+	State            string                 `protobuf:"bytes,10,opt,name=state,proto3" json:"state,omitempty"`
+	Attempt          int64                  `protobuf:"varint,11,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	TargetCommandId  string                 `protobuf:"bytes,12,opt,name=target_command_id,json=targetCommandId,proto3" json:"target_command_id,omitempty"`
+	AcceptedAt       *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
+	StartedAt        *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt       *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	ErrorCode        string                 `protobuf:"bytes,16,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	EffectSummary    *SessionEffectSummary  `protobuf:"bytes,17,opt,name=effect_summary,json=effectSummary,proto3" json:"effect_summary,omitempty"`
+	Effects          []*SessionEffectStatus `protobuf:"bytes,18,rep,name=effects,proto3" json:"effects,omitempty"`
+	EffectsTruncated bool                   `protobuf:"varint,19,opt,name=effects_truncated,json=effectsTruncated,proto3" json:"effects_truncated,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *SessionCommandStatus) Reset() {
+	*x = SessionCommandStatus{}
+	mi := &file_ipc_proto_msgTypes[81]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionCommandStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionCommandStatus) ProtoMessage() {}
+
+func (x *SessionCommandStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[81]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionCommandStatus.ProtoReflect.Descriptor instead.
+func (*SessionCommandStatus) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{81}
+}
+
+func (x *SessionCommandStatus) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetGeneration() int64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *SessionCommandStatus) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *SessionCommandStatus) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetLane() string {
+	if x != nil {
+		return x.Lane
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetAttempt() int64 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *SessionCommandStatus) GetTargetCommandId() string {
+	if x != nil {
+		return x.TargetCommandId
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetAcceptedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AcceptedAt
+	}
+	return nil
+}
+
+func (x *SessionCommandStatus) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *SessionCommandStatus) GetFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return nil
+}
+
+func (x *SessionCommandStatus) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *SessionCommandStatus) GetEffectSummary() *SessionEffectSummary {
+	if x != nil {
+		return x.EffectSummary
+	}
+	return nil
+}
+
+func (x *SessionCommandStatus) GetEffects() []*SessionEffectStatus {
+	if x != nil {
+		return x.Effects
+	}
+	return nil
+}
+
+func (x *SessionCommandStatus) GetEffectsTruncated() bool {
+	if x != nil {
+		return x.EffectsTruncated
+	}
+	return false
+}
+
+type SessionRoutineAttemptStatus struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Number         int64                  `protobuf:"varint,1,opt,name=number,proto3" json:"number,omitempty"`
+	State          string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	AttachedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=attached_at,json=attachedAt,proto3" json:"attached_at,omitempty"`
+	HeartbeatAt    *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=heartbeat_at,json=heartbeatAt,proto3" json:"heartbeat_at,omitempty"`
+	LeaseExpiresAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
+	DetachedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=detached_at,json=detachedAt,proto3" json:"detached_at,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SessionRoutineAttemptStatus) Reset() {
+	*x = SessionRoutineAttemptStatus{}
+	mi := &file_ipc_proto_msgTypes[82]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionRoutineAttemptStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionRoutineAttemptStatus) ProtoMessage() {}
+
+func (x *SessionRoutineAttemptStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[82]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionRoutineAttemptStatus.ProtoReflect.Descriptor instead.
+func (*SessionRoutineAttemptStatus) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{82}
+}
+
+func (x *SessionRoutineAttemptStatus) GetNumber() int64 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *SessionRoutineAttemptStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *SessionRoutineAttemptStatus) GetAttachedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AttachedAt
+	}
+	return nil
+}
+
+func (x *SessionRoutineAttemptStatus) GetHeartbeatAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.HeartbeatAt
+	}
+	return nil
+}
+
+func (x *SessionRoutineAttemptStatus) GetLeaseExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LeaseExpiresAt
+	}
+	return nil
+}
+
+func (x *SessionRoutineAttemptStatus) GetDetachedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DetachedAt
+	}
+	return nil
+}
+
+type SessionRoutineMailboxSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Queued        int64                  `protobuf:"varint,1,opt,name=queued,proto3" json:"queued,omitempty"`
+	Claimed       int64                  `protobuf:"varint,2,opt,name=claimed,proto3" json:"claimed,omitempty"`
+	Processed     int64                  `protobuf:"varint,3,opt,name=processed,proto3" json:"processed,omitempty"`
+	DeadLetter    int64                  `protobuf:"varint,4,opt,name=dead_letter,json=deadLetter,proto3" json:"dead_letter,omitempty"`
+	LastSequence  int64                  `protobuf:"varint,5,opt,name=last_sequence,json=lastSequence,proto3" json:"last_sequence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionRoutineMailboxSummary) Reset() {
+	*x = SessionRoutineMailboxSummary{}
+	mi := &file_ipc_proto_msgTypes[83]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionRoutineMailboxSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionRoutineMailboxSummary) ProtoMessage() {}
+
+func (x *SessionRoutineMailboxSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[83]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionRoutineMailboxSummary.ProtoReflect.Descriptor instead.
+func (*SessionRoutineMailboxSummary) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{83}
+}
+
+func (x *SessionRoutineMailboxSummary) GetQueued() int64 {
+	if x != nil {
+		return x.Queued
+	}
+	return 0
+}
+
+func (x *SessionRoutineMailboxSummary) GetClaimed() int64 {
+	if x != nil {
+		return x.Claimed
+	}
+	return 0
+}
+
+func (x *SessionRoutineMailboxSummary) GetProcessed() int64 {
+	if x != nil {
+		return x.Processed
+	}
+	return 0
+}
+
+func (x *SessionRoutineMailboxSummary) GetDeadLetter() int64 {
+	if x != nil {
+		return x.DeadLetter
+	}
+	return 0
+}
+
+func (x *SessionRoutineMailboxSummary) GetLastSequence() int64 {
+	if x != nil {
+		return x.LastSequence
+	}
+	return 0
+}
+
+type SessionRoutineStatus struct {
+	state         protoimpl.MessageState        `protogen:"open.v1"`
+	SessionId     string                        `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId         string                        `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ParentRunId   string                        `protobuf:"bytes,3,opt,name=parent_run_id,json=parentRunId,proto3" json:"parent_run_id,omitempty"`
+	TaskId        string                        `protobuf:"bytes,4,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	AgentId       string                        `protobuf:"bytes,5,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	ModelId       string                        `protobuf:"bytes,6,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`
+	ProviderId    string                        `protobuf:"bytes,7,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
+	Backend       string                        `protobuf:"bytes,8,opt,name=backend,proto3" json:"backend,omitempty"`
+	State         string                        `protobuf:"bytes,9,opt,name=state,proto3" json:"state,omitempty"`
+	StartedAt     *timestamppb.Timestamp        `protobuf:"bytes,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt    *timestamppb.Timestamp        `protobuf:"bytes,11,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	Attempt       *SessionRoutineAttemptStatus  `protobuf:"bytes,12,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	Mailbox       *SessionRoutineMailboxSummary `protobuf:"bytes,13,opt,name=mailbox,proto3" json:"mailbox,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionRoutineStatus) Reset() {
+	*x = SessionRoutineStatus{}
+	mi := &file_ipc_proto_msgTypes[84]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionRoutineStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionRoutineStatus) ProtoMessage() {}
+
+func (x *SessionRoutineStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[84]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionRoutineStatus.ProtoReflect.Descriptor instead.
+func (*SessionRoutineStatus) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{84}
+}
+
+func (x *SessionRoutineStatus) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetParentRunId() string {
+	if x != nil {
+		return x.ParentRunId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetModelId() string {
+	if x != nil {
+		return x.ModelId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetProviderId() string {
+	if x != nil {
+		return x.ProviderId
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *SessionRoutineStatus) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *SessionRoutineStatus) GetFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return nil
+}
+
+func (x *SessionRoutineStatus) GetAttempt() *SessionRoutineAttemptStatus {
+	if x != nil {
+		return x.Attempt
+	}
+	return nil
+}
+
+func (x *SessionRoutineStatus) GetMailbox() *SessionRoutineMailboxSummary {
+	if x != nil {
+		return x.Mailbox
+	}
+	return nil
+}
+
+type RoutineMailboxStatus struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SessionId      string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId          string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	MessageId      string                 `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	PeerRunId      string                 `protobuf:"bytes,4,opt,name=peer_run_id,json=peerRunId,proto3" json:"peer_run_id,omitempty"`
+	Kind           string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	Direction      string                 `protobuf:"bytes,6,opt,name=direction,proto3" json:"direction,omitempty"`
+	State          string                 `protobuf:"bytes,7,opt,name=state,proto3" json:"state,omitempty"`
+	Sequence       int64                  `protobuf:"varint,8,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	ByteCount      int64                  `protobuf:"varint,9,opt,name=byte_count,json=byteCount,proto3" json:"byte_count,omitempty"`
+	CreatedAt      *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	ProcessedAt    *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=processed_at,json=processedAt,proto3" json:"processed_at,omitempty"`
+	DeadLetteredAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=dead_lettered_at,json=deadLetteredAt,proto3" json:"dead_lettered_at,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RoutineMailboxStatus) Reset() {
+	*x = RoutineMailboxStatus{}
+	mi := &file_ipc_proto_msgTypes[85]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoutineMailboxStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoutineMailboxStatus) ProtoMessage() {}
+
+func (x *RoutineMailboxStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[85]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoutineMailboxStatus.ProtoReflect.Descriptor instead.
+func (*RoutineMailboxStatus) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{85}
+}
+
+func (x *RoutineMailboxStatus) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetPeerRunId() string {
+	if x != nil {
+		return x.PeerRunId
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetDirection() string {
+	if x != nil {
+		return x.Direction
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *RoutineMailboxStatus) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *RoutineMailboxStatus) GetByteCount() int64 {
+	if x != nil {
+		return x.ByteCount
+	}
+	return 0
+}
+
+func (x *RoutineMailboxStatus) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *RoutineMailboxStatus) GetProcessedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ProcessedAt
+	}
+	return nil
+}
+
+func (x *RoutineMailboxStatus) GetDeadLetteredAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DeadLetteredAt
+	}
+	return nil
+}
+
+type CommandReceipt struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SessionId       string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RunId           string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	TaskId          string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	CommandId       string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	TurnId          string                 `protobuf:"bytes,5,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	Generation      int64                  `protobuf:"varint,6,opt,name=generation,proto3" json:"generation,omitempty"`
+	Sequence        int64                  `protobuf:"varint,7,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Lane            string                 `protobuf:"bytes,8,opt,name=lane,proto3" json:"lane,omitempty"`
+	State           string                 `protobuf:"bytes,9,opt,name=state,proto3" json:"state,omitempty"`
+	Duplicate       bool                   `protobuf:"varint,10,opt,name=duplicate,proto3" json:"duplicate,omitempty"`
+	Attempt         int64                  `protobuf:"varint,11,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	TargetCommandId string                 `protobuf:"bytes,12,opt,name=target_command_id,json=targetCommandId,proto3" json:"target_command_id,omitempty"`
+	AcceptedAt      *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
+	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt      *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	ErrorCode       string                 `protobuf:"bytes,16,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CommandReceipt) Reset() {
+	*x = CommandReceipt{}
+	mi := &file_ipc_proto_msgTypes[86]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandReceipt) ProtoMessage() {}
+
+func (x *CommandReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_ipc_proto_msgTypes[86]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandReceipt.ProtoReflect.Descriptor instead.
+func (*CommandReceipt) Descriptor() ([]byte, []int) {
+	return file_ipc_proto_rawDescGZIP(), []int{86}
+}
+
+func (x *CommandReceipt) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetGeneration() int64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *CommandReceipt) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *CommandReceipt) GetLane() string {
+	if x != nil {
+		return x.Lane
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetDuplicate() bool {
+	if x != nil {
+		return x.Duplicate
+	}
+	return false
+}
+
+func (x *CommandReceipt) GetAttempt() int64 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *CommandReceipt) GetTargetCommandId() string {
+	if x != nil {
+		return x.TargetCommandId
+	}
+	return ""
+}
+
+func (x *CommandReceipt) GetAcceptedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AcceptedAt
+	}
+	return nil
+}
+
+func (x *CommandReceipt) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *CommandReceipt) GetFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return nil
+}
+
+func (x *CommandReceipt) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
 var File_ipc_proto protoreflect.FileDescriptor
 
 const file_ipc_proto_rawDesc = "" +
@@ -4785,19 +6782,22 @@ const file_ipc_proto_rawDesc = "" +
 	"\apayload\x18\x03 \x01(\v2\x17.google.protobuf.StructR\apayload\x128\n" +
 	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x19\n" +
 	"\bevent_id\x18\x05 \x01(\tR\aeventId\x12\x19\n" +
-	"\bagent_id\x18\x06 \x01(\tR\aagentId\"\x9d\x01\n" +
+	"\bagent_id\x18\x06 \x01(\tR\aagentId\"\xbc\x01\n" +
 	"\x0eCommandRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12#\n" +
 	"\rsession_token\x18\x04 \x01(\tR\fsessionToken\x12\x19\n" +
-	"\bagent_id\x18\x05 \x01(\tR\aagentId\"b\n" +
+	"\bagent_id\x18\x05 \x01(\tR\aagentId\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x06 \x01(\tR\tcommandId\"\x9c\x01\n" +
 	"\x0fCommandResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1d\n" +
 	"\n" +
-	"command_id\x18\x03 \x01(\tR\tcommandId\"\x8f\x01\n" +
+	"command_id\x18\x03 \x01(\tR\tcommandId\x128\n" +
+	"\areceipt\x18\x04 \x01(\v2\x1e.buckley.ipc.v1.CommandReceiptR\areceipt\"\x8f\x01\n" +
 	"\x13ListSessionsRequest\x12\x14\n" +
 	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\x05R\x06offset\x12#\n" +
@@ -4899,7 +6899,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\fdenied_tools\x18\x02 \x03(\tR\vdeniedTools\x12)\n" +
 	"\x10require_approval\x18\x03 \x03(\tR\x0frequireApproval\x121\n" +
 	"\x15max_exec_time_seconds\x18\x04 \x01(\x05R\x12maxExecTimeSeconds\x12-\n" +
-	"\x13max_file_size_bytes\x18\x05 \x01(\x03R\x10maxFileSizeBytes\"\x9a\x02\n" +
+	"\x13max_file_size_bytes\x18\x05 \x01(\x03R\x10maxFileSizeBytes\"\xe3\x02\n" +
 	"\x0fHeadlessSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
@@ -4910,7 +6910,8 @@ const file_ipc_proto_rawDesc = "" +
 	"\n" +
 	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x19\n" +
 	"\bpod_name\x18\a \x01(\tR\apodName\x12\x1c\n" +
-	"\tnamespace\x18\b \x01(\tR\tnamespace\"y\n" +
+	"\tnamespace\x18\b \x01(\tR\tnamespace\x12G\n" +
+	"\x0finitial_receipt\x18\t \x01(\v2\x1e.buckley.ipc.v1.CommandReceiptR\x0einitialReceipt\"y\n" +
 	"\x15DeleteHeadlessRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -5211,7 +7212,227 @@ const file_ipc_proto_rawDesc = "" +
 	"\bendpoint\x18\x01 \x01(\tR\bendpoint\"7\n" +
 	"\x16VAPIDPublicKeyResponse\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x01 \x01(\tR\tpublicKey2\x96\x12\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\";\n" +
+	"\x1aGetSessionExecutionRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"e\n" +
+	"\x1bGetSessionExecutionResponse\x12F\n" +
+	"\texecution\x18\x01 \x01(\v2(.buckley.ipc.v1.SessionExecutionSnapshotR\texecution\"\x90\x01\n" +
+	"\x1aListSessionCommandsRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
+	"\x06states\x18\x02 \x03(\tR\x06states\x12%\n" +
+	"\x0eafter_sequence\x18\x03 \x01(\x03R\rafterSequence\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\x9f\x01\n" +
+	"\x1bListSessionCommandsResponse\x12@\n" +
+	"\bcommands\x18\x01 \x03(\v2$.buckley.ipc.v1.SessionCommandStatusR\bcommands\x12#\n" +
+	"\rnext_sequence\x18\x02 \x01(\x03R\fnextSequence\x12\x19\n" +
+	"\bhas_more\x18\x03 \x01(\bR\ahasMore\"X\n" +
+	"\x18GetSessionCommandRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x02 \x01(\tR\tcommandId\"[\n" +
+	"\x19GetSessionCommandResponse\x12>\n" +
+	"\acommand\x18\x01 \x01(\v2$.buckley.ipc.v1.SessionCommandStatusR\acommand\"\x9a\x01\n" +
+	"\x1aListSessionRoutinesRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\"\n" +
+	"\rparent_run_id\x18\x02 \x01(\tR\vparentRunId\x12#\n" +
+	"\rbefore_cursor\x18\x03 \x01(\tR\fbeforeCursor\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\x9b\x01\n" +
+	"\x1bListSessionRoutinesResponse\x12@\n" +
+	"\broutines\x18\x01 \x03(\v2$.buckley.ipc.v1.SessionRoutineStatusR\broutines\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor\x12\x19\n" +
+	"\bhas_more\x18\x03 \x01(\bR\ahasMore\"P\n" +
+	"\x18GetSessionRoutineRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\"[\n" +
+	"\x19GetSessionRoutineResponse\x12>\n" +
+	"\aroutine\x18\x01 \x01(\v2$.buckley.ipc.v1.SessionRoutineStatusR\aroutine\"\xa6\x01\n" +
+	"\x19ListRoutineMailboxRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x16\n" +
+	"\x06states\x18\x03 \x03(\tR\x06states\x12%\n" +
+	"\x0eafter_sequence\x18\x04 \x01(\x03R\rafterSequence\x12\x14\n" +
+	"\x05limit\x18\x05 \x01(\x05R\x05limit\"\x9e\x01\n" +
+	"\x1aListRoutineMailboxResponse\x12@\n" +
+	"\bmessages\x18\x01 \x03(\v2$.buckley.ipc.v1.RoutineMailboxStatusR\bmessages\x12#\n" +
+	"\rnext_sequence\x18\x02 \x01(\x03R\fnextSequence\x12\x19\n" +
+	"\bhas_more\x18\x03 \x01(\bR\ahasMore\"\xd3\x04\n" +
+	"\x18SessionExecutionSnapshot\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12 \n" +
+	"\vinitialized\x18\x02 \x01(\bR\vinitialized\x12;\n" +
+	"\x05state\x18\x03 \x01(\v2%.buckley.ipc.v1.SessionExecutionStateR\x05state\x12N\n" +
+	"\x0fcommand_summary\x18\x04 \x01(\v2%.buckley.ipc.v1.SessionCommandSummaryR\x0ecommandSummary\x12K\n" +
+	"\x0eeffect_summary\x18\x05 \x01(\v2$.buckley.ipc.v1.SessionEffectSummaryR\reffectSummary\x12P\n" +
+	"\x11attention_effects\x18\x06 \x03(\v2#.buckley.ipc.v1.SessionEffectStatusR\x10attentionEffects\x12>\n" +
+	"\x1battention_effects_truncated\x18\a \x01(\bR\x19attentionEffectsTruncated\x12M\n" +
+	"\x0frecent_commands\x18\b \x03(\v2$.buckley.ipc.v1.SessionCommandStatusR\x0erecentCommands\x12;\n" +
+	"\vobserved_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\"\xc6\x01\n" +
+	"\x15SessionExecutionState\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x03R\n" +
+	"generation\x12\x1f\n" +
+	"\vreason_code\x18\x04 \x01(\tR\n" +
+	"reasonCode\x129\n" +
+	"\n" +
+	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\x83\x03\n" +
+	"\x15SessionCommandSummary\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
+	"\x05total\x18\x02 \x01(\x03R\x05total\x12\x1a\n" +
+	"\baccepted\x18\x03 \x01(\x03R\baccepted\x12\x18\n" +
+	"\arunning\x18\x04 \x01(\x03R\arunning\x12\x1c\n" +
+	"\tsucceeded\x18\x05 \x01(\x03R\tsucceeded\x12\x16\n" +
+	"\x06failed\x18\x06 \x01(\x03R\x06failed\x12\x18\n" +
+	"\ablocked\x18\a \x01(\x03R\ablocked\x12 \n" +
+	"\vinterrupted\x18\b \x01(\x03R\vinterrupted\x12\x1c\n" +
+	"\tcancelled\x18\t \x01(\x03R\tcancelled\x12!\n" +
+	"\fwork_pending\x18\n" +
+	" \x01(\x03R\vworkPending\x12'\n" +
+	"\x0fcontrol_pending\x18\v \x01(\x03R\x0econtrolPending\x12#\n" +
+	"\rlast_sequence\x18\f \x01(\x03R\flastSequence\"\x94\x01\n" +
+	"\x14SessionEffectSummary\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x03R\x05total\x12\x16\n" +
+	"\x06active\x18\x02 \x01(\x03R\x06active\x12\x1c\n" +
+	"\tambiguous\x18\x03 \x01(\x03R\tambiguous\x12\x14\n" +
+	"\x05ended\x18\x04 \x01(\x03R\x05ended\x12\x1a\n" +
+	"\bresolved\x18\x05 \x01(\x03R\bresolved\"\xf2\x03\n" +
+	"\x13SessionEffectStatus\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x02 \x01(\tR\tcommandId\x12-\n" +
+	"\x12command_generation\x18\x03 \x01(\x03R\x11commandGeneration\x12\x1b\n" +
+	"\teffect_id\x18\x04 \x01(\tR\beffectId\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\x12\x14\n" +
+	"\x05state\x18\x06 \x01(\tR\x05state\x129\n" +
+	"\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"expires_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12=\n" +
+	"\fambiguous_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vambiguousAt\x125\n" +
+	"\bended_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12;\n" +
+	"\vresolved_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"resolvedAt\"\xea\x05\n" +
+	"\x14SessionCommandStatus\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x04 \x01(\tR\tcommandId\x12\x17\n" +
+	"\aturn_id\x18\x05 \x01(\tR\x06turnId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x06 \x01(\x03R\n" +
+	"generation\x12\x1a\n" +
+	"\bsequence\x18\a \x01(\x03R\bsequence\x12\x12\n" +
+	"\x04type\x18\b \x01(\tR\x04type\x12\x12\n" +
+	"\x04lane\x18\t \x01(\tR\x04lane\x12\x14\n" +
+	"\x05state\x18\n" +
+	" \x01(\tR\x05state\x12\x18\n" +
+	"\aattempt\x18\v \x01(\x03R\aattempt\x12*\n" +
+	"\x11target_command_id\x18\f \x01(\tR\x0ftargetCommandId\x12;\n" +
+	"\vaccepted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"acceptedAt\x129\n" +
+	"\n" +
+	"started_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
+	"\vfinished_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"finishedAt\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x10 \x01(\tR\terrorCode\x12K\n" +
+	"\x0eeffect_summary\x18\x11 \x01(\v2$.buckley.ipc.v1.SessionEffectSummaryR\reffectSummary\x12=\n" +
+	"\aeffects\x18\x12 \x03(\v2#.buckley.ipc.v1.SessionEffectStatusR\aeffects\x12+\n" +
+	"\x11effects_truncated\x18\x13 \x01(\bR\x10effectsTruncated\"\xca\x02\n" +
+	"\x1bSessionRoutineAttemptStatus\x12\x16\n" +
+	"\x06number\x18\x01 \x01(\x03R\x06number\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12;\n" +
+	"\vattached_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"attachedAt\x12=\n" +
+	"\fheartbeat_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vheartbeatAt\x12D\n" +
+	"\x10lease_expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x0eleaseExpiresAt\x12;\n" +
+	"\vdetached_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"detachedAt\"\xb4\x01\n" +
+	"\x1cSessionRoutineMailboxSummary\x12\x16\n" +
+	"\x06queued\x18\x01 \x01(\x03R\x06queued\x12\x18\n" +
+	"\aclaimed\x18\x02 \x01(\x03R\aclaimed\x12\x1c\n" +
+	"\tprocessed\x18\x03 \x01(\x03R\tprocessed\x12\x1f\n" +
+	"\vdead_letter\x18\x04 \x01(\x03R\n" +
+	"deadLetter\x12#\n" +
+	"\rlast_sequence\x18\x05 \x01(\x03R\flastSequence\"\x97\x04\n" +
+	"\x14SessionRoutineStatus\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\"\n" +
+	"\rparent_run_id\x18\x03 \x01(\tR\vparentRunId\x12\x17\n" +
+	"\atask_id\x18\x04 \x01(\tR\x06taskId\x12\x19\n" +
+	"\bagent_id\x18\x05 \x01(\tR\aagentId\x12\x19\n" +
+	"\bmodel_id\x18\x06 \x01(\tR\amodelId\x12\x1f\n" +
+	"\vprovider_id\x18\a \x01(\tR\n" +
+	"providerId\x12\x18\n" +
+	"\abackend\x18\b \x01(\tR\abackend\x12\x14\n" +
+	"\x05state\x18\t \x01(\tR\x05state\x129\n" +
+	"\n" +
+	"started_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
+	"\vfinished_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"finishedAt\x12E\n" +
+	"\aattempt\x18\f \x01(\v2+.buckley.ipc.v1.SessionRoutineAttemptStatusR\aattempt\x12F\n" +
+	"\amailbox\x18\r \x01(\v2,.buckley.ipc.v1.SessionRoutineMailboxSummaryR\amailbox\"\xce\x03\n" +
+	"\x14RoutineMailboxStatus\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x03 \x01(\tR\tmessageId\x12\x1e\n" +
+	"\vpeer_run_id\x18\x04 \x01(\tR\tpeerRunId\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\x12\x1c\n" +
+	"\tdirection\x18\x06 \x01(\tR\tdirection\x12\x14\n" +
+	"\x05state\x18\a \x01(\tR\x05state\x12\x1a\n" +
+	"\bsequence\x18\b \x01(\x03R\bsequence\x12\x1d\n" +
+	"\n" +
+	"byte_count\x18\t \x01(\x03R\tbyteCount\x129\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12=\n" +
+	"\fprocessed_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\vprocessedAt\x12D\n" +
+	"\x10dead_lettered_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x0edeadLetteredAt\"\xb5\x04\n" +
+	"\x0eCommandReceipt\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x04 \x01(\tR\tcommandId\x12\x17\n" +
+	"\aturn_id\x18\x05 \x01(\tR\x06turnId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x06 \x01(\x03R\n" +
+	"generation\x12\x1a\n" +
+	"\bsequence\x18\a \x01(\x03R\bsequence\x12\x12\n" +
+	"\x04lane\x18\b \x01(\tR\x04lane\x12\x14\n" +
+	"\x05state\x18\t \x01(\tR\x05state\x12\x1c\n" +
+	"\tduplicate\x18\n" +
+	" \x01(\bR\tduplicate\x12\x18\n" +
+	"\aattempt\x18\v \x01(\x03R\aattempt\x12*\n" +
+	"\x11target_command_id\x18\f \x01(\tR\x0ftargetCommandId\x12;\n" +
+	"\vaccepted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"acceptedAt\x129\n" +
+	"\n" +
+	"started_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
+	"\vfinished_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"finishedAt\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x10 \x01(\tR\terrorCode2\x96\x12\n" +
 	"\n" +
 	"BuckleyIPC\x12F\n" +
 	"\tSubscribe\x12 .buckley.ipc.v1.SubscribeRequest\x1a\x15.buckley.ipc.v1.Event0\x01\x12N\n" +
@@ -5242,7 +7463,14 @@ const file_ipc_proto_rawDesc = "" +
 	"\vGetAuditLog\x12\".buckley.ipc.v1.GetAuditLogRequest\x1a .buckley.ipc.v1.AuditLogResponse\x12b\n" +
 	"\rSubscribePush\x12'.buckley.ipc.v1.PushSubscriptionRequest\x1a(.buckley.ipc.v1.PushSubscriptionResponse\x12Q\n" +
 	"\x0fUnsubscribePush\x12&.buckley.ipc.v1.UnsubscribePushRequest\x1a\x16.google.protobuf.Empty\x12S\n" +
-	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponseB)Z'm31labs.dev/buckley/pkg/ipc/proto;ipcpbb\x06proto3"
+	"\x11GetVAPIDPublicKey\x12\x16.google.protobuf.Empty\x1a&.buckley.ipc.v1.VAPIDPublicKeyResponse2\xa5\x05\n" +
+	"\x12BuckleyObservation\x12n\n" +
+	"\x13GetSessionExecution\x12*.buckley.ipc.v1.GetSessionExecutionRequest\x1a+.buckley.ipc.v1.GetSessionExecutionResponse\x12n\n" +
+	"\x13ListSessionCommands\x12*.buckley.ipc.v1.ListSessionCommandsRequest\x1a+.buckley.ipc.v1.ListSessionCommandsResponse\x12h\n" +
+	"\x11GetSessionCommand\x12(.buckley.ipc.v1.GetSessionCommandRequest\x1a).buckley.ipc.v1.GetSessionCommandResponse\x12n\n" +
+	"\x13ListSessionRoutines\x12*.buckley.ipc.v1.ListSessionRoutinesRequest\x1a+.buckley.ipc.v1.ListSessionRoutinesResponse\x12h\n" +
+	"\x11GetSessionRoutine\x12(.buckley.ipc.v1.GetSessionRoutineRequest\x1a).buckley.ipc.v1.GetSessionRoutineResponse\x12k\n" +
+	"\x12ListRoutineMailbox\x12).buckley.ipc.v1.ListRoutineMailboxRequest\x1a*.buckley.ipc.v1.ListRoutineMailboxResponseB)Z'm31labs.dev/buckley/pkg/ipc/proto;ipcpbb\x06proto3"
 
 var (
 	file_ipc_proto_rawDescOnce sync.Once
@@ -5256,196 +7484,270 @@ func file_ipc_proto_rawDescGZIP() []byte {
 	return file_ipc_proto_rawDescData
 }
 
-var file_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
+var file_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 91)
 var file_ipc_proto_goTypes = []any{
-	(*SubscribeRequest)(nil),            // 0: buckley.ipc.v1.SubscribeRequest
-	(*Event)(nil),                       // 1: buckley.ipc.v1.Event
-	(*CommandRequest)(nil),              // 2: buckley.ipc.v1.CommandRequest
-	(*CommandResponse)(nil),             // 3: buckley.ipc.v1.CommandResponse
-	(*ListSessionsRequest)(nil),         // 4: buckley.ipc.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil),        // 5: buckley.ipc.v1.ListSessionsResponse
-	(*SessionSummary)(nil),              // 6: buckley.ipc.v1.SessionSummary
-	(*GetSessionRequest)(nil),           // 7: buckley.ipc.v1.GetSessionRequest
-	(*SessionDetail)(nil),               // 8: buckley.ipc.v1.SessionDetail
-	(*Message)(nil),                     // 9: buckley.ipc.v1.Message
-	(*Todo)(nil),                        // 10: buckley.ipc.v1.Todo
-	(*Skill)(nil),                       // 11: buckley.ipc.v1.Skill
-	(*PlanSummary)(nil),                 // 12: buckley.ipc.v1.PlanSummary
-	(*SessionSummaryText)(nil),          // 13: buckley.ipc.v1.SessionSummaryText
-	(*IssueSessionTokenRequest)(nil),    // 14: buckley.ipc.v1.IssueSessionTokenRequest
-	(*SessionTokenResponse)(nil),        // 15: buckley.ipc.v1.SessionTokenResponse
-	(*CreateHeadlessRequest)(nil),       // 16: buckley.ipc.v1.CreateHeadlessRequest
-	(*ResourceLimits)(nil),              // 17: buckley.ipc.v1.ResourceLimits
-	(*ToolPolicy)(nil),                  // 18: buckley.ipc.v1.ToolPolicy
-	(*HeadlessSession)(nil),             // 19: buckley.ipc.v1.HeadlessSession
-	(*DeleteHeadlessRequest)(nil),       // 20: buckley.ipc.v1.DeleteHeadlessRequest
-	(*HeadlessSessionList)(nil),         // 21: buckley.ipc.v1.HeadlessSessionList
-	(*WorkflowActionRequest)(nil),       // 22: buckley.ipc.v1.WorkflowActionRequest
-	(*WorkflowActionResponse)(nil),      // 23: buckley.ipc.v1.WorkflowActionResponse
-	(*RegisterAgentRequest)(nil),        // 24: buckley.ipc.v1.RegisterAgentRequest
-	(*AgentCommand)(nil),                // 25: buckley.ipc.v1.AgentCommand
-	(*ShellCommand)(nil),                // 26: buckley.ipc.v1.ShellCommand
-	(*FileOperation)(nil),               // 27: buckley.ipc.v1.FileOperation
-	(*GuiAction)(nil),                   // 28: buckley.ipc.v1.GuiAction
-	(*ProcessControl)(nil),              // 29: buckley.ipc.v1.ProcessControl
-	(*SystemQuery)(nil),                 // 30: buckley.ipc.v1.SystemQuery
-	(*AgentResult)(nil),                 // 31: buckley.ipc.v1.AgentResult
-	(*FileInfo)(nil),                    // 32: buckley.ipc.v1.FileInfo
-	(*AgentHeartbeatRequest)(nil),       // 33: buckley.ipc.v1.AgentHeartbeatRequest
-	(*AgentHeartbeatResponse)(nil),      // 34: buckley.ipc.v1.AgentHeartbeatResponse
-	(*AgentList)(nil),                   // 35: buckley.ipc.v1.AgentList
-	(*AgentInfo)(nil),                   // 36: buckley.ipc.v1.AgentInfo
-	(*ListPlansRequest)(nil),            // 37: buckley.ipc.v1.ListPlansRequest
-	(*ListPlansResponse)(nil),           // 38: buckley.ipc.v1.ListPlansResponse
-	(*GetPlanRequest)(nil),              // 39: buckley.ipc.v1.GetPlanRequest
-	(*Plan)(nil),                        // 40: buckley.ipc.v1.Plan
-	(*PlanTask)(nil),                    // 41: buckley.ipc.v1.PlanTask
-	(*ProjectList)(nil),                 // 42: buckley.ipc.v1.ProjectList
-	(*Project)(nil),                     // 43: buckley.ipc.v1.Project
-	(*CreateProjectRequest)(nil),        // 44: buckley.ipc.v1.CreateProjectRequest
-	(*PersonaList)(nil),                 // 45: buckley.ipc.v1.PersonaList
-	(*Persona)(nil),                     // 46: buckley.ipc.v1.Persona
-	(*ListPendingApprovalsRequest)(nil), // 47: buckley.ipc.v1.ListPendingApprovalsRequest
-	(*PendingApprovalsList)(nil),        // 48: buckley.ipc.v1.PendingApprovalsList
-	(*PendingApproval)(nil),             // 49: buckley.ipc.v1.PendingApproval
-	(*DiffLine)(nil),                    // 50: buckley.ipc.v1.DiffLine
-	(*ApproveToolCallRequest)(nil),      // 51: buckley.ipc.v1.ApproveToolCallRequest
-	(*ApproveToolCallResponse)(nil),     // 52: buckley.ipc.v1.ApproveToolCallResponse
-	(*RejectToolCallRequest)(nil),       // 53: buckley.ipc.v1.RejectToolCallRequest
-	(*RejectToolCallResponse)(nil),      // 54: buckley.ipc.v1.RejectToolCallResponse
-	(*ApprovalPolicy)(nil),              // 55: buckley.ipc.v1.ApprovalPolicy
-	(*UpdateApprovalPolicyRequest)(nil), // 56: buckley.ipc.v1.UpdateApprovalPolicyRequest
-	(*GetAuditLogRequest)(nil),          // 57: buckley.ipc.v1.GetAuditLogRequest
-	(*AuditLogResponse)(nil),            // 58: buckley.ipc.v1.AuditLogResponse
-	(*AuditEntry)(nil),                  // 59: buckley.ipc.v1.AuditEntry
-	(*PushSubscriptionRequest)(nil),     // 60: buckley.ipc.v1.PushSubscriptionRequest
-	(*PushSubscriptionResponse)(nil),    // 61: buckley.ipc.v1.PushSubscriptionResponse
-	(*UnsubscribePushRequest)(nil),      // 62: buckley.ipc.v1.UnsubscribePushRequest
-	(*VAPIDPublicKeyResponse)(nil),      // 63: buckley.ipc.v1.VAPIDPublicKeyResponse
-	nil,                                 // 64: buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
-	nil,                                 // 65: buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
-	nil,                                 // 66: buckley.ipc.v1.ShellCommand.EnvEntry
-	nil,                                 // 67: buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
-	(*structpb.Struct)(nil),             // 68: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),       // 69: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),               // 70: google.protobuf.Empty
+	(*SubscribeRequest)(nil),             // 0: buckley.ipc.v1.SubscribeRequest
+	(*Event)(nil),                        // 1: buckley.ipc.v1.Event
+	(*CommandRequest)(nil),               // 2: buckley.ipc.v1.CommandRequest
+	(*CommandResponse)(nil),              // 3: buckley.ipc.v1.CommandResponse
+	(*ListSessionsRequest)(nil),          // 4: buckley.ipc.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil),         // 5: buckley.ipc.v1.ListSessionsResponse
+	(*SessionSummary)(nil),               // 6: buckley.ipc.v1.SessionSummary
+	(*GetSessionRequest)(nil),            // 7: buckley.ipc.v1.GetSessionRequest
+	(*SessionDetail)(nil),                // 8: buckley.ipc.v1.SessionDetail
+	(*Message)(nil),                      // 9: buckley.ipc.v1.Message
+	(*Todo)(nil),                         // 10: buckley.ipc.v1.Todo
+	(*Skill)(nil),                        // 11: buckley.ipc.v1.Skill
+	(*PlanSummary)(nil),                  // 12: buckley.ipc.v1.PlanSummary
+	(*SessionSummaryText)(nil),           // 13: buckley.ipc.v1.SessionSummaryText
+	(*IssueSessionTokenRequest)(nil),     // 14: buckley.ipc.v1.IssueSessionTokenRequest
+	(*SessionTokenResponse)(nil),         // 15: buckley.ipc.v1.SessionTokenResponse
+	(*CreateHeadlessRequest)(nil),        // 16: buckley.ipc.v1.CreateHeadlessRequest
+	(*ResourceLimits)(nil),               // 17: buckley.ipc.v1.ResourceLimits
+	(*ToolPolicy)(nil),                   // 18: buckley.ipc.v1.ToolPolicy
+	(*HeadlessSession)(nil),              // 19: buckley.ipc.v1.HeadlessSession
+	(*DeleteHeadlessRequest)(nil),        // 20: buckley.ipc.v1.DeleteHeadlessRequest
+	(*HeadlessSessionList)(nil),          // 21: buckley.ipc.v1.HeadlessSessionList
+	(*WorkflowActionRequest)(nil),        // 22: buckley.ipc.v1.WorkflowActionRequest
+	(*WorkflowActionResponse)(nil),       // 23: buckley.ipc.v1.WorkflowActionResponse
+	(*RegisterAgentRequest)(nil),         // 24: buckley.ipc.v1.RegisterAgentRequest
+	(*AgentCommand)(nil),                 // 25: buckley.ipc.v1.AgentCommand
+	(*ShellCommand)(nil),                 // 26: buckley.ipc.v1.ShellCommand
+	(*FileOperation)(nil),                // 27: buckley.ipc.v1.FileOperation
+	(*GuiAction)(nil),                    // 28: buckley.ipc.v1.GuiAction
+	(*ProcessControl)(nil),               // 29: buckley.ipc.v1.ProcessControl
+	(*SystemQuery)(nil),                  // 30: buckley.ipc.v1.SystemQuery
+	(*AgentResult)(nil),                  // 31: buckley.ipc.v1.AgentResult
+	(*FileInfo)(nil),                     // 32: buckley.ipc.v1.FileInfo
+	(*AgentHeartbeatRequest)(nil),        // 33: buckley.ipc.v1.AgentHeartbeatRequest
+	(*AgentHeartbeatResponse)(nil),       // 34: buckley.ipc.v1.AgentHeartbeatResponse
+	(*AgentList)(nil),                    // 35: buckley.ipc.v1.AgentList
+	(*AgentInfo)(nil),                    // 36: buckley.ipc.v1.AgentInfo
+	(*ListPlansRequest)(nil),             // 37: buckley.ipc.v1.ListPlansRequest
+	(*ListPlansResponse)(nil),            // 38: buckley.ipc.v1.ListPlansResponse
+	(*GetPlanRequest)(nil),               // 39: buckley.ipc.v1.GetPlanRequest
+	(*Plan)(nil),                         // 40: buckley.ipc.v1.Plan
+	(*PlanTask)(nil),                     // 41: buckley.ipc.v1.PlanTask
+	(*ProjectList)(nil),                  // 42: buckley.ipc.v1.ProjectList
+	(*Project)(nil),                      // 43: buckley.ipc.v1.Project
+	(*CreateProjectRequest)(nil),         // 44: buckley.ipc.v1.CreateProjectRequest
+	(*PersonaList)(nil),                  // 45: buckley.ipc.v1.PersonaList
+	(*Persona)(nil),                      // 46: buckley.ipc.v1.Persona
+	(*ListPendingApprovalsRequest)(nil),  // 47: buckley.ipc.v1.ListPendingApprovalsRequest
+	(*PendingApprovalsList)(nil),         // 48: buckley.ipc.v1.PendingApprovalsList
+	(*PendingApproval)(nil),              // 49: buckley.ipc.v1.PendingApproval
+	(*DiffLine)(nil),                     // 50: buckley.ipc.v1.DiffLine
+	(*ApproveToolCallRequest)(nil),       // 51: buckley.ipc.v1.ApproveToolCallRequest
+	(*ApproveToolCallResponse)(nil),      // 52: buckley.ipc.v1.ApproveToolCallResponse
+	(*RejectToolCallRequest)(nil),        // 53: buckley.ipc.v1.RejectToolCallRequest
+	(*RejectToolCallResponse)(nil),       // 54: buckley.ipc.v1.RejectToolCallResponse
+	(*ApprovalPolicy)(nil),               // 55: buckley.ipc.v1.ApprovalPolicy
+	(*UpdateApprovalPolicyRequest)(nil),  // 56: buckley.ipc.v1.UpdateApprovalPolicyRequest
+	(*GetAuditLogRequest)(nil),           // 57: buckley.ipc.v1.GetAuditLogRequest
+	(*AuditLogResponse)(nil),             // 58: buckley.ipc.v1.AuditLogResponse
+	(*AuditEntry)(nil),                   // 59: buckley.ipc.v1.AuditEntry
+	(*PushSubscriptionRequest)(nil),      // 60: buckley.ipc.v1.PushSubscriptionRequest
+	(*PushSubscriptionResponse)(nil),     // 61: buckley.ipc.v1.PushSubscriptionResponse
+	(*UnsubscribePushRequest)(nil),       // 62: buckley.ipc.v1.UnsubscribePushRequest
+	(*VAPIDPublicKeyResponse)(nil),       // 63: buckley.ipc.v1.VAPIDPublicKeyResponse
+	(*GetSessionExecutionRequest)(nil),   // 64: buckley.ipc.v1.GetSessionExecutionRequest
+	(*GetSessionExecutionResponse)(nil),  // 65: buckley.ipc.v1.GetSessionExecutionResponse
+	(*ListSessionCommandsRequest)(nil),   // 66: buckley.ipc.v1.ListSessionCommandsRequest
+	(*ListSessionCommandsResponse)(nil),  // 67: buckley.ipc.v1.ListSessionCommandsResponse
+	(*GetSessionCommandRequest)(nil),     // 68: buckley.ipc.v1.GetSessionCommandRequest
+	(*GetSessionCommandResponse)(nil),    // 69: buckley.ipc.v1.GetSessionCommandResponse
+	(*ListSessionRoutinesRequest)(nil),   // 70: buckley.ipc.v1.ListSessionRoutinesRequest
+	(*ListSessionRoutinesResponse)(nil),  // 71: buckley.ipc.v1.ListSessionRoutinesResponse
+	(*GetSessionRoutineRequest)(nil),     // 72: buckley.ipc.v1.GetSessionRoutineRequest
+	(*GetSessionRoutineResponse)(nil),    // 73: buckley.ipc.v1.GetSessionRoutineResponse
+	(*ListRoutineMailboxRequest)(nil),    // 74: buckley.ipc.v1.ListRoutineMailboxRequest
+	(*ListRoutineMailboxResponse)(nil),   // 75: buckley.ipc.v1.ListRoutineMailboxResponse
+	(*SessionExecutionSnapshot)(nil),     // 76: buckley.ipc.v1.SessionExecutionSnapshot
+	(*SessionExecutionState)(nil),        // 77: buckley.ipc.v1.SessionExecutionState
+	(*SessionCommandSummary)(nil),        // 78: buckley.ipc.v1.SessionCommandSummary
+	(*SessionEffectSummary)(nil),         // 79: buckley.ipc.v1.SessionEffectSummary
+	(*SessionEffectStatus)(nil),          // 80: buckley.ipc.v1.SessionEffectStatus
+	(*SessionCommandStatus)(nil),         // 81: buckley.ipc.v1.SessionCommandStatus
+	(*SessionRoutineAttemptStatus)(nil),  // 82: buckley.ipc.v1.SessionRoutineAttemptStatus
+	(*SessionRoutineMailboxSummary)(nil), // 83: buckley.ipc.v1.SessionRoutineMailboxSummary
+	(*SessionRoutineStatus)(nil),         // 84: buckley.ipc.v1.SessionRoutineStatus
+	(*RoutineMailboxStatus)(nil),         // 85: buckley.ipc.v1.RoutineMailboxStatus
+	(*CommandReceipt)(nil),               // 86: buckley.ipc.v1.CommandReceipt
+	nil,                                  // 87: buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
+	nil,                                  // 88: buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
+	nil,                                  // 89: buckley.ipc.v1.ShellCommand.EnvEntry
+	nil,                                  // 90: buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
+	(*structpb.Struct)(nil),              // 91: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),        // 92: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),                // 93: google.protobuf.Empty
 }
 var file_ipc_proto_depIdxs = []int32{
-	68, // 0: buckley.ipc.v1.Event.payload:type_name -> google.protobuf.Struct
-	69, // 1: buckley.ipc.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
-	6,  // 2: buckley.ipc.v1.ListSessionsResponse.sessions:type_name -> buckley.ipc.v1.SessionSummary
-	69, // 3: buckley.ipc.v1.SessionSummary.created_at:type_name -> google.protobuf.Timestamp
-	69, // 4: buckley.ipc.v1.SessionSummary.last_active:type_name -> google.protobuf.Timestamp
-	6,  // 5: buckley.ipc.v1.SessionDetail.session:type_name -> buckley.ipc.v1.SessionSummary
-	9,  // 6: buckley.ipc.v1.SessionDetail.recent_messages:type_name -> buckley.ipc.v1.Message
-	10, // 7: buckley.ipc.v1.SessionDetail.todos:type_name -> buckley.ipc.v1.Todo
-	11, // 8: buckley.ipc.v1.SessionDetail.active_skills:type_name -> buckley.ipc.v1.Skill
-	12, // 9: buckley.ipc.v1.SessionDetail.active_plan:type_name -> buckley.ipc.v1.PlanSummary
-	13, // 10: buckley.ipc.v1.SessionDetail.summary:type_name -> buckley.ipc.v1.SessionSummaryText
-	69, // 11: buckley.ipc.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
-	69, // 12: buckley.ipc.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
-	69, // 13: buckley.ipc.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
-	69, // 14: buckley.ipc.v1.SessionSummaryText.generated_at:type_name -> google.protobuf.Timestamp
-	64, // 15: buckley.ipc.v1.CreateHeadlessRequest.env:type_name -> buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
-	17, // 16: buckley.ipc.v1.CreateHeadlessRequest.limits:type_name -> buckley.ipc.v1.ResourceLimits
-	18, // 17: buckley.ipc.v1.CreateHeadlessRequest.tool_policy:type_name -> buckley.ipc.v1.ToolPolicy
-	69, // 18: buckley.ipc.v1.HeadlessSession.created_at:type_name -> google.protobuf.Timestamp
-	69, // 19: buckley.ipc.v1.HeadlessSession.updated_at:type_name -> google.protobuf.Timestamp
-	19, // 20: buckley.ipc.v1.HeadlessSessionList.sessions:type_name -> buckley.ipc.v1.HeadlessSession
-	65, // 21: buckley.ipc.v1.RegisterAgentRequest.metadata:type_name -> buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
-	26, // 22: buckley.ipc.v1.AgentCommand.shell:type_name -> buckley.ipc.v1.ShellCommand
-	27, // 23: buckley.ipc.v1.AgentCommand.file:type_name -> buckley.ipc.v1.FileOperation
-	28, // 24: buckley.ipc.v1.AgentCommand.gui:type_name -> buckley.ipc.v1.GuiAction
-	29, // 25: buckley.ipc.v1.AgentCommand.process:type_name -> buckley.ipc.v1.ProcessControl
-	30, // 26: buckley.ipc.v1.AgentCommand.query:type_name -> buckley.ipc.v1.SystemQuery
-	66, // 27: buckley.ipc.v1.ShellCommand.env:type_name -> buckley.ipc.v1.ShellCommand.EnvEntry
-	32, // 28: buckley.ipc.v1.AgentResult.file_info:type_name -> buckley.ipc.v1.FileInfo
-	32, // 29: buckley.ipc.v1.AgentResult.file_list:type_name -> buckley.ipc.v1.FileInfo
-	68, // 30: buckley.ipc.v1.AgentResult.query_result:type_name -> google.protobuf.Struct
-	69, // 31: buckley.ipc.v1.AgentResult.started_at:type_name -> google.protobuf.Timestamp
-	69, // 32: buckley.ipc.v1.AgentResult.completed_at:type_name -> google.protobuf.Timestamp
-	69, // 33: buckley.ipc.v1.FileInfo.modified_at:type_name -> google.protobuf.Timestamp
-	67, // 34: buckley.ipc.v1.AgentHeartbeatResponse.config_updates:type_name -> buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
-	36, // 35: buckley.ipc.v1.AgentList.agents:type_name -> buckley.ipc.v1.AgentInfo
-	69, // 36: buckley.ipc.v1.AgentInfo.connected_at:type_name -> google.protobuf.Timestamp
-	69, // 37: buckley.ipc.v1.AgentInfo.last_heartbeat:type_name -> google.protobuf.Timestamp
-	12, // 38: buckley.ipc.v1.ListPlansResponse.plans:type_name -> buckley.ipc.v1.PlanSummary
-	41, // 39: buckley.ipc.v1.Plan.tasks:type_name -> buckley.ipc.v1.PlanTask
-	69, // 40: buckley.ipc.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
-	69, // 41: buckley.ipc.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
-	69, // 42: buckley.ipc.v1.PlanTask.created_at:type_name -> google.protobuf.Timestamp
-	69, // 43: buckley.ipc.v1.PlanTask.updated_at:type_name -> google.protobuf.Timestamp
-	43, // 44: buckley.ipc.v1.ProjectList.projects:type_name -> buckley.ipc.v1.Project
-	69, // 45: buckley.ipc.v1.Project.last_active:type_name -> google.protobuf.Timestamp
-	46, // 46: buckley.ipc.v1.PersonaList.personas:type_name -> buckley.ipc.v1.Persona
-	49, // 47: buckley.ipc.v1.PendingApprovalsList.approvals:type_name -> buckley.ipc.v1.PendingApproval
-	68, // 48: buckley.ipc.v1.PendingApproval.tool_input:type_name -> google.protobuf.Struct
-	69, // 49: buckley.ipc.v1.PendingApproval.expires_at:type_name -> google.protobuf.Timestamp
-	69, // 50: buckley.ipc.v1.PendingApproval.created_at:type_name -> google.protobuf.Timestamp
-	50, // 51: buckley.ipc.v1.PendingApproval.diff_lines:type_name -> buckley.ipc.v1.DiffLine
-	69, // 52: buckley.ipc.v1.ApprovalPolicy.created_at:type_name -> google.protobuf.Timestamp
-	69, // 53: buckley.ipc.v1.ApprovalPolicy.updated_at:type_name -> google.protobuf.Timestamp
-	59, // 54: buckley.ipc.v1.AuditLogResponse.entries:type_name -> buckley.ipc.v1.AuditEntry
-	69, // 55: buckley.ipc.v1.AuditEntry.executed_at:type_name -> google.protobuf.Timestamp
-	0,  // 56: buckley.ipc.v1.BuckleyIPC.Subscribe:input_type -> buckley.ipc.v1.SubscribeRequest
-	2,  // 57: buckley.ipc.v1.BuckleyIPC.SendCommand:input_type -> buckley.ipc.v1.CommandRequest
-	4,  // 58: buckley.ipc.v1.BuckleyIPC.ListSessions:input_type -> buckley.ipc.v1.ListSessionsRequest
-	7,  // 59: buckley.ipc.v1.BuckleyIPC.GetSession:input_type -> buckley.ipc.v1.GetSessionRequest
-	14, // 60: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:input_type -> buckley.ipc.v1.IssueSessionTokenRequest
-	16, // 61: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:input_type -> buckley.ipc.v1.CreateHeadlessRequest
-	20, // 62: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:input_type -> buckley.ipc.v1.DeleteHeadlessRequest
-	70, // 63: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:input_type -> google.protobuf.Empty
-	37, // 64: buckley.ipc.v1.BuckleyIPC.ListPlans:input_type -> buckley.ipc.v1.ListPlansRequest
-	39, // 65: buckley.ipc.v1.BuckleyIPC.GetPlan:input_type -> buckley.ipc.v1.GetPlanRequest
-	70, // 66: buckley.ipc.v1.BuckleyIPC.ListProjects:input_type -> google.protobuf.Empty
-	44, // 67: buckley.ipc.v1.BuckleyIPC.CreateProject:input_type -> buckley.ipc.v1.CreateProjectRequest
-	70, // 68: buckley.ipc.v1.BuckleyIPC.ListPersonas:input_type -> google.protobuf.Empty
-	22, // 69: buckley.ipc.v1.BuckleyIPC.WorkflowAction:input_type -> buckley.ipc.v1.WorkflowActionRequest
-	24, // 70: buckley.ipc.v1.BuckleyIPC.RegisterAgent:input_type -> buckley.ipc.v1.RegisterAgentRequest
-	31, // 71: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:input_type -> buckley.ipc.v1.AgentResult
-	33, // 72: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:input_type -> buckley.ipc.v1.AgentHeartbeatRequest
-	70, // 73: buckley.ipc.v1.BuckleyIPC.ListAgents:input_type -> google.protobuf.Empty
-	47, // 74: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:input_type -> buckley.ipc.v1.ListPendingApprovalsRequest
-	51, // 75: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:input_type -> buckley.ipc.v1.ApproveToolCallRequest
-	53, // 76: buckley.ipc.v1.BuckleyIPC.RejectToolCall:input_type -> buckley.ipc.v1.RejectToolCallRequest
-	70, // 77: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:input_type -> google.protobuf.Empty
-	56, // 78: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:input_type -> buckley.ipc.v1.UpdateApprovalPolicyRequest
-	57, // 79: buckley.ipc.v1.BuckleyIPC.GetAuditLog:input_type -> buckley.ipc.v1.GetAuditLogRequest
-	60, // 80: buckley.ipc.v1.BuckleyIPC.SubscribePush:input_type -> buckley.ipc.v1.PushSubscriptionRequest
-	62, // 81: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:input_type -> buckley.ipc.v1.UnsubscribePushRequest
-	70, // 82: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:input_type -> google.protobuf.Empty
-	1,  // 83: buckley.ipc.v1.BuckleyIPC.Subscribe:output_type -> buckley.ipc.v1.Event
-	3,  // 84: buckley.ipc.v1.BuckleyIPC.SendCommand:output_type -> buckley.ipc.v1.CommandResponse
-	5,  // 85: buckley.ipc.v1.BuckleyIPC.ListSessions:output_type -> buckley.ipc.v1.ListSessionsResponse
-	8,  // 86: buckley.ipc.v1.BuckleyIPC.GetSession:output_type -> buckley.ipc.v1.SessionDetail
-	15, // 87: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:output_type -> buckley.ipc.v1.SessionTokenResponse
-	19, // 88: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:output_type -> buckley.ipc.v1.HeadlessSession
-	70, // 89: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:output_type -> google.protobuf.Empty
-	21, // 90: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:output_type -> buckley.ipc.v1.HeadlessSessionList
-	38, // 91: buckley.ipc.v1.BuckleyIPC.ListPlans:output_type -> buckley.ipc.v1.ListPlansResponse
-	40, // 92: buckley.ipc.v1.BuckleyIPC.GetPlan:output_type -> buckley.ipc.v1.Plan
-	42, // 93: buckley.ipc.v1.BuckleyIPC.ListProjects:output_type -> buckley.ipc.v1.ProjectList
-	43, // 94: buckley.ipc.v1.BuckleyIPC.CreateProject:output_type -> buckley.ipc.v1.Project
-	45, // 95: buckley.ipc.v1.BuckleyIPC.ListPersonas:output_type -> buckley.ipc.v1.PersonaList
-	23, // 96: buckley.ipc.v1.BuckleyIPC.WorkflowAction:output_type -> buckley.ipc.v1.WorkflowActionResponse
-	25, // 97: buckley.ipc.v1.BuckleyIPC.RegisterAgent:output_type -> buckley.ipc.v1.AgentCommand
-	70, // 98: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:output_type -> google.protobuf.Empty
-	34, // 99: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:output_type -> buckley.ipc.v1.AgentHeartbeatResponse
-	35, // 100: buckley.ipc.v1.BuckleyIPC.ListAgents:output_type -> buckley.ipc.v1.AgentList
-	48, // 101: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:output_type -> buckley.ipc.v1.PendingApprovalsList
-	52, // 102: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:output_type -> buckley.ipc.v1.ApproveToolCallResponse
-	54, // 103: buckley.ipc.v1.BuckleyIPC.RejectToolCall:output_type -> buckley.ipc.v1.RejectToolCallResponse
-	55, // 104: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
-	55, // 105: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
-	58, // 106: buckley.ipc.v1.BuckleyIPC.GetAuditLog:output_type -> buckley.ipc.v1.AuditLogResponse
-	61, // 107: buckley.ipc.v1.BuckleyIPC.SubscribePush:output_type -> buckley.ipc.v1.PushSubscriptionResponse
-	70, // 108: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:output_type -> google.protobuf.Empty
-	63, // 109: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:output_type -> buckley.ipc.v1.VAPIDPublicKeyResponse
-	83, // [83:110] is the sub-list for method output_type
-	56, // [56:83] is the sub-list for method input_type
-	56, // [56:56] is the sub-list for extension type_name
-	56, // [56:56] is the sub-list for extension extendee
-	0,  // [0:56] is the sub-list for field type_name
+	91,  // 0: buckley.ipc.v1.Event.payload:type_name -> google.protobuf.Struct
+	92,  // 1: buckley.ipc.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	86,  // 2: buckley.ipc.v1.CommandResponse.receipt:type_name -> buckley.ipc.v1.CommandReceipt
+	6,   // 3: buckley.ipc.v1.ListSessionsResponse.sessions:type_name -> buckley.ipc.v1.SessionSummary
+	92,  // 4: buckley.ipc.v1.SessionSummary.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 5: buckley.ipc.v1.SessionSummary.last_active:type_name -> google.protobuf.Timestamp
+	6,   // 6: buckley.ipc.v1.SessionDetail.session:type_name -> buckley.ipc.v1.SessionSummary
+	9,   // 7: buckley.ipc.v1.SessionDetail.recent_messages:type_name -> buckley.ipc.v1.Message
+	10,  // 8: buckley.ipc.v1.SessionDetail.todos:type_name -> buckley.ipc.v1.Todo
+	11,  // 9: buckley.ipc.v1.SessionDetail.active_skills:type_name -> buckley.ipc.v1.Skill
+	12,  // 10: buckley.ipc.v1.SessionDetail.active_plan:type_name -> buckley.ipc.v1.PlanSummary
+	13,  // 11: buckley.ipc.v1.SessionDetail.summary:type_name -> buckley.ipc.v1.SessionSummaryText
+	92,  // 12: buckley.ipc.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
+	92,  // 13: buckley.ipc.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 14: buckley.ipc.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
+	92,  // 15: buckley.ipc.v1.SessionSummaryText.generated_at:type_name -> google.protobuf.Timestamp
+	87,  // 16: buckley.ipc.v1.CreateHeadlessRequest.env:type_name -> buckley.ipc.v1.CreateHeadlessRequest.EnvEntry
+	17,  // 17: buckley.ipc.v1.CreateHeadlessRequest.limits:type_name -> buckley.ipc.v1.ResourceLimits
+	18,  // 18: buckley.ipc.v1.CreateHeadlessRequest.tool_policy:type_name -> buckley.ipc.v1.ToolPolicy
+	92,  // 19: buckley.ipc.v1.HeadlessSession.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 20: buckley.ipc.v1.HeadlessSession.updated_at:type_name -> google.protobuf.Timestamp
+	86,  // 21: buckley.ipc.v1.HeadlessSession.initial_receipt:type_name -> buckley.ipc.v1.CommandReceipt
+	19,  // 22: buckley.ipc.v1.HeadlessSessionList.sessions:type_name -> buckley.ipc.v1.HeadlessSession
+	88,  // 23: buckley.ipc.v1.RegisterAgentRequest.metadata:type_name -> buckley.ipc.v1.RegisterAgentRequest.MetadataEntry
+	26,  // 24: buckley.ipc.v1.AgentCommand.shell:type_name -> buckley.ipc.v1.ShellCommand
+	27,  // 25: buckley.ipc.v1.AgentCommand.file:type_name -> buckley.ipc.v1.FileOperation
+	28,  // 26: buckley.ipc.v1.AgentCommand.gui:type_name -> buckley.ipc.v1.GuiAction
+	29,  // 27: buckley.ipc.v1.AgentCommand.process:type_name -> buckley.ipc.v1.ProcessControl
+	30,  // 28: buckley.ipc.v1.AgentCommand.query:type_name -> buckley.ipc.v1.SystemQuery
+	89,  // 29: buckley.ipc.v1.ShellCommand.env:type_name -> buckley.ipc.v1.ShellCommand.EnvEntry
+	32,  // 30: buckley.ipc.v1.AgentResult.file_info:type_name -> buckley.ipc.v1.FileInfo
+	32,  // 31: buckley.ipc.v1.AgentResult.file_list:type_name -> buckley.ipc.v1.FileInfo
+	91,  // 32: buckley.ipc.v1.AgentResult.query_result:type_name -> google.protobuf.Struct
+	92,  // 33: buckley.ipc.v1.AgentResult.started_at:type_name -> google.protobuf.Timestamp
+	92,  // 34: buckley.ipc.v1.AgentResult.completed_at:type_name -> google.protobuf.Timestamp
+	92,  // 35: buckley.ipc.v1.FileInfo.modified_at:type_name -> google.protobuf.Timestamp
+	90,  // 36: buckley.ipc.v1.AgentHeartbeatResponse.config_updates:type_name -> buckley.ipc.v1.AgentHeartbeatResponse.ConfigUpdatesEntry
+	36,  // 37: buckley.ipc.v1.AgentList.agents:type_name -> buckley.ipc.v1.AgentInfo
+	92,  // 38: buckley.ipc.v1.AgentInfo.connected_at:type_name -> google.protobuf.Timestamp
+	92,  // 39: buckley.ipc.v1.AgentInfo.last_heartbeat:type_name -> google.protobuf.Timestamp
+	12,  // 40: buckley.ipc.v1.ListPlansResponse.plans:type_name -> buckley.ipc.v1.PlanSummary
+	41,  // 41: buckley.ipc.v1.Plan.tasks:type_name -> buckley.ipc.v1.PlanTask
+	92,  // 42: buckley.ipc.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 43: buckley.ipc.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
+	92,  // 44: buckley.ipc.v1.PlanTask.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 45: buckley.ipc.v1.PlanTask.updated_at:type_name -> google.protobuf.Timestamp
+	43,  // 46: buckley.ipc.v1.ProjectList.projects:type_name -> buckley.ipc.v1.Project
+	92,  // 47: buckley.ipc.v1.Project.last_active:type_name -> google.protobuf.Timestamp
+	46,  // 48: buckley.ipc.v1.PersonaList.personas:type_name -> buckley.ipc.v1.Persona
+	49,  // 49: buckley.ipc.v1.PendingApprovalsList.approvals:type_name -> buckley.ipc.v1.PendingApproval
+	91,  // 50: buckley.ipc.v1.PendingApproval.tool_input:type_name -> google.protobuf.Struct
+	92,  // 51: buckley.ipc.v1.PendingApproval.expires_at:type_name -> google.protobuf.Timestamp
+	92,  // 52: buckley.ipc.v1.PendingApproval.created_at:type_name -> google.protobuf.Timestamp
+	50,  // 53: buckley.ipc.v1.PendingApproval.diff_lines:type_name -> buckley.ipc.v1.DiffLine
+	92,  // 54: buckley.ipc.v1.ApprovalPolicy.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 55: buckley.ipc.v1.ApprovalPolicy.updated_at:type_name -> google.protobuf.Timestamp
+	59,  // 56: buckley.ipc.v1.AuditLogResponse.entries:type_name -> buckley.ipc.v1.AuditEntry
+	92,  // 57: buckley.ipc.v1.AuditEntry.executed_at:type_name -> google.protobuf.Timestamp
+	76,  // 58: buckley.ipc.v1.GetSessionExecutionResponse.execution:type_name -> buckley.ipc.v1.SessionExecutionSnapshot
+	81,  // 59: buckley.ipc.v1.ListSessionCommandsResponse.commands:type_name -> buckley.ipc.v1.SessionCommandStatus
+	81,  // 60: buckley.ipc.v1.GetSessionCommandResponse.command:type_name -> buckley.ipc.v1.SessionCommandStatus
+	84,  // 61: buckley.ipc.v1.ListSessionRoutinesResponse.routines:type_name -> buckley.ipc.v1.SessionRoutineStatus
+	84,  // 62: buckley.ipc.v1.GetSessionRoutineResponse.routine:type_name -> buckley.ipc.v1.SessionRoutineStatus
+	85,  // 63: buckley.ipc.v1.ListRoutineMailboxResponse.messages:type_name -> buckley.ipc.v1.RoutineMailboxStatus
+	77,  // 64: buckley.ipc.v1.SessionExecutionSnapshot.state:type_name -> buckley.ipc.v1.SessionExecutionState
+	78,  // 65: buckley.ipc.v1.SessionExecutionSnapshot.command_summary:type_name -> buckley.ipc.v1.SessionCommandSummary
+	79,  // 66: buckley.ipc.v1.SessionExecutionSnapshot.effect_summary:type_name -> buckley.ipc.v1.SessionEffectSummary
+	80,  // 67: buckley.ipc.v1.SessionExecutionSnapshot.attention_effects:type_name -> buckley.ipc.v1.SessionEffectStatus
+	81,  // 68: buckley.ipc.v1.SessionExecutionSnapshot.recent_commands:type_name -> buckley.ipc.v1.SessionCommandStatus
+	92,  // 69: buckley.ipc.v1.SessionExecutionSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	92,  // 70: buckley.ipc.v1.SessionExecutionState.updated_at:type_name -> google.protobuf.Timestamp
+	92,  // 71: buckley.ipc.v1.SessionEffectStatus.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 72: buckley.ipc.v1.SessionEffectStatus.expires_at:type_name -> google.protobuf.Timestamp
+	92,  // 73: buckley.ipc.v1.SessionEffectStatus.ambiguous_at:type_name -> google.protobuf.Timestamp
+	92,  // 74: buckley.ipc.v1.SessionEffectStatus.ended_at:type_name -> google.protobuf.Timestamp
+	92,  // 75: buckley.ipc.v1.SessionEffectStatus.resolved_at:type_name -> google.protobuf.Timestamp
+	92,  // 76: buckley.ipc.v1.SessionCommandStatus.accepted_at:type_name -> google.protobuf.Timestamp
+	92,  // 77: buckley.ipc.v1.SessionCommandStatus.started_at:type_name -> google.protobuf.Timestamp
+	92,  // 78: buckley.ipc.v1.SessionCommandStatus.finished_at:type_name -> google.protobuf.Timestamp
+	79,  // 79: buckley.ipc.v1.SessionCommandStatus.effect_summary:type_name -> buckley.ipc.v1.SessionEffectSummary
+	80,  // 80: buckley.ipc.v1.SessionCommandStatus.effects:type_name -> buckley.ipc.v1.SessionEffectStatus
+	92,  // 81: buckley.ipc.v1.SessionRoutineAttemptStatus.attached_at:type_name -> google.protobuf.Timestamp
+	92,  // 82: buckley.ipc.v1.SessionRoutineAttemptStatus.heartbeat_at:type_name -> google.protobuf.Timestamp
+	92,  // 83: buckley.ipc.v1.SessionRoutineAttemptStatus.lease_expires_at:type_name -> google.protobuf.Timestamp
+	92,  // 84: buckley.ipc.v1.SessionRoutineAttemptStatus.detached_at:type_name -> google.protobuf.Timestamp
+	92,  // 85: buckley.ipc.v1.SessionRoutineStatus.started_at:type_name -> google.protobuf.Timestamp
+	92,  // 86: buckley.ipc.v1.SessionRoutineStatus.finished_at:type_name -> google.protobuf.Timestamp
+	82,  // 87: buckley.ipc.v1.SessionRoutineStatus.attempt:type_name -> buckley.ipc.v1.SessionRoutineAttemptStatus
+	83,  // 88: buckley.ipc.v1.SessionRoutineStatus.mailbox:type_name -> buckley.ipc.v1.SessionRoutineMailboxSummary
+	92,  // 89: buckley.ipc.v1.RoutineMailboxStatus.created_at:type_name -> google.protobuf.Timestamp
+	92,  // 90: buckley.ipc.v1.RoutineMailboxStatus.processed_at:type_name -> google.protobuf.Timestamp
+	92,  // 91: buckley.ipc.v1.RoutineMailboxStatus.dead_lettered_at:type_name -> google.protobuf.Timestamp
+	92,  // 92: buckley.ipc.v1.CommandReceipt.accepted_at:type_name -> google.protobuf.Timestamp
+	92,  // 93: buckley.ipc.v1.CommandReceipt.started_at:type_name -> google.protobuf.Timestamp
+	92,  // 94: buckley.ipc.v1.CommandReceipt.finished_at:type_name -> google.protobuf.Timestamp
+	0,   // 95: buckley.ipc.v1.BuckleyIPC.Subscribe:input_type -> buckley.ipc.v1.SubscribeRequest
+	2,   // 96: buckley.ipc.v1.BuckleyIPC.SendCommand:input_type -> buckley.ipc.v1.CommandRequest
+	4,   // 97: buckley.ipc.v1.BuckleyIPC.ListSessions:input_type -> buckley.ipc.v1.ListSessionsRequest
+	7,   // 98: buckley.ipc.v1.BuckleyIPC.GetSession:input_type -> buckley.ipc.v1.GetSessionRequest
+	14,  // 99: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:input_type -> buckley.ipc.v1.IssueSessionTokenRequest
+	16,  // 100: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:input_type -> buckley.ipc.v1.CreateHeadlessRequest
+	20,  // 101: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:input_type -> buckley.ipc.v1.DeleteHeadlessRequest
+	93,  // 102: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:input_type -> google.protobuf.Empty
+	37,  // 103: buckley.ipc.v1.BuckleyIPC.ListPlans:input_type -> buckley.ipc.v1.ListPlansRequest
+	39,  // 104: buckley.ipc.v1.BuckleyIPC.GetPlan:input_type -> buckley.ipc.v1.GetPlanRequest
+	93,  // 105: buckley.ipc.v1.BuckleyIPC.ListProjects:input_type -> google.protobuf.Empty
+	44,  // 106: buckley.ipc.v1.BuckleyIPC.CreateProject:input_type -> buckley.ipc.v1.CreateProjectRequest
+	93,  // 107: buckley.ipc.v1.BuckleyIPC.ListPersonas:input_type -> google.protobuf.Empty
+	22,  // 108: buckley.ipc.v1.BuckleyIPC.WorkflowAction:input_type -> buckley.ipc.v1.WorkflowActionRequest
+	24,  // 109: buckley.ipc.v1.BuckleyIPC.RegisterAgent:input_type -> buckley.ipc.v1.RegisterAgentRequest
+	31,  // 110: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:input_type -> buckley.ipc.v1.AgentResult
+	33,  // 111: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:input_type -> buckley.ipc.v1.AgentHeartbeatRequest
+	93,  // 112: buckley.ipc.v1.BuckleyIPC.ListAgents:input_type -> google.protobuf.Empty
+	47,  // 113: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:input_type -> buckley.ipc.v1.ListPendingApprovalsRequest
+	51,  // 114: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:input_type -> buckley.ipc.v1.ApproveToolCallRequest
+	53,  // 115: buckley.ipc.v1.BuckleyIPC.RejectToolCall:input_type -> buckley.ipc.v1.RejectToolCallRequest
+	93,  // 116: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:input_type -> google.protobuf.Empty
+	56,  // 117: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:input_type -> buckley.ipc.v1.UpdateApprovalPolicyRequest
+	57,  // 118: buckley.ipc.v1.BuckleyIPC.GetAuditLog:input_type -> buckley.ipc.v1.GetAuditLogRequest
+	60,  // 119: buckley.ipc.v1.BuckleyIPC.SubscribePush:input_type -> buckley.ipc.v1.PushSubscriptionRequest
+	62,  // 120: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:input_type -> buckley.ipc.v1.UnsubscribePushRequest
+	93,  // 121: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:input_type -> google.protobuf.Empty
+	64,  // 122: buckley.ipc.v1.BuckleyObservation.GetSessionExecution:input_type -> buckley.ipc.v1.GetSessionExecutionRequest
+	66,  // 123: buckley.ipc.v1.BuckleyObservation.ListSessionCommands:input_type -> buckley.ipc.v1.ListSessionCommandsRequest
+	68,  // 124: buckley.ipc.v1.BuckleyObservation.GetSessionCommand:input_type -> buckley.ipc.v1.GetSessionCommandRequest
+	70,  // 125: buckley.ipc.v1.BuckleyObservation.ListSessionRoutines:input_type -> buckley.ipc.v1.ListSessionRoutinesRequest
+	72,  // 126: buckley.ipc.v1.BuckleyObservation.GetSessionRoutine:input_type -> buckley.ipc.v1.GetSessionRoutineRequest
+	74,  // 127: buckley.ipc.v1.BuckleyObservation.ListRoutineMailbox:input_type -> buckley.ipc.v1.ListRoutineMailboxRequest
+	1,   // 128: buckley.ipc.v1.BuckleyIPC.Subscribe:output_type -> buckley.ipc.v1.Event
+	3,   // 129: buckley.ipc.v1.BuckleyIPC.SendCommand:output_type -> buckley.ipc.v1.CommandResponse
+	5,   // 130: buckley.ipc.v1.BuckleyIPC.ListSessions:output_type -> buckley.ipc.v1.ListSessionsResponse
+	8,   // 131: buckley.ipc.v1.BuckleyIPC.GetSession:output_type -> buckley.ipc.v1.SessionDetail
+	15,  // 132: buckley.ipc.v1.BuckleyIPC.IssueSessionToken:output_type -> buckley.ipc.v1.SessionTokenResponse
+	19,  // 133: buckley.ipc.v1.BuckleyIPC.CreateHeadlessSession:output_type -> buckley.ipc.v1.HeadlessSession
+	93,  // 134: buckley.ipc.v1.BuckleyIPC.DeleteHeadlessSession:output_type -> google.protobuf.Empty
+	21,  // 135: buckley.ipc.v1.BuckleyIPC.ListHeadlessSessions:output_type -> buckley.ipc.v1.HeadlessSessionList
+	38,  // 136: buckley.ipc.v1.BuckleyIPC.ListPlans:output_type -> buckley.ipc.v1.ListPlansResponse
+	40,  // 137: buckley.ipc.v1.BuckleyIPC.GetPlan:output_type -> buckley.ipc.v1.Plan
+	42,  // 138: buckley.ipc.v1.BuckleyIPC.ListProjects:output_type -> buckley.ipc.v1.ProjectList
+	43,  // 139: buckley.ipc.v1.BuckleyIPC.CreateProject:output_type -> buckley.ipc.v1.Project
+	45,  // 140: buckley.ipc.v1.BuckleyIPC.ListPersonas:output_type -> buckley.ipc.v1.PersonaList
+	23,  // 141: buckley.ipc.v1.BuckleyIPC.WorkflowAction:output_type -> buckley.ipc.v1.WorkflowActionResponse
+	25,  // 142: buckley.ipc.v1.BuckleyIPC.RegisterAgent:output_type -> buckley.ipc.v1.AgentCommand
+	93,  // 143: buckley.ipc.v1.BuckleyIPC.ReportAgentResult:output_type -> google.protobuf.Empty
+	34,  // 144: buckley.ipc.v1.BuckleyIPC.AgentHeartbeat:output_type -> buckley.ipc.v1.AgentHeartbeatResponse
+	35,  // 145: buckley.ipc.v1.BuckleyIPC.ListAgents:output_type -> buckley.ipc.v1.AgentList
+	48,  // 146: buckley.ipc.v1.BuckleyIPC.ListPendingApprovals:output_type -> buckley.ipc.v1.PendingApprovalsList
+	52,  // 147: buckley.ipc.v1.BuckleyIPC.ApproveToolCall:output_type -> buckley.ipc.v1.ApproveToolCallResponse
+	54,  // 148: buckley.ipc.v1.BuckleyIPC.RejectToolCall:output_type -> buckley.ipc.v1.RejectToolCallResponse
+	55,  // 149: buckley.ipc.v1.BuckleyIPC.GetApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
+	55,  // 150: buckley.ipc.v1.BuckleyIPC.UpdateApprovalPolicy:output_type -> buckley.ipc.v1.ApprovalPolicy
+	58,  // 151: buckley.ipc.v1.BuckleyIPC.GetAuditLog:output_type -> buckley.ipc.v1.AuditLogResponse
+	61,  // 152: buckley.ipc.v1.BuckleyIPC.SubscribePush:output_type -> buckley.ipc.v1.PushSubscriptionResponse
+	93,  // 153: buckley.ipc.v1.BuckleyIPC.UnsubscribePush:output_type -> google.protobuf.Empty
+	63,  // 154: buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey:output_type -> buckley.ipc.v1.VAPIDPublicKeyResponse
+	65,  // 155: buckley.ipc.v1.BuckleyObservation.GetSessionExecution:output_type -> buckley.ipc.v1.GetSessionExecutionResponse
+	67,  // 156: buckley.ipc.v1.BuckleyObservation.ListSessionCommands:output_type -> buckley.ipc.v1.ListSessionCommandsResponse
+	69,  // 157: buckley.ipc.v1.BuckleyObservation.GetSessionCommand:output_type -> buckley.ipc.v1.GetSessionCommandResponse
+	71,  // 158: buckley.ipc.v1.BuckleyObservation.ListSessionRoutines:output_type -> buckley.ipc.v1.ListSessionRoutinesResponse
+	73,  // 159: buckley.ipc.v1.BuckleyObservation.GetSessionRoutine:output_type -> buckley.ipc.v1.GetSessionRoutineResponse
+	75,  // 160: buckley.ipc.v1.BuckleyObservation.ListRoutineMailbox:output_type -> buckley.ipc.v1.ListRoutineMailboxResponse
+	128, // [128:161] is the sub-list for method output_type
+	95,  // [95:128] is the sub-list for method input_type
+	95,  // [95:95] is the sub-list for extension type_name
+	95,  // [95:95] is the sub-list for extension extendee
+	0,   // [0:95] is the sub-list for field type_name
 }
 
 func init() { file_ipc_proto_init() }
@@ -5466,9 +7768,9 @@ func file_ipc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ipc_proto_rawDesc), len(file_ipc_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   68,
+			NumMessages:   91,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_ipc_proto_goTypes,
 		DependencyIndexes: file_ipc_proto_depIdxs,

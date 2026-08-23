@@ -118,6 +118,59 @@ func TestRuntimeStateTracker_SubagentProjectionRetainsCyclicParents(t *testing.T
 	}
 }
 
+func TestMergeAgentRunsDurableTerminalTruthAndDeterministicTree(t *testing.T) {
+	started := time.Date(2026, time.August, 20, 9, 0, 0, 0, time.UTC)
+	durable := []AgentRun{
+		{ID: "completed", Status: "completed", StartedAt: started, UpdatedAt: started.Add(5 * time.Second)},
+		{ID: "blocked", Status: "blocked", StartedAt: started.Add(time.Second), UpdatedAt: started.Add(5 * time.Second)},
+		{ID: "detached", Status: "resumable", StartedAt: started.Add(2 * time.Second), UpdatedAt: started.Add(10 * time.Second)},
+		{ID: "parent", Status: "resumable", StartedAt: started.Add(3 * time.Second), UpdatedAt: started.Add(3 * time.Second)},
+		{ID: "child-b", ParentID: "parent", Status: "completed", StartedAt: started.Add(4 * time.Second)},
+		{ID: "child-a", ParentID: "parent", Status: "completed", StartedAt: started.Add(4 * time.Second)},
+		{ID: "orphan", ParentID: "missing-parent", Status: "completed", StartedAt: started.Add(6 * time.Second)},
+	}
+	live := []AgentRun{
+		{ID: "completed", Status: "failed", UpdatedAt: started.Add(20 * time.Second)},
+		{ID: "blocked", Status: "completed", UpdatedAt: started.Add(20 * time.Second)},
+		{ID: "detached", Status: "running", UpdatedAt: started.Add(9 * time.Second)},
+		{ID: "parent", Status: "running", UpdatedAt: started.Add(20 * time.Second)},
+		{ID: "child-a", ParentID: "stale-parent", Status: "failed", UpdatedAt: started.Add(20 * time.Second)},
+	}
+
+	merged := MergeAgentRuns(durable, live)
+	if countProjectedAgentRuns(merged) != len(durable) {
+		t.Fatalf("merged duplicate count = %d, want %d: %+v", countProjectedAgentRuns(merged), len(durable), merged)
+	}
+	if got := findProjectedAgentRun(merged, "completed"); got == nil || got.Status != "completed" {
+		t.Fatalf("completed durable truth = %+v", got)
+	}
+	if got := findProjectedAgentRun(merged, "blocked"); got == nil || got.Status != "blocked" {
+		t.Fatalf("blocked durable truth = %+v", got)
+	}
+	if got := findProjectedAgentRun(merged, "detached"); got == nil || got.Status != "resumable" {
+		t.Fatalf("stale live overlay advanced detached run = %+v", got)
+	}
+	parent := findProjectedAgentRun(merged, "parent")
+	if parent == nil || parent.Status != "running" || len(parent.Children) != 2 || parent.Children[0].ID != "child-a" || parent.Children[1].ID != "child-b" {
+		t.Fatalf("deterministic parent projection = %+v", parent)
+	}
+	if got := findProjectedAgentRun(merged, "orphan"); got == nil || got.ParentID != "missing-parent" {
+		t.Fatalf("missing-parent run disappeared: %+v", got)
+	}
+}
+
+func findProjectedAgentRun(runs []AgentRun, id string) *AgentRun {
+	for i := range runs {
+		if runs[i].ID == id {
+			return &runs[i]
+		}
+		if found := findProjectedAgentRun(runs[i].Children, id); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
 func countProjectedAgentRuns(runs []AgentRun) int {
 	count := 0
 	for _, run := range runs {

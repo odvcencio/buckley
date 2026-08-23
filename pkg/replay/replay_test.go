@@ -2,9 +2,12 @@ package replay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,11 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
 )
+
+func durableTurnDigest(responseJSON string) string {
+	sum := sha256.Sum256([]byte(responseJSON))
+	return hex.EncodeToString(sum[:])
+}
 
 func newReplayStores(t *testing.T) (*runledger.SQLiteStore, *evidence.SQLiteStore) {
 	t.Helper()
@@ -107,6 +115,181 @@ func TestVerify_ReplayReadyRun(t *testing.T) {
 	}
 	if !report.Valid || report.StepCount != 1 || report.EvidenceCount != 2 {
 		t.Fatalf("report = %+v, want valid one-step report with two evidence objects", report)
+	}
+}
+
+func TestVerify_DurableTurnReceiptMustMatchCompletedCurrentStep(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		secondAttempt   bool
+		leaveStarted    bool
+		wrongStep       bool
+		staleAttempt    bool
+		corruptResponse bool
+		corruptDigest   bool
+		wrongOutputID   bool
+		stepKind        string
+		eventTaskID     string
+		wrongProjection bool
+		valid           bool
+	}{
+		{name: "correct completed receipt", valid: true},
+		{name: "wrong step", wrongStep: true},
+		{name: "stale attempt", secondAttempt: true, staleAttempt: true},
+		{name: "corrupt response", corruptResponse: true},
+		{name: "corrupt digest", corruptDigest: true},
+		{name: "started with receipt", leaveStarted: true},
+		{name: "wrong canonical output event", wrongOutputID: true},
+		{name: "crafted tool step", stepKind: "tool"},
+		{name: "crafted model step", stepKind: "model"},
+		{name: "cross task receipt", eventTaskID: "task-2"},
+		{name: "duplicated projection changed", wrongProjection: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, ev := newReplayStores(t)
+			ctx := t.Context()
+			run, err := ledger.StartRun(ctx, runledger.AgentRun{SessionID: "durable-turn-receipt"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const (
+				taskID             = "task-1"
+				workflowInstanceID = "wf-durable-receipt"
+				activity           = "run_turn.v3"
+				generation         = 3
+				turnIndex          = 4
+			)
+			stepKind := tt.stepKind
+			if stepKind == "" {
+				stepKind = "durable_turn"
+			}
+			stepID := "turn_" + runledger.StableEventID(
+				"durable-turn-step-v3", run.RunID, taskID, workflowInstanceID,
+				activity, "3", "4",
+			)
+			step, _, err := ledger.BeginStep(ctx, runledger.ExecutionStep{
+				RunID: run.RunID, TaskID: taskID, StepID: stepID, Kind: stepKind, InputDigest: "input-digest",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.secondAttempt {
+				if err := ledger.FailStepAttempt(ctx, step, "predispatch retry", time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+				step, _, err = ledger.BeginStep(ctx, runledger.ExecutionStep{
+					RunID: run.RunID, TaskID: taskID, StepID: stepID, Kind: stepKind, InputDigest: "input-digest",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ledger.MarkStepDispatched(ctx, step, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			responseJSON := `{"kind":"completed","status":"completed"}`
+			outputDigest := durableTurnDigest(responseJSON)
+			payload := map[string]any{
+				"receipt_schema":       runledger.DurableTurnReceiptSchemaV1,
+				"step_id":              stepID,
+				"attempt":              step.Attempt,
+				"input_digest":         step.InputDigest,
+				"response_json":        responseJSON,
+				"output_digest":        outputDigest,
+				"workflow_instance_id": workflowInstanceID,
+				"activity":             activity,
+				"generation":           generation,
+				"turn_index":           turnIndex,
+				"kind":                 "completed",
+				"decision":             "",
+			}
+			if tt.wrongStep {
+				payload["step_id"] = "another-step"
+			}
+			if tt.staleAttempt {
+				payload["attempt"] = step.Attempt - 1
+			}
+			if tt.corruptResponse {
+				payload["response_json"] = `{"kind":"blocked"}`
+			}
+			if tt.corruptDigest {
+				payload["output_digest"] = strings.Repeat("0", 64)
+			}
+			if tt.wrongProjection {
+				payload["kind"] = "blocked"
+			}
+			eventTaskID := tt.eventTaskID
+			if eventTaskID == "" {
+				eventTaskID = taskID
+			}
+			eventID := runledger.StableEventID(
+				runledger.EventDurableTurn, run.RunID, eventTaskID, workflowInstanceID,
+				activity, "3", "4",
+			)
+			event, err := ledger.Append(ctx, runledger.Event{
+				ID: eventID, RunID: run.RunID, TaskID: eventTaskID, Type: runledger.EventDurableTurn, Payload: payload,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.leaveStarted {
+				outputID := event.ID
+				if tt.wrongOutputID {
+					outputID = "different-event"
+				}
+				if err := ledger.CompleteStepAttempt(ctx, step, outputID, outputDigest, time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report, err := Verify(ctx, ledger, ledger, ev, run.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Valid != tt.valid {
+				t.Fatalf("report valid = %v, want %v; issues=%+v", report.Valid, tt.valid, report.Issues)
+			}
+			if !tt.valid {
+				found := false
+				for _, issue := range report.Issues {
+					found = found || issue.Code == "durable_turn_receipt" || issue.Code == "missing_step_record" || issue.Code == "orphan_step_record"
+				}
+				if !found {
+					t.Fatalf("issues=%+v, want receipt integrity failure", report.Issues)
+				}
+			}
+		})
+	}
+}
+
+func TestVerify_DurableTurnReceiptSchemaCannotDowngradeToLegacy(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		payload map[string]any
+		valid   bool
+	}{
+		{name: "true legacy", payload: map[string]any{"activity": "run_turn", "generation": 1, "turn_index": 2}, valid: true},
+		{name: "V3 activity without schema", payload: map[string]any{"activity": "run_turn.v3"}},
+		{name: "receipt fields without schema", payload: map[string]any{"step_id": "step-1", "attempt": 1}},
+		{name: "unknown schema", payload: map[string]any{"receipt_schema": "future.schema"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, ev := newReplayStores(t)
+			ctx := t.Context()
+			run, err := ledger.StartRun(ctx, runledger.AgentRun{SessionID: "durable-turn-schema"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledger.Append(ctx, runledger.Event{RunID: run.RunID, Type: runledger.EventDurableTurn, Payload: tt.payload}); err != nil {
+				t.Fatal(err)
+			}
+			report, err := Verify(ctx, ledger, ledger, ev, run.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Valid != tt.valid {
+				t.Fatalf("report valid=%v want=%v issues=%+v", report.Valid, tt.valid, report.Issues)
+			}
+		})
 	}
 }
 

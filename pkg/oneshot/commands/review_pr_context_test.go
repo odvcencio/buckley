@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -46,6 +47,18 @@ func TestNormalizePRCommandResult_PreservesPendingChecksJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizePRCommandResult_PreservesFailedChecksJSON(t *testing.T) {
+	want := []byte(`[{"name":"required/unit","state":"FAILURE"}]`)
+	args := []string{"pr", "checks", "820", "--json", "name,state", "--required", "--repo", "m31labs/gotreesitter"}
+	got, err := normalizePRCommandResult("gh", args, want, reviewCommandExitError{code: 1})
+	if err != nil {
+		t.Fatalf("normalizePRCommandResult: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizePRCommandResult_PreservesCanonicalNoChecksAsEmptyJSON(t *testing.T) {
 	args := []string{"pr", "checks", "216", "--json", "name,state", "--repo", "m31labs/gotreesitter"}
 	output := []byte("no checks reported on the 'release/v0.23.0' branch\n")
@@ -68,6 +81,74 @@ func TestNormalizePRCommandResult_PreservesCanonicalNoChecksAsEmptyJSON(t *testi
 	}
 }
 
+func TestNormalizePRCommandResult_DistinguishesNoRequiredChecks(t *testing.T) {
+	requiredArgs := []string{"pr", "checks", "820", "--json", "name,state", "--required", "--repo", "m31labs/gotreesitter"}
+	output := []byte("no required checks reported on the 'topic' branch\n")
+	got, err := normalizePRCommandResult("gh", requiredArgs, output, reviewCommandExitError{code: 1})
+	if err != nil {
+		t.Fatalf("normalize required checks: %v", err)
+	}
+	if string(got) != "[]" {
+		t.Fatalf("required output = %q, want []", got)
+	}
+
+	ordinaryArgs := []string{"pr", "checks", "820", "--json", "name,state", "--repo", "m31labs/gotreesitter"}
+	if _, err := normalizePRCommandResult("gh", ordinaryArgs, output, reviewCommandExitError{code: 1}); err == nil {
+		t.Fatal("ordinary checks accepted the no-required-checks diagnostic")
+	}
+	if _, err := normalizePRCommandResult("gh", requiredArgs, []byte("no checks reported on the 'topic' branch\n"), reviewCommandExitError{code: 1}); err == nil {
+		t.Fatal("required checks accepted the ordinary no-checks diagnostic")
+	}
+}
+
+func TestCapturePRCIAdmission_RequiresPassingRequiredContexts(t *testing.T) {
+	pr := &PRInfo{
+		Number:     820,
+		Host:       "github.com",
+		Repository: "m31labs/gotreesitter",
+		BaseBranch: "main",
+		BaseSHA:    "base-sha",
+		HeadBranch: "topic",
+		HeadSHA:    "head-sha",
+	}
+	run := func(name string, args ...string) ([]byte, error) {
+		if name != "gh" || !hasPRArgPrefix(args, "pr", "checks", "820", "--json", "name,state") || !hasPRArg(args, "--required") {
+			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+		}
+		return []byte(`[]`), nil
+	}
+	capture, err := capturePRCIAdmission(run, prReference{Number: 820, Host: pr.Host, Repository: pr.Repository}, pr, []string{"parser.go"})
+	if err != nil {
+		t.Fatalf("capturePRCIAdmission: %v", err)
+	}
+	if capture.Receipt.Decision != reviewpolicy.CIAdmissionDeny || capture.Receipt.Reason != reviewpolicy.CIAdmissionReasonNoRequiredContexts {
+		t.Fatalf("admission = %s/%s", capture.Receipt.Decision, capture.Receipt.Reason)
+	}
+
+	unavailable, err := capturePRCIAdmission(func(string, ...string) ([]byte, error) {
+		return nil, errors.New("required-check API unavailable")
+	}, prReference{Number: 820, Host: pr.Host, Repository: pr.Repository}, pr, []string{"parser.go"})
+	if err != nil {
+		t.Fatalf("capture unavailable CI admission: %v", err)
+	}
+	if unavailable.FetchErr == nil || unavailable.Receipt.Decision != reviewpolicy.CIAdmissionUnavailable ||
+		unavailable.Receipt.Reason != reviewpolicy.CIAdmissionReasonRequiredContextsUnavailable {
+		t.Fatalf("unavailable admission = %#v", unavailable)
+	}
+
+	failedJSON := []byte(`[{"name":"required/unit","state":"FAILURE"}]`)
+	failed, err := capturePRCIAdmission(func(name string, args ...string) ([]byte, error) {
+		return normalizePRCommandResult(name, args, failedJSON, reviewCommandExitError{code: 1})
+	}, prReference{Number: 820, Host: pr.Host, Repository: pr.Repository}, pr, []string{"parser.go"})
+	if err != nil {
+		t.Fatalf("capture failed required context: %v", err)
+	}
+	if failed.FetchErr != nil || failed.Receipt.Decision != reviewpolicy.CIAdmissionDeny ||
+		failed.Receipt.Reason != reviewpolicy.CIAdmissionReasonRequiredContextsNotPassing {
+		t.Fatalf("failed required-context admission = %#v", failed)
+	}
+}
+
 func TestNormalizePRCommandResult_RejectsOtherFailures(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -75,7 +156,6 @@ func TestNormalizePRCommandResult_RejectsOtherFailures(t *testing.T) {
 		output []byte
 		code   int
 	}{
-		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte(`[{"state":"PENDING"}]`), code: 1},
 		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("no checks reported on the 'topic' branch; authentication failed"), code: 1},
 		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("no checks reported on the '' branch"), code: 1},
 		{name: "gh", args: []string{"pr", "checks", "208", "--json", "name,state"}, output: []byte("not json"), code: 8},
@@ -847,6 +927,8 @@ func TestAssemblePRContext_MarksConcurrentHeadPushIncomplete(t *testing.T) {
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "diff", "208"):
 			return []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") && hasPRArg(args, "--required"):
+			return []byte(`[{"name":"required/unit","state":"SUCCESS"}]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(`[]`), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):
@@ -1028,7 +1110,7 @@ func TestRevalidatePRContext_PendingChecksExitEightRemainsReviewable(t *testing.
 	})
 	run := func(name string, args ...string) ([]byte, error) {
 		output, err := base(name, args...)
-		if err == nil && name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") {
+		if err == nil && name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") && !hasPRArg(args, "--required") {
 			return normalizePRCommandResult(name, args, output, reviewCommandExitError{code: 8})
 		}
 		return output, err
@@ -1050,7 +1132,7 @@ func TestRevalidatePRContext_StableNoChecksExitOneRemainsReviewable(t *testing.T
 	base := stablePRRevalidationRunner(prRevalidationOutputs{checks: `[]`})
 	run := func(name string, args ...string) ([]byte, error) {
 		output, err := base(name, args...)
-		if err == nil && name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") {
+		if err == nil && name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") && !hasPRArg(args, "--required") {
 			return normalizePRCommandResult(name, args, []byte("no checks reported on the 'release/v0.23.0' branch\n"), reviewCommandExitError{code: 1})
 		}
 		return output, err
@@ -1062,6 +1144,158 @@ func TestRevalidatePRContext_StableNoChecksExitOneRemainsReviewable(t *testing.T
 	}
 	if changed != "" {
 		t.Fatalf("no-check CI changed evidence = %q, want stable", changed)
+	}
+}
+
+func TestRevalidatePRContext_RejectsInvalidCapturedCIAdmission(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*testing.T, *PRContext)
+		want string
+	}{
+		{
+			name: "missing",
+			edit: func(_ *testing.T, ctx *PRContext) { ctx.CIAdmission = reviewpolicy.CIAdmissionReceipt{} },
+			want: "receipt is missing",
+		},
+		{
+			name: "stale",
+			edit: func(_ *testing.T, ctx *PRContext) { ctx.PR.HeadSHA = "different-head" },
+			want: "receipt is stale",
+		},
+		{
+			name: "tampered",
+			edit: func(_ *testing.T, ctx *PRContext) { ctx.CIAdmission.Decision = reviewpolicy.CIAdmissionDeny },
+			want: "receipt is invalid",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := stablePRRevalidationContext()
+			test.edit(t, ctx)
+			calls := 0
+			_, err := revalidatePRContext(ctx, func(string, ...string) ([]byte, error) {
+				calls++
+				return nil, errors.New("runner should not be called")
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			if calls != 0 {
+				t.Fatalf("runner calls = %d, want pre-fetch rejection", calls)
+			}
+		})
+	}
+}
+
+func TestRevalidatePRContext_StableNonAllowAdmissionRemainsUsable(t *testing.T) {
+	tests := []struct {
+		name               string
+		files              []string
+		requiredContexts   []reviewpolicy.CIRequiredContext
+		requiredChecksJSON string
+		wantDecision       reviewpolicy.CIAdmissionDecision
+		wantReason         reviewpolicy.CIAdmissionReason
+	}{
+		{
+			name:               "zero required contexts",
+			files:              []string{"pkg/ratchet.go"},
+			requiredChecksJSON: `[]`,
+			wantDecision:       reviewpolicy.CIAdmissionDeny,
+			wantReason:         reviewpolicy.CIAdmissionReasonNoRequiredContexts,
+		},
+		{
+			name:  "changed test file without reachability adapter",
+			files: []string{"pkg/ratchet_test.go"},
+			requiredContexts: []reviewpolicy.CIRequiredContext{
+				{Name: "required/unit", State: "SUCCESS"},
+			},
+			requiredChecksJSON: `[{"name":"required/unit","state":"SUCCESS"}]`,
+			wantDecision:       reviewpolicy.CIAdmissionUnavailable,
+			wantReason:         reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := stablePRRevalidationContext()
+			ctx.Files = test.files
+			receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+				Expectation:               ctx.CIAdmissionExpectation(),
+				RequiredContextsAvailable: true,
+				RequiredContexts:          test.requiredContexts,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx.CIAdmission = receipt
+			if receipt.Decision != test.wantDecision || receipt.Reason != test.wantReason {
+				t.Fatalf("fixture admission = %s/%s", receipt.Decision, receipt.Reason)
+			}
+			if err := receipt.Authorize(ctx.CIAdmissionExpectation()); err == nil {
+				t.Fatal("non-allow fixture unexpectedly authorized")
+			}
+
+			changed, err := revalidatePRContext(ctx, stablePRRevalidationRunner(prRevalidationOutputs{
+				requiredChecks: test.requiredChecksJSON,
+			}))
+			if err != nil {
+				t.Fatalf("revalidatePRContext: %v", err)
+			}
+			if changed != "" {
+				t.Fatalf("stable non-allow receipt changed evidence = %q", changed)
+			}
+		})
+	}
+}
+
+func TestRevalidatePRContext_RequiredContextChangeInvalidatesAdmission(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	changed, err := revalidatePRContext(ctx, stablePRRevalidationRunner(prRevalidationOutputs{requiredChecks: `[]`}))
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	for _, want := range []string{
+		"required CI contexts changed",
+		"CI admission allow/required_contexts_passed -> deny/no_required_contexts",
+	} {
+		if !strings.Contains(changed, want) {
+			t.Errorf("changed evidence %q missing %q", changed, want)
+		}
+	}
+}
+
+func TestRevalidatePRContext_PassingRequiredContextSetChangeInvalidatesAdmission(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	changed, err := revalidatePRContext(ctx, stablePRRevalidationRunner(prRevalidationOutputs{
+		requiredChecks: `[{"name":"required/replacement","state":"SUCCESS"}]`,
+	}))
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	for _, want := range []string{"required CI contexts changed", "CI admission receipt changed"} {
+		if !strings.Contains(changed, want) {
+			t.Errorf("changed evidence %q missing %q", changed, want)
+		}
+	}
+}
+
+func TestRevalidatePRContext_RequiredContextAPIUnavailableInvalidatesAdmission(t *testing.T) {
+	ctx := stablePRRevalidationContext()
+	base := stablePRRevalidationRunner(prRevalidationOutputs{})
+	run := func(name string, args ...string) ([]byte, error) {
+		if name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") && hasPRArg(args, "--required") {
+			return nil, errors.New("required-check API unavailable")
+		}
+		return base(name, args...)
+	}
+	changed, err := revalidatePRContext(ctx, run)
+	if err != nil {
+		t.Fatalf("revalidatePRContext: %v", err)
+	}
+	if !strings.Contains(changed, "CI admission allow/required_contexts_passed -> unavailable/required_contexts_unavailable") {
+		t.Fatalf("changed evidence = %q", changed)
 	}
 }
 
@@ -1342,6 +1576,7 @@ func TestPRCommentsReportGraphQLAndRESTFailures(t *testing.T) {
 
 type prRevalidationOutputs struct {
 	checks         string
+	requiredChecks string
 	comments       string
 	reviews        string
 	inline         string
@@ -1349,7 +1584,7 @@ type prRevalidationOutputs struct {
 }
 
 func stablePRRevalidationContext() *PRContext {
-	return &PRContext{
+	ctx := &PRContext{
 		PR: &PRInfo{
 			Number:         208,
 			Host:           "github.com",
@@ -1383,14 +1618,29 @@ func stablePRRevalidationContext() *PRContext {
 			OriginalLine:    12,
 			ResolutionKnown: true,
 		}},
+		Files:  []string{"pkg/ratchet.go"},
 		target: prReference{Number: 208, Host: "github.com", Repository: "m31labs/buckley"},
 	}
+	receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+		Expectation:               ctx.CIAdmissionExpectation(),
+		RequiredContextsAvailable: true,
+		RequiredContexts:          []reviewpolicy.CIRequiredContext{{Name: "required/unit", State: "SUCCESS"}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	ctx.CIAdmission = receipt
+	return ctx
 }
 
 func stablePRRevalidationRunner(overrides prRevalidationOutputs) prCommandRunner {
 	checks := overrides.checks
 	if checks == "" {
 		checks = `[{"name":"unit","state":"SUCCESS"}]`
+	}
+	requiredChecks := overrides.requiredChecks
+	if requiredChecks == "" {
+		requiredChecks = `[{"name":"required/unit","state":"SUCCESS"}]`
 	}
 	comments := overrides.comments
 	if comments == "" {
@@ -1413,6 +1663,8 @@ func stablePRRevalidationRunner(overrides prRevalidationOutputs) prCommandRunner
 		switch {
 		case name == "gh" && hasPRArgPrefix(args, "pr", "view", "208", "--json") && strings.Contains(strings.Join(args, " "), "headRefOid"):
 			return []byte(fmt.Sprintf(`{"number":208,"url":"https://github.com/m31labs/buckley/pull/208","baseRefName":"main","baseRefOid":"base-sha","headRefName":"topic","headRefOid":"head-sha","reviewDecision":%q}`, reviewDecision)), nil
+		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state") && hasPRArg(args, "--required"):
+			return []byte(requiredChecks), nil
 		case name == "gh" && hasPRArgPrefix(args, "pr", "checks", "208", "--json", "name,state"):
 			return []byte(checks), nil
 		case name == "gh" && hasPRArgPrefix(args, "api", "--paginate", "--slurp") && hasPRArg(args, "repos/m31labs/buckley/issues/208/comments?per_page=100"):

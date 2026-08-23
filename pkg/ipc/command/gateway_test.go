@@ -1,7 +1,9 @@
 package command
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/mock/gomock"
@@ -247,6 +249,20 @@ func TestSessionCommandEnsureID_Stable(t *testing.T) {
 	}
 	if second != first {
 		t.Fatalf("EnsureID changed ID: first=%q second=%q", first, second)
+	}
+}
+
+func TestSessionCommandAcceptedByIsPrivate(t *testing.T) {
+	cmd := SessionCommand{
+		SessionID: "session-private-actor", ID: "command-private-actor",
+		Type: "input", Content: "hello", AcceptedBy: "production-secret-principal",
+	}
+	encoded, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), cmd.AcceptedBy) || strings.Contains(string(encoded), "AcceptedBy") || strings.Contains(string(encoded), "acceptedBy") {
+		t.Fatalf("private actor leaked into command JSON: %s", encoded)
 	}
 }
 

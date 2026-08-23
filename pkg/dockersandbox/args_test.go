@@ -34,7 +34,7 @@ func TestBuildCreateArgs_Defaults(t *testing.T) {
 		{"create command", "create"},
 		{"container name", "--name test-container"},
 		{"read-only", "--read-only"},
-		{"workspace mount", "-v /home/user/project:/workspace"},
+		{"workspace mount", "--mount type=bind,source=/home/user/project,destination=/workspace"},
 		{"tmpfs", "--tmpfs /tmp:size=64m"},
 		{"network none", "--network none"},
 		{"cpus", "--cpus 1.0"},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ type versionedTurnRunner struct {
 	minimalTaskRunner
 	boundCalls  int
 	legacyCalls int
+	v3Calls     int
 }
 
 type minimalTaskRunner struct {
@@ -282,6 +284,11 @@ func (r *versionedTurnRunner) RunTurn(context.Context, durability.TurnRequest) (
 
 func (r *versionedTurnRunner) RunLegacyTurn(context.Context, durability.TurnRequest) (durability.TurnResponse, error) {
 	r.legacyCalls++
+	return durability.TurnResponse{}, nil
+}
+
+func (r *versionedTurnRunner) RunTurnV3(context.Context, durability.TurnRequest) (durability.TurnResponse, error) {
+	r.v3Calls++
 	return durability.TurnResponse{}, nil
 }
 
@@ -665,8 +672,15 @@ func TestSelectTurnActivity_VersionsKeepLegacyTrustNarrow(t *testing.T) {
 	if _, err := selectTurnActivity(runner, false)(context.Background(), durability.TurnRequest{}); err != nil {
 		t.Fatalf("bound invocation: %v", err)
 	}
-	if runner.legacyCalls != 1 || runner.boundCalls != 1 {
-		t.Fatalf("calls = legacy:%d bound:%d, want one each", runner.legacyCalls, runner.boundCalls)
+	v3, err := selectTurnActivityV3(runner)
+	if err != nil {
+		t.Fatalf("V3 selection: %v", err)
+	}
+	if _, err := v3(context.Background(), durability.TurnRequest{}); err != nil {
+		t.Fatalf("V3 invocation: %v", err)
+	}
+	if runner.legacyCalls != 1 || runner.boundCalls != 1 || runner.v3Calls != 1 {
+		t.Fatalf("calls = legacy:%d bound:%d v3:%d, want one each", runner.legacyCalls, runner.boundCalls, runner.v3Calls)
 	}
 }
 
@@ -683,10 +697,33 @@ func TestPreV4TaskRunner_RegistersAndUsesCompatibilityFallbacks(t *testing.T) {
 	if runner.runCalls != 1 {
 		t.Fatalf("RunTurn calls = %d, want legacy request routed to base capability", runner.runCalls)
 	}
+	if _, err := selectTurnActivityV3(runner); err == nil || !strings.Contains(err.Error(), "does not support V3") {
+		t.Fatalf("V3 selection error = %v, want explicit unsupported capability", err)
+	}
 
 	err := finalizeGoal(context.Background(), runner, durability.GoalFinalization{RunID: "run-pre-v4"})
 	if err == nil || !strings.Contains(err.Error(), "does not support V4 goal finalization") {
 		t.Fatalf("finalizeGoal error = %v, want explicit unsupported capability", err)
+	}
+}
+
+func TestStartGoal_SchedulesV5ForNewGeneration(t *testing.T) {
+	start := durability.GoalStart{RunID: "run-v5", WorkspaceRoot: t.TempDir()}
+	client := &generationWorkflowClient{instances: map[string]*workflow.WorkflowMetadata{}}
+	backend := &Backend{client: client}
+
+	instanceID, err := backend.StartGoal(context.Background(), start)
+	if err != nil {
+		t.Fatalf("StartGoal: %v", err)
+	}
+	if instanceID != InstanceIDForRun(start.RunID) {
+		t.Fatalf("instance ID = %q, want %q", instanceID, InstanceIDForRun(start.RunID))
+	}
+	client.mu.Lock()
+	metadata := client.instances[instanceID]
+	client.mu.Unlock()
+	if metadata == nil || metadata.Name != GoalWorkflowV5 {
+		t.Fatalf("scheduled workflow metadata = %+v, want %q", metadata, GoalWorkflowV5)
 	}
 }
 
@@ -765,6 +802,173 @@ func TestDeferredTasks_SortedAndBounded(t *testing.T) {
 	got := deferredTasks(yields, 2)
 	if len(got) != 2 || got[0] != "task-a" || got[1] != "task-c" {
 		t.Fatalf("deferredTasks = %v, want [task-a task-c]", got)
+	}
+}
+
+func TestMarkNoncompletedGoalResult_ExplicitlyMarksBlockedAndParkedTasks(t *testing.T) {
+	result := markNoncompletedGoalResult(durability.GoalResult{
+		Tasks: []durability.TaskOutcome{
+			{TaskID: "task-completed", Status: "completed"},
+			{TaskID: "task-parked", Status: "parked"},
+			{TaskID: "task-blocked", Status: "blocked"},
+			{TaskID: "task-yielded", Status: "in_progress"},
+		},
+	})
+	if result.Status != durability.GoalResultIncomplete {
+		t.Fatalf("status = %q, want incomplete", result.Status)
+	}
+	want := []string{"task-blocked", "task-parked", "task-yielded"}
+	if !reflect.DeepEqual(result.DeferredTasks, want) {
+		t.Fatalf("deferred tasks = %v, want %v", result.DeferredTasks, want)
+	}
+}
+
+func TestRetryWaitID_IsStableAndOrdinalScoped(t *testing.T) {
+	checkpointID := "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	digest := strings.Repeat("a", 64)
+	first := retryWaitID("goal-run", "task-1", 1, checkpointID, 2, 1, digest)
+	if first != retryWaitID("goal-run", "task-1", 1, checkpointID, 2, 1, digest) {
+		t.Fatal("retry wait identity changed across replay")
+	}
+	if first == retryWaitID("goal-run", "task-1", 2, checkpointID, 2, 1, digest) ||
+		first == retryWaitID("goal-run", "task-2", 1, checkpointID, 2, 1, digest) ||
+		first == retryWaitID("goal-run", "task-1", 1, checkpointID, 3, 2, digest) {
+		t.Fatal("retry wait identities were not scoped by task and ordinal")
+	}
+}
+
+func TestRetryWaitPayload_IsCompactAndBodyFree(t *testing.T) {
+	wait := durability.RetryWait{
+		RunID:                     "run-compact",
+		TaskID:                    "task-1",
+		WorkflowInstanceID:        "goal-run-compact",
+		WaitID:                    "retry-1-0123456789abcdef01234567",
+		Category:                  "provider",
+		ReasonCode:                "retryable_capacity",
+		RetryAfterUnixMS:          1770000000123,
+		Ordinal:                   1,
+		ExpectedCheckpointID:      "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		ExpectedCheckpointVersion: 2,
+		BlockerDigest:             strings.Repeat("a", 64),
+	}
+	payload, err := json.Marshal(wait)
+	if err != nil {
+		t.Fatalf("marshal retry wait: %v", err)
+	}
+	encoded := string(payload)
+	for _, forbidden := range []string{"prompt", "tool_result", "provider_body", "blocker_reason"} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("retry wait payload contains forbidden body field %q: %s", forbidden, encoded)
+		}
+	}
+	if len(payload) > 512 {
+		t.Fatalf("retry wait payload length = %d, want compact payload", len(payload))
+	}
+}
+
+func TestSanitizeTurnResponse_DropsUntrustedRetryHistoryFields(t *testing.T) {
+	secret := "SECRET-provider-token-π"
+	got := sanitizeTurnResponse(durability.TurnRequest{Generation: 4, TurnIndex: 7}, durability.TurnResponse{
+		Kind:                      string(goalloop.StepBlocked),
+		Status:                    "blocked",
+		BlockerCategory:           secret + strings.Repeat("x", 2048),
+		BlockerReasonCode:         secret + strings.Repeat("界", 1024),
+		RetryAfterUnixMS:          1770000000123,
+		RetryOrdinal:              999999,
+		WaitID:                    secret,
+		ExpectedCheckpointID:      secret,
+		ExpectedCheckpointVersion: 5,
+		BlockerDigest:             secret,
+	})
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal sanitized response: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "界") {
+		t.Fatalf("sanitized workflow response leaked untrusted text: %s", encoded)
+	}
+	if got.BlockerCategory != "execution" || got.BlockerReasonCode != "blocked" {
+		t.Fatalf("sanitized codes = %q/%q, want execution/blocked", got.BlockerCategory, got.BlockerReasonCode)
+	}
+	if got.RetryAfterUnixMS != 0 || got.WaitID != "" || got.ExpectedCheckpointID != "" || got.BlockerDigest != "" {
+		t.Fatalf("invalid retry identity survived sanitization: %+v", got)
+	}
+}
+
+func TestSanitizeTurnResponse_PreservesOnlyValidBoundedRetryIdentity(t *testing.T) {
+	req := durability.TurnRequest{Generation: 4, TurnIndex: 7}
+	got := sanitizeTurnResponse(req, durability.TurnResponse{
+		Kind:                      string(goalloop.StepBlocked),
+		Status:                    "blocked",
+		BlockerCategory:           "provider",
+		BlockerReasonCode:         "retryable_capacity",
+		RetryAfterUnixMS:          1770000000123,
+		RetryOrdinal:              999,
+		WaitID:                    "runner-controlled-wait",
+		ExpectedCheckpointID:      "cp_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		ExpectedCheckpointVersion: 5,
+		BlockerDigest:             strings.Repeat("a", 64),
+	})
+	if got.WaitID != "" || got.RetryOrdinal != req.TurnIndex+1 {
+		t.Fatalf("workflow-owned wait fields = wait:%q ordinal:%d", got.WaitID, got.RetryOrdinal)
+	}
+	if got.BlockerCategory != "provider" || got.BlockerReasonCode != "retryable_capacity" || got.RetryAfterUnixMS == 0 {
+		t.Fatalf("valid retry metadata was not preserved: %+v", got)
+	}
+}
+
+func TestSanitizeRetryWakeResult_BoundsWorkflowHistory(t *testing.T) {
+	secret := "SECRET-wake-body-界"
+	got, err := sanitizeRetryWakeResult(durability.RetryWakeResult{
+		Disposition: durability.RetryWakeStale,
+		TaskStatus:  secret + strings.Repeat("x", 2048),
+	})
+	if err != nil {
+		t.Fatalf("sanitize stale wake: %v", err)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal stale wake: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || got.TaskStatus != "blocked" {
+		t.Fatalf("sanitized wake leaked untrusted status: %s", encoded)
+	}
+	applied, err := sanitizeRetryWakeResult(durability.RetryWakeResult{
+		Disposition: durability.RetryWakeApplied,
+		TaskStatus:  secret,
+	})
+	if err != nil || applied.TaskStatus != "in_progress" {
+		t.Fatalf("applied wake normalization = %+v err:%v", applied, err)
+	}
+	if _, err := sanitizeRetryWakeResult(durability.RetryWakeResult{Disposition: secret}); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("invalid disposition error = %v", err)
+	}
+}
+
+func TestRetryWaitBudgetAndDelay_AreBoundedAcrossDriveCycles(t *testing.T) {
+	state := &taskRetryState{}
+	for want := 1; want <= defaultMaxRetryWaits; want++ {
+		got, ok := reserveRetryWait(state)
+		if !ok || got != want {
+			t.Fatalf("reserve %d = ordinal:%d ok:%v", want, got, ok)
+		}
+	}
+	if ordinal, ok := reserveRetryWait(state); ok || ordinal != 0 {
+		t.Fatalf("wait beyond bound = ordinal:%d ok:%v", ordinal, ok)
+	}
+	if state.WaitOrdinal != defaultMaxRetryWaits || state.WaitCount != defaultMaxRetryWaits {
+		t.Fatalf("workflow-wide retry state = %+v", state)
+	}
+
+	now := time.Unix(1770000000, 0).UTC()
+	if _, ok := boundedRetryDelay(now, 0); ok {
+		t.Fatal("zero retry deadline scheduled a timer")
+	}
+	if delay, ok := boundedRetryDelay(now, now.Add(-time.Hour).UnixMilli()); !ok || delay != minimumRetryDelay {
+		t.Fatalf("past retry delay = %s ok:%v, want %s", delay, ok, minimumRetryDelay)
+	}
+	if delay, ok := boundedRetryDelay(now, now.Add(72*time.Hour).UnixMilli()); !ok || delay != maximumRetryDelay {
+		t.Fatalf("far retry delay = %s ok:%v, want %s", delay, ok, maximumRetryDelay)
 	}
 }
 

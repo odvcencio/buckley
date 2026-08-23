@@ -37,6 +37,42 @@ func StableStepID(runID, taskID, turnID string, round int, kind string, ordinal 
 	return fmt.Sprintf("%s/%s/%s/round-%03d/%s-%03d", runID, taskID, turnID, round, kind, ordinal)
 }
 
+// StableApprovalID derives the durable approval identity from the exact
+// logical tool step. Provider tool-call IDs are intentionally not inputs: a
+// provider may assign a different correlation ID while the durable step is
+// replayed. Empty identity fields return an empty string so legacy callers
+// can continue using their raw provider ID.
+func StableApprovalID(runID, taskID, turnID, stepID string, round, toolIndex int) string {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(taskID) == "" ||
+		strings.TrimSpace(turnID) == "" || strings.TrimSpace(stepID) == "" ||
+		round <= 0 || toolIndex < 0 {
+		return ""
+	}
+	payload := struct {
+		Version   string `json:"version"`
+		RunID     string `json:"run_id"`
+		TaskID    string `json:"task_id"`
+		TurnID    string `json:"turn_id"`
+		StepID    string `json:"step_id"`
+		Round     int    `json:"round"`
+		ToolIndex int    `json:"tool_index"`
+	}{
+		Version:   "buckley.approval.v1",
+		RunID:     runID,
+		TaskID:    taskID,
+		TurnID:    turnID,
+		StepID:    stepID,
+		Round:     round,
+		ToolIndex: toolIndex,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return "approval_" + hex.EncodeToString(sum[:])
+}
+
 func jsonDigest(value any) (string, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {

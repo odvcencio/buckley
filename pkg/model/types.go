@@ -1,8 +1,10 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -159,6 +161,10 @@ type ChatRequest struct {
 	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
 	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
 	PromptCache          *PromptCache      `json:"-"`
+	// RetryMode is an internal execution contract. It never enters provider
+	// JSON; launch admission uses single_attempt so Dapr remains the sole retry
+	// owner for model effects.
+	RetryMode RequestRetryMode `json:"-"`
 	// ReviewSnapshot pins native verification to the immutable Git state
 	// captured once for an entire review run. Native providers materialize it;
 	// API-backed review tools are bound to the same descriptor by the agent runner.
@@ -1064,6 +1070,19 @@ type ModelCatalog struct {
 	Data []ModelInfo `json:"data"`
 }
 
+func (c *ModelCatalog) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+		return err
+	}
+	type modelCatalogAlias ModelCatalog
+	var decoded modelCatalogAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = ModelCatalog(decoded)
+	return nil
+}
+
 // ModelInfo represents information about a model
 type ModelInfo struct {
 	ID            string `json:"id"`
@@ -1079,55 +1098,104 @@ type ModelInfo struct {
 	// PricingKnown records that a provider catalog explicitly supplied both
 	// prompt and completion prices. It distinguishes an authoritative free
 	// model from a zero-value ModelPricing whose prices are simply unavailable.
-	PricingKnown        bool         `json:"-"`
-	Created             int64        `json:"created"` // Unix timestamp
-	Architecture        Architecture `json:"architecture,omitempty"`
-	SupportedParameters []string     `json:"supported_parameters,omitempty"`
+	PricingKnown bool `json:"-"`
+	// RawPricing retains the bounded exact catalog lexemes used by launch
+	// admission. Cost reporting continues to use Pricing; safety decisions must
+	// use RawPricing so tiny nonzero values cannot underflow through float64.
+	RawPricing map[string]string `json:"-"`
+	// RawPricingJSON is a best-effort copy of the provider's exact pricing
+	// value. Ordinary catalog consumers tolerate null, future, complex, and
+	// oversized pricing values; launch admission revalidates this raw value
+	// against its stricter bounded contract.
+	RawPricingJSON      json.RawMessage `json:"-"`
+	Created             int64           `json:"created"` // Unix timestamp
+	Architecture        Architecture    `json:"architecture,omitempty"`
+	SupportedParameters []string        `json:"supported_parameters,omitempty"`
 }
 
 // UnmarshalJSON accepts the common top-level catalog shape and OpenRouter's
 // nested top_provider.max_completion_tokens capability in one place.
 func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+		return err
+	}
+	// Decode every ordinary field without invoking ModelPricing's strict
+	// numeric parser. Provider catalogs have historically carried null, future,
+	// and occasionally non-standard pricing values; those must not make an
+	// otherwise usable model record unreadable.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	rawPricing, pricingPresent := fields["pricing"]
+	delete(fields, "pricing")
 	type modelInfoAlias ModelInfo
 	var base modelInfoAlias
-	if err := json.Unmarshal(data, &base); err != nil {
+	baseData, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(baseData, &base); err != nil {
 		return err
 	}
 	var capabilities struct {
 		TopProvider struct {
 			MaxCompletionTokens int `json:"max_completion_tokens"`
 		} `json:"top_provider"`
-		Pricing map[string]json.RawMessage `json:"pricing"`
 	}
 	if err := json.Unmarshal(data, &capabilities); err != nil {
 		return err
 	}
 	*m = ModelInfo(base)
-	m.PricingKnown = explicitPricingValue(capabilities.Pricing["prompt"]) &&
-		explicitPricingValue(capabilities.Pricing["completion"])
+	if pricingPresent {
+		m.RawPricingJSON = append(json.RawMessage(nil), rawPricing...)
+		// Keep ordinary cost behavior for conventional pricing, while ignoring
+		// malformed/future shapes for compatibility.
+		var pricing ModelPricing
+		if err := json.Unmarshal(rawPricing, &pricing); err == nil {
+			m.Pricing = pricing
+		}
+		if parsed, err := decodeCatalogPricing(rawPricing); err == nil {
+			m.RawPricing = parsed
+			m.PricingKnown = validCatalogPrice(parsed["prompt"]) && validCatalogPrice(parsed["completion"])
+		}
+	}
 	if m.MaxCompletionTokens <= 0 {
 		m.MaxCompletionTokens = capabilities.TopProvider.MaxCompletionTokens
 	}
 	return nil
 }
 
-func explicitPricingValue(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
+func rejectDuplicateTopLevelJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return fmt.Errorf("model catalog object is invalid")
 	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return false
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return fmt.Errorf("model catalog object is invalid")
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("model catalog object contains duplicate top-level field %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("model catalog object is invalid")
+		}
 	}
-	switch value := value.(type) {
-	case float64:
-		return true
-	case string:
-		_, err := strconv.ParseFloat(value, 64)
-		return err == nil
-	default:
-		return false
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return fmt.Errorf("model catalog object is invalid")
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("model catalog object has trailing data")
+	}
+	return nil
 }
 
 // Architecture contains model architecture details

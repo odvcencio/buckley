@@ -180,6 +180,10 @@ var migrations = []SQLiteMigration{
 	{18, "provider_continuations", ensureProviderContinuationsSchema},
 	{19, "model_behavior_profiles", ensureModelBehaviorProfilesSchema},
 	{20, "normalize_fixed_width_timestamps", normalizeLegacyTimestamps},
+	{21, "session_command_journal", ensureSessionExecSchema},
+	{22, "session_execution_state", ensureSessionExecutionStateSchema},
+	{23, "session_effect_permits", ensureSessionEffectPermitSchema},
+	{24, "web_session_token_index", ensureWebSessionTokenIndex},
 }
 
 // sqliteTimestampLayout keeps every fractional second at nine digits.
@@ -299,6 +303,24 @@ func ensureModelBehaviorProfilesSchema(db MigrationDB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_model_behavior_profiles_latest ON model_behavior_profiles(model_id, measured_at, profile_version)`); err != nil {
 		return fmt.Errorf("index model_behavior_profiles: %w", err)
+	}
+	return nil
+}
+
+func ensureWebSessionTokenIndex(db MigrationDB) error {
+	if _, err := db.Exec(`
+		DELETE FROM web_sessions
+		WHERE COALESCE(token_id, '') <> ''
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM api_tokens source
+			WHERE source.id = web_sessions.token_id AND source.revoked = 0
+		  )
+	`); err != nil {
+		return fmt.Errorf("remove inactive-token web sessions: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_web_sessions_token_id ON web_sessions(token_id)`); err != nil {
+		return fmt.Errorf("index web sessions by token: %w", err)
 	}
 	return nil
 }

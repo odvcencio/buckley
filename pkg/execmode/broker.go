@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,10 @@ const (
 	// transparently follows next_cursor, so programs still receive complete
 	// listings without one oversized broker response.
 	maxListEntries = 500
+	// DefaultCapabilityCallLimit bounds the total broker operations one
+	// exec_program can fan out internally. Program-level composition remains
+	// useful, but it cannot turn one model tool call into unbounded crawling.
+	DefaultCapabilityCallLimit = 32
 )
 
 // AuditRecord is one capability call's durable trace: what was asked,
@@ -86,6 +91,10 @@ type Broker struct {
 	granted map[string]bool
 	expires time.Time
 
+	callMu            sync.Mutex
+	capabilityCalls   int
+	capabilityCallMax int
+
 	server   *http.Server
 	socket   string
 	listener net.Listener
@@ -114,6 +123,16 @@ func WithTokenTTL(ttl time.Duration) BrokerOption {
 	}
 }
 
+// WithCapabilityCallLimit overrides the per-program capability operation
+// budget. Non-positive values retain the safe default.
+func WithCapabilityCallLimit(limit int) BrokerOption {
+	return func(b *Broker) {
+		if limit > 0 {
+			b.capabilityCallMax = limit
+		}
+	}
+}
+
 // NewBroker jails capabilities to workspaceRoot and wires the audit sink.
 // Both are required; the token is generated per broker and expires.
 func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Broker, error) {
@@ -129,10 +148,11 @@ func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Br
 		return nil, fmt.Errorf("execmode: generate token: %w", err)
 	}
 	broker := &Broker{
-		root:    root,
-		token:   hex.EncodeToString(buf),
-		audit:   audit,
-		expires: time.Now().Add(DefaultTokenTTL),
+		root:              root,
+		token:             hex.EncodeToString(buf),
+		audit:             audit,
+		expires:           time.Now().Add(DefaultTokenTTL),
+		capabilityCallMax: DefaultCapabilityCallLimit,
 	}
 	WithCapabilities(ReadOnlySet...)(broker)
 	for _, opt := range opts {
@@ -207,6 +227,12 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 			http.Error(w, "capability "+method+" is not granted to this run", http.StatusForbidden)
 			return
 		}
+		if !b.consumeCapabilityCall() {
+			detail := fmt.Sprintf("capability call budget exhausted (%d per program)", b.capabilityCallMax)
+			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: detail, Timestamp: time.Now().UTC()})
+			http.Error(w, detail, http.StatusTooManyRequests)
+			return
+		}
 
 		var params map[string]any
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&params); err != nil {
@@ -232,6 +258,16 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(result)
 	}
+}
+
+func (b *Broker) consumeCapabilityCall() bool {
+	b.callMu.Lock()
+	defer b.callMu.Unlock()
+	if b.capabilityCalls >= b.capabilityCallMax {
+		return false
+	}
+	b.capabilityCalls++
+	return true
 }
 
 // jail resolves a workspace-relative path and rejects anything that
@@ -377,7 +413,7 @@ func listCursor(value any) (int, error) {
 }
 
 func skipDirName(name string) bool {
-	return name == ".git" || name == "node_modules" || name == "vendor"
+	return name == ".git" || name == ".worktrees" || name == "node_modules" || name == "vendor"
 }
 
 // searchText finds literal matches, optionally restricted to files whose

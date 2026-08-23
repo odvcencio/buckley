@@ -13,10 +13,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +37,7 @@ import (
 	projectconversation "m31labs.dev/buckley/pkg/conversation"
 	coordination "m31labs.dev/buckley/pkg/coordination/coordinator"
 	coordevents "m31labs.dev/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/graft"
 	"m31labs.dev/buckley/pkg/gts"
 	"m31labs.dev/buckley/pkg/ipc"
@@ -342,6 +346,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	embeddedIPC, _, err := startEmbeddedIPCServer(cfg, store, telemetryHub, nil, planStore, nil, modelManager)
+	if err != nil {
+		if codeRuntime != nil {
+			_ = codeRuntime.Fail(err)
+		}
+		fmt.Fprintf(os.Stderr, "Error starting IPC server: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Set up signal handler
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -350,7 +363,7 @@ func main() {
 		ctrl.Stop()
 	}()
 
-	runErr := ctrl.Run()
+	runErr := runInteractiveWithEmbeddedIPC(ctrl, embeddedIPC)
 	var codeModeCloseErr error
 	if codeRuntime != nil {
 		if runErr != nil {
@@ -2267,7 +2280,93 @@ func isLoopbackAddress(addr string) bool {
 	}
 }
 
-func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager) (func(), string, error) {
+type interactiveController interface {
+	Run() error
+	Stop()
+}
+
+var errEmbeddedIPCStopped = errors.New("embedded IPC stopped")
+
+type embeddedIPCHandle struct {
+	cancel     context.CancelCauseFunc
+	cancelOnce sync.Once
+	finishOnce sync.Once
+	done       chan struct{}
+	mu         sync.Mutex
+	err        error
+}
+
+func newEmbeddedIPCHandle(cancel context.CancelCauseFunc) *embeddedIPCHandle {
+	return &embeddedIPCHandle{cancel: cancel, done: make(chan struct{})}
+}
+
+func (h *embeddedIPCHandle) finish(err error) {
+	if h == nil {
+		return
+	}
+	h.finishOnce.Do(func() {
+		h.mu.Lock()
+		h.err = err
+		h.mu.Unlock()
+		close(h.done)
+	})
+}
+
+func (h *embeddedIPCHandle) Wait() error {
+	if h == nil {
+		return nil
+	}
+	<-h.done
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+func (h *embeddedIPCHandle) Stop() error {
+	if h == nil {
+		return nil
+	}
+	h.cancelOnce.Do(func() {
+		h.cancel(errEmbeddedIPCStopped)
+	})
+	return h.Wait()
+}
+
+func runInteractiveWithEmbeddedIPC(controller interactiveController, embedded *embeddedIPCHandle) error {
+	if embedded == nil {
+		return controller.Run()
+	}
+	var lifecycleOrder atomic.Uint64
+	var ipcFailureOrder atomic.Uint64
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		if err := embedded.Wait(); err != nil {
+			ipcFailureOrder.Store(lifecycleOrder.Add(1))
+			controller.Stop()
+		}
+	}()
+	runErr := controller.Run()
+	runReturnOrder := lifecycleOrder.Add(1)
+	ipcErr := embedded.Stop()
+	<-watcherDone
+	if order := ipcFailureOrder.Load(); ipcErr != nil && order != 0 && order < runReturnOrder {
+		return fmt.Errorf("embedded IPC server: %w", ipcErr)
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if ipcErr != nil {
+		return fmt.Errorf("embedded IPC server: %w", ipcErr)
+	}
+	return nil
+}
+
+func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager) (*embeddedIPCHandle, string, error) {
+	return startEmbeddedIPCServerWithGrace(cfg, store, telemetryHub, commandGateway, planStore, workflow, models, 350*time.Millisecond)
+}
+
+func startEmbeddedIPCServerWithGrace(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager, startupGrace time.Duration) (*embeddedIPCHandle, string, error) {
 	ipcCfg := cfg.IPC
 	if !ipcCfg.Enabled {
 		return nil, "", nil
@@ -2297,29 +2396,67 @@ func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryH
 		ProjectRoot:       projectRoot,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	server := ipc.NewServer(serverCfg, store, telemetryHub, commandGateway, planStore, cfg, workflow, models)
-
-	errCh := make(chan error, 1)
+	server := serveNewServerFn(serverCfg, store, telemetryHub, commandGateway, planStore, cfg, workflow, models)
+	if err := configureEmbeddedIPCDurability(server, store); err != nil {
+		return nil, "", fmt.Errorf("configure embedded IPC durability: %w", err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	handle := newEmbeddedIPCHandle(cancel)
 	go func() {
-		errCh <- server.Start(ctx)
+		err := server.Start(ctx)
+		if errors.Is(context.Cause(ctx), errEmbeddedIPCStopped) && (err == nil || errors.Is(err, context.Canceled)) {
+			err = nil
+		} else if err == nil {
+			err = fmt.Errorf("embedded IPC server stopped unexpectedly")
+		}
+		handle.finish(err)
 	}()
 
+	timer := time.NewTimer(startupGrace)
+	defer timer.Stop()
 	select {
-	case err := <-errCh:
-		cancel()
-		if errors.Is(err, context.Canceled) {
-			return nil, "", nil
-		}
+	case <-handle.done:
+		err := handle.Wait()
+		_ = handle.Stop()
 		return nil, "", err
-	case <-time.After(350 * time.Millisecond):
+	case <-timer.C:
 	}
 
 	url := humanReadableURL(serverCfg.BindAddress)
-	stop := func() {
-		cancel()
+	return handle, url, nil
+}
+
+func configureEmbeddedIPCDurability(server ipcServer, store *storage.Store) error {
+	if isNilIPCServer(server) {
+		return fmt.Errorf("IPC server unavailable")
 	}
-	return stop, url, nil
+	durable, ok := server.(interface {
+		SetDurableStores(runledger.Store, evidence.Store) error
+	})
+	if !ok {
+		return fmt.Errorf("IPC server does not support durable observation")
+	}
+	ledger, evidenceStore, err := openServeDurableStores(store)
+	if err != nil {
+		return err
+	}
+	if err := durable.SetDurableStores(ledger, evidenceStore); err != nil {
+		return fmt.Errorf("publish embedded IPC durability: %w", err)
+	}
+	return nil
+}
+
+func isNilIPCServer(server ipcServer) bool {
+	if server == nil {
+		return true
+	}
+	value := reflect.ValueOf(server)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func humanReadableURL(bind string) string {

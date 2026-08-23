@@ -22,6 +22,17 @@ type recordingSink struct {
 	fail    bool
 }
 
+func TestCapsAPICard_TeachesBoundedSearchFirstComposition(t *testing.T) {
+	for _, want := range []string{"at most 32 broker operations", "SearchTextGlob", ".worktrees"} {
+		if !strings.Contains(CapsAPICard, want) {
+			t.Fatalf("CapsAPICard missing %q", want)
+		}
+	}
+	if strings.Contains(CapsAPICard, `caps.WalkDir(".")`) {
+		t.Fatal("CapsAPICard still teaches whole-repository traversal")
+	}
+}
+
 func (s *recordingSink) Record(record AuditRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -526,6 +537,61 @@ func TestBroker_CapabilityGrantEnforced(t *testing.T) {
 	records := sink.byMethod(CapSearchText)
 	if len(records) != 1 || records[0].Outcome != "denied" {
 		t.Fatalf("denial audit = %+v, want one denied record", records)
+	}
+}
+
+func TestBroker_CapabilityCallBudgetBoundsProgramFanout(t *testing.T) {
+	t.Parallel()
+	workspace := newWorkspace(t)
+	sink := &recordingSink{}
+	broker, err := NewBroker(workspace, sink, WithCapabilityCallLimit(2))
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	socket := filepath.Join(t.TempDir(), "caps.sock")
+	if err := broker.Start(socket); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer broker.Close()
+
+	for call := 1; call <= 3; call++ {
+		resp, err := capsHTTPCall(t, socket, broker.Token(), "/v1/files/read", `{"path":"greeting.txt"}`)
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if call <= 2 && resp.status != http.StatusOK {
+			t.Fatalf("call %d status = %d, want 200", call, resp.status)
+		}
+		if call == 3 && (resp.status != http.StatusTooManyRequests || !strings.Contains(resp.body, "budget exhausted")) {
+			t.Fatalf("call %d = %d %q, want bounded denial", call, resp.status, resp.body)
+		}
+	}
+	records := sink.byMethod(CapFilesRead)
+	if len(records) != 3 || records[2].Outcome != "denied" || !strings.Contains(records[2].Detail, "2 per program") {
+		t.Fatalf("audit records = %+v, want two calls and one bounded denial", records)
+	}
+}
+
+func TestBroker_RecursiveDiscoverySkipsManagedWorktrees(t *testing.T) {
+	t.Parallel()
+	workspace := newWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(workspace, ".worktrees", "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".worktrees", "other", "hidden.go"), []byte("package hidden\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	broker, err := NewBroker(workspace, &recordingSink{})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	result, err := broker.filesList(map[string]any{"dir": ".", "recursive": true, "cursor": 0})
+	if err != nil {
+		t.Fatalf("filesList: %v", err)
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), ".worktrees") || !strings.Contains(string(encoded), "greeting.txt") {
+		t.Fatalf("recursive listing = %s, want workspace files without managed worktrees", encoded)
 	}
 }
 

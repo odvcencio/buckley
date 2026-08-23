@@ -74,6 +74,15 @@ func (r *Resolver) NextBatch(ctx context.Context, req durability.NextBatchReques
 	return runner.NextBatch(ctx, req)
 }
 
+// NextBatchV2 implements durability.NextBatchV2Runner.
+func (r *Resolver) NextBatchV2(ctx context.Context, req durability.NextBatchV2Request) (durability.NextBatchResponse, error) {
+	runner, err := r.runner(ctx, req.RunID)
+	if err != nil {
+		return durability.NextBatchResponse{}, err
+	}
+	return runner.NextBatchV2(ctx, req)
+}
+
 // RunTurn implements durability.TaskRunner.
 func (r *Resolver) RunTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
 	runner, err := r.runner(ctx, req.RunID)
@@ -81,6 +90,15 @@ func (r *Resolver) RunTurn(ctx context.Context, req durability.TurnRequest) (dur
 		return durability.TurnResponse{}, err
 	}
 	return runner.RunTurn(ctx, req)
+}
+
+// RunTurnV3 implements durability.DurableTurnRunner.
+func (r *Resolver) RunTurnV3(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+	runner, err := r.runner(ctx, req.RunID)
+	if err != nil {
+		return durability.TurnResponse{}, err
+	}
+	return runner.RunTurnV3(ctx, req)
 }
 
 // RunLegacyTurn implements durability.LegacyTaskRunner for in-flight workflow
@@ -111,6 +129,42 @@ func (r *Resolver) ResolveApproval(ctx context.Context, resolution durability.Ap
 	return runner.ResolveApproval(ctx, resolution)
 }
 
+// RecordRetryWaiting implements durability.RetryWaiter.
+func (r *Resolver) RecordRetryWaiting(ctx context.Context, wait durability.RetryWait) error {
+	runner, err := r.runner(ctx, wait.RunID)
+	if err != nil {
+		return err
+	}
+	return runner.RecordRetryWaiting(ctx, wait)
+}
+
+// WakeRetry implements durability.RetryWaiter.
+func (r *Resolver) WakeRetry(ctx context.Context, wait durability.RetryWait) error {
+	runner, err := r.runner(ctx, wait.RunID)
+	if err != nil {
+		return err
+	}
+	return runner.WakeRetry(ctx, wait)
+}
+
+// WakeRetryV2 implements durability.RetryWakeResolver.
+func (r *Resolver) WakeRetryV2(ctx context.Context, wait durability.RetryWait) (durability.RetryWakeResult, error) {
+	runner, err := r.runner(ctx, wait.RunID)
+	if err != nil {
+		return durability.RetryWakeResult{}, err
+	}
+	return runner.WakeRetryV2(ctx, wait)
+}
+
+// ResolveRetry implements durability.RetryWaiter.
+func (r *Resolver) ResolveRetry(ctx context.Context, wait durability.RetryWait) error {
+	runner, err := r.runner(ctx, wait.RunID)
+	if err != nil {
+		return err
+	}
+	return runner.ResolveRetry(ctx, wait)
+}
+
 // FinalizeGoal implements durability.GoalFinalizer.
 func (r *Resolver) FinalizeGoal(ctx context.Context, finalization durability.GoalFinalization) error {
 	runner, err := r.runner(ctx, finalization.RunID)
@@ -123,3 +177,7 @@ func (r *Resolver) FinalizeGoal(ctx context.Context, finalization durability.Goa
 var _ durability.TaskRunner = (*Resolver)(nil)
 var _ durability.LegacyTaskRunner = (*Resolver)(nil)
 var _ durability.GoalFinalizer = (*Resolver)(nil)
+var _ durability.RetryWaiter = (*Resolver)(nil)
+var _ durability.DurableTurnRunner = (*Resolver)(nil)
+var _ durability.NextBatchV2Runner = (*Resolver)(nil)
+var _ durability.RetryWakeResolver = (*Resolver)(nil)

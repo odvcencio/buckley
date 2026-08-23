@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -29,6 +31,11 @@ type Goal struct {
 	Constraints        []string
 	Deadline           time.Time
 	BudgetUSD          float64
+	// ModelRequest is the compact, immutable model contract captured at
+	// intake. Keeping it on the goal makes local resumes and standalone
+	// durable workers issue the same request instead of inheriting whatever
+	// model/privacy defaults happen to be present after a restart.
+	ModelRequest GoalModelRequest
 	// WorkspaceRoot is the canonical directory this goal is allowed to
 	// execute against. Durable workers compare it with their configured
 	// work directory before accepting any activity for the goal.
@@ -39,6 +46,34 @@ type Goal struct {
 	// ApprovalMode is the ADR 0006 tier that applies while unattended.
 	ApprovalMode string
 }
+
+// GoalModelRequest is the transport-neutral portion of a goal's model
+// request. It intentionally contains only bounded routing controls; prompts,
+// tool results, provider responses, and credentials never enter goal history.
+type GoalModelRequest struct {
+	PolicyVersion    string
+	Policy           string
+	PolicyAction     string
+	PolicyReasonCode string
+	Model            string
+	ReasoningEffort  string
+	RetentionMode    string
+	// OpenRouterZDR is retained as a compact compatibility projection for
+	// histories written before RetentionMode became explicit. New intake writes
+	// both fields consistently; loading a legacy true value promotes it to zdr.
+	OpenRouterZDR            bool
+	OpenRouterDataCollection string
+	WorkspaceLicense         WorkspaceLicenseEvidence
+}
+
+const (
+	MaxGoalModelIDBytes = 256
+
+	GoalModelPolicyVersionV1 = "buckley.model-data-policy.v1"
+	GoalRetentionLegacy      = "legacy"
+	GoalRetentionZDR         = "zdr"
+	GoalRetentionNonZDR      = "non_zdr"
+)
 
 // NormalizeWorkspaceRoot resolves a workspace directory to one stable local
 // identity. Symlinks are resolved so a worker cannot appear to match a goal
@@ -71,7 +106,153 @@ func (g Goal) Validate() error {
 	if strings.TrimSpace(g.Statement) == "" {
 		return errEmptyStatement
 	}
+	if err := g.ModelRequest.Validate(); err != nil {
+		return err
+	}
+	if g.ModelRequest.PolicyVersion == GoalModelPolicyVersionV1 {
+		workspaceRoot := strings.TrimSpace(g.WorkspaceRoot)
+		if workspaceRoot == "" || workspaceRoot != g.WorkspaceRoot {
+			return fmt.Errorf("goalloop: v1 goal model policy requires a canonical workspace root")
+		}
+		canonical, err := NormalizeWorkspaceRoot(workspaceRoot)
+		if err != nil || canonical != workspaceRoot {
+			return fmt.Errorf("goalloop: v1 goal model policy requires a canonical workspace root")
+		}
+	}
 	return nil
+}
+
+// Validate rejects malformed or weakening model contracts before they are
+// written to the durable ledger.
+func (r GoalModelRequest) Validate() error {
+	switch r.PolicyVersion {
+	case "", GoalModelPolicyVersionV1:
+	default:
+		return fmt.Errorf("goalloop: unsupported goal model policy version")
+	}
+	retention := r.EffectiveRetentionMode()
+	switch retention {
+	case GoalRetentionLegacy, GoalRetentionZDR, GoalRetentionNonZDR:
+	default:
+		return fmt.Errorf("goalloop: unsupported goal retention mode %q", r.RetentionMode)
+	}
+	if r.RetentionMode != "" && r.RetentionMode != retention {
+		return fmt.Errorf("goalloop: goal retention mode must be canonical lowercase")
+	}
+	if r.OpenRouterZDR && retention != GoalRetentionZDR {
+		return fmt.Errorf("goalloop: OpenRouter ZDR projection conflicts with retention mode")
+	}
+
+	modelID := strings.TrimSpace(r.Model)
+	if modelID != r.Model {
+		return fmt.Errorf("goalloop: goal model must not have surrounding whitespace")
+	}
+	if len(modelID) > MaxGoalModelIDBytes || !utf8.ValidString(modelID) || containsGoalControl(modelID) {
+		return fmt.Errorf("goalloop: goal model is invalid")
+	}
+
+	effort := strings.ToLower(strings.TrimSpace(r.ReasoningEffort))
+	if effort != r.ReasoningEffort {
+		return fmt.Errorf("goalloop: goal reasoning effort must be canonical lowercase")
+	}
+	switch effort {
+	case "", "auto", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("goalloop: unsupported goal reasoning effort %q", r.ReasoningEffort)
+	}
+
+	collection := strings.ToLower(strings.TrimSpace(r.OpenRouterDataCollection))
+	if collection != r.OpenRouterDataCollection {
+		return fmt.Errorf("goalloop: OpenRouter data collection policy must be canonical lowercase")
+	}
+	if collection != "" && collection != "deny" {
+		return fmt.Errorf("goalloop: unsupported OpenRouter data collection policy %q", r.OpenRouterDataCollection)
+	}
+	if (retention == GoalRetentionZDR || retention == GoalRetentionNonZDR || collection != "") && modelID == "" {
+		return fmt.Errorf("goalloop: an explicit OpenRouter privacy policy requires an exact goal model")
+	}
+	if retention == GoalRetentionZDR || retention == GoalRetentionNonZDR || collection != "" {
+		if err := ValidateOpenRouterModelID(modelID); err != nil {
+			return err
+		}
+	}
+	if retention == GoalRetentionNonZDR && collection != "deny" {
+		return fmt.Errorf("goalloop: explicit OpenRouter non-ZDR requires data_collection=deny")
+	}
+	if err := r.WorkspaceLicense.Validate(); err != nil {
+		return err
+	}
+	if r.PolicyVersion == GoalModelPolicyVersionV1 {
+		if r.RetentionMode == "" {
+			return fmt.Errorf("goalloop: v1 goal model policy requires an explicit retention mode")
+		}
+		if retention == GoalRetentionZDR && !r.WorkspaceLicense.IsZero() {
+			return fmt.Errorf("goalloop: strict ZDR policy must not bind workspace license evidence")
+		}
+		if retention != GoalRetentionZDR && r.WorkspaceLicense.IsZero() {
+			return fmt.Errorf("goalloop: non-ZDR goal policy requires bound workspace license evidence")
+		}
+		if r.PolicyAction != "allow" || !validGoalPolicyLabel(r.Policy) || !validGoalPolicyCode(r.PolicyReasonCode) {
+			return fmt.Errorf("goalloop: v1 goal model policy decision is invalid")
+		}
+	} else if r.RetentionMode != "" || r.Policy != "" || r.PolicyAction != "" || r.PolicyReasonCode != "" || !r.WorkspaceLicense.IsZero() {
+		return fmt.Errorf("goalloop: explicit model policy metadata requires a policy version")
+	}
+	return nil
+}
+
+// ValidateOpenRouterModelID requires the canonical provider/model identity
+// OpenRouter uses on the wire and in responses. Persisting an unqualified ID
+// would make an otherwise successful exact-model request appear to drift after
+// the provider normalizes it.
+func ValidateOpenRouterModelID(modelID string) error {
+	provider, slug, qualified := strings.Cut(strings.TrimSpace(modelID), "/")
+	if !qualified || provider == "" || slug == "" || strings.Contains(slug, "/") {
+		return fmt.Errorf("goalloop: an explicit OpenRouter privacy policy requires a canonical provider/model identifier")
+	}
+	return nil
+}
+
+func validGoalPolicyLabel(value string) bool {
+	switch value {
+	case "strict_zdr", "oss_non_zdr", "oss_legacy":
+		return true
+	default:
+		return false
+	}
+}
+
+func validGoalPolicyCode(value string) bool {
+	if value == "" || len(value) > 64 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r != '_' && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+// EffectiveRetentionMode maps receipt-less legacy histories onto the governed
+// legacy path while preserving an explicitly persisted false/non-ZDR mode.
+func (r GoalModelRequest) EffectiveRetentionMode() string {
+	if r.RetentionMode != "" {
+		return strings.ToLower(strings.TrimSpace(r.RetentionMode))
+	}
+	if r.OpenRouterZDR {
+		return GoalRetentionZDR
+	}
+	return GoalRetentionLegacy
+}
+
+func containsGoalControl(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // TaskSpec is one decomposed unit of work.

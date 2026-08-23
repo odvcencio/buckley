@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"m31labs.dev/buckley/pkg/secretsafety"
 )
 
 // ReviewUntrackedFile is an untracked text file selected for worktree review.
@@ -271,48 +271,19 @@ func reviewUntrackedPatch(ctx context.Context, root, path string) ([]byte, error
 }
 
 func reviewUntrackedBinary(content []byte) bool {
-	if !utf8.Valid(content) {
-		return true
-	}
-	for _, b := range content {
-		if (b < 0x20 && b != '\n' && b != '\r' && b != '\t') || b == 0x7f {
-			return true
-		}
-	}
-	return false
+	return secretsafety.BinaryContent(content)
 }
 
 // reviewUntrackedSecretContent is deliberately conservative and only applies
 // to automatic project capture. Explicit branch allowlists retain the prior
 // behavior because they represent an operator-selected disclosure decision.
 func reviewUntrackedSecretContent(content []byte) bool {
-	text := strings.ToLower(string(content))
-	for _, marker := range []string{
-		"-----begin private key-----",
-		"aws_secret_access_key=",
-		"aws_secret_access_key:",
-		"github_pat_",
-		"ghp_",
-		"xoxb-",
-		"xoxp-",
-		"authorization: bearer ",
-		"x-api-key:",
-		"api_key=",
-		"api-key=",
-		"access_token=",
-		"client_secret=",
-	} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
+	return secretsafety.AutomaticDisclosureSecretContent(content)
 }
 
 func excludeReviewUntrackedPath(path string) bool {
-	lowerPath := strings.ToLower(filepath.ToSlash(path))
-	base := strings.ToLower(filepath.Base(lowerPath))
-	if unsafeReviewUntrackedPath(path) || reviewUntrackedBinaryPath(base) || reviewUntrackedSecretDirectory(lowerPath) {
+	base := strings.ToLower(filepath.Base(filepath.ToSlash(path)))
+	if secretsafety.SensitivePath(path) {
 		return true
 	}
 
@@ -321,108 +292,13 @@ func excludeReviewUntrackedPath(path string) bool {
 		return true
 	}
 
-	secretFiles := []string{
-		".envrc",
-		"credentials.json", "credentials.yaml", "credentials.yml",
-		"secrets.json", "secrets.yaml", "secrets.yml",
-		".secrets",
-		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
-		".pem", ".key", ".p12", ".pfx",
-		".htpasswd", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
-		"service-account.json", "serviceaccount.json",
-		"kubeconfig", ".kube/config",
-	}
-	for _, secret := range secretFiles {
-		if base == secret || strings.HasSuffix(base, secret) {
-			return true
-		}
-	}
-	safeDotenvExample := base == "sample.env" || base == "example.env" || base == ".env.example"
-	if !safeDotenvExample && (strings.HasPrefix(base, ".env") || strings.HasSuffix(base, ".env") || strings.Contains(base, ".env.")) {
-		return true
-	}
-	if reviewUntrackedSensitiveDataName(base) {
-		return true
-	}
-	if lowerPath == ".kube/config" || strings.HasSuffix(lowerPath, "/.kube/config") {
-		return true
-	}
-	if lowerPath == ".docker/config.json" || strings.HasSuffix(lowerPath, "/.docker/config.json") {
-		return true
-	}
-	return strings.Contains(lowerPath, ".aws/") && (base == "credentials" || base == "config")
+	return false
 }
 
 func unsafeReviewUntrackedPath(path string) bool {
-	if !utf8.ValidString(path) {
-		return true
-	}
-	for _, r := range path {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewUntrackedSecretDirectory(path string) bool {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	for _, part := range parts[:len(parts)-1] {
-		switch part {
-		case "secret", "secrets", ".secrets", "credential", "credentials", ".credentials", ".aws", ".kube", ".ssh":
-			return true
-		}
-	}
-	return false
-}
-
-func hasReviewSecretDataSuffix(base string) bool {
-	extensions := []string{
-		".json", ".yaml", ".yml", ".txt", ".ini", ".conf", ".cfg",
-		".toml", ".properties", ".xml", ".csv",
-	}
-	for _, extension := range extensions {
-		if strings.HasSuffix(base, extension) {
-			return true
-		}
-	}
-	return base == "secret" || base == "secrets" || base == "credential" || base == "credentials"
-}
-
-func reviewUntrackedSensitiveDataName(base string) bool {
-	if !hasReviewSecretDataSuffix(base) {
-		return false
-	}
-	markers := []string{
-		"secret", "credential", "password", "passwd", "token",
-		"api-key", "api_key", "apikey", "private-key", "private_key",
-		"service-account", "service_account", "serviceaccount", "oauth",
-	}
-	for _, marker := range markers {
-		if strings.Contains(base, marker) {
-			return true
-		}
-	}
-	return false
+	return secretsafety.UnsafePath(path)
 }
 
 func reviewUntrackedBinaryPath(base string) bool {
-	extensions := []string{
-		".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
-		".mp4", ".mov", ".avi", ".mkv", ".webm",
-		".mp3", ".wav", ".flac", ".aac",
-		".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
-		".woff", ".woff2", ".ttf", ".otf",
-		".psd", ".ai", ".sketch",
-		".sqlite", ".sqlite3", ".db", ".wasm",
-		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-		".bin", ".o", ".a", ".so", ".dylib", ".dll", ".exe", ".class",
-		".jar", ".war", ".apk",
-	}
-	for _, extension := range extensions {
-		if strings.HasSuffix(base, extension) {
-			return true
-		}
-	}
-	return false
+	return secretsafety.BinaryPath(base)
 }

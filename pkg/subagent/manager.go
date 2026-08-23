@@ -22,8 +22,9 @@ const (
 	maxCapturedOutput    = 256 * 1024
 	// DefaultOutputSpoolLimit bounds child output retained on disk. Process
 	// runners should stream into a spool instead of accumulating output in RAM.
-	DefaultOutputSpoolLimit int64 = 32 * 1024 * 1024
-	defaultCommandBuffer          = 64
+	DefaultOutputSpoolLimit            int64 = 32 * 1024 * 1024
+	defaultCommandBuffer                     = 64
+	DefaultAttachmentHeartbeatInterval       = 10 * time.Second
 	// maxTaskTelemetryBytes matches boundedTask's snapshot-level bound so the
 	// telemetry copy of a task description is never larger than the
 	// snapshot value it was derived from.
@@ -41,9 +42,13 @@ const (
 
 type Request struct {
 	ID              string
+	SessionID       string
 	ParentSessionID string
 	ParentRunID     string
 	TaskID          string
+	TurnID          string
+	AttemptID       string
+	LeaseGeneration int64
 	Agent           string
 	Spec            string
 	Task            string
@@ -115,9 +120,19 @@ type InteractiveCapturedRunner interface {
 	RunInteractiveCaptured(ctx context.Context, request Request, started func(pid int), commands <-chan CommandDelivery) (CapturedOutput, error)
 }
 
-// ErrLiveDeliveryUnavailable means a command remains safely queued because no
-// attached adapter can transport it into the running child.
-var ErrLiveDeliveryUnavailable = errors.New("live subagent command delivery is unavailable")
+var (
+	// ErrLiveDeliveryUnavailable means a command remains safely queued because no
+	// attached adapter can transport it into the running child.
+	ErrLiveDeliveryUnavailable = errors.New("live subagent command delivery is unavailable")
+	// ErrAttachmentLeaseTooShort reports a configured lease that cannot retain a
+	// strict renewal margin without spinning the heartbeat loop.
+	ErrAttachmentLeaseTooShort = errors.New("subagent attachment lease too short")
+)
+
+var (
+	errHeartbeatStopped        = errors.New("subagent heartbeat stopped")
+	errHeartbeatRenewalTimeout = errors.New("subagent heartbeat renewal timed out")
+)
 
 // CommandDelivery pairs a durable message with a one-shot transport ack.
 type CommandDelivery struct {
@@ -138,9 +153,13 @@ func (d CommandDelivery) Acknowledge(err error) {
 
 type Snapshot struct {
 	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id,omitempty"`
 	ParentSessionID string    `json:"parent_session_id,omitempty"`
 	ParentRunID     string    `json:"parent_run_id,omitempty"`
 	TaskID          string    `json:"task_id,omitempty"`
+	TurnID          string    `json:"turn_id,omitempty"`
+	AttemptID       string    `json:"attempt_id,omitempty"`
+	LeaseGeneration int64     `json:"lease_generation,omitempty"`
 	Agent           string    `json:"agent,omitempty"`
 	Spec            string    `json:"spec,omitempty"`
 	Task            string    `json:"task,omitempty"`
@@ -156,6 +175,10 @@ type Snapshot struct {
 	// OutputSpoolPath is intentionally process-local and never serialized. A
 	// lifecycle observer may consume it synchronously before Manager removes it.
 	OutputSpoolPath string `json:"-"`
+	// rawError is available only to the synchronous lifecycle observer so a
+	// durable coordinator can place full detail in evidence. Public snapshots
+	// retain only Error's bounded, redacted projection.
+	rawError string
 	// Persona, Model, and Tier are empty unless the spawn resolved a
 	// persona via SpawnOptions.Persona; see Request for their meaning.
 	Persona         string            `json:"persona,omitempty"`
@@ -177,8 +200,14 @@ type Snapshot struct {
 // durable adapter can record lifecycle facts without blocking peers.
 type LifecycleObserver func(Snapshot)
 
+// HeartbeatObserver renews the exact durable attempt represented by the
+// snapshot. Returning an error cancels the runner and marks the local result
+// as a durability failure; the coordinator still fences any terminal write.
+type HeartbeatObserver func(context.Context, Snapshot) error
+
 type run struct {
 	snapshot Snapshot
+	ctx      context.Context
 	cancel   context.CancelFunc
 	deadline bool
 	done     chan struct{}
@@ -186,17 +215,19 @@ type run struct {
 }
 
 type Manager struct {
-	mu            sync.RWMutex
-	runner        Runner
-	runs          map[string]*run
-	maxConcurrent int
-	parentSession string
-	hub           *telemetry.Hub
-	closed        bool
-	wg            sync.WaitGroup
-	personas      *persona.Registry
-	parentPersona persona.Persona
-	observer      LifecycleObserver
+	mu                sync.RWMutex
+	runner            Runner
+	runs              map[string]*run
+	maxConcurrent     int
+	parentSession     string
+	hub               *telemetry.Hub
+	closed            bool
+	wg                sync.WaitGroup
+	personas          *persona.Registry
+	parentPersona     persona.Persona
+	observer          LifecycleObserver
+	heartbeat         HeartbeatObserver
+	heartbeatInterval time.Duration
 }
 
 func NewManager(runner Runner, maxConcurrent int) *Manager {
@@ -204,10 +235,27 @@ func NewManager(runner Runner, maxConcurrent int) *Manager {
 		maxConcurrent = DefaultMaxConcurrent
 	}
 	return &Manager{
-		runner:        runner,
-		runs:          make(map[string]*run),
-		maxConcurrent: maxConcurrent,
+		runner:            runner,
+		runs:              make(map[string]*run),
+		maxConcurrent:     maxConcurrent,
+		heartbeatInterval: DefaultAttachmentHeartbeatInterval,
 	}
+}
+
+// SetHeartbeatObserver installs bounded periodic ownership renewal. The
+// interval is injectable for deterministic tests and must be configured below
+// the backing attachment lease duration by the coordinator.
+func (m *Manager) SetHeartbeatObserver(observer HeartbeatObserver, interval time.Duration) {
+	if m == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = DefaultAttachmentHeartbeatInterval
+	}
+	m.mu.Lock()
+	m.heartbeat = observer
+	m.heartbeatInterval = interval
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetTelemetry(hub *telemetry.Hub, parentSession string) {
@@ -256,9 +304,13 @@ type SpawnOptions struct {
 	// ID is the stable child-run identity supplied by a durable coordinator.
 	// Empty keeps legacy ULID generation.
 	ID              string
+	SessionID       string
 	ParentSessionID string
 	ParentRunID     string
 	TaskID          string
+	TurnID          string
+	AttemptID       string
+	LeaseGeneration int64
 	Agent           string
 	Spec            string
 	Task            string
@@ -300,7 +352,7 @@ func (m *Manager) Spawn(agent, spec, task string, timeoutSeconds int) (Snapshot,
 // *persona.EscalationError (wrapped, so errors.As still finds it) instead
 // of spawning.
 func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
-	if m == nil || m.runner == nil {
+	if m == nil || nilPort(m.runner) {
 		return Snapshot{}, fmt.Errorf("subagent manager is unavailable")
 	}
 	task := strings.TrimSpace(opts.Task)
@@ -372,9 +424,13 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	current := &run{
 		snapshot: Snapshot{
 			ID:              id,
+			SessionID:       firstNonEmpty(strings.TrimSpace(opts.SessionID), strings.TrimSpace(opts.ParentSessionID), m.parentSession),
 			ParentSessionID: firstNonEmpty(strings.TrimSpace(opts.ParentSessionID), m.parentSession),
 			ParentRunID:     strings.TrimSpace(opts.ParentRunID),
 			TaskID:          strings.TrimSpace(opts.TaskID),
+			TurnID:          strings.TrimSpace(opts.TurnID),
+			AttemptID:       strings.TrimSpace(opts.AttemptID),
+			LeaseGeneration: opts.LeaseGeneration,
 			Agent:           strings.TrimSpace(opts.Agent),
 			Spec:            strings.TrimSpace(opts.Spec),
 			Task:            boundedTask(task),
@@ -393,6 +449,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 			TimeoutSeconds:  opts.TimeoutSeconds,
 			Budget:          opts.Budget,
 		},
+		ctx:      ctx,
 		cancel:   cancel,
 		deadline: deadlineBound,
 		done:     make(chan struct{}),
@@ -406,9 +463,13 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	m.publish(telemetry.EventSubagentSpawned, snapshot, "")
 	go m.run(ctx, current, Request{
 		ID:              id,
+		SessionID:       snapshot.SessionID,
 		ParentSessionID: snapshot.ParentSessionID,
 		ParentRunID:     snapshot.ParentRunID,
 		TaskID:          snapshot.TaskID,
+		TurnID:          snapshot.TurnID,
+		AttemptID:       snapshot.AttemptID,
+		LeaseGeneration: snapshot.LeaseGeneration,
 		Agent:           snapshot.Agent,
 		Spec:            snapshot.Spec,
 		Task:            task,
@@ -451,7 +512,24 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 		m.publish(telemetry.EventSubagentState, snapshot, "")
 		m.observe(snapshot)
 	}
-	capture, err := m.runCaptured(ctx, request, started, current.commands)
+	stopHeartbeat, heartbeatStartErr := m.startHeartbeat(current)
+	var capture CapturedOutput
+	var err error
+	m.mu.Lock()
+	launchContextErr := ctx.Err()
+	launchRunner := heartbeatStartErr == nil && launchContextErr == nil && current.snapshot.State == StateRunning
+	m.mu.Unlock()
+	if launchRunner {
+		capture, err = m.runCaptured(ctx, request, started, current.commands)
+	}
+	// The heartbeat loop owns the durable attachment until it has stopped and
+	// its final in-flight renewal has a definitive result. Classifying or
+	// publishing a terminal snapshot before this join would allow a concurrent
+	// ownership loss to be mislabeled completed.
+	ownershipErr := stopHeartbeat()
+	if ownershipErr == nil {
+		ownershipErr = heartbeatStartErr
+	}
 
 	m.mu.Lock()
 	current.snapshot.FinishedAt = time.Now()
@@ -461,39 +539,114 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	current.snapshot.OutputTruncated = capture.Truncated
 	current.snapshot.OutputSpoolPath = capture.SpoolPath
 	eventType := telemetry.EventSubagentCompleted
+	var rawError string
 	switch {
+	case ownershipErr != nil:
+		current.snapshot.State = StateFailed
+		rawError = "subagent durability heartbeat failed: " + ownershipErr.Error()
+		eventType = telemetry.EventSubagentFailed
 	case errors.Is(ctx.Err(), context.DeadlineExceeded) && current.deadline:
 		current.snapshot.State = StateFailed
-		current.snapshot.Error = "subagent elapsed-time limit exceeded: " + ctx.Err().Error()
+		rawError = "subagent elapsed-time limit exceeded: " + ctx.Err().Error()
 		eventType = telemetry.EventSubagentFailed
 	case ctx.Err() != nil:
 		current.snapshot.State = StateCancelled
-		current.snapshot.Error = ctx.Err().Error()
+		rawError = ctx.Err().Error()
 		eventType = telemetry.EventSubagentCancelled
 	case err != nil:
 		current.snapshot.State = StateFailed
-		current.snapshot.Error = err.Error()
+		rawError = err.Error()
 		eventType = telemetry.EventSubagentFailed
 	case capture.Truncated:
 		current.snapshot.State = StateFailed
-		current.snapshot.Error = outputTruncationMessage(capture)
+		rawError = outputTruncationMessage(capture)
 		eventType = telemetry.EventSubagentFailed
 	default:
 		current.snapshot.State = StateCompleted
 	}
-	if capture.Truncated && !strings.Contains(current.snapshot.Error, "output capture") {
-		current.snapshot.Error = firstNonEmpty(current.snapshot.Error+"; "+outputTruncationMessage(capture), outputTruncationMessage(capture))
+	if capture.Truncated && !strings.Contains(rawError, "output capture") {
+		rawError = firstNonEmpty(rawError+"; "+outputTruncationMessage(capture), outputTruncationMessage(capture))
 	}
+	current.snapshot.rawError = rawError
+	current.snapshot.Error = telemetry.SanitizeText(rawError, 1024)
 	snapshot := current.snapshot
 	m.mu.Unlock()
 	m.publish(eventType, snapshot, snapshot.Error)
 	m.observe(snapshot)
 	if capture.SpoolPath != "" {
 		_ = os.Remove(capture.SpoolPath)
-		m.mu.Lock()
-		current.snapshot.OutputSpoolPath = ""
-		m.mu.Unlock()
 	}
+	m.mu.Lock()
+	current.snapshot.OutputSpoolPath = ""
+	current.snapshot.rawError = ""
+	m.mu.Unlock()
+}
+
+func (m *Manager) startHeartbeat(current *run) (func() error, error) {
+	if m == nil || current == nil {
+		return func() error { return nil }, nil
+	}
+	m.mu.RLock()
+	observer := m.heartbeat
+	interval := m.heartbeatInterval
+	snapshot := current.snapshot
+	m.mu.RUnlock()
+	if observer == nil || snapshot.AttemptID == "" || snapshot.LeaseGeneration <= 0 {
+		return func() error { return nil }, nil
+	}
+	if interval <= 0 {
+		interval = DefaultAttachmentHeartbeatInterval
+	}
+	heartbeatCtx, cancelHeartbeat := context.WithCancelCause(context.Background())
+	renew := func() error {
+		m.mu.RLock()
+		currentSnapshot := current.snapshot
+		m.mu.RUnlock()
+		return observer(heartbeatCtx, currentSnapshot)
+	}
+	// Establish exact ownership before starting a periodic schedule. The first
+	// cadence begins only after this renewal succeeds, so a renewal delayed by
+	// storage contention cannot leave an already-expired ticker event queued.
+	if err := renew(); err != nil {
+		cancelHeartbeat(errHeartbeatStopped)
+		return func() error { return nil }, err
+	}
+	if current.ctx.Err() != nil {
+		cancelHeartbeat(errHeartbeatStopped)
+		return func() error { return nil }, nil
+	}
+	ticker := time.NewTicker(interval)
+	done := make(chan error, 1)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+				if err := renew(); err != nil {
+					if errors.Is(context.Cause(heartbeatCtx), errHeartbeatStopped) && errors.Is(err, context.Canceled) {
+						done <- nil
+						return
+					}
+					current.cancel()
+					done <- err
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	var result error
+	stop := func() error {
+		once.Do(func() {
+			cancelHeartbeat(errHeartbeatStopped)
+			result = <-done
+		})
+		return result
+	}
+	return stop, nil
 }
 
 func (m *Manager) runCaptured(ctx context.Context, request Request, started func(int), commands <-chan CommandDelivery) (CapturedOutput, error) {
@@ -568,9 +721,21 @@ func (m *Manager) Deliver(ctx context.Context, id string, message agentcoord.Mes
 	m.mu.RLock()
 	current, ok := m.runs[id]
 	_, interactive := m.runner.(InteractiveRunner)
+	if !interactive {
+		_, interactive = m.runner.(InteractiveCapturedRunner)
+	}
 	if !ok || !interactive || current.snapshot.State != StateRunning {
 		m.mu.RUnlock()
 		return fmt.Errorf("%w: %s", ErrLiveDeliveryUnavailable, id)
+	}
+	// A live child may only receive messages for the exact persisted process
+	// attachment. Legacy in-memory managers have no fence and retain their
+	// previous behavior; durable callers enrich messages before reaching here.
+	if current.snapshot.AttemptID != "" {
+		if strings.TrimSpace(message.AttemptID) != current.snapshot.AttemptID || message.LeaseGeneration != current.snapshot.LeaseGeneration {
+			m.mu.RUnlock()
+			return fmt.Errorf("%w: stale subagent attachment for %s", ErrLiveDeliveryUnavailable, id)
+		}
 	}
 	commands, done := current.commands, current.done
 	m.mu.RUnlock()
@@ -778,7 +943,7 @@ func (m *Manager) publish(eventType telemetry.EventType, snapshot Snapshot, errT
 		data["duration_ms"] = snapshot.FinishedAt.Sub(snapshot.StartedAt).Milliseconds()
 	}
 	if errText != "" {
-		data["error"] = boundedMessage(errText)
+		data["error"] = telemetry.SanitizeText(errText, 1024)
 	}
 	hub.Publish(telemetry.Event{
 		Type:      eventType,

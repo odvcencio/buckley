@@ -9,7 +9,10 @@ func TestBuildToolRegistryNilConfigDoesNotPanic(t *testing.T) {
 			t.Fatalf("nil-config registry construction panicked: %v", rec)
 		}
 	}()
-	tools, closer := r.buildToolRegistry("sess", "")
+	tools, closer, err := r.buildToolRegistry("sess", "", nil, nil)
+	if err != nil {
+		t.Fatalf("buildToolRegistry: %v", err)
+	}
 	if tools == nil {
 		t.Fatal("expected a registry even with nil config")
 	}

@@ -24,6 +24,8 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// BuckleyIPCName is the fully-qualified name of the BuckleyIPC service.
 	BuckleyIPCName = "buckley.ipc.v1.BuckleyIPC"
+	// BuckleyObservationName is the fully-qualified name of the BuckleyObservation service.
+	BuckleyObservationName = "buckley.ipc.v1.BuckleyObservation"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -105,6 +107,24 @@ const (
 	// BuckleyIPCGetVAPIDPublicKeyProcedure is the fully-qualified name of the BuckleyIPC's
 	// GetVAPIDPublicKey RPC.
 	BuckleyIPCGetVAPIDPublicKeyProcedure = "/buckley.ipc.v1.BuckleyIPC/GetVAPIDPublicKey"
+	// BuckleyObservationGetSessionExecutionProcedure is the fully-qualified name of the
+	// BuckleyObservation's GetSessionExecution RPC.
+	BuckleyObservationGetSessionExecutionProcedure = "/buckley.ipc.v1.BuckleyObservation/GetSessionExecution"
+	// BuckleyObservationListSessionCommandsProcedure is the fully-qualified name of the
+	// BuckleyObservation's ListSessionCommands RPC.
+	BuckleyObservationListSessionCommandsProcedure = "/buckley.ipc.v1.BuckleyObservation/ListSessionCommands"
+	// BuckleyObservationGetSessionCommandProcedure is the fully-qualified name of the
+	// BuckleyObservation's GetSessionCommand RPC.
+	BuckleyObservationGetSessionCommandProcedure = "/buckley.ipc.v1.BuckleyObservation/GetSessionCommand"
+	// BuckleyObservationListSessionRoutinesProcedure is the fully-qualified name of the
+	// BuckleyObservation's ListSessionRoutines RPC.
+	BuckleyObservationListSessionRoutinesProcedure = "/buckley.ipc.v1.BuckleyObservation/ListSessionRoutines"
+	// BuckleyObservationGetSessionRoutineProcedure is the fully-qualified name of the
+	// BuckleyObservation's GetSessionRoutine RPC.
+	BuckleyObservationGetSessionRoutineProcedure = "/buckley.ipc.v1.BuckleyObservation/GetSessionRoutine"
+	// BuckleyObservationListRoutineMailboxProcedure is the fully-qualified name of the
+	// BuckleyObservation's ListRoutineMailbox RPC.
+	BuckleyObservationListRoutineMailboxProcedure = "/buckley.ipc.v1.BuckleyObservation/ListRoutineMailbox"
 )
 
 // BuckleyIPCClient is a client for the buckley.ipc.v1.BuckleyIPC service.
@@ -913,4 +933,204 @@ func (UnimplementedBuckleyIPCHandler) UnsubscribePush(context.Context, *connect.
 
 func (UnimplementedBuckleyIPCHandler) GetVAPIDPublicKey(context.Context, *connect.Request[emptypb.Empty]) (*connect.Response[proto.VAPIDPublicKeyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyIPC.GetVAPIDPublicKey is not implemented"))
+}
+
+// BuckleyObservationClient is a client for the buckley.ipc.v1.BuckleyObservation service.
+type BuckleyObservationClient interface {
+	GetSessionExecution(context.Context, *connect.Request[proto.GetSessionExecutionRequest]) (*connect.Response[proto.GetSessionExecutionResponse], error)
+	ListSessionCommands(context.Context, *connect.Request[proto.ListSessionCommandsRequest]) (*connect.Response[proto.ListSessionCommandsResponse], error)
+	GetSessionCommand(context.Context, *connect.Request[proto.GetSessionCommandRequest]) (*connect.Response[proto.GetSessionCommandResponse], error)
+	ListSessionRoutines(context.Context, *connect.Request[proto.ListSessionRoutinesRequest]) (*connect.Response[proto.ListSessionRoutinesResponse], error)
+	GetSessionRoutine(context.Context, *connect.Request[proto.GetSessionRoutineRequest]) (*connect.Response[proto.GetSessionRoutineResponse], error)
+	ListRoutineMailbox(context.Context, *connect.Request[proto.ListRoutineMailboxRequest]) (*connect.Response[proto.ListRoutineMailboxResponse], error)
+}
+
+// NewBuckleyObservationClient constructs a client for the buckley.ipc.v1.BuckleyObservation
+// service. By default, it uses the Connect protocol with the binary Protobuf Codec, asks for
+// gzipped responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply
+// the connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewBuckleyObservationClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) BuckleyObservationClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	buckleyObservationMethods := proto.File_ipc_proto.Services().ByName("BuckleyObservation").Methods()
+	return &buckleyObservationClient{
+		getSessionExecution: connect.NewClient[proto.GetSessionExecutionRequest, proto.GetSessionExecutionResponse](
+			httpClient,
+			baseURL+BuckleyObservationGetSessionExecutionProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("GetSessionExecution")),
+			connect.WithClientOptions(opts...),
+		),
+		listSessionCommands: connect.NewClient[proto.ListSessionCommandsRequest, proto.ListSessionCommandsResponse](
+			httpClient,
+			baseURL+BuckleyObservationListSessionCommandsProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("ListSessionCommands")),
+			connect.WithClientOptions(opts...),
+		),
+		getSessionCommand: connect.NewClient[proto.GetSessionCommandRequest, proto.GetSessionCommandResponse](
+			httpClient,
+			baseURL+BuckleyObservationGetSessionCommandProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("GetSessionCommand")),
+			connect.WithClientOptions(opts...),
+		),
+		listSessionRoutines: connect.NewClient[proto.ListSessionRoutinesRequest, proto.ListSessionRoutinesResponse](
+			httpClient,
+			baseURL+BuckleyObservationListSessionRoutinesProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("ListSessionRoutines")),
+			connect.WithClientOptions(opts...),
+		),
+		getSessionRoutine: connect.NewClient[proto.GetSessionRoutineRequest, proto.GetSessionRoutineResponse](
+			httpClient,
+			baseURL+BuckleyObservationGetSessionRoutineProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("GetSessionRoutine")),
+			connect.WithClientOptions(opts...),
+		),
+		listRoutineMailbox: connect.NewClient[proto.ListRoutineMailboxRequest, proto.ListRoutineMailboxResponse](
+			httpClient,
+			baseURL+BuckleyObservationListRoutineMailboxProcedure,
+			connect.WithSchema(buckleyObservationMethods.ByName("ListRoutineMailbox")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// buckleyObservationClient implements BuckleyObservationClient.
+type buckleyObservationClient struct {
+	getSessionExecution *connect.Client[proto.GetSessionExecutionRequest, proto.GetSessionExecutionResponse]
+	listSessionCommands *connect.Client[proto.ListSessionCommandsRequest, proto.ListSessionCommandsResponse]
+	getSessionCommand   *connect.Client[proto.GetSessionCommandRequest, proto.GetSessionCommandResponse]
+	listSessionRoutines *connect.Client[proto.ListSessionRoutinesRequest, proto.ListSessionRoutinesResponse]
+	getSessionRoutine   *connect.Client[proto.GetSessionRoutineRequest, proto.GetSessionRoutineResponse]
+	listRoutineMailbox  *connect.Client[proto.ListRoutineMailboxRequest, proto.ListRoutineMailboxResponse]
+}
+
+// GetSessionExecution calls buckley.ipc.v1.BuckleyObservation.GetSessionExecution.
+func (c *buckleyObservationClient) GetSessionExecution(ctx context.Context, req *connect.Request[proto.GetSessionExecutionRequest]) (*connect.Response[proto.GetSessionExecutionResponse], error) {
+	return c.getSessionExecution.CallUnary(ctx, req)
+}
+
+// ListSessionCommands calls buckley.ipc.v1.BuckleyObservation.ListSessionCommands.
+func (c *buckleyObservationClient) ListSessionCommands(ctx context.Context, req *connect.Request[proto.ListSessionCommandsRequest]) (*connect.Response[proto.ListSessionCommandsResponse], error) {
+	return c.listSessionCommands.CallUnary(ctx, req)
+}
+
+// GetSessionCommand calls buckley.ipc.v1.BuckleyObservation.GetSessionCommand.
+func (c *buckleyObservationClient) GetSessionCommand(ctx context.Context, req *connect.Request[proto.GetSessionCommandRequest]) (*connect.Response[proto.GetSessionCommandResponse], error) {
+	return c.getSessionCommand.CallUnary(ctx, req)
+}
+
+// ListSessionRoutines calls buckley.ipc.v1.BuckleyObservation.ListSessionRoutines.
+func (c *buckleyObservationClient) ListSessionRoutines(ctx context.Context, req *connect.Request[proto.ListSessionRoutinesRequest]) (*connect.Response[proto.ListSessionRoutinesResponse], error) {
+	return c.listSessionRoutines.CallUnary(ctx, req)
+}
+
+// GetSessionRoutine calls buckley.ipc.v1.BuckleyObservation.GetSessionRoutine.
+func (c *buckleyObservationClient) GetSessionRoutine(ctx context.Context, req *connect.Request[proto.GetSessionRoutineRequest]) (*connect.Response[proto.GetSessionRoutineResponse], error) {
+	return c.getSessionRoutine.CallUnary(ctx, req)
+}
+
+// ListRoutineMailbox calls buckley.ipc.v1.BuckleyObservation.ListRoutineMailbox.
+func (c *buckleyObservationClient) ListRoutineMailbox(ctx context.Context, req *connect.Request[proto.ListRoutineMailboxRequest]) (*connect.Response[proto.ListRoutineMailboxResponse], error) {
+	return c.listRoutineMailbox.CallUnary(ctx, req)
+}
+
+// BuckleyObservationHandler is an implementation of the buckley.ipc.v1.BuckleyObservation service.
+type BuckleyObservationHandler interface {
+	GetSessionExecution(context.Context, *connect.Request[proto.GetSessionExecutionRequest]) (*connect.Response[proto.GetSessionExecutionResponse], error)
+	ListSessionCommands(context.Context, *connect.Request[proto.ListSessionCommandsRequest]) (*connect.Response[proto.ListSessionCommandsResponse], error)
+	GetSessionCommand(context.Context, *connect.Request[proto.GetSessionCommandRequest]) (*connect.Response[proto.GetSessionCommandResponse], error)
+	ListSessionRoutines(context.Context, *connect.Request[proto.ListSessionRoutinesRequest]) (*connect.Response[proto.ListSessionRoutinesResponse], error)
+	GetSessionRoutine(context.Context, *connect.Request[proto.GetSessionRoutineRequest]) (*connect.Response[proto.GetSessionRoutineResponse], error)
+	ListRoutineMailbox(context.Context, *connect.Request[proto.ListRoutineMailboxRequest]) (*connect.Response[proto.ListRoutineMailboxResponse], error)
+}
+
+// NewBuckleyObservationHandler builds an HTTP handler from the service implementation. It returns
+// the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewBuckleyObservationHandler(svc BuckleyObservationHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	buckleyObservationMethods := proto.File_ipc_proto.Services().ByName("BuckleyObservation").Methods()
+	buckleyObservationGetSessionExecutionHandler := connect.NewUnaryHandler(
+		BuckleyObservationGetSessionExecutionProcedure,
+		svc.GetSessionExecution,
+		connect.WithSchema(buckleyObservationMethods.ByName("GetSessionExecution")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyObservationListSessionCommandsHandler := connect.NewUnaryHandler(
+		BuckleyObservationListSessionCommandsProcedure,
+		svc.ListSessionCommands,
+		connect.WithSchema(buckleyObservationMethods.ByName("ListSessionCommands")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyObservationGetSessionCommandHandler := connect.NewUnaryHandler(
+		BuckleyObservationGetSessionCommandProcedure,
+		svc.GetSessionCommand,
+		connect.WithSchema(buckleyObservationMethods.ByName("GetSessionCommand")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyObservationListSessionRoutinesHandler := connect.NewUnaryHandler(
+		BuckleyObservationListSessionRoutinesProcedure,
+		svc.ListSessionRoutines,
+		connect.WithSchema(buckleyObservationMethods.ByName("ListSessionRoutines")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyObservationGetSessionRoutineHandler := connect.NewUnaryHandler(
+		BuckleyObservationGetSessionRoutineProcedure,
+		svc.GetSessionRoutine,
+		connect.WithSchema(buckleyObservationMethods.ByName("GetSessionRoutine")),
+		connect.WithHandlerOptions(opts...),
+	)
+	buckleyObservationListRoutineMailboxHandler := connect.NewUnaryHandler(
+		BuckleyObservationListRoutineMailboxProcedure,
+		svc.ListRoutineMailbox,
+		connect.WithSchema(buckleyObservationMethods.ByName("ListRoutineMailbox")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/buckley.ipc.v1.BuckleyObservation/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case BuckleyObservationGetSessionExecutionProcedure:
+			buckleyObservationGetSessionExecutionHandler.ServeHTTP(w, r)
+		case BuckleyObservationListSessionCommandsProcedure:
+			buckleyObservationListSessionCommandsHandler.ServeHTTP(w, r)
+		case BuckleyObservationGetSessionCommandProcedure:
+			buckleyObservationGetSessionCommandHandler.ServeHTTP(w, r)
+		case BuckleyObservationListSessionRoutinesProcedure:
+			buckleyObservationListSessionRoutinesHandler.ServeHTTP(w, r)
+		case BuckleyObservationGetSessionRoutineProcedure:
+			buckleyObservationGetSessionRoutineHandler.ServeHTTP(w, r)
+		case BuckleyObservationListRoutineMailboxProcedure:
+			buckleyObservationListRoutineMailboxHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedBuckleyObservationHandler returns CodeUnimplemented from all methods.
+type UnimplementedBuckleyObservationHandler struct{}
+
+func (UnimplementedBuckleyObservationHandler) GetSessionExecution(context.Context, *connect.Request[proto.GetSessionExecutionRequest]) (*connect.Response[proto.GetSessionExecutionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.GetSessionExecution is not implemented"))
+}
+
+func (UnimplementedBuckleyObservationHandler) ListSessionCommands(context.Context, *connect.Request[proto.ListSessionCommandsRequest]) (*connect.Response[proto.ListSessionCommandsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.ListSessionCommands is not implemented"))
+}
+
+func (UnimplementedBuckleyObservationHandler) GetSessionCommand(context.Context, *connect.Request[proto.GetSessionCommandRequest]) (*connect.Response[proto.GetSessionCommandResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.GetSessionCommand is not implemented"))
+}
+
+func (UnimplementedBuckleyObservationHandler) ListSessionRoutines(context.Context, *connect.Request[proto.ListSessionRoutinesRequest]) (*connect.Response[proto.ListSessionRoutinesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.ListSessionRoutines is not implemented"))
+}
+
+func (UnimplementedBuckleyObservationHandler) GetSessionRoutine(context.Context, *connect.Request[proto.GetSessionRoutineRequest]) (*connect.Response[proto.GetSessionRoutineResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.GetSessionRoutine is not implemented"))
+}
+
+func (UnimplementedBuckleyObservationHandler) ListRoutineMailbox(context.Context, *connect.Request[proto.ListRoutineMailboxRequest]) (*connect.Response[proto.ListRoutineMailboxResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("buckley.ipc.v1.BuckleyObservation.ListRoutineMailbox is not implemented"))
 }

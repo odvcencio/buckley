@@ -562,6 +562,175 @@ func TestController_DispatchesToolsBackfillsIDsAndSumsUsage(t *testing.T) {
 	}
 }
 
+func TestController_ContextualDispatcherCarriesStableApprovalIdentity(t *testing.T) {
+	var dispatched []ToolDispatchCall
+	round := 0
+	const (
+		runID  = "run-contextual"
+		taskID = "task-contextual"
+		turnID = "turn-contextual"
+	)
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			round++
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			switch round {
+			case 1:
+				return toolCallResponse("provider-round-1", "write_file", `{"path":"one"}`, model.Usage{}), nil
+			case 2:
+				return toolCallResponse("provider-round-2", "write_file", `{"path":"two"}`, model.Usage{}), nil
+			default:
+				return textResponse("done", model.Usage{}), nil
+			}
+		}),
+		DispatchTools: ContextualToolDispatcherFunc(func(_ context.Context, calls []ToolDispatchCall) ([]ToolOutcome, error) {
+			dispatched = append(dispatched, calls...)
+			return []ToolOutcome{{Content: "ok", Success: true}}, nil
+		}),
+		RunID: runID, TaskID: taskID, TurnID: turnID,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if _, err := ctrl.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(dispatched) != 2 {
+		t.Fatalf("dispatched calls = %+v, want two calls", dispatched)
+	}
+	for index, got := range dispatched {
+		wantRound := index + 1
+		wantProviderID := fmt.Sprintf("provider-round-%d", wantRound)
+		wantStepID := StableStepID(runID, taskID, turnID, wantRound, "tool", 0)
+		if got.Call.ID != wantProviderID || got.ProviderToolCallID != wantProviderID {
+			t.Fatalf("call %d provider identity = %+v, want %q", index, got, wantProviderID)
+		}
+		if got.RunID != runID || got.TaskID != taskID || got.TurnID != turnID || got.StepID != wantStepID || got.Round != wantRound || got.ToolIndex != 0 {
+			t.Fatalf("call %d durable identity = %+v", index, got)
+		}
+		wantApprovalID := StableApprovalID(runID, taskID, turnID, wantStepID, wantRound, 0)
+		if got.ApprovalID != wantApprovalID || got.ApprovalID == got.ProviderToolCallID {
+			t.Fatalf("call %d approval identity = %q, provider=%q want %q", index, got.ApprovalID, got.ProviderToolCallID, wantApprovalID)
+		}
+		if StableApprovalID(runID, taskID, turnID, got.StepID, got.Round, got.ToolIndex) != got.ApprovalID {
+			t.Fatalf("call %d approval identity was not replay-stable", index)
+		}
+	}
+	if dispatched[0].ApprovalID == dispatched[1].ApprovalID {
+		t.Fatalf("distinct rounds collided on approval ID %q", dispatched[0].ApprovalID)
+	}
+}
+
+func TestController_ContextualModelCallerCarriesExactStepIdentity(t *testing.T) {
+	const (
+		runID  = "run-contextual-model"
+		taskID = "task-contextual-model"
+		turnID = "turn-contextual-model"
+	)
+	var got ModelDispatchCall
+	controller, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ContextualModelCallerFunc(func(_ context.Context, call ModelDispatchCall) (*model.ChatResponse, error) {
+			got = call
+			return textResponse("done", model.Usage{}), nil
+		}),
+		RunID: runID, TaskID: taskID, TurnID: turnID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantStep := StableStepID(runID, taskID, turnID, 1, "model", 0)
+	if got.RunID != runID || got.TaskID != taskID || got.TurnID != turnID ||
+		got.StepID != wantStep || got.Kind != "model" || got.Round != 1 ||
+		got.Request.Model != "test-model" || got.UseContinuation {
+		t.Fatalf("contextual model call = %+v", got)
+	}
+}
+
+func TestController_ContextualDispatcherStableWithoutProviderIDs(t *testing.T) {
+	var dispatched []ToolDispatchCall
+	round := 0
+	const (
+		runID  = "run-contextual-missing-provider"
+		taskID = "task-contextual-missing-provider"
+		turnID = "turn-contextual-missing-provider"
+	)
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			round++
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			switch round {
+			case 1:
+				return toolCallResponse("", "write_file", `{"path":"one"}`, model.Usage{}), nil
+			case 2:
+				return toolCallResponse("", "write_file", `{"path":"two"}`, model.Usage{}), nil
+			default:
+				return textResponse("done", model.Usage{}), nil
+			}
+		}),
+		DispatchTools: ContextualToolDispatcherFunc(func(_ context.Context, calls []ToolDispatchCall) ([]ToolOutcome, error) {
+			dispatched = append(dispatched, calls...)
+			return []ToolOutcome{{Content: "ok", Success: true}}, nil
+		}),
+		RunID: runID, TaskID: taskID, TurnID: turnID,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if _, err := ctrl.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(dispatched) != 2 {
+		t.Fatalf("dispatched calls = %+v, want two calls", dispatched)
+	}
+	for index, got := range dispatched {
+		wantRound := index + 1
+		if got.ProviderToolCallID != "tool-1" || got.Call.ID != got.ProviderToolCallID {
+			t.Fatalf("call %d provider fallback = %+v, want tool-1", index, got)
+		}
+		stepID := StableStepID(runID, taskID, turnID, wantRound, "tool", 0)
+		wantApprovalID := StableApprovalID(runID, taskID, turnID, stepID, wantRound, 0)
+		if got.ApprovalID != wantApprovalID {
+			t.Fatalf("call %d approval ID = %q, want %q", index, got.ApprovalID, wantApprovalID)
+		}
+		if got.ApprovalID != StableApprovalID(runID, taskID, turnID, got.StepID, got.Round, got.ToolIndex) {
+			t.Fatalf("call %d approval identity was not replay-stable", index)
+		}
+	}
+	if dispatched[0].ApprovalID == dispatched[1].ApprovalID {
+		t.Fatalf("missing provider IDs collided across rounds: %q", dispatched[0].ApprovalID)
+	}
+}
+
+func TestStableApprovalID_LegacyFallbackAndReplay(t *testing.T) {
+	step := StableStepID("run-one", "task-one", "turn-one", 3, "tool", 2)
+	first := StableApprovalID("run-one", "task-one", "turn-one", step, 3, 2)
+	if first == "" {
+		t.Fatal("stable approval ID is empty")
+	}
+	if replay := StableApprovalID("run-one", "task-one", "turn-one", step, 3, 2); replay != first {
+		t.Fatalf("replay approval ID = %q, want %q", replay, first)
+	}
+	if otherRound := StableApprovalID("run-one", "task-one", "turn-one", StableStepID("run-one", "task-one", "turn-one", 4, "tool", 2), 4, 2); otherRound == first {
+		t.Fatalf("rounds collided on approval ID %q", first)
+	}
+	if otherSession := StableApprovalID("run-two", "task-one", "turn-one", step, 3, 2); otherSession == first {
+		t.Fatalf("distinct sessions collided on approval ID %q", first)
+	}
+	if legacy := StableApprovalID("", "task-one", "turn-one", step, 3, 2); legacy != "" {
+		t.Fatalf("legacy identity = %q, want empty fallback marker", legacy)
+	}
+}
+
 func TestController_GovernorStopsOnExactRepeat(t *testing.T) {
 	calls := 0
 	ctrl, err := NewController(ControllerConfig{

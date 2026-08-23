@@ -401,18 +401,16 @@ const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
 	"  type Match struct { File string; Line int; Text string }\n" +
-	"Paths are workspace-relative. Example:\n" +
+	"Paths are workspace-relative. One program may make at most 32 broker operations; paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
-	"import (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"execprogram/caps\"\n)\n\n" +
+	"import (\n\t\"fmt\"\n\n\t\"execprogram/caps\"\n)\n\n" +
 	"func main() {\n" +
-	"\tfiles, err := caps.WalkDir(\".\")\n" +
+	"\tmatches, capped, err := caps.SearchTextGlob(\"TODO\", \"*.go\")\n" +
 	"\tif err != nil {\n\t\tpanic(err)\n\t}\n" +
-	"\tcount := 0\n" +
-	"\tfor _, f := range files {\n" +
-	"\t\tif !strings.HasSuffix(f, \".go\") {\n\t\t\tcontinue\n\t\t}\n" +
-	"\t\tbody, _, err := caps.ReadFile(f)\n" +
-	"\t\tif err != nil {\n\t\t\tcontinue\n\t\t}\n" +
-	"\t\tcount += strings.Count(body, \"TODO\")\n" +
+	"\tlimit := len(matches)\n" +
+	"\tif limit > 5 {\n\t\tlimit = 5\n\t}\n" +
+	"\tfmt.Printf(\"matches=%d capped=%v\\n\", len(matches), capped)\n" +
+	"\tfor _, match := range matches[:limit] {\n" +
+	"\t\tfmt.Printf(\"%s:%d %s\\n\", match.File, match.Line, match.Text)\n" +
 	"\t}\n" +
-	"\tfmt.Printf(\"todos=%d\\n\", count)\n" +
 	"}"

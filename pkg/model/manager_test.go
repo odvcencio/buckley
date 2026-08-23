@@ -481,6 +481,61 @@ func TestProviderIDForModelUsesCatalogAndRouting(t *testing.T) {
 	}
 }
 
+func TestResolveModelRoute_ConfigRoutingOutranksCatalogAndRouteHandoffFailsClosed(t *testing.T) {
+	openRouter := &stubProvider{id: "openrouter", catalog: ModelCatalog{Data: []ModelInfo{{ID: "stealth/ox-alpha", ContextLength: 1_048_576}}}}
+	direct := &stubProvider{id: "openai", catalog: ModelCatalog{Data: []ModelInfo{{ID: "direct/model", ContextLength: 16_000}}}}
+	mgr := &Manager{
+		config: &config.Config{
+			Models: config.ModelConfig{DefaultProvider: "openrouter", FallbackChains: map[string][]string{}},
+			Providers: config.ProviderConfig{ModelRouting: map[string]string{
+				"stealth/": "openai",
+				"direct/":  "openai",
+			}},
+		},
+		providers:      map[string]Provider{"openrouter": openRouter, "openai": direct},
+		providerOrder:  []string{"openai", "openrouter"},
+		catalog:        map[string]ModelInfo{"stealth/ox-alpha": openRouter.catalog.Data[0]},
+		providerModels: map[string][]string{"openrouter": {"stealth/ox-alpha"}, "openai": {"direct/model"}},
+		modelProviders: map[string]string{"stealth/ox-alpha": "openrouter", "direct/model": "openai"},
+		routingHooks:   NewRoutingHooks(),
+	}
+
+	if legacy := mgr.ProviderIDForModel("stealth/ox-alpha"); legacy != "openrouter" {
+		t.Fatalf("legacy catalog projection = %q, want disagreement fixture", legacy)
+	}
+	route, err := mgr.ResolveModelRoute("stealth/ox-alpha")
+	if err != nil {
+		t.Fatalf("ResolveModelRoute: %v", err)
+	}
+	if route.ProviderID != "openai" || route.SelectedModel != "stealth/ox-alpha" {
+		t.Fatalf("authoritative route = %+v", route)
+	}
+
+	// Remove the static conflicting prefix for the handoff race. The first
+	// resolution is OpenRouter; a stateful hook changes the second resolution
+	// to a direct-provider model. ChatCompletionForRoute must stop before either
+	// provider receives a request.
+	delete(mgr.config.Providers.ModelRouting, "stealth/")
+	hookCalls := 0
+	mgr.routingHooks.Register(func(decision *RoutingDecision) *RoutingDecision {
+		hookCalls++
+		if hookCalls >= 2 {
+			decision.SelectedModel = "direct/model"
+		}
+		return decision
+	})
+	route, err = mgr.ResolveModelRoute("stealth/ox-alpha")
+	if err != nil || route.ProviderID != "openrouter" {
+		t.Fatalf("initial governed route = %+v, %v", route, err)
+	}
+	if _, err := mgr.ChatCompletionForRoute(context.Background(), ChatRequest{Model: "stealth/ox-alpha"}, route); err == nil || !strings.Contains(err.Error(), "route changed") {
+		t.Fatalf("ChatCompletionForRoute error = %v", err)
+	}
+	if len(openRouter.requests) != 0 || len(direct.requests) != 0 {
+		t.Fatalf("provider requests openrouter=%d direct=%d, want zero", len(openRouter.requests), len(direct.requests))
+	}
+}
+
 func TestChatCompletionNormalizesModelID(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{

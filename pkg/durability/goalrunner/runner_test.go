@@ -2,9 +2,12 @@ package goalrunner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/durability"
 	"m31labs.dev/buckley/pkg/evidence"
@@ -27,6 +30,37 @@ type scriptedEngine struct {
 	calls    int
 }
 
+type contractCaptureEngine struct {
+	request goalloop.GoalModelRequest
+}
+
+func (e *contractCaptureEngine) RunTurn(_ context.Context, task goalloop.TaskContext) (goalloop.TurnOutcome, error) {
+	e.request = task.Goal.ModelRequest
+	return goalloop.TurnOutcome{Rounds: 1, StateChanged: true, Summary: "captured"}, nil
+}
+
+type failOnceEventSink struct {
+	eventType string
+	calls     int
+}
+
+type reportFailLedger struct{ runledger.Store }
+
+func (reportFailLedger) SumMetricByTask(context.Context, string, string) (map[string]float64, error) {
+	return nil, fmt.Errorf("injected report metric failure")
+}
+
+func (s *failOnceEventSink) WriteEvent(_ context.Context, event runledger.Event) error {
+	if event.Type != s.eventType {
+		return nil
+	}
+	s.calls++
+	if s.calls == 1 {
+		return fmt.Errorf("injected %s secondary append failure", event.Type)
+	}
+	return nil
+}
+
 func (e *scriptedEngine) RunTurn(_ context.Context, _ goalloop.TaskContext) (goalloop.TurnOutcome, error) {
 	idx := e.calls
 	if idx >= len(e.outcomes) {
@@ -38,7 +72,16 @@ func (e *scriptedEngine) RunTurn(_ context.Context, _ goalloop.TaskContext) (goa
 
 func newTestRunner(t *testing.T, engine goalloop.TurnEngine) (*Runner, *goalloop.Intake) {
 	t.Helper()
-	dir := t.TempDir()
+	return newTestRunnerWithGoal(t, engine, goalloop.Goal{Statement: "port files", WorkspaceRoot: t.TempDir()})
+}
+
+func newTestRunnerWithGoal(t *testing.T, engine goalloop.TurnEngine, goal goalloop.Goal) (*Runner, *goalloop.Intake) {
+	t.Helper()
+	dir := goal.WorkspaceRoot
+	if strings.TrimSpace(dir) == "" {
+		dir = t.TempDir()
+		goal.WorkspaceRoot = dir
+	}
 	ev, err := evidence.New(filepath.Join(dir, "shared.db"), evidence.WithBlobRoot(filepath.Join(dir, "blobs")))
 	if err != nil {
 		t.Fatalf("evidence.New: %v", err)
@@ -61,19 +104,79 @@ func newTestRunner(t *testing.T, engine goalloop.TurnEngine) (*Runner, *goalloop
 	if err != nil {
 		t.Fatalf("goalloop.New: %v", err)
 	}
-	intake, err := loop.Start(context.Background(), goalloop.Goal{Statement: "port files", WorkspaceRoot: dir})
+	intake, err := loop.Start(context.Background(), goal)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	specs := make(map[string]goalloop.TaskSpec, len(intake.Tasks))
-	for _, task := range intake.Tasks {
-		specs[task.TaskID] = task.Spec
+	loadedGoal, specs, err := loop.LoadGoal(context.Background(), intake.RunID)
+	if err != nil {
+		t.Fatalf("LoadGoal after restart: %v", err)
 	}
-	runner, err := New(loop, intake.RunID, dir, intake.Goal, specs)
+	runner, err := New(loop, intake.RunID, dir, loadedGoal, specs)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return runner, intake
+}
+
+func TestRunner_RestartPreservesDurableGoalModelRequest(t *testing.T) {
+	t.Parallel()
+	engine := &contractCaptureEngine{}
+	contract := goalloop.GoalModelRequest{
+		PolicyVersion:            goalloop.GoalModelPolicyVersionV1,
+		Policy:                   "strict_zdr",
+		PolicyAction:             "allow",
+		PolicyReasonCode:         "zdr_enforced",
+		Model:                    "stealth/ox-alpha",
+		ReasoningEffort:          "max",
+		RetentionMode:            goalloop.GoalRetentionZDR,
+		OpenRouterZDR:            true,
+		OpenRouterDataCollection: "deny",
+	}
+	runner, intake := newTestRunnerWithGoal(t, engine, goalloop.Goal{
+		Statement:     "probe",
+		WorkspaceRoot: t.TempDir(),
+		ModelRequest:  contract,
+	})
+
+	seed, err := runner.ResumeSeed(context.Background(), intake.RunID, intake.Tasks[0].TaskID)
+	if err != nil {
+		t.Fatalf("ResumeSeed: %v", err)
+	}
+	if _, err := runner.RunTurn(context.Background(), durability.TurnRequest{
+		RunID:              intake.RunID,
+		TaskID:             intake.Tasks[0].TaskID,
+		WorkspaceRoot:      intake.Goal.WorkspaceRoot,
+		WorkflowInstanceID: testGoalWorkflowInstanceID(intake.RunID, 0),
+		Drive:              seed.Drive,
+	}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if engine.request != contract {
+		t.Fatalf("worker request = %+v, want persisted %+v", engine.request, contract)
+	}
+}
+
+func TestRunner_NewNeverClassifiesRootlessV1GoalAsLegacy(t *testing.T) {
+	workerRoot := t.TempDir()
+	v1 := goalloop.Goal{
+		Statement: "root-bound goal",
+		ModelRequest: goalloop.GoalModelRequest{
+			PolicyVersion: goalloop.GoalModelPolicyVersionV1,
+			Policy:        "strict_zdr", PolicyAction: "allow", PolicyReasonCode: "zdr_enforced",
+			Model: "stealth/ox-alpha", RetentionMode: goalloop.GoalRetentionZDR, OpenRouterZDR: true,
+		},
+	}
+	if runner, err := New(nil, "run-rootless-v1", workerRoot, v1, nil); err == nil || runner != nil || !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("New rootless v1 = %#v, %v", runner, err)
+	}
+	legacy, err := New(nil, "run-rootless-legacy", workerRoot, goalloop.Goal{Statement: "legacy goal"}, nil)
+	if err != nil {
+		t.Fatalf("New rootless legacy: %v", err)
+	}
+	if !legacy.legacyRoot {
+		t.Fatal("rootless v0 goal was not retained as legacy")
+	}
 }
 
 // TestRunner_DrivesTaskThroughWireForm exercises the full activity
@@ -184,6 +287,263 @@ func TestRunner_RunTurnRejectsForeignWorkspaceBeforeEngine(t *testing.T) {
 	}
 	if engine.calls != 0 {
 		t.Fatalf("engine calls = %d, want 0 after fail-closed binding", engine.calls)
+	}
+}
+
+func TestRunner_RetryWaitAuditAndWakeAreIdempotent(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	engine := &scriptedEngine{outcomes: []goalloop.TurnOutcome{{
+		Rounds: 1,
+		Blocker: &taskstate.Blocker{
+			Reason:     "provider rate limit",
+			RetryAfter: &future,
+		},
+	}}}
+	runner, intake := newTestRunner(t, engine)
+	ctx := context.Background()
+	taskID := intake.Tasks[0].TaskID
+	seed, err := runner.ResumeSeed(ctx, intake.RunID, taskID)
+	if err != nil {
+		t.Fatalf("ResumeSeed: %v", err)
+	}
+	turn, err := runner.RunTurnV3(ctx, durability.TurnRequest{
+		RunID:              intake.RunID,
+		TaskID:             taskID,
+		WorkspaceRoot:      intake.Goal.WorkspaceRoot,
+		Drive:              seed.Drive,
+		WorkflowInstanceID: "goal-retry-test",
+	})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if turn.Kind != string(goalloop.StepBlocked) || turn.RetryAfterUnixMS <= time.Now().UnixMilli() {
+		t.Fatalf("turn = %+v, want future retryable block", turn)
+	}
+	wait := durability.RetryWait{
+		RunID:                     intake.RunID,
+		TaskID:                    taskID,
+		WorkflowInstanceID:        "goal-retry-test",
+		WaitID:                    "retry-1-0123456789abcdef01234567",
+		Category:                  turn.BlockerCategory,
+		ReasonCode:                turn.BlockerReasonCode,
+		RetryAfterUnixMS:          turn.RetryAfterUnixMS,
+		Ordinal:                   1,
+		ExpectedCheckpointID:      turn.ExpectedCheckpointID,
+		ExpectedCheckpointVersion: turn.ExpectedCheckpointVersion,
+		BlockerDigest:             turn.BlockerDigest,
+	}
+	waitingSink := &failOnceEventSink{eventType: runledger.EventDurableRetryWaiting}
+	runner.loop.Ledger().SetRalphSink(waitingSink)
+	if err := runner.RecordRetryWaiting(ctx, wait); err == nil {
+		t.Fatal("RecordRetryWaiting succeeded despite injected audit failure")
+	}
+	if err := runner.RecordRetryWaiting(ctx, wait); err != nil {
+		t.Fatalf("RecordRetryWaiting redelivery: %v", err)
+	}
+	if waitingSink.calls != 2 {
+		t.Fatalf("retry waiting deliveries = %d, want failed attempt plus reconciliation", waitingSink.calls)
+	}
+	waiting, err := runner.loop.Ledger().ListEvents(ctx, runledger.EventQuery{
+		RunID: intake.RunID,
+		Types: []string{runledger.EventDurableRetryWaiting},
+	})
+	if err != nil {
+		t.Fatalf("List waiting events: %v", err)
+	}
+	if len(waiting) != 1 {
+		t.Fatalf("retry waiting events = %d, want 1", len(waiting))
+	}
+
+	before, err := runner.loop.Ledger().LatestTaskCheckpoint(ctx, taskID)
+	if err != nil {
+		t.Fatalf("LatestTaskCheckpoint before wake: %v", err)
+	}
+	if before.Status != taskstate.StatusBlocked {
+		t.Fatalf("checkpoint before wake = %q, want blocked", before.Status)
+	}
+	sink := &failOnceEventSink{eventType: runledger.EventControllerDecision}
+	runner.loop.Ledger().SetRalphSink(sink)
+	if err := runner.WakeRetry(ctx, wait); err == nil {
+		t.Fatal("WakeRetry succeeded despite injected post-save audit failure")
+	}
+	after, err := runner.loop.Ledger().LatestTaskCheckpoint(ctx, taskID)
+	if err != nil {
+		t.Fatalf("LatestTaskCheckpoint after wake: %v", err)
+	}
+	if after.Status != taskstate.StatusInProgress || after.Version != before.Version+1 {
+		t.Fatalf("checkpoint after wake = status %q version %d, want in_progress version %d", after.Status, after.Version, before.Version+1)
+	}
+	wakeResult, err := runner.WakeRetryV2(ctx, wait)
+	if err != nil {
+		t.Fatalf("WakeRetryV2 redelivery: %v", err)
+	}
+	if wakeResult.Disposition != durability.RetryWakeAlreadyApplied {
+		t.Fatalf("wake redelivery disposition = %q, want %q", wakeResult.Disposition, durability.RetryWakeAlreadyApplied)
+	}
+	replayed, err := runner.loop.Ledger().LatestTaskCheckpoint(ctx, taskID)
+	if err != nil {
+		t.Fatalf("LatestTaskCheckpoint after redelivery: %v", err)
+	}
+	if replayed.Version != after.Version {
+		t.Fatalf("redelivered wake created checkpoint version %d, want %d", replayed.Version, after.Version)
+	}
+	if sink.calls != 2 {
+		t.Fatalf("wake audit deliveries = %d, want failed attempt plus reconciliation", sink.calls)
+	}
+
+	resolvedSink := &failOnceEventSink{eventType: runledger.EventDurableRetryResolved}
+	runner.loop.Ledger().SetRalphSink(resolvedSink)
+	if err := runner.ResolveRetry(ctx, wait); err == nil {
+		t.Fatal("ResolveRetry succeeded despite injected audit failure")
+	}
+	if err := runner.ResolveRetry(ctx, wait); err != nil {
+		t.Fatalf("ResolveRetry redelivery: %v", err)
+	}
+	if resolvedSink.calls != 2 {
+		t.Fatalf("retry resolved deliveries = %d, want failed attempt plus reconciliation", resolvedSink.calls)
+	}
+	resolved, err := runner.loop.Ledger().ListEvents(ctx, runledger.EventQuery{
+		RunID: intake.RunID,
+		Types: []string{runledger.EventDurableRetryResolved},
+	})
+	if err != nil {
+		t.Fatalf("List resolved events: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("retry resolved events = %d, want 1", len(resolved))
+	}
+}
+
+func TestRunner_RetryWaitAuditNormalizesUntrustedCodes(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	engine := &scriptedEngine{outcomes: []goalloop.TurnOutcome{{
+		Rounds:  1,
+		Blocker: &taskstate.Blocker{Reason: "provider rate limit", RetryAfter: &future},
+	}}}
+	runner, intake := newTestRunner(t, engine)
+	ctx := context.Background()
+	taskID := intake.Tasks[0].TaskID
+	seed, err := runner.ResumeSeed(ctx, intake.RunID, taskID)
+	if err != nil {
+		t.Fatalf("ResumeSeed: %v", err)
+	}
+	turn, err := runner.RunTurnV3(ctx, durability.TurnRequest{
+		RunID: intake.RunID, TaskID: taskID, WorkspaceRoot: intake.Goal.WorkspaceRoot,
+		Generation: seed.Generation, Drive: seed.Drive, WorkflowInstanceID: "wf-normalize",
+	})
+	if err != nil {
+		t.Fatalf("RunTurnV3: %v", err)
+	}
+	secret := "SECRET-retry-policy-π"
+	wait := durability.RetryWait{
+		RunID:                     intake.RunID,
+		TaskID:                    taskID,
+		WorkflowInstanceID:        "wf-normalize",
+		WaitID:                    "retry-1-0123456789abcdef01234567",
+		Category:                  secret + strings.Repeat("x", 2048),
+		ReasonCode:                secret + strings.Repeat("界", 1024),
+		RetryAfterUnixMS:          turn.RetryAfterUnixMS,
+		Ordinal:                   1,
+		ExpectedCheckpointID:      turn.ExpectedCheckpointID,
+		ExpectedCheckpointVersion: turn.ExpectedCheckpointVersion,
+		BlockerDigest:             turn.BlockerDigest,
+	}
+	if err := runner.RecordRetryWaiting(ctx, wait); err != nil {
+		t.Fatalf("RecordRetryWaiting: %v", err)
+	}
+	events, err := runner.loop.Ledger().ListEvents(ctx, runledger.EventQuery{
+		RunID: intake.RunID, Types: []string{runledger.EventDurableRetryWaiting},
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("retry waiting events = %d, want 1", len(events))
+	}
+	encoded, err := json.Marshal(events[0])
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "界") {
+		t.Fatalf("retry event leaked untrusted text: %s", encoded)
+	}
+	if events[0].Payload["category"] != "execution" || events[0].Payload["reason_code"] != "blocked" {
+		t.Fatalf("retry event codes = %+v, want normalized defaults", events[0].Payload)
+	}
+}
+
+func TestRunner_NextBatchReportsBlockedTasksAsIncomplete(t *testing.T) {
+	engine := &scriptedEngine{outcomes: []goalloop.TurnOutcome{{
+		Rounds:  1,
+		Blocker: &taskstate.Blocker{Reason: "manual dependency"},
+	}}}
+	runner, intake := newTestRunner(t, engine)
+	ctx := context.Background()
+	taskID := intake.Tasks[0].TaskID
+	seed, err := runner.ResumeSeed(ctx, intake.RunID, taskID)
+	if err != nil {
+		t.Fatalf("ResumeSeed: %v", err)
+	}
+	if _, err := runner.RunTurn(ctx, durability.TurnRequest{
+		RunID:         intake.RunID,
+		TaskID:        taskID,
+		WorkspaceRoot: intake.Goal.WorkspaceRoot,
+		Drive:         seed.Drive,
+	}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	batch, err := runner.NextBatchV2(ctx, durability.NextBatchV2Request{RunID: intake.RunID})
+	if err != nil {
+		t.Fatalf("NextBatchV2: %v", err)
+	}
+	if !batch.Done || len(batch.Tasks) != 0 {
+		t.Fatalf("terminal batch = %+v, want done with no tasks", batch)
+	}
+	if len(batch.IncompleteTaskIDs) != 1 || batch.IncompleteTaskIDs[0] != taskID {
+		t.Fatalf("incomplete task IDs = %v, want [%s]", batch.IncompleteTaskIDs, taskID)
+	}
+}
+
+func TestRunner_NextBatchV1DoesNotAcquireV2ReportFailure(t *testing.T) {
+	dir := t.TempDir()
+	ev, err := evidence.New(filepath.Join(dir, "shared.db"), evidence.WithBlobRoot(filepath.Join(dir, "blobs")))
+	if err != nil {
+		t.Fatalf("evidence.New: %v", err)
+	}
+	t.Cleanup(func() { _ = ev.Close() })
+	store, err := runledger.NewWithDB(ev.DB())
+	if err != nil {
+		t.Fatalf("runledger.NewWithDB: %v", err)
+	}
+	checkpoints, err := taskstate.NewManager(store, ev)
+	if err != nil {
+		t.Fatalf("taskstate.NewManager: %v", err)
+	}
+	ledger := reportFailLedger{Store: store}
+	loop, err := goalloop.New(goalloop.Config{
+		Ledger: ledger, Checkpoints: checkpoints,
+		Engine: &scriptedEngine{outcomes: []goalloop.TurnOutcome{{Rounds: 1}}}, SessionID: "next-batch-versioning",
+	})
+	if err != nil {
+		t.Fatalf("goalloop.New: %v", err)
+	}
+	ctx := context.Background()
+	intake, err := loop.Start(ctx, goalloop.Goal{Statement: "next batch versioning", WorkspaceRoot: dir})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	specs := map[string]goalloop.TaskSpec{intake.Tasks[0].TaskID: intake.Tasks[0].Spec}
+	runner, err := New(loop, intake.RunID, dir, intake.Goal, specs)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	deferred := []string{intake.Tasks[0].TaskID}
+	legacy, err := runner.NextBatch(ctx, durability.NextBatchRequest{RunID: intake.RunID, Deferred: deferred})
+	if err != nil || !legacy.Done {
+		t.Fatalf("next_batch.v1 terminal pull = %+v err:%v, want historical Done", legacy, err)
+	}
+	if _, err := runner.NextBatchV2(ctx, durability.NextBatchV2Request{RunID: intake.RunID, Deferred: deferred}); err == nil || !strings.Contains(err.Error(), "injected report metric failure") {
+		t.Fatalf("next_batch.v2 report error = %v", err)
 	}
 }
 

@@ -1,11 +1,24 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+var ErrApprovalDecisionConflict = errors.New("storage: approval decision conflict")
+
+const (
+	maxApprovalDecisionIDBytes        = 128
+	maxApprovalDecisionSessionBytes   = 256
+	maxApprovalDecisionPrincipalBytes = 128
+	maxApprovalDecisionReasonBytes    = 512
 )
 
 // ApprovalPolicy represents a stored approval policy
@@ -308,22 +321,28 @@ func (s *Store) GetPendingApproval(id string) (*PendingApproval, error) {
 			WHERE id = ?
 		`, id)
 
-	var approval PendingApproval
-	var riskReasonsJSON string
-	var decidedBy sql.NullString
-	var decidedAtTime sql.NullTime
-	var decisionReason sql.NullString
-
-	err := row.Scan(&approval.ID, &approval.SessionID, &approval.ToolName,
-		&approval.ToolInput, &approval.RiskScore, &riskReasonsJSON,
-		&approval.Status, &decidedBy, &decidedAtTime, &decisionReason, &approval.ExpiresAt, &approval.CreatedAt)
+	approval, err := scanPendingApproval(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get pending approval: %w", err)
 	}
+	return approval, nil
+}
 
+func scanPendingApproval(row rowScanner) (*PendingApproval, error) {
+	var approval PendingApproval
+	var riskReasonsJSON string
+	var decidedBy sql.NullString
+	var decidedAtTime sql.NullTime
+	var decisionReason sql.NullString
+	err := row.Scan(&approval.ID, &approval.SessionID, &approval.ToolName,
+		&approval.ToolInput, &approval.RiskScore, &riskReasonsJSON,
+		&approval.Status, &decidedBy, &decidedAtTime, &decisionReason, &approval.ExpiresAt, &approval.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
 	if riskReasonsJSON != "" {
 		if err := json.Unmarshal([]byte(riskReasonsJSON), &approval.RiskReasons); err != nil {
 			return nil, fmt.Errorf("unmarshal risk reasons: %w", err)
@@ -342,10 +361,204 @@ func (s *Store) GetPendingApproval(id string) (*PendingApproval, error) {
 	return &approval, nil
 }
 
+// DecidePendingApproval atomically applies one approved/rejected decision.
+// The returned duplicate flag is true only when the same semantic decision was
+// already committed; the original authoritative decision timestamp is kept.
+func (s *Store) DecidePendingApproval(id, sessionID, status, decidedBy, reason string, decidedAt time.Time) (*PendingApproval, bool, error) {
+	if s == nil || s.db == nil {
+		return nil, false, ErrStoreClosed
+	}
+	id = strings.TrimSpace(id)
+	sessionID = strings.TrimSpace(sessionID)
+	status = strings.TrimSpace(status)
+	decidedBy = strings.TrimSpace(decidedBy)
+	reason = strings.TrimSpace(reason)
+	if status != "approved" && status != "rejected" {
+		return nil, false, fmt.Errorf("decide pending approval: status must be approved or rejected")
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"id", id, maxApprovalDecisionIDBytes},
+		{"session id", sessionID, maxApprovalDecisionSessionBytes},
+		{"decided by", decidedBy, maxApprovalDecisionPrincipalBytes},
+	} {
+		if !validApprovalDecisionText(field.value, field.max, false) {
+			return nil, false, fmt.Errorf("decide pending approval: invalid %s", field.name)
+		}
+	}
+	if !validApprovalDecisionText(reason, maxApprovalDecisionReasonBytes, true) {
+		return nil, false, fmt.Errorf("decide pending approval: invalid decision reason")
+	}
+	if decidedAt.IsZero() {
+		return nil, false, fmt.Errorf("decide pending approval: decision time is required")
+	}
+	decidedAt = decidedAt.UTC()
+
+	var approval *PendingApproval
+	duplicate := false
+	err := s.withSessionExecWrite(context.Background(), func(db *sessionExecConn) error {
+		result, err := db.exec(`UPDATE pending_approvals
+			SET status = ?, decided_by = ?, decided_at = ?, decision_reason = ?
+			WHERE id = ? AND session_id = ? AND status = 'pending'`,
+			status, decidedBy, decidedAt, nullIfEmpty(reason), id, sessionID)
+		if err != nil {
+			return fmt.Errorf("decide pending approval: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read pending approval decision result: %w", err)
+		}
+		approval, err = scanPendingApproval(db.queryRow(`
+			SELECT id, session_id, tool_name, tool_input, risk_score, risk_reasons,
+			       status, decided_by, decided_at, decision_reason, expires_at, created_at
+			FROM pending_approvals WHERE id = ?`, id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("decide pending approval: not found")
+		}
+		if err != nil {
+			return fmt.Errorf("read decided pending approval: %w", err)
+		}
+		if changed == 1 {
+			return nil
+		}
+		if changed != 0 || approval.SessionID != sessionID || approval.Status != status ||
+			approval.DecidedBy != decidedBy || strings.TrimSpace(approval.DecisionReason) != reason {
+			return ErrApprovalDecisionConflict
+		}
+		duplicate = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !duplicate {
+		s.notify(newEvent(EventApprovalDecided, approval.SessionID, approval.ID, map[string]any{
+			"status":          approval.Status,
+			"decided_by":      approval.DecidedBy,
+			"decision_reason": approval.DecisionReason,
+		}))
+	}
+	return approval, duplicate, nil
+}
+
+// ExpirePendingApproval atomically expires one approval only when the exact
+// session-owned row is still pending and its expiry is at or before the
+// database's current time. The returned approval is reread under the same
+// write lock, so a concurrent approval or rejection is returned as the
+// authoritative winner rather than being overwritten.
+func (s *Store) ExpirePendingApproval(id, sessionID string) (*PendingApproval, bool, error) {
+	if s == nil || s.db == nil {
+		return nil, false, ErrStoreClosed
+	}
+	id = strings.TrimSpace(id)
+	sessionID = strings.TrimSpace(sessionID)
+	if !validApprovalDecisionText(id, maxApprovalDecisionIDBytes, false) {
+		return nil, false, fmt.Errorf("expire pending approval: invalid id")
+	}
+	if !validApprovalDecisionText(sessionID, maxApprovalDecisionSessionBytes, false) {
+		return nil, false, fmt.Errorf("expire pending approval: invalid session id")
+	}
+
+	var (
+		approval *PendingApproval
+		changed  bool
+	)
+	err := s.withSessionExecWrite(context.Background(), func(db *sessionExecConn) error {
+		nowMillis, err := sessionExecNowMillis(db)
+		if err != nil {
+			return err
+		}
+		approval, changed, err = expirePendingApprovalTx(db, id, sessionID, sessionExecTime(nowMillis))
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if changed {
+		s.notify(newEvent(EventApprovalExpired, approval.SessionID, approval.ID, map[string]any{
+			"status":          approval.Status,
+			"decision_reason": approval.DecisionReason,
+		}))
+	}
+	return approval, changed, nil
+}
+
+func expirePendingApprovalTx(db *sessionExecConn, id, sessionID string, now time.Time) (*PendingApproval, bool, error) {
+	// Read and compare the expiry under BEGIN IMMEDIATE. The SQLite driver
+	// applies TIMESTAMP affinity when binding/scanning values, so a SQL text
+	// comparison can mistake a future Go-format timestamp for an expired one.
+	var rawExpiresAt string
+	if err := db.queryRow(`SELECT expires_at FROM pending_approvals WHERE id = ? AND session_id = ?`, id, sessionID).Scan(&rawExpiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, fmt.Errorf("expire pending approval: not found")
+		}
+		return nil, false, fmt.Errorf("read pending approval expiry: %w", err)
+	}
+	expiresAt := parseSQLiteTimestamp(rawExpiresAt)
+	if expiresAt.IsZero() {
+		return nil, false, fmt.Errorf("expire pending approval: invalid expiry timestamp")
+	}
+	now = now.UTC()
+	if expiresAt.After(now) {
+		approval, err := scanPendingApproval(db.queryRow(`
+			SELECT id, session_id, tool_name, tool_input, risk_score, risk_reasons,
+			       status, decided_by, decided_at, decision_reason, expires_at, created_at
+			FROM pending_approvals WHERE id = ? AND session_id = ?`, id, sessionID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, fmt.Errorf("expire pending approval: not found")
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("read pending approval: %w", err)
+		}
+		return approval, false, nil
+	}
+	result, err := db.exec(`UPDATE pending_approvals
+		SET status = 'expired', decided_by = NULL, decided_at = ?, decision_reason = 'timeout'
+		WHERE id = ? AND session_id = ? AND status = 'pending'`,
+		sqliteTimestamp(now), id, sessionID)
+	if err != nil {
+		return nil, false, fmt.Errorf("expire pending approval: %w", err)
+	}
+	changedRows, err := result.RowsAffected()
+	if err != nil {
+		return nil, false, fmt.Errorf("read pending approval expiry result: %w", err)
+	}
+	approval, err := scanPendingApproval(db.queryRow(`
+		SELECT id, session_id, tool_name, tool_input, risk_score, risk_reasons,
+		       status, decided_by, decided_at, decision_reason, expires_at, created_at
+		FROM pending_approvals WHERE id = ? AND session_id = ?`, id, sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("expire pending approval: not found")
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read expired pending approval: %w", err)
+	}
+	return approval, changedRows == 1, nil
+}
+
+func validApprovalDecisionText(value string, maxBytes int, allowEmpty bool) bool {
+	if (!allowEmpty && value == "") || len(value) > maxBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) && char != '\n' && char != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 // UpdatePendingApproval updates a pending approval's status
 func (s *Store) UpdatePendingApproval(approval *PendingApproval) error {
 	if s.db == nil {
 		return ErrStoreClosed
+	}
+	if approval != nil && strings.TrimSpace(approval.Status) == "expired" {
+		_, _, err := s.ExpirePendingApproval(approval.ID, approval.SessionID)
+		return err
 	}
 
 	var decidedAt any
@@ -446,18 +659,56 @@ func (s *Store) ExpirePendingApprovals() (int, error) {
 		return 0, ErrStoreClosed
 	}
 
-	now := time.Now()
-	result, err := s.db.Exec(`
-		UPDATE pending_approvals
-		SET status = 'expired', decided_at = ?, decision_reason = 'timeout'
-		WHERE status = 'pending' AND expires_at < ?
-	`, now, now)
+	var expired []*PendingApproval
+	err := s.withSessionExecWrite(context.Background(), func(db *sessionExecConn) error {
+		nowMillis, err := sessionExecNowMillis(db)
+		if err != nil {
+			return err
+		}
+		now := sessionExecTime(nowMillis)
+		rows, err := db.query(`
+			SELECT id, session_id FROM pending_approvals
+			WHERE status = 'pending'`)
+		if err != nil {
+			return fmt.Errorf("list pending approvals to expire: %w", err)
+		}
+		var candidates [][2]string
+		for rows.Next() {
+			var id, sessionID string
+			if err := rows.Scan(&id, &sessionID); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan pending approval to expire: %w", err)
+			}
+			candidates = append(candidates, [2]string{id, sessionID})
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate pending approvals to expire: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close pending approvals to expire: %w", err)
+		}
+		for _, candidate := range candidates {
+			approval, changed, err := expirePendingApprovalTx(db, candidate[0], candidate[1], now)
+			if err != nil {
+				return err
+			}
+			if changed {
+				expired = append(expired, approval)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("expire pending approvals: %w", err)
+		return 0, err
 	}
-
-	count, _ := result.RowsAffected()
-	return int(count), nil
+	for _, approval := range expired {
+		s.notify(newEvent(EventApprovalExpired, approval.SessionID, approval.ID, map[string]any{
+			"status":          approval.Status,
+			"decision_reason": approval.DecisionReason,
+		}))
+	}
+	return len(expired), nil
 }
 
 // LogToolExecution logs a tool execution to the audit log

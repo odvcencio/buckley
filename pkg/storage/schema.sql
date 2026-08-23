@@ -90,6 +90,136 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
 END;
 
+-- Durable foreground-command journal. Command bodies remain transcript
+-- material and are projected only when a worker claims the command.
+CREATE TABLE IF NOT EXISTS session_execution_state (
+    session_id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL CHECK(mode IN ('headless','detached','adopted')),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0 AND generation <= 1000000000000),
+    reason_code TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    CHECK(length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256),
+    CHECK(reason_code IS NULL OR length(CAST(reason_code AS BLOB)) <= 64),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS session_commands (
+    session_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL CHECK(task_id = 'foreground'),
+    turn_id TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+    sequence INTEGER NOT NULL CHECK(sequence > 0 AND sequence <= 1000000000000),
+    lane TEXT NOT NULL CHECK(lane IN ('work','control')),
+    command_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    input_digest TEXT NOT NULL CHECK(length(input_digest) = 64),
+    accepted_by TEXT NOT NULL,
+    target_command_id TEXT,
+    state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','failed','blocked','interrupted','cancelled')),
+    attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0 AND attempt <= 1000000),
+    lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0 AND lease_generation <= 1000000),
+    lease_owner TEXT,
+    lease_expires_at_ms INTEGER,
+    accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+    started_at_ms INTEGER,
+    heartbeat_at_ms INTEGER,
+    completed_at_ms INTEGER,
+    error_code TEXT,
+    error_text TEXT,
+    outcome_json TEXT,
+    completion_digest TEXT,
+    completed_by TEXT,
+    completion_lease_generation INTEGER,
+    PRIMARY KEY(session_id, command_id),
+    UNIQUE(session_id, sequence),
+    UNIQUE(run_id, turn_id),
+    CHECK(length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256),
+    CHECK(length(CAST(command_id AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(length(CAST(turn_id AS BLOB)) BETWEEN 1 AND 192),
+    CHECK(length(CAST(command_type AS BLOB)) BETWEEN 1 AND 32),
+    CHECK(length(CAST(content AS BLOB)) <= 1048576),
+    CHECK(length(CAST(accepted_by AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(target_command_id IS NULL OR length(CAST(target_command_id AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(lease_owner IS NULL OR length(CAST(lease_owner AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(error_code IS NULL OR length(CAST(error_code AS BLOB)) <= 64),
+    CHECK(error_text IS NULL OR length(CAST(error_text AS BLOB)) <= 512),
+    CHECK(outcome_json IS NULL OR length(CAST(outcome_json AS BLOB)) <= 32768),
+    CHECK(completion_digest IS NULL OR length(completion_digest) = 64),
+    CHECK(completed_by IS NULL OR length(CAST(completed_by AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(lease_expires_at_ms IS NULL OR lease_expires_at_ms >= 0),
+    CHECK(started_at_ms IS NULL OR started_at_ms >= 0),
+    CHECK(heartbeat_at_ms IS NULL OR heartbeat_at_ms >= 0),
+    CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    CHECK(completion_lease_generation IS NULL OR completion_lease_generation > 0),
+    CHECK((state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at_ms IS NOT NULL)
+       OR (state <> 'running' AND lease_owner IS NULL AND lease_expires_at_ms IS NULL)),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_commands_ready
+    ON session_commands(session_id, lane, state, sequence);
+CREATE INDEX IF NOT EXISTS idx_session_commands_lease
+    ON session_commands(state, lease_expires_at_ms);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_commands_one_running_lane
+    ON session_commands(session_id, lane) WHERE state = 'running';
+
+CREATE TABLE IF NOT EXISTS session_effect_permits (
+    session_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    effect_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('model','tool')),
+    lease_owner TEXT NOT NULL,
+    lease_generation INTEGER NOT NULL CHECK(lease_generation > 0 AND lease_generation <= 1000000),
+    state TEXT NOT NULL CHECK(state IN ('active','ambiguous','ended','resolved')),
+    expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    ambiguous_at_ms INTEGER CHECK(ambiguous_at_ms IS NULL OR ambiguous_at_ms >= 0),
+    ended_at_ms INTEGER CHECK(ended_at_ms IS NULL OR ended_at_ms >= 0),
+    resolved_at_ms INTEGER CHECK(resolved_at_ms IS NULL OR resolved_at_ms >= 0),
+    resolved_by TEXT,
+    resolution_reason TEXT,
+    PRIMARY KEY(session_id, command_id, generation, effect_id),
+    CHECK(length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256),
+    CHECK(length(CAST(command_id AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(length(CAST(effect_id AS BLOB)) BETWEEN 1 AND 512),
+    CHECK(length(CAST(lease_owner AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(resolved_by IS NULL OR length(CAST(resolved_by AS BLOB)) BETWEEN 1 AND 128),
+    CHECK(resolution_reason IS NULL OR length(CAST(resolution_reason AS BLOB)) BETWEEN 1 AND 512),
+    CHECK((state = 'active' AND ambiguous_at_ms IS NULL AND ended_at_ms IS NULL
+            AND resolved_at_ms IS NULL AND resolved_by IS NULL AND resolution_reason IS NULL)
+       OR (state = 'ambiguous' AND ambiguous_at_ms IS NOT NULL AND ended_at_ms IS NULL
+            AND resolved_at_ms IS NULL AND resolved_by IS NULL AND resolution_reason IS NULL)
+       OR (state = 'ended' AND ended_at_ms IS NOT NULL
+            AND resolved_at_ms IS NULL AND resolved_by IS NULL AND resolution_reason IS NULL)
+       OR (state = 'resolved' AND ambiguous_at_ms IS NOT NULL AND ended_at_ms IS NULL
+            AND resolved_at_ms IS NOT NULL AND resolved_by IS NOT NULL AND resolution_reason IS NOT NULL)),
+    FOREIGN KEY (session_id, command_id)
+        REFERENCES session_commands(session_id, command_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_effect_permits_active
+    ON session_effect_permits(session_id, state, expires_at_ms, effect_id);
+
+CREATE TABLE IF NOT EXISTS session_command_transcript (
+    session_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal <= 1000000),
+    message_id INTEGER UNIQUE,
+    entry_json TEXT NOT NULL CHECK(length(CAST(entry_json AS BLOB)) BETWEEN 1 AND 8388608),
+    entry_digest TEXT NOT NULL CHECK(length(entry_digest) = 64),
+    PRIMARY KEY(session_id, command_id, generation, ordinal),
+    FOREIGN KEY (session_id, command_id)
+        REFERENCES session_commands(session_id, command_id) ON DELETE CASCADE,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_command_transcript_message
+    ON session_command_transcript(message_id);
+
 -- Episodic memories: compacted summaries / decisions for retrieval
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -341,6 +471,7 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_web_sessions_token_id ON web_sessions(token_id);
 
 -- CLI tickets approved in browser (for remote login)
 CREATE TABLE IF NOT EXISTS cli_tickets (

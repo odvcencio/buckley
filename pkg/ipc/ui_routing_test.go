@@ -135,11 +135,26 @@ func TestBrowserUIDefaultsToGoSX(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/?token=unit-token", nil)
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
-	if resp.Code != http.StatusOK {
+	if resp.Code != http.StatusSeeOther || resp.Header().Get("Location") != "/" {
 		t.Fatalf("GoSX UI status=%d body=%q", resp.Code, resp.Body.String())
 	}
-	if !strings.Contains(resp.Body.String(), "Mission Control") || strings.Contains(resp.Body.String(), "index.js") {
-		t.Fatalf("expected GoSX Mission Control document, got %q", resp.Body.String())
+	if strings.Contains(resp.Header().Get("Location"), "token") {
+		t.Fatalf("query token survived redirect: %q", resp.Header().Get("Location"))
+	}
+	cookie := findCookie(resp.Result().Cookies(), sessionCookieName)
+	if cookie == nil {
+		t.Fatalf("query-token exchange did not issue %s", sessionCookieName)
+	}
+
+	followReq := httptest.NewRequest(http.MethodGet, resp.Header().Get("Location"), nil)
+	followReq.AddCookie(cookie)
+	followResp := httptest.NewRecorder()
+	router.ServeHTTP(followResp, followReq)
+	if followResp.Code != http.StatusOK {
+		t.Fatalf("GoSX follow status=%d body=%q", followResp.Code, followResp.Body.String())
+	}
+	if !strings.Contains(followResp.Body.String(), "Mission Control") || strings.Contains(followResp.Body.String(), "index.js") {
+		t.Fatalf("expected GoSX Mission Control document, got %q", followResp.Body.String())
 	}
 
 	assetReq := httptest.NewRequest(http.MethodGet, "/assets/mission-control.css", nil)

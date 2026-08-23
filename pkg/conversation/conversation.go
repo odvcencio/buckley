@@ -327,57 +327,58 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 
 // SaveMessage saves a message to storage
 func (c *Conversation) SaveMessage(store *storage.Store, msg Message) error {
-	contentText, contentJSON, contentType, err := serializeMessageContent(msg.Content)
+	storageMsg, err := StorageMessage(c.SessionID, msg)
 	if err != nil {
-		return fmt.Errorf("serialize message content: %w", err)
+		return err
 	}
-
-	storageMsg := &storage.Message{
-		SessionID:        c.SessionID,
-		Role:             msg.Role,
-		Content:          contentText,
-		ContentJSON:      contentJSON,
-		ContentType:      contentType,
-		Reasoning:        msg.Reasoning,
-		ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
-		ToolCalls:        encodeToolCalls(msg.ToolCalls),
-		ToolCallID:       msg.ToolCallID,
-		Name:             msg.Name,
-		Timestamp:        msg.Timestamp,
-		Tokens:           msg.Tokens,
-		IsSummary:        msg.IsSummary,
-		IsTruncated:      msg.IsTruncated,
-	}
-
-	return store.SaveMessage(storageMsg)
+	return store.SaveMessage(&storageMsg)
 }
 
 // SaveAllMessages saves all messages to storage
 func (c *Conversation) SaveAllMessages(store *storage.Store) error {
 	messages := make([]storage.Message, len(c.Messages))
 	for i, msg := range c.Messages {
-		contentText, contentJSON, contentType, err := serializeMessageContent(msg.Content)
+		storageMsg, err := StorageMessage(c.SessionID, msg)
 		if err != nil {
 			return fmt.Errorf("serialize message %d: %w", i, err)
 		}
-		messages[i] = storage.Message{
-			SessionID:        c.SessionID,
-			Role:             msg.Role,
-			Content:          contentText,
-			ContentJSON:      contentJSON,
-			ContentType:      contentType,
-			Reasoning:        msg.Reasoning,
-			ReasoningDetails: encodeReasoningDetails(msg.ReasoningDetails),
-			ToolCalls:        encodeToolCalls(msg.ToolCalls),
-			ToolCallID:       msg.ToolCallID,
-			Name:             msg.Name,
-			Timestamp:        msg.Timestamp,
-			Tokens:           msg.Tokens,
-			IsSummary:        msg.IsSummary,
-			IsTruncated:      msg.IsTruncated,
-		}
+		messages[i] = storageMsg
 	}
 	return store.ReplaceMessages(c.SessionID, messages)
+}
+
+// StorageMessage losslessly converts one conversation message into Buckley's
+// existing storage projection. Durable command callers apply their stricter
+// transcript validation after this compatibility-preserving conversion.
+func StorageMessage(sessionID string, msg Message) (storage.Message, error) {
+	contentText, contentJSON, contentType, err := serializeMessageContent(msg.Content)
+	if err != nil {
+		return storage.Message{}, fmt.Errorf("serialize message content: %w", err)
+	}
+	toolCalls, err := encodeToolCalls(msg.ToolCalls)
+	if err != nil {
+		return storage.Message{}, fmt.Errorf("serialize message tool calls: %w", err)
+	}
+	reasoningDetails, err := encodeReasoningDetails(msg.ReasoningDetails)
+	if err != nil {
+		return storage.Message{}, fmt.Errorf("serialize message reasoning details: %w", err)
+	}
+	return storage.Message{
+		SessionID:        sessionID,
+		Role:             msg.Role,
+		Content:          contentText,
+		ContentJSON:      contentJSON,
+		ContentType:      contentType,
+		ToolCalls:        toolCalls,
+		ToolCallID:       msg.ToolCallID,
+		Name:             msg.Name,
+		Reasoning:        msg.Reasoning,
+		ReasoningDetails: reasoningDetails,
+		Timestamp:        msg.Timestamp,
+		Tokens:           msg.Tokens,
+		IsSummary:        msg.IsSummary,
+		IsTruncated:      msg.IsTruncated,
+	}, nil
 }
 
 func cloneReasoningDetails(details []model.ReasoningDetail) []model.ReasoningDetail {
@@ -387,15 +388,15 @@ func cloneReasoningDetails(details []model.ReasoningDetail) []model.ReasoningDet
 	return append([]model.ReasoningDetail(nil), details...)
 }
 
-func encodeReasoningDetails(details []model.ReasoningDetail) string {
+func encodeReasoningDetails(details []model.ReasoningDetail) (string, error) {
 	if len(details) == 0 {
-		return ""
+		return "", nil
 	}
 	data, err := json.Marshal(details)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return string(data)
+	return string(data), nil
 }
 
 func decodeReasoningDetails(raw string) []model.ReasoningDetail {
@@ -409,15 +410,15 @@ func decodeReasoningDetails(raw string) []model.ReasoningDetail {
 	return details
 }
 
-func encodeToolCalls(toolCalls []model.ToolCall) string {
+func encodeToolCalls(toolCalls []model.ToolCall) (string, error) {
 	if len(toolCalls) == 0 {
-		return ""
+		return "", nil
 	}
 	data, err := json.Marshal(toolCalls)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return string(data)
+	return string(data), nil
 }
 
 func decodeToolCalls(raw string) []model.ToolCall {

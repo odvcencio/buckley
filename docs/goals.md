@@ -32,6 +32,45 @@ buckley goal report <run-id>
 
 `goal start` prints the run ID. Everything else takes it.
 
+Pin model and OpenRouter privacy at intake when the same request contract must
+survive local resumes or a standalone durable worker restart:
+
+```bash
+buckley goal start --model stealth/ox-alpha --reasoning-effort max \
+  --openrouter-zdr --openrouter-data-collection deny \
+  --task "Run a harmless tool-use evaluation" \
+  "Evaluate Ox with strict request privacy"
+```
+
+The model, reasoning effort, and provider policy are stored as compact goal
+metadata. Every resumed turn reuses them; a worker that cannot apply the
+OpenRouter policy fails closed rather than sending a weaker request. OpenRouter
+privacy flags require a canonical qualified model ID such as
+`stealth/ox-alpha`; `--openrouter-data-collection` is accepted only together
+with exactly one of `--openrouter-zdr` or `--openrouter-no-zdr`.
+
+For an explicitly non-ZDR OpenRouter run, use the separate OSS exception:
+
+```bash
+buckley goal start --model stealth/ox-alpha --reasoning-effort max \
+  --openrouter-no-zdr --openrouter-data-collection deny \
+  --task "Run a harmless tool-use evaluation" \
+  "Evaluate Ox in a recognized OSS workspace"
+```
+
+The non-ZDR exception is a governed eligibility rule, not a privacy guarantee.
+It requires an exact root `LICENSE`/`COPYING` file matching Buckley's
+conservative MIT or Apache-2.0 catalog. Buckley binds its digest at intake and
+revalidates it before every model request; missing, changed, ambiguous,
+symlinked, proprietary, unreadable, or unsupported licenses block. Legacy
+goals also require a currently recognized OSS license when resumed. Strict ZDR
+does not use the license exception, but still fails if the selected provider
+cannot enforce ZDR. Exact goal models disable provider fallbacks.
+
+Repository cleanliness, ignored or untracked secrets, submodules, and
+workspace symlink escapes are separate campaign-launch preflight checks; a
+recognized license does not establish any of those properties.
+
 ## Recording a goal
 
 | Flag | Meaning |
@@ -42,6 +81,11 @@ buckley goal report <run-id>
 | `--constraint` | A limit the work must respect; repeat for several |
 | `--task` | One explicit task, in queue order; repeat for several |
 | `--approval` | Approval tier that applies while unattended |
+| `--model` | Exact internal-engine model, persisted for every resume/worker |
+| `--reasoning-effort` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `--openrouter-zdr` | Require a ZDR-compatible OpenRouter endpoint |
+| `--openrouter-no-zdr` | Explicit OSS-only exception to ZDR; requires `data_collection=deny` |
+| `--openrouter-data-collection` | OpenRouter data policy; currently `deny` |
 
 Without `--task`, the goal becomes a single task carrying the whole
 statement. With `--task`, you control the decomposition and the order.
@@ -82,6 +126,10 @@ nohup buckley goal run <run-id> > goal.log 2>&1 &
 of the internal engine. Buckley still owns scheduling, checkpoints,
 verification, and budget; the backend only executes. A backend that hits
 a rate limit parks the task with a retry timer and the queue moves on.
+External backends cannot currently enforce a persisted v1 model/privacy
+contract, so Buckley rejects them before process construction for such goals.
+Truly legacy external-backend histories remain eligible only while their exact
+workspace root has a currently recognized OSS license.
 
 ## Verification and completion
 

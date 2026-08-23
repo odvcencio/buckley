@@ -139,6 +139,16 @@ service BuckleyIPC {
   rpc GetVAPIDPublicKey(google.protobuf.Empty) returns (VAPIDPublicKeyResponse);
 }
 
+// BuckleyObservation exposes bounded, read-only durable session projections.
+service BuckleyObservation {
+  rpc GetSessionExecution(GetSessionExecutionRequest) returns (GetSessionExecutionResponse);
+  rpc ListSessionCommands(ListSessionCommandsRequest) returns (ListSessionCommandsResponse);
+  rpc GetSessionCommand(GetSessionCommandRequest) returns (GetSessionCommandResponse);
+  rpc ListSessionRoutines(ListSessionRoutinesRequest) returns (ListSessionRoutinesResponse);
+  rpc GetSessionRoutine(GetSessionRoutineRequest) returns (GetSessionRoutineResponse);
+  rpc ListRoutineMailbox(ListRoutineMailboxRequest) returns (ListRoutineMailboxResponse);
+}
+
 // =============================================================================
 // Event Streaming Messages
 // =============================================================================
@@ -196,6 +206,9 @@ message CommandRequest {
 
   // Target agent for host agent commands
   string agent_id = 5;
+
+  // Stable caller-provided identity for session commands.
+  string command_id = 6;
 }
 
 message CommandResponse {
@@ -203,6 +216,7 @@ message CommandResponse {
   string status = 1;
   string message = 2;
   string command_id = 3;
+  CommandReceipt receipt = 4;
 }
 
 message ListSessionsRequest {
@@ -355,6 +369,7 @@ message HeadlessSession {
   // Container details (if running in k8s)
   string pod_name = 7;
   string namespace = 8;
+  CommandReceipt initial_receipt = 9;
 }
 
 message DeleteHeadlessRequest {
@@ -789,4 +804,220 @@ message UnsubscribePushRequest {
 
 message VAPIDPublicKeyResponse {
   string public_key = 1;
+}
+
+// =============================================================================
+// Durable Session Observation Messages
+// =============================================================================
+
+message GetSessionExecutionRequest {
+  string session_id = 1;
+}
+
+message GetSessionExecutionResponse {
+  SessionExecutionSnapshot execution = 1;
+}
+
+message ListSessionCommandsRequest {
+  string session_id = 1;
+  repeated string states = 2;
+  int64 after_sequence = 3;
+  int32 limit = 4;
+}
+
+message ListSessionCommandsResponse {
+  repeated SessionCommandStatus commands = 1;
+  int64 next_sequence = 2;
+  bool has_more = 3;
+}
+
+message GetSessionCommandRequest {
+  string session_id = 1;
+  string command_id = 2;
+}
+
+message GetSessionCommandResponse {
+  SessionCommandStatus command = 1;
+}
+
+message ListSessionRoutinesRequest {
+  string session_id = 1;
+  string parent_run_id = 2;
+  string before_cursor = 3;
+  int32 limit = 4;
+}
+
+message ListSessionRoutinesResponse {
+  repeated SessionRoutineStatus routines = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+}
+
+message GetSessionRoutineRequest {
+  string session_id = 1;
+  string run_id = 2;
+}
+
+message GetSessionRoutineResponse {
+  SessionRoutineStatus routine = 1;
+}
+
+message ListRoutineMailboxRequest {
+  string session_id = 1;
+  string run_id = 2;
+  repeated string states = 3;
+  int64 after_sequence = 4;
+  int32 limit = 5;
+}
+
+message ListRoutineMailboxResponse {
+  repeated RoutineMailboxStatus messages = 1;
+  int64 next_sequence = 2;
+  bool has_more = 3;
+}
+
+message SessionExecutionSnapshot {
+  string session_id = 1;
+  bool initialized = 2;
+  SessionExecutionState state = 3;
+  SessionCommandSummary command_summary = 4;
+  SessionEffectSummary effect_summary = 5;
+  repeated SessionEffectStatus attention_effects = 6;
+  bool attention_effects_truncated = 7;
+  repeated SessionCommandStatus recent_commands = 8;
+  google.protobuf.Timestamp observed_at = 9;
+}
+
+message SessionExecutionState {
+  string session_id = 1;
+  string mode = 2;
+  int64 generation = 3;
+  string reason_code = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message SessionCommandSummary {
+  string session_id = 1;
+  int64 total = 2;
+  int64 accepted = 3;
+  int64 running = 4;
+  int64 succeeded = 5;
+  int64 failed = 6;
+  int64 blocked = 7;
+  int64 interrupted = 8;
+  int64 cancelled = 9;
+  int64 work_pending = 10;
+  int64 control_pending = 11;
+  int64 last_sequence = 12;
+}
+
+message SessionEffectSummary {
+  int64 total = 1;
+  int64 active = 2;
+  int64 ambiguous = 3;
+  int64 ended = 4;
+  int64 resolved = 5;
+}
+
+message SessionEffectStatus {
+  string session_id = 1;
+  string command_id = 2;
+  int64 command_generation = 3;
+  string effect_id = 4;
+  string kind = 5;
+  string state = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  google.protobuf.Timestamp ambiguous_at = 9;
+  google.protobuf.Timestamp ended_at = 10;
+  google.protobuf.Timestamp resolved_at = 11;
+}
+
+message SessionCommandStatus {
+  string session_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  string command_id = 4;
+  string turn_id = 5;
+  int64 generation = 6;
+  int64 sequence = 7;
+  string type = 8;
+  string lane = 9;
+  string state = 10;
+  int64 attempt = 11;
+  string target_command_id = 12;
+  google.protobuf.Timestamp accepted_at = 13;
+  google.protobuf.Timestamp started_at = 14;
+  google.protobuf.Timestamp finished_at = 15;
+  string error_code = 16;
+  SessionEffectSummary effect_summary = 17;
+  repeated SessionEffectStatus effects = 18;
+  bool effects_truncated = 19;
+}
+
+message SessionRoutineAttemptStatus {
+  int64 number = 1;
+  string state = 2;
+  google.protobuf.Timestamp attached_at = 3;
+  google.protobuf.Timestamp heartbeat_at = 4;
+  google.protobuf.Timestamp lease_expires_at = 5;
+  google.protobuf.Timestamp detached_at = 6;
+}
+
+message SessionRoutineMailboxSummary {
+  int64 queued = 1;
+  int64 claimed = 2;
+  int64 processed = 3;
+  int64 dead_letter = 4;
+  int64 last_sequence = 5;
+}
+
+message SessionRoutineStatus {
+  string session_id = 1;
+  string run_id = 2;
+  string parent_run_id = 3;
+  string task_id = 4;
+  string agent_id = 5;
+  string model_id = 6;
+  string provider_id = 7;
+  string backend = 8;
+  string state = 9;
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp finished_at = 11;
+  SessionRoutineAttemptStatus attempt = 12;
+  SessionRoutineMailboxSummary mailbox = 13;
+}
+
+message RoutineMailboxStatus {
+  string session_id = 1;
+  string run_id = 2;
+  string message_id = 3;
+  string peer_run_id = 4;
+  string kind = 5;
+  string direction = 6;
+  string state = 7;
+  int64 sequence = 8;
+  int64 byte_count = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp processed_at = 11;
+  google.protobuf.Timestamp dead_lettered_at = 12;
+}
+
+message CommandReceipt {
+  string session_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  string command_id = 4;
+  string turn_id = 5;
+  int64 generation = 6;
+  int64 sequence = 7;
+  string lane = 8;
+  string state = 9;
+  bool duplicate = 10;
+  int64 attempt = 11;
+  string target_command_id = 12;
+  google.protobuf.Timestamp accepted_at = 13;
+  google.protobuf.Timestamp started_at = 14;
+  google.protobuf.Timestamp finished_at = 15;
+  string error_code = 16;
 }

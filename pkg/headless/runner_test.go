@@ -198,6 +198,15 @@ func TestRunnerIdleDetection(t *testing.T) {
 	if !runner.IsIdle() {
 		t.Error("expected runner to be idle after timeout")
 	}
+	runner.state = StateProcessing
+	if runner.IsIdle() {
+		t.Error("processing runner must never be idle-eligible")
+	}
+	runner.state = StatePaused
+	if runner.IsIdle() {
+		t.Error("paused runner must not be idle-eligible")
+	}
+	runner.state = StateIdle
 
 	// Update last active to now
 	runner.lastActive = time.Now()
@@ -222,6 +231,89 @@ func TestRunnerConfig(t *testing.T) {
 			t.Error("expected error for missing model manager")
 		}
 	})
+}
+
+func TestInertRunnerRejectsCommandsAndDisposesSilently(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &mockEmitter{}
+	runner, err := newInertRunner(RunnerConfig{
+		Session:      &storage.Session{ID: "inert-session", CreatedAt: time.Now(), LastActive: time.Now()},
+		ModelManager: newTestModelManager(t),
+		Store:        store,
+		Emitter:      emitter,
+	})
+	if err != nil {
+		t.Fatalf("newInertRunner: %v", err)
+	}
+	if err := runner.HandleSessionCommand(command.SessionCommand{Type: "input", Content: "must not queue"}); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("inert HandleSessionCommand error = %v", err)
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("inert runner emitted before disposal: %+v", emitter.events)
+	}
+
+	runner.disposeBeforeStart()
+	select {
+	case <-runner.commandStopped:
+	default:
+		t.Fatal("silent inert disposal did not close lifecycle channel")
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("inert disposal emitted state: %+v", emitter.events)
+	}
+	if err := runner.activate(); err == nil || !strings.Contains(err.Error(), "stopped before activation") {
+		t.Fatalf("activation after disposal error = %v", err)
+	}
+}
+
+func TestInertRunnerActivationIsIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &mockEmitter{}
+	runner, err := newInertRunner(RunnerConfig{
+		Session:      &storage.Session{ID: "activate-once", CreatedAt: time.Now(), LastActive: time.Now()},
+		ModelManager: newTestModelManager(t),
+		Store:        store,
+		Emitter:      emitter,
+	})
+	if err != nil {
+		t.Fatalf("newInertRunner: %v", err)
+	}
+	if err := runner.activate(); err != nil {
+		t.Fatalf("activate(first): %v", err)
+	}
+	if err := runner.activate(); err != nil {
+		t.Fatalf("activate(second): %v", err)
+	}
+	runner.Stop()
+	select {
+	case <-runner.commandStopped:
+	case <-time.After(time.Second):
+		t.Fatal("activated command loop did not stop")
+	}
+	if len(emitter.events) != 1 || emitter.events[0].Type != EventStateChanged {
+		t.Fatalf("idempotent activation/stop events = %+v", emitter.events)
+	}
+}
+
+func TestNewRunnerActivatesForDirectCallers(t *testing.T) {
+	store := newTestStore(t)
+	runner, err := NewRunner(RunnerConfig{
+		Session:      &storage.Session{ID: "direct-runner", CreatedAt: time.Now(), LastActive: time.Now()},
+		ModelManager: newTestModelManager(t),
+		Store:        store,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if !runner.activated {
+		t.Fatal("NewRunner returned an inert runner")
+	}
+	runner.Stop()
+	select {
+	case <-runner.commandStopped:
+	case <-time.After(time.Second):
+		t.Fatal("direct runner command loop did not stop")
+	}
 }
 
 func TestPendingApproval(t *testing.T) {

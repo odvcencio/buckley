@@ -8,6 +8,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
 // ReviewBranchDef implements oneshot.AgentDefinition for branch code review.
@@ -147,6 +148,8 @@ type ReviewPRDef struct {
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
+	CIAdmission                 reviewpolicy.CIAdmissionReceipt
+	CIAdmissionExpectation      reviewpolicy.CIAdmissionExpectation
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	MaxIterations               int
@@ -188,8 +191,12 @@ func (d ReviewPRDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
 }
 
 func (d ReviewPRDef) authoritativeRemoteCIPasses() bool {
-	return parseRemoteCIState(d.CIStatus) == VerificationPass &&
-		(d.CIProvenance == prCISourceHead || d.CIProvenance == prCISourceBase)
+	if parseRemoteCIState(d.CIStatus) != VerificationPass ||
+		(d.CIProvenance != prCISourceHead && d.CIProvenance != prCISourceBase) {
+		return false
+	}
+	expectation := ciAdmissionExpectationForChangedFiles(d.CIAdmissionExpectation, d.ChangedFiles)
+	return d.CIAdmission.Authorize(expectation) == nil
 }
 
 // AuthoritativeRemoteCIPasses reports whether immutable remote checks can
@@ -226,6 +233,8 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 		ContextIncomplete:           d.ContextIncomplete,
 		CIStatus:                    d.CIStatus,
 		CIProvenance:                d.CIProvenance,
+		CIAdmission:                 d.CIAdmission,
+		CIAdmissionExpectation:      ciAdmissionExpectationForChangedFiles(d.CIAdmissionExpectation, d.ChangedFiles),
 		RequiresFeedbackDisposition: d.RequiresFeedbackDisposition,
 		RequiredFeedbackIDs:         d.RequiredFeedbackIDs,
 		RequirePassingRemoteCI:      true,

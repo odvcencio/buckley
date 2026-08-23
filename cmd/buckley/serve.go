@@ -15,11 +15,13 @@ import (
 	"syscall"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/headless"
 	"m31labs.dev/buckley/pkg/ipc"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
@@ -271,16 +273,82 @@ func runServeCommand(args []string) error {
 
 	cfg := buildServeIPCConfig(appCfg, opts, agentPromptSection(agentProfile))
 	server := serveNewServerFn(cfg, store, telemetryHub, commandGateway, planStore, appCfg, nil, models)
+	if durableServer, ok := server.(interface {
+		SetDurableStores(runledger.Store, evidence.Store) error
+	}); ok {
+		ledger, evidenceStore, err := openServeDurableStores(store)
+		if err != nil {
+			return fmt.Errorf("initialize serve durability: %w", err)
+		}
+		if err := durableServer.SetDurableStores(ledger, evidenceStore); err != nil {
+			return fmt.Errorf("configure serve durability: %w", err)
+		}
+	}
 	if models != nil {
 		if registryInit, ok := server.(interface {
-			InitHeadlessRegistry(context.Context) *headless.Registry
+			InitHeadlessRegistryWithError(context.Context) (*headless.Registry, error)
 		}); ok && commandGateway != nil {
-			if reg := registryInit.InitHeadlessRegistry(ctx); reg != nil {
+			reg, err := registryInit.InitHeadlessRegistryWithError(ctx)
+			if err != nil {
+				return fmt.Errorf("initialize headless registry: %w", err)
+			}
+			if reg != nil {
 				commandGateway.Register(reg)
 			}
 		}
 	}
 	return server.Start(ctx)
+}
+
+// openServeDurableStores composes the canonical run ledger and evidence
+// stores onto the same SQLite connection already owned by the IPC storage
+// adapter. The storage owner remains responsible for closing that connection.
+func openServeDurableStores(store *storage.Store) (runledger.Store, evidence.Store, error) {
+	if store == nil || store.DB() == nil {
+		return nil, nil, fmt.Errorf("storage unavailable")
+	}
+	dbPath, err := serveDatabaseFilePath(store)
+	if err != nil {
+		return nil, nil, err
+	}
+	blobRoot := filepath.Join(filepath.Dir(dbPath), "evidence")
+	evidenceStore, err := evidence.NewWithDB(store.DB(), blobRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open evidence store: %w", err)
+	}
+	ledger, err := runledger.NewWithDB(store.DB())
+	if err != nil {
+		return nil, nil, fmt.Errorf("open run ledger: %w", err)
+	}
+	return ledger, evidenceStore, nil
+}
+
+func serveDatabaseFilePath(store *storage.Store) (string, error) {
+	if store == nil || store.DB() == nil {
+		return "", fmt.Errorf("storage unavailable")
+	}
+	rows, err := store.DB().Query("PRAGMA database_list")
+	if err != nil {
+		return "", fmt.Errorf("inspect durable database path: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, path string
+		if err := rows.Scan(&seq, &name, &path); err != nil {
+			return "", fmt.Errorf("scan durable database path: %w", err)
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "main") && strings.TrimSpace(path) != "" {
+			return filepath.Clean(path), nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("read durable database path: %w", err)
+	}
+	// SQLite memory databases have no filesystem path. Keep their blob root
+	// deterministic for embedded/test callers while production stores always
+	// resolve to the actual selected database above.
+	return filepath.Join(".", "buckley.db"), nil
 }
 
 func initServeModels(appCfg *config.Config) *model.Manager {

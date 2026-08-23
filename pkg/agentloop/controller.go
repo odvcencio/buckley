@@ -109,6 +109,37 @@ func (f ModelCallerFunc) Call(ctx context.Context, req model.ChatRequest, useCon
 	return f(ctx, req, useContinuation)
 }
 
+// ModelDispatchCall carries the exact durable step identity immediately
+// adjacent to the provider invocation. Request remains the provider-facing
+// payload; StepID is Buckley's stable execution identity.
+type ModelDispatchCall struct {
+	Request         model.ChatRequest
+	UseContinuation bool
+	RunID           string
+	TaskID          string
+	TurnID          string
+	StepID          string
+	Kind            string
+	Round           int
+}
+
+// ContextualModelCaller is an additive extension used by adapters that must
+// fence provider effects against a durable execution lease.
+type ContextualModelCaller interface {
+	ModelCaller
+	CallWithContext(context.Context, ModelDispatchCall) (*model.ChatResponse, error)
+}
+
+type ContextualModelCallerFunc func(context.Context, ModelDispatchCall) (*model.ChatResponse, error)
+
+func (f ContextualModelCallerFunc) Call(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
+	return f(ctx, ModelDispatchCall{Request: req, UseContinuation: useContinuation})
+}
+
+func (f ContextualModelCallerFunc) CallWithContext(ctx context.Context, call ModelDispatchCall) (*model.ChatResponse, error) {
+	return f(ctx, call)
+}
+
 // ToolOutcome is one dispatched tool call's result, already formatted as the
 // content a tool-role model.Message carries back to the model. Approval,
 // posture/permission gating (parked decisions pass straight through as a
@@ -122,6 +153,12 @@ type ToolOutcome struct {
 	// as readonly, modifying, destructive, or control. It is recorded with
 	// the durable step event so a future retry policy can be conservative.
 	EffectClass string
+	// StateObserved reports that the dispatcher applied a workspace-state
+	// observation policy around this call. StateChanged is the resulting
+	// verdict. These are deliberately separate from EffectClass: permissions
+	// describe what a tool may do, while progress describes what it did.
+	StateObserved bool
+	StateChanged  bool
 	// YieldObserved reports whether the adapter can state an exact result
 	// count. A true zero is a successful empty query, not an error.
 	YieldObserved bool
@@ -146,6 +183,55 @@ type ToolDispatcherFunc func(ctx context.Context, calls []model.ToolCall) ([]Too
 
 // Dispatch implements ToolDispatcher.
 func (f ToolDispatcherFunc) Dispatch(ctx context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
+	return f(ctx, calls)
+}
+
+// ToolDispatchCall carries the durable identity for one model-requested tool
+// call. Call remains the provider-facing value (including its provider tool
+// call ID); the other fields are Buckley's execution identity and must not be
+// substituted into the model transcript.
+//
+// ApprovalID is empty when the controller does not have a complete durable
+// identity. Dispatchers must fall back to Call.ID in that case so legacy
+// callers retain their existing approval behavior.
+type ToolDispatchCall struct {
+	Call               model.ToolCall
+	ProviderToolCallID string
+	ApprovalID         string
+	RunID              string
+	TaskID             string
+	TurnID             string
+	StepID             string
+	Round              int
+	ToolIndex          int
+}
+
+// ContextualToolDispatcher is an additive extension to ToolDispatcher. The
+// controller uses it when a dispatcher opts into durable tool-call identity;
+// ordinary ToolDispatcher implementations continue to receive model.ToolCall
+// values exactly as before.
+type ContextualToolDispatcher interface {
+	ToolDispatcher
+	DispatchWithContext(ctx context.Context, calls []ToolDispatchCall) ([]ToolOutcome, error)
+}
+
+// ContextualToolDispatcherFunc adapts a contextual dispatch function while
+// retaining the legacy ToolDispatcher method for callers that invoke it
+// directly.
+type ContextualToolDispatcherFunc func(context.Context, []ToolDispatchCall) ([]ToolOutcome, error)
+
+func (f ContextualToolDispatcherFunc) Dispatch(ctx context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
+	contextual := make([]ToolDispatchCall, len(calls))
+	for index, call := range calls {
+		contextual[index] = ToolDispatchCall{
+			Call:               call,
+			ProviderToolCallID: call.ID,
+		}
+	}
+	return f(ctx, contextual)
+}
+
+func (f ContextualToolDispatcherFunc) DispatchWithContext(ctx context.Context, calls []ToolDispatchCall) ([]ToolOutcome, error) {
 	return f(ctx, calls)
 }
 
@@ -1804,7 +1890,17 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	if err := c.markStepDispatched(ctx, step); err != nil {
 		return nil, err
 	}
-	response, callErr := c.cfg.CallModel.Call(ctx, req, useContinuation)
+	var response *model.ChatResponse
+	var callErr error
+	if contextual, ok := c.cfg.CallModel.(ContextualModelCaller); ok {
+		response, callErr = contextual.CallWithContext(ctx, ModelDispatchCall{
+			Request: req, UseContinuation: useContinuation,
+			RunID: c.cfg.RunID, TaskID: c.cfg.TaskID, TurnID: c.cfg.TurnID,
+			StepID: step.StepID, Kind: stepKind, Round: round,
+		})
+	} else {
+		response, callErr = c.cfg.CallModel.Call(ctx, req, useContinuation)
+	}
 	persistedProviderError := modelstep.NormalizeError(callErr)
 	if callErr != nil && response == nil {
 		blockErr := c.blockDispatchedStep(ctx, step, callErr, "", "")
@@ -2030,7 +2126,7 @@ func (c *Controller) dispatchToolRound(ctx context.Context, state *toolRoundStat
 			return err
 		}
 	}
-	pendingOutcomes, dispatchErr := c.cfg.DispatchTools.Dispatch(ctx, state.pendingCalls)
+	pendingOutcomes, dispatchErr := c.dispatchPendingTools(ctx, state, round)
 	// Once Dispatch reports outcomes, external effects may already exist. Give
 	// their receipts a short cleanup window that cannot be cut off by a caller
 	// cancellation racing with this handoff.
@@ -2052,6 +2148,29 @@ func (c *Controller) dispatchToolRound(ctx context.Context, state *toolRoundStat
 		return errors.Join(err, c.blockPendingToolSteps(journalCtx, state, resolved, err))
 	}
 	return nil
+}
+
+func (c *Controller) dispatchPendingTools(ctx context.Context, state *toolRoundState, round int) ([]ToolOutcome, error) {
+	if contextual, ok := c.cfg.DispatchTools.(ContextualToolDispatcher); ok {
+		calls := make([]ToolDispatchCall, len(state.pendingIndexes))
+		for position, index := range state.pendingIndexes {
+			call := state.calls[index]
+			stepID := state.steps[index].StepID
+			calls[position] = ToolDispatchCall{
+				Call:               call,
+				ProviderToolCallID: call.ID,
+				ApprovalID:         StableApprovalID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, stepID, round, index),
+				RunID:              c.cfg.RunID,
+				TaskID:             c.cfg.TaskID,
+				TurnID:             c.cfg.TurnID,
+				StepID:             stepID,
+				Round:              round,
+				ToolIndex:          index,
+			}
+		}
+		return contextual.DispatchWithContext(ctx, calls)
+	}
+	return c.cfg.DispatchTools.Dispatch(ctx, state.pendingCalls)
 }
 
 func (c *Controller) blockPendingToolSteps(ctx context.Context, state *toolRoundState, start int, dispatchErr error) error {
@@ -2079,6 +2198,8 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	record := state.records[index]
 	record["effect_class"] = outcome.EffectClass
 	record["success"] = outcome.Success
+	record["state_observed"] = outcome.StateObserved
+	record["state_changed"] = outcome.StateChanged
 	record["yield_observed"] = outcome.YieldObserved
 	if outcome.YieldObserved {
 		record["yield_count"] = outcome.YieldCount
@@ -2110,6 +2231,7 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		}
 		content := outcome.Content
 		decision := c.cfg.Governor.Observe(call.Function.Name, call.Function.Arguments, content, outcome.Success)
+		decision = mergeGovernorDecisions(decision, c.cfg.Governor.ObserveProgress(outcome.EffectClass, outcome.Success, outcome.StateObserved, outcome.StateChanged))
 		if strings.TrimSpace(decision.Nudge) != "" {
 			content += "\n\n" + decision.Nudge
 		}
@@ -2126,6 +2248,22 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		}
 	}
 	return stopDecision, nil
+}
+
+func mergeGovernorDecisions(current, effect Decision) Decision {
+	if effect.Stop {
+		return effect
+	}
+	if current.Stop {
+		return current
+	}
+	if strings.TrimSpace(effect.Nudge) == "" {
+		return current
+	}
+	if strings.TrimSpace(current.Nudge) != "" {
+		effect.Nudge = current.Nudge + "\n\n" + effect.Nudge
+	}
+	return effect
 }
 
 // consultProgress runs the section-20 progress policy at the end of one

@@ -488,21 +488,23 @@ func TestRegistryCleanupIdleSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	runner, ok := registry.GetSession(info.ID)
+	if !ok || runner == nil {
+		t.Fatal("created runner unavailable")
+	}
+	runner.setState(StateProcessing)
 
-	// Wait for session to become idle
+	// Active work may outlive the idle threshold without being evicted.
 	time.Sleep(10 * time.Millisecond)
-
-	// Trigger cleanup
 	registry.cleanupIdleSessions()
+	if registry.Count() != 1 {
+		t.Fatalf("processing session was evicted after idle timeout")
+	}
 
-	// Session should be removed
+	runner.setState(StateIdle)
+	registry.cleanupIdleSessions()
 	if registry.Count() != 0 {
-		// Check if runner is actually idle
-		runner, ok := registry.GetSession(info.ID)
-		if ok && runner != nil {
-			t.Logf("runner still exists, IsIdle=%v, State=%v", runner.IsIdle(), runner.State())
-		}
-		t.Errorf("expected 0 sessions after cleanup, got %d", registry.Count())
+		t.Errorf("expected idle session cleanup, got %d sessions", registry.Count())
 	}
 }
 

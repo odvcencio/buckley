@@ -69,11 +69,12 @@ func (a *dockerSandboxAdapter) Execute(ctx context.Context, req SandboxRequest) 
 		return nil, err
 	}
 	return &SandboxResult{
-		ExitCode: result.ExitCode,
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		Duration: result.Duration,
-		Killed:   result.Killed,
+		ExitCode:        result.ExitCode,
+		Stdout:          result.Stdout,
+		Stderr:          result.Stderr,
+		Duration:        result.Duration,
+		Killed:          result.Killed,
+		OutputTruncated: result.OutputTruncated,
 	}, nil
 }
 
@@ -81,8 +82,28 @@ func (a *dockerSandboxAdapter) Ready(ctx context.Context) error {
 	return a.sb.Ready(ctx)
 }
 
+func (a *dockerSandboxAdapter) ImageReady(ctx context.Context) error {
+	return a.sb.ImageReady(ctx)
+}
+
+func (a *dockerSandboxAdapter) InspectImage(ctx context.Context) (dockersandbox.ImageIdentity, error) {
+	return a.sb.InspectImage(ctx)
+}
+
+func (a *dockerSandboxAdapter) Prepare(ctx context.Context) error {
+	return a.sb.Prepare(ctx)
+}
+
+func (a *dockerSandboxAdapter) VerifyPrepared(ctx context.Context, expected dockersandbox.PreparedVerification) error {
+	return a.sb.VerifyPrepared(ctx, expected)
+}
+
 func (a *dockerSandboxAdapter) Close() error {
 	return a.sb.Close()
+}
+
+func (a *dockerSandboxAdapter) CloseContext(ctx context.Context) error {
+	return a.sb.CloseContext(ctx)
 }
 
 func (r *Registry) enableShellContainerMode(composePath, service, workDir string) {

@@ -10,6 +10,7 @@ package gosxui
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -28,6 +29,10 @@ const (
 	startActionPath   = "/__actions/start-work"
 	commandActionPath = "/__actions/command"
 	logoutActionPath  = "/__actions/logout"
+	csrfFieldName     = "_csrf"
+	maxActionFormSize = int64(1 << 20)
+	safeActionFailure = "action failed"
+	safeLoadFailure   = "mission control unavailable"
 )
 
 // Backend is the narrow port between GoSX and Buckley's IPC/domain layers.
@@ -40,6 +45,12 @@ type Backend interface {
 	Logout(context.Context, *http.Request, http.ResponseWriter) error
 }
 
+// MutationGuard validates the browser mutation trust boundary. Backends that
+// do not implement it cannot receive unsafe GoSX actions.
+type MutationGuard interface {
+	ValidateMutation(context.Context, *http.Request, string) error
+}
+
 type StartWorkRequest struct {
 	Project  string
 	Agent    string
@@ -49,9 +60,10 @@ type StartWorkRequest struct {
 }
 
 type CommandRequest struct {
-	SessionID string
-	Type      string
-	Content   string
+	SessionID  string
+	Type       string
+	Content    string
+	ApprovalID string
 }
 
 type PageData struct {
@@ -61,6 +73,7 @@ type PageData struct {
 	CanWrite      bool
 	CanOperate    bool
 	RequireToken  bool
+	CSRFToken     string
 	ProjectRoot   string
 	Error         string
 	Sessions      []SessionView
@@ -155,19 +168,20 @@ func NewHandler(backend Backend) http.Handler {
 	if backend == nil {
 		backend = emptyBackend{}
 	}
+	guard, _ := backend.(MutationGuard)
 
 	app := server.New()
 	app.SetPublicDir("")
 	app.EnableNavigation()
-	app.EnableSecurityPolicy(server.SecurityPolicy{ContentSecurityPolicy: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-{nonce}'; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'"})
+	app.EnableSecurityPolicy(server.SecurityPolicy{ContentSecurityPolicy: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-{nonce}'; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'"})
 	app.Page("GET /", func(ctx *server.Context) gosx.Node {
 		data, err := backend.Load(ctx.Request.Context(), ctx.Request)
-		if err != nil {
-			data.Error = err.Error()
+		if err != nil || data.Error != "" {
+			data.Error = safeLoadFailure
 		}
 		if ctx.Request != nil && ctx.Request.URL != nil {
-			if raw := strings.TrimSpace(ctx.Request.URL.Query().Get("error")); raw != "" && data.Error == "" {
-				data.Error, _ = url.QueryUnescape(raw)
+			if raw := strings.TrimSpace(ctx.Request.URL.Query().Get("error")); raw == safeActionFailure && data.Error == "" {
+				data.Error = safeActionFailure
 			}
 		}
 		ctx.SetMetadata(server.Metadata{Title: server.Title{Absolute: "Buckley · Mission Control"}})
@@ -178,7 +192,7 @@ func NewHandler(backend Backend) http.Handler {
 		return renderDocument(data)
 	})
 	app.Mount("/assets/mission-control.css", embeddedAsset("styles.css", "text/css; charset=utf-8"))
-	app.Mount(startActionPath, actionHandler(func(ctx context.Context, r *http.Request, _ http.ResponseWriter, values url.Values) (string, error) {
+	app.Mount(startActionPath, actionHandler(guard, func(ctx context.Context, r *http.Request, _ http.ResponseWriter, values url.Values) (string, error) {
 		id, err := backend.StartWork(ctx, r, StartWorkRequest{
 			Project:  values.Get("project"),
 			Agent:    values.Get("agent"),
@@ -191,12 +205,13 @@ func NewHandler(backend Backend) http.Handler {
 		}
 		return "/?session=" + url.QueryEscape(id), nil
 	}))
-	app.Mount(commandActionPath, actionHandler(func(ctx context.Context, r *http.Request, _ http.ResponseWriter, values url.Values) (string, error) {
+	app.Mount(commandActionPath, actionHandler(guard, func(ctx context.Context, r *http.Request, _ http.ResponseWriter, values url.Values) (string, error) {
 		id := strings.TrimSpace(values.Get("session_id"))
 		if err := backend.Dispatch(ctx, r, CommandRequest{
-			SessionID: id,
-			Type:      values.Get("type"),
-			Content:   values.Get("content"),
+			SessionID:  id,
+			Type:       values.Get("type"),
+			Content:    values.Get("content"),
+			ApprovalID: values.Get("approval_id"),
 		}); err != nil {
 			return "", err
 		}
@@ -205,33 +220,52 @@ func NewHandler(backend Backend) http.Handler {
 		}
 		return "/?session=" + url.QueryEscape(id), nil
 	}))
-	app.Mount(logoutActionPath, actionHandler(func(ctx context.Context, r *http.Request, w http.ResponseWriter, _ url.Values) (string, error) {
+	app.Mount(logoutActionPath, actionHandler(guard, func(ctx context.Context, r *http.Request, w http.ResponseWriter, _ url.Values) (string, error) {
 		if err := backend.Logout(ctx, r, w); err != nil {
 			return "", err
 		}
 		return "/", nil
 	}))
-	return app.Build()
+	handler := app.Build()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		handler.ServeHTTP(w, r)
+	})
 }
 
-func actionHandler(fn func(context.Context, *http.Request, http.ResponseWriter, url.Values) (string, error)) http.Handler {
+func actionHandler(guard MutationGuard, fn func(context.Context, *http.Request, http.ResponseWriter, url.Values) (string, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxActionFormSize)
 		if err := r.ParseForm(); err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "form too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "invalid form", http.StatusBadRequest)
 			return
 		}
-		destination, err := fn(r.Context(), r, w, r.Form)
+		csrfValues := r.PostForm[csrfFieldName]
+		if guard == nil || len(csrfValues) != 1 || len(r.Form[csrfFieldName]) != 1 || guard.ValidateMutation(r.Context(), r, csrfValues[0]) != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		destination, err := fn(r.Context(), r, w, r.PostForm)
 		if err != nil {
-			redirect := "/?error=" + url.QueryEscape(err.Error())
-			if sessionID := strings.TrimSpace(r.Form.Get("session_id")); sessionID != "" {
+			redirect := "/?error=" + url.QueryEscape(safeActionFailure)
+			if sessionID := strings.TrimSpace(r.PostForm.Get("session_id")); sessionID != "" {
 				redirect += "&session=" + url.QueryEscape(sessionID)
 			}
 			http.Redirect(w, r, redirect, http.StatusSeeOther)
 			return
+		}
+		if !strings.HasPrefix(destination, "/") || strings.HasPrefix(destination, "//") {
+			destination = "/"
 		}
 		http.Redirect(w, r, destination, http.StatusSeeOther)
 	})
@@ -300,7 +334,7 @@ func renderMissionControl(data PageData) gosx.Node {
 			gosx.El("div", cls("topbar-meta"),
 				gosx.El("span", cls("scope-pill"), gosx.Text(strings.ToUpper(data.Scope))),
 				gosx.El("span", cls("principal"), gosx.Text(data.PrincipalName)),
-				server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", logoutActionPath)), gosx.El("button", cls("button button-quiet"), gosx.Attr("type", "submit"), gosx.Text("Sign out"))),
+				server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", logoutActionPath)), csrfInput(data.CSRFToken), gosx.El("button", cls("button button-quiet"), gosx.Attr("type", "submit"), gosx.Text("Sign out"))),
 			),
 		),
 	}
@@ -458,7 +492,7 @@ func renderSessionHeader(data PageData) gosx.Node {
 	session := data.Current
 	buttons := []gosx.Node{}
 	if data.CanWrite {
-		buttons = append(buttons, commandButton(session.ID, "pause", "", "Pause", "button button-quiet"), commandButton(session.ID, "resume", "", "Resume", "button button-quiet"), commandButton(session.ID, "interrupt", "", "Interrupt", "button button-danger"))
+		buttons = append(buttons, commandButton(data.CSRFToken, session.ID, "pause", "", "", "Pause", "button button-quiet"), commandButton(data.CSRFToken, session.ID, "resume", "", "", "Resume", "button button-quiet"), commandButton(data.CSRFToken, session.ID, "interrupt", "", "", "Interrupt", "button button-danger"))
 	}
 	return el("div", cls("session-header"), gosx.El("div", cls("session-title"), gosx.El("span", cls("eyebrow"), gosx.Text("RUN / "+session.ID)), gosx.El("h1", gosx.Text(sessionLabel(*session))), gosx.El("p", cls("mono muted"), gosx.Text(session.Project+branchSuffix(session.Branch)))), el("div", cls("session-actions"), buttons...))
 }
@@ -491,7 +525,7 @@ func renderControls(data PageData) gosx.Node {
 	}
 	return gosx.El("section", cls("panel controls-panel"),
 		gosx.El("div", cls("panel-head"), gosx.El("div", gosx.El("span", cls("eyebrow"), gosx.Text("STEERING")), gosx.El("h2", gosx.Text("Send an instruction"))), gosx.El("span", cls("scope-pill"), gosx.Text(firstNonEmpty(data.Current.Model, "config model")))),
-		server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "command-form")), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", data.Current.ID))), gosx.El("select", gosx.Attrs(gosx.Attr("name", "type")), gosx.El("option", gosx.Attr("value", "input"), gosx.Text("message")), gosx.El("option", gosx.Attr("value", "steer"), gosx.Text("steer / interrupt")), gosx.El("option", gosx.Attr("value", "queue"), gosx.Text("queue")), gosx.El("option", gosx.Attr("value", "slash"), gosx.Text("slash command"))), gosx.El("textarea", gosx.Attrs(gosx.Attr("name", "content"), gosx.Attr("rows", "3"), gosx.Attr("placeholder", "Ask Buckley to continue, inspect, or change direction…"))), gosx.El("button", cls("button button-primary"), gosx.Attr("type", "submit"), gosx.Text("Dispatch"))),
+		server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "command-form")), csrfInput(data.CSRFToken), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", data.Current.ID))), gosx.El("select", gosx.Attrs(gosx.Attr("name", "type")), gosx.El("option", gosx.Attr("value", "input"), gosx.Text("message")), gosx.El("option", gosx.Attr("value", "steer"), gosx.Text("steer / interrupt")), gosx.El("option", gosx.Attr("value", "queue"), gosx.Text("queue")), gosx.El("option", gosx.Attr("value", "slash"), gosx.Text("slash command"))), gosx.El("textarea", gosx.Attrs(gosx.Attr("name", "content"), gosx.Attr("rows", "3"), gosx.Attr("placeholder", "Ask Buckley to continue, inspect, or change direction…"))), gosx.El("button", cls("button button-primary"), gosx.Attr("type", "submit"), gosx.Text("Dispatch"))),
 	)
 }
 
@@ -511,7 +545,7 @@ func renderEvidence(data PageData) gosx.Node {
 	columns = append(columns, el("div", cls("evidence-card"), gosx.El("div", cls("eyebrow"), gosx.Text("CHECKPOINTS")), el("ul", cls("todo-list"), todos...)))
 	approvals := make([]gosx.Node, 0, len(data.Approvals))
 	for _, approval := range data.Approvals {
-		approvals = append(approvals, gosx.El("div", cls("approval"), gosx.El("div", cls("eyebrow"), gosx.Text("APPROVAL REQUIRED")), gosx.El("strong", gosx.Text(approval.ToolName)), gosx.El("pre", gosx.Text(approval.ToolArgs)), gosx.El("p", cls("muted tiny"), gosx.Text("expires "+approval.ExpiresAt)), gosx.El("div", cls("approval-actions"), commandButton(data.Current.ID, "approval", "approve", "Approve", "button button-primary"), commandButton(data.Current.ID, "approval", "reject", "Reject", "button button-danger"))))
+		approvals = append(approvals, gosx.El("div", cls("approval"), gosx.El("div", cls("eyebrow"), gosx.Text("APPROVAL REQUIRED")), gosx.El("strong", gosx.Text(approval.ToolName)), gosx.El("pre", gosx.Text(approval.ToolArgs)), gosx.El("p", cls("muted tiny"), gosx.Text("expires "+approval.ExpiresAt)), gosx.El("div", cls("approval-actions"), commandButton(data.CSRFToken, data.Current.ID, "approval", "approve", approval.ID, "Approve", "button button-primary"), commandButton(data.CSRFToken, data.Current.ID, "approval", "reject", approval.ID, "Reject", "button button-danger"))))
 	}
 	if len(approvals) == 0 {
 		approvals = append(approvals,
@@ -556,6 +590,7 @@ func renderStartForm(data PageData) gosx.Node {
 		gosx.El("h2", gosx.Text("Start an agent in a directory")),
 		gosx.El("p", cls("muted"), gosx.Text("The daemon resolves profiles, policy, model routing, and persistence.")),
 		server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", startActionPath), gosx.Attr("class", "start-form")),
+			csrfInput(data.CSRFToken),
 			field("Directory", "project", "text", firstNonEmpty(data.ProjectRoot, "."), "repository path"),
 			el("div", cls("form-grid"), selectField("Agent profile", "agent", options...), field("Subagent", "subagent", "text", "", "optional profile subagent")),
 			selectField("Model override", "model", modelOptions...),
@@ -576,8 +611,27 @@ func selectField(label, name string, options ...gosx.Node) gosx.Node {
 	return gosx.El("label", cls("field"), gosx.El("span", gosx.Text(label)), el("select", gosx.Attrs(gosx.Attr("name", name)), options...))
 }
 
-func commandButton(sessionID, typ, content, label, className string) gosx.Node {
-	return server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "inline-form")), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", sessionID))), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "type"), gosx.Attr("value", typ))), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "content"), gosx.Attr("value", content))), gosx.El("button", cls(className), gosx.Attr("type", "submit"), gosx.Text(label)))
+func commandButton(csrfToken, sessionID, typ, content, approvalID, label, className string) gosx.Node {
+	children := []gosx.Node{
+		csrfInput(csrfToken),
+		gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", sessionID))),
+		gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "type"), gosx.Attr("value", typ))),
+		gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "content"), gosx.Attr("value", content))),
+	}
+	if approvalID != "" {
+		children = append(children, gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "approval_id"), gosx.Attr("value", approvalID))))
+	}
+	children = append(children, gosx.El("button", cls(className), gosx.Attr("type", "submit"), gosx.Text(label)))
+	args := make([]any, 1, len(children)+1)
+	args[0] = gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "inline-form"))
+	for _, child := range children {
+		args = append(args, child)
+	}
+	return server.Form(args...)
+}
+
+func csrfInput(token string) gosx.Node {
+	return gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", csrfFieldName), gosx.Attr("value", token)))
 }
 
 func metric(label, value string) gosx.Node {

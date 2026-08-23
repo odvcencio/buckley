@@ -20,7 +20,7 @@ import (
 
 // setupMissionRoutes sets up Mission Control API routes
 func (s *Server) setupMissionRoutes(r chi.Router) {
-	r.Route("/api/mission", func(r chi.Router) {
+	r.Route("/mission", func(r chi.Router) {
 		// Event stream
 		r.Get("/events", s.handleMissionEvents)
 
@@ -221,16 +221,19 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// If we have a command gateway and session, dispatch the message into the session.
-	if s.commandGW != nil && sessionID != "" {
+	acceptedToSession := false
+	if commandTargetAvailable(s) && sessionID != "" {
 		cmd := command.SessionCommand{
-			SessionID: sessionID,
-			Type:      "input",
-			Content:   req.Message,
+			SessionID:  sessionID,
+			Type:       "input",
+			Content:    req.Message,
+			AcceptedBy: strings.TrimSpace(principal.Name),
 		}
-		if err := s.commandGW.Dispatch(cmd); err != nil {
+		if _, err := s.dispatchCommandWithReceipt(r.Context(), &cmd, commandDispatchGateway); err != nil {
 			respondError(w, http.StatusServiceUnavailable, errors.New("failed to dispatch message to session"))
 			return
 		}
+		acceptedToSession = true
 	}
 
 	now := time.Now()
@@ -244,8 +247,13 @@ func (s *Server) handleSendAgentMessage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.missionStore.RecordAgentActivity(activity); err != nil {
-		respondError(w, http.StatusInternalServerError, errors.New("failed to record activity"))
-		return
+		if !acceptedToSession {
+			respondError(w, http.StatusInternalServerError, errors.New("failed to record activity"))
+			return
+		}
+		if s.logger != nil {
+			s.logger.Printf("mission activity after accepted command failed: %v", err)
+		}
 	}
 
 	s.hub.Broadcast(Event{

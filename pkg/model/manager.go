@@ -19,15 +19,26 @@ const catalogFetchTimeout = 30 * time.Second
 
 // Manager manages provider routing and model metadata.
 type Manager struct {
-	catalogMu       sync.RWMutex
-	config          *config.Config
-	providers       map[string]Provider
-	providerOrder   []string
-	catalog         map[string]ModelInfo
-	providerModels  map[string][]string
-	modelProviders  map[string]string
-	routingHooks    *RoutingHooks
-	privacyFallback OpenRouterPrivacyFallback
+	catalogMu          sync.RWMutex
+	config             *config.Config
+	providers          map[string]Provider
+	providerOrder      []string
+	catalog            map[string]ModelInfo
+	providerModels     map[string][]string
+	modelProviders     map[string]string
+	routingHooks       *RoutingHooks
+	privacyFallback    OpenRouterPrivacyFallback
+	launchAdmissionNow func() time.Time
+}
+
+// ModelRoute is one authoritative model/provider routing decision. Callers
+// that govern provider-specific request policy can resolve once, audit that
+// exact route, and require ChatCompletionForRoute to fail before dispatch if a
+// concurrent hook or routing change would select anything else.
+type ModelRoute struct {
+	RequestedModel string
+	SelectedModel  string
+	ProviderID     string
 }
 
 // ProviderThreadStore persists native provider conversation identifiers so a
@@ -337,6 +348,34 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
+	return m.chatCompletionResolved(ctx, req, selectedModel, provider)
+}
+
+// ResolveModelRoute returns the same route selection ChatCompletion uses,
+// including configured prefix routing and routing hooks.
+func (m *Manager) ResolveModelRoute(modelID string) (ModelRoute, error) {
+	requested := strings.TrimSpace(modelID)
+	selected, provider := m.resolveModel(requested)
+	if provider == nil {
+		return ModelRoute{}, fmt.Errorf("no provider configured for model %s", requested)
+	}
+	return ModelRoute{RequestedModel: requested, SelectedModel: selected, ProviderID: provider.ID()}, nil
+}
+
+// ChatCompletionForRoute dispatches only if the current authoritative route
+// still exactly matches the previously governed decision.
+func (m *Manager) ChatCompletionForRoute(ctx context.Context, req ChatRequest, expected ModelRoute) (*ChatResponse, error) {
+	selected, provider := m.resolveModel(req.Model)
+	if provider == nil {
+		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
+	}
+	if strings.TrimSpace(req.Model) != expected.RequestedModel || selected != expected.SelectedModel || provider.ID() != expected.ProviderID {
+		return nil, fmt.Errorf("model route changed before dispatch")
+	}
+	return m.chatCompletionResolved(ctx, req, selected, provider)
+}
+
+func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, selectedModel string, provider Provider) (*ChatResponse, error) {
 	req.Model = selectedModel
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
@@ -346,8 +385,11 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
 	}
+	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
+		return nil, err
+	}
 	resp, err := chatCompletionWithAffordableOutputRetry(ctx, provider, req)
-	if err != nil && resp == nil && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
+	if err != nil && resp == nil && req.RetryMode == RequestRetryDefault && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
 		fallbackReq, ok := openRouterDataCollectionDenyRequest(req)
 		if ok {
 			resp, err = chatCompletionWithAffordableOutputRetry(ctx, provider, fallbackReq)
@@ -375,7 +417,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 func chatCompletionWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (*ChatResponse, error) {
 	for attempt := 0; ; attempt++ {
 		resp, err := provider.ChatCompletion(ctx, req)
-		if err == nil || resp != nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+		if err == nil || resp != nil || provider.ID() != "openrouter" || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 			return resp, err
 		}
 		affordable, ok := affordableOutputTokenLimit(err)
@@ -428,6 +470,9 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
 	}
+	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
+		return nil, err
+	}
 	continuationReq.Request = req
 
 	var (
@@ -436,7 +481,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	)
 	for attempt := 0; ; attempt++ {
 		resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
-		if err == nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+		if err == nil || provider.ID() != "openrouter" || continuationReq.Request.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 			break
 		}
 		affordable, ok := affordableOutputTokenLimit(err)
@@ -449,7 +494,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 		}
 		continuationReq.Request = next
 	}
-	if err != nil && resp == nil && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
+	if err != nil && resp == nil && continuationReq.Request.RetryMode == RequestRetryDefault && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
 		fallbackReq, ok := openRouterDataCollectionDenyRequest(continuationReq.Request)
 		if ok {
 			continuationReq.Request = fallbackReq
@@ -484,6 +529,14 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
+	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
+		chunkChan := make(chan StreamChunk)
+		close(chunkChan)
+		errChan := make(chan error, 1)
+		errChan <- err
+		close(errChan)
+		return chunkChan, errChan
+	}
 	if provider.ID() != "openrouter" {
 		return provider.ChatCompletionStream(ctx, req)
 	}
@@ -544,6 +597,10 @@ func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider
 			}
 
 			if terminalErr == nil {
+				return
+			}
+			if req.RetryMode != RequestRetryDefault {
+				errorsOut <- terminalErr
 				return
 			}
 			if !sawChunk && privacyRetry && !privacyFallbackAttempted && shouldTryOpenRouterPrivacyFallback(terminalErr) {

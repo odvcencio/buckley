@@ -12,7 +12,35 @@ import (
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
+
+func withPassingTestCIAdmission(t *testing.T, def ReviewPRDef) ReviewPRDef {
+	t.Helper()
+	expectation := prCIAdmissionExpectation(&PRInfo{
+		Number:     208,
+		Host:       "github.com",
+		Repository: "m31labs/buckley",
+		BaseBranch: "main",
+		BaseSHA:    "base-sha",
+		HeadBranch: "topic",
+		HeadSHA:    "head-sha",
+	}, def.ChangedFiles)
+	receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+		Expectation:               expectation,
+		RequiredContextsAvailable: true,
+		RequiredContexts:          []reviewpolicy.CIRequiredContext{{Name: "required/unit", State: "SUCCESS"}},
+	})
+	if err != nil {
+		t.Fatalf("create test CI admission receipt: %v", err)
+	}
+	if receipt.Decision != reviewpolicy.CIAdmissionAllow {
+		t.Fatalf("test fixture cannot mint passing CI admission for %v: %s/%s", def.ChangedFiles, receipt.Decision, receipt.Reason)
+	}
+	def.CIAdmission = receipt
+	def.CIAdmissionExpectation = expectation
+	return def
+}
 
 func TestDefaultBranchContextOptions(t *testing.T) {
 	opts := DefaultBranchContextOptions()
@@ -703,10 +731,10 @@ func TestProceduralVerificationGapCannotProduceDefectGrade(t *testing.T) {
 }
 
 func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testing.T) {
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		CIStatus:     "passing (8/8)",
 		CIProvenance: prCISourceHead,
-	}
+	})
 	for _, name := range def.AllowedTools() {
 		if name == "run_verification" {
 			t.Fatal("authoritative remote CI still exposed run_verification")
@@ -717,6 +745,11 @@ func TestReviewPRDefSkipsDuplicateVerificationForAuthoritativeRemoteCI(t *testin
 	}
 	if !strings.Contains(def.SystemPrompt(), "Do not lower the grade or recommendation") {
 		t.Fatal("system prompt did not forbid penalties for disabled duplicate verification")
+	}
+	unsealed := def
+	unsealed.CIAdmission = reviewpolicy.CIAdmissionReceipt{}
+	if !assert.Contains(t, unsealed.AllowedTools(), "run_verification") {
+		t.Fatal("green optional checks without a CI admission receipt disabled focused verification")
 	}
 
 	pending := ReviewPRDef{
@@ -894,6 +927,7 @@ func TestReviewDefinitionsSkipHostEvidenceOnlyForAuthoritativeRemoteCI(t *testin
 
 	passing := pending
 	passing.CIStatus = "passing (3/3)"
+	passing = withPassingTestCIAdmission(t, passing)
 	assert.Empty(t, passing.AgentEvidenceRequests())
 }
 
@@ -918,11 +952,11 @@ func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *test
 	result := &ReviewAgentResult{Parsed: &ParsedReview{Approved: true}}
 
 	for _, provenance := range []string{prCISourceHead, prCISourceBase} {
-		def := ReviewPRDef{
+		def := withPassingTestCIAdmission(t, ReviewPRDef{
 			ChangedFiles: []string{"pkg/model/client.go"},
 			CIStatus:     "passing (4/4)",
 			CIProvenance: provenance,
-		}
+		})
 		assert.NoError(t, def.ValidateAgentExecution(result, nil))
 	}
 
@@ -942,11 +976,11 @@ func TestApprovedPRUsesAuthoritativeRemoteCIInsteadOfDuplicateLocalSuite(t *test
 }
 
 func TestReviewPRRuntimeAcceptsExactChangelogDocumentationLedger(t *testing.T) {
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles: []string{"CHANGELOG.md"},
 		CIStatus:     "passing (1/1)",
 		CIProvenance: prCISourceBase,
-	}
+	})
 	result, err := def.ParseResult(`## Grade: A
 
 ## Summary
@@ -1255,12 +1289,12 @@ func TestApprovalCriticIsExplicitlyOptIn(t *testing.T) {
 	assert.Contains(t, branchCriticPrompt, "Re-read relevant source with tools")
 	assert.Contains(t, branchCriticPrompt, "complete machine-validated review becomes the final result")
 
-	pr := ReviewPRDef{
+	pr := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles:   []string{"ratchet.go"},
 		CIStatus:       "passing (1/1)",
 		CIProvenance:   prCISourceHead,
 		ApprovalCritic: true,
-	}
+	})
 	prResult, err := pr.ParseResult(approval)
 	assert.NoError(t, err)
 	assert.NoError(t, pr.ValidateResult(prResult))
@@ -1492,13 +1526,13 @@ None.
 }
 
 func TestReviewPRDefValidateResultAcceptsCompleteApproval(t *testing.T) {
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go", "skips.go"},
 		CIStatus:                    "passing (22/22)",
 		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
-	}
+	})
 	base := `## Grade: A
 
 ## Summary
@@ -1549,11 +1583,11 @@ func TestReviewApprovalRequiresGradeAWithoutFindingsOrSuggestions(t *testing.T) 
 	coverage := "- **File**: `ratchet.go` — reviewed the changed bound and its consumer.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: named remote checks passed."
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles: []string{"ratchet.go"},
 		CIStatus:     "passing (1/1)",
 		CIProvenance: prCISourceHead,
-	}
+	})
 
 	gradeB := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
 	result, err := def.ParseResult(gradeB)
@@ -1827,7 +1861,7 @@ func TestReviewValidationRequiresBlockerForRequestChanges(t *testing.T) {
 }
 
 func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
-	def := ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
+	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
 
 	valid := completeReviewWithCoverage("- **File**: `./pkg\\ratchet.go` — reviewed the exact changed file and its paired bound.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
@@ -1847,7 +1881,7 @@ func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
 }
 
 func TestReviewCoverageLedgerAllowsCompleteDirectoryGroups(t *testing.T) {
-	def := ReviewPRDef{ChangedFiles: []string{"pkg/feature/a.go", "pkg/feature/b_test.go", "README.md"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead}
+	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/feature/a.go", "pkg/feature/b.go", "README.md"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
 	review := completeReviewWithCoverage(
 		"- **File**: `pkg/feature/**` — reviewed both feature files and their shared contract.\n" +
 			"- **File**: `README.md` — reviewed the changed documentation claim.\n" + "- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
@@ -1892,11 +1926,11 @@ func TestReviewCoverageLedgerRequiresExplicitFeedbackDisposition(t *testing.T) {
 }
 
 func TestReviewApprovalRequiresDisprovedFalsification(t *testing.T) {
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles: []string{"ratchet.go"},
 		CIStatus:     "passing (1/1)",
 		CIProvenance: prCISourceHead,
-	}
+	})
 	base := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: focused test passed.")
@@ -2068,17 +2102,17 @@ func TestReviewPRApprovalRequiresAuthoritativePassingRemoteCI(t *testing.T) {
 		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
 		"- **Verification**: named remote checks passed.")
 
-	valid := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceHead}
+	valid := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceHead})
 	result, err := valid.ParseResult(base)
 	assert.NoError(t, err)
 	assert.NoError(t, valid.ValidateResult(result))
 
-	documentationBase := ReviewPRDef{ChangedFiles: []string{"README.md"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase}
+	documentationBase := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"README.md"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase})
 	result, err = documentationBase.ParseResult(strings.ReplaceAll(base, "ratchet.go", "README.md"))
 	assert.NoError(t, err)
 	assert.NoError(t, documentationBase.ValidateResult(result))
 
-	sourceBase := ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase}
+	sourceBase := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"ratchet.go"}, CIStatus: "passing (3/3)", CIProvenance: prCISourceBase})
 	result, err = sourceBase.ParseResult(base)
 	assert.NoError(t, err)
 	assert.ErrorContains(t, sourceBase.ValidateResult(result), "documentation-only approval")
@@ -2108,19 +2142,103 @@ func TestReviewPRApprovalRequiresAuthoritativePassingRemoteCI(t *testing.T) {
 	}
 }
 
+func TestReviewPRApprovalRejectsNonAuthoritativeCIAdmission(t *testing.T) {
+	review := completeReviewWithCoverage("- **File**: `ratchet.go` — reviewed the exact changed file.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed.")
+	valid := withPassingTestCIAdmission(t, ReviewPRDef{
+		ChangedFiles: []string{"ratchet.go"},
+		CIStatus:     "passing (3/3)",
+		CIProvenance: prCISourceHead,
+	})
+
+	tests := []struct {
+		name string
+		edit func(*testing.T, ReviewPRDef) ReviewPRDef
+		want string
+	}{
+		{
+			name: "missing",
+			edit: func(_ *testing.T, def ReviewPRDef) ReviewPRDef {
+				def.CIAdmission = reviewpolicy.CIAdmissionReceipt{}
+				return def
+			},
+			want: "receipt is missing",
+		},
+		{
+			name: "stale",
+			edit: func(_ *testing.T, def ReviewPRDef) ReviewPRDef {
+				def.CIAdmissionExpectation.Identity.HeadSHA = "different-head"
+				return def
+			},
+			want: "receipt is stale",
+		},
+		{
+			name: "tampered",
+			edit: func(_ *testing.T, def ReviewPRDef) ReviewPRDef {
+				def.CIAdmission.Decision = reviewpolicy.CIAdmissionDeny
+				return def
+			},
+			want: "receipt is invalid",
+		},
+		{
+			name: "denied",
+			edit: func(t *testing.T, def ReviewPRDef) ReviewPRDef {
+				receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+					Expectation:               def.CIAdmissionExpectation,
+					RequiredContextsAvailable: true,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				def.CIAdmission = receipt
+				return def
+			},
+			want: "ci admission denied: no_required_contexts",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			def := test.edit(t, valid)
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.ErrorContains(t, def.ValidateResult(result), test.want)
+			assert.Contains(t, def.AllowedTools(), "run_verification")
+			assert.NotEmpty(t, def.AgentEvidenceRequests())
+		})
+	}
+}
+
+func TestReviewPRAdmissionCannotOmitRecognizedChangedTestFile(t *testing.T) {
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
+		ChangedFiles: []string{"parser.go"},
+		CIStatus:     "passing (1/1)",
+		CIProvenance: prCISourceHead,
+	})
+	def.ChangedFiles = []string{"parser_test.go"}
+	review := completeReviewWithCoverage("- **File**: `parser_test.go` — reviewed the changed test.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: named remote checks passed.")
+	result, err := def.ParseResult(review)
+	assert.NoError(t, err)
+	assert.ErrorContains(t, def.ValidateResult(result), "receipt is stale")
+	assert.Contains(t, def.AllowedTools(), "run_verification")
+}
+
 func TestReviewFeedbackLedgerRequiresExactPerIDDisposition(t *testing.T) {
 	const fileLine = "- **File**: `ratchet.go` — reviewed the exact changed file.\n"
 	const disposition = "- **Feedback disposition**: `DISPOSITIONED` — every supplied ID is listed below.\n"
 	const verification = "- **Verification**: named remote checks passed."
 	entry1 := "- **Feedback**: `thread:PRRT_1` — `ADDRESSED` — focused test proves the requested boundary fix.\n"
 	entry2 := "- **Feedback**: `review:123` — `DISPUTED` — source trace proves the concern does not apply.\n"
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go"},
 		CIStatus:                    "passing (2/2)",
 		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1", "review:123"},
-	}
+	})
 
 	valid := completeReviewWithCoverage(fileLine + disposition + entry1 + entry2 + verification)
 	result, err := def.ParseResult(valid)
@@ -2171,13 +2289,13 @@ func TestReviewFeedbackLedgerUnresolvedBlocksOnlyApproval(t *testing.T) {
 		"- **Feedback disposition**: `DISPOSITIONED` — every supplied ID is listed below.\n" +
 		"- **Feedback**: `thread:PRRT_1` — `UNRESOLVED` — requested regression test is still absent.\n" +
 		"- **Verification**: named remote checks passed."
-	def := ReviewPRDef{
+	def := withPassingTestCIAdmission(t, ReviewPRDef{
 		ChangedFiles:                []string{"ratchet.go"},
 		CIStatus:                    "passing (1/1)",
 		CIProvenance:                prCISourceHead,
 		RequiresFeedbackDisposition: true,
 		RequiredFeedbackIDs:         []string{"thread:PRRT_1"},
-	}
+	})
 
 	approval, err := def.ParseResult(completeReviewWithCoverage(coverage))
 	assert.NoError(t, err)

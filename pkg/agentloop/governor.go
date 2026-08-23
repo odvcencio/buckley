@@ -11,8 +11,14 @@ import (
 
 // Config controls bounded agent-loop execution and stagnation detection.
 type Config struct {
-	MaxRounds          int
-	MaxToolCalls       int
+	MaxRounds    int
+	MaxToolCalls int
+	// ReadOnlyWarningAt, ReadOnlyActionAt, and MaxReadOnlyCalls form an
+	// escalation ladder for discovery that produces evidence but never changes
+	// state. Zero MaxReadOnlyCalls disables this fuse.
+	ReadOnlyWarningAt  int
+	ReadOnlyActionAt   int
+	MaxReadOnlyCalls   int
 	ExactRepeatLimit   int
 	OutcomeRepeatLimit int
 	CycleMaxLength     int
@@ -54,6 +60,64 @@ type Governor struct {
 
 	maxExactCount   int
 	maxOutcomeCount int
+	readOnlyCalls   int
+}
+
+// ObserveEffect tracks whether tool work is advancing beyond discovery.
+// It is separate from Observe so callers that do not classify effects retain
+// the existing governor behavior.
+func (g *Governor) ObserveEffect(effectClass string, success bool) Decision {
+	return g.ObserveProgress(effectClass, success, false, false)
+}
+
+// ObserveProgress tracks convergence using observed workspace change when a
+// dispatcher can provide it. Effect metadata remains the conservative
+// fallback for adapters that do not yet observe workspace state.
+func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, stateChanged bool) Decision {
+	if g == nil || g.config.MaxReadOnlyCalls <= 0 {
+		return Decision{}
+	}
+	effectClass = strings.ToLower(strings.TrimSpace(effectClass))
+	if effectClass == "control" || effectClass == "" {
+		return Decision{}
+	}
+	if stateObserved {
+		if success && stateChanged {
+			g.readOnlyCalls = 0
+			return Decision{}
+		}
+		g.readOnlyCalls++
+	} else {
+		switch effectClass {
+		case "readonly":
+			g.readOnlyCalls++
+		default:
+			if success {
+				g.readOnlyCalls = 0
+				return Decision{}
+			}
+			g.readOnlyCalls++
+		}
+	}
+	if g.readOnlyCalls >= g.config.MaxReadOnlyCalls {
+		reason := fmt.Sprintf("tool loop used %d calls without a successful state-changing action", g.readOnlyCalls)
+		return stopDecision("read_only_budget", reason, g.readOnlyCalls)
+	}
+	if g.config.ReadOnlyWarningAt > 0 && g.readOnlyCalls == g.config.ReadOnlyWarningAt {
+		return Decision{
+			Kind:  "read_only_budget_warning",
+			Count: g.readOnlyCalls,
+			Nudge: "Harness checkpoint: discovery has consumed half of its bounded budget without changing state. Preserve your creative latitude, but now choose and state the smallest viable implementation slice supported by the evidence. Prefer executing that slice over broadening discovery; otherwise complete a read-only task or report a concrete blocker.",
+		}
+	}
+	if g.config.ReadOnlyActionAt > 0 && g.readOnlyCalls == g.config.ReadOnlyActionAt {
+		return Decision{
+			Kind:  "read_only_action_required",
+			Count: g.readOnlyCalls,
+			Nudge: "Harness action boundary: the evidence budget is nearly exhausted. The next tool work must make an observable workspace change, complete the task if it is read-only, or report a concrete blocker. Further discovery without action will be parked deterministically.",
+		}
+	}
+	return Decision{}
 }
 
 // New constructs a progress-aware loop governor.
@@ -220,6 +284,13 @@ func (g *Governor) EvidenceNovelty() (float64, bool) {
 	return novelty, g.toolCalls >= evidenceNoveltyMinSamples
 }
 
+// ActionRequired reports whether discovery has crossed the action boundary.
+// Dispatchers can use this signal to narrow capabilities without interpreting
+// model prose. A successful observed state change resets the boundary.
+func (g *Governor) ActionRequired() bool {
+	return g != nil && g.config.ReadOnlyActionAt > 0 && g.readOnlyCalls >= g.config.ReadOnlyActionAt
+}
+
 func normalizedConfig(config Config) Config {
 	defaults := DefaultConfig()
 	if config.MaxRounds <= 0 {
@@ -227,6 +298,20 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxToolCalls <= 0 {
 		config.MaxToolCalls = defaults.MaxToolCalls
+	}
+	if config.MaxReadOnlyCalls > 0 {
+		if config.ReadOnlyWarningAt <= 0 {
+			config.ReadOnlyWarningAt = max(config.MaxReadOnlyCalls/2, 1)
+		}
+		if config.ReadOnlyWarningAt >= config.MaxReadOnlyCalls {
+			config.ReadOnlyWarningAt = max(config.MaxReadOnlyCalls-1, 1)
+		}
+		if config.ReadOnlyActionAt <= config.ReadOnlyWarningAt {
+			config.ReadOnlyActionAt = config.MaxReadOnlyCalls - 4
+		}
+		if config.ReadOnlyActionAt <= config.ReadOnlyWarningAt || config.ReadOnlyActionAt >= config.MaxReadOnlyCalls {
+			config.ReadOnlyActionAt = 0
+		}
 	}
 	if config.ExactRepeatLimit < 2 {
 		config.ExactRepeatLimit = defaults.ExactRepeatLimit

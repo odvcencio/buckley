@@ -316,6 +316,39 @@ func TestManager_SaveResumeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestManager_SaveIfLatest_AtomicallyExtendsExpectedCheckpoint(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	ctx := context.Background()
+	input := SaveInput{
+		State:     validState(),
+		Reason:    TriggerEditBatchEnd,
+		SessionID: "sess-cas",
+		RunID:     "run-cas",
+	}
+	root, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{})
+	if err != nil {
+		t.Fatalf("SaveIfLatest root: %v", err)
+	}
+	if root.Version != 1 || root.ParentCheckpointID != "" {
+		t.Fatalf("root = %+v, want version 1 without parent", root)
+	}
+	if _, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{}); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("duplicate root error = %v, want ErrCheckpointConflict", err)
+	}
+
+	input.State.Summary = "conditional successor"
+	successor, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{CheckpointID: root.CheckpointID, Version: root.Version})
+	if err != nil {
+		t.Fatalf("SaveIfLatest successor: %v", err)
+	}
+	if successor.Version != 2 || successor.ParentCheckpointID != root.CheckpointID {
+		t.Fatalf("successor = %+v, want version 2 chained to root", successor)
+	}
+	if _, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{CheckpointID: root.CheckpointID, Version: root.Version}); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("stale successor error = %v, want ErrCheckpointConflict", err)
+	}
+}
+
 func TestManager_SaveRejectsInvalidState(t *testing.T) {
 	t.Parallel()
 	mgr, _ := newTestManager(t)

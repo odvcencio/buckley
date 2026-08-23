@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/durability"
@@ -22,9 +24,11 @@ import (
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/goalloop"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/ralph"
 	"m31labs.dev/buckley/pkg/replay"
 	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -35,9 +39,11 @@ import (
 // UX arrives with G9; this surface creates and inspects goals.
 func runGoalCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: buckley goal <start|status|list|report|run|audit|replay|approve> [flags]")
+		return errors.New("usage: buckley goal <preflight|start|status|list|report|run|audit|replay|approve> [flags]")
 	}
 	switch args[0] {
+	case "preflight":
+		return runGoalPreflight(args[1:])
 	case "start":
 		return runGoalStart(args[1:])
 	case "status":
@@ -57,7 +63,7 @@ func runGoalCommand(args []string) error {
 	case "worker":
 		return runGoalWorker(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want start, status, list, report, run, audit, replay, approve, or worker)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want preflight, start, status, list, report, run, audit, replay, approve, or worker)", args[0])
 	}
 }
 
@@ -255,6 +261,11 @@ func runGoalAudit(args []string) error {
 		switch {
 		case ev.Type == "capability.call":
 			line = fmt.Sprintf("caps %-12s %-6s %s", ev.Payload["method"], ev.Payload["outcome"], truncate(fmt.Sprint(ev.Payload["params"]), 80))
+		case ev.Type == runledger.EventControllerDecision && goalAuditField(ev.Payload["kind"], 32) == "model_data_policy":
+			line = fmt.Sprintf("decide model-data   action=%s policy=%s reason=%s",
+				goalAuditField(ev.Payload["action"], 16),
+				goalAuditField(ev.Payload["policy"], 32),
+				goalAuditField(ev.Payload["reason_code"], 64))
 		case ev.Type == runledger.EventControllerDecision:
 			line = fmt.Sprintf("decide %-12s %s", ev.Payload["decision"], truncate(fmt.Sprint(ev.Payload["reason"]), 90))
 		case strings.HasPrefix(ev.Type, "model.") || strings.HasPrefix(ev.Type, "tool."):
@@ -273,6 +284,19 @@ func runGoalAudit(args []string) error {
 		fmt.Println("No audited events for this run")
 	}
 	return nil
+}
+
+func goalAuditField(value any, maxBytes int) string {
+	text, ok := value.(string)
+	if !ok || text == "" || len(text) > maxBytes || !utf8.ValidString(text) {
+		return "<invalid>"
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) {
+			return "<invalid>"
+		}
+	}
+	return text
 }
 
 // runGoalReplay verifies a goal's durable replay contract without invoking a
@@ -353,34 +377,65 @@ func runGoalRun(args []string) error {
 	}
 	runID := strings.TrimSpace(fs.Arg(0))
 
-	cfg, mgr, store, err := initDependenciesFn()
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
 	stores, cleanup, err := openGoalStores()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	workDir, err := os.Getwd()
+	workDir, err := goalRunWorkspaceFn()
+	if err != nil {
+		return err
+	}
+	loadLoop, err := goalloop.New(goalloop.Config{
+		Ledger:      stores.ledger,
+		Checkpoints: stores.checkpoints,
+		SessionID:   "goal-cli",
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	goal, specs, err := loadLoop.LoadGoal(ctx, runID)
 	if err != nil {
 		return err
 	}
 
+	var cfg *config.Config
 	var engine goalloop.TurnEngine
 	if *backendName != "" {
-		backend, err := goalBackendFor(*backendName)
+		policyEngine, err := preflightExternalGoalPolicy(goal, workDir)
 		if err != nil {
 			return err
 		}
-		engine, err = ralph.NewBackendTurnEngine(backend, stores.evidence, workDir)
+		cfg, err = config.Load()
 		if err != nil {
 			return err
+		}
+		backend, err := goalBackendForFn(*backendName)
+		if err != nil {
+			return err
+		}
+		backendEngine, err := ralph.NewBackendTurnEngine(backend, stores.evidence, workDir)
+		if err != nil {
+			return err
+		}
+		engine = &externalGoalPolicyEngine{
+			inner:        backendEngine,
+			ledger:       stores.ledger,
+			policyEngine: policyEngine,
+			workDir:      workDir,
+			providerID:   "external/" + strings.ToLower(strings.TrimSpace(*backendName)),
 		}
 	} else {
+		var mgr *model.Manager
+		var store *storage.Store
+		cfg, mgr, store, err = initDependenciesFn()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
 		registry := tool.NewRegistry()
 		tool.ApplyToolMiddlewareConfig(registry, cfg)
 		registry.ConfigureContainers(cfg, workDir)
@@ -416,13 +471,6 @@ func runGoalRun(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	goal, specs, err := loop.LoadGoal(ctx, runID)
-	if err != nil {
-		return err
-	}
 	fmt.Printf("Running goal %s: %s\n", runID, goal.Statement)
 	if goal.BudgetUSD > 0 {
 		fmt.Printf("Budget: $%.2f · posture: %s\n", goal.BudgetUSD, goal.Posture)
@@ -724,6 +772,11 @@ func runGoalStart(args []string) error {
 	budget := fs.Float64("budget", 0, "dollar ceiling for the goal (0 = no budget)")
 	posture := fs.String("posture", "interactive", "budget posture: interactive | frugal | overnight")
 	approval := fs.String("approval", "safe", "approval envelope while unattended (ADR 0006 tier)")
+	modelID := fs.String("model", strings.TrimSpace(modelOverrideFlag), "exact model for every internal-engine turn; persisted for resume and workers")
+	reasoningEffort := fs.String("reasoning-effort", "", "reasoning effort: auto | off | minimal | low | medium | high | xhigh | max")
+	openRouterZDR := fs.Bool("openrouter-zdr", false, "require an OpenRouter zero-data-retention endpoint on every model request")
+	openRouterNoZDR := fs.Bool("openrouter-no-zdr", false, "explicitly allow a non-ZDR OpenRouter endpoint for a verified OSS workspace")
+	openRouterDataCollection := fs.String("openrouter-data-collection", "", "OpenRouter provider data policy (supported: deny)")
 	var criteria goalStringList
 	fs.Var(&criteria, "criteria", "acceptance criterion (repeatable)")
 	var constraints goalStringList
@@ -736,8 +789,69 @@ func runGoalStart(args []string) error {
 	if fs.NArg() == 0 {
 		return errors.New("usage: buckley goal start [flags] \"<statement>\"")
 	}
+	seenZDR, seenNoZDR, seenDataCollection := false, false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "openrouter-zdr":
+			seenZDR = true
+		case "openrouter-no-zdr":
+			seenNoZDR = true
+		case "openrouter-data-collection":
+			seenDataCollection = true
+		}
+	})
+	if seenZDR && seenNoZDR {
+		return errors.New("--openrouter-zdr and --openrouter-no-zdr are mutually exclusive")
+	}
+	if seenZDR && !*openRouterZDR || seenNoZDR && !*openRouterNoZDR {
+		return errors.New("use --openrouter-zdr or --openrouter-no-zdr without an explicit false value")
+	}
+	if seenDataCollection && !seenZDR && !seenNoZDR {
+		return errors.New("--openrouter-data-collection requires --openrouter-zdr or --openrouter-no-zdr")
+	}
 	statement := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	workspaceRoot, err := os.Getwd()
+	normalizedModel, suffixEffort := config.SplitReasoningSuffix(strings.TrimSpace(*modelID))
+	normalizedEffort := strings.ToLower(strings.TrimSpace(*reasoningEffort))
+	if normalizedEffort == "" {
+		normalizedEffort = suffixEffort
+	}
+	retentionMode := goalloop.GoalRetentionLegacy
+	if seenZDR {
+		retentionMode = goalloop.GoalRetentionZDR
+	} else if seenNoZDR {
+		retentionMode = goalloop.GoalRetentionNonZDR
+	}
+	if normalizedModel == "stealth/ox-alpha" && !seenZDR && !seenNoZDR {
+		return errors.New("stealth/ox-alpha requires either --openrouter-zdr or --openrouter-no-zdr")
+	}
+	if seenZDR || seenNoZDR || seenDataCollection {
+		if err := goalloop.ValidateOpenRouterModelID(normalizedModel); err != nil {
+			return err
+		}
+	}
+	requestContract := goalloop.GoalModelRequest{
+		Model:                    normalizedModel,
+		ReasoningEffort:          normalizedEffort,
+		RetentionMode:            retentionMode,
+		OpenRouterZDR:            retentionMode == goalloop.GoalRetentionZDR,
+		OpenRouterDataCollection: strings.ToLower(strings.TrimSpace(*openRouterDataCollection)),
+	}
+	workspaceRoot, err := goalStartWorkspaceFn()
+	if err != nil {
+		return err
+	}
+	workspaceRoot, err = goalloop.NormalizeWorkspaceRoot(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	providerID := ""
+	if retentionMode == goalloop.GoalRetentionZDR || retentionMode == goalloop.GoalRetentionNonZDR {
+		providerID, err = resolveGoalStartProviderFn(normalizedModel)
+		if err != nil {
+			return err
+		}
+	}
+	requestContract, err = bindGoalModelPolicy(workspaceRoot, providerID, requestContract)
 	if err != nil {
 		return err
 	}
@@ -756,6 +870,7 @@ func runGoalStart(args []string) error {
 		Posture:            *posture,
 		ApprovalMode:       *approval,
 		WorkspaceRoot:      workspaceRoot,
+		ModelRequest:       requestContract,
 	})
 	if err != nil {
 		return err
@@ -882,6 +997,8 @@ func runGoalList(args []string) error {
 // goalBackendFor builds a named external backend preset (design section
 // 8: external backends as task executors). Unknown names run as a bare
 // command receiving the prompt as its single argument.
+var goalBackendForFn = goalBackendFor
+
 func goalBackendFor(name string) (ralph.Backend, error) {
 	switch name {
 	case "claude":

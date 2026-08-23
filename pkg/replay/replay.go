@@ -5,6 +5,9 @@ package replay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -118,6 +121,13 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 		seenEventIDs[event.ID] = true
 
 		stepID := payloadString(event.Payload, "step_id")
+		durableReceiptSchema := ""
+		if event.Type == runledger.EventDurableTurn {
+			durableReceiptSchema = payloadString(event.Payload, "receipt_schema")
+			if validationErr := validateDurableTurnReceiptShape(event); validationErr != nil {
+				report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "durable_turn_receipt_schema", Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
+			}
+		}
 		if stepID != "" {
 			stepIDs[stepID] = true
 			if payloadString(event.Payload, "input_digest") == "" && requiresInputDigest(event.Type) {
@@ -178,6 +188,11 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 						report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: issueCode, Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
 					}
 				}
+				if event.Type == runledger.EventDurableTurn && durableReceiptSchema == runledger.DurableTurnReceiptSchemaV1 {
+					if validationErr := validateDurableTurnReceipt(event, step); validationErr != nil {
+						report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "durable_turn_receipt", Message: validationErr.Error(), Sequence: event.Sequence, StepID: stepID})
+					}
+				}
 				if step.Kind == "model" && !validatedModelSteps[stepID] {
 					validatedModelSteps[stepID] = true
 					switch {
@@ -229,6 +244,9 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 				report.Issues = append(report.Issues, Issue{Severity: SeverityError, Code: "step_status_mismatch", Message: fmt.Sprintf("event says completed but step status is %s", step.Status), Sequence: event.Sequence, StepID: stepID})
 			}
 		}
+		if event.Type == runledger.EventDurableTurn && durableReceiptSchema == runledger.DurableTurnReceiptSchemaV1 && journal == nil {
+			report.Issues = append(report.Issues, Issue{Severity: SeverityWarning, Code: "durable_turn_receipt_unverified", Message: "durable turn receipt cannot be matched without a step journal", Sequence: event.Sequence, StepID: stepID})
+		}
 	}
 
 	for _, step := range enumeratedSteps {
@@ -271,6 +289,106 @@ func Verify(ctx context.Context, ledger runledger.Store, journal runledger.StepJ
 		}
 	}
 	return report, nil
+}
+
+func validateDurableTurnReceiptShape(event runledger.Event) error {
+	schema := payloadString(event.Payload, "receipt_schema")
+	if schema == "" {
+		if payloadString(event.Payload, "activity") == "run_turn.v3" || durableTurnReceiptFieldsPresent(event.Payload) {
+			return fmt.Errorf("V3 durable turn receipt has no schema")
+		}
+		return nil
+	}
+	if schema != runledger.DurableTurnReceiptSchemaV1 {
+		return fmt.Errorf("unsupported durable turn receipt schema %q", schema)
+	}
+	if payloadString(event.Payload, "step_id") == "" {
+		return fmt.Errorf("durable turn receipt has no step ID")
+	}
+	return nil
+}
+
+func durableTurnReceiptFieldsPresent(payload map[string]any) bool {
+	for _, key := range []string{"step_id", "attempt", "input_digest", "response_json", "output_digest"} {
+		if _, ok := payload[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDurableTurnReceipt(event runledger.Event, step runledger.ExecutionStep) error {
+	if step.Kind != "durable_turn" {
+		return fmt.Errorf("durable turn receipt references step kind %q", step.Kind)
+	}
+	if step.RunID != event.RunID {
+		return fmt.Errorf("durable turn receipt run does not match completed step")
+	}
+	if step.TaskID == "" || step.TaskID != event.TaskID {
+		return fmt.Errorf("durable turn receipt task does not match completed step")
+	}
+	if step.Status != runledger.StepCompleted {
+		return fmt.Errorf("durable turn receipt references step status %q", step.Status)
+	}
+	if step.DispatchState != runledger.StepDispatchDispatched {
+		return fmt.Errorf("durable turn receipt references dispatch state %q", step.DispatchState)
+	}
+	attempt, ok := payloadInteger(event.Payload, "attempt")
+	if !ok || attempt <= 0 || attempt != step.Attempt {
+		return fmt.Errorf("durable turn receipt attempt does not match completed step attempt")
+	}
+	if payloadString(event.Payload, "input_digest") != step.InputDigest {
+		return fmt.Errorf("durable turn receipt input digest does not match completed step")
+	}
+	workflowInstanceID := payloadString(event.Payload, "workflow_instance_id")
+	activity := payloadString(event.Payload, "activity")
+	generation, generationOK := payloadInteger(event.Payload, "generation")
+	turnIndex, turnIndexOK := payloadInteger(event.Payload, "turn_index")
+	if workflowInstanceID == "" || activity == "" || !generationOK || generation < 0 || !turnIndexOK || turnIndex < 0 {
+		return fmt.Errorf("durable turn receipt has invalid stable identity coordinates")
+	}
+	expectedStepID := "turn_" + runledger.StableEventID(
+		"durable-turn-step-v3", event.RunID, event.TaskID, workflowInstanceID,
+		activity, fmt.Sprintf("%d", generation), fmt.Sprintf("%d", turnIndex),
+	)
+	if step.StepID != expectedStepID {
+		return fmt.Errorf("durable turn receipt step ID is not canonical")
+	}
+	expectedEventID := runledger.StableEventID(
+		runledger.EventDurableTurn, event.RunID, event.TaskID, workflowInstanceID,
+		activity, fmt.Sprintf("%d", generation), fmt.Sprintf("%d", turnIndex),
+	)
+	if event.ID != expectedEventID {
+		return fmt.Errorf("durable turn receipt event ID is not canonical")
+	}
+	responseJSON, _ := event.Payload["response_json"].(string)
+	if strings.TrimSpace(responseJSON) == "" || !json.Valid([]byte(responseJSON)) {
+		return fmt.Errorf("durable turn receipt response is not valid JSON")
+	}
+	var responseProjection struct {
+		Kind     string `json:"kind"`
+		Decision string `json:"decision,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(responseJSON), &responseProjection); err != nil {
+		return fmt.Errorf("durable turn receipt response projection is invalid")
+	}
+	projectedKind, kindOK := event.Payload["kind"].(string)
+	projectedDecision, decisionOK := event.Payload["decision"].(string)
+	if !kindOK || projectedKind != responseProjection.Kind || !decisionOK || projectedDecision != responseProjection.Decision {
+		return fmt.Errorf("durable turn receipt duplicated response projection changed")
+	}
+	sum := sha256.Sum256([]byte(responseJSON))
+	outputDigest := hex.EncodeToString(sum[:])
+	if payloadString(event.Payload, "output_digest") != outputDigest {
+		return fmt.Errorf("durable turn receipt response digest is invalid")
+	}
+	if event.ID != step.OutputEvidenceID {
+		return fmt.Errorf("durable turn receipt event does not match completed step output")
+	}
+	if outputDigest != step.OutputDigest {
+		return fmt.Errorf("durable turn receipt digest does not match completed step output")
+	}
+	return nil
 }
 
 func requiresStepID(eventType string) bool {
