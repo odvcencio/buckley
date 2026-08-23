@@ -7,8 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/transparency"
+	"github.com/draco/buckley/pkg/transparency"
 )
 
 // BranchContext contains context for branch review.
@@ -66,7 +65,7 @@ type BranchContextOptions struct {
 // DefaultBranchContextOptions returns sensible defaults.
 func DefaultBranchContextOptions() BranchContextOptions {
 	return BranchContextOptions{
-		MaxDiffBytes:    diffsignal.ReviewDiffBudget,
+		MaxDiffBytes:    200_000,
 		IncludeUnstaged: true,
 		IncludeAgents:   true,
 		BaseBranch:      "", // Auto-detect
@@ -123,19 +122,17 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 	ctx.Files = parseNameStatus(nameStatus)
 	audit.Add("changed files", estimateTokens(nameStatus))
 
-	// Get diff from base. diffsignal reshapes it so low-signal bulk
-	// (binary, generated, minified files) cannot starve real changes.
-	diff, rawTruncated, err := gitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch+"...HEAD")
+	// Get diff from base
+	diff, truncated, err := gitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch+"...HEAD")
 	if err != nil {
-		diff, rawTruncated, err = gitOutputLimited(diffsignal.MaxParseBytes, "diff", ctx.BaseBranch)
+		diff, truncated, err = gitOutputLimited(opts.MaxDiffBytes, "diff", ctx.BaseBranch)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get diff: %w", err)
 	}
-	diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
-	ctx.Diff = diffRes.Context
-	diffTokens := estimateTokens(ctx.Diff)
-	if rawTruncated || diffRes.Truncated {
+	ctx.Diff = diff
+	diffTokens := estimateTokens(diff)
+	if truncated {
 		audit.AddTruncated("git diff", diffTokens, opts.MaxDiffBytes/4)
 	} else {
 		audit.Add("git diff", diffTokens)
@@ -149,10 +146,10 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 
 	// Get unstaged changes if requested
 	if opts.IncludeUnstaged {
-		unstaged, _, _ := gitOutputLimited(diffsignal.MaxParseBytes, "diff")
+		unstaged, _ := gitOutput("diff")
 		if strings.TrimSpace(unstaged) != "" {
-			ctx.Unstaged = diffsignal.Prioritize(unstaged, opts.MaxDiffBytes).Context
-			audit.Add("unstaged changes", estimateTokens(ctx.Unstaged))
+			ctx.Unstaged = unstaged
+			audit.Add("unstaged changes", estimateTokens(unstaged))
 		}
 	}
 

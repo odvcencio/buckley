@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,42 +23,27 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	acpserver "m31labs.dev/buckley/pkg/acp/server"
-	"m31labs.dev/buckley/pkg/agentloop"
-	"m31labs.dev/buckley/pkg/agentspec"
-	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	projectconversation "m31labs.dev/buckley/pkg/conversation"
-	coordination "m31labs.dev/buckley/pkg/coordination/coordinator"
-	coordevents "m31labs.dev/buckley/pkg/coordination/events"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/gts"
-	"m31labs.dev/buckley/pkg/ipc"
-	"m31labs.dev/buckley/pkg/ipc/command"
-	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/protocol"
-	rlmrunner "m31labs.dev/buckley/pkg/rlm/runner"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/runledger"
-	"m31labs.dev/buckley/pkg/setup"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/types"
-	"m31labs.dev/buckley/pkg/ui/tui"
-	buckleyversion "m31labs.dev/buckley/pkg/version"
+	acppb "github.com/draco/buckley/pkg/acp/proto"
+	acpserver "github.com/draco/buckley/pkg/acp/server"
+	"github.com/draco/buckley/pkg/config"
+	projectcontext "github.com/draco/buckley/pkg/context"
+	coordination "github.com/draco/buckley/pkg/coordination/coordinator"
+	coordevents "github.com/draco/buckley/pkg/coordination/events"
+	"github.com/draco/buckley/pkg/ipc"
+	"github.com/draco/buckley/pkg/ipc/command"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/orchestrator"
+	rlmrunner "github.com/draco/buckley/pkg/rlm/runner"
+	"github.com/draco/buckley/pkg/setup"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/ui/tui"
 )
 
 // Version information - set via ldflags during build
 var (
-	version   = buckleyversion.Release
+	version   = "1.0.0-dev"
 	commit    = "unknown"
 	buildDate = "unknown"
 )
@@ -68,15 +52,9 @@ var encodingOverrideFlag string
 var quietMode bool
 var noColor bool
 var configPath string
-var modelOverrideFlag string
-var agentProfileFlag string
 
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
-
-// initReviewDependenciesFn keeps explicit review-only model overrides inside
-// dependency construction so provider registration sees every selected model.
-var initReviewDependenciesFn = initReviewDependencies
 
 // orchestratorRunner captures the subset of orchestrator behavior the CLI needs.
 // It enables unit-testing CLI subcommands without live model calls.
@@ -89,34 +67,10 @@ type orchestratorRunner interface {
 
 // newOrchestratorFn allows tests to stub orchestrator construction.
 var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore) orchestratorRunner {
-	// Create rules engine (graceful degradation if it fails).
-	var arbEngine *rules.Engine
-	if home, err := os.UserHomeDir(); err == nil {
-		configDir := filepath.Join(home, ".buckley")
-		if e, err := rules.NewEngine(
-			rules.WithUserOverrides(filepath.Join(configDir, "rules")),
-		); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
-		} else {
-			arbEngine = e
-		}
-	}
-
-	// Create GTS context pipeline if the gts binary is available.
-	var gtsPipeline *gts.Pipeline
-	if gtsBinary, err := exec.LookPath("gts"); err == nil {
-		runner := gts.NewRunner(gts.WithBinary(gtsBinary), gts.WithTimeout(30*time.Second), gts.WithMemLimit(2048))
-		gtsPipeline = gts.NewPipeline(runner, arbEngine, nil)
-	}
-
 	if cfg != nil && cfg.ExecutionMode() == config.ExecutionModeRLM {
-		r := rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
-		workDir := config.ResolveProjectRoot(cfg)
-		graftClient := graft.NewClient(workDir, "buckley")
-		r.SetGraftClient(graftClient)
-		return r
+		return rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
 	}
-	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
+	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore)
 }
 
 type startupOptions struct {
@@ -127,28 +81,8 @@ type startupOptions struct {
 	quiet            bool
 	noColor          bool
 	configPath       string
-	modelOverride    string
-	agentPath        string
-	codeMode         bool
 	plainModeSet     bool
 	plainMode        bool
-}
-
-type startupPendingFlag int
-
-const (
-	startupPendingNone startupPendingFlag = iota
-	startupPendingPrompt
-	startupPendingEncoding
-	startupPendingConfig
-	startupPendingModel
-	startupPendingAgent
-)
-
-type startupFlagState struct {
-	pending       startupPendingFlag
-	modelFlagSeen bool
-	agentFlagSeen bool
 }
 
 func main() {
@@ -169,8 +103,6 @@ func main() {
 	quietMode = opts.quiet
 	noColor = opts.noColor
 	configPath = opts.configPath
-	modelOverrideFlag = opts.modelOverride
-	agentProfileFlag = opts.agentPath
 	os.Args = append([]string{os.Args[0]}, opts.args...)
 
 	if handled, exitCode := dispatchSubcommand(opts.args); handled {
@@ -206,26 +138,7 @@ func main() {
 		os.Exit(2)
 	}
 	applySandboxOverride(cfg)
-	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading agent spec: %v\n", err)
-		os.Exit(2)
-	}
-	if agentProfile != nil {
-		agentProfile.ApplyToConfig(cfg)
-	}
-	applyStartupModelOverride(cfg, modelOverrideFlag)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "Error applying project trust: %v\n", err)
-		os.Exit(1)
-	}
 
 	if !cfg.Providers.HasReadyProvider() {
 		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_LITELLM_ENABLED=1).")
@@ -261,9 +174,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
-	modelManager.SetProviderThreadStore(store)
 
 	// Load project context (AGENTS.md)
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	loader := projectcontext.NewLoader(cwd)
 	projectContext, err := loader.Load()
 	if err != nil {
@@ -281,7 +199,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
+		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore)
 		os.Exit(exitCode)
 	}
 
@@ -297,7 +215,7 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
+				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore)
 				os.Exit(exitCode)
 			}
 		}
@@ -306,38 +224,16 @@ func main() {
 	telemetryHub := telemetry.NewHub()
 	defer telemetryHub.Close()
 
-	var codeRuntime *codeModeRuntime
-	var codeModeToolFactory tui.CodeModeToolFactory
-	var codeModeRunLedger runledger.Store
-	if opts.codeMode {
-		codeRuntime, err = openCodeModeRuntime(cwd)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", err)
-			os.Exit(1)
-		}
-		codeModeToolFactory = codeRuntime.Tool
-		codeModeRunLedger = codeRuntime.RunLedger()
-	}
-
 	// Create and run TUI
 	ctrl, err := tui.NewController(tui.ControllerConfig{
-		Config:              cfg,
-		ModelManager:        modelManager,
-		Store:               store,
-		ProjectCtx:          projectContext,
-		Telemetry:           telemetryHub,
-		SessionID:           resumeSessionID,
-		AgentProfile:        agentPromptSection(agentProfile),
-		KnowledgeContext:    hyphaeProjectKnowledgeContext(cfg, cwd),
-		ModelOverride:       modelOverrideFlag,
-		CodeModeToolFactory: codeModeToolFactory,
-		RunLedger:           codeModeRunLedger,
-		SubagentEvidence:    codeRuntime.EvidenceStore(),
+		Config:       cfg,
+		ModelManager: modelManager,
+		Store:        store,
+		ProjectCtx:   projectContext,
+		Telemetry:    telemetryHub,
+		SessionID:    resumeSessionID,
 	})
 	if err != nil {
-		if codeRuntime != nil {
-			_ = codeRuntime.Fail(err)
-		}
 		fmt.Fprintf(os.Stderr, "Error creating TUI: %v\n", err)
 		os.Exit(1)
 	}
@@ -350,420 +246,72 @@ func main() {
 		ctrl.Stop()
 	}()
 
-	runErr := ctrl.Run()
-	var codeModeCloseErr error
-	if codeRuntime != nil {
-		if runErr != nil {
-			codeModeCloseErr = codeRuntime.Fail(runErr)
-		} else {
-			codeModeCloseErr = codeRuntime.Close()
-		}
-	}
-	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", runErr)
+	if err := ctrl.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
-	}
-	if codeModeCloseErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", codeModeCloseErr)
 	}
 }
 
 // executeOneShot executes a single prompt and exits
-func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool) int {
-	return executeOneShotWithStepCap(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, 0)
-}
-
-// executeOneShotWithStepCap keeps the public one-shot path unchanged while
-// allowing a resolved subagent persona to enforce its iteration contract in
-// the shared ACP loop.
-func executeOneShotWithStepCap(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, stepCap int) int {
-	return executeOneShotWithStepCapAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, stepCap, "")
-}
-
-// executeOneShotWithStepCapAndOutputSchema adds the output-contract control
-// plane to the normal one-shot path. The submit_artifact tool is deliberately
-// registered only for Artifact v1 child runs so ordinary interactive prompts
-// keep their small, familiar tool surface.
-func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, stepCap int, outputSchema string) int {
-	return executeOneShotWithLimitsAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, acpLoopLimits{StepCap: stepCap}, outputSchema)
-}
-
-func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
-	_ = planStore
-	outputSchema = strings.TrimSpace(outputSchema)
-	stepCap := limits.StepCap
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	engine, err := rules.NewDefaultEngine()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
-		engine = nil
-	}
-
-	resolvedModel, err := model.ResolvePhaseModelRequired(cfg, mgr, engine, "execution", modelOverride)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-
+func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore) int {
 	if !quietMode {
-		fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
-		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
+		if cwd, err := os.Getwd(); err == nil {
+			fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
+		}
+		if modelID := strings.TrimSpace(cfg.Models.Execution); modelID != "" {
+			fmt.Fprintf(os.Stderr, "model: %s\n", modelID)
+		}
 	}
 	if mgr != nil {
 		mgr.SetRequestTimeout(0)
 	}
 
-	skills := skill.NewRegistry()
-	if err := skills.LoadAll(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
+	// Build system prompt
+	systemPrompt := "You are Buckley, an AI development assistant. Be concise and helpful."
+	if projectContext != nil && projectContext.RawContent != "" {
+		systemPrompt += "\n\nProject Context:\n" + projectContext.RawContent
 	}
-	conv := projectconversation.New("oneshot")
-	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
 
-	registry := tool.NewRegistry()
-	if err := registry.LoadDefaultPlugins(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
+	// Build messages
+	messages := []model.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: prompt},
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
-	} else if hookCloser != nil {
-		defer hookCloser.Close()
+
+	// Get model ID
+	modelID := cfg.Models.Execution
+	if modelID == "" {
+		modelID = "openai/gpt-4o"
 	}
-	registry.ConfigureContainers(cfg, cwd)
-	registry.SetWorkDir(cwd)
-	if candidate, ok := registry.Get("spawn_subagent"); ok {
-		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
-			if limits.ChildContract {
-				subagents.SetTelemetry(nil, limits.ParentSessionID)
+
+	// Create request
+	req := model.ChatRequest{
+		Model:    modelID,
+		Messages: messages,
+		Stream:   true,
+	}
+
+	// Stream response
+	ctx := context.Background()
+	chunkChan, errChan := mgr.ChatCompletionStream(ctx, req)
+
+	for {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				fmt.Println() // Final newline
+				return 0
 			}
-			subagents.SetExecutionContext(limits.RunID, limits.TaskID)
-		}
-	}
-	adaptiveProtocol, protocolAvailable := compileOneShotAdaptiveProtocol(cfg, mgr, store, engine, resolvedModel, registry, outputSchema)
-	if protocolAvailable && !quietMode {
-		fmt.Fprintf(os.Stderr, "protocol: %s (%s; policy=%s; mode=%s)\n", adaptiveProtocol.ProtocolID, adaptiveProtocol.Receipt.PolicyOutcome, adaptiveProtocol.Receipt.PolicyVersion, adaptiveProtocol.Mode)
-	}
-	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
-		if executionStage := adaptiveProtocolExecutionStage(*adaptiveProtocol); executionStage.MaxTurns > 0 && (stepCap == 0 || executionStage.MaxTurns < stepCap) {
-			if !limits.ChildContract || stepCap > 0 {
-				stepCap = executionStage.MaxTurns
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+				fmt.Print(chunk.Choices[0].Delta.Content)
 			}
-		}
-	}
-	var artifactSubmission *builtin.ArtifactSubmission
-	artifactContract := artifactv1.OutputContract{}
-	if outputSchema == artifactv1.SchemaVersion {
-		artifactContract = artifactv1.NegotiatedOutput(artifactv1.ProviderCapabilities{
-			ToolCalls: mgr == nil || mgr.SupportsTools(resolvedModel),
-		})
-		if artifactContract.Mode == artifactv1.OutputSubmitArtifact {
-			artifactSubmission = &builtin.ArtifactSubmission{}
-			registry.Register(&builtin.SubmitArtifactTool{Submission: artifactSubmission})
-		}
-	}
-	autoCodeMode := protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
-	enableCodeMode := codeMode || autoCodeMode
-	var codeRuntime *codeModeRuntime
-	var codeModeFailure error
-	if enableCodeMode {
-		codeRuntime, err = openCodeModeRuntime(cwd)
-		if err != nil {
-			if autoCodeMode && !codeMode {
-				fmt.Fprintf(os.Stderr, "Warning: adaptive protocol kept code mode at suggest because isolated execution is unavailable: %v\n", err)
-				autoCodeMode = false
-			} else {
-				fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", err)
+		case err, ok := <-errChan:
+			if ok && err != nil {
+				fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 				return 1
 			}
-		} else {
-			defer func() {
-				var closeErr error
-				if codeModeFailure != nil {
-					closeErr = codeRuntime.Fail(codeModeFailure)
-				} else {
-					closeErr = codeRuntime.Close()
-				}
-				if closeErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", closeErr)
-				}
-			}()
-			codeTool, toolErr := codeRuntime.Tool("oneshot")
-			if toolErr != nil {
-				codeModeFailure = toolErr
-				fmt.Fprintf(os.Stderr, "Error enabling code mode: %v\n", toolErr)
-				return 1
-			}
-			registry.Register(codeTool)
-			registry.SetToolKind(codeTool.Name(), "execute")
 		}
 	}
-	registry.Register(&builtin.SkillActivationTool{
-		Registry:     skills,
-		Conversation: skillState,
-	})
-	createTool := &builtin.CreateSkillTool{Registry: skills}
-	createTool.SetWorkDir(cwd)
-	registry.Register(createTool)
-	toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools)
-	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
-		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
-	}
-	if toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil); toolFilter != nil {
-		skillState.SetToolFilter(toolFilter)
-	}
-
-	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), hyphaeProjectKnowledgeContext(cfg, cwd))
-	if _, enabled := registry.Get("exec_program"); enabled {
-		systemPrompt += "\n\n" + prompts.CodeModeSystemPrompt
-	}
-	if outputSchema == artifactv1.SchemaVersion {
-		systemPrompt = artifactv1.ArtifactPrompt(systemPrompt, artifactContract)
-	}
-	conv.AddSystemMessage(systemPrompt)
-	conv.AddUserMessage(prompt)
-
-	runCtx := context.Background()
-	var cancel context.CancelFunc
-	if limits.MaxElapsedSeconds > 0 {
-		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
-		defer cancel()
-	}
-	limits.StepCap = stepCap
-	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, nil, limits)
-	if err != nil {
-		codeModeFailure = err
-		return printOneShotFailure(responseText, err)
-	}
-
-	if outputSchema == artifactv1.SchemaVersion {
-		artifact, artifactErr := resolveOneShotArtifact(responseText, artifactContract, artifactSubmission)
-		if artifactErr != nil {
-			codeModeFailure = artifactErr
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", artifactErr)
-			return 1
-		}
-		artifactJSON, renderErr := artifactv1.RenderJSON(artifact)
-		artifactErr = renderErr
-		if artifactErr != nil {
-			codeModeFailure = fmt.Errorf("render artifact output: %w", artifactErr)
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", codeModeFailure)
-			return 1
-		}
-		responseText = string(artifactJSON)
-	}
-
-	if responseText != "" {
-		fmt.Print(responseText)
-	}
-	if !strings.HasSuffix(responseText, "\n") {
-		fmt.Println()
-	}
-	codeModeFailure = nil
-	return 0
-}
-
-func printOneShotFailure(responseText string, err error) int {
-	var partial *partialStreamTurnError
-	var incomplete *agentloop.IncompleteTurnError
-	switch {
-	case errors.As(err, &partial) && responseText != "":
-		fmt.Print(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			fmt.Println()
-		}
-		fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
-		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
-	case errors.As(err, &incomplete):
-		if responseText != "" {
-			fmt.Print(responseText)
-			if !strings.HasSuffix(responseText, "\n") {
-				fmt.Println()
-			}
-			fmt.Println("\n[Incomplete result — completed evidence was preserved, but final synthesis did not complete.]")
-		}
-		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; preserved_output_bytes=%d)\n", len(responseText))
-	}
-	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
-	return 1
-}
-
-func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequired bool) []string {
-	if filter == nil {
-		return filter
-	}
-	tools := append([]string(nil), filter...)
-	if artifactRequired {
-		tools = append(tools, "submit_artifact")
-	}
-	if codeModeRequired {
-		tools = append(tools, "exec_program")
-	}
-	return cleanToolNames(tools)
-}
-
-func applyProtocolToolFilter(filter, protocolTools []string) []string {
-	protocolTools = cleanToolNames(protocolTools)
-	if len(protocolTools) == 0 {
-		return filter
-	}
-	if filter == nil {
-		return protocolTools
-	}
-	return intersectAgentRunTools(filter, protocolTools)
-}
-
-func adaptiveProtocolExecutionStage(value protocol.Protocol) protocol.Stage {
-	if len(value.Stages) == 0 {
-		return protocol.Stage{}
-	}
-	return value.Stages[len(value.Stages)-1]
-}
-
-func compileOneShotAdaptiveProtocol(cfg *config.Config, mgr *model.Manager, store *storage.Store, engine *rules.Engine, modelID string, registry *tool.Registry, outputSchema string) (*protocol.Protocol, bool) {
-	if cfg == nil {
-		return nil, false
-	}
-	mode := strings.ToLower(strings.TrimSpace(cfg.AdaptiveProtocol.Mode))
-	if mode != protocol.ModeShadow && mode != protocol.ModeDynamic {
-		return nil, false
-	}
-	profile, found, err := oneShotBehaviorProfile(cfg, mgr, store, modelID)
-	if err != nil {
-		if !quietMode {
-			fmt.Fprintf(os.Stderr, "Warning: adaptive protocol profile ignored: %v\n", err)
-		}
-		return nil, false
-	}
-	if !found {
-		return nil, false
-	}
-	candidateTools := make([]string, 0)
-	if registry != nil {
-		for _, candidate := range registry.List() {
-			if candidate != nil {
-				candidateTools = append(candidateTools, candidate.Name())
-			}
-		}
-	}
-	var evaluator types.RuleEvaluator
-	if engine != nil {
-		evaluator = rules.NewEngineAdapter(engine)
-	}
-	compiled, err := protocol.NewCompiler(evaluator, protocol.CompilerConfig{
-		Mode:          mode,
-		PolicyVersion: cfg.AdaptiveProtocol.PolicyVersion,
-		MaxFanout:     cfg.AdaptiveProtocol.MaxFanout,
-		AutoCodeMode:  cfg.AdaptiveProtocol.AutoCodeMode,
-	}).Compile(protocol.TaskRequest{
-		Phase:          "execution",
-		TaskClass:      "coding",
-		Risk:           "medium",
-		NeedsArtifact:  strings.TrimSpace(outputSchema) == artifactv1.SchemaVersion,
-		CandidateTools: candidateTools,
-	}, profile)
-	if err != nil {
-		if !quietMode {
-			fmt.Fprintf(os.Stderr, "Warning: adaptive protocol compilation failed: %v\n", err)
-		}
-		return nil, false
-	}
-	return &compiled, true
-}
-
-// oneShotBehaviorProfile gives an explicit config profile precedence so an
-// operator can pin or roll back a protocol deterministically. In its absence,
-// the latest immutable aggregate profile from the local SQLite adapter is
-// eligible; the resulting version and digest still land in the receipt.
-func oneShotBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *storage.Store, modelID string) (protocol.BehaviorProfile, bool, error) {
-	modelID = strings.TrimSpace(modelID)
-	if cfg != nil {
-		if source, ok := cfg.AdaptiveProtocol.Profiles[modelID]; ok {
-			profile, err := protocolProfileFromConfig(modelID, mgr, source)
-			return profile, true, err
-		}
-	}
-	if store == nil {
-		return protocol.BehaviorProfile{}, false, nil
-	}
-	profile, found, err := storage.NewBehaviorProfileStore(store).Latest(context.Background(), modelID)
-	if err != nil || !found {
-		return protocol.BehaviorProfile{}, found, err
-	}
-	return profile, true, nil
-}
-
-func protocolProfileFromConfig(modelID string, mgr *model.Manager, source config.ModelBehaviorProfileConfig) (protocol.BehaviorProfile, error) {
-	measuredAt := time.Time{}
-	if value := strings.TrimSpace(source.MeasuredAt); value != "" {
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			return protocol.BehaviorProfile{}, fmt.Errorf("parse measured_at: %w", err)
-		}
-		measuredAt = parsed
-	}
-	provider := ""
-	if mgr != nil {
-		provider = mgr.ProviderIDForModel(modelID)
-	}
-	profile := protocol.BehaviorProfile{
-		SchemaVersion: protocol.ProfileSchemaVersion,
-		ModelID:       strings.TrimSpace(modelID),
-		Provider:      provider,
-		Version:       strings.TrimSpace(source.Version),
-		Class:         protocol.ModelClass(strings.TrimSpace(source.Class)),
-		SampleSize:    source.SampleSize,
-		Confidence:    source.Confidence,
-		MeasuredAt:    measuredAt,
-		Capabilities: protocol.Capabilities{
-			ToolCalls:            source.ToolCalls,
-			NativeJSONSchema:     source.NativeJSONSchema,
-			ParallelToolCalls:    source.ParallelToolCalls,
-			Continuation:         source.Continuation,
-			Reasoning:            source.Reasoning,
-			CodeMode:             source.CodeMode,
-			ContextWindowTokens:  source.ContextWindowTokens,
-			SafeVisibleToolCount: source.SafeVisibleToolCount,
-		},
-		Metrics: protocol.BehaviorMetrics{
-			ToolReliability:             source.ToolReliability,
-			ArgumentRepairReliability:   source.ArgumentRepairReliability,
-			StructuredOutputReliability: source.StructuredOutputReliability,
-			ParallelCallReliability:     source.ParallelCallReliability,
-			EditFidelity:                source.EditFidelity,
-			VerificationPassRate:        source.VerificationPassRate,
-			EffectiveContextTokens:      source.EffectiveContextTokens,
-			ContinuationReliability:     source.ContinuationReliability,
-			LatencyP50MS:                source.LatencyP50MS,
-			LatencyP95MS:                source.LatencyP95MS,
-			CostUSDPerMTokens:           source.CostUSDPerMTokens,
-		},
-	}
-	if err := profile.Validate(); err != nil {
-		return protocol.BehaviorProfile{}, err
-	}
-	return profile, nil
-}
-
-func resolveOneShotArtifact(response string, contract artifactv1.OutputContract, submission *builtin.ArtifactSubmission) (artifactv1.Artifact, error) {
-	if submission != nil {
-		if artifact, ok := submission.Artifact(); ok {
-			return artifact, nil
-		}
-	}
-	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), []byte(response), contract.Mode, artifactv1.DecodeOptions{})
-	if err != nil {
-		if contract.Mode == artifactv1.OutputSubmitArtifact {
-			return artifactv1.Artifact{}, fmt.Errorf("required artifact output was not submitted through submit_artifact or returned as valid JSON: %w", err)
-		}
-		return artifactv1.Artifact{}, fmt.Errorf("required artifact output is invalid: %w", err)
-	}
-	return artifact, nil
 }
 
 func runPlanCommand(args []string) error {
@@ -822,11 +370,6 @@ func runExecuteCommand(args []string) error {
 	registry := tool.NewRegistry()
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
-	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
-	} else if hookCloser != nil {
-		defer hookCloser.Close()
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
@@ -900,11 +443,6 @@ func runExecuteTaskCommand(args []string) error {
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
-	} else if hookCloser != nil {
-		defer hookCloser.Close()
-	}
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
@@ -948,26 +486,10 @@ func pushBranch(remote, branch string) error {
 		remote = "origin"
 	}
 	fmt.Printf("Pushing HEAD to %s:%s\n", remote, branch)
-	if err := runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch)); err != nil {
-		return err
-	}
-	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer hashCancel()
-	if hash := currentHeadHash(hashCtx, false); hash != "" {
-		fmt.Printf("Pushed: %s\n", hash)
-	}
-	return nil
+	return runGitCommand("push", remote, fmt.Sprintf("HEAD:%s", branch))
 }
 
 func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) {
-	return initDependenciesWithReviewCritic("", false)
-}
-
-func initReviewDependencies(criticModel string) (*config.Config, *model.Manager, *storage.Store, error) {
-	return initDependenciesWithReviewCritic(criticModel, true)
-}
-
-func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bool) (*config.Config, *model.Manager, *storage.Store, error) {
 	ensureBuckleyRuntimeIgnored()
 
 	// Load configuration
@@ -978,26 +500,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	if encodingOverrideFlag != "" {
 		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
-	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
-	if err != nil {
-		return nil, nil, nil, withExitCode(fmt.Errorf("loading agent spec: %w", err), 2)
-	}
-	if agentProfile != nil {
-		agentProfile.ApplyToConfig(cfg)
-	}
-	applyStartupModelOverride(cfg, modelOverrideFlag)
-	if prepareReviewCritic {
-		applyReviewCriticModelOverride(cfg, criticModel)
-	}
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if _, _, err := ensureProjectTrust(cfg, cwd); err != nil {
-		return nil, nil, nil, fmt.Errorf("applying project trust: %w", err)
-	}
 
 	if !cfg.Providers.HasReadyProvider() {
 		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_LITELLM_ENABLED"), 2)
@@ -1023,13 +526,12 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
-	modelManager.SetProviderThreadStore(store)
 
 	return cfg, modelManager, store, nil
 }
 
 func printHelp() {
-	fmt.Println("Buckley - Tool-First AI Agent Harness")
+	fmt.Println("Buckley - AI Development Assistant")
 	fmt.Println()
 	fmt.Println("USAGE:")
 	fmt.Println("  buckley [FLAGS] [COMMAND]")
@@ -1047,53 +549,29 @@ func printHelp() {
 	fmt.Println("                                   Execute single task (CI/batch friendly)")
 	fmt.Println("  commit [--dry-run]               Generate structured commit via tool-use (transparent)")
 	fmt.Println("  pr [--dry-run]                   Generate structured PR via tool-use (transparent)")
-	fmt.Println("  review [--scope worktree|branch|changes]")
-	fmt.Println("                                   Review local changes with repository context")
-	fmt.Println("  review-pr <number|url>           Review a GitHub PR with CI and review-thread context")
 	fmt.Println("  experiment run <name> -m <model> -p <prompt>")
 	fmt.Println("                                   Run a parallel model comparison experiment")
 	fmt.Println("  experiment list [--status <s>]   List recent experiments")
 	fmt.Println("  experiment show <id|name>        Show experiment results (--format terminal|markdown)")
 	fmt.Println("  experiment diff <id|name>        Compare variant outputs side-by-side")
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
-	fmt.Println("  experiment profile <id|name>     Calibrate model behavior from measured runs")
-	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
-	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
-	fmt.Println("  goal <start|run|status|report>   Record, run, and inspect durable goals (run drives the live model; list shows recent)")
 	fmt.Println("  remote <subcommand>              Remote session operations (attach, sessions, tokens, login, console)")
 	fmt.Println("  batch prune-workspaces           Garbage-collect stale batch workspaces (k8s/CI)")
 	fmt.Println("  git-webhook                      Listen for merge webhooks and run regression/release commands")
-	fmt.Println("  buckbot [review|repo|pr] ...      Buckley's general-purpose review agent")
-	fmt.Println("  agent init [path]                Create a filesystem-first agent/ layout")
-	fmt.Println("  agent list                       List discovered project agent profiles")
-	fmt.Println("  agent check [--project|path]     Validate a Buckley agent profile")
-	fmt.Println("  agent show [--project|path]      Show a project agent profile summary")
-	fmt.Println("  agent info [--project|path]      Inspect resolved agent profile and runnable subagents")
-	fmt.Println("  agent subagents [--project|path] List runnable subagents and invocation examples")
-	fmt.Println("  agent run [--project|--dry-run|--no-tools] Invoke or preview a named subagent")
 	fmt.Println("  agent-server                     HTTP proxy for ACP editor workflows (inline propose/apply)")
 	fmt.Println("  lsp [--coordinator addr]         Start LSP server on stdio (editor integration)")
 	fmt.Println("  acp [--workdir dir] [--log file] Start ACP agent on stdio (Zed/JetBrains/Neovim)")
 	fmt.Println("  hunt [--dir path]                Scan codebase for improvement suggestions")
 	fmt.Println("  dream [--dir path] [--plan]      Analyze architecture and identify gaps")
-	fmt.Println("  info [--json|--format json]      Inspect resolved harness configuration and capabilities")
-	fmt.Println("  skills [init|list|show]          Create, list, or inspect workflow skills")
 	fmt.Println("  config [check|show|path]         Manage configuration")
-	fmt.Println("  trust [status|allow|deny|reset]  Inspect or change project trust")
-	fmt.Println("  doctor chat [init|runs|-project] Create, inspect, or run chat health checks")
+	fmt.Println("  doctor                           Quick system health check (alias for config check)")
 	fmt.Println("  completion [bash|zsh|fish]       Generate shell completions")
 	fmt.Println("  worktree create [--container]    Create git worktree")
-	fmt.Println("  rules list                       List loaded rule domains (embedded vs user override)")
-	fmt.Println("  rules check <file.arb>           Validate an .arb file compiles")
-	fmt.Println("  rules eval <domain> <facts.json> Evaluate a domain with JSON facts, print matched rules")
-	fmt.Println("  rules facts [domain]             List Buckley Arbiter fact contracts")
 	fmt.Println("  migrate                          Apply database migrations")
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
 	fmt.Println("  resume <session-id>              Resume a previous session")
-	fmt.Println("  session export <session-id>      Export a session transcript (--format json|markdown)")
-	fmt.Println("  models refresh [--dry-run]       Merge models.dev capability/pricing metadata into the catalog cache")
 	fmt.Println()
 	fmt.Println("FLAGS:")
 	fmt.Println("  -p <prompt>                      Run prompt in one-shot mode")
@@ -1102,9 +580,6 @@ func printHelp() {
 	fmt.Println("  --no-color                       Disable colored output")
 	fmt.Println("  --tui                            Use rich TUI interface")
 	fmt.Println("  --plain                          Use plain scrollback mode")
-	fmt.Println("  --code-mode                      Offer audited exec_program for batched repository analysis (requires bubblewrap)")
-	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
-	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1118,16 +593,8 @@ func printHelp() {
 	fmt.Println("  BUCKLEY_MODEL_PLANNING           Override planning model")
 	fmt.Println("  BUCKLEY_MODEL_EXECUTION          Override execution model")
 	fmt.Println("  BUCKLEY_MODEL_REVIEW             Override review model")
-	fmt.Println("  BUCKLEY_CODE_MODE               Enable audited exec_program in interactive or one-shot mode")
 	fmt.Println("  BUCKLEY_MODEL_COMMIT             Override model for `buckley commit`")
 	fmt.Println("  BUCKLEY_MODEL_PR                 Override model for `buckley pr`")
-	fmt.Println("  BUCKLEY_ONESHOT_BACKEND          Override one-shot backend: api, codex, or claude")
-	fmt.Println("  BUCKLEY_COMMIT_BACKEND           Override backend for `buckley commit`")
-	fmt.Println("  BUCKLEY_PR_BACKEND               Override backend for `buckley pr`")
-	fmt.Println("  BUCKLEY_CODEX_ENABLED            Enable Codex CLI as a chat provider")
-	fmt.Println("  BUCKLEY_CODEX_MODEL              Override Codex CLI chat model")
-	fmt.Println("  BUCKLEY_CODEX_COMMAND            Override Codex CLI command path")
-	fmt.Println("  BUCKLEY_CLAUDE_COMMAND           Override Claude CLI command path")
 	fmt.Println("  BUCKLEY_PROMPT_COMMIT            Override prompt template for `buckley commit`")
 	fmt.Println("  BUCKLEY_PROMPT_PR                Override prompt template for `buckley pr`")
 	fmt.Println("  BUCKLEY_PR_BASE                  Override PR base branch (e.g., main)")
@@ -1147,7 +614,6 @@ func printHelp() {
 	fmt.Println("CONFIGURATION:")
 	fmt.Println("  User config:    ~/.buckley/config.yaml")
 	fmt.Println("  Project config: ./.buckley/config.yaml")
-	fmt.Println("  Codex chat:     set models.execution: codex/gpt-5.4 and models.reasoning: xhigh")
 	fmt.Println("  Run 'buckley config check' to validate your setup")
 	fmt.Println()
 	fmt.Println("GETTING STARTED:")
@@ -1157,7 +623,7 @@ func printHelp() {
 	fmt.Println("  4. Type /help for available commands")
 	fmt.Println()
 	fmt.Println("DOCUMENTATION:")
-	fmt.Println("  https://github.com/odvcencio/buckley")
+	fmt.Println("  https://github.com/draco/buckley")
 }
 
 func printVersion() {
@@ -1211,14 +677,6 @@ func runConfigCheck() error {
 	}
 	fmt.Println()
 
-	// Load and validate config before reporting credentials. OpenRouter can be
-	// supplied by ~/.buckley/config.env, so checking only process env would
-	// incorrectly report the configured review provider as missing.
-	cfg, err := config.Load()
-	if err != nil {
-		return withExitCode(err, 2)
-	}
-
 	// Check API keys
 	fmt.Println("API keys:")
 	providers := []struct {
@@ -1231,27 +689,22 @@ func runConfigCheck() error {
 		{"Google", "GOOGLE_API_KEY"},
 	}
 
-	ready := make(map[string]bool)
-	for _, provider := range cfg.Providers.ReadyProviders() {
-		ready[provider] = true
-	}
+	hasProvider := false
 	for _, p := range providers {
-		if !ready[strings.ToLower(p.name)] {
-			fmt.Printf("  - %s: not configured\n", p.name)
-			continue
-		}
-		source := "environment"
-		if p.name == "OpenRouter" && os.Getenv(p.envVar) == "" {
-			if checkConfigEnvFile() != "" {
-				source = "~/.buckley/config.env"
-			} else {
-				source = "config.yaml"
-			}
+		if key := os.Getenv(p.envVar); key != "" {
+			fmt.Printf("  ✓ %s: configured\n", p.name)
+			hasProvider = true
 		} else {
-			fmt.Printf("  ✓ %s: configured (%s)\n", p.name, source)
-			continue
+			fmt.Printf("  - %s: not set\n", p.name)
 		}
-		fmt.Printf("  ✓ %s: configured (%s)\n", p.name, source)
+	}
+
+	// Check config.env fallback
+	if !hasProvider {
+		if key := checkConfigEnvFile(); key != "" {
+			fmt.Printf("  ✓ OpenRouter: found in ~/.buckley/config.env\n")
+			hasProvider = true
+		}
 	}
 	fmt.Println()
 
@@ -1263,6 +716,12 @@ func runConfigCheck() error {
 		fmt.Println("  ✗ git: not found (required)")
 	}
 	fmt.Println()
+
+	// Load and validate config
+	cfg, err := config.Load()
+	if err != nil {
+		return withExitCode(err, 2)
+	}
 
 	// Show validation warnings
 	warnings := cfg.ValidationWarnings()
@@ -1301,23 +760,9 @@ func runConfigShow() error {
 	fmt.Printf("  Execution: %s\n", cfg.Models.Execution)
 	fmt.Printf("  Review:    %s\n", cfg.Models.Review)
 	fmt.Println()
-	fmt.Printf("Buckbot:\n")
-	fmt.Printf("  Review model: %s\n", cfg.Buckbot.Model)
-	fmt.Printf("  Critic model: %s\n", cfg.Buckbot.CriticModel)
-	privacyFallback := strings.TrimSpace(cfg.Buckbot.OpenRouterPrivacyFallback)
-	if privacyFallback == "" {
-		privacyFallback = "disabled"
-	}
-	fmt.Printf("  OpenRouter privacy fallback (legacy, inert): %s\n", privacyFallback)
-	fmt.Printf("  Review budget: %s\n", configBudgetSummary(cfg.Buckbot.PerReviewBudgetUSD))
-	fmt.Printf("  Tool-call cap: %s\n", configLimitSummary(cfg.Buckbot.MaxToolCalls))
-	fmt.Println()
 	fmt.Printf("Orchestrator:\n")
 	fmt.Printf("  Trust level: %s\n", cfg.Orchestrator.TrustLevel)
 	fmt.Printf("  Auto workflow: %v\n", cfg.Orchestrator.AutoWorkflow)
-	if status, _, _, err := projectTrustStatusForPath(""); err == nil {
-		fmt.Printf("  Project trust: %s\n", status)
-	}
 	fmt.Println()
 	fmt.Printf("Providers:\n")
 	for _, p := range cfg.Providers.ReadyProviders() {
@@ -1326,29 +771,12 @@ func runConfigShow() error {
 	return nil
 }
 
-func configBudgetSummary(value float64) string {
-	if value <= 0 {
-		return "uncapped"
-	}
-	return fmt.Sprintf("$%.2f", value)
-}
-
-func configLimitSummary(value int) string {
-	if value <= 0 {
-		return "unlimited"
-	}
-	return strconv.Itoa(value)
-}
-
 func runConfigPath() error {
 	home, _ := os.UserHomeDir()
 	fmt.Println("Configuration file locations:")
 	fmt.Printf("  User:    %s\n", filepath.Join(home, ".buckley", "config.yaml"))
 	fmt.Printf("  Project: %s\n", ".buckley/config.yaml")
 	fmt.Printf("  Env:     %s\n", filepath.Join(home, ".buckley", "config.env"))
-	if trustPath, err := resolveProjectTrustPath(); err == nil {
-		fmt.Printf("  Trust:   %s\n", trustPath)
-	}
 	dbPath, err := resolveDBPath()
 	if err != nil {
 		dbPath = fmt.Sprintf("error: %v", err)
@@ -1420,51 +848,23 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr review review-pr buckbot experiment eval serve attach goal remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task commit pr experiment serve remote batch git-webhook agent-server lsp acp config doctor completion worktree migrate db resume help version"
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --quiet --no-color --config" -- "${cur}") )
             return 0
             ;;
         batch)
             COMPREPLY=( $(compgen -W "prune-workspaces" -- "${cur}") )
             return 0
             ;;
-        buckbot)
-            COMPREPLY=( $(compgen -W "review local repo project pr pull-request review-pr --help" -- "${cur}") )
-            return 0
-            ;;
-        agent)
-            COMPREPLY=( $(compgen -W "init list check show info subagents run invoke" -- "${cur}") )
-            return 0
-            ;;
-        skills|skill)
-            COMPREPLY=( $(compgen -W "init list show" -- "${cur}") )
-            return 0
-            ;;
         config)
             COMPREPLY=( $(compgen -W "check show path" -- "${cur}") )
             return 0
             ;;
-        doctor)
-            COMPREPLY=( $(compgen -W "check chat" -- "${cur}") )
-            return 0
-            ;;
-        chat)
-            COMPREPLY=( $(compgen -W "init runs artifacts" -- "${cur}") )
-            return 0
-            ;;
-        runs|artifacts)
-            COMPREPLY=( $(compgen -W "show" -- "${cur}") )
-            return 0
-            ;;
         experiment)
-            COMPREPLY=( $(compgen -W "run list show diff replay profile" -- "${cur}") )
-            return 0
-            ;;
-        eval)
-            COMPREPLY=( $(compgen -W "init list run runs show artifacts" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "run" -- "${cur}") )
             return 0
             ;;
         completion)
@@ -1475,11 +875,7 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -W "backup restore" -- "${cur}") )
             return 0
             ;;
-        rules)
-            COMPREPLY=( $(compgen -W "list check eval facts" -- "${cur}") )
-            return 0
-            ;;
-        --config|-c|--agent)
+        --config|-c)
             COMPREPLY=( $(compgen -f -- "${cur}") )
             return 0
             ;;
@@ -1502,32 +898,21 @@ _buckley() {
         'execute-task:Execute single task'
         'commit:Create action-style commit'
         'pr:Create pull request'
-        'review:Review local changes with repository context'
-        'review-pr:Review a GitHub pull request'
-        'buckbot:Run Buckley’s general-purpose review agent'
         'experiment:Run model comparison experiments'
-        'eval:Run project chat eval scenarios'
         'serve:Start local server'
-        'attach:Join a running session over loopback gRPC'
-        'goal:Record a durable goal and inspect its task tree'
         'remote:Remote session management'
         'batch:Batch helpers (k8s/CI)'
         'git-webhook:Run regression/release webhooks daemon'
-        'agent:Validate, inspect, and invoke Buckley agent specs'
-        'skills:List or inspect loaded workflow skills'
-        'skill:Alias for skills'
         'agent-server:Run ACP HTTP proxy for editor workflows'
         'lsp:Start LSP server on stdio for editor integration'
         'acp:Start ACP agent on stdio for Zed/JetBrains/Neovim'
-        'info:Inspect resolved harness configuration and capabilities'
         'config:Manage configuration'
         'completion:Generate shell completions'
         'worktree:Git worktree management'
-        'rules:Inspect Arbiter rules and fact contracts'
         'migrate:Apply database migrations'
         'db:Backup/restore SQLite DB'
         'resume:Resume a previous session'
-        'doctor:Quick system and chat health checks'
+        'doctor:Quick system health check'
         'help:Show help information'
         'version:Show version information'
     )
@@ -1536,13 +921,11 @@ _buckley() {
         '-p[Run prompt in one-shot mode]:prompt:' \
         '-c[Use custom config file]:config file:_files' \
         '--config[Use custom config file]:config file:_files' \
-        '--agent[Load a buckley.agent/v1 runtime profile]:agent spec:_files' \
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
         '--tui[Use rich TUI interface]' \
         '--plain[Use plain scrollback mode]' \
-        '--code-mode[Offer audited exec_program for batched repository analysis]' \
         '-v[Show version]' \
         '--version[Show version]' \
         '-h[Show help]' \
@@ -1559,32 +942,11 @@ _buckley() {
                 batch)
                     _values 'batch command' prune-workspaces
                     ;;
-                buckbot)
-                    _values 'Buckbot review mode' review local repo project pr pull-request review-pr
-                    ;;
-                agent)
-                    _values 'agent command' init list check show info subagents run invoke
-                    ;;
-                skills|skill)
-                    _values 'skills command' init list show
-                    ;;
                 experiment)
-                    _values 'experiment command' run list show diff replay profile
-                    ;;
-                eval)
-                    _values 'eval command' init list run runs show artifacts
+                    _values 'experiment command' run
                     ;;
                 config)
                     _values 'config command' check show path
-                    ;;
-                doctor)
-                    _values 'doctor command' check chat
-                    ;;
-                chat)
-                    _values 'doctor chat command' init runs artifacts
-                    ;;
-                runs|artifacts)
-                    _values 'doctor chat runs command' show
                     ;;
                 completion)
                     _values 'shell' bash zsh fish
@@ -1612,45 +974,31 @@ complete -c buckley -n __fish_use_subcommand -a execute -d 'Execute a plan'
 complete -c buckley -n __fish_use_subcommand -a execute-task -d 'Execute single task'
 complete -c buckley -n __fish_use_subcommand -a commit -d 'Create action-style commit'
 complete -c buckley -n __fish_use_subcommand -a pr -d 'Create pull request'
-complete -c buckley -n __fish_use_subcommand -a review -d 'Review local changes with repository context'
-complete -c buckley -n __fish_use_subcommand -a review-pr -d 'Review a GitHub pull request'
-complete -c buckley -n __fish_use_subcommand -a buckbot -d 'Run Buckley’s general-purpose review agent'
-complete -c buckley -n '__fish_seen_subcommand_from buckbot' -a 'review local repo project pr pull-request review-pr'
 complete -c buckley -n __fish_use_subcommand -a experiment -d 'Run model comparison experiments'
-complete -c buckley -n __fish_use_subcommand -a eval -d 'Run project chat eval scenarios'
 complete -c buckley -n __fish_use_subcommand -a serve -d 'Start local server'
-complete -c buckley -n __fish_use_subcommand -a attach -d 'Join a running session over loopback gRPC'
-complete -c buckley -n __fish_use_subcommand -a goal -d 'Record a durable goal and inspect its task tree'
 complete -c buckley -n __fish_use_subcommand -a remote -d 'Remote session management'
 complete -c buckley -n __fish_use_subcommand -a batch -d 'Batch helpers (k8s/CI)'
 complete -c buckley -n __fish_use_subcommand -a git-webhook -d 'Run regression/release webhooks daemon'
-complete -c buckley -n __fish_use_subcommand -a agent -d 'Validate, inspect, and invoke Buckley agent specs'
-complete -c buckley -n __fish_use_subcommand -a skills -d 'List or inspect loaded workflow skills'
-complete -c buckley -n __fish_use_subcommand -a skill -d 'Alias for skills'
 complete -c buckley -n __fish_use_subcommand -a agent-server -d 'Run ACP HTTP proxy for editor workflows'
 complete -c buckley -n __fish_use_subcommand -a lsp -d 'Start LSP server on stdio'
 complete -c buckley -n __fish_use_subcommand -a acp -d 'Start ACP agent on stdio (Zed/JetBrains/Neovim)'
-complete -c buckley -n __fish_use_subcommand -a info -d 'Inspect resolved harness configuration and capabilities'
 complete -c buckley -n __fish_use_subcommand -a config -d 'Manage configuration'
 complete -c buckley -n __fish_use_subcommand -a completion -d 'Generate shell completions'
 complete -c buckley -n __fish_use_subcommand -a worktree -d 'Git worktree management'
-complete -c buckley -n __fish_use_subcommand -a rules -d 'Inspect Arbiter rules and fact contracts'
 complete -c buckley -n __fish_use_subcommand -a migrate -d 'Apply database migrations'
 complete -c buckley -n __fish_use_subcommand -a db -d 'Backup/restore SQLite DB'
 complete -c buckley -n __fish_use_subcommand -a resume -d 'Resume a previous session'
-complete -c buckley -n __fish_use_subcommand -a doctor -d 'Quick system and chat health checks'
+complete -c buckley -n __fish_use_subcommand -a doctor -d 'Quick system health check'
 complete -c buckley -n __fish_use_subcommand -a help -d 'Show help information'
 complete -c buckley -n __fish_use_subcommand -a version -d 'Show version information'
 
 # Global flags
 complete -c buckley -s p -d 'Run prompt in one-shot mode'
 complete -c buckley -s c -l config -d 'Use custom config file' -r
-complete -c buckley -l agent -d 'Load a buckley.agent/v1 runtime profile' -r
 complete -c buckley -s q -l quiet -d 'Suppress non-essential output'
 complete -c buckley -l no-color -d 'Disable colored output'
 complete -c buckley -l tui -d 'Use rich TUI interface'
 complete -c buckley -l plain -d 'Use plain scrollback mode'
-complete -c buckley -l code-mode -d 'Offer audited exec_program for batched repository analysis'
 complete -c buckley -s v -l version -d 'Show version'
 complete -c buckley -s h -l help -d 'Show help'
 
@@ -1659,44 +1007,8 @@ complete -c buckley -n '__fish_seen_subcommand_from config' -a check -d 'Validat
 complete -c buckley -n '__fish_seen_subcommand_from config' -a show -d 'Show current configuration'
 complete -c buckley -n '__fish_seen_subcommand_from config' -a path -d 'Show config file paths'
 
-# Agent subcommands
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a check -d 'Validate agent spec'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a init -d 'Create a filesystem-first agent layout'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a list -d 'List discovered project agent specs'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a show -d 'Inspect agent spec'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a info -d 'Inspect resolved agent profile'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a subagents -d 'List runnable subagents'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a run -d 'Invoke a named subagent'
-complete -c buckley -n '__fish_seen_subcommand_from agent' -a invoke -d 'Invoke a named subagent'
-
-# Skills subcommands
-complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a init -d 'Create a project workflow skill'
-complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a list -d 'List loaded workflow skills'
-complete -c buckley -n '__fish_seen_subcommand_from skills skill' -a show -d 'Inspect a loaded workflow skill'
-
-# Doctor subcommands
-complete -c buckley -n '__fish_seen_subcommand_from doctor' -a check -d 'Validate configuration'
-complete -c buckley -n '__fish_seen_subcommand_from doctor' -a chat -d 'Run multi-turn chat health check'
-complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a init -d 'Create a project chat check scenario'
-complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a runs -d 'List chat check artifact runs'
-complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat' -a artifacts -d 'List chat check artifact runs'
-complete -c buckley -n '__fish_seen_subcommand_from doctor; and __fish_seen_subcommand_from chat; and __fish_seen_subcommand_from runs artifacts' -a show -d 'Show a chat check artifact run'
-
 # Experiment subcommands
 complete -c buckley -n '__fish_seen_subcommand_from experiment' -a run -d 'Run an experiment'
-complete -c buckley -n '__fish_seen_subcommand_from experiment' -a list -d 'List experiments'
-complete -c buckley -n '__fish_seen_subcommand_from experiment' -a show -d 'Show experiment results'
-complete -c buckley -n '__fish_seen_subcommand_from experiment' -a diff -d 'Compare experiment variants'
-complete -c buckley -n '__fish_seen_subcommand_from experiment' -a replay -d 'Replay a session with a new model'
-complete -c buckley -n '__fish_seen_subcommand_from experiment' -a profile -d 'Calibrate model behavior from measured runs'
-
-# Eval subcommands
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a init -d 'Create a project chat eval scenario'
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a list -d 'List project chat eval scenarios'
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a run -d 'Run project chat eval scenarios'
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a runs -d 'List chat eval artifact runs'
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a show -d 'Show a chat eval artifact run'
-complete -c buckley -n '__fish_seen_subcommand_from eval' -a artifacts -d 'List chat eval artifact runs'
 
 # Completion subcommands
 complete -c buckley -n '__fish_seen_subcommand_from completion' -a bash -d 'Generate bash completion'
@@ -1729,18 +1041,10 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runExecuteCommand, args[1:])
 	case "remote":
 		return true, runCommand(runRemoteCommand, args[1:])
-	case "attach":
-		return true, runCommand(runAttachCommand, args[1:])
-	case "goal":
-		return true, runCommand(runGoalCommand, args[1:])
 	case "batch":
 		return true, runCommand(runBatchCommand, args[1:])
 	case "git-webhook":
 		return true, runCommand(runGitWebhookCommand, args[1:])
-	case "buckbot":
-		return true, runCommand(runBuckbotCommand, args[1:])
-	case "agent":
-		return true, runCommand(runAgentCommand, args[1:])
 	case "execute-task":
 		return true, runCommand(runExecuteTaskCommand, args[1:])
 	case "commit":
@@ -1753,8 +1057,6 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runReviewPRCommand, args[1:])
 	case "experiment":
 		return true, runCommand(runExperimentCommand, args[1:])
-	case "eval":
-		return true, runCommand(runEvalCommand, args[1:])
 	case "serve":
 		return true, runCommand(runServeCommand, args[1:])
 	case "migrate":
@@ -1769,10 +1071,6 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runWorktreeCommand, args[1:])
 	case "resume":
 		return false, 0
-	case "session":
-		return true, runCommand(runSessionCommand, args[1:])
-	case "models":
-		return true, runCommand(runModelsCommand, args[1:])
 	case "agent-server":
 		return true, runCommand(runAgentServerCommand, args[1:])
 	case "lsp":
@@ -1783,18 +1081,11 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runHuntCommand, args[1:])
 	case "dream":
 		return true, runCommand(runDreamCommand, args[1:])
-	case "info":
-		return true, runCommand(runInfoCommand, args[1:])
-	case "skills", "skill":
-		return true, runCommand(runSkillsCommand, args[1:])
 	case "config":
 		return true, runCommand(runConfigCommand, args[1:])
-	case "trust":
-		return true, runCommand(runTrustCommand, args[1:])
 	case "doctor":
-		return true, runCommand(runDoctorCommand, args[1:])
-	case "rules":
-		return true, runCommand(runRulesCommand, args[1:])
+		// Alias for config check - quick system health check
+		return true, runCommand(runConfigCommand, []string{"check"})
 	case "completion":
 		return true, runCommand(runCompletionCommand, args[1:])
 	default:
@@ -1810,9 +1101,6 @@ func dispatchSubcommand(args []string) (bool, int) {
 
 func runCommand(handler func([]string) error, args []string) int {
 	if err := handler(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return exitCodeForError(err)
 	}
@@ -1820,156 +1108,78 @@ func runCommand(handler func([]string) error, args []string) int {
 }
 
 func parseStartupOptions(raw []string) (*startupOptions, error) {
-	opts := startupOptionsFromEnv()
-	state := startupFlagState{}
-	filtered := make([]string, 0, len(raw))
-
-	for _, arg := range raw {
-		if state.consumePending(opts, arg) {
-			continue
-		}
-
-		if state.consumeStartupFlag(opts, arg, len(filtered) == 0) {
-			continue
-		}
-		filtered = append(filtered, arg)
-	}
-
-	if err := state.validate(opts); err != nil {
-		return nil, err
-	}
-
-	opts.args = filtered
-	return opts, nil
-}
-
-func startupOptionsFromEnv() *startupOptions {
-	opts := &startupOptions{
-		agentPath: strings.TrimSpace(os.Getenv("BUCKLEY_AGENT")),
-	}
+	opts := &startupOptions{}
 	if val, ok := parseBoolEnv("BUCKLEY_QUIET"); ok {
 		opts.quiet = val
 	}
 	if val, ok := parseBoolEnv("NO_COLOR"); ok {
 		opts.noColor = val
 	}
-	if val, ok := parseBoolEnv("BUCKLEY_CODE_MODE"); ok {
-		opts.codeMode = val
-	}
-	return opts
-}
 
-func (s *startupFlagState) consumePending(opts *startupOptions, arg string) bool {
-	switch s.pending {
-	case startupPendingPrompt:
-		opts.prompt = arg
-	case startupPendingEncoding:
-		opts.encodingOverride = strings.ToLower(arg)
-	case startupPendingConfig:
-		opts.configPath = arg
-	case startupPendingModel:
-		opts.modelOverride = strings.TrimSpace(arg)
-	case startupPendingAgent:
-		opts.agentPath = strings.TrimSpace(arg)
-	default:
-		return false
-	}
-	s.pending = startupPendingNone
-	return true
-}
+	filtered := make([]string, 0, len(raw))
+	var nextPrompt bool
+	var nextEncoding bool
+	var nextConfig bool
 
-func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
-	switch arg {
-	case "--plain", "--no-tui":
-		opts.plainModeSet = true
-		opts.plainMode = true
-	case "--tui":
-		opts.plainModeSet = true
-		opts.plainMode = false
-	case "--code-mode":
-		if !beforeCommand {
-			return false
+	for _, arg := range raw {
+		if nextPrompt {
+			opts.prompt = arg
+			nextPrompt = false
+			continue
 		}
-		opts.codeMode = true
-	case "-p":
-		s.pending = startupPendingPrompt
-	case "--encoding":
-		if !beforeCommand {
-			return false
+		if nextEncoding {
+			opts.encodingOverride = strings.ToLower(arg)
+			nextEncoding = false
+			continue
 		}
-		s.pending = startupPendingEncoding
-	case "--encoding=toon":
-		if !beforeCommand {
-			return false
+		if nextConfig {
+			opts.configPath = arg
+			nextConfig = false
+			continue
 		}
-		opts.encodingOverride = "toon"
-	case "--encoding=json", "--json":
-		if !beforeCommand {
-			return false
-		}
-		opts.encodingOverride = "json"
-	case "--quiet", "-q":
-		opts.quiet = true
-	case "--no-color":
-		opts.noColor = true
-	case "--config", "-c":
-		s.pending = startupPendingConfig
-	case "--model", "-m":
-		if !beforeCommand {
-			return false
-		}
-		s.pending = startupPendingModel
-		s.modelFlagSeen = true
-	case "--agent":
-		if !beforeCommand {
-			return false
-		}
-		s.pending = startupPendingAgent
-		s.agentFlagSeen = true
-	default:
-		return s.consumeStartupValueFlag(opts, arg, beforeCommand)
-	}
-	return true
-}
 
-func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
-	if strings.HasPrefix(arg, "--config=") {
-		opts.configPath = strings.TrimPrefix(arg, "--config=")
-		return true
+		switch arg {
+		case "--plain", "--no-tui":
+			opts.plainModeSet = true
+			opts.plainMode = true
+		case "--tui":
+			opts.plainModeSet = true
+			opts.plainMode = false
+		case "-p":
+			nextPrompt = true
+		case "--encoding":
+			nextEncoding = true
+		case "--encoding=toon":
+			opts.encodingOverride = "toon"
+		case "--encoding=json", "--json":
+			opts.encodingOverride = "json"
+		case "--quiet", "-q":
+			opts.quiet = true
+		case "--no-color":
+			opts.noColor = true
+		case "--config", "-c":
+			nextConfig = true
+		default:
+			if strings.HasPrefix(arg, "--config=") {
+				opts.configPath = strings.TrimPrefix(arg, "--config=")
+			} else {
+				filtered = append(filtered, arg)
+			}
+		}
 	}
-	if strings.HasPrefix(arg, "--model=") && beforeCommand {
-		opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
-		s.modelFlagSeen = true
-		return true
-	}
-	if strings.HasPrefix(arg, "--agent=") && beforeCommand {
-		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
-		s.agentFlagSeen = true
-		return true
-	}
-	return false
-}
 
-func (s startupFlagState) validate(opts *startupOptions) error {
-	switch s.pending {
-	case startupPendingPrompt:
-		return fmt.Errorf("-p requires a prompt argument")
-	case startupPendingEncoding:
-		return fmt.Errorf("--encoding requires a value")
-	case startupPendingConfig:
-		return fmt.Errorf("--config requires a path argument")
-	case startupPendingModel:
-		return fmt.Errorf("--model requires a value")
-	case startupPendingAgent:
-		return fmt.Errorf("--agent requires a path")
+	if nextPrompt {
+		return nil, fmt.Errorf("-p requires a prompt argument")
 	}
-	if s.modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
-		return fmt.Errorf("--model requires a value")
+	if nextEncoding {
+		return nil, fmt.Errorf("--encoding requires a value")
 	}
-	if s.agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
-		return fmt.Errorf("--agent requires a path")
+	if nextConfig {
+		return nil, fmt.Errorf("--config requires a path argument")
 	}
-	return nil
+
+	opts.args = filtered
+	return opts, nil
 }
 
 func (o *startupOptions) consumeResumeCommand() error {
@@ -2012,187 +1222,6 @@ func applySandboxOverride(cfg *config.Config) {
 		cfg.Worktrees.UseContainers = true
 	case "host", "off", "disable", "disabled", "false", "no":
 		cfg.Worktrees.UseContainers = false
-	}
-}
-
-func applyStartupModelOverride(cfg *config.Config, modelID string) {
-	if cfg == nil {
-		return
-	}
-	modelID = normalizeModelIDWithReasoning(cfg, modelID)
-	if modelID == "" {
-		return
-	}
-	disableConfiguredModelFallbacks(cfg, modelID)
-
-	cfg.Models.Execution = modelID
-	if strings.HasPrefix(modelID, "codex/") {
-		cfg.Providers.Codex.Enabled = true
-		cfg.Models.DefaultProvider = "codex"
-		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
-			cfg.Models.Reasoning = "xhigh"
-		}
-		if cfg.Models.Planning == "" || cfg.Models.Planning == config.DefaultPlanningModel {
-			cfg.Models.Planning = modelID
-		}
-		if cfg.Models.Review == "" || cfg.Models.Review == config.DefaultReviewModel {
-			cfg.Models.Review = modelID
-		}
-	} else if strings.HasPrefix(modelID, "openai/gpt-5") || strings.HasPrefix(modelID, "gpt-5") {
-		if strings.TrimSpace(cfg.Models.Reasoning) == "" {
-			cfg.Models.Reasoning = "xhigh"
-		}
-	}
-}
-
-// disableConfiguredModelFallbacks makes an explicit command selection exact.
-// Config-selected defaults may still use their declared fallback chains, but
-// a user-supplied model must never be silently replaced during evaluation.
-func disableConfiguredModelFallbacks(cfg *config.Config, modelID string) {
-	if cfg == nil || cfg.Models.FallbackChains == nil {
-		return
-	}
-	modelID, _ = config.SplitReasoningSuffix(strings.TrimSpace(modelID))
-	if modelID != "" {
-		delete(cfg.Models.FallbackChains, modelID)
-	}
-}
-
-func loadStartupAgentProfile(path string) (*agentspec.RuntimeProfile, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, nil
-	}
-	return agentspec.LoadRuntimeProfile(path)
-}
-
-func agentPromptSection(profile *agentspec.RuntimeProfile) string {
-	if profile == nil {
-		return ""
-	}
-	return profile.PromptSection()
-}
-
-func hyphaeProjectKnowledgeContext(cfg *config.Config, workDir string) string {
-	if cfg == nil || !cfg.Memory.HyphaeRecall {
-		return ""
-	}
-	return knowledgehyphae.ProjectKnowledgeContext(context.Background(), workDir, cfg.Memory.HyphaeSpace)
-}
-
-func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.Registry, explicitAllowed []string) []string {
-	allowed := cleanToolNames(explicitAllowed)
-	var denied []string
-	tier := ""
-	if profile != nil && profile.Spec != nil {
-		denied = cleanToolNames(profile.Spec.Tools.Deny)
-		tier = strings.TrimSpace(profile.Spec.Tools.Tier)
-		if len(allowed) == 0 {
-			allowed = cleanToolNames(profile.Spec.Tools.Allow)
-		}
-	}
-	if tier == "none" {
-		return []string{}
-	}
-	if len(allowed) == 0 {
-		allowed = toolsForTier(registry, tier)
-	}
-	if len(allowed) == 0 && len(denied) == 0 {
-		return nil
-	}
-	return subtractToolNames(allowed, denied)
-}
-
-func toolsForTier(registry *tool.Registry, tier string) []string {
-	tier = strings.TrimSpace(tier)
-	if tier == "none" {
-		return []string{}
-	}
-	if tier == "" || tier == "full" || registry == nil {
-		return nil
-	}
-
-	var maxTier types.PermissionTier
-	switch tier {
-	case "read_only":
-		maxTier = types.TierReadOnly
-	case "standard":
-		maxTier = types.TierWorkspaceWrite
-	default:
-		return nil
-	}
-
-	allowed := []string{}
-	for _, candidate := range registry.List() {
-		if tool.RequiredTierForTool(candidate) <= maxTier {
-			allowed = append(allowed, candidate.Name())
-		}
-	}
-	return cleanToolNames(allowed)
-}
-
-func cleanToolNames(values []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func subtractToolNames(values, denied []string) []string {
-	if len(denied) == 0 {
-		return cleanToolNames(values)
-	}
-	blocked := map[string]struct{}{}
-	for _, value := range denied {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			blocked[value] = struct{}{}
-		}
-	}
-	out := []string{}
-	for _, value := range cleanToolNames(values) {
-		if _, ok := blocked[value]; !ok {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
-func normalizeModelIDWithReasoning(cfg *config.Config, modelID string) string {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return ""
-	}
-	normalized, effort := config.SplitReasoningSuffix(modelID)
-	if normalized != "" {
-		modelID = normalized
-	}
-	if cfg != nil && effort != "" {
-		cfg.Models.Reasoning = effort
-	}
-	return modelID
-}
-
-func applyCommandModelOverride(modelID string) func() {
-	modelID = strings.TrimSpace(modelID)
-	previous := modelOverrideFlag
-	if modelID != "" {
-		// Preserve the reasoning suffix until the command has loaded config;
-		// resolveReviewModel applies it before runtime reasoning resolution.
-		modelOverrideFlag = modelID
-	}
-	return func() {
-		modelOverrideFlag = previous
 	}
 }
 
@@ -2336,17 +1365,6 @@ func humanReadableURL(bind string) string {
 	return fmt.Sprintf("http://%s:%s", host, port)
 }
 
-type acpEventStoreHandle struct {
-	store coordevents.EventStore
-	close func()
-}
-
-func (h acpEventStoreHandle) Close() {
-	if h.close != nil {
-		h.close()
-	}
-}
-
 // startACPServer launches the ACP gRPC server when configured.
 func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store) (func(), error) {
 	acpCfg := cfg.ACP
@@ -2354,124 +1372,92 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 		return nil, nil
 	}
 
-	tlsCfg, err := configureACPTransport(acpCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	eventStore, err := openACPEventStore(acpCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore.store)
-	if err != nil {
-		eventStore.Close()
-		return nil, fmt.Errorf("init ACP coordinator: %w", err)
-	}
-
-	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
-	if err != nil {
-		eventStore.Close()
-		return nil, fmt.Errorf("init ACP gRPC server: %w", err)
-	}
-
-	lis, err := net.Listen("tcp", acpCfg.Listen)
-	if err != nil {
-		eventStore.Close()
-		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
-	}
-
-	grpcServer := newACPGRPCServer(srv, tlsCfg)
-	stop, err := serveACPGRPCServer(grpcServer, lis, eventStore.Close)
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Printf("🚀 ACP gRPC server listening on %s (event store: %s)\n", acpCfg.Listen, acpEventStoreName(acpCfg))
-	return stop, nil
-}
-
-func configureACPTransport(acpCfg config.ACPConfig) (*tls.Config, error) {
 	useTLS := hasACPTLS(acpCfg)
 	allowInsecure := acpCfg.AllowInsecureLocal && isLoopbackAddress(acpCfg.Listen)
 	if !useTLS && !allowInsecure {
 		return nil, fmt.Errorf("acp listener %s requires mTLS or allow_insecure_local=true on loopback", acpCfg.Listen)
 	}
-	if !useTLS {
-		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
-		return nil, nil
-	}
-	return loadACPTLSConfig(acpCfg)
-}
 
-func loadACPTLSConfig(acpCfg config.ACPConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(acpCfg.TLSCertFile, acpCfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load ACP TLS certs: %w", err)
-	}
-
-	clientCAPEM, err := os.ReadFile(acpCfg.TLSClientCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("load ACP client CA: %w", err)
-	}
-
-	clientCAPool := x509.NewCertPool()
-	if ok := clientCAPool.AppendCertsFromPEM(clientCAPEM); !ok {
-		return nil, fmt.Errorf("invalid ACP client CA bundle")
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    clientCAPool,
-		MinVersion:   tls.VersionTLS12,
-	}, nil
-}
-
-func openACPEventStore(acpCfg config.ACPConfig) (acpEventStoreHandle, error) {
-	if acpEventStoreName(acpCfg) == "nats" {
-		store, err := coordevents.NewNATSEventStore(acpNATSOptions(acpCfg.NATS))
+	var tlsCfg *tls.Config
+	if useTLS {
+		cert, err := tls.LoadX509KeyPair(acpCfg.TLSCertFile, acpCfg.TLSKeyFile)
 		if err != nil {
-			return acpEventStoreHandle{}, fmt.Errorf("init NATS event store: %w", err)
+			return nil, fmt.Errorf("load ACP TLS certs: %w", err)
 		}
-		return acpEventStoreHandle{store: store, close: store.Close}, nil
+
+		clientCAPEM, err := os.ReadFile(acpCfg.TLSClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("load ACP client CA: %w", err)
+		}
+
+		clientCAPool := x509.NewCertPool()
+		if ok := clientCAPool.AppendCertsFromPEM(clientCAPEM); !ok {
+			return nil, fmt.Errorf("invalid ACP client CA bundle")
+		}
+
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    clientCAPool,
+			MinVersion:   tls.VersionTLS12,
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: starting ACP without TLS (allow_insecure_local=true for %s)\n", acpCfg.Listen)
 	}
 
-	dbPath, err := resolveACPEventsDBPath()
+	var eventStore coordevents.EventStore
+	var closer func()
+
+	if strings.ToLower(acpCfg.EventStore) == "nats" {
+		opts := coordevents.NATSOptions{
+			URL:            acpCfg.NATS.URL,
+			Username:       acpCfg.NATS.Username,
+			Password:       acpCfg.NATS.Password,
+			Token:          acpCfg.NATS.Token,
+			TLS:            acpCfg.NATS.TLS,
+			StreamPrefix:   acpCfg.NATS.StreamPrefix,
+			SnapshotBucket: acpCfg.NATS.SnapshotBucket,
+			ConnectTimeout: acpCfg.NATS.ConnectTimeout,
+			RequestTimeout: acpCfg.NATS.RequestTimeout,
+		}
+		store, err := coordevents.NewNATSEventStore(opts)
+		if err != nil {
+			return nil, fmt.Errorf("init NATS event store: %w", err)
+		}
+		eventStore = store
+		closer = store.Close
+	} else {
+		dbPath, err := resolveACPEventsDBPath()
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+			return nil, fmt.Errorf("init SQLite event store: ensure directory: %w", err)
+		}
+		store, err := coordevents.NewSQLiteEventStore(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("init SQLite event store: %w", err)
+		}
+		eventStore = store
+		closer = func() { _ = store.Close() }
+	}
+
+	coord, err := coordination.NewCoordinator(coordination.DefaultConfig(), eventStore)
 	if err != nil {
-		return acpEventStoreHandle{}, err
+		if closer != nil {
+			closer()
+		}
+		return nil, fmt.Errorf("init ACP coordinator: %w", err)
 	}
-	store, err := coordevents.NewSQLiteEventStore(dbPath)
+
+	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
 	if err != nil {
-		return acpEventStoreHandle{}, fmt.Errorf("init SQLite event store: %w", err)
+		if closer != nil {
+			closer()
+		}
+		return nil, fmt.Errorf("init ACP gRPC server: %w", err)
 	}
-	return acpEventStoreHandle{store: store, close: func() { _ = store.Close() }}, nil
-}
 
-func acpNATSOptions(cfg config.NATSConfig) coordevents.NATSOptions {
-	return coordevents.NATSOptions{
-		URL:            cfg.URL,
-		Username:       cfg.Username,
-		Password:       cfg.Password,
-		Token:          cfg.Token,
-		TLS:            cfg.TLS,
-		StreamPrefix:   cfg.StreamPrefix,
-		SnapshotBucket: cfg.SnapshotBucket,
-		ConnectTimeout: cfg.ConnectTimeout,
-		RequestTimeout: cfg.RequestTimeout,
-	}
-}
-
-func acpEventStoreName(acpCfg config.ACPConfig) string {
-	name := strings.TrimSpace(strings.ToLower(acpCfg.EventStore))
-	if name == "" {
-		return "sqlite"
-	}
-	return name
-}
-
-func newACPGRPCServer(srv *acpserver.Server, tlsCfg *tls.Config) *grpc.Server {
 	grpcOpts := []grpc.ServerOption{}
 	if tlsCfg != nil {
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
@@ -2482,10 +1468,15 @@ func newACPGRPCServer(srv *acpserver.Server, tlsCfg *tls.Config) *grpc.Server {
 	)
 	grpcServer := grpc.NewServer(grpcOpts...)
 	acppb.RegisterAgentCommunicationServer(grpcServer, srv)
-	return grpcServer
-}
 
-func serveACPGRPCServer(grpcServer *grpc.Server, lis net.Listener, closeEventStore func()) (func(), error) {
+	lis, err := net.Listen("tcp", acpCfg.Listen)
+	if err != nil {
+		if closer != nil {
+			closer()
+		}
+		return nil, fmt.Errorf("listen on %s: %w", acpCfg.Listen, err)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- grpcServer.Serve(lis)
@@ -2493,8 +1484,8 @@ func serveACPGRPCServer(grpcServer *grpc.Server, lis net.Listener, closeEventSto
 
 	stop := func() {
 		grpcServer.GracefulStop()
-		if closeEventStore != nil {
-			closeEventStore()
+		if closer != nil {
+			closer()
 		}
 	}
 
@@ -2508,5 +1499,6 @@ func serveACPGRPCServer(grpcServer *grpc.Server, lis net.Listener, closeEventSto
 	case <-time.After(150 * time.Millisecond):
 	}
 
+	fmt.Printf("🚀 ACP gRPC server listening on %s (event store: %s)\n", acpCfg.Listen, strings.ToLower(acpCfg.EventStore))
 	return stop, nil
 }

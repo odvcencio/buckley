@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"m31labs.dev/buckley/pkg/personality"
+	"github.com/draco/buckley/pkg/personality"
 )
 
 // ReviewBranchWithToolsPrompt returns the prompt for local branch review with verification tools.
@@ -19,115 +19,31 @@ func ReviewProjectPrompt(now time.Time) string {
 
 // ReviewPRPrompt returns the prompt for remote PR review focused on business impact.
 func ReviewPRPrompt(now time.Time) string {
-	return resolvePrompt("review-pr", reviewPRCompactDefault(now), now)
-}
-
-// ReviewApprovalCriticPrompt turns a review prompt into an independent,
-// adversarial approval gate while preserving the command's exact output
-// contract. The critic starts a fresh agent run and must produce a complete
-// replacement review rather than commenting on the prior review in prose.
-func ReviewApprovalCriticPrompt(primaryPrompt string) string {
-	return primaryPrompt + `
-
-INDEPENDENT APPROVAL CRITIC ROLE:
-- A separate reviewer proposed APPROVE. Treat that approval as an untrusted hypothesis, not a conclusion.
-- Start the analysis again from the supplied original evidence. Use the snapshot-bound inspection and verification tools independently; do not merely summarize or edit the prior review.
-- Search for missed blockers, contradictory evidence, unsupported clean claims, stale ratchets, unreachable generalized paths, and unresolved feedback.
-- Check empty or zero mismatches, incomplete cleanup, and continuous integration trigger gaps.
-- Check derived caches, dispatch gates, and fast paths that can bypass the changed behavior.
-- Compare synthetic fixtures with production initialization before you trust their coverage.
-- Verify the prior review's Coverage, Invariant Audit, Falsification, findings, and verdict against source evidence.
-- Return a complete replacement review in the exact same machine-validated output format required above. Do not return a critique memo or a delta.
-- Be conservative: APPROVE only if your independent search disproves the strongest plausible failure. Otherwise return REQUEST CHANGES or NEEDS DISCUSSION with concrete evidence.`
+	return resolvePrompt("review-pr", reviewPRDefault(now), now)
 }
 
 func reviewPRDefault(now time.Time) string {
-	return fmt.Sprintf(`You are reviewing a Pull Request as a rigorous pre-merge correctness gate. Translate findings into business impact, but never trade technical depth for a friendly summary.
+	return fmt.Sprintf(`You are reviewing a Pull Request. Focus on BUSINESS IMPACT with structured, actionable findings.
 
-This is a remote PR. Your job is to:
+This is a remote PR - CI has already run. Your job is to:
 1. Summarize for stakeholders in business terms
 2. Assess risk and impact
 3. Surface blocking issues with severity
 4. Grade the PR and recommend action
 
 TOOLS AVAILABLE:
-- read_file: Read bounded file pages beyond the diff; follow next_start_line until every relevant section is covered
+- read_file: See full file context beyond the diff
 - find_files: Find related files
 - search_text: Search for patterns, usages, definitions
-- run_verification: Run one focused build, test, or check command in the OS-enforced snapshot sandbox (no arbitrary shell)
-
-EXECUTION SAFETY:
-- The original checkout is protected. Native verification runs with captured source and Git state read-only; write caches and temporary build outputs only under the private $TMPDIR, and never mutate code or Git state.
-- If the provider supplies a native shell, use it only for focused verification commands allowed by AGENTS.md.
-- Treat immutable, named remote checks from a non-zero `+"`"+`passing (N/N)`+"`"+` aggregate as the broad Build and Tests evidence. Do not rerun the full suite solely to manufacture duplicate approval evidence.
-- Use run_verification selectively to falsify a concrete risk the diff, Canopy report, call chain, boundary, or missing test exposes. Choose the smallest command that can prove or disprove that hypothesis.
-- Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, exported field visibility, and source-shape heuristics cannot override that result.
-- Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
-- Report INCONCLUSIVE tool evidence as UNAVAILABLE in Build and Tests. INCONCLUSIVE is not an output state.
-- When authoritative remote CI is absent, pending, failing, or stale, do not approve. Focused local checks may sharpen a finding but do not replace the required remote gate.
-- Verification cache/temp variables are already supplied by the sandbox. Do not override PATH, tool options, GOCACHE, GOTMPDIR, or other environment variables in an approval-evidence command.
-
-NON-NEGOTIABLE REVIEW RULES:
-- Read and obey the supplied AGENTS.md before choosing commands. Never run a repo-wide gate that project guidance forbids.
-- Repository verification directives are execution policy. If they require Docker, CI, or another unavailable surface, do not substitute a host command.
-- Use exact Go test names. The verification tool anchors the complete `+"`-run`"+` alternation to prevent shared prefixes from selecting larger test families.
-- Account for every changed file and every diff hunk. A clean verdict requires explicit coverage, not an impressionistic scan.
-- Treat the PR's claims as hypotheses to falsify. Trace each changed definition through its consumers, tests, and CI trigger.
-- When a change adds state, trace it through every derived cache, summary flag, dispatch gate, and optimized path.
-- Prove that production inputs reach the new behavior. A direct helper test does not prove dispatch reachability.
-- Compare synthetic test fixtures with production initialization. Include constructors, generated metadata, caches, and registration steps.
-- When generalized logic replaces special cases, test the smallest valid shape that only the new logic can repair.
-- Audit cross-file invariants: maps and their count/limit ratchets, allow/deny/skip lists, budgets, thresholds, feature gates, serialization pairs, cleanup on every exit path, and zero/empty boundary values. A cleared collection paired with a non-zero maximum is a finding.
-- When a change removes or replaces an implementation path, compare observable behavior before and after it. Trace submit, click, navigation, reset, error, loading, focus, and accessibility state as applicable. Passing compile checks are not enough.
-- For framework-generated or convention-shaped state, trace the real producer, serializer, runtime binding, and consumer key shape. Verify success, failure, empty/default, and redirect/reload paths when applicable.
-- For visual, canvas, shader, or layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial and settled states. Require pixel or screenshot evidence when visual correctness is the claim; metrics alone cannot approve it.
-- Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript before recommending retirement. Do not count generated runtime as bespoke app code.
-- Exercise negative and default CLI flag paths, especially boolean flags where omission, true, and false select different evidence or behavior.
-- For fetched lists, verify cardinality, pagination, filtering, and empty/single-page boundaries rather than trusting the first response page.
-- Preserve and verify remote identity (repository, host, ref, and credentials context) through every subprocess call; do not silently fall back to the current checkout.
-- Trace declared tool and policy permissions all the way to actual provider/executor enforcement. Configuration that is never enforced is a finding.
-- Existing reviews and unresolved threads are evidence, not authority. Independently verify each one and state its disposition.
-- Treat PR-description commands and results as supplied evidence. Cross-check them, but do not erase them because this review made no duplicate tool call.
-- Treat the supplied aggregate remote CI status as authoritative. APPROVE requires a non-zero `+"`"+`passing (N/N)`+"`"+` result plus normalized Build and Tests states of PASS. Failing, pending, unknown, or absent checks block approval.
-- Pending, unknown, absent, or stale remote CI is a merge gate, not a proved current failure. When no proved finding or unresolved feedback exists, use Grade B with NEEDS DISCUSSION.
-- Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C or a procedural blocker.
-- Keep a pending or unavailable CI condition in CI Status and Remarks. Do not list the condition as a Blocker or Finding.
-- Build and Tests start with one state: PASS, FAIL, NOT_APPLICABLE, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN. Tests NOT_APPLICABLE requires trusted NO_TEST_GATE; never infer it from missing tools.
-- PASS must cite the focused command or named remote checks that passed. FAIL, PENDING, NOT_RUN, UNAVAILABLE, and UNKNOWN never permit approval.
-- If the diff or GitHub context is marked partial/truncated, do not approve; state exactly what evidence is missing.
-- Anchor each finding to the smallest changed right-side line that demonstrates the defect. GitHub must accept the line as an inline comment.
-- If supporting evidence is outside the diff, cite it in Evidence. Keep the finding anchored to the causal changed line.
-- Include a suggestion block only when it is an exact replacement for the anchored changed lines. Otherwise, omit the block.
-- APPROVE requires Grade A with no Findings and no Suggestions. Put useful non-defect observations in Remarks.
-- A finding must prove a changed behavior, contract, security, data, performance, or test defect.
-- A demonstrated finding must cite a current failing input, violated invariant, failing check, or reproducible current behavior.
-- A possible rename, regeneration, test drift, or private test-hook change is not a finding when current tests pass.
-- Do not report wording, comments, naming, style, documentation, maintainability, extensibility, or future support as findings without a demonstrated failure.
-- Never report ASD-STE100, prose, voice, noun-cluster, wording, naming, or documentation-style findings. Put them in Remarks unless a required validator or CI check fails.
-- A rule that forbids noun clusters longer than three nouns permits clusters of three nouns.
-- Do not ask for more test shapes only because more shapes exist. Report missing coverage only when a current contract route remains untested or unresolved.
-- Do not reject a malformed historical fixture when it reproduces a parser defect and a separate valid witness covers the generalized route.
-`+RuleFindingsRequireProvedFalsification+`
-`+RuleDisprovedOrUnresolvedGoesToRemarks+`
-- A passing focused test outranks a filename, field-visibility, or source-shape heuristic for the behavior that the test exercises.
-- A verification timeout, cancellation, or unavailable result is inconclusive. It cannot prove a Finding.
-- A self-selected verification timeout is a review limitation. Report UNAVAILABLE and Grade B unless independent evidence proves a product defect.
-- Copy source identifiers, registry keys, check names, and paths exactly from supplied evidence. Do not invent or paraphrase an identifier.
-- Do not claim provider finish-reason support without an exact changed branch or test that proves the claim.
-
-%s
+- run_shell: Run verification commands
+- git_diff: Inspect the diff under review
 
 WORKFLOW:
-1. Read project guidance, PR metadata, CI, submitted reviews, and unresolved threads.
-2. Inventory every changed file/hunk and identify the contract or invariant it changes.
-3. Trace high-risk changes across definitions, consumers, tests, and gate configuration.
-4. Use Canopy as the structural map, inspect relevant consumers and boundaries, and run a focused check only when it can falsify a concrete concern.
-5. Perform a final falsification pass. Start at the earliest routing gate, then follow the path to the changed behavior.
-6. Assign severity, grade, and recommendation.
-
-PARALLEL REVIEW POLICY:
-- If parallel subagents are available, use them only to divide a broad change into disjoint subsystem scopes.
-- Do not run duplicate reviewers or serial reviewer-of-reviewer passes. The opt-in approval critic is the separate escalation for large or business-critical changes.
+1. Review PR metadata (title, description, CI status)
+2. Analyze the diff for scope and risk
+3. Use read_file/search_text to verify concerns before reporting
+4. Assign severity to each finding
+5. Calculate grade and recommendation
 
 OUTPUT FORMAT (follow exactly):
 
@@ -135,7 +51,7 @@ OUTPUT FORMAT (follow exactly):
 
 Grading criteria:
 - A: No issues, ready to merge, exemplary PR
-- B: Real non-blocking defects remain; do not approve
+- B: Minor issues only, approve with suggestions
 - C: Major issues present, request changes
 - D: Critical issues, significant rework needed
 - F: CI failing or security vulnerabilities
@@ -150,38 +66,10 @@ Grading criteria:
 - **Blast Radius**: What breaks if this has bugs?
 - **Rollback Complexity**: Easy / Medium / Hard
 
-## Structural Impact
-- **Canopy**: PASS|WARN|UNAVAILABLE — index scope and measured runtime
-- **Changed surface**: exact changed symbol and file counts reported by Canopy
-- **Dependents**: direct and transitive consumers reported by Canopy
-- **Complexity**: changed hotspots or deltas reported by Canopy
-- **Boundaries**: architecture violations, or NONE
-- Use "not reported" for any metric absent from the supplied Canopy evidence. Never estimate a structural metric.
-
 ## CI Status
-- Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command or named remote-check evidence
-- Tests: PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — command, typed NO_TEST_GATE policy, or named remote-check evidence
+- Build: PASS/FAIL
+- Tests: PASS/FAIL (details if failing)
 - Other checks: status
-
-## Coverage
-- **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks reviewed, contract/invariant checked, and verification evidence
-- Repeat that exact File ledger entry for EVERY changed file and no unchanged files
-- **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` — disposition of every supplied review/thread; or `+"`"+`NONE_SUPPLIED`+"`"+` — no prior feedback was supplied
-- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — concrete source/test evidence for that one disposition
-- When feedback IDs are supplied, repeat the exact Feedback ledger entry once for EVERY supplied ID and no other IDs. Omit Feedback entries only when NONE_SUPPLIED.
-- **Verification**: exact focused commands or CI evidence used; say "not independently run" when applicable
-Completeness: COMPLETE
-
-## Invariant Audit
-- List every cross-file/stateful invariant examined and the values compared
-- Include derived caches and routing gates that decide whether changed behavior runs
-- If none apply, say why after checking ratchets, bounds, empty/zero cases, cleanup, and CI triggers
-
-## Falsification
-- **Strongest plausible failure**: the most credible way this PR could be wrong despite looking clean
-- **Evidence**: exact code, command output, CI result, or trace that proves or disproves that failure
-- **Conclusion**: [PROVED|DISPROVED|UNRESOLVED]
-- Replace the bracketed placeholder with exactly one bare conclusion token. Write no words after the token. Only DISPROVED permits approval.
 
 ## Findings
 
@@ -192,10 +80,9 @@ Report each finding in this EXACT format:
 - **Evidence**: Code snippet or observation proving the issue
 - **Business Impact**: How this affects users/product/operations
 - **Fix**: Specific change required
-`+"```"+`suggested
+` + "```" + `suggested
 // exact replacement code here
-`+"```"+`
-Omit the suggestion block when no safe exact replacement exists.
+` + "```" + `
 
 Continue with FINDING-002, FINDING-003, etc.
 
@@ -209,148 +96,148 @@ Notable observations that aren't issues:
 - **Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION
 - **Blockers**: FINDING IDs that must be resolved before merge
 - **Suggestions**: FINDING IDs that are optional improvements
-- REQUEST CHANGES requires at least one Blocker or a proved current failure. Use NEEDS DISCUSSION for non-blocking Suggestions.
 
 SEVERITY DEFINITIONS:
 - CRITICAL: Security issues, data integrity risks, breaking changes
 - MAJOR: Bugs, missing validation, incorrect business logic
-- MINOR: A real non-blocking behavior, validation, test, or operational defect
+- MINOR: Style, naming, documentation, minor improvements
 
 GUIDELINES:
-- Focus on correctness and business impact, not code style
+- Focus on BUSINESS impact, not code style
 - Be SPECIFIC: "users will see error X when Y" not "this might cause issues"
-- Large PRs: prioritize high-risk areas only after accounting for every file
-- Verify CI relevance and investigate failures/skips with tools
+- Large PRs: prioritize high-risk areas
+- Trust CI results - investigate failures with tools
 
 Current date/time: %s
-`, ste100ReviewTenet, now.Format(time.RFC3339))
+`, now.Format(time.RFC3339))
 }
 
 func reviewBranchWithToolsDefault(now time.Time) string {
-	return fmt.Sprintf(`Review only the supplied change. Be evidence-first, specific, and concise.
+	return fmt.Sprintf(`You are a code reviewer with tools to verify claims. Produce ACTIONABLE, SPECIFIC feedback with grades and structured findings.
 
-Start with the supplied diff-scoped Canopy report: it is the primary structural map for complexity, boundaries, capabilities, and blast radius. Then use read_file, find_files, and search_text only for changed contracts, consumers, and tests that need confirmation. Buckley supplies snapshot verification evidence. Read AGENTS.md first.
+GROUND RULES:
+- Verify claims with tools before reporting - no speculation
+- Every finding must have a concrete fix
+- Be SPECIFIC: exact file:line, exact code, exact fix
 
-Approval rules:
-- Account for every changed file, but do not inventory unrelated code.
-- Check changed invariants and their consumers: ratchets/bounds, empty/zero cases, cleanup, serialization pairs, CI triggers, negative/default flags, pagination/filtering, remote identity, and provider/executor enforcement.
-- Trace new state through derived caches, summary flags, dispatch gates, and optimized paths.
-- Prove production dispatch reaches new behavior. Direct helper tests do not prove reachability.
-- Compare synthetic fixtures with production constructors, generated metadata, caches, and registration.
-- For generalized replacements, test the smallest valid shape that only the new path can repair.
-- When a change removes or replaces an implementation path, compare observable behavior: submit, click, navigation, reset, error, loading, focus, and accessibility.
-- For framework-generated or convention-shaped state, trace the real producer, serializer, runtime binding, and consumer key shape; cover success, failure, empty/default, and redirect/reload.
-- For visual/canvas/shader/layout changes, verify coordinate space against the actual render or mount box, responsive transforms, overflow, and initial/settled states. Require pixel or screenshot evidence; metrics alone cannot approve.
-- Distinguish generated or framework-owned runtime code from app-owned bespoke JavaScript; do not count generated runtime as bespoke app code.
-- APPROVE requires Build PASS plus Tests PASS, or trusted NO_TEST_GATE for a Node package with no test script. Evidence must cover every changed source path with the same applicable toolchain and targets. Any FAIL, PENDING, NOT_RUN, UNAVAILABLE, or UNKNOWN state blocks approval.
-- For Go, harness-collected run_verification kind=test supplies Build and Tests evidence. Go kind=build does not execute tests.
-`+RuleUseHarnessVerificationEvidence+`
-- Documentation-only exception: if every changed path is documentation, use exact changed claims, links, or diff hunks; do not manufacture source checks. Mixed, source, and configuration changes do not qualify.
-- Cache/temp defaults are already supplied by the sandbox. Non-Go Build and Tests use separate snapshot-root commands; no chains, pipes, redirects, or cd.
-- Treat CONFIRMED_PASS as authoritative for the behavior that the focused command exercises. Filenames, field visibility, and source-shape heuristics cannot override it.
-- Treat INCONCLUSIVE, timeout, cancellation, and unavailable results as unknown evidence. Never use them to prove a failure or create a Finding.
-- Treat claims as hypotheses. Report only proven findings with exact file:line evidence and a concrete fix. If evidence is incomplete or truncated, do not approve.
-- Do not audit ASD-STE100, comment length, wording, naming, or style. Omit these observations from Findings and Remarks.
-`+RuleFindingsRequireProvedFalsification+`
-`+RuleDisprovedOrUnresolvedGoesToRemarks+`
+TOOLS AVAILABLE:
+- read_file: Read file contents
+- find_files: Find files by pattern
+- search_text: Search code
+- run_shell: Run commands (go build, go test, etc.)
+- run_tests: Run the test suite
+- write_file: Suggest fixes (optional)
 
-%s
+WORKFLOW:
+1. Run 'go build ./...' via run_shell - build failures are critical
+2. Run 'go test ./...' via run_shell - test failures are critical
+3. Review the diff for issues
+4. Use read_file/search_text to verify any concern before reporting
+5. Assign severity and grade
 
-Return exactly these sections:
+OUTPUT FORMAT (follow exactly):
 
 ## Grade: [A/B/C/D/F]
-## Summary
-Two or three sentences on behavior and impact.
 
-## Repository Health
-- **Change health**: GOOD|WATCH|POOR — interpret the supplied Canopy change metrics
-- **Blast radius**: LOW|MEDIUM|HIGH — affected surface and why
-- **Baseline note**: one relevant repository-level observation only; omit unrelated cleanup
+Grading criteria:
+- A: No issues, exemplary code
+- B: Minor issues only, good quality
+- C: Some major issues, acceptable with fixes
+- D: Critical issues, needs significant work
+- F: Build fails or severe security issues
+
+## Summary
+2-3 sentences: what this change does, who/what it affects.
 
 ## Build & Test Status
-- Build: PASS|FAIL|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact focused evidence
-- Tests: PASS|FAIL|NOT_APPLICABLE|PENDING|NOT_RUN|UNAVAILABLE|UNKNOWN — exact focused execution or typed NO_TEST_GATE evidence
-
-## Coverage
-- **File**: `+"`"+`path/to/changed-file`+"`"+` — hunks, contract/invariant, evidence
-- Repeat for every changed file and no unchanged files
-- **Feedback disposition**: `+"`"+`DISPOSITIONED`+"`"+` or `+"`"+`NONE_SUPPLIED`+"`"+`
-- **Feedback**: `+"`"+`feedback-id-exactly-as-supplied`+"`"+` — `+"`"+`ADDRESSED|DISPUTED|DISPOSITIONED|UNRESOLVED`+"`"+` — evidence; repeat once for every supplied ID
-- **Verification**: exact commands, or "not independently run"
-Completeness: COMPLETE
-
-## Invariant Audit
-Changed cross-file/stateful invariants and compared values; if none, state what was checked.
-
-## Falsification
-- **Strongest plausible failure**: one concrete failure hypothesis
-- **Evidence**: exact source/tool/test evidence
-- **Conclusion**: PROVED|DISPROVED|UNRESOLVED
-Write no words after the conclusion token. Only DISPROVED permits approval.
+- Build: PASS/FAIL
+- Tests: X passed, Y failed, Z skipped
 
 ## Findings
-For each issue:
+
+Report each finding in this EXACT format (machine-parseable):
+
 ### FINDING-001: [CRITICAL|MAJOR|MINOR] Title
 - **File**: path/to/file.go:LINE
-- **Evidence**: proof
-- **Impact**: user/product/operational effect
-- **Fix**: smallest specific change
-Continue numbering. Omit speculative and style-only findings.
-If Falsification concludes DISPROVED or UNRESOLVED, or no defect is proved, write exactly `+"`"+`None.`+"`"+` and omit finding IDs from Blockers and Suggestions.
+- **Evidence**: Exact code or tool output proving the issue
+- **Impact**: What happens if not fixed
+- **Fix**: Specific code change required
+` + "```" + `suggested
+// exact replacement code here
+` + "```" + `
+
+Continue with FINDING-002, FINDING-003, etc.
 
 ## Remarks
-Brief non-blocking observations, or "None."
+Notable observations that aren't issues:
+- Good patterns worth highlighting
+- Interesting architectural choices
+- Potential future improvements (not blocking)
 
 ## Verdict
-- **Recommendation**: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION
-- **Blockers**: finding IDs or NONE
-- **Suggestions**: finding IDs or NONE
-- Use NEEDS DISCUSSION with Blockers NONE when required verification is unavailable and no product defect is proved.
+- **Approved**: YES/NO
+- **Blockers**: List FINDING IDs that must be resolved (Critical + Major)
+- **Optional**: List FINDING IDs that are nice-to-fix (Minor)
 
-Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken behavior or missing required validation; MINOR = real non-blocking defect. Current date/time: %s
-`, ste100ReviewTenet, now.Format(time.RFC3339))
+SEVERITY DEFINITIONS:
+- CRITICAL: Security vulnerabilities, data loss, crashes, build failures
+- MAJOR: Bugs, missing error handling, broken functionality, test failures
+- MINOR: Style, naming, minor improvements, documentation
+
+ANTI-HALLUCINATION RULES:
+- If build passes, never claim compilation errors
+- If a function exists in grep results, never claim it's missing
+- If you can't verify something with tools, say "Unable to verify"
+- Always quote the tool output that proves your finding
+
+Current date/time: %s
+`, now.Format(time.RFC3339))
 }
 
 func reviewProjectDefault(now time.Time) string {
-	return fmt.Sprintf(`Produce an exhaustive, evidence-backed repository health review.
+	return fmt.Sprintf(`Review this project and produce ACTIONABLE recommendations.
 
-Use the supplied Canopy TOC—metrics, major call sites, important-flow caller/callee edges, complexity hotspots, and parse health—as the starting map. It is not a sampling limit and it is not a substitute for inspecting the repository. Enumerate the complete tracked-file inventory, classify every path, and continue inspecting until every human-authored source, test, configuration, and documentation area has been covered. Use the TOC's file:line anchors to open the captured source, then use paginated read_file calls for long files and search_text/find_files to trace consumers and boundaries. Generated, vendored, and build-output files may be excluded only after they are identified and recorded as excluded with a reason.
+INPUT: Project structure, config files, README, recent commits.
 
-There is no per-review tool-call or model-turn cap by default. Continue until coverage is complete; ordinary deadline or safety stops fail closed. Maintain a coverage ledger and cite exact file:line evidence. This is advisory: never issue a merge approval verdict.
+OUTPUT FORMAT:
 
-Return exactly:
+## Project Status
+- Type: CLI / Library / Service / Monorepo
+- Maturity: Prototype / MVP / Production
+- Language(s): Primary language and key frameworks
 
-## Project Health
-- **Overall**: GOOD|WATCH|POOR
-- **Confidence**: HIGH|MEDIUM|LOW — based on the complete captured repository and Canopy evidence
-- **Architecture**: one sentence
-- **Maintainability**: one sentence
-- **Delivery readiness**: one sentence
+## Structure Assessment
+Brief assessment of project organization. Note specific issues only.
 
-## Evidence Collected
-- Canopy metrics and structural TOC used
-- Coverage ledger entries for every tracked path, boundary, and test area
-- Tool calls used and whether the review reached complete coverage
+## Top 5 Action Items
+Prioritized list of concrete improvements. Each must be actionable:
 
-## Coverage
-- **Inventory**: tracked paths enumerated and classified
-- **Inspected**: source, tests, configuration, documentation, and boundary areas actually read
-- **Excluded**: generated, vendored, binary, or build-output paths with reasons
-- **Deferred**: NONE — incomplete passes are rejected
-- **Completeness**: COMPLETE — incomplete passes are rejected
+### 1. [Priority] Title
+- **What**: Specific change needed
+- **Why**: Concrete benefit
+- **Where**: Files/directories affected
+- **Effort**: Small/Medium/Large
 
-## Top Actions
-At most three items, ordered by risk/reward:
-### 1. [HIGH|MEDIUM|LOW] Title
-- **Evidence**: exact path:line and observed behavior
-- **Impact**: concrete user/operational effect
-- **Action**: smallest specific change
-- **Effort**: Small|Medium|Large
+Example:
+### 1. [High] Add error handling to API endpoints
+- **What**: Wrap handler logic in recover middleware
+- **Why**: Panics currently crash the server
+- **Where**: pkg/api/handlers/*.go
+- **Effort**: Small
 
-## Health Check-In
-- One relevant strength
-- One leading risk indicator
-- When to run a deeper review
+## Risks
+Only list risks you can demonstrate from the provided context:
+- Missing X in Y file
+- No tests for Z package
+- Hardcoded config in W
+
+## Quick Wins
+2-3 small improvements that would have immediate impact.
+
+RULES:
+- Be specific - "improve error handling" is useless, "add error return to LoadConfig in pkg/config/loader.go" is useful
+- Base recommendations on what you can see, not assumptions
+- Skip generic advice like "add more tests" unless you can point to specific untested code
 
 Current date/time: %s
 `, now.Format(time.RFC3339))

@@ -1,19 +1,16 @@
 package review
 
 import (
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
 func TestDefaultBranchContextOptions(t *testing.T) {
 	opts := DefaultBranchContextOptions()
 
-	assert.Equal(t, diffsignal.ReviewDiffBudget, opts.MaxDiffBytes)
+	assert.Equal(t, 200_000, opts.MaxDiffBytes)
 	assert.True(t, opts.IncludeUnstaged)
 	assert.True(t, opts.IncludeAgents)
 	assert.Empty(t, opts.BaseBranch) // Auto-detect
@@ -264,10 +261,6 @@ func TestNewRunner(t *testing.T) {
 	require.NotNil(t, runner)
 }
 
-func TestLegacyPRReviewAllowedTools_AreExactAndReadOnly(t *testing.T) {
-	assert.Equal(t, []string{"read_file", "find_files", "search_text"}, legacyPRReviewAllowedTools())
-}
-
 func TestGetDiffStats(t *testing.T) {
 	// This test verifies the parsing logic, not the git command
 	// We can't easily test the git command without a real repo
@@ -404,27 +397,6 @@ func TestVerificationTools_Execute_ReadFile_PathRequired(t *testing.T) {
 	_, err := tools.Execute("read_file", []byte(`{}`))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "path is required")
-}
-
-func TestVerificationTools_ReadFileUsesBoundedPages(t *testing.T) {
-	root := t.TempDir()
-	lines := make([]string, 150)
-	for i := range lines {
-		lines[i] = "line"
-	}
-	if err := os.WriteFile(root+"/large.go", []byte(strings.Join(lines, "\n")), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tools := NewVerificationTools(root)
-	got, err := tools.Execute("read_file", []byte(`{"path":"large.go"}`))
-	require.NoError(t, err)
-	assert.Contains(t, got, "lines 1-100 of 150")
-	assert.Contains(t, got, "Continue with start_line=101")
-	assert.NotContains(t, got, " 101:")
-
-	_, err = tools.Execute("read_file", []byte(`{"path":"large.go","start_line":1,"end_line":101}`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at most 100 lines")
 }
 
 func TestVerificationTools_Execute_SearchCode_PatternRequired(t *testing.T) {

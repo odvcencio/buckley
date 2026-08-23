@@ -13,15 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/rlm"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/bus"
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/orchestrator"
+	"github.com/draco/buckley/pkg/rlm"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
 )
 
 // Runner provides plan execution using the RLM runtime.
@@ -40,7 +39,6 @@ type Runner struct {
 	runtime     *rlm.Runtime
 	currentPlan *orchestrator.Plan
 	planner     *orchestrator.Planner
-	graftClient *graft.Client
 }
 
 // New constructs an RLM runner with the full runtime wired.
@@ -82,13 +80,6 @@ func (r *Runner) SetBus(b bus.MessageBus) {
 	r.bus = b
 }
 
-// SetGraftClient configures graft coordination for subagent lifecycle.
-func (r *Runner) SetGraftClient(client *graft.Client) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.graftClient = client
-}
-
 func (r *Runner) initRuntime() error {
 	if r.models == nil {
 		return fmt.Errorf("model manager required")
@@ -109,13 +100,12 @@ func (r *Runner) initRuntime() error {
 	}
 
 	runtime, err := rlm.NewRuntime(rlmCfg, rlm.RuntimeDeps{
-		Models:      r.models,
-		Store:       r.store,
-		Registry:    r.registry,
-		Bus:         r.bus,
-		Telemetry:   r.telemetry,
-		UseToon:     r.cfg != nil && r.cfg.Encoding.UseToon,
-		GraftClient: r.graftClient,
+		Models:    r.models,
+		Store:     r.store,
+		Registry:  r.registry,
+		Bus:       r.bus,
+		Telemetry: r.telemetry,
+		UseToon:   r.cfg != nil && r.cfg.Encoding.UseToon,
 	})
 	if err != nil {
 		return err

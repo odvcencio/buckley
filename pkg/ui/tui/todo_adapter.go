@@ -3,8 +3,8 @@ package tui
 import (
 	"time"
 
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/tool/builtin"
 )
 
 // todoStoreAdapter adapts storage.Store to the builtin.TodoStore interface.

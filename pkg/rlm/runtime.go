@@ -3,24 +3,20 @@ package rlm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/agentloop"
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/coordination/security"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"github.com/draco/buckley/pkg/bus"
+	"github.com/draco/buckley/pkg/coordination/security"
+	"github.com/draco/buckley/pkg/encoding/toon"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/tool/builtin"
 )
 
 const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.
@@ -118,8 +114,6 @@ type RuntimeDeps struct {
 	Telemetry    *telemetry.Hub
 	SessionID    string
 	UseToon      bool // Use TOON encoding for compact tool results
-	Engine       *rules.Engine
-	GraftClient  *graft.Client // Optional graft coordination client
 }
 
 // Runtime is the RLM execution engine.
@@ -135,8 +129,6 @@ type Runtime struct {
 	telemetry   *telemetry.Hub
 	sessionID   string
 	resultCodec *toon.Codec // TOON encoding for compact tool results
-	engine      *rules.Engine
-	graftClient *graft.Client
 
 	hooksMu sync.RWMutex
 	hooks   []IterationHook
@@ -162,18 +154,14 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 	conflicts := NewConflictDetector()
 	scratchpad := NewScratchpad(deps.Store, deps.Summarizer, cfg.Scratchpad)
 
-	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{
-		MaxConcurrent: cfg.SubAgent.MaxConcurrent,
-	}, BatchDispatcherDeps{
-		Router:      router,
-		Models:      deps.Models,
-		Registry:    registry,
-		Scratchpad:  scratchpad,
-		Conflicts:   conflicts,
-		Approver:    deps.ToolApprover,
-		Bus:         deps.Bus,
-		Engine:      deps.Engine,
-		GraftClient: deps.GraftClient,
+	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{}, BatchDispatcherDeps{
+		Router:     router,
+		Models:     deps.Models,
+		Registry:   registry,
+		Scratchpad: scratchpad,
+		Conflicts:  conflicts,
+		Approver:   deps.ToolApprover,
+		Bus:        deps.Bus,
 	})
 	if err != nil {
 		return nil, err
@@ -191,8 +179,6 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 		telemetry:   deps.Telemetry,
 		sessionID:   strings.TrimSpace(deps.SessionID),
 		resultCodec: toon.New(deps.UseToon),
-		engine:      deps.Engine,
-		graftClient: deps.GraftClient,
 	}, nil
 }
 
@@ -206,63 +192,13 @@ func (r *Runtime) OnIteration(hook IterationHook) {
 	r.hooksMu.Unlock()
 }
 
-// errCoordinatorAnswerReady signals the DispatchTools hook's post-dispatch
-// readiness check (token budget exhausted, confidence threshold met, or
-// set_answer(ready=true) already applied by the tool call itself): the
-// pre-migration coordinator loop's `for ... && !answer.Ready` condition
-// would end the loop right here, without one more model call. Returning
-// this from DispatchTools makes agentloop.Controller stop the turn
-// immediately for the same reason, at the same point, instead of spending
-// one more (budget-exceeding) model round before the caller notices Ready.
-var errCoordinatorAnswerReady = errors.New("rlm: coordinator answer ready")
-
-// coordinatorGovernorConfig tunes pkg/agentloop.Governor for
-// Runtime.Execute. The coordinator's own maxIterations (CoordinatorConfig,
-// normally 10) is already Governor.MaxRounds verbatim -- it was always the
-// authoritative round ceiling, so the migration does not loosen it. Only
-// the repeat/cycle detectors are loosened past pkg/agentloop.DefaultConfig:
-// re-inspecting the same scratchpad key, or delegating a similarly-shaped
-// follow-up task, is normal coordinator behavior and should not trip a
-// guard the coordinator never had before this migration.
-func coordinatorGovernorConfig(maxIterations int) agentloop.Config {
-	cfg := agentloop.DefaultConfig()
-	cfg.MaxRounds = maxIterations
-	cfg.ExactRepeatLimit = 5
-	cfg.OutcomeRepeatLimit = 8
-	return cfg
-}
-
 // Execute runs the coordinator loop for a task.
-//
-// Migrated onto pkg/agentloop.Controller (the shared turn engine): request
-// projection, tool-call ID backfill, and per-round Governor consultation
-// are Controller-owned. The coordinator's own budget/readiness logic (token
-// budget, confidence threshold, set_answer) is unchanged; it decides
-// whether to stop from inside the DispatchTools hook, exactly where the
-// pre-migration loop decided it, and stops Controller immediately via
-// errCoordinatorAnswerReady rather than letting one more model round run
-// after budget or confidence already say the answer is done. If the shared
-// Governor intervenes first, Controller reserves a tools-disabled synthesis
-// and Execute accepts only its conclusive final message.
 func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("runtime is nil")
 	}
 	if strings.TrimSpace(task) == "" {
 		return nil, fmt.Errorf("task required")
-	}
-
-	// Register coordinator agent with graft coordination.
-	if r.graftClient != nil && r.graftClient.Available() {
-		if err := r.graftClient.Coordination.Join(ctx); err != nil {
-			r.publishGraftDebug("graft coordinator join failed: %v", err)
-		} else {
-			defer func() {
-				if err := r.graftClient.Coordination.Leave(ctx); err != nil {
-					r.publishGraftDebug("graft coordinator leave failed: %v", err)
-				}
-			}()
-		}
 	}
 
 	start := time.Now()
@@ -282,24 +218,6 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	confidenceThreshold := r.config.Coordinator.ConfidenceThreshold
 	if confidenceThreshold <= 0 {
 		confidenceThreshold = DefaultConfig().Coordinator.ConfidenceThreshold
-	}
-
-	// Evaluate coordinator budget rules to override defaults.
-	if r.engine != nil {
-		matched, evalErr := rules.Eval(r.engine, "coordinator", rules.CoordinatorFacts{
-			EstimatedTokens: maxTokens,
-		})
-		if evalErr == nil && len(matched) > 0 {
-			if mi, ok := matched[0].Params["max_iterations"].(float64); ok && int(mi) > 0 {
-				maxIterations = int(mi)
-			}
-			if mt, ok := matched[0].Params["max_tokens"].(float64); ok && int(mt) > 0 {
-				maxTokens = int(mt)
-			}
-			if ct, ok := matched[0].Params["confidence_threshold"].(float64); ok && ct > 0 {
-				confidenceThreshold = ct
-			}
-		}
 	}
 
 	runtimeDeadline := false
@@ -324,46 +242,70 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 		{Role: "system", Content: coordinatorSystemPrompt},
 		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
 	}
-	coordinatorModel := r.coordinatorModelID()
-	sessionID := fmt.Sprintf("rlm-coordinator-%d", start.UnixNano())
-	contextWindow, _ := r.models.GetContextLength(coordinatorModel)
 
-	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
-		answer.Iteration = round
-		if round > 1 {
-			// The pre-migration loop appended this at the end of the prior
-			// round once it knew that round would not be the last one;
-			// Controller calls BuildRequest once per round instead, so the
-			// equivalent point is "every round after the first."
-			messages = append(messages, model.Message{
-				Role:    "user",
-				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
-			})
+	for answer.Iteration < maxIterations && !answer.Ready {
+		if err := ctx.Err(); err != nil {
+			if err == context.DeadlineExceeded && runtimeDeadline {
+				answer.Ready = true
+				break
+			}
+			return &answer, err
 		}
+
+		answer.Iteration++
+
 		req := model.ChatRequest{
-			Model:      coordinatorModel,
+			Model:      r.coordinatorModelID(),
+			Messages:   messages,
 			Tools:      toolDefs,
 			ToolChoice: toolChoice,
-			SessionID:  sessionID,
 		}
-		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
-		return req, nil
-	}
+		if r.models.SupportsReasoning(req.Model) {
+			req.Reasoning = &model.ReasoningConfig{Effort: defaultReasoningEffort}
+		}
 
-	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
-		resp, err := r.models.ChatCompletion(ctx, req)
+		resp, err := streamChatCompletion(ctx, r.models, req)
 		if err != nil {
-			return nil, err
+			return &answer, err
 		}
 		answer.TokensUsed += resp.Usage.TotalTokens
-		return resp, nil
-	})
 
-	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
-		toolResults := r.executeCoordinatorTools(ctx, registry, calls)
-		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
-		for i, tr := range toolResults {
-			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
+		if len(resp.Choices) == 0 {
+			return &answer, fmt.Errorf("no response from coordinator")
+		}
+
+		choice := resp.Choices[0]
+		if len(choice.Message.ToolCalls) == 0 {
+			content := extractText(choice.Message)
+			if content != "" {
+				answer.Content = strings.TrimSpace(content)
+				answer.Ready = true
+			}
+			summaries := r.collectScratchpadSummaries(ctx, 6)
+			r.emitIteration(IterationEvent{
+				Iteration:     answer.Iteration,
+				MaxIterations: maxIterations,
+				Ready:         answer.Ready,
+				TokensUsed:    answer.TokensUsed,
+				Summary:       answer.Content,
+				Scratchpad:    summaries,
+			})
+			break
+		}
+
+		messages = append(messages, model.Message{
+			Role:      "assistant",
+			Content:   choice.Message.Content,
+			ToolCalls: choice.Message.ToolCalls,
+		})
+		toolResults := r.executeCoordinatorTools(ctx, registry, choice.Message.ToolCalls)
+		for _, result := range toolResults {
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				ToolCallID: result.ID,
+				Name:       result.Name,
+				Content:    result.Result,
+			})
 		}
 
 		if answer.TokensUsed >= maxTokens {
@@ -383,76 +325,14 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			Scratchpad:    summaries,
 		})
 
-		if answer.Ready {
-			return outcomes, errCoordinatorAnswerReady
+		if !answer.Ready {
+			messages = append(messages, model.Message{
+				Role:    "user",
+				Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold),
+			})
 		}
-		return outcomes, nil
-	})
-
-	// Mirrors the pre-migration messages accumulation: the assistant
-	// tool-call message and its tool results feed the next round's request.
-	// The terminal (no-tool-call) assistant message never lands here -- its
-	// content is read from Controller's Result.Message once the loop ends.
-	history := agentloop.HistorySinkFunc(func(msg model.Message) {
-		switch {
-		case len(msg.ToolCalls) > 0:
-			messages = append(messages, msg)
-		case msg.Role == "tool":
-			messages = append(messages, msg)
-		}
-	})
-
-	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:          agentloop.New(coordinatorGovernorConfig(maxIterations)),
-		FinalizeOnStop:    true,
-		LifecycleObserver: telemetry.NewAgentLoopObserver(r.telemetry),
-		BuildRequest:      buildRequest,
-		CallModel:         callModel,
-		DispatchTools:     dispatchTools,
-		History:           history,
-	})
-	if err != nil {
-		return &answer, err
 	}
 
-	result, runErr := ctrl.Run(ctx)
-	if result != nil && result.Termination.Kind != "" {
-		r.emitTermination(result.Termination)
-	}
-	if runErr != nil {
-		if errors.Is(runErr, errCoordinatorAnswerReady) {
-			answer.Normalize()
-			return &answer, nil
-		}
-		if errors.Is(runErr, context.DeadlineExceeded) && runtimeDeadline {
-			answer.Ready = true
-			answer.Normalize()
-			return &answer, nil
-		}
-		return &answer, runErr
-	}
-	if completionErr := result.RequireConclusive(); completionErr != nil {
-		return &answer, completionErr
-	}
-
-	switch result.FinishReason {
-	case agentloop.FinishReasonEmptyChoices:
-		return &answer, fmt.Errorf("no response from coordinator")
-	}
-	content := extractText(result.Message)
-	if content != "" {
-		answer.Content = strings.TrimSpace(content)
-		answer.Ready = true
-	}
-	summaries := r.collectScratchpadSummaries(ctx, 6)
-	r.emitIteration(IterationEvent{
-		Iteration:     answer.Iteration,
-		MaxIterations: maxIterations,
-		Ready:         answer.Ready,
-		TokensUsed:    answer.TokensUsed,
-		Summary:       answer.Content,
-		Scratchpad:    summaries,
-	})
 	answer.Normalize()
 	return &answer, nil
 }
@@ -472,32 +352,6 @@ func (r *Runtime) buildCoordinatorRegistry(ctx context.Context, answer *Answer) 
 	registry.Register(NewDelegateBatchTool(r.dispatcher, ctxProvider))
 	registry.Register(NewInspectTool(r.scratchpad, ctxProvider))
 	registry.Register(NewSetAnswerTool(answer))
-
-	// Validate via arbiter that coordinator role is restricted.
-	if r.engine != nil {
-		matched, err := rules.Eval(r.engine, "role_permissions", rules.RolePermissionFacts{
-			Role: "coordinator",
-		})
-		if err == nil && len(matched) > 0 {
-			// The rule confirms coordinator can only use these 4 tools.
-			// If someone overrides the .arb to change coordinator access,
-			// they'd need to register tools here too -- intentional friction.
-			if r.telemetry != nil {
-				r.telemetry.Publish(telemetry.Event{
-					Type:      telemetry.EventDebug,
-					SessionID: r.sessionID,
-					Data: map[string]any{
-						"source":    "rlm.role_permissions",
-						"role":      "coordinator",
-						"action":    matched[0].Action,
-						"can_write": false,
-						"can_shell": false,
-					},
-				})
-			}
-		}
-	}
-
 	return registry
 }
 
@@ -584,18 +438,11 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
-		res, err := registry.ExecuteWithContext(ctx, name, args)
+		res, err := registry.Execute(name, args)
 		if err != nil {
 			result.Result = fmt.Sprintf("execution error: %v", err)
-			result.Error = err.Error()
-			result.Success = false
 		} else {
 			result.Result = r.formatCoordinatorResult(res)
-			result.Success = res != nil && res.Success
-			if res != nil {
-				result.Error = res.Error
-				result.Stderr, _ = res.Data["stderr"].(string)
-			}
 		}
 		results = append(results, result)
 	}
@@ -628,30 +475,10 @@ func (r *Runtime) emitIteration(event IterationEvent) {
 	}
 }
 
-func (r *Runtime) emitTermination(termination agentloop.Termination) {
-	if r == nil || r.telemetry == nil {
-		return
-	}
-	r.telemetry.Publish(telemetry.Event{
-		Type:      telemetry.EventDebug,
-		SessionID: r.sessionID,
-		Data: map[string]any{
-			"source":                 "rlm.controller",
-			"termination_kind":       termination.Kind,
-			"termination_reason":     termination.Reason,
-			"finalization_attempted": termination.FinalizationAttempted,
-			"finalization_error":     termination.FinalizationError,
-		},
-	})
-}
-
 type coordinatorToolResult struct {
-	ID      string
-	Name    string
-	Result  string
-	Error   string
-	Stderr  string
-	Success bool
+	ID     string
+	Name   string
+	Result string
 }
 
 func (r *Runtime) formatCoordinatorResult(res *builtin.Result) string {
@@ -685,20 +512,6 @@ func extractText(msg model.Message) string {
 	return content
 }
 
-func (r *Runtime) publishGraftDebug(format string, args ...any) {
-	if r.telemetry == nil {
-		return
-	}
-	r.telemetry.Publish(telemetry.Event{
-		Type:      telemetry.EventDebug,
-		SessionID: r.sessionID,
-		Data: map[string]any{
-			"source":  "rlm.graft",
-			"message": fmt.Sprintf(format, args...),
-		},
-	})
-}
-
 func formatScratchpadSummaries(summaries []EntrySummary) []map[string]any {
 	out := make([]map[string]any, 0, len(summaries))
 	for _, summary := range summaries {
@@ -711,4 +524,188 @@ func formatScratchpadSummaries(summaries []EntrySummary) []map[string]any {
 		})
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Streaming chat completions.
+//
+// A blocking ChatCompletion call against a heavy reasoning model can sit
+// silent for minutes: nothing is written to the wire until the provider has
+// generated the *entire* response, so a slow model looks indistinguishable
+// from a hung one, and a context deadline that fires mid-generation loses
+// everything the model had already produced. streamChatCompletion instead
+// drives model.Manager.ChatCompletionStream and incrementally assembles the
+// equivalent non-streaming *model.ChatResponse, so:
+//
+//  1. Callers get the exact same response shape (Choices[0].Message.Content /
+//     .ToolCalls / .Reasoning, Usage) that ChatCompletion would have returned
+//     -- the tool-call extraction and text-extraction logic downstream is
+//     unchanged.
+//  2. If ctx is canceled or its deadline expires mid-stream, whatever content
+//     / tool-call data had already arrived is returned instead of being
+//     discarded, so a slow-but-progressing model still yields a usable
+//     (if truncated) answer rather than "timed out with no output".
+//  3. Setting BUCKLEY_STREAM_DEBUG=1 in the environment makes the incremental
+//     content/reasoning deltas visible on stderr as they arrive, which is
+//     useful when diagnosing a run that looks stalled. This is off by default
+//     so normal operation (and tests) see no behavior change; wiring
+//     per-token progress into a UI/telemetry surface is a follow-up (the
+//     review/PR call sites that consume this package are out of scope for
+//     this change).
+// ---------------------------------------------------------------------------
+
+// streamChatCompletion issues a streaming chat completion and assembles the
+// equivalent non-streaming *model.ChatResponse from the received chunks.
+func streamChatCompletion(ctx context.Context, client *model.Manager, req model.ChatRequest) (*model.ChatResponse, error) {
+	chunkCh, errCh := client.ChatCompletionStream(ctx, req)
+
+	agg := newStreamAggregator()
+	var streamErr error
+
+	for chunkCh != nil || errCh != nil {
+		select {
+		case chunk, ok := <-chunkCh:
+			if !ok {
+				chunkCh = nil
+				continue
+			}
+			agg.absorb(chunk)
+			logStreamProgress(chunk)
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			streamErr = err
+		case <-ctx.Done():
+			if agg.hasContent() {
+				// Partial response survives the deadline/cancellation instead
+				// of being discarded.
+				return agg.chatResponse(), nil
+			}
+			return nil, ctx.Err()
+		}
+	}
+
+	if streamErr != nil && !agg.hasContent() {
+		return nil, streamErr
+	}
+	return agg.chatResponse(), nil
+}
+
+// streamAggregator incrementally assembles a *model.ChatResponse from a
+// sequence of model.StreamChunk deltas.
+type streamAggregator struct {
+	role         string
+	content      strings.Builder
+	reasoning    strings.Builder
+	toolCalls    map[int]*model.ToolCall
+	toolOrder    []int
+	usage        model.Usage
+	finishReason string
+	id           string
+	respModel    string
+}
+
+func newStreamAggregator() *streamAggregator {
+	return &streamAggregator{toolCalls: make(map[int]*model.ToolCall)}
+}
+
+func (a *streamAggregator) absorb(chunk model.StreamChunk) {
+	if chunk.ID != "" {
+		a.id = chunk.ID
+	}
+	if chunk.Model != "" {
+		a.respModel = chunk.Model
+	}
+	if chunk.Usage != nil {
+		a.usage = *chunk.Usage
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Role != "" {
+			a.role = choice.Delta.Role
+		}
+		if choice.Delta.Content != "" {
+			a.content.WriteString(choice.Delta.Content)
+		}
+		if choice.Delta.Reasoning != "" {
+			a.reasoning.WriteString(choice.Delta.Reasoning)
+		}
+		if choice.FinishReason != nil && *choice.FinishReason != "" {
+			a.finishReason = *choice.FinishReason
+		}
+		for _, td := range choice.Delta.ToolCalls {
+			tc, ok := a.toolCalls[td.Index]
+			if !ok {
+				tc = &model.ToolCall{}
+				a.toolCalls[td.Index] = tc
+				a.toolOrder = append(a.toolOrder, td.Index)
+			}
+			if td.ID != "" {
+				tc.ID = td.ID
+			}
+			if td.Type != "" {
+				tc.Type = td.Type
+			}
+			if td.Function != nil {
+				tc.Function.Name += td.Function.Name
+				tc.Function.Arguments += td.Function.Arguments
+			}
+		}
+	}
+}
+
+func (a *streamAggregator) hasContent() bool {
+	return a.content.Len() > 0 || a.reasoning.Len() > 0 || len(a.toolCalls) > 0
+}
+
+func (a *streamAggregator) chatResponse() *model.ChatResponse {
+	role := a.role
+	if role == "" {
+		role = "assistant"
+	}
+	msg := model.Message{
+		Role:      role,
+		Content:   a.content.String(),
+		Reasoning: a.reasoning.String(),
+	}
+	if len(a.toolOrder) > 0 {
+		calls := make([]model.ToolCall, 0, len(a.toolOrder))
+		for _, idx := range a.toolOrder {
+			calls = append(calls, *a.toolCalls[idx])
+		}
+		msg.ToolCalls = calls
+	}
+	return &model.ChatResponse{
+		ID:    a.id,
+		Model: a.respModel,
+		Choices: []model.Choice{{
+			Index:        0,
+			Message:      msg,
+			FinishReason: a.finishReason,
+		}},
+		Usage: a.usage,
+	}
+}
+
+var streamDebugEnabled = sync.OnceValue(func() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("BUCKLEY_STREAM_DEBUG")))
+	return v != "" && v != "0" && v != "false"
+})
+
+// logStreamProgress writes incremental content/reasoning deltas to stderr
+// when BUCKLEY_STREAM_DEBUG is set, so a run that looks stalled can be
+// visibly confirmed as still streaming tokens.
+func logStreamProgress(chunk model.StreamChunk) {
+	if !streamDebugEnabled() {
+		return
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" {
+			fmt.Fprint(os.Stderr, choice.Delta.Content)
+		}
+		if choice.Delta.Reasoning != "" {
+			fmt.Fprint(os.Stderr, choice.Delta.Reasoning)
+		}
+	}
 }

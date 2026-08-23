@@ -10,16 +10,16 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/paths"
-	"m31labs.dev/buckley/pkg/personality"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
+	"github.com/draco/buckley/pkg/artifact"
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/paths"
+	"github.com/draco/buckley/pkg/personality"
+	"github.com/draco/buckley/pkg/prompts"
+	"github.com/draco/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/tool/builtin"
 )
 
 // WorkflowPhase represents the current phase of the workflow
@@ -688,12 +688,32 @@ func isSafeCommand(cmd string) bool {
 		return true
 	}
 
+	// Safe command prefixes that don't require authorization
 	safeCommands := []string{
-		"ls",
-		"cat ",
-		"echo ",
-		"git ",
 		"go test",
+		"go build",
+		"go run",
+		"go mod",
+		"go get",
+		"npm test",
+		"npm run",
+		"npm install",
+		"cargo test",
+		"cargo build",
+		"make test",
+		"pytest",
+		"python -m pytest",
+		"jest",
+		"mocha",
+		"ls",
+		"cat",
+		"grep",
+		"find",
+		"echo",
+		"pwd",
+		"which",
+		"git ",
+		"gh ",
 	}
 
 	for _, safe := range safeCommands {

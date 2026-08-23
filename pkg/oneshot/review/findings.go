@@ -40,16 +40,16 @@ type Finding struct {
 
 // ParsedReview contains the structured review data.
 type ParsedReview struct {
-	Grade       Grade
-	Summary     string
-	BuildStatus string
-	TestStatus  string
-	Findings    []Finding
-	Remarks     []string
-	Approved    bool
-	Blockers    []string // Finding IDs
-	Suggestions []string // Finding IDs
-	RawReview   string
+	Grade        Grade
+	Summary      string
+	BuildStatus  string
+	TestStatus   string
+	Findings     []Finding
+	Remarks      []string
+	Approved     bool
+	Blockers     []string // Finding IDs
+	Suggestions  []string // Finding IDs
+	RawReview    string
 }
 
 // ParseReview extracts structured data from review markdown.

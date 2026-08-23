@@ -2,7 +2,8 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'Buckley',
-  description: 'Tool-first AI agent harness for serious repository work',
+  description: 'The AI development assistant that doesn\'t waste your time',
+  ignoreDeadLinks: true,
 
   head: [
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
@@ -16,7 +17,7 @@ export default defineConfig({
 
     nav: [
       { text: 'Docs', link: '/' },
-      { text: 'Blog', link: '/blog/2026-01-04-introducing-buckley' },
+      { text: 'Blog', link: '/blog/' },
       { text: 'GitHub', link: 'https://github.com/odvcencio/buckley' }
     ],
 
@@ -27,28 +28,21 @@ export default defineConfig({
           items: [
             { text: 'Introduction', link: '/' },
             { text: 'CLI Reference', link: '/CLI' },
-            { text: 'Configuration', link: '/CONFIGURATION' }
+            { text: 'Configuration', link: '/CONFIGURATION' },
           ]
         },
         {
-          text: 'Operating Buckley',
+          text: 'Reference',
           items: [
-            { text: 'Running Goals', link: '/goals' },
-            { text: 'Code Mode', link: '/code-mode' },
-            { text: 'Troubleshooting', link: '/troubleshooting' }
+            { text: 'Error Handling', link: '/ERRORS' },
           ]
         },
-        {
-          text: 'Interfaces',
-          items: [
-            { text: 'Mission Control (GoSX)', link: '/MISSION_CONTROL' },
-            { text: 'Editor Integration', link: '/ACP' }
-          ]
-        },
+      ],
+      '/blog/': [
         {
           text: 'Blog',
           items: [
-            { text: 'Introducing Buckley', link: '/blog/2026-01-04-introducing-buckley' },
+            { text: 'All Posts', link: '/blog/' },
           ]
         }
       ]

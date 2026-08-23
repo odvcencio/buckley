@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/draco/buckley/pkg/skill"
 	"gopkg.in/yaml.v3"
-	"m31labs.dev/buckley/pkg/skill"
 )
 
 // CreateSkillTool writes a new SKILL.md into the project or personal skill directory.
@@ -22,7 +22,7 @@ func (t *CreateSkillTool) Name() string {
 }
 
 func (t *CreateSkillTool) Description() string {
-	return "Create a Buckley skill: a reusable workflow written to .buckley/skills/<name>/SKILL.md."
+	return "Create a new Buckley skill by writing a SKILL.md file under .buckley/skills/<name>/SKILL.md. Provide name, description, and markdown body."
 }
 
 func (t *CreateSkillTool) Parameters() ParameterSchema {

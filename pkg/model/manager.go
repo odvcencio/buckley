@@ -2,63 +2,25 @@ package model
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/config"
 )
-
-const catalogFetchTimeout = 30 * time.Second
 
 // Manager manages provider routing and model metadata.
 type Manager struct {
-	catalogMu      sync.RWMutex
 	config         *config.Config
 	providers      map[string]Provider
 	providerOrder  []string
 	catalog        map[string]ModelInfo
 	providerModels map[string][]string
 	modelProviders map[string]string
-	routingHooks   *RoutingHooks
-}
-
-// ProviderThreadStore persists native provider conversation identifiers so a
-// Buckley session can resume the same provider thread after a process restart.
-type ProviderThreadStore interface {
-	LoadProviderThread(sessionID, providerID string) (string, error)
-	SaveProviderThread(sessionID, providerID, threadID string) error
-	DeleteProviderThread(sessionID, providerID string) error
-}
-
-// EnableTelemetry wires live native-provider events into Buckley's telemetry hub.
-func (m *Manager) EnableTelemetry(hub *telemetry.Hub) {
-	if m == nil {
-		return
-	}
-	for _, provider := range m.providers {
-		if setter, ok := provider.(interface{ SetTelemetry(*telemetry.Hub) }); ok {
-			setter.SetTelemetry(hub)
-		}
-	}
-}
-
-// SetProviderThreadStore wires durable native-provider conversation state.
-func (m *Manager) SetProviderThreadStore(store ProviderThreadStore) {
-	if m == nil {
-		return
-	}
-	for _, provider := range m.providers {
-		if setter, ok := provider.(interface{ SetProviderThreadStore(ProviderThreadStore) }); ok {
-			setter.SetProviderThreadStore(store)
-		}
-	}
+	initWarnings   []string
 }
 
 // NewManager creates a new model manager
@@ -81,7 +43,6 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		catalog:        make(map[string]ModelInfo),
 		providerModels: make(map[string][]string),
 		modelProviders: make(map[string]string),
-		routingHooks:   NewRoutingHooks(),
 	}, nil
 }
 
@@ -99,7 +60,7 @@ func (m *Manager) Initialize() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cat, err := fetchCatalogWithTimeout(provider, catalogFetchTimeout)
+			cat, err := provider.FetchCatalog()
 			if err != nil {
 				errCh <- fmt.Errorf("%s catalog: %w", provider.ID(), err)
 				return
@@ -119,145 +80,35 @@ func (m *Manager) Initialize() error {
 	close(errCh)
 	for err := range errCh {
 		if err != nil {
-			return fmt.Errorf("initializing provider catalog: %w", err)
+			return err
 		}
 	}
 
-	m.catalogMu.Lock()
 	m.catalog = aggregated
 	m.providerModels = providerModels
 	m.modelProviders = modelProviders
-	m.catalogMu.Unlock()
 
 	if err := m.ensureConfiguredModels(); err != nil {
-		return fmt.Errorf("ensuring configured models: %w", err)
+		return err
 	}
 	return nil
-}
-
-// RefreshProviderCatalog fetches a provider's current catalog and atomically
-// replaces only that provider's entries in the merged catalog.
-func (m *Manager) RefreshProviderCatalog(providerID string) error {
-	if m == nil {
-		return fmt.Errorf("model manager unavailable")
-	}
-	providerID = strings.TrimSpace(providerID)
-	provider, ok := m.providers[providerID]
-	if !ok {
-		return fmt.Errorf("provider not configured: %s", providerID)
-	}
-
-	var (
-		catalog *ModelCatalog
-		err     error
-	)
-	if refresher, ok := provider.(interface{ RefreshCatalog() (*ModelCatalog, error) }); ok {
-		catalog, err = refreshCatalogWithTimeout(refresher, catalogFetchTimeout)
-	} else {
-		catalog, err = fetchCatalogWithTimeout(provider, catalogFetchTimeout)
-	}
-	if err != nil {
-		return fmt.Errorf("refresh %s catalog: %w", providerID, err)
-	}
-	if catalog == nil {
-		return fmt.Errorf("refresh %s catalog: empty response", providerID)
-	}
-
-	m.catalogMu.Lock()
-	defer m.catalogMu.Unlock()
-	for _, modelID := range m.providerModels[providerID] {
-		delete(m.catalog, modelID)
-		delete(m.modelProviders, modelID)
-	}
-	modelIDs := make([]string, 0, len(catalog.Data))
-	for _, info := range catalog.Data {
-		m.catalog[info.ID] = info
-		m.modelProviders[info.ID] = providerID
-		modelIDs = append(modelIDs, info.ID)
-	}
-	sort.Strings(modelIDs)
-	m.providerModels[providerID] = modelIDs
-	return nil
-}
-
-func refreshCatalogWithTimeout(refresher interface{ RefreshCatalog() (*ModelCatalog, error) }, timeout time.Duration) (*ModelCatalog, error) {
-	if timeout <= 0 {
-		return refresher.RefreshCatalog()
-	}
-	type result struct {
-		catalog *ModelCatalog
-		err     error
-	}
-	resultCh := make(chan result, 1)
-	go func() {
-		catalog, err := refresher.RefreshCatalog()
-		resultCh <- result{catalog: catalog, err: err}
-	}()
-	select {
-	case result := <-resultCh:
-		return result.catalog, result.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("refresh timed out after %s", timeout)
-	}
-}
-
-func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCatalog, error) {
-	if timeout <= 0 {
-		return provider.FetchCatalog()
-	}
-	type result struct {
-		cat *ModelCatalog
-		err error
-	}
-	resCh := make(chan result, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				resCh <- result{cat: nil, err: fmt.Errorf("panic during catalog fetch: %v", r)}
-			}
-		}()
-		cat, err := provider.FetchCatalog()
-		resCh <- result{cat: cat, err: err}
-	}()
-
-	select {
-	case res := <-resCh:
-		return res.cat, res.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("fetch timed out after %s", timeout)
-	}
 }
 
 // GetModelInfo returns information about a model
 func (m *Manager) GetModelInfo(modelID string) (*ModelInfo, error) {
-	for _, candidate := range m.modelInfoCandidates(modelID) {
-		m.catalogMu.RLock()
-		if info, ok := m.catalog[candidate]; ok {
-			m.catalogMu.RUnlock()
-			return &info, nil
-		}
-		m.catalogMu.RUnlock()
+	if info, ok := m.catalog[modelID]; ok {
+		return &info, nil
 	}
 
 	provider := m.providerForModel(modelID)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", modelID)
 	}
-
-	for _, candidate := range m.modelInfoCandidates(modelID) {
-		info, err := provider.GetModelInfo(candidate)
-		if err == nil {
-			return info, nil
-		}
-	}
-
-	return nil, fmt.Errorf("model not found: %s", modelID)
+	return provider.GetModelInfo(modelID)
 }
 
 // GetCatalog returns the merged model catalog
 func (m *Manager) GetCatalog() *ModelCatalog {
-	m.catalogMu.RLock()
-	defer m.catalogMu.RUnlock()
 	var models []ModelInfo
 	for _, info := range m.catalog {
 		models = append(models, info)
@@ -277,10 +128,7 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	if modelID == "" {
 		return ""
 	}
-	m.catalogMu.RLock()
-	providerID, ok := m.modelProviders[modelID]
-	m.catalogMu.RUnlock()
-	if ok {
+	if providerID, ok := m.modelProviders[modelID]; ok {
 		return providerID
 	}
 	if provider := m.providerForModel(modelID); provider != nil {
@@ -295,17 +143,6 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	return ""
 }
 
-// RoutingHooks exposes the model routing hook registry.
-func (m *Manager) RoutingHooks() *RoutingHooks {
-	if m == nil {
-		return nil
-	}
-	if m.routingHooks == nil {
-		m.routingHooks = NewRoutingHooks()
-	}
-	return m.routingHooks
-}
-
 // SetRequestTimeout updates provider HTTP request timeouts when supported.
 func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 	for _, provider := range m.providers {
@@ -315,409 +152,67 @@ func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 	}
 }
 
-// SetOpenRouterPrivacyFallback validates the retained configuration value.
-// Privacy downgrades are disabled at dispatch until a trusted OSS admission
-// capability exists, so a recognized legacy value is intentionally inert.
-func (m *Manager) SetOpenRouterPrivacyFallback(policy OpenRouterPrivacyFallback) error {
-	if m == nil {
-		return fmt.Errorf("model manager is nil")
-	}
-	_, err := ParseOpenRouterPrivacyFallback(string(policy))
-	return err
-}
-
 // ChatCompletion performs a chat completion routed to the proper provider
 func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	selectedModel, provider := m.resolveModel(req.Model)
+	provider := m.providerForModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
-	req.Model = selectedModel
-	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
-	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
-	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
-		return nil, err
-	}
-	resp, err := chatCompletionWithAffordableOutputRetry(ctx, provider, req)
+	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
-		// Preserve a provider response returned alongside an error. Streaming
-		// and some native adapters can have billable usage/content before a
-		// transport or validation failure; Controller must persist/account it
-		// instead of turning it into a bare retryable error.
-		return resp, err
-	}
-	if resp == nil {
-		return nil, NilChatResponseError(req)
-	}
-	if len(resp.Choices) == 0 {
-		return resp, NoResponseChoicesError(req, resp)
-	}
-	return resp, nil
-}
-
-func chatCompletionWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (*ChatResponse, error) {
-	for attempt := 0; ; attempt++ {
-		resp, err := provider.ChatCompletion(ctx, req)
-		if err == nil || resp != nil || provider.ID() != "openrouter" || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
-			return resp, err
-		}
-		affordable, ok := affordableOutputTokenLimit(err)
-		if !ok {
-			return resp, err
-		}
-		next, lowered := lowerRequestOutputLimit(req, affordable)
-		if !lowered {
-			return resp, err
-		}
-		req = next
-	}
-}
-
-// SupportsContinuation reports whether the provider selected for modelID
-// offers provider-native continuation state (decision 0001).
-func (m *Manager) SupportsContinuation(modelID string) bool {
-	if m == nil {
-		return false
-	}
-	selectedModel, provider := m.resolveModel(modelID)
-	client, ok := provider.(ContinuationClient)
-	if !ok {
-		return false
-	}
-	return client.SupportsContinuation(selectedModel)
-}
-
-// ChatCompletionWithContinuation performs a continuation-aware chat completion
-// routed to the provider selected for the model, applying the same request
-// transforms as ChatCompletion. It returns an error if the resolved provider
-// does not implement ContinuationClient; callers should check
-// SupportsContinuation first and fall back to ChatCompletion otherwise.
-func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuationReq ContinuationRequest) (*ContinuationResponse, error) {
-	req := continuationReq.Request
-	selectedModel, provider := m.resolveModel(req.Model)
-	if provider == nil {
-		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
-	}
-	client, ok := provider.(ContinuationClient)
-	if !ok {
-		return nil, fmt.Errorf("provider %s does not support continuation", provider.ID())
-	}
-	req.Model = selectedModel
-	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
-	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
-	req = m.applyPromptCache(req, provider.ID())
-	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
 		return nil, err
-	}
-	continuationReq.Request = req
-
-	var (
-		resp *ContinuationResponse
-		err  error
-	)
-	for attempt := 0; ; attempt++ {
-		resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
-		if err == nil || provider.ID() != "openrouter" || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
-			break
-		}
-		affordable, ok := affordableOutputTokenLimit(err)
-		if !ok {
-			break
-		}
-		next, lowered := lowerRequestOutputLimit(continuationReq.Request, affordable)
-		if !lowered {
-			break
-		}
-		continuationReq.Request = next
-	}
-	if err != nil {
-		return resp, err
-	}
-	if resp == nil || resp.Response == nil {
-		return nil, fmt.Errorf("empty continuation response for model %s", req.Model)
-	}
-	if len(resp.Response.Choices) == 0 {
-		return resp, NoResponseChoicesError(req, resp.Response)
 	}
 	return resp, nil
 }
 
 // ChatCompletionStream performs a streaming chat completion
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	selectedModel, provider := m.resolveModel(req.Model)
+	provider := m.providerForModel(req.Model)
 	if provider == nil {
-		chunkChan := make(chan StreamChunk)
-		close(chunkChan)
 		errChan := make(chan error, 1)
 		errChan <- fmt.Errorf("no provider configured for model %s", req.Model)
 		close(errChan)
-		return chunkChan, errChan
+		return nil, errChan
 	}
-	req.Model = selectedModel
-	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
-	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
-	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
-		return streamErrorChannels(err)
-	}
-	if provider.ID() != "openrouter" {
-		return provider.ChatCompletionStream(ctx, req)
-	}
-	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req)
+	return provider.ChatCompletionStream(ctx, req)
 }
 
-// chatCompletionStreamWithAffordableOutputRetry retries only a provider
-// rejection that arrives before the first stream chunk. Once any content,
-// reasoning, usage, or tool-call delta has been observed, replaying the request
-// could duplicate externally visible work and the original error is final.
-func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	chunksOut := make(chan StreamChunk, 10)
-	errorsOut := make(chan error, 1)
-
-	go func() {
-		defer close(chunksOut)
-		defer close(errorsOut)
-
-		for attempt := 0; ; attempt++ {
-			chunks, errStream := provider.ChatCompletionStream(ctx, req)
-			sawChunk := false
-			var terminalErr error
-			for chunks != nil || errStream != nil {
-				select {
-				case <-ctx.Done():
-					if terminalErr != nil {
-						errorsOut <- errors.Join(ctx.Err(), terminalErr)
-					} else {
-						errorsOut <- ctx.Err()
-					}
-					return
-				case chunk, ok := <-chunks:
-					if !ok {
-						chunks = nil
-						continue
-					}
-					sawChunk = true
-					select {
-					case chunksOut <- chunk:
-					case <-ctx.Done():
-						errorsOut <- ctx.Err()
-						return
-					}
-				case err, ok := <-errStream:
-					if !ok {
-						errStream = nil
-						continue
-					}
-					if err != nil {
-						terminalErr = err
-					}
-				}
-			}
-
-			if terminalErr == nil {
-				return
-			}
-			if sawChunk || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
-				errorsOut <- terminalErr
-				return
-			}
-			affordable, ok := affordableOutputTokenLimit(terminalErr)
-			if !ok {
-				errorsOut <- terminalErr
-				return
-			}
-			next, lowered := lowerRequestOutputLimit(req, affordable)
-			if !lowered {
-				errorsOut <- terminalErr
-				return
-			}
-			req = next
-		}
-	}()
-
-	return chunksOut, errorsOut
-}
-
-func (m *Manager) applyFallbackChain(req ChatRequest, selectedModel, providerID string) ChatRequest {
-	if m == nil || m.config == nil || providerID != "openrouter" || len(req.Models) > 0 || requestDisablesFallbacks(req) {
-		return req
-	}
-
-	chain := m.config.Models.FallbackChains[strings.TrimSpace(selectedModel)]
-	if len(chain) == 0 {
-		return req
-	}
-
-	seen := make(map[string]struct{}, len(chain)+1)
-	models := make([]string, 0, len(chain)+1)
-	add := func(modelID string) {
-		const maxOpenRouterFallbackModels = 3
-		if len(models) >= maxOpenRouterFallbackModels {
-			return
-		}
-		modelID = strings.TrimSpace(modelID)
-		if modelID == "" {
-			return
-		}
-		if _, ok := seen[modelID]; ok {
-			return
-		}
-		seen[modelID] = struct{}{}
-		models = append(models, modelID)
-	}
-	add(selectedModel)
-	for _, modelID := range chain {
-		add(modelID)
-	}
-	if len(models) <= 1 {
-		return req
-	}
-
-	req.Models = models
-	if req.Provider == nil {
-		req.Provider = map[string]any{}
-	}
-	if _, ok := req.Provider["allow_fallbacks"]; !ok {
-		req.Provider["allow_fallbacks"] = true
-	}
-	return req
-}
-
-func requestDisablesFallbacks(req ChatRequest) bool {
-	allowFallbacks, present := req.Provider["allow_fallbacks"]
-	if !present {
-		return false
-	}
-	enabled, ok := allowFallbacks.(bool)
-	return ok && !enabled
-}
-
-func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
-	req = normalizeProviderChatRequest(req, providerID)
-	if providerID == "openrouter" && len(req.Transforms) == 0 {
-		req.Transforms = []string{"middle-out"}
-	}
-	return req
-}
-
-func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
-	var cfg config.PromptCacheConfig
-	if m != nil && m.config != nil {
-		cfg = m.config.PromptCache
-	}
-
-	cache := req.PromptCache
-	cacheEnabled := cache != nil && cache.Enabled
-	if !cacheEnabled {
-		if !cfg.Enabled {
-			return req
-		}
-		if len(cfg.Providers) > 0 && !containsString(cfg.Providers, providerID) {
-			return req
-		}
-		cache = &PromptCache{
-			Enabled:        true,
-			SystemMessages: cfg.SystemMessages,
-			TailMessages:   cfg.TailMessages,
-		}
-		req.PromptCache = cache
-		cacheEnabled = true
-	}
-
-	if !cacheEnabled {
-		return req
-	}
-
-	switch providerID {
-	case "openrouter", "litellm":
-		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
-			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
-		}
-	case "openai":
-		if req.PromptCacheKey == "" {
-			req.PromptCacheKey = strings.TrimSpace(cfg.Key)
-		}
-		if req.PromptCacheRetention == "" {
-			req.PromptCacheRetention = strings.TrimSpace(cfg.Retention)
-		}
-	}
-
-	return req
-}
-
-func containsString(values []string, target string) bool {
-	if len(values) == 0 {
-		return false
-	}
-	target = strings.TrimSpace(target)
-	for _, value := range values {
-		if strings.TrimSpace(value) == target {
-			return true
-		}
-	}
-	return false
-}
-
+// providerForModel resolves which provider should serve a given model ID.
+//
+// Precedence, most to least specific:
+//
+//  1. modelProviders: the explicit model -> provider mapping discovered from
+//     each provider's own catalog during Initialize(). If we've already seen
+//     this exact model ID advertised by a specific provider, that provider is
+//     authoritative -- this is the only source of truth that actually knows,
+//     e.g., that "z-ai/glm-5.2" lives on openrouter. It must be checked before
+//     any heuristic or default so that unrelated config changes (clearing
+//     default_provider, enabling a low-priority provider) can never silently
+//     reroute a known model to the wrong provider/endpoint.
+//  2. Providers.ModelRouting: configured prefix -> provider hints. Useful for
+//     models not present in a fetched catalog (e.g. before Initialize() has
+//     run, or for providers/models the catalog fetch didn't cover).
+//  3. Models.DefaultProvider: the configured default provider.
+//  4. providerOrder: alphabetically sorted provider IDs, as a last resort.
+//
+// When modelProviders has an entry that agrees with what step 2-4 would have
+// picked anyway, behavior is unchanged; the map only changes the outcome when
+// it disagrees with the old prefix/default/order heuristics, which is exactly
+// the misrouting this ordering exists to prevent.
 func (m *Manager) providerForModel(modelID string) Provider {
-	_, provider := m.resolveModel(modelID)
-	return provider
-}
-
-func (m *Manager) resolveModel(modelID string) (string, Provider) {
-	if m == nil {
-		return modelID, nil
-	}
-	requested := strings.TrimSpace(modelID)
-	if requested == "" {
-		return modelID, nil
-	}
-
-	providerID, routed := m.providerIDFromRouting(requested)
-	reason := ""
-	if routed {
-		reason = "config"
-	}
-
-	selected := requested
-	decision := &RoutingDecision{
-		RequestedModel: requested,
-		SelectedModel:  selected,
-		Reason:         reason,
-	}
-	if m.routingHooks != nil {
-		decision = m.routingHooks.Apply(decision)
-		if decision != nil && strings.TrimSpace(decision.SelectedModel) != "" {
-			selected = decision.SelectedModel
-		}
-	}
-
-	if selected != requested {
-		providerID, _ = m.providerIDFromRouting(selected)
-	}
-
-	return selected, m.providerFromIDOrFallback(providerID)
-}
-
-func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
-	for prefix, providerID := range m.config.Providers.ModelRouting {
-		if strings.HasPrefix(modelID, prefix) {
-			return providerID, true
-		}
-	}
-	return "", false
-}
-
-func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
-	if providerID != "" {
+	if providerID, ok := m.modelProviders[modelID]; ok {
 		if provider, ok := m.providers[providerID]; ok {
 			return provider
+		}
+	}
+
+	for prefix, providerID := range m.config.Providers.ModelRouting {
+		if strings.HasPrefix(modelID, prefix) {
+			if provider, ok := m.providers[providerID]; ok {
+				return provider
+			}
 		}
 	}
 
@@ -764,7 +259,24 @@ func (m *Manager) GetPricing(modelID string) (*ModelPricing, error) {
 	return &info.Pricing, nil
 }
 
+// Warnings returns non-fatal warnings raised during the most recent
+// Initialize() call (e.g. a role that had no model configured and was
+// defaulted to a discovered model). Callers that don't surface stderr to end
+// users (headless mode, the ACP/IPC server, the TUI) should check this after
+// Initialize() and display it prominently -- these warnings indicate Buckley
+// is not running the exact model configuration that was asked for.
+func (m *Manager) Warnings() []string {
+	if m == nil || len(m.initWarnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(m.initWarnings))
+	copy(out, m.initWarnings)
+	return out
+}
+
 func (m *Manager) ensureConfiguredModels() error {
+	m.initWarnings = nil
+
 	if len(m.catalog) == 0 {
 		return fmt.Errorf("no models discovered from configured providers")
 	}
@@ -789,12 +301,29 @@ func (m *Manager) ensureConfiguredModels() error {
 		warnings = append(warnings, warning)
 	}
 
+	m.initWarnings = warnings
 	for _, warning := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", warning)
 	}
 	return nil
 }
 
+// ensureModel validates the model configured for a role (planning, execution,
+// review) against the discovered catalog.
+//
+// Fallback policy -- deliberately asymmetric:
+//
+//   - If the role was left unconfigured (empty string), there is nothing the
+//     user explicitly asked for, so it's safe to pick a deterministic default
+//     from the discovered catalog and proceed, as long as we say so loudly
+//     (see Warnings()).
+//   - If the role WAS configured to a specific model (by the user, a config
+//     file, or an env var) and that model isn't available from any configured
+//     provider -- a typo, a deprecated/removed model ID, or a model that
+//     moved to a provider that isn't enabled -- we do NOT silently substitute
+//     a different model. That is precisely the "ran the wrong model without
+//     telling anyone" landmine this manager must not step on. Initialize()
+//     fails with a clear, actionable error instead.
 func (m *Manager) ensureModel(role string) (string, error) {
 	var field *string
 	switch role {
@@ -808,27 +337,58 @@ func (m *Manager) ensureModel(role string) (string, error) {
 		return "", nil
 	}
 
-	if *field != "" && m.modelAvailable(*field) {
-		return "", nil
+	if *field != "" {
+		if m.modelAvailable(*field) {
+			return "", nil
+		}
+		return "", fmt.Errorf(
+			"%s model %q is not available from any configured provider; "+
+				"fix models.%s in your config (available models: %s)",
+			role, *field, role, m.availableModelsSummary(),
+		)
 	}
 
 	fallback, ok := m.selectFallbackModel()
 	if !ok {
-		if *field == "" {
-			return "", fmt.Errorf("no available models to configure %s role", role)
-		}
-		return "", fmt.Errorf("%s model %q not found and no fallback models available", role, *field)
+		return "", fmt.Errorf("no available models to configure %s role", role)
 	}
 
-	previous := *field
 	*field = fallback
-
-	if previous == "" {
-		return fmt.Sprintf("%s model not configured; defaulting to %s", role, fallback), nil
-	}
-	return fmt.Sprintf("%s model %q not found; defaulting to %s", role, previous, fallback), nil
+	return fmt.Sprintf("%s model not configured; auto-selected %s (set models.%s to pin this choice)", role, fallback, role), nil
 }
 
+// availableModelsSummary returns a bounded, deterministically ordered,
+// human-readable list of model IDs available across all configured
+// providers, for use in error messages. The catalog is already sorted by ID
+// (see GetCatalog); the list is capped so a large catalog doesn't produce an
+// unreadable wall of text.
+func (m *Manager) availableModelsSummary() string {
+	catalog := m.GetCatalog()
+	if len(catalog.Data) == 0 {
+		return "(no models discovered from configured providers)"
+	}
+
+	const maxListed = 15
+	ids := make([]string, 0, len(catalog.Data))
+	for _, info := range catalog.Data {
+		ids = append(ids, info.ID)
+	}
+
+	if len(ids) > maxListed {
+		return fmt.Sprintf("%s, and %d more", strings.Join(ids[:maxListed], ", "), len(ids)-maxListed)
+	}
+	return strings.Join(ids, ", ")
+}
+
+// selectFallbackModel picks a deterministic default model when a role was
+// never configured. Provider selection follows the same precedence as
+// providerForModel (DefaultProvider, then the sorted providerOrder); within a
+// provider, the first model from its catalog fetch is used. The two
+// defensive branches below only trigger for a provider that has models in
+// the discovered catalog but isn't reachable via DefaultProvider/providerOrder
+// (should not normally happen) -- they iterate deterministically (sorted)
+// rather than ranging over a map directly, since Go intentionally randomizes
+// map iteration order and this selection must be stable across runs.
 func (m *Manager) selectFallbackModel() (string, bool) {
 	var providersToTry []string
 	if m.config.Models.DefaultProvider != "" {
@@ -848,24 +408,30 @@ func (m *Manager) selectFallbackModel() (string, bool) {
 		}
 	}
 
-	m.catalogMu.RLock()
-	defer m.catalogMu.RUnlock()
-	for _, models := range m.providerModels {
-		if len(models) > 0 {
-			return models[0], true
+	if len(m.providerModels) > 0 {
+		providerIDs := make([]string, 0, len(m.providerModels))
+		for providerID := range m.providerModels {
+			if seen[providerID] {
+				continue
+			}
+			providerIDs = append(providerIDs, providerID)
+		}
+		sort.Strings(providerIDs)
+		for _, providerID := range providerIDs {
+			if modelID, ok := m.firstModelForProvider(providerID); ok {
+				return modelID, true
+			}
 		}
 	}
 
-	for modelID := range m.catalog {
-		return modelID, true
+	if catalog := m.GetCatalog(); len(catalog.Data) > 0 {
+		return catalog.Data[0].ID, true
 	}
 
 	return "", false
 }
 
 func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
-	m.catalogMu.RLock()
-	defer m.catalogMu.RUnlock()
 	models := m.providerModels[providerID]
 	if len(models) == 0 {
 		return "", false
@@ -874,15 +440,8 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 }
 
 func (m *Manager) modelAvailable(modelID string) bool {
-	for _, candidate := range m.modelInfoCandidates(modelID) {
-		m.catalogMu.RLock()
-		if _, ok := m.catalog[candidate]; ok {
-			m.catalogMu.RUnlock()
-			return true
-		}
-		m.catalogMu.RUnlock()
-	}
-	return false
+	_, ok := m.catalog[modelID]
+	return ok
 }
 
 // GetContextLength returns the context length for a model
@@ -943,21 +502,14 @@ func (m *Manager) SupportsReasoning(modelID string) bool {
 
 // SupportsTools checks if a model supports function/tool calling
 func (m *Manager) SupportsTools(modelID string) bool {
-	return m.SupportsParameter(modelID, "tools") || m.SupportsParameter(modelID, "functions")
-}
-
-// SupportsParameter reports whether the provider catalog advertises a request
-// field for this model. Provider-specific optional fields must be gated by this
-// method so a model that supports tools is not assumed to support every tool
-// control field.
-func (m *Manager) SupportsParameter(modelID, parameter string) bool {
 	info, err := m.GetModelInfo(modelID)
 	if err != nil {
 		return false
 	}
-	parameter = strings.TrimSpace(parameter)
-	for _, candidate := range info.SupportedParameters {
-		if candidate == parameter {
+
+	// Check supported_parameters for "tools" or "functions"
+	for _, param := range info.SupportedParameters {
+		if param == "tools" || param == "functions" {
 			return true
 		}
 	}
@@ -986,46 +538,6 @@ func (m *Manager) GetVisionFallbackModel() string {
 
 	// Return first preference even if not validated
 	return fallbacks[0]
-}
-
-func (m *Manager) modelInfoCandidates(modelID string) []string {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return nil
-	}
-
-	seen := map[string]struct{}{}
-	candidates := make([]string, 0, 4)
-	add := func(candidate string) {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			return
-		}
-		if _, ok := seen[candidate]; ok {
-			return
-		}
-		seen[candidate] = struct{}{}
-		candidates = append(candidates, candidate)
-	}
-
-	add(modelID)
-	if strings.Contains(modelID, "/") {
-		return candidates
-	}
-
-	if providerID := m.ProviderIDForModel(modelID); providerID != "" {
-		add(providerID + "/" + modelID)
-	}
-
-	m.catalogMu.RLock()
-	defer m.catalogMu.RUnlock()
-	for knownModelID := range m.catalog {
-		if strings.HasSuffix(knownModelID, "/"+modelID) {
-			add(knownModelID)
-		}
-	}
-
-	return candidates
 }
 
 // DescribeImage uses a vision model to describe an image
@@ -1070,28 +582,17 @@ func (m *Manager) DescribeImage(ctx context.Context, imageURL string) (string, e
 	return ExtractTextContent(resp.Choices[0].Message.Content)
 }
 
-// ExtractTextContent extracts plain text from message content, handling both string and multimodal formats.
+// ExtractTextContent extracts text from a message content field
 func ExtractTextContent(content any) (string, error) {
 	switch v := content.(type) {
-	case nil:
-		return "", nil
 	case string:
 		return v, nil
-	case []ContentPart:
-		if text := extractTextFromContentParts(v); text != "" {
-			return text, nil
-		}
 	case []any:
 		// Try to extract text from content parts
 		var textParts []string
 		for _, part := range v {
-			switch partVal := part.(type) {
-			case map[string]any:
-				if text := extractTextFromMap(partVal); text != "" {
-					textParts = append(textParts, text)
-				}
-			case ContentPart:
-				if text := extractTextFromContentParts([]ContentPart{partVal}); text != "" {
+			if partMap, ok := part.(map[string]any); ok {
+				if text, ok := partMap["text"].(string); ok && text != "" {
 					textParts = append(textParts, text)
 				}
 			}
@@ -1099,91 +600,13 @@ func ExtractTextContent(content any) (string, error) {
 		if len(textParts) > 0 {
 			return strings.Join(textParts, "\n"), nil
 		}
-	case map[string]any:
-		if text := extractTextFromMap(v); text != "" {
-			return text, nil
-		}
 	}
 
-	return "", fmt.Errorf("unexpected content format: %T", content)
+	return "", fmt.Errorf("unexpected content format")
 }
 
-func extractTextFromContentParts(parts []ContentPart) string {
-	var textParts []string
-	for _, part := range parts {
-		if strings.TrimSpace(part.Type) == "text" && part.Text != "" {
-			textParts = append(textParts, part.Text)
-		}
-	}
-	return strings.Join(textParts, "\n")
-}
-
-func extractTextFromMap(part map[string]any) string {
-	if part == nil {
-		return ""
-	}
-	if text := extractTextValue(part["text"]); text != "" {
-		return text
-	}
-	if text := extractTextValue(part["content"]); text != "" {
-		return text
-	}
-	if text := extractTextValue(part["value"]); text != "" {
-		return text
-	}
-	if text := extractTextValue(part["output_text"]); text != "" {
-		return text
-	}
-	return ""
-}
-
-func extractTextValue(raw any) string {
-	switch v := raw.(type) {
-	case string:
-		return v
-	case map[string]any:
-		if text := extractTextValue(v["text"]); text != "" {
-			return text
-		}
-		if text := extractTextValue(v["content"]); text != "" {
-			return text
-		}
-		if text := extractTextValue(v["value"]); text != "" {
-			return text
-		}
-	}
-	return ""
-}
-
-// ExtractTextContentOrEmpty extracts plain text from message content, returning empty string on error.
+// ExtractTextContentOrEmpty extracts text from content, returning empty string on error
 func ExtractTextContentOrEmpty(content any) string {
 	text, _ := ExtractTextContent(content)
 	return text
-}
-
-// thinkTagPattern matches <think>...</think> blocks in model output.
-// Kimi K2 and other reasoning models embed thinking in these tags.
-var thinkTagPattern = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
-
-// ExtractThinkingContent extracts thinking/reasoning text from message content parts.
-func ExtractThinkingContent(text string) (thinking string, content string) {
-	matches := thinkTagPattern.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return "", text
-	}
-
-	// Collect all thinking blocks
-	var thinkingParts []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			thinkingParts = append(thinkingParts, strings.TrimSpace(match[1]))
-		}
-	}
-
-	// Remove thinking tags from content
-	content = thinkTagPattern.ReplaceAllString(text, "")
-	content = strings.TrimSpace(content)
-
-	thinking = strings.Join(thinkingParts, "\n\n")
-	return thinking, content
 }

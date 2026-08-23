@@ -1,22 +1,17 @@
 package skill
 
 import (
-	"errors"
 	"fmt"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 )
 
 // Registry manages skill discovery, loading, and activation
 type Registry struct {
-	mu          sync.RWMutex
-	loadMu      sync.Mutex
-	skills      map[string]*Skill       // All discovered skills by name
-	active      map[string]*ActiveSkill // Currently active skills
-	loader      *Loader
-	diagnostics []string
+	mu     sync.RWMutex
+	skills map[string]*Skill       // All discovered skills by name
+	active map[string]*ActiveSkill // Currently active skills
+	loader *Loader
 }
 
 // NewRegistry creates a new skill registry
@@ -28,87 +23,29 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register adds or replaces a skill in the registry.
-func (r *Registry) Register(s *Skill) error {
-	if s == nil {
-		return fmt.Errorf("skill is required")
-	}
-	if err := s.Validate(); err != nil {
-		return err
-	}
-	if s.LoadedAt.IsZero() {
-		s.LoadedAt = time.Now()
-	}
-
-	r.mu.Lock()
-	r.skills[s.Name] = s
-	if active := r.active[s.Name]; active != nil {
-		active.Skill = s
-	}
-	r.mu.Unlock()
-	return nil
-}
-
 // LoadAll loads skills from all standard locations in precedence order
 func (r *Registry) LoadAll() error {
-	r.loadMu.Lock()
-	defer r.loadMu.Unlock()
-
-	next := make(map[string]*Skill)
-	var loadErrs []error
-	var diagnostics []string
-	record := func(source string, err error) {
-		if err == nil {
-			return
-		}
-		loadErrs = append(loadErrs, fmt.Errorf("load %s skills: %w", source, err))
-		for _, detail := range errorLeaves(err) {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: %s", source, detail))
-		}
-	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	// Load in precedence order (later overrides earlier)
-	record("bundled", r.loader.LoadBundled(next))
-	record("plugin", r.loader.LoadFromPlugins(next))
-	record("personal", r.loader.LoadPersonal(next))
-	record("project agent", r.loader.LoadProjectAgent(next))
-	record("project", r.loader.LoadProject(next))
-
-	r.mu.Lock()
-	r.skills = next
-	r.diagnostics = diagnostics
-	for name, active := range r.active {
-		loaded, ok := next[name]
-		if !ok {
-			delete(r.active, name)
-			continue
-		}
-		active.Skill = loaded
+	if err := r.loader.LoadBundled(r.skills); err != nil {
+		return fmt.Errorf("failed to load bundled skills: %w", err)
 	}
-	r.mu.Unlock()
 
-	return errors.Join(loadErrs...)
-}
-
-func errorLeaves(err error) []string {
-	type multiError interface {
-		Unwrap() []error
+	if err := r.loader.LoadFromPlugins(r.skills); err != nil {
+		return fmt.Errorf("failed to load plugin skills: %w", err)
 	}
-	if joined, ok := err.(multiError); ok {
-		var leaves []string
-		for _, child := range joined.Unwrap() {
-			leaves = append(leaves, errorLeaves(child)...)
-		}
-		return leaves
-	}
-	return []string{err.Error()}
-}
 
-// Diagnostics returns recoverable problems found during the latest load.
-func (r *Registry) Diagnostics() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return append([]string(nil), r.diagnostics...)
+	if err := r.loader.LoadPersonal(r.skills); err != nil {
+		return fmt.Errorf("failed to load personal skills: %w", err)
+	}
+
+	if err := r.loader.LoadProject(r.skills); err != nil {
+		return fmt.Errorf("failed to load project skills: %w", err)
+	}
+
+	return nil
 }
 
 // Get retrieves a skill by name (returns any for interface compatibility)
@@ -134,7 +71,6 @@ func (r *Registry) List() []*Skill {
 	for _, skill := range r.skills {
 		skills = append(skills, skill)
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
 	return skills
 }
 
@@ -144,13 +80,7 @@ func (r *Registry) ListBySource() map[string][]any {
 	defer r.mu.RUnlock()
 
 	bySource := make(map[string][]any)
-	names := make([]string, 0, len(r.skills))
-	for name := range r.skills {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		skill := r.skills[name]
+	for _, skill := range r.skills {
 		bySource[skill.Source] = append(bySource[skill.Source], any(skill))
 	}
 	return bySource
@@ -167,9 +97,6 @@ func (r *Registry) GetByPhase(phase string) []PhaseSkill {
 			phaseSkills = append(phaseSkills, skill)
 		}
 	}
-	sort.Slice(phaseSkills, func(i, j int) bool {
-		return phaseSkills[i].GetName() < phaseSkills[j].GetName()
-	})
 	return phaseSkills
 }
 
@@ -241,14 +168,9 @@ func (r *Registry) ListActive() []any {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	names := make([]string, 0, len(r.active))
-	for name := range r.active {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	active := make([]any, 0, len(names))
-	for _, name := range names {
-		active = append(active, any(r.active[name]))
+	active := make([]any, 0, len(r.active))
+	for _, as := range r.active {
+		active = append(active, any(as))
 	}
 	return active
 }
@@ -285,17 +207,14 @@ func (r *Registry) GetDescriptions() string {
 	}
 
 	result := "# Available Skills\n\n"
-	result += "These are lightweight triggers; full instructions load only after activation. "
-	result += "Use `activate_skill` when relevant; `/skill <name>` is the user shortcut; phase tags auto-activate.\n\n"
+	result += "You have access to workflow skills that provide structured guidance. Skills can be activated in three ways:\n\n"
+	result += "1. **Automatic** - Some skills auto-activate during specific phases (planning/execute/review)\n"
+	result += "2. **Model-driven** - Use the `activate_skill` tool when you recognize a relevant pattern\n"
+	result += "3. **User-triggered** - User explicitly requests via `/skill <name>`\n\n"
+	result += "Available skills:\n"
 
-	names := make([]string, 0, len(r.skills))
-	for name := range r.skills {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		skill := r.skills[name]
-		result += fmt.Sprintf("- %s: %s", skill.Name, promptSkillDescription(skill.Description))
+	for _, skill := range r.skills {
+		result += fmt.Sprintf("- %s: %s", skill.Name, skill.Description)
 		if skill.Phase != "" {
 			result += fmt.Sprintf(" [auto-activates in %s phase]", skill.Phase)
 		}
@@ -304,14 +223,4 @@ func (r *Registry) GetDescriptions() string {
 
 	result += "\nWhen a skill is active, follow its instructions precisely.\n"
 	return result
-}
-
-func promptSkillDescription(description string) string {
-	const maxRunes = 400
-	compact := strings.Join(strings.Fields(description), " ")
-	runes := []rune(compact)
-	if len(runes) <= maxRunes {
-		return compact
-	}
-	return strings.TrimSpace(string(runes[:maxRunes-1])) + "…"
 }
