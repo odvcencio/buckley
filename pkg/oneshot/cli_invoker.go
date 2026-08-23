@@ -125,7 +125,11 @@ func (inv *CLIInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt stri
 		return nil, builder.Build(), fmt.Errorf("marshal CLI schema: %w", err)
 	}
 
-	prompt := buildCLIPrompt(systemPrompt, userPrompt, tool, schemaJSON)
+	promptSchema := schemaJSON
+	if inv.backend == CLIBackendCodex {
+		promptSchema = nil
+	}
+	prompt := buildCLIPrompt(systemPrompt, userPrompt, tool, promptSchema)
 	cmd, cleanup, err := inv.buildCommand(tool, prompt, schemaJSON)
 	if err != nil {
 		builder.WithError(err)
@@ -179,6 +183,12 @@ func (inv *CLIInvoker) buildCommand(tool tools.Definition, prompt string, schema
 }
 
 func (inv *CLIInvoker) buildCodexCommand(tool tools.Definition, prompt string, schemaJSON []byte) (CLICommand, func(), error) {
+	for _, arg := range inv.extraArgs {
+		if arg == "--output-schema" || strings.HasPrefix(arg, "--output-schema=") {
+			return CLICommand{}, nil, fmt.Errorf("codex extra argument %q conflicts with reserved --output-schema", arg)
+		}
+	}
+
 	tmp, err := os.CreateTemp(inv.tempDir, "buckley-"+tool.Name+"-schema-*.json")
 	if err != nil {
 		return CLICommand{}, nil, fmt.Errorf("create Codex output schema: %w", err)
@@ -252,12 +262,18 @@ func buildCLIPrompt(systemPrompt, userPrompt string, tool tools.Definition, sche
 		b.WriteString(userPrompt)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("Return only a JSON object matching the schema below. ")
+	if len(schemaJSON) > 0 {
+		b.WriteString("Return only a JSON object matching the schema below. ")
+	} else {
+		b.WriteString("Return only a JSON object matching the structured output schema. ")
+	}
 	b.WriteString("The object is the argument payload for `")
 	b.WriteString(tool.Name)
-	b.WriteString("`; do not wrap it in a tool-call envelope, markdown fence, or explanatory text.\n\n")
-	b.WriteString("JSON schema:\n")
-	b.Write(schemaJSON)
+	b.WriteString("`; do not wrap it in a tool-call envelope, markdown fence, or explanatory text.")
+	if len(schemaJSON) > 0 {
+		b.WriteString("\n\nJSON schema:\n")
+		b.Write(schemaJSON)
+	}
 	b.WriteString("\n")
 	return b.String()
 }
