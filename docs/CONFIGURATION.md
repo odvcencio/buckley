@@ -161,7 +161,7 @@ buckbot:
   model: deepseek/deepseek-v4-pro-0813
   critic_model: qwen/qwen3.8-max
   reasoning: auto
-  openrouter_privacy_fallback: zdr_then_data_collection_deny
+  openrouter_privacy_fallback: none # legacy zdr_then_data_collection_deny is accepted but inert
   per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
   monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
   max_review_iterations: 0 # adaptive
@@ -169,25 +169,25 @@ buckbot:
   max_validation_attempts: 2
 ```
 
-The default Buckbot model is DeepSeek V4 Pro 0813 through OpenRouter. The
-OpenRouter account or guardrail must permit an eligible DeepSeek endpoint;
-Buckley fails closed with the provider's privacy/guardrail error when no such
-endpoint is available.
+The default Buckbot model resolves to DeepSeek V4 Pro 0813 through OpenRouter.
+That selection does not currently authorize or send an OpenRouter request.
 
-`openrouter_privacy_fallback: zdr_then_data_collection_deny` is an explicit
-opt-in compatibility mode. Buckley first requests a ZDR endpoint. If OpenRouter
-returns its policy-filtered 404 before inference, Buckley retries once with
-`provider.data_collection: deny`. This is not equivalent to ZDR and should not
-be used when strict zero retention is mandatory. The retry never occurs for a
-request that already supplied an explicit privacy policy.
+`openrouter_privacy_fallback: zdr_then_data_collection_deny` remains accepted
+only for configuration compatibility. It is inert: Buckley does not retry a
+ZDR request with `provider.data_collection: deny`, and the setting cannot
+authorize non-ZDR dispatch.
 
-Requests outside a Buckbot runtime do not add `provider.zdr` or
-`provider.data_collection: deny`. OpenRouter account and guardrail policies still apply and
-cannot be relaxed by a request. If OpenRouter returns `404` with “no endpoints
-available” and mentions guardrails or data policy, check Settings → Privacy and
-Guardrails for ZDR, data-collection, provider, and model allowlists. A model
-with no ZDR-compatible endpoint cannot run while the account enforces ZDR;
-choose a compatible model or change that account policy deliberately.
+In this release, the OpenRouter-backed CLI, interactive TUI, ACP, and RLM
+surfaces construct neither an explicit strict-ZDR request nor a trusted host
+admission. Their OpenRouter turns fail locally at the Manager boundary before
+a provider adapter or HTTP request is called. Configuring an endpoint, account
+privacy setting, guardrail, model, or legacy fallback cannot make these
+surfaces dispatch.
+
+The lower-level Manager recognizes an exact strict-ZDR request constructed by
+a trusted host. A later trusted host may also mint an OSS admission for a
+bounded non-ZDR request. Neither construction path is wired into the current
+CLI, TUI, ACP, or RLM surfaces, so OpenRouter dispatch remains blocked there.
 
 Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project

@@ -32,11 +32,17 @@ func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a standard completion.
 func (p *OpenRouterProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := validateModelDispatch(req, p.ID()); err != nil {
+		return nil, err
+	}
 	return p.client.ChatCompletion(ctx, req)
 }
 
 // ChatCompletionStream executes a streaming completion.
 func (p *OpenRouterProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := validateModelDispatch(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	return p.client.ChatCompletionStream(ctx, req)
 }
 

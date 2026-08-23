@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -155,14 +156,11 @@ func TestManagerNormalizeCostBoundedRequest_PinsOpenRouterAndPreflightsWireTrans
 		t.Fatalf("normalization is not idempotent:\nfirst:  %#v\nsecond: %#v", normalized, twice)
 	}
 
-	if _, err := mgr.ChatCompletion(context.Background(), normalized); err != nil {
-		t.Fatalf("ChatCompletion: %v", err)
+	if _, err := mgr.ChatCompletion(context.Background(), normalized); !errors.Is(err, ErrOpenRouterOSSAdmissionRequired) {
+		t.Fatalf("ChatCompletion error = %v, want OSS admission requirement", err)
 	}
-	if !reflect.DeepEqual(provider.lastRequest, normalized) {
-		t.Fatalf("wire request differs from preflight:\npreflight: %#v\nwire:      %#v", normalized, provider.lastRequest)
-	}
-	if provider.lastRequest.Model != info.ID || len(provider.lastRequest.Models) != 0 || provider.lastRequest.Provider["allow_fallbacks"] != false {
-		t.Fatalf("wire request did not preserve exact route: %+v", provider.lastRequest)
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider requests = %d, non-ZDR preflight must stop before dispatch", len(provider.requests))
 	}
 }
 

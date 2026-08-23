@@ -132,33 +132,63 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// OpenRouterRetentionMode is Buckley's internal retention contract for an
+// OpenRouter request. It is never serialized to the provider; the wire policy
+// must independently assert the same posture.
+type OpenRouterRetentionMode string
+
+const (
+	OpenRouterRetentionUnspecified OpenRouterRetentionMode = ""
+	OpenRouterRetentionZDR         OpenRouterRetentionMode = "zdr"
+	OpenRouterRetentionNonZDR      OpenRouterRetentionMode = "non_zdr"
+)
+
+// RequestRetryMode controls retry loops in Buckley's OpenRouter Client and
+// Manager layers. Direct non-OpenRouter ProviderTransport adapters do not
+// consume it. It is an internal execution contract and never enters provider
+// JSON.
+type RequestRetryMode string
+
+const (
+	RequestRetryDefault       RequestRetryMode = ""
+	RequestRetrySingleAttempt RequestRetryMode = "single_attempt"
+)
+
+// openRouterOSSAdmission is an opaque process-local capability. There is
+// intentionally no constructor in this change: non-ZDR OpenRouter dispatch
+// remains disabled until a trusted host admission path can mint one.
+type openRouterOSSAdmission struct{}
+
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
-	Model                string            `json:"model"`
-	Models               []string          `json:"models,omitempty"` // OpenRouter fallback model list
-	Messages             []Message         `json:"messages"`
-	Temperature          float64           `json:"temperature,omitempty"`
-	MaxTokens            int               `json:"max_tokens,omitempty"`
-	MaxCompletionTokens  int               `json:"max_completion_tokens,omitempty"`
-	Stream               bool              `json:"stream"`
-	StreamOptions        *StreamOptions    `json:"stream_options,omitempty"`
-	Tools                []map[string]any  `json:"tools,omitempty"`               // OpenAI function definitions
-	ToolChoice           string            `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
-	ParallelToolCalls    *bool             `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
-	Reasoning            *ReasoningConfig  `json:"reasoning,omitempty"`           // Reasoning config for supported models
-	IncludeReasoning     *bool             `json:"include_reasoning,omitempty"`   // OpenRouter legacy reasoning toggle
-	Transforms           []string          `json:"transforms,omitempty"`          // Provider-specific prompt transforms (e.g., OpenRouter)
-	Provider             map[string]any    `json:"provider,omitempty"`            // OpenRouter provider routing preferences
-	ResponseFormat       map[string]any    `json:"response_format,omitempty"`     // JSON mode or JSON schema
-	Seed                 *int              `json:"seed,omitempty"`
-	ServiceTier          string            `json:"service_tier,omitempty"`
-	SessionID            string            `json:"session_id,omitempty"`             // OpenRouter observability/session grouping
-	Metadata             map[string]string `json:"metadata,omitempty"`               // OpenRouter request metadata
-	Trace                map[string]string `json:"trace,omitempty"`                  // OpenRouter tracing metadata
-	CacheControl         *CacheControl     `json:"cache_control,omitempty"`          // OpenRouter top-level prompt caching
-	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
-	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
-	PromptCache          *PromptCache      `json:"-"`
+	Model                string                  `json:"model"`
+	Models               []string                `json:"models,omitempty"` // OpenRouter fallback model list
+	Messages             []Message               `json:"messages"`
+	Temperature          float64                 `json:"temperature,omitempty"`
+	MaxTokens            int                     `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  int                     `json:"max_completion_tokens,omitempty"`
+	Stream               bool                    `json:"stream"`
+	StreamOptions        *StreamOptions          `json:"stream_options,omitempty"`
+	Tools                []map[string]any        `json:"tools,omitempty"`               // OpenAI function definitions
+	ToolChoice           string                  `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
+	ParallelToolCalls    *bool                   `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
+	Reasoning            *ReasoningConfig        `json:"reasoning,omitempty"`           // Reasoning config for supported models
+	IncludeReasoning     *bool                   `json:"include_reasoning,omitempty"`   // OpenRouter legacy reasoning toggle
+	Transforms           []string                `json:"transforms,omitempty"`          // Provider-specific prompt transforms (e.g., OpenRouter)
+	Provider             map[string]any          `json:"provider,omitempty"`            // OpenRouter provider routing preferences
+	ResponseFormat       map[string]any          `json:"response_format,omitempty"`     // JSON mode or JSON schema
+	Seed                 *int                    `json:"seed,omitempty"`
+	ServiceTier          string                  `json:"service_tier,omitempty"`
+	SessionID            string                  `json:"session_id,omitempty"`             // OpenRouter observability/session grouping
+	Metadata             map[string]string       `json:"metadata,omitempty"`               // OpenRouter request metadata
+	Trace                map[string]string       `json:"trace,omitempty"`                  // OpenRouter tracing metadata
+	CacheControl         *CacheControl           `json:"cache_control,omitempty"`          // OpenRouter top-level prompt caching
+	PromptCacheKey       string                  `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
+	PromptCacheRetention string                  `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
+	PromptCache          *PromptCache            `json:"-"`
+	OpenRouterRetention  OpenRouterRetentionMode `json:"-"`
+	RetryMode            RequestRetryMode        `json:"-"`
+	openRouterAdmission  *openRouterOSSAdmission
 	// ReviewSnapshot pins native verification to the immutable Git state
 	// captured once for an entire review run. Native providers materialize it;
 	// API-backed review tools are bound to the same descriptor by the agent runner.

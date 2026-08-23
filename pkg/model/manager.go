@@ -19,15 +19,14 @@ const catalogFetchTimeout = 30 * time.Second
 
 // Manager manages provider routing and model metadata.
 type Manager struct {
-	catalogMu       sync.RWMutex
-	config          *config.Config
-	providers       map[string]Provider
-	providerOrder   []string
-	catalog         map[string]ModelInfo
-	providerModels  map[string][]string
-	modelProviders  map[string]string
-	routingHooks    *RoutingHooks
-	privacyFallback OpenRouterPrivacyFallback
+	catalogMu      sync.RWMutex
+	config         *config.Config
+	providers      map[string]Provider
+	providerOrder  []string
+	catalog        map[string]ModelInfo
+	providerModels map[string][]string
+	modelProviders map[string]string
+	routingHooks   *RoutingHooks
 }
 
 // ProviderThreadStore persists native provider conversation identifiers so a
@@ -316,19 +315,15 @@ func (m *Manager) SetRequestTimeout(timeout time.Duration) {
 	}
 }
 
-// SetOpenRouterPrivacyFallback enables an explicit, policy-aware retry for
-// OpenRouter requests. The value must be one of the supported
-// OpenRouterPrivacyFallback constants; unknown values fail closed.
+// SetOpenRouterPrivacyFallback validates the retained configuration value.
+// Privacy downgrades are disabled at dispatch until a trusted OSS admission
+// capability exists, so a recognized legacy value is intentionally inert.
 func (m *Manager) SetOpenRouterPrivacyFallback(policy OpenRouterPrivacyFallback) error {
 	if m == nil {
 		return fmt.Errorf("model manager is nil")
 	}
-	parsed, err := ParseOpenRouterPrivacyFallback(string(policy))
-	if err != nil {
-		return err
-	}
-	m.privacyFallback = parsed
-	return nil
+	_, err := ParseOpenRouterPrivacyFallback(string(policy))
+	return err
 }
 
 // ChatCompletion performs a chat completion routed to the proper provider
@@ -338,24 +333,15 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
 	req.Model = selectedModel
+	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	privacyRetry := false
-	if provider.ID() == "openrouter" {
-		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
+	if err := validateModelDispatch(req, provider.ID()); err != nil {
+		return nil, err
 	}
 	resp, err := chatCompletionWithAffordableOutputRetry(ctx, provider, req)
-	if err != nil && resp == nil && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
-		fallbackReq, ok := openRouterDataCollectionDenyRequest(req)
-		if ok {
-			resp, err = chatCompletionWithAffordableOutputRetry(ctx, provider, fallbackReq)
-			if err != nil {
-				err = fmt.Errorf("OpenRouter ZDR route failed; data_collection=deny fallback also failed: %w", err)
-			}
-		}
-	}
 	if err != nil {
 		// Preserve a provider response returned alongside an error. Streaming
 		// and some native adapters can have billable usage/content before a
@@ -375,7 +361,7 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 func chatCompletionWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (*ChatResponse, error) {
 	for attempt := 0; ; attempt++ {
 		resp, err := provider.ChatCompletion(ctx, req)
-		if err == nil || resp != nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+		if err == nil || resp != nil || provider.ID() != "openrouter" || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 			return resp, err
 		}
 		affordable, ok := affordableOutputTokenLimit(err)
@@ -420,13 +406,13 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 		return nil, fmt.Errorf("provider %s does not support continuation", provider.ID())
 	}
 	req.Model = selectedModel
+	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	privacyRetry := false
-	if provider.ID() == "openrouter" {
-		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
+	if err := validateModelDispatch(req, provider.ID()); err != nil {
+		return nil, err
 	}
 	continuationReq.Request = req
 
@@ -436,7 +422,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	)
 	for attempt := 0; ; attempt++ {
 		resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
-		if err == nil || provider.ID() != "openrouter" || attempt >= maxAffordableOutputRetries {
+		if err == nil || provider.ID() != "openrouter" || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 			break
 		}
 		affordable, ok := affordableOutputTokenLimit(err)
@@ -448,13 +434,6 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 			break
 		}
 		continuationReq.Request = next
-	}
-	if err != nil && resp == nil && privacyRetry && shouldTryOpenRouterPrivacyFallback(err) {
-		fallbackReq, ok := openRouterDataCollectionDenyRequest(continuationReq.Request)
-		if ok {
-			continuationReq.Request = fallbackReq
-			resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
-		}
 	}
 	if err != nil {
 		return resp, err
@@ -480,25 +459,25 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 		return chunkChan, errChan
 	}
 	req.Model = selectedModel
+	req = normalizeOpenRouterStrictZDRRoute(req, provider.ID())
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
+	if err := validateModelDispatch(req, provider.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	if provider.ID() != "openrouter" {
 		return provider.ChatCompletionStream(ctx, req)
 	}
-	privacyRetry := false
-	if provider.ID() == "openrouter" {
-		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
-	}
-	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req, privacyRetry)
+	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req)
 }
 
 // chatCompletionStreamWithAffordableOutputRetry retries only a provider
 // rejection that arrives before the first stream chunk. Once any content,
 // reasoning, usage, or tool-call delta has been observed, replaying the request
 // could duplicate externally visible work and the original error is final.
-func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest, privacyRetry bool) (<-chan StreamChunk, <-chan error) {
+func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	chunksOut := make(chan StreamChunk, 10)
 	errorsOut := make(chan error, 1)
 
@@ -506,7 +485,6 @@ func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider
 		defer close(chunksOut)
 		defer close(errorsOut)
 
-		privacyFallbackAttempted := false
 		for attempt := 0; ; attempt++ {
 			chunks, errStream := provider.ChatCompletionStream(ctx, req)
 			sawChunk := false
@@ -546,14 +524,7 @@ func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider
 			if terminalErr == nil {
 				return
 			}
-			if !sawChunk && privacyRetry && !privacyFallbackAttempted && shouldTryOpenRouterPrivacyFallback(terminalErr) {
-				if next, ok := openRouterDataCollectionDenyRequest(req); ok {
-					req = next
-					privacyFallbackAttempted = true
-					continue
-				}
-			}
-			if sawChunk || attempt >= maxAffordableOutputRetries {
+			if sawChunk || req.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 				errorsOut <- terminalErr
 				return
 			}

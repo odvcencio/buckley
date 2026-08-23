@@ -186,8 +186,8 @@ func (c *Client) retryLimit(err error) int {
 	return limit
 }
 
-func (c *Client) canRetryModelRequest(attempt int, err error) bool {
-	return isRetryableError(err) && attempt < c.retryLimit(err)
+func (c *Client) canRetryModelRequest(attempt int, err error, mode RequestRetryMode) bool {
+	return mode == RequestRetryDefault && isRetryableError(err) && attempt < c.retryLimit(err)
 }
 
 func retryExhaustedError(attempt int, err error) error {
@@ -369,6 +369,9 @@ func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion performs a non-streaming chat completion with automatic retries
 func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
+		return nil, err
+	}
 	req.Stream = false
 
 	var result *ChatResponse
@@ -410,7 +413,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			resp, err := c.httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
-				if c.canRetryModelRequest(attempt, lastErr) {
+				if c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
 					continue
 				}
 				return retryExhaustedError(attempt, lastErr)
@@ -420,7 +423,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				resp.Body.Close()
 				lastErr = apiErr
 
-				if c.canRetryModelRequest(attempt, apiErr) {
+				if c.canRetryModelRequest(attempt, apiErr, req.RetryMode) {
 					continue
 				}
 				if isRetryableError(apiErr) {
@@ -492,6 +495,9 @@ func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 
 // ChatCompletionStream performs a streaming chat completion with automatic retries
 func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
@@ -552,7 +558,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			if c.canRetryModelRequest(attempt, lastErr) {
+			if c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
 				continue
 			}
 			return retryExhaustedError(attempt, lastErr)
@@ -564,7 +570,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 			lastErr = apiErr
 
 			// Only retry if error is retryable
-			if c.canRetryModelRequest(attempt, apiErr) {
+			if c.canRetryModelRequest(attempt, apiErr, req.RetryMode) {
 				continue
 			}
 			if isRetryableError(apiErr) {
@@ -580,7 +586,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		_ = resp.Body.Close()
 		if streamErr != nil {
 			lastErr = fmt.Errorf("parsing SSE stream: %w", streamErr)
-			if events == 0 && c.canRetryModelRequest(attempt, lastErr) {
+			if events == 0 && c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
 				continue
 			}
 			if events == 0 && isRetryableError(lastErr) {

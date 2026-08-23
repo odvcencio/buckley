@@ -1308,7 +1308,7 @@ func runConfigShow() error {
 	if privacyFallback == "" {
 		privacyFallback = "disabled"
 	}
-	fmt.Printf("  OpenRouter privacy fallback: %s\n", privacyFallback)
+	fmt.Printf("  OpenRouter privacy fallback (legacy, inert): %s\n", privacyFallback)
 	fmt.Printf("  Review budget: %s\n", configBudgetSummary(cfg.Buckbot.PerReviewBudgetUSD))
 	fmt.Printf("  Tool-call cap: %s\n", configLimitSummary(cfg.Buckbot.MaxToolCalls))
 	fmt.Println()
