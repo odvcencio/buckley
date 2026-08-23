@@ -1,0 +1,110 @@
+--- a/grep/where.go
++++ b/grep/where.go
+@@
+-func splitClauses(s string) []string {
+-	s = strings.ReplaceAll(s, "\n", ";")
+-	return strings.Split(s, ";")
++func splitClauses(s string) []string {
++	var clauses []string
++	var cur strings.Builder
++	var quote byte
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		if quote != 0 {
++			cur.WriteByte(c)
++			if c == '\\' && i+1 < len(s) {
++				cur.WriteByte(s[i+1])
++				i++
++			} else if c == quote {
++				quote = 0
++			}
++			continue
++		}
++		switch c {
++		case '"', '\'':
++			quote = c
++			cur.WriteByte(c)
++		case ';', '\n':
++			clauses = append(clauses, cur.String())
++			cur.Reset()
++		default:
++			cur.WriteByte(c)
++		}
++	}
++	clauses = append(clauses, cur.String())
++	return clauses
+ }
+ 
+ func stripQuotes(s string) string {
+@@
+-	if len(s) >= 2 {
+-		if (s[0] == '"' && s[len(s)-1] == '"') ||
+-			(s[0] == '\'' && s[len(s)-1] == '\'') {
+-			return s[1 : len(s)-1]
++	if len(s) >= 2 {
++		q := s[0]
++		if (q == '"' || q == '\'') && s[len(s)-1] == q {
++			s = s[1 : len(s)-1]
++			var out strings.Builder
++			for i := 0; i < len(s); i++ {
++				if s[i] == '\\' && i+1 < len(s) && s[i+1] == q {
++					out.WriteByte(q)
++					i++
++					continue
++				}
++				out.WriteByte(s[i])
++			}
++			return out.String()
+ 		}
+ 	}
+ 	return s
+ }
+--- a/grep/where_test.go
++++ b/grep/where_test.go
+@@
+ func TestCompileWhere_QuotedSeparators(t *testing.T) {
+-	tests := []struct {
+-		name    string
+-		where   string
+-		wantErr bool
+-	}{
+-		{name: "double quoted semicolon", where: `contains($NAME, "a;b")`},
+-		{name: "single quoted semicolon", where: `contains($NAME, 'a;b')`},
+-		{name: "quoted newline", where: "contains($NAME, \"a\nb\")"},
+-		{name: "single quoted newline", where: "contains($NAME, 'a\nb')"},
+-	}
+-	for _, tt := range tests {
+-		t.Run(tt.name, func(t *testing.T) {
+-			if _, err := CompileWhere(tt.where); err != nil {
+-				t.Fatalf("unexpected error: %v", err)
+-			}
+-		})
+-	}
++	cases := []struct {
++		name  string
++		where string
++		text  string
++		match bool
++	}{
++		{name: "double quoted semicolon", where: `contains($NAME, "a;b")`, text: "a;b", match: true},
++		{name: "single quoted semicolon", where: `contains($NAME, 'a;b')`, text: "a;b", match: true},
++		{name: "double quoted newline", where: "contains($NAME, \"a\nb\")", text: "a\nb", match: true},
++		{name: "single quoted newline", where: "contains($NAME, 'a\nb')", text: "a\nb", match: true},
++		{name: "escaped double quote", where: `contains($NAME, "a\";b")`, text: `a";b`, match: true},
++		{name: "escaped single quote", where: `contains($NAME, 'a\';b')`, text: `a';b`, match: true},
++		{name: "regex escapes preserved", where: `contains($NAME, "\d+")`, text: `\d+`, match: true},
++		{name: "ordinary semicolon ANDs", where: `contains($NAME, "a"); contains($NAME, "b")`, text: "ab", match: true},
++		{name: "ordinary newline ANDs", where: "contains($NAME, \"a\")\ncontains($NAME, \"b\")", text: "ab", match: true},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			pred, err := CompileWhere(tc.where)
++			if err != nil {
++				t.Fatalf("CompileWhere(%q): %v", tc.where, err)
++			}
++			if got := pred(tc.text); got != tc.match {
++				t.Fatalf("match(%q) = %v, want %v", tc.text, got, tc.match)
++			}
++		})
++	}
+ }

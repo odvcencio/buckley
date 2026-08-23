@@ -1,0 +1,122 @@
+diff --git a/grep/where.go b/grep/where.go
+index 0000000..0000001 100644
+--- a/grep/where.go
++++ b/grep/where.go
+@@ -60,9 +60,30 @@ func CompileWhere(where string) (WhereFilter, error) {
+ }
+ 
+-// splitClauses splits a where string on semicolons and newlines.
++// splitClauses splits a where string on semicolons and newlines that occur
++// outside of single- or double-quoted arguments. Backslash-escaped quotes
++// inside a quoted argument do not terminate the quote.
+ func splitClauses(s string) []string {
+-	// Replace newlines with semicolons, then split.
+-	s = strings.ReplaceAll(s, "\n", ";")
+-	return strings.Split(s, ";")
++	var clauses []string
++	var cur strings.Builder
++	var quote byte
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		switch {
++		case quote != 0:
++			if c == '\\' && i+1 < len(s) && s[i+1] == quote {
++				cur.WriteByte(c)
++				cur.WriteByte(quote)
++				i++
++				continue
++			}
++			if c == quote {
++				quote = 0
++			}
++			cur.WriteByte(c)
++		case c == '"' || c == '\'':
++			quote = c
++			cur.WriteByte(c)
++		case c == ';' || c == '\n':
++			clauses = append(clauses, cur.String())
++			cur.Reset()
++		default:
++			cur.WriteByte(c)
++		}
++	}
++	clauses = append(clauses, cur.String())
++	return clauses
+ }
+diff --git a/grep/where_test.go b/grep/where_test.go
+index 0000000..0000002 100644
+--- a/grep/where_test.go
++++ b/grep/where_test.go
+@@ -0,0 +1,79 @@
++func TestSplitClauses_QuotedSeparators(t *testing.T) {
++	tests := []struct {
++		name string
++		in   string
++		want []string
++	}{
++		{
++			name: "quoted semicolon double",
++			in:   `contains($TEXT, "a;b")`,
++			want: []string{`contains($TEXT, "a;b")`},
++		},
++		{
++			name: "quoted semicolon single",
++			in:   `contains($TEXT, 'a;b')`,
++			want: []string{`contains($TEXT, 'a;b')`},
++		},
++		{
++			name: "quoted newline double",
++			in:   "contains($TEXT, \"a\nb\")",
++			want: []string{`contains($TEXT, "a\nb")`},
++		},
++		{
++			name: "quoted newline single",
++			in:   "contains($TEXT, 'a\nb')",
++			want: []string{`contains($TEXT, 'a\nb')`},
++		},
++		{
++			name: "escaped double quote inside double quotes",
++			in:   `contains($TEXT, "a\";b"); matches($TEXT, "x")`,
++			want: []string{`contains($TEXT, "a\";b")`, ` matches($TEXT, "x")`},
++		},
++		{
++			name: "escaped single quote inside single quotes",
++			in:   `contains($TEXT, 'a\';b'); matches($TEXT, "x")`,
++			want: []string{`contains($TEXT, 'a\';b')`, ` matches($TEXT, "x")`},
++		},
++		{
++			name: "ordinary multi-clause semicolons",
++			in:   `contains($A, "x"); contains($B, "y")`,
++			want: []string{`contains($A, "x")`, ` contains($B, "y")`},
++		},
++		{
++			name: "ordinary multi-clause newlines",
++			in:   "contains($A, \"x\")\ncontains($B, \"y\")",
++			want: []string{`contains($A, "x")`, `contains($B, "y")`},
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := splitClauses(tt.in)
++			if len(got) != len(tt.want) {
++				t.Fatalf("splitClauses(%q) = %q, want %q", tt.in, got, tt.want)
++			}
++			for i := range got {
++				if got[i] != tt.want[i] {
++					t.Errorf("clause %d = %q, want %q", i, got[i], tt.want[i])
++				}
++			}
++		})
++	}
++}
++
++func TestCompileWhere_QuotedSemicolon(t *testing.T) {
++	filter, err := CompileWhere(`matches($NAME, "first;second")`)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	r := &Result{Captures: map[string]Capture{"NAME": {Name: "NAME", Text: []byte("first;second")}}}
++	if !filter(r, nil, nil) {
++		t.Error("expected filter to match first;second")
++	}
++}
