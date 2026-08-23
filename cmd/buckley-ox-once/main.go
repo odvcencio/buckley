@@ -51,11 +51,6 @@ func run() error {
 	if len(prompt) == 0 || len(prompt) > maxPromptBytes {
 		return fmt.Errorf("prompt size %d is outside 1..%d bytes", len(prompt), maxPromptBytes)
 	}
-	if _, err := os.Stat(outputPath); err == nil {
-		return fmt.Errorf("output already exists: %s", outputPath)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect output: %w", err)
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
@@ -83,8 +78,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("Ox Alpha request failed: %w", err)
 	}
-	if response == nil || len(response.Choices) != 1 {
-		return fmt.Errorf("Ox Alpha returned %d choices, want exactly one", len(response.Choices))
+	content, err := oxAlphaPatchText(response)
+	if err != nil {
+		return err
+	}
+	if err := writeExclusiveOutput(outputPath, []byte(content)); err != nil {
+		return err
+	}
+	fmt.Printf("saved one Ox Alpha response for %s at %s\n", exactHead, outputPath)
+	return nil
+}
+
+func oxAlphaPatchText(response *model.ChatResponse) (string, error) {
+	if response == nil {
+		return "", errors.New("Ox Alpha returned a nil response")
+	}
+	if len(response.Choices) != 1 {
+		return "", fmt.Errorf("Ox Alpha returned %d choices, want exactly one", len(response.Choices))
 	}
 	choice := response.Choices[0]
 	content, _ := choice.Message.Content.(string)
@@ -106,12 +116,39 @@ func run() error {
 		content = recovered.String()
 	}
 	if strings.TrimSpace(content) == "" {
-		return fmt.Errorf("Ox Alpha returned no patch text (finish_reason=%q)", choice.FinishReason)
+		return "", fmt.Errorf("Ox Alpha returned no patch text (finish_reason=%q)", choice.FinishReason)
 	}
-	if err := os.WriteFile(outputPath, []byte(content), 0o600); err != nil {
+	return content, nil
+}
+
+func writeExclusiveOutput(path string, content []byte) error {
+	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("output already exists: %s", path)
+		}
+		return fmt.Errorf("create Ox Alpha output: %w", err)
+	}
+	createdInfo, _ := output.Stat()
+	keep := false
+	defer func() {
+		if keep {
+			return
+		}
+		_ = output.Close()
+		currentInfo, err := os.Lstat(path)
+		if err == nil && createdInfo != nil && os.SameFile(createdInfo, currentInfo) {
+			_ = os.Remove(path)
+		}
+	}()
+
+	if _, err := output.Write(content); err != nil {
 		return fmt.Errorf("write Ox Alpha output: %w", err)
 	}
-	fmt.Printf("saved one Ox Alpha response for %s at %s\n", exactHead, outputPath)
+	if err := output.Close(); err != nil {
+		return fmt.Errorf("close Ox Alpha output: %w", err)
+	}
+	keep = true
 	return nil
 }
 

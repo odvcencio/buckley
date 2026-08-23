@@ -74,6 +74,27 @@ func TestOneUseStrictZDROpenRouterClient_ExactWireAndSingleDispatch(t *testing.T
 	}
 }
 
+func TestOneUseStrictZDROpenRouterClient_DynamicContentLargeIntegerPreserved(t *testing.T) {
+	const expectedWire = `{"model":"qwen/qwen3.7-flash","messages":[{"role":"user","content":{"nonce":9007199254740993}}],"stream":false,"provider":{"allow_fallbacks":false,"zdr":true}}`
+	var calls atomic.Int32
+	governed, _ := newStrictZDROneUseTestClient(t, ossAdmissionRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if err := assertOSSAdmissionOracleRequest(req, "test-key", false, expectedWire); err != nil {
+			t.Fatal(err)
+		}
+		return strictZDROneUseSuccess(req), nil
+	}))
+	req := strictZDROneUseRequest()
+	req.Messages[0].Content = map[string]any{"nonce": int64(9007199254740993)}
+
+	if _, err := governed.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("transport calls = %d, want 1", calls.Load())
+	}
+}
+
 func TestOneUseStrictZDROpenRouterClient_ConcurrentCallsDispatchExactlyOnce(t *testing.T) {
 	var calls atomic.Int32
 	governed, _ := newStrictZDROneUseTestClient(t, ossAdmissionRoundTripper(func(req *http.Request) (*http.Response, error) {

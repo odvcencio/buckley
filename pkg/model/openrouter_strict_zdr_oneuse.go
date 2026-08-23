@@ -121,9 +121,23 @@ func (c *OneUseStrictZDROpenRouterClient) admit(req ChatRequest) (ChatRequest, e
 	if err != nil {
 		return ChatRequest{}, fmt.Errorf("clone openrouter strict-zdr request: %w", err)
 	}
-	var prepared ChatRequest
-	if err := json.Unmarshal(serialized, &prepared); err != nil {
+	type requestClone ChatRequest
+	type messageClone Message
+	var cloned struct {
+		requestClone
+		Messages []messageClone `json:"messages"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(serialized))
+	decoder.UseNumber()
+	if err := decoder.Decode(&cloned); err != nil {
 		return ChatRequest{}, fmt.Errorf("clone openrouter strict-zdr request: %w", err)
+	}
+	prepared := ChatRequest(cloned.requestClone)
+	if cloned.Messages != nil {
+		prepared.Messages = make([]Message, len(cloned.Messages))
+		for i := range cloned.Messages {
+			prepared.Messages[i] = Message(cloned.Messages[i])
+		}
 	}
 	prepared.Model = c.modelID
 	prepared.Stream = false
