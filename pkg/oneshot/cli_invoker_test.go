@@ -1,8 +1,10 @@
 package oneshot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -10,11 +12,15 @@ import (
 	"m31labs.dev/buckley/pkg/tools"
 )
 
-func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {
+func TestCLIInvokerCodex_UsesSingleCompleteOutputSchemaFile(t *testing.T) {
 	tool := testCLITool()
 	tempDir := t.TempDir()
 	var got CLICommand
 	var schemaPath string
+	wantSchema, err := marshalCLISchema(tool.Parameters)
+	if err != nil {
+		t.Fatalf("marshal expected schema: %v", err)
+	}
 
 	inv, err := NewCLIInvoker(CLIInvokerConfig{
 		Backend:         CLIBackendCodex,
@@ -23,23 +29,37 @@ func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {
 		TempDir:         tempDir,
 		Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
 			got = cmd
-			for i, arg := range cmd.Args {
-				if arg == "--output-schema" && i+1 < len(cmd.Args) {
-					schemaPath = cmd.Args[i+1]
-				}
+			schemaPaths := codexOutputSchemaPaths(cmd.Args)
+			if len(schemaPaths) != 1 {
+				t.Fatalf("output schema paths = %v, want exactly one", schemaPaths)
 			}
-			if schemaPath == "" {
-				t.Fatalf("missing --output-schema in args: %v", cmd.Args)
-			}
+			schemaPath = schemaPaths[0]
 			schemaData, err := os.ReadFile(schemaPath)
 			if err != nil {
 				t.Fatalf("read schema: %v", err)
 			}
-			if !strings.Contains(string(schemaData), `"action"`) {
-				t.Fatalf("schema missing action property: %s", schemaData)
+			if !bytes.Equal(schemaData, wantSchema) {
+				t.Fatalf("schema file differs from complete marshaled schema\ngot:\n%s\nwant:\n%s", schemaData, wantSchema)
 			}
-			if !strings.Contains(string(schemaData), `"additionalProperties": false`) {
-				t.Fatalf("schema should close object properties: %s", schemaData)
+
+			var schema map[string]any
+			if err := json.Unmarshal(schemaData, &schema); err != nil {
+				t.Fatalf("unmarshal schema: %v", err)
+			}
+			if schema["type"] != "object" || schema["additionalProperties"] != false {
+				t.Fatalf("schema should be a closed object: %s", schemaData)
+			}
+			properties, ok := schema["properties"].(map[string]any)
+			if !ok || len(properties) != len(tool.Parameters.Properties) {
+				t.Fatalf("schema properties = %#v, want all %d properties", schema["properties"], len(tool.Parameters.Properties))
+			}
+			for name := range tool.Parameters.Properties {
+				if _, ok := properties[name]; !ok {
+					t.Fatalf("schema missing property %q: %s", name, schemaData)
+				}
+				if !schemaRequiredContains(schema, name) {
+					t.Fatalf("schema missing required property %q: %s", name, schemaData)
+				}
 			}
 			return CLICommandResult{Stdout: []byte(`{"action":"add","subject":"CLI backend","body":["Adds Codex CLI output-schema support"]}`)}, nil
 		},
@@ -73,11 +93,213 @@ func TestCLIInvokerCodexUsesOutputSchemaFile(t *testing.T) {
 	if got.Args[len(got.Args)-1] != "-" {
 		t.Fatalf("codex prompt should be read from stdin, args: %v", got.Args)
 	}
-	if !strings.Contains(got.Stdin, "Return only a JSON object") {
-		t.Fatalf("stdin missing JSON instruction: %q", got.Stdin)
+	for _, want := range []string{"system", "user", "Return only a JSON object", "`generate_commit`"} {
+		if !strings.Contains(got.Stdin, want) {
+			t.Fatalf("stdin missing %q: %q", want, got.Stdin)
+		}
+	}
+	for _, forbidden := range []string{"JSON schema:", `"properties"`, `"action"`, `"subject"`, `"body"`} {
+		if strings.Contains(got.Stdin, forbidden) {
+			t.Fatalf("stdin duplicated schema fragment %q: %q", forbidden, got.Stdin)
+		}
 	}
 	if _, err := os.Stat(schemaPath); !os.IsNotExist(err) {
 		t.Fatalf("schema file should be cleaned up, stat err: %v", err)
+	}
+}
+
+func TestCLIInvokerCodex_RejectsReservedOutputSchemaExtraArgsBeforeEffects(t *testing.T) {
+	tests := []struct {
+		name      string
+		extraArgs []string
+	}{
+		{name: "separate", extraArgs: []string{"--output-schema", "attacker-schema.json"}},
+		{name: "equals", extraArgs: []string{"--output-schema=attacker-schema.json"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			runnerCalls := 0
+			inv, err := NewCLIInvoker(CLIInvokerConfig{
+				Backend:   CLIBackendCodex,
+				ExtraArgs: tt.extraArgs,
+				TempDir:   tempDir,
+				Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
+					runnerCalls++
+					return CLICommandResult{Stdout: []byte(`{"action":"add"}`)}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewCLIInvoker: %v", err)
+			}
+
+			result, trace, err := inv.Invoke(context.Background(), "system", "user evidence", testCLITool(), nil)
+			if err == nil || !strings.Contains(err.Error(), "conflicts with reserved --output-schema") {
+				t.Fatalf("Invoke error = %v, want reserved output schema rejection", err)
+			}
+			if result != nil {
+				t.Fatalf("result = %+v, want nil", result)
+			}
+			if trace == nil || trace.Error == "" || len(trace.ToolCalls) != 0 {
+				t.Fatalf("failure trace should record the rejection without a tool call: %+v", trace)
+			}
+			if runnerCalls != 0 {
+				t.Fatalf("runner calls = %d, want zero", runnerCalls)
+			}
+			entries, err := os.ReadDir(tempDir)
+			if err != nil {
+				t.Fatalf("read temp dir: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("temp artifacts = %v, want none", entries)
+			}
+		})
+	}
+}
+
+func TestCodexOutputSchemaPaths_CountsSeparateAndEqualsForms(t *testing.T) {
+	paths := codexOutputSchemaPaths([]string{
+		"exec",
+		"--output-schema", "first.json",
+		"--output-schema=second.json",
+	})
+	if len(paths) != 2 || paths[0] != "first.json" || paths[1] != "second.json" {
+		t.Fatalf("paths = %v, want both output schema spellings", paths)
+	}
+}
+
+func TestCLIInvokerCodex_LargeSchemaDoesNotGrowStdin(t *testing.T) {
+	const propertyCount = 512
+	const toolName = "schema_size_invariant"
+
+	smallTool := tools.Definition{
+		Name: toolName,
+		Parameters: tools.ObjectSchema(map[string]tools.Property{
+			"field_0000": tools.StringProperty("small field"),
+		}, "field_0000"),
+	}
+	largeProperties := make(map[string]tools.Property, propertyCount)
+	largeRequired := make([]string, 0, propertyCount)
+	largeOutput := make(map[string]string, propertyCount)
+	for i := 0; i < propertyCount; i++ {
+		name := fmt.Sprintf("field_%04d", i)
+		largeProperties[name] = tools.StringProperty(strings.Repeat("large schema description ", 4))
+		largeRequired = append(largeRequired, name)
+		largeOutput[name] = "value"
+	}
+	largeTool := tools.Definition{
+		Name:       toolName,
+		Parameters: tools.ObjectSchema(largeProperties, largeRequired...),
+	}
+	largeStdout, err := json.Marshal(largeOutput)
+	if err != nil {
+		t.Fatalf("marshal large output: %v", err)
+	}
+
+	type measurement struct {
+		stdin       string
+		schemaBytes int
+	}
+	invoke := func(tool tools.Definition, stdout []byte) measurement {
+		t.Helper()
+		var got measurement
+		inv, err := NewCLIInvoker(CLIInvokerConfig{
+			Backend: CLIBackendCodex,
+			TempDir: t.TempDir(),
+			Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
+				paths := codexOutputSchemaPaths(cmd.Args)
+				if len(paths) != 1 {
+					t.Fatalf("output schema paths = %v, want exactly one", paths)
+				}
+				schemaData, err := os.ReadFile(paths[0])
+				if err != nil {
+					t.Fatalf("read schema: %v", err)
+				}
+				got = measurement{stdin: cmd.Stdin, schemaBytes: len(schemaData)}
+				return CLICommandResult{Stdout: stdout}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewCLIInvoker: %v", err)
+		}
+		result, _, err := inv.Invoke(context.Background(), "fixed system", "fixed user evidence", tool, nil)
+		if err != nil {
+			t.Fatalf("Invoke: %v", err)
+		}
+		if result == nil || result.ToolCall == nil {
+			t.Fatalf("missing tool call: %+v", result)
+		}
+		return got
+	}
+
+	small := invoke(smallTool, []byte(`{"field_0000":"value"}`))
+	large := invoke(largeTool, largeStdout)
+	if small.stdin != large.stdin {
+		t.Fatalf("Codex stdin changed with schema size: small=%d bytes large=%d bytes", len(small.stdin), len(large.stdin))
+	}
+	if large.schemaBytes <= small.schemaBytes {
+		t.Fatalf("large schema file = %d bytes, want greater than small schema file %d", large.schemaBytes, small.schemaBytes)
+	}
+	t.Logf("Codex stdin=%d bytes; schema file grew from %d to %d bytes", len(small.stdin), small.schemaBytes, large.schemaBytes)
+}
+
+func TestCLIInvokerCodex_ValidOutputRoundTrips(t *testing.T) {
+	inv, err := NewCLIInvoker(CLIInvokerConfig{
+		Backend: CLIBackendCodex,
+		TempDir: t.TempDir(),
+		Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
+			return CLICommandResult{Stdout: []byte(`{"action":"add","subject":"Round trip","body":["Preserved"]}`)}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCLIInvoker: %v", err)
+	}
+
+	result, _, err := inv.Invoke(context.Background(), "system", "user evidence", testCLITool(), nil)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var payload struct {
+		Action  string   `json:"action"`
+		Subject string   `json:"subject"`
+		Body    []string `json:"body"`
+	}
+	if result == nil || result.ToolCall == nil {
+		t.Fatalf("missing tool call: %+v", result)
+	}
+	if err := result.ToolCall.Unmarshal(&payload); err != nil {
+		t.Fatalf("unmarshal tool call: %v", err)
+	}
+	if payload.Action != "add" || payload.Subject != "Round trip" || len(payload.Body) != 1 || payload.Body[0] != "Preserved" {
+		t.Fatalf("round-trip payload = %+v", payload)
+	}
+}
+
+func TestCLIInvokerCodex_MalformedOutputFailsClosed(t *testing.T) {
+	inv, err := NewCLIInvoker(CLIInvokerConfig{
+		Backend: CLIBackendCodex,
+		TempDir: t.TempDir(),
+		Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
+			return CLICommandResult{Stdout: []byte(`{"action":`)}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCLIInvoker: %v", err)
+	}
+
+	result, trace, err := inv.Invoke(context.Background(), "system", "user evidence", testCLITool(), nil)
+	if err == nil {
+		t.Fatal("expected malformed output error")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if trace == nil || trace.Error == "" || len(trace.ToolCalls) != 0 {
+		t.Fatalf("failure trace should record the error without a tool call: %+v", trace)
+	}
+	if !strings.Contains(err.Error(), "parse codex CLI JSON output") {
+		t.Fatalf("error = %q, want parse failure", err)
 	}
 }
 
@@ -224,6 +446,25 @@ func containsSubsequence(values, want []string) bool {
 		}
 	}
 	return false
+}
+
+func codexOutputSchemaPaths(args []string) []string {
+	var paths []string
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--output-schema=") {
+			paths = append(paths, strings.TrimPrefix(arg, "--output-schema="))
+			continue
+		}
+		if arg != "--output-schema" {
+			continue
+		}
+		if i+1 >= len(args) {
+			paths = append(paths, "")
+			continue
+		}
+		paths = append(paths, args[i+1])
+	}
+	return paths
 }
 
 func schemaRequiredContains(schema map[string]any, want string) bool {
