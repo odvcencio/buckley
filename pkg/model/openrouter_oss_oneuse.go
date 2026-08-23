@@ -3,11 +3,13 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
@@ -16,17 +18,20 @@ const OxAlphaOpenRouterModelID = "stealth/ox-alpha"
 
 var ErrOpenRouterOSSOneUseSpent = errors.New("model: openrouter oss one-use client is spent")
 
-// OneUseOSSOpenRouterClient sends at most one non-ZDR completion for an exact
-// Ox Alpha model after revalidating recognized root-license evidence.
+// OneUseOSSOpenRouterClient sends at most one non-ZDR patch completion for an
+// exact Ox Alpha model and a prompt bound by a one-use OSS blob rule.
 type OneUseOSSOpenRouterClient struct {
-	self     *OneUseOSSOpenRouterClient
-	provider *OpenRouterProvider
-	client   *Client
-	evidence workspaceevidence.RootLicenseBlobEvidence
-	used     atomic.Bool
+	self       *OneUseOSSOpenRouterClient
+	provider   *OpenRouterProvider
+	client     *Client
+	rule       *workspaceevidence.OSSBlobRule
+	boundRule  *workspaceevidence.OSSBlobRule
+	prompt     []byte
+	clientSeal [sha256.Size]byte
+	used       atomic.Bool
 }
 
-func NewOneUseOSSOpenRouterClient(ctx context.Context, apiKey, baseURL, modelID string, evidence workspaceevidence.RootLicenseBlobEvidence) (*OneUseOSSOpenRouterClient, error) {
+func NewOneUseOSSOpenRouterClient(apiKey, baseURL, modelID string, rule *workspaceevidence.OSSBlobRule, prompt []byte) (*OneUseOSSOpenRouterClient, error) {
 	if apiKey == "" || strings.TrimSpace(apiKey) != apiKey || strings.ContainsAny(apiKey, "\x00\r\n") {
 		return nil, fmt.Errorf("openrouter oss client requires a canonical credential")
 	}
@@ -39,30 +44,24 @@ func NewOneUseOSSOpenRouterClient(ctx context.Context, apiKey, baseURL, modelID 
 	if modelID != OxAlphaOpenRouterModelID {
 		return nil, fmt.Errorf("openrouter oss client only allows %s", OxAlphaOpenRouterModelID)
 	}
-	if !recognizedOSSRootLicense(evidence.DetectedSPDXHint()) {
-		return nil, fmt.Errorf("openrouter oss client requires a recognized root OSS license")
+	if rule == nil {
+		return nil, fmt.Errorf("openrouter oss client requires an OSS blob rule")
 	}
-	if err := evidence.Revalidate(ctx); err != nil {
-		return nil, fmt.Errorf("revalidate root OSS license: %w", err)
+	if len(prompt) == 0 || len(prompt) > workspaceevidence.MaxOSSPromptBlobBytes || !utf8.Valid(prompt) || bytes.IndexByte(prompt, 0) >= 0 {
+		return nil, fmt.Errorf("openrouter oss client requires a non-empty UTF-8 prompt")
 	}
 
 	client := NewClientWithOptions(apiKey, baseURL, ClientOptions{NetworkLogsEnabled: false})
 	governed := &OneUseOSSOpenRouterClient{
-		provider: &OpenRouterProvider{client: client},
-		client:   client,
-		evidence: evidence,
+		provider:  &OpenRouterProvider{client: client},
+		client:    client,
+		rule:      rule,
+		boundRule: rule,
+		prompt:    bytes.Clone(prompt),
 	}
 	governed.self = governed
+	governed.clientSeal = ossOneUseClientSeal(governed)
 	return governed, nil
-}
-
-func recognizedOSSRootLicense(spdx string) bool {
-	switch spdx {
-	case "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MPL-2.0":
-		return true
-	default:
-		return false
-	}
 }
 
 func (c *OneUseOSSOpenRouterClient) Close() error {
@@ -72,67 +71,73 @@ func (c *OneUseOSSOpenRouterClient) Close() error {
 	return c.client.Close()
 }
 
-func (c *OneUseOSSOpenRouterClient) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if c == nil || c.self != c || c.provider == nil || c.client == nil || c.provider.client != c.client {
-		return nil, fmt.Errorf("openrouter oss client is invalid")
-	}
-	if c.used.Load() {
-		return nil, ErrOpenRouterOSSOneUseSpent
-	}
-	if req.Model != OxAlphaOpenRouterModelID || strings.TrimSpace(req.Model) != req.Model {
-		return nil, fmt.Errorf("openrouter oss request requires the exact Ox Alpha model")
-	}
-	if req.Stream || len(req.Models) != 0 || len(req.Provider) != 0 || len(req.Transforms) != 0 {
-		return nil, fmt.Errorf("openrouter oss request contains caller-controlled routing")
-	}
-	if req.OpenRouterRetention != OpenRouterRetentionUnspecified || req.RetryMode != RequestRetryDefault || req.openRouterAdmission != nil || req.openRouterContext != ([32]byte{}) {
-		return nil, fmt.Errorf("openrouter oss request contains caller-controlled authority")
-	}
-	if req.PromptCache != nil || req.CacheControl != nil || req.PromptCacheKey != "" || req.PromptCacheRetention != "" {
-		return nil, fmt.Errorf("openrouter oss request contains prompt caching")
-	}
-	if req.ReviewSnapshot != nil || len(req.Tools) != 0 || req.ToolChoice != "" || req.ParallelToolCalls != nil {
-		return nil, fmt.Errorf("openrouter oss request must be patch-text only")
-	}
-	if !recognizedOSSRootLicense(c.evidence.DetectedSPDXHint()) {
-		return nil, fmt.Errorf("openrouter oss client lost recognized root-license evidence")
-	}
-	if err := c.evidence.Revalidate(ctx); err != nil {
-		return nil, fmt.Errorf("revalidate root OSS license before dispatch: %w", err)
-	}
-	if !c.used.CompareAndSwap(false, true) {
-		return nil, ErrOpenRouterOSSOneUseSpent
-	}
-
-	serialized, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("clone openrouter oss request: %w", err)
-	}
-	var prepared ChatRequest
-	if err := json.Unmarshal(serialized, &prepared); err != nil {
-		return nil, fmt.Errorf("clone openrouter oss request: %w", err)
-	}
-	prepared.Model = OxAlphaOpenRouterModelID
-	prepared.Stream = false
-	prepared.Models = nil
-	prepared.Provider = map[string]any{
-		"allow_fallbacks": false,
-		"data_collection": "deny",
-		"zdr":             false,
-	}
-	prepared.OpenRouterRetention = OpenRouterRetentionNonZDR
-	prepared.RetryMode = RequestRetrySingleAttempt
-
-	admitted, err := mintOSSNonZDROpenRouterAdmission(c.provider, prepared)
+func (c *OneUseOSSOpenRouterClient) CompletePatch(ctx context.Context) (*ChatResponse, error) {
+	admitted, err := c.admit(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return c.provider.ChatCompletion(ctx, admitted)
 }
 
+func (c *OneUseOSSOpenRouterClient) admit(ctx context.Context) (ChatRequest, error) {
+	if c == nil || c.self != c || c.provider == nil || c.client == nil || c.provider.client != c.client || c.rule == nil || c.rule != c.boundRule || len(c.prompt) == 0 || !utf8.Valid(c.prompt) || c.clientSeal != ossOneUseClientSeal(c) {
+		return ChatRequest{}, fmt.Errorf("openrouter oss client is invalid")
+	}
+	if c.used.Load() {
+		return ChatRequest{}, ErrOpenRouterOSSOneUseSpent
+	}
+
+	prompt := bytes.Clone(c.prompt)
+	prepared := ChatRequest{
+		Model:               OxAlphaOpenRouterModelID,
+		Messages:            []Message{{Role: "user", Content: string(prompt)}},
+		MaxCompletionTokens: 16384,
+		Stream:              false,
+		Reasoning:           &ReasoningConfig{Effort: "medium"},
+		Provider: map[string]any{
+			"allow_fallbacks": false,
+			"data_collection": "deny",
+			"zdr":             false,
+		},
+		OpenRouterRetention: OpenRouterRetentionNonZDR,
+		RetryMode:           RequestRetrySingleAttempt,
+	}
+	ruleContext, err := c.rule.ClaimForDispatch(ctx, prompt)
+	if err != nil {
+		return ChatRequest{}, fmt.Errorf("claim openrouter oss blob rule: %w", err)
+	}
+	if ruleContext == ([sha256.Size]byte{}) {
+		return ChatRequest{}, fmt.Errorf("openrouter oss blob rule returned an empty context binding")
+	}
+	if !c.used.CompareAndSwap(false, true) {
+		return ChatRequest{}, ErrOpenRouterOSSOneUseSpent
+	}
+	prepared.openRouterContext = ruleContext
+	return mintOSSNonZDROpenRouterAdmission(c.provider, prepared)
+}
+
+func ossOneUseClientSeal(client *OneUseOSSOpenRouterClient) [sha256.Size]byte {
+	if client == nil || client.client == nil {
+		return [sha256.Size]byte{}
+	}
+	hasher := sha256.New()
+	writeOpenRouterOSSDigestField(hasher, "domain", []byte("buckley.openrouter.oss-one-use-client.v1"))
+	writeOpenRouterOSSDigestField(hasher, "model", []byte(OxAlphaOpenRouterModelID))
+	writeOpenRouterOSSDigestField(hasher, "route", []byte(openRouterChatRoute(client.client)))
+	credential := openRouterOSSCredentialFingerprint(client.client.apiKey)
+	writeOpenRouterOSSDigestField(hasher, "credential-fingerprint", credential[:])
+	writeOpenRouterOSSDigestField(hasher, "prompt", client.prompt)
+	var seal [sha256.Size]byte
+	copy(seal[:], hasher.Sum(nil))
+	return seal
+}
+
 func mintOSSNonZDROpenRouterAdmission(provider *OpenRouterProvider, req ChatRequest) (ChatRequest, error) {
 	if provider == nil || provider.client == nil || provider.client.ossHTTPClient == nil {
 		return ChatRequest{}, fmt.Errorf("openrouter oss admission requires an exact provider")
+	}
+	if req.openRouterContext == ([sha256.Size]byte{}) {
+		return ChatRequest{}, fmt.Errorf("openrouter oss admission requires a rule context binding")
 	}
 	client := provider.client
 	body, err := json.Marshal(req)
@@ -162,7 +167,8 @@ func mintOSSNonZDROpenRouterAdmission(provider *OpenRouterProvider, req ChatRequ
 		headers:               headers,
 		headerRecord:          headerRecord,
 		credentialFingerprint: credentialFingerprint,
-		wireDigest:            openRouterOSSFinalWireDigest("openrouter", req.Model, route, false, headerRecord, credentialFingerprint, body),
+		contextBinding:        req.openRouterContext,
+		wireDigest:            openRouterOSSFinalWireDigest(req.openRouterContext, "openrouter", req.Model, route, false, headerRecord, credentialFingerprint, body),
 		inFlight:              inFlight,
 		consumed:              consumed,
 	}

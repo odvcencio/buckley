@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	openRouterOSSAdmissionDigestDomain    = "buckley.openrouter.oss-admission.final-wire.v2"
+	openRouterOSSAdmissionDigestDomain    = "buckley.openrouter.oss-admission.final-wire.v3"
 	openRouterOSSCredentialDigestDomain   = "buckley.openrouter.oss-admission.credential.v1"
 	openRouterOSSHeaderRecordDomain       = "buckley.openrouter.oss-admission.headers.v1"
 	openRouterOSSContentType              = "application/json"
@@ -43,9 +43,9 @@ const (
 	openRouterAdmissionPolicyStrictZDR
 )
 
-// openRouterOSSAdmission is an opaque, process-local, one-use capability.
-// There is intentionally no production constructor in this dormant slice.
-// A future trusted host boundary must bind the exact final request itself.
+// openRouterOSSAdmission is an opaque, process-local, one-use capability. The
+// non-ZDR path mints it only after a host-formed OSS blob rule has been claimed;
+// both policies bind the exact final request and a nonzero runtime context.
 type openRouterOSSAdmission struct {
 	self                  *openRouterOSSAdmission
 	policy                openRouterAdmissionPolicy
@@ -212,8 +212,8 @@ func validateOpenRouterOSSRequestPolicy(req ChatRequest) error {
 		if !exact || collection != "deny" {
 			return fmt.Errorf("%w: provider data_collection=deny is required", errOpenRouterOSSAdmissionInvalid)
 		}
-		if req.openRouterContext != ([sha256.Size]byte{}) || admission.contextBinding != ([sha256.Size]byte{}) {
-			return fmt.Errorf("%w: dormant oss admission cannot carry a runtime context binding", errOpenRouterOSSAdmissionInvalid)
+		if admission.contextBinding == ([sha256.Size]byte{}) || req.openRouterContext != admission.contextBinding {
+			return fmt.Errorf("%w: oss rule context binding mismatch", errOpenRouterOSSAdmissionInvalid)
 		}
 	case openRouterAdmissionPolicyStrictZDR:
 		if req.OpenRouterRetention != OpenRouterRetentionZDR {
@@ -280,8 +280,8 @@ func rejectOpenRouterOSSCacheKeys(body []byte) error {
 	return nil
 }
 
-func openRouterOSSFinalWireDigest(providerID, model, route string, stream bool, headerRecord []byte, credentialFingerprint [sha256.Size]byte, body []byte) [sha256.Size]byte {
-	return openRouterAdmissionFinalWireDigest(openRouterAdmissionPolicyOSSNonZDR, [sha256.Size]byte{}, providerID, model, route, stream, headerRecord, credentialFingerprint, body)
+func openRouterOSSFinalWireDigest(contextBinding [sha256.Size]byte, providerID, model, route string, stream bool, headerRecord []byte, credentialFingerprint [sha256.Size]byte, body []byte) [sha256.Size]byte {
+	return openRouterAdmissionFinalWireDigest(openRouterAdmissionPolicyOSSNonZDR, contextBinding, providerID, model, route, stream, headerRecord, credentialFingerprint, body)
 }
 
 func openRouterAdmissionFinalWireDigest(policy openRouterAdmissionPolicy, contextBinding [sha256.Size]byte, providerID, model, route string, stream bool, headerRecord []byte, credentialFingerprint [sha256.Size]byte, body []byte) [sha256.Size]byte {
@@ -298,7 +298,11 @@ func openRouterAdmissionFinalWireDigest(policy openRouterAdmissionPolicy, contex
 	}
 	writeOpenRouterOSSDigestField(hasher, "headers", headerRecord)
 	writeOpenRouterOSSDigestField(hasher, "credential-fingerprint", credentialFingerprint[:])
-	if policy == openRouterAdmissionPolicyStrictZDR {
+	switch policy {
+	case openRouterAdmissionPolicyOSSNonZDR:
+		writeOpenRouterOSSDigestField(hasher, "policy", []byte("oss-non-zdr"))
+		writeOpenRouterOSSDigestField(hasher, "context-binding", contextBinding[:])
+	case openRouterAdmissionPolicyStrictZDR:
 		writeOpenRouterOSSDigestField(hasher, "policy", []byte("strict-zdr"))
 		writeOpenRouterOSSDigestField(hasher, "context-binding", contextBinding[:])
 	}

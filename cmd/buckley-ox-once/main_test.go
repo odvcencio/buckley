@@ -1,13 +1,102 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/model"
 )
+
+const testMITLicense = `MIT License
+
+Copyright (c) 2026 Test Holder
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`
+
+func TestFormTrackedOSSPrompt_UsesExactCommittedBlob(t *testing.T) {
+	root, head := newTrackedPromptRepository(t)
+	rule, prompt, err := formTrackedOSSPrompt(context.Background(), root, head, ".buckley/tasks/task.md")
+	if err != nil {
+		t.Fatalf("formTrackedOSSPrompt() error = %v", err)
+	}
+	if got, want := string(prompt), "return a unified diff\n"; got != want {
+		t.Fatalf("prompt = %q, want %q", got, want)
+	}
+	binding, err := rule.ClaimForDispatch(context.Background(), prompt)
+	if err != nil {
+		t.Fatalf("ClaimForDispatch() error = %v", err)
+	}
+	if binding == ([32]byte{}) {
+		t.Fatal("ClaimForDispatch() returned an empty binding")
+	}
+}
+
+func TestFormTrackedOSSPrompt_RejectsExternalAndUntrackedPaths(t *testing.T) {
+	root, head := newTrackedPromptRepository(t)
+	untracked := filepath.Join(root, ".buckley", "tasks", "untracked.md")
+	if err := os.WriteFile(untracked, []byte("untracked\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(untracked) error = %v", err)
+	}
+
+	for _, promptPath := range []string{untracked, ".buckley/tasks/untracked.md"} {
+		if _, _, err := formTrackedOSSPrompt(context.Background(), root, head, promptPath); err == nil {
+			t.Fatalf("formTrackedOSSPrompt(%q) succeeded, want rejection", promptPath)
+		}
+	}
+}
+
+func newTrackedPromptRepository(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	runGitTest(t, root, "init", "-q")
+	runGitTest(t, root, "config", "user.email", "buckley-tests@example.invalid")
+	runGitTest(t, root, "config", "user.name", "Buckley Tests")
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(testMITLicense), 0o600); err != nil {
+		t.Fatalf("WriteFile(LICENSE) error = %v", err)
+	}
+	taskDir := filepath.Join(root, ".buckley", "tasks")
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(taskDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "task.md"), []byte("return a unified diff\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(task) error = %v", err)
+	}
+	runGitTest(t, root, "add", "LICENSE", ".buckley/tasks/task.md")
+	runGitTest(t, root, "commit", "-q", "-m", "test fixture")
+	head := strings.TrimSpace(runGitTest(t, root, "rev-parse", "HEAD"))
+	return root, head
+}
+
+func runGitTest(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
+}
 
 func TestWriteExclusiveOutput_CreatesPrivateFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "response.patch")

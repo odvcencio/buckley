@@ -17,8 +17,6 @@ import (
 	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
-const maxPromptBytes = 96 << 10
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "buckley-ox-once:", err)
@@ -30,7 +28,7 @@ func run() error {
 	var repoRoot, exactHead, promptPath, outputPath string
 	flag.StringVar(&repoRoot, "repo", "", "canonical clean Git worktree root")
 	flag.StringVar(&exactHead, "head", "", "exact full HEAD commit OID")
-	flag.StringVar(&promptPath, "prompt", "", "bounded prompt file")
+	flag.StringVar(&promptPath, "prompt", "", "repo-relative prompt blob committed at --head")
 	flag.StringVar(&outputPath, "output", "", "exclusive output file")
 	flag.Parse()
 
@@ -44,37 +42,24 @@ func run() error {
 	if err := requireExactCleanHead(canonicalRoot, exactHead); err != nil {
 		return err
 	}
-	prompt, err := os.ReadFile(promptPath)
-	if err != nil {
-		return fmt.Errorf("read prompt: %w", err)
-	}
-	if len(prompt) == 0 || len(prompt) > maxPromptBytes {
-		return fmt.Errorf("prompt size %d is outside 1..%d bytes", len(prompt), maxPromptBytes)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
-	evidence, err := workspaceevidence.InspectRootLicenseBlob(ctx, canonicalRoot, exactHead)
+	rule, prompt, err := formTrackedOSSPrompt(ctx, canonicalRoot, exactHead, promptPath)
 	if err != nil {
-		return fmt.Errorf("inspect root license: %w", err)
+		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load Buckley config: %w", err)
 	}
 	provider := cfg.Providers.OpenRouter
-	client, err := model.NewOneUseOSSOpenRouterClient(ctx, provider.APIKey, provider.BaseURL, model.OxAlphaOpenRouterModelID, evidence)
+	client, err := model.NewOneUseOSSOpenRouterClient(provider.APIKey, provider.BaseURL, model.OxAlphaOpenRouterModelID, rule, prompt)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	response, err := client.ChatCompletion(ctx, model.ChatRequest{
-		Model:               model.OxAlphaOpenRouterModelID,
-		Messages:            []model.Message{{Role: "user", Content: string(prompt)}},
-		MaxCompletionTokens: 16384,
-		Reasoning:           &model.ReasoningConfig{Effort: "medium"},
-	})
+	response, err := client.CompletePatch(ctx)
 	if err != nil {
 		return fmt.Errorf("Ox Alpha request failed: %w", err)
 	}
@@ -87,6 +72,18 @@ func run() error {
 	}
 	fmt.Printf("saved one Ox Alpha response for %s at %s\n", exactHead, outputPath)
 	return nil
+}
+
+func formTrackedOSSPrompt(ctx context.Context, canonicalRoot, exactHead, promptPath string) (*workspaceevidence.OSSBlobRule, []byte, error) {
+	evidence, err := workspaceevidence.InspectRootLicenseBlob(ctx, canonicalRoot, exactHead)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect root license: %w", err)
+	}
+	rule, prompt, err := workspaceevidence.MintTrackedPromptOSSBlobRule(ctx, evidence, promptPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("form tracked OSS prompt authority: %w", err)
+	}
+	return rule, prompt, nil
 }
 
 func oxAlphaPatchText(response *model.ChatResponse) (string, error) {

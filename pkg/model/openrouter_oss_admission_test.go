@@ -152,9 +152,9 @@ func ossAdmissionOracleCredentialFingerprint(apiKey string) [sha256.Size]byte {
 	return fingerprint
 }
 
-func ossAdmissionOracleFinalWireDigest(model, route string, stream bool, headerRecord []byte, credentialFingerprint [sha256.Size]byte, body []byte) [sha256.Size]byte {
+func ossAdmissionOracleFinalWireDigest(contextBinding [sha256.Size]byte, model, route string, stream bool, headerRecord []byte, credentialFingerprint [sha256.Size]byte, body []byte) [sha256.Size]byte {
 	hasher := sha256.New()
-	ossAdmissionOracleWriteDigestField(hasher, "domain", []byte("buckley.openrouter.oss-admission.final-wire.v2"))
+	ossAdmissionOracleWriteDigestField(hasher, "domain", []byte("buckley.openrouter.oss-admission.final-wire.v3"))
 	ossAdmissionOracleWriteDigestField(hasher, "provider", []byte("openrouter"))
 	ossAdmissionOracleWriteDigestField(hasher, "model", []byte(model))
 	ossAdmissionOracleWriteDigestField(hasher, "method", []byte("POST"))
@@ -166,6 +166,8 @@ func ossAdmissionOracleFinalWireDigest(model, route string, stream bool, headerR
 	}
 	ossAdmissionOracleWriteDigestField(hasher, "headers", headerRecord)
 	ossAdmissionOracleWriteDigestField(hasher, "credential-fingerprint", credentialFingerprint[:])
+	ossAdmissionOracleWriteDigestField(hasher, "policy", []byte("oss-non-zdr"))
+	ossAdmissionOracleWriteDigestField(hasher, "context-binding", contextBinding[:])
 	ossAdmissionOracleWriteDigestField(hasher, "final-wire", body)
 	var digest [sha256.Size]byte
 	copy(digest[:], hasher.Sum(nil))
@@ -181,6 +183,9 @@ func mintOSSAdmissionForTest(t *testing.T, provider *OpenRouterProvider, req Cha
 	}
 	client := provider.client
 	req.Stream = stream
+	if req.openRouterContext == ([sha256.Size]byte{}) {
+		req.openRouterContext = sha256.Sum256([]byte("test-only-oss-rule-context"))
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal admitted test request: %v", err)
@@ -211,7 +216,8 @@ func mintOSSAdmissionForTest(t *testing.T, provider *OpenRouterProvider, req Cha
 		headers:               headers,
 		headerRecord:          headerRecord,
 		credentialFingerprint: credentialFingerprint,
-		wireDigest:            ossAdmissionOracleFinalWireDigest(req.Model, route, stream, headerRecord, credentialFingerprint, body),
+		contextBinding:        req.openRouterContext,
+		wireDigest:            ossAdmissionOracleFinalWireDigest(req.openRouterContext, req.Model, route, stream, headerRecord, credentialFingerprint, body),
 		inFlight:              inFlight,
 		consumed:              consumed,
 	}
@@ -530,6 +536,11 @@ func TestOpenRouterOSSAdmissionBindingMismatchesStopBeforeTransport(t *testing.T
 			_, err := client.ChatCompletion(context.Background(), req)
 			return err
 		}},
+		{name: "rule context", call: func(_ *testing.T, _ *OpenRouterProvider, client *Client, req ChatRequest) error {
+			req.openRouterContext = sha256.Sum256([]byte("different-oss-rule-context"))
+			_, err := client.ChatCompletion(context.Background(), req)
+			return err
+		}},
 		{name: "route", call: func(_ *testing.T, _ *OpenRouterProvider, client *Client, req ChatRequest) error {
 			client.baseURL += "/different"
 			_, err := client.ChatCompletion(context.Background(), req)
@@ -590,6 +601,35 @@ func TestOpenRouterOSSAdmissionBindingMismatchesStopBeforeTransport(t *testing.T
 			t.Fatalf("transport calls = %d, want zero", calls.Load())
 		}
 	})
+}
+
+func TestOpenRouterOSSAdmissionContextSubstitutionStopsBeforeTransport(t *testing.T) {
+	var calls atomic.Int32
+	provider, client := newOSSAdmissionTestProvider(t, ossAdmissionRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return ossAdmissionResponse(req, http.StatusOK, `{"id":"ok","model":"stealth/ox-alpha","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	}))
+	req, admission := mintOSSAdmissionForTest(t, provider, baseOSSAdmissionTestRequest(), false)
+	originalContext := req.openRouterContext
+	substituted := sha256.Sum256([]byte("substituted-oss-rule-context"))
+	req.openRouterContext = substituted
+	admission.contextBinding = substituted
+
+	if _, err := client.ChatCompletion(context.Background(), req); !errors.Is(err, errOpenRouterOSSAdmissionInvalid) {
+		t.Fatalf("substituted context error = %v, want invalid admission", err)
+	}
+	if calls.Load() != 0 || admission.consumed.Load() || admission.inFlight.Load() {
+		t.Fatalf("substituted context calls=%d consumed=%v inFlight=%v", calls.Load(), admission.consumed.Load(), admission.inFlight.Load())
+	}
+
+	req.openRouterContext = originalContext
+	admission.contextBinding = originalContext
+	if _, err := client.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatalf("restored context: %v", err)
+	}
+	if calls.Load() != 1 || !admission.consumed.Load() || admission.inFlight.Load() {
+		t.Fatalf("restored context calls=%d consumed=%v inFlight=%v", calls.Load(), admission.consumed.Load(), admission.inFlight.Load())
+	}
 }
 
 func TestOpenRouterOSSAdmissionRejectsFallbacksAndAllCacheShapes(t *testing.T) {
