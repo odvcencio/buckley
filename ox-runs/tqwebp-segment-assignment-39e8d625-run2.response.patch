@@ -1,0 +1,595 @@
+```diff
+diff --git a/internal/encoder/segment_assignment.go b/internal/encoder/segment_assignment.go
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/internal/encoder/segment_assignment.go
+@@ -0,0 +1,231 @@
++package encoder
++
++import (
++	"m31labs.dev/tqwebp/internal/cost"
++	"m31labs.dev/tqwebp/internal/frame"
++)
++
++// Static bounds for the dormant segment assignment planner. All loops in this
++// file run a fixed number of iterations determined solely by the input length;
++// there is no randomness, floating point, map usage, recursion, goroutines, or
++// convergence-until-stable control flow.
++const (
++	segmentAssignmentMaxSegments     = 4
++	segmentAssignmentExhaustiveLimit = 6
++)
++
++// segmentAssignmentResult is the private planning evidence returned by
++// assignSegments. It is byte-inert: nothing in the encoder consumes it yet.
++type segmentAssignmentResult struct {
++	// IDs is in macroblock raster order. When Enabled is false it is filled
++	// with zeros and has the same length as the input.
++	IDs []uint8
++	// Segmentation is the frame-level segmentation state implied by the plan.
++	// It is the zero value when the plan is disabled.
++	Segmentation frame.Segmentation
++	// Enabled reports whether the enabled plan beat the disabled baseline on
++	// a strict rate-domain payoff.
++	Enabled bool
++	// Gain echoes the supplied content-score gain in Q8 rate units.
++	Gain cost.Cost
++	// EnabledCost prices the enabled plan exactly once via
++	// priceSegmentControl; it already contains the map update gates,
++	// probability literals, and ID records. segmentMapPlan.SignalCost and
++	// segmentMapPlan.IDCost are never added again.
++	EnabledCost segmentControlCost
++	// DisabledCost prices the disabled baseline exactly once via
++	// priceSegmentControl(frame.Segmentation{}, nil).
++	DisabledCost segmentControlCost
++	// CandidatesEvaluated exposes bounded candidate statistics for tests.
++	CandidatesEvaluated int
++	// ExhaustiveSearch reports whether the exhaustive small-input path ran.
++	ExhaustiveSearch bool
++}
++
++// assignSegments plans a 1..4 segment assignment for raster-ordered features.
++// gain is the supplied content-score gain in Q8 rate units; the plan is
++// enabled only when gain strictly exceeds the incremental control rate
++// (enabled.TotalCost - disabled.TotalCost). The input slice is never mutated.
++func assignSegments(features []segmentFeature, gain cost.Cost) segmentAssignmentResult {
++	n := len(features)
++	res := segmentAssignmentResult{Gain: gain}
++	res.DisabledCost = priceSegmentControl(frame.Segmentation{}, nil)
++	if n == 0 {
++		return res
++	}
++	res.ExhaustiveSearch = n <= segmentAssignmentExhaustiveLimit
++
++	bestPayoff := cost.Cost(0) // strict gain required to enable
++	var bestIDs []uint8
++	var bestPlan segmentMapPlan
++	var bestControl segmentControlCost
++	found := false
++
++	eval := func(cand []uint8) {
++		res.CandidatesEvaluated++
++		can := canonicalizeSegmentIDs(cand, n)
++		if can == nil {
++			return
++		}
++		can = collapseEquivalentClusters(can, features)
++		if len(can) != n {
++			return
++		}
++		plan := deriveSegmentMapPlan(can)
++		ctrl := priceSegmentControl(segmentationFromPlan(plan), can)
++		payoff := gain - (ctrl.TotalCost - res.DisabledCost.TotalCost)
++		if !found || payoff > bestPayoff || (payoff == bestPayoff && segmentIDLexLess(can, bestIDs)) {
++			found = true
++			bestPayoff = payoff
++			bestIDs = append(bestIDs[:0], can...)
++			bestPlan = plan
++			bestControl = ctrl
++		}
++	}
++
++	if res.ExhaustiveSearch {
++		// Fixed iteration count: exactly segmentAssignmentMaxSegments^n
++		// labelings, enumerated in lexicographic order via a mixed-radix
++		// counter. No recursion, no maps, no randomness.
++		cur := make([]uint8, n)
++		for {
++			eval(cur)
++			i := n - 1
++			for i >= 0 && cur[i] == segmentAssignmentMaxSegments-1 {
++				cur[i] = 0
++				i--
++			}
++			if i < 0 {
++				break
++			}
++			cur[i]++
++		}
++	} else {
++		// Fixed candidate count: one single-segment baseline plus three
++		// threshold families x three prefix lengths = 19 candidates total,
++		// independent of n.
++		cur := make([]uint8, n)
++		eval(cur)
++		for kind := 0; kind < 3; kind++ {
++			var th [3]uint32
++			switch kind {
++			case 0:
++				th = [3]uint32{64, 128, 192}
++			case 1:
++				th = [3]uint32{30000, 60000, 90000}
++			default:
++				th = [3]uint32{266342400, 532684800, 799027200}
++			}
++			for k := 1; k <= 3; k++ {
++				applySegmentThresholds(cur, features, kind, th, k)
++				eval(cur)
++			}
++		}
++	}
++
++	// Fail closed: any inconsistent internal state falls back to disabled.
++	if !found || len(bestIDs) != n {
++		res.IDs = make([]uint8, n)
++		res.Enabled = false
++		res.Segmentation = frame.Segmentation{}
++		res.EnabledCost = segmentControlCost{}
++		return res
++	}
++
++	// The selected IDs are derived and priced exactly once; the winner's
++	// already-computed plan and control ledger are transferred verbatim, so
++	// SignalCost/IDCost from deriveSegmentMapPlan are never double counted.
++	res.Enabled = true
++	res.IDs = append([]uint8(nil), bestIDs...)
++	res.Segmentation = segmentationFromPlan(bestPlan)
++	res.EnabledCost = bestControl
++	return res
++}
++
++// segmentationFromPlan builds the enabled frame state for a derived plan.
++func segmentationFromPlan(p segmentMapPlan) frame.Segmentation {
++	var s frame.Segmentation
++	s.Enabled = true
++	s.UpdateMap = true
++	s.UpdateData = false
++	s.TreeProbs = p.Probs
++	return s
++}
++
++// canonicalizeSegmentIDs relabels src so that IDs are assigned 0,1,2,... in
++// order of first raster occurrence. Empty clusters vanish. It returns nil on
++// any out-of-range label.
++func canonicalizeSegmentIDs(src []uint8, n int) []uint8 {
++	out := make([]uint8, n)
++	var remap [segmentAssignmentMaxSegments]int8
++	for i := range remap {
++		remap[i] = -1
++	}
++	next := int8(0)
++	for i := 0; i < n; i++ {
++		l := src[i]
++		if int(l) >= segmentAssignmentMaxSegments {
++			return nil
++		}
++		if remap[l] < 0 {
++			remap[l] = next
++			next++
++		}
++		out[i] = uint8(remap[l])
++	}
++	return out
++}
++
++// collapseEquivalentClusters merges clusters with identical feature
++// aggregates into the lowest involved ID, repeating a bounded number of
++// passes (at most segmentAssignmentMaxSegments-1 merges can occur).
++func collapseEquivalentClusters(ids []uint8, feats []segmentFeature) []uint8 {
++	type clusterAgg struct {
++		count    int
++		sumMean  uint64
++		sumVar   uint64
++		sumEdge  uint64
++	}
++	for pass := 0; pass < segmentAssignmentMaxSegments; pass++ {
++		var aggs [segmentAssignmentMaxSegments]clusterAgg
++		for i := range feats {
++			a := &aggs[ids[i]]
++			a.count++
++			a.sumMean += uint64(feats[i].Mean)
++			a.sumVar += uint64(feats[i].Variance)
++			a.sumEdge += uint64(feats[i].Edge)
++		}
++		merged := false
++		for j := 1; j < segmentAssignmentMaxSegments && !merged; j++ {
++			if aggs[j].count == 0 {
++				continue
++			}
++			for i := 0; i < j; i++ {
++				if aggs[i].count == 0 {
++					continue
++				}
++				if aggs[i] == aggs[j] {
++					for k := range ids {
++						if ids[k] == uint8(j) {
++							ids[k] = uint8(i)
++						}
++					}
++					merged = true
++					break
++				}
++			}
++		}
++		if !merged {
++			break
++		}
++		fixed := canonicalizeSegmentIDs(ids, len(ids))
++		if fixed == nil {
++			return ids
++		}
++		copy(ids, fixed)
++	}
++	return ids
++}
++
++// segmentIDLexLess reports whether a is lexicographically smaller than b,
++// implementing the lower-ID tie rule at the first differing raster position.
++func segmentIDLexLess(a, b []uint8) bool {
++	n := len(a)
++	if len(b) < n {
++		n = len(b)
++	}
++	for i := 0; i < n; i++ {
++		if a[i] != b[i] {
++			return a[i] < b[i]
++		}
++	}
++	return false
++}
++
++// applySegmentThresholds fills dst with threshold-rank labels derived from
++// one feature channel. Clusters may come out empty; canonicalization removes
++// them later.
++func applySegmentThresholds(dst []uint8, feats []segmentFeature, kind int, th [3]uint32, k int) {
++	for i := range feats {
++		var v uint32
++		switch kind {
++		case 0:
++			v = uint32(feats[i].Mean)
++		case 1:
++			v = feats[i].Variance
++		default:
++			v = feats[i].Edge
++		}
++		id := uint8(0)
++		for t := 0; t < k; t++ {
++			if v >= th[t] {
++				id++
++			}
++		}
++		dst[i] = id
++	}
++}
+diff --git a/internal/encoder/segment_assignment_test.go b/internal/encoder/segment_assignment_test.go
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/internal/encoder/segment_assignment_test.go
+@@ -0,0 +1,459 @@
++package encoder
++
++import (
++	"reflect"
++	"runtime"
++	"testing"
++
++	"m31labs.dev/tqwebp/internal/cost"
++	"m31labs.dev/tqwebp/internal/frame"
++)
++
++// --- deterministic test-only pseudo randomness -----------------------------
++
++type segmentAssignmentLCG struct{ s uint64 }
++
++func (l *segmentAssignmentLCG) next(mod uint64) uint64 {
++	l.s = l.s*6364136223846793005 + 1442695040888963407
++	return (l.s >> 33) % mod
++}
++
++var (
++	segmentAssignmentMeans = []uint8{0, 1, 63, 64, 127, 128, 191, 192, 255}
++	segmentAssignmentVars  = []uint32{0, 1, 1000, 266342400, 532684800, 799027200, 1065369600}
++	segmentAssignmentEdges = []uint32{0, 1, 29999, 30000, 60000, 90000, 122400}
++	segmentAssignmentGains = []cost.Cost{0, cost.Unit, 5 * cost.Unit, 100 * cost.Unit, 1 << 20}
++)
++
++// --- independent slow oracle ------------------------------------------------
++
++// oracleRenormalize relabels present cluster IDs to 0,1,2,... by first raster
++// occurrence. Implemented independently of the production helper.
++func oracleRenormalize(ids []uint8) []uint8 {
++	out := make([]uint8, len(ids))
++	var seen [4]bool
++	next := uint8(0)
++	for i, id := range ids {
++		if !seen[id] {
++			seen[id] = true
++			next++
++		}
++		out[i] = next - 1
++	}
++	return out
++}
++
++// oracleCollapse merges feature-equivalent clusters into the lowest involved
++// ID until a unique fixpoint is reached. Independent of production helpers.
++func oracleCollapse(ids []uint8, feats []segmentFeature) []uint8 {
++	out := append([]uint8(nil), ids...)
++	type sig struct {
++		c    int
++		m, v, e uint64
++	}
++	for {
++		var present [4]bool
++		for _, id := range out {
++			present[id] = true
++		}
++		var sigs [4]sig
++		for i, f := range feats {
++			s := &sigs[out[i]]
++			s.c++
++			s.m += uint64(f.Mean)
++			s.v += uint64(f.Variance)
++			s.e += uint64(f.Edge)
++		}
++		mi, mj := -1, -1
++		for j := 0; j < 4 && mi < 0; j++ {
++			if !present[j] {
++				continue
++			}
++			for i := 0; i < j; i++ {
++				if present[i] && sigs[i] == sigs[j] {
++					mi, mj = i, j
++					break
++				}
++			}
++		}
++		if mi < 0 {
++			return out
++		}
++		for i := range out {
++			if out[i] == uint8(mj) {
++				out[i] = uint8(mi)
++			}
++		}
++		out = oracleRenormalize(out)
++	}
++}
++
++func oracleLexLess(a, b []uint8) bool {
++	for i := 0; i < len(a) && i < len(b); i++ {
++		if a[i] != b[i] {
++			return a[i] < b[i]
++		}
++	}
++	return false
++}
++
++type segmentAssignmentOracleResult struct {
++	ids     []uint8
++	seg     frame.Segmentation
++	enabled bool
++	ctrl    segmentControlCost
++}
++
++// oracleBest enumerates every feasible 1..4 segment labeling of features,
++// canonicalizes, collapses equivalents, prices each candidate through the
++// real ledger APIs, and selects the strict-payoff winner with lower-ID ties.
++func oracleBest(features []segmentFeature, gain cost.Cost) segmentAssignmentOracleResult {
++	n := len(features)
++	disabled := priceSegmentControl(frame.Segmentation{}, nil)
++	var best segmentAssignmentOracleResult
++	bestPayoff := cost.Cost(0)
++	found := false
++	cur := make([]int, n)
++	for {
++		valid := true
++		can := make([]uint8, n)
++		var seen [4]bool
++		next := 0
++		for i, l := range cur {
++			if l < 0 || l > 3 {
++				valid = false
++				break
++			}
++			if !seen[l] {
++				seen[l] = true
++				next++
++			}
++			can[i] = uint8(next - 1)
++		}
++		if valid {
++			can = oracleCollapse(can, features)
++			plan := deriveSegmentMapPlan(can)
++			s := frame.Segmentation{Enabled: true, UpdateMap: true}
++			s.TreeProbs = plan.Probs
++			c := priceSegmentControl(s, can)
++			payoff := gain - (c.TotalCost - disabled.TotalCost)
++			if !found || payoff > bestPayoff || (payoff == bestPayoff && oracleLexLess(can, best.ids)) {
++				found = true
++				bestPayoff = payoff
++				best = segmentAssignmentOracleResult{
++					ids:     append([]uint8(nil), can...),
++					seg:     s,
++					enabled: true,
++					ctrl:    c,
++				}
++			}
++		}
++		i := n - 1
++		for i >= 0 && cur[i] == 3 {
++			cur[i] = 0
++			i--
++		}
++		if i < 0 {
++			break
++		}
++		cur[i]++
++	}
++	if !found {
++		best.ids = make([]uint8, n)
++	}
++	return best
++}
++
++// --- tests -------------------------------------------------------------------
++
++func TestSegmentAssignmentMatchesExhaustiveOracle(t *testing.T) {
++	rng := segmentAssignmentLCG{s: 0x5eed1234}
++	for trial := 0; trial < 90; trial++ {
++		n := 1 + int(rng.next(5)) // lengths 1..5
++		feats := make([]segmentFeature, n)
++		for i := range feats {
++			feats[i] = segmentFeature{
++				Mean:     segmentAssignmentMeans[rng.next(uint64(len(segmentAssignmentMeans)))],
++				Variance: segmentAssignmentVars[rng.next(uint64(len(segmentAssignmentVars)))],
++				Edge:     segmentAssignmentEdges[rng.next(uint64(len(segmentAssignmentEdges)))],
++			}
++		}
++		gain := segmentAssignmentGains[rng.next(uint64(len(segmentAssignmentGains)))]
++
++		got := assignSegments(feats, gain)
++		want := oracleBest(feats, gain)
++
++		if got.Enabled != want.enabled {
++			t.Fatalf("trial %d: Enabled=%v want %v", trial, got.Enabled, want.enabled)
++		}
++		if !reflect.DeepEqual(got.IDs, want.ids) {
++			t.Fatalf("trial %d: IDs=%v want %v (gain=%d)", trial, got.IDs, want.ids, gain)
++		}
++		if want.enabled && !reflect.DeepEqual(got.Segmentation, want.seg) {
++			t.Fatalf("trial %d: Segmentation=%+v want %+v", trial, got.Segmentation, want.seg)
++		}
++		if want.enabled && got.EnabledCost != want.ctrl {
++			t.Fatalf("trial %d: EnabledCost=%+v want %+v", trial, got.EnabledCost, want.ctrl)
++		}
++		if got.DisabledCost != priceSegmentControl(frame.Segmentation{}, nil) {
++			t.Fatalf("trial %d: bad disabled baseline", trial)
++		}
++		maxCands := 1 << (2 * uint(n))
++		if got.CandidatesEvaluated > maxCands {
++			t.Fatalf("trial %d: candidates %d exceed bound %d", trial, got.CandidatesEvaluated, maxCands)
++		}
++		if !got.ExhaustiveSearch {
++			t.Fatalf("trial %d: expected exhaustive path for n=%d", trial, n)
++		}
++	}
++}
++
++func TestSegmentAssignmentLedgerParity(t *testing.T) {
++	inputs := [][]segmentFeature{
++		{{Mean: 10}, {Mean: 200}},
++		{{Mean: 0, Variance: 1, Edge: 2}, {Mean: 250, Variance: 1000, Edge: 3}, {Mean: 128}},
++		{{Mean: 5}, {Mean: 5}, {Mean: 5}, {Mean: 5}},
++	}
++	for gi, feats := range inputs {
++		for _, gain := range []cost.Cost{0, cost.Unit, 1 << 24} {
++			res := assignSegments(feats, gain)
++			if !res.Enabled {
++				if !reflect.DeepEqual(res.Segmentation, frame.Segmentation{}) {
++					t.Fatalf("case %d: disabled result carries segmentation state", gi)
++				}
++				if res.EnabledCost != (segmentControlCost{}) {
++					t.Fatalf("case %d: disabled result carries enabled cost state", gi)
++				}
++				continue
++			}
++			// Exact control-ledger parity with a fresh priceSegmentControl
++			// call proves the map update gates, probability literals, and ID
++			// records are charged exactly once and that the plan's
++			// SignalCost/IDCost were never added again.
++			wantCtrl := priceSegmentControl(res.Segmentation, res.IDs)
++			if res.EnabledCost != wantCtrl {
++				t.Fatalf("case %d: EnabledCost=%+v want %+v", gi, res.EnabledCost, wantCtrl)
++			}
++			if res.EnabledCost.TotalCost != res.EnabledCost.HeaderCost+res.EnabledCost.IDCost {
++				t.Fatalf("case %d: ledger total is not header+IDs", gi)
++			}
++			plan := deriveSegmentMapPlan(res.IDs)
++			if res.Segmentation.TreeProbs != plan.Probs {
++				t.Fatalf("case %d: TreeProbs mismatch", gi)
++			}
++			if !res.Segmentation.Enabled || !res.Segmentation.UpdateMap || res.Segmentation.UpdateData {
++				t.Fatalf("case %d: bad segmentation flags", gi)
++			}
++			if res.Segmentation.Absolute {
++				t.Fatalf("case %d: Absolute must stay false", gi)
++			}
++		}
++	}
++}
++
++func TestSegmentAssignmentStrictPayoffBoundaries(t *testing.T) {
++	feats := []segmentFeature{{Mean: 12, Edge: 100}, {Mean: 240, Edge: 5}, {Mean: 130}}
++	disabled := priceSegmentControl(frame.Segmentation{}, nil)
++	// Brute force the true minimum incremental enabled cost over all
++	// labelings so the boundary is exact regardless of which labeling wins.
++	minDelta := cost.Cost(1 << 62)
++	cur := make([]int, len(feats))
++	for {
++		can := make([]uint8, len(feats))
++		var seen [4]bool
++		next := 0
++		for i, l := range cur {
++			if !seen[l] {
++				seen[l] = true
++				next++
++			}
++			can[i] = uint8(next - 1)
++		}
++		can = oracleCollapse(can, feats)
++		plan := deriveSegmentMapPlan(can)
++		s := frame.Segmentation{Enabled: true, UpdateMap: true}
++		s.TreeProbs = plan.Probs
++		delta := priceSegmentControl(s, can).TotalCost - disabled.TotalCost
++		if delta < minDelta {
++			minDelta = delta
++		}
++		i := len(cur) - 1
++		for i >= 0 && cur[i] == 3 {
++			cur[i] = 0
++			i--
++		}
++		if i < 0 {
++			break
++		}
++		cur[i]++
++	}
++
++	below := assignSegments(feats, minDelta-1)
++	if below.Enabled {
++		t.Fatal("gain = minDelta-1 must stay disabled")
++	}
++	equal := assignSegments(feats, minDelta)
++	if equal.Enabled {
++		t.Fatal("gain = minDelta (equality) must fall back to disabled")
++	}
++	above := assignSegments(feats, minDelta+1)
++	if !above.Enabled {
++		t.Fatal("gain = minDelta+1 must enable on strict gain")
++	}
++	want := oracleBest(feats, minDelta+1)
++	if !reflect.DeepEqual(above.IDs, want.ids) || above.EnabledCost != want.ctrl {
++		t.Fatalf("boundary winner mismatch: %+v vs %+v", above, want)
++	}
++}
++
++func TestSegmentAssignmentDegenerateInputs(t *testing.T) {
++	// Empty input: defined, deterministic, panic-free, fully disabled.
++	empty := assignSegments(nil, cost.Unit)
++	if len(empty.IDs) != 0 || empty.Enabled || !reflect.DeepEqual(empty.Segmentation, frame.Segmentation{}) {
++		t.Fatal("bad empty-input result")
++	}
++	if
