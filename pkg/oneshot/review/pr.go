@@ -5,32 +5,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/transparency"
+	"github.com/draco/buckley/pkg/prompts"
+	"github.com/draco/buckley/pkg/transparency"
 )
 
 // PRInfo contains parsed PR metadata.
 type PRInfo struct {
-	Number       int
-	Title        string
-	Author       string
-	State        string
-	URL          string
-	Body         string
-	CIStatus     string
-	Labels       []string
-	BaseBranch   string
-	HeadBranch   string
-	Additions    int
-	Deletions    int
+	Number    int
+	Title     string
+	Author    string
+	State     string
+	URL       string
+	Body      string
+	CIStatus  string
+	Labels    []string
+	BaseBranch string
+	HeadBranch string
+	Additions int
+	Deletions int
 	ChangedFiles int
 }
 
@@ -70,9 +67,9 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 	systemPrompt := prompts.ReviewPRPrompt(time.Now())
 	userPrompt := buildPRPrompt(prCtx)
 
-	// Prefer the tool agent for full tool access
-	if r.agentRunner != nil {
-		result, err := r.reviewPRWithAgent(ctx, prCtx, systemPrompt, userPrompt, audit)
+	// Prefer RLM for full tool access
+	if r.rlmRunner != nil {
+		result, err := r.reviewPRWithRLM(ctx, prCtx, systemPrompt, userPrompt, audit)
 		if err != nil {
 			return nil, err
 		}
@@ -83,23 +80,23 @@ func (r *Runner) ReviewPR(ctx context.Context, prRef string) (*RunResult, error)
 	return r.reviewPRWithLegacyTools(ctx, prCtx, systemPrompt, userPrompt, audit)
 }
 
-// reviewPRWithAgent runs a PR review using one multi-turn tool agent.
-func (r *Runner) reviewPRWithAgent(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
+// reviewPRWithRLM runs a PR review using full RLM tool ecosystem.
+func (r *Runner) reviewPRWithRLM(ctx context.Context, prCtx *PRContext, systemPrompt, userPrompt string, audit *transparency.ContextAudit) (*RunResult, error) {
 	result := &RunResult{ContextAudit: audit, PRInfo: prCtx.PR}
 
-	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, userPrompt, legacyPRReviewAllowedTools(), oneshot.AgentExecutionOpts{})
+	// Allow read, glob, grep, bash for verification
+	// PR reviews focus on understanding business impact using standard tools
+	allowedTools := prReviewTools
+
+	rlmResult, err := r.rlmRunner.Run(ctx, systemPrompt, userPrompt, allowedTools)
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Review = agentResult.Response
-	result.Trace = agentResult.Trace
+	result.Review = rlmResult.Response
+	result.Trace = rlmResult.Trace
 	return result, nil
-}
-
-func legacyPRReviewAllowedTools() []string {
-	return []string{"read_file", "find_files", "search_text"}
 }
 
 // reviewPRWithLegacyTools runs a PR review with PR-specific tools (legacy fallback).
@@ -222,15 +219,15 @@ func getPRInfo(prNumber int) (*PRInfo, error) {
 	}
 
 	var data struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		Author struct {
+		Number       int    `json:"number"`
+		Title        string `json:"title"`
+		Author       struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		State  string `json:"state"`
-		URL    string `json:"url"`
-		Body   string `json:"body"`
-		Labels []struct {
+		State        string `json:"state"`
+		URL          string `json:"url"`
+		Body         string `json:"body"`
+		Labels       []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		BaseRefName  string `json:"baseRefName"`
@@ -262,40 +259,10 @@ func getPRInfo(prNumber int) (*PRInfo, error) {
 		pr.Labels = append(pr.Labels, l.Name)
 	}
 
-	// Get CI status, waiting out a pending gate first: an approval
-	// cannot be granted against PENDING CI (review_findings enforces
-	// that), so reviewing before the checks settle burns a full model
-	// pass on a review that must refuse. Waiting is cheap; the review
-	// is not.
-	pr.CIStatus = awaitCISettled(prNumber, ciSettleTimeout)
+	// Get CI status
+	pr.CIStatus = getCIStatus(prNumber)
 
 	return pr, nil
-}
-
-// ciSettleTimeout bounds how long a review waits for pending CI before
-// proceeding with whatever state it finds. Typical suite runs finish in
-// a few minutes; a hung run should not hold the review hostage forever.
-const ciSettleTimeout = 8 * time.Minute
-
-// awaitCISettled polls the PR's aggregated check state until it leaves
-// "pending" or the timeout elapses, reporting progress on stderr.
-func awaitCISettled(prNumber int, timeout time.Duration) string {
-	status := getCIStatus(prNumber)
-	if !strings.HasPrefix(status, "pending") {
-		return status
-	}
-	fmt.Fprintf(os.Stderr, "CI is %s; waiting up to %s for checks to settle before reviewing\n", status, timeout)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(15 * time.Second)
-		status = getCIStatus(prNumber)
-		if !strings.HasPrefix(status, "pending") {
-			fmt.Fprintf(os.Stderr, "CI settled: %s\n", status)
-			return status
-		}
-	}
-	fmt.Fprintf(os.Stderr, "CI still %s after %s; reviewing anyway\n", status, timeout)
-	return status
 }
 
 // getCIStatus gets aggregated CI status.
@@ -348,14 +315,10 @@ func getPRDiff(prNumber int) (string, error) {
 		return "", err
 	}
 
-	// Prioritize signal and truncate if too large.
-	// Reserve space for the truncation marker so output stays within budget.
-	const truncMarker = "\n... (truncated)"
-	budget := diffsignal.ReviewDiffBudget - len(truncMarker)
-	res := diffsignal.Prioritize(string(output), budget)
-	diff := res.Context
-	if res.Truncated {
-		diff += truncMarker
+	// Truncate if too large
+	diff := string(output)
+	if len(diff) > 200000 {
+		diff = diff[:200000] + "\n... (truncated)"
 	}
 	return diff, nil
 }

@@ -3,37 +3,29 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/draco/buckley/pkg/config"
+	projectcontext "github.com/draco/buckley/pkg/context"
+	"github.com/draco/buckley/pkg/conversation"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/session"
+	"github.com/draco/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/tool/builtin"
+	"github.com/draco/buckley/pkg/ui/theme"
+	"github.com/draco/buckley/pkg/ui/widgets"
 	"gopkg.in/yaml.v3"
-	"m31labs.dev/buckley/pkg/config"
-	projectcontext "m31labs.dev/buckley/pkg/context"
-	"m31labs.dev/buckley/pkg/conversation"
-	"m31labs.dev/buckley/pkg/diffsignal"
-	"m31labs.dev/buckley/pkg/evidence"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/policy"
-	"m31labs.dev/buckley/pkg/prompts"
-	"m31labs.dev/buckley/pkg/rules"
-	"m31labs.dev/buckley/pkg/runledger"
-	"m31labs.dev/buckley/pkg/session"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
-	"m31labs.dev/buckley/pkg/types"
-	"m31labs.dev/buckley/pkg/ui/shadowgit"
-	"m31labs.dev/buckley/pkg/ui/widgets"
 )
 
 // Controller connects the TUI to Buckley's backend services.
@@ -51,42 +43,16 @@ type Controller struct {
 	registry     *tool.Registry
 	conversation *conversation.Conversation
 	telemetry    *telemetry.Hub
-	rulesEngine  *rules.Engine
-	evaluator    types.RuleEvaluator
-	resolver     *model.Resolver
 
 	// Event bridge for sidebar updates
 	telemetryBridge *TelemetryUIBridge
-	approvalRouter  *tuiApprovalRouter
 
 	// State
-	workDir             string
-	agentProfile        string
-	knowledgeContext    string
-	modelOverride       string
-	codeModeToolFactory CodeModeToolFactory
-
-	// modelVariant is the name of the active reasoning preset (see
-	// conversation.ModelVariant), cycled by keybind. Empty until the user
-	// cycles for the first time.
-	modelVariant string
-	// recentModels holds up to maxRecentModels most-recently-used execution
-	// model IDs for this session, most recent first, cycled by keybind.
-	recentModels []string
+	workDir string
 
 	// Multi-session support - each session runs independently
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
-
-	// runLedger is the optional read-only run ledger backing the
-	// navigator's Sessions section (see ControllerConfig.RunLedger).
-	runLedger        runledger.Store
-	subagentEvidence evidence.Store
-	// sessionRunNodes maps a run ID shown in the navigator back to its
-	// materialized run-tree node, so a click can show that run's state in
-	// the inspector. Rebuilt on every refreshSessionNav call; nil when the
-	// navigator is showing the flat session-list fallback.
-	sessionRunNodes map[string]*runledger.RunNode
 }
 
 // QueuedMessage represents a user message queued during streaming.
@@ -94,8 +60,6 @@ type QueuedMessage struct {
 	Content      string
 	Timestamp    time.Time
 	Acknowledged bool
-	DisableTools bool
-	Steering     bool
 }
 
 // SessionState holds the state for a single session.
@@ -103,89 +67,43 @@ type SessionState struct {
 	ID            string
 	Conversation  *conversation.Conversation
 	ToolRegistry  *tool.Registry
-	HookCloser    io.Closer
 	SkillRegistry *skill.Registry
 	SkillState    *skill.RuntimeState
 	Streaming     bool
-	Compacting    bool
 	Cancel        context.CancelFunc
 	MessageQueue  []QueuedMessage // Messages queued while streaming
-
-	DisableToolsNextTurn bool
-
-	// continuation lazily holds this session's provider continuation cursor
-	// (decision 0001), behind the models.provider_continuation flag.
-	continuation *model.ContinuationCoordinator
-
-	// permissionBroker is the session-local interactive approval bridge used
-	// by the registry's governed permission middleware.
-	permissionBroker *tuiApprovalBroker
-	permissionsReady bool
-	parkedDecisions  *policy.ParkedDecisionLog
-
-	// undoStack holds applied turns eligible for /undo, oldest first.
-	// redoStack holds turns /undo removed, most recently undone last, so
-	// /redo pops from its tail. A new turn clears redoStack (see
-	// beginTurnUndo), matching standard undo/redo branch-discard semantics.
-	undoStack []turnUndoRecord
-	redoStack []turnUndoRecord
-
-	// undoStore is this session's shadow-git handle (see pkg/ui/shadowgit),
-	// lazily resolved and cached. It stays nil when the workspace is not a
-	// git repository; undoStoreChecked records that the lookup already ran
-	// so later turns do not retry a doomed rev-parse every time.
-	undoStore        *shadowgit.Store
-	undoStoreChecked bool
 }
-
-// turnUndoRecord captures one undoable assistant turn: the shadow-git tree
-// hashes bracketing it and the conversation messages it appended, so
-// /undo and /redo can restore both the file changes and the conversation
-// tail together.
-type turnUndoRecord struct {
-	beforeTree     string
-	afterTree      string
-	messagesBefore int
-	messages       []conversation.Message
-}
-
-// CodeModeToolFactory creates the per-session exec_program tool. The command
-// layer owns its durable stores and supplies this factory only for an explicit
-// code-mode launch, keeping the TUI independent of the concrete adapter.
-type CodeModeToolFactory func(sessionID string) (tool.Tool, error)
 
 // ControllerConfig configures the controller.
 type ControllerConfig struct {
-	Config              *config.Config
-	ModelManager        *model.Manager
-	Store               *storage.Store
-	ProjectCtx          *projectcontext.ProjectContext
-	Telemetry           *telemetry.Hub
-	SessionID           string // Resume session, empty for new
-	AgentProfile        string
-	KnowledgeContext    string // Optional, bounded project-memory guidance
-	ModelOverride       string // CLI --model override, takes precedence over routing rules
-	CodeModeToolFactory CodeModeToolFactory
-
-	// RunLedger is an optional, read-only run ledger consulted for the
-	// navigator's Sessions section (see Pillar D: session tree). When nil,
-	// or when no run exists for the current session, the navigator falls
-	// back to the flat session list.
-	RunLedger runledger.Store
-	// SubagentEvidence enables durable AgentCoordinator adapters for the
-	// session-local spawn_subagent tool when RunLedger is also present.
-	SubagentEvidence evidence.Store
+	Config       *config.Config
+	ModelManager *model.Manager
+	Store        *storage.Store
+	ProjectCtx   *projectcontext.ProjectContext
+	Telemetry    *telemetry.Hub
+	SessionID    string // Resume session, empty for new
 }
 
-func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool, codeModeToolFactory CodeModeToolFactory, subagentLedger runledger.Store, subagentEvidence evidence.Store) (*SessionState, error) {
+func newSessionState(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string, loadMessages bool) (*SessionState, error) {
 	sess := &SessionState{
 		ID:           sessionID,
 		Conversation: conversation.New(sessionID),
 	}
 
 	if loadMessages && store != nil {
-		if err := sess.Conversation.LoadFromStorage(store); err != nil {
-			return nil, fmt.Errorf("load session %s messages: %w", sessionID, err)
+		if msgs, err := store.GetMessages(sessionID, 1000, 0); err == nil {
+			for _, msg := range msgs {
+				content := msg.Content
+				if msg.ContentJSON != "" {
+					content = msg.ContentJSON
+				}
+				switch msg.Role {
+				case "user":
+					sess.Conversation.AddUserMessage(content)
+				case "assistant":
+					sess.Conversation.AddAssistantMessage(content)
+				}
+			}
 		}
 	}
 
@@ -195,7 +113,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	skillState := skill.NewRuntimeState(sess.Conversation.AddSystemMessage)
-	registry, hookCloser := buildRegistry(cfg, store, workDir, hub, sessionID)
+	registry := buildRegistry(cfg, store, workDir, hub, sessionID)
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
 		Conversation: skillState,
@@ -205,83 +123,101 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 		createTool.SetWorkDir(workDir)
 	}
 	registry.Register(createTool)
-	if codeModeToolFactory != nil {
-		codeTool, err := codeModeToolFactory(sessionID)
-		if err != nil {
-			if hookCloser != nil {
-				_ = hookCloser.Close()
-			}
-			return nil, fmt.Errorf("create code-mode tool for session %s: %w", sessionID, err)
-		}
-		if codeTool == nil || codeTool.Name() != "exec_program" {
-			if hookCloser != nil {
-				_ = hookCloser.Close()
-			}
-			return nil, fmt.Errorf("create code-mode tool for session %s: factory returned %T", sessionID, codeTool)
-		}
-		registry.Register(codeTool)
-		registry.SetToolKind(codeTool.Name(), "execute")
-	}
-	configureRegistrySubagentDurability(registry, subagentLedger, subagentEvidence)
 
 	sess.ToolRegistry = registry
-	sess.HookCloser = hookCloser
 	sess.SkillRegistry = skills
 	sess.SkillState = skillState
 
 	return sess, nil
 }
 
-func configureRegistrySubagentDurability(registry *tool.Registry, ledger runledger.Store, store evidence.Store) {
-	if registry == nil || ledger == nil || store == nil {
-		return
-	}
-	candidate, ok := registry.Get("spawn_subagent")
-	if !ok {
-		return
-	}
-	if subagents, ok := candidate.(*builtin.SubagentTool); ok {
-		subagents.SetDurability(ledger, store)
-	}
-}
-
 // NewController creates a new TUI controller.
 func NewController(cfg ControllerConfig) (*Controller, error) {
-	if cfg.ModelManager != nil && cfg.Telemetry != nil {
-		cfg.ModelManager.EnableTelemetry(cfg.Telemetry)
-	}
 	workDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	projectSessions, currentIdx, err := loadOrCreateControllerSessions(cfg, workDir)
-	if err != nil {
-		return nil, err
+	// Collect all active sessions for this project and load their messages
+	var projectSessions []*SessionState
+	allSessions, _ := cfg.Store.ListSessions(100)
+	for _, s := range allSessions {
+		if s.ProjectPath == workDir && s.Status == storage.SessionStatusActive {
+			sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true)
+			if err != nil {
+				return nil, err
+			}
+			projectSessions = append(projectSessions, sess)
+		}
+	}
+
+	// Get or create session
+	sessionID := cfg.SessionID
+	currentIdx := 0
+	if sessionID == "" {
+		if len(projectSessions) > 0 {
+			// Resume most recent active session - sessionID is available via projectSessions[0].ID
+			// currentIdx is already 0
+		} else {
+			// Create a new session
+			baseID := session.DetermineSessionID(workDir)
+			timestamp := time.Now().Format("0102-150405") // MMDD-HHMMSS
+			sessionID = fmt.Sprintf("%s-%s", baseID, timestamp)
+
+			now := time.Now()
+			sess := &storage.Session{
+				ID:          sessionID,
+				ProjectPath: workDir,
+				CreatedAt:   now,
+				LastActive:  now,
+				Status:      storage.SessionStatusActive,
+			}
+			if err := cfg.Store.CreateSession(sess); err != nil {
+				return nil, fmt.Errorf("create session: %w", err)
+			}
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
+			if err != nil {
+				return nil, err
+			}
+			projectSessions = []*SessionState{sessState}
+		}
+	} else {
+		// Find index of specified session
+		found := false
+		for i, s := range projectSessions {
+			if s.ID == sessionID {
+				currentIdx = i
+				found = true
+				break
+			}
+		}
+		if !found && len(projectSessions) == 0 {
+			now := time.Now()
+			sess := &storage.Session{
+				ID:          sessionID,
+				ProjectPath: workDir,
+				CreatedAt:   now,
+				LastActive:  now,
+				Status:      storage.SessionStatusActive,
+			}
+			if err := cfg.Store.CreateSession(sess); err != nil {
+				return nil, fmt.Errorf("create session: %w", err)
+			}
+			sessState, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false)
+			if err != nil {
+				return nil, err
+			}
+			projectSessions = []*SessionState{sessState}
+			currentIdx = 0
+		}
 	}
 
 	// Determine project root
 	projectRoot := workDir
 
-	var rulesEngine *rules.Engine
-	if engine, err := rules.NewDefaultEngine(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
-	} else {
-		rulesEngine = engine
-	}
-	var evaluator types.RuleEvaluator
-	if rulesEngine != nil {
-		evaluator = rules.NewEngineAdapter(rulesEngine)
-	}
-	resolver := model.NewResolver(rulesEngine, model.ResolverConfig{
-		Planning:  cfg.Config.Models.Planning,
-		Execution: cfg.Config.Models.Execution,
-		Review:    cfg.Config.Models.Review,
-	}, cfg.ModelManager)
-
 	// Create TUI app
 	app, err := NewWidgetApp(WidgetAppConfig{
-		Theme:       defaultBuckleyTheme(),
+		Theme:       theme.DefaultTheme(),
 		ModelName:   cfg.Config.Models.Execution,
 		WorkDir:     workDir,
 		ProjectRoot: projectRoot,
@@ -291,30 +227,17 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	}
 
 	ctrl := &Controller{
-		app:                 app,
-		cfg:                 cfg.Config,
-		modelMgr:            cfg.ModelManager,
-		store:               cfg.Store,
-		projectCtx:          cfg.ProjectCtx,
-		registry:            projectSessions[currentIdx].ToolRegistry,
-		conversation:        projectSessions[currentIdx].Conversation,
-		telemetry:           cfg.Telemetry,
-		rulesEngine:         rulesEngine,
-		evaluator:           evaluator,
-		resolver:            resolver,
-		workDir:             workDir,
-		agentProfile:        strings.TrimSpace(cfg.AgentProfile),
-		knowledgeContext:    strings.TrimSpace(cfg.KnowledgeContext),
-		modelOverride:       strings.TrimSpace(cfg.ModelOverride),
-		codeModeToolFactory: cfg.CodeModeToolFactory,
-		sessions:            projectSessions,
-		currentSession:      currentIdx,
-		runLedger:           cfg.RunLedger,
-		subagentEvidence:    cfg.SubagentEvidence,
-		approvalRouter:      newTUIApprovalRouter(),
-	}
-	for _, session := range projectSessions {
-		configureSessionSubagentPolicy(session, evaluator)
+		app:            app,
+		cfg:            cfg.Config,
+		modelMgr:       cfg.ModelManager,
+		store:          cfg.Store,
+		projectCtx:     cfg.ProjectCtx,
+		registry:       projectSessions[currentIdx].ToolRegistry,
+		conversation:   projectSessions[currentIdx].Conversation,
+		telemetry:      cfg.Telemetry,
+		workDir:        workDir,
+		sessions:       projectSessions,
+		currentSession: currentIdx,
 	}
 
 	// Create telemetry bridge for sidebar updates
@@ -329,174 +252,11 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		ctrl.handleShellCmd,
 	)
 	app.SetSessionCallbacks(
-		ctrl.nextSessionAndRefreshNav,
-		ctrl.prevSessionAndRefreshNav,
+		ctrl.nextSession,
+		ctrl.prevSession,
 	)
-	app.SetModelVariantCallbacks(
-		ctrl.cycleModelVariant,
-		ctrl.cycleRecentModel,
-	)
-	app.SetInterruptCallback(ctrl.cancelCurrentStream)
-	app.SetSessionNavCallback(ctrl.handleSessionNodeSelected)
-	app.SetApprovalCallback(ctrl.handleApproval)
-	app.SetModelPickerActionCallback(ctrl.handleModelPickerAction)
-	for _, session := range projectSessions {
-		ctrl.configureSessionPermissions(session)
-	}
-
-	ctrl.refreshSessionNav()
 
 	return ctrl, nil
-}
-
-func configureSessionSubagentPolicy(session *SessionState, evaluator types.RuleEvaluator) {
-	if session == nil || session.ToolRegistry == nil {
-		return
-	}
-	candidate, ok := session.ToolRegistry.Get("spawn_subagent")
-	if !ok {
-		return
-	}
-	if subagents, ok := candidate.(*builtin.SubagentTool); ok {
-		subagents.SetEvaluator(evaluator)
-	}
-}
-
-// configureSessionPermissions installs the same layered posture/project/user
-// permission middleware used by headless sessions, with the TUI's bounded
-// approval broker as the interactive Ask surface.
-func (c *Controller) configureSessionPermissions(sess *SessionState) {
-	if c == nil || sess == nil || sess.ToolRegistry == nil || sess.permissionsReady {
-		return
-	}
-	posture := policy.PostureInteractive
-	var postureCfg config.PostureConfig
-	var permissions config.PermissionsConfig
-	if c.cfg != nil {
-		posture = policy.SelectPosture(c.cfg.Postures.Default)
-		postureCfg = c.cfg.Postures.Layers[posture]
-		permissions = c.cfg.Permissions
-	}
-	workspaceRoot := strings.TrimSpace(c.workDir)
-	if c.cfg != nil && strings.TrimSpace(c.cfg.Sandbox.WorkspacePath) != "" {
-		configuredRoot := strings.TrimSpace(c.cfg.Sandbox.WorkspacePath)
-		if !filepath.IsAbs(configuredRoot) {
-			configuredRoot = filepath.Join(workspaceRoot, configuredRoot)
-		}
-		workspaceRoot = configuredRoot
-	}
-	if c.approvalRouter == nil {
-		c.approvalRouter = newTUIApprovalRouter()
-	}
-	broker := newTUIApprovalBroker(sess.ID, c.approvalRouter)
-	broker.bindApp(c.app)
-	sess.permissionBroker = broker
-	sess.parkedDecisions = policy.NewParkedDecisionLog()
-	sess.ToolRegistry.Use(tool.NewPermissionMiddleware(&tool.PermissionGate{
-		Layers: []policy.PermissionLayer{
-			{Name: "posture:" + posture, Rules: postureCfg.Rules},
-			{Name: "project", Rules: permissions.Project},
-			{Name: "user", Rules: permissions.User},
-		},
-		WorkspaceRoot:    workspaceRoot,
-		Posture:          posture,
-		ParkAskDecisions: postureCfg.ParkAskDecisions,
-		Evaluator:        c.evaluator,
-		ParkedSink:       sess.parkedDecisions,
-		ApprovalHandler:  broker.Request,
-		RequireApproval:  true,
-	}))
-	sess.permissionsReady = true
-}
-
-func (c *Controller) handleApproval(requestID string, approved, alwaysAllow bool) {
-	if c == nil || c.approvalRouter == nil {
-		return
-	}
-	c.approvalRouter.resolve(requestID, approved, alwaysAllow)
-}
-
-func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*SessionState, int, error) {
-	projectSessions, err := loadActiveProjectSessions(cfg, workDir)
-	if err != nil {
-		return nil, 0, err
-	}
-	return resolveControllerSession(cfg, workDir, projectSessions)
-}
-
-func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*SessionState, error) {
-	var projectSessions []*SessionState
-	allSessions, err := cfg.Store.ListSessionsByRepo(workDir)
-	if err != nil {
-		return nil, fmt.Errorf("list project sessions: %w", err)
-	}
-	for _, s := range allSessions {
-		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
-			continue
-		}
-		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
-		if err != nil {
-			return nil, err
-		}
-		projectSessions = append(projectSessions, sess)
-	}
-	return projectSessions, nil
-}
-
-func resolveControllerSession(cfg ControllerConfig, workDir string, projectSessions []*SessionState) ([]*SessionState, int, error) {
-	sessionID := cfg.SessionID
-	if sessionID == "" {
-		if len(projectSessions) > 0 {
-			for i, sess := range projectSessions {
-				if sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
-					return projectSessions, i, nil
-				}
-			}
-			return projectSessions, 0, nil
-		}
-		sess, err := createControllerSession(cfg, workDir, generatedControllerSessionID(workDir))
-		if err != nil {
-			return nil, 0, err
-		}
-		return []*SessionState{sess}, 0, nil
-	}
-
-	for i, s := range projectSessions {
-		if s.ID == sessionID {
-			return projectSessions, i, nil
-		}
-	}
-
-	if len(projectSessions) > 0 {
-		return projectSessions, 0, nil
-	}
-
-	sess, err := createControllerSession(cfg, workDir, sessionID)
-	if err != nil {
-		return nil, 0, err
-	}
-	return []*SessionState{sess}, 0, nil
-}
-
-func generatedControllerSessionID(workDir string) string {
-	baseID := session.DetermineSessionID(workDir)
-	timestamp := time.Now().Format("0102-150405") // MMDD-HHMMSS
-	return fmt.Sprintf("%s-%s", baseID, timestamp)
-}
-
-func createControllerSession(cfg ControllerConfig, workDir, sessionID string) (*SessionState, error) {
-	now := time.Now()
-	sess := &storage.Session{
-		ID:          sessionID,
-		ProjectPath: workDir,
-		CreatedAt:   now,
-		LastActive:  now,
-		Status:      storage.SessionStatusActive,
-	}
-	if err := cfg.Store.CreateSession(sess); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
-	return newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, sessionID, false, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
 }
 
 // Run starts the TUI controller.
@@ -505,33 +265,26 @@ func (c *Controller) Run() error {
 	if c.telemetryBridge != nil {
 		c.telemetryBridge.Start(context.Background())
 	}
-	defer func() {
-		for _, sess := range c.sessions {
-			if sess == nil {
-				continue
-			}
-			if sess.permissionBroker != nil {
-				sess.permissionBroker.close()
-			}
-			if sess.HookCloser != nil {
-				_ = sess.HookCloser.Close()
-			}
-		}
-	}()
 
 	// Show welcome
 	c.app.WelcomeScreen()
 
 	// Add system context if available
 	if c.projectCtx != nil && c.projectCtx.Loaded {
-		c.app.addMessageImmediately("Project context loaded from AGENTS.md", "system")
+		c.app.AddMessage("Project context loaded from AGENTS.md", "system")
 	}
 
 	// Load existing conversation history for current session
 	sess := c.sessions[c.currentSession]
 	if len(sess.Conversation.Messages) > 0 {
-		c.app.addMessageImmediately(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
-		renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
+		c.app.AddMessage(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
+		for _, msg := range sess.Conversation.Messages {
+			content := ""
+			if s, ok := msg.Content.(string); ok {
+				content = s
+			}
+			c.app.AddMessage(content, msg.Role)
+		}
 	}
 
 	// Run the app
@@ -540,6 +293,9 @@ func (c *Controller) Run() error {
 
 // handleSubmit processes user input submission.
 func (c *Controller) handleSubmit(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if text == "" {
 		return
 	}
@@ -550,60 +306,29 @@ func (c *Controller) handleSubmit(text string) {
 		return
 	}
 
-	c.submitPrompt(text, true)
-}
-
-func (c *Controller) submitPrompt(text string, steering bool) {
-	c.mu.Lock()
-
 	// Get current session
 	sess := c.sessions[c.currentSession]
-	disableTools := shouldDisableToolsForPrompt(text)
 
-	if sess.Compacting {
-		c.mu.Unlock()
-		c.app.AddMessage("Context compaction is running. Wait for it to finish before sending another message.", "system")
-		return
-	}
-
-	// Steering cancels the active model request and becomes the next visible
-	// turn. Explicit queueing preserves the current run and FIFO order.
+	// If session is streaming, queue the message instead of starting new stream
 	if sess.Streaming {
 		sess.MessageQueue = append(sess.MessageQueue, QueuedMessage{
-			Content:      text,
-			Timestamp:    time.Now(),
-			DisableTools: disableTools,
-			Steering:     steering,
+			Content:   text,
+			Timestamp: time.Now(),
 		})
-		cancel := sess.Cancel
-		queued := len(sess.MessageQueue)
-		c.mu.Unlock()
-		label := " (queued)"
-		status := fmt.Sprintf("Streaming... [%d queued]", queued)
-		if steering {
-			label = " (steering)"
-			status = fmt.Sprintf("Steering active run... [%d pending]", queued)
-		}
-		c.app.AddMessage(text+label, "user")
-		c.app.SetStatus(status)
-		if steering && cancel != nil {
-			cancel()
-		}
+		// Show queued message with indicator
+		c.app.AddMessage(text+" (queued)", "user")
+		c.updateQueueIndicator(sess)
 		return
 	}
 
 	// Add user message to display
 	c.app.AddMessage(text, "user")
-	if disableTools {
-		sess.DisableToolsNextTurn = true
-	}
 
 	// Create context with cancellation for this session
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.Cancel = cancel
 	sess.Streaming = true
 	c.emitStreaming(sess.ID, true)
-	c.mu.Unlock()
 
 	// Start streaming response for this session
 	go c.streamResponse(ctx, text, sess)
@@ -619,29 +344,17 @@ func (c *Controller) handleCommand(text string) {
 	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
-	case "/new":
+	case "/new", "/clear", "/reset":
 		c.newSession()
-		c.refreshSessionNav()
-
-	case "/clear", "/reset":
-		c.clearCurrentSession()
 
 	case "/sessions", "/tabs":
 		c.listSessions()
 
-	case "/resume":
-		if len(parts) < 2 {
-			c.app.AddMessage("Usage: /resume <session number or id>. Run /sessions to list saved sessions.", "system")
-			return
-		}
-		c.resumeSession(strings.Join(parts[1:], " "))
-		c.refreshSessionNav()
-
 	case "/next", "/n":
-		c.nextSessionAndRefreshNav()
+		c.nextSession()
 
 	case "/prev", "/p":
-		c.prevSessionAndRefreshNav()
+		c.prevSession()
 
 	case "/model", "/models":
 		if len(parts) > 1 {
@@ -651,89 +364,26 @@ func (c *Controller) handleCommand(text string) {
 				return
 			}
 			modelID := strings.TrimSpace(strings.Join(parts[1:], " "))
-			c.setExecutionModel(modelID)
+			c.setExecutionModelLocked(modelID)
 		} else {
-			c.showLiveModelPicker()
+			c.showModelPickerLocked()
 		}
-
-	case "/tokens", "/context", "/usage", "/status":
-		c.showContextReport()
-
-	case "/history":
-		c.showHistory(parts[1:])
-
-	case "/export":
-		c.exportCurrentSession(parts[1:])
-
-	case "/compact", "/summarize":
-		c.compactCurrentSession()
-
-	case "/cancel", "/stop":
-		c.cancelCurrentStream()
-
-	case "/undo":
-		c.undoLastTurn()
-
-	case "/redo":
-		c.redoLastTurn()
-
-	case "/queue":
-		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
-		if prompt == "" {
-			c.app.AddMessage("Usage: /queue <message>", "system")
-			return
-		}
-		c.submitPrompt(prompt, false)
-
-	case "/steer":
-		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
-		if prompt == "" {
-			c.app.AddMessage("Usage: /steer <message>", "system")
-			return
-		}
-		c.submitPrompt(prompt, true)
-
-	case "/agent", "/agents":
-		c.handleSubagentCommand(parts[1:])
-
-	case "/plans":
-		c.showPlans()
-
-	case "/config":
-		c.showConfigSummary()
 
 	case "/help":
 		c.app.AddMessage(`Commands:
-  /new                 - Start a new session
-  /clear, /reset       - Clear the current session
-  /tokens, /context    - Show context, token, and tool-output budget
-  /compact             - Summarize older context in the current session
-  /history             - Show recent conversation turns
-  /export [file]       - Export the current conversation to Markdown
-  /cancel, /stop       - Cancel the current response and clear queued input
-  /undo                - Revert the last assistant turn's messages and file changes
-  /redo                - Restore a turn /undo reverted
-  /steer <message>     - Interrupt and redirect the active response
-  /queue <message>     - Run a follow-up after the active response
-  /agents              - List active subagents
-  /agent spawn [@name] <task> - Start a generic or named subagent
-  /agent send <target> <message> - Command one, a group, or all subagents
-  /agent steer <target> <message> - Send high-priority user steering
-  /agent cancel <target> [reason] - Cancel one, a group, or all subagents
+  /new, /clear, /reset - Start a new session
   /sessions, /tabs     - List active sessions
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
   /model [id]          - Pick or set the execution model
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
-  /plans               - List saved plans
-  /config              - Show active Buckley config summary
   /review              - Review current git diff
   /commit              - Generate commit message for staged changes
   /help                - Show this help
   /quit, /exit         - Exit Buckley
 
-Shortcuts: Shift+Enter (new line), Ctrl+C (interrupt active work), Alt+Right (next), Alt+Left (prev), Alt+C (copy last code), Alt+M (cycle model variant), Alt+R (cycle recent model), Ctrl+F (search)`, "system")
+Shortcuts: Alt+Right (next), Alt+Left (prev), Ctrl+F (search)`, "system")
 
 	case "/quit", "/exit":
 		c.app.Quit()
@@ -758,25 +408,13 @@ func (c *Controller) showModelPickerLocked() {
 		return
 	}
 
-	c.app.ShowModelPicker(items, ModelPickerActionSelectExecution)
-}
-
-func (c *Controller) showLiveModelPicker() {
-	if c.modelMgr == nil {
-		c.app.AddMessage("Model catalog unavailable in this session.", "system")
-		return
-	}
-	c.app.StartProcessStatus("Refreshing OpenRouter model catalog")
-	go func() {
-		err := c.modelMgr.RefreshProviderCatalog("openrouter")
-		c.app.StopProcessStatus()
-		if err != nil {
-			c.app.AddMessage("OpenRouter catalog refresh failed; showing the last available catalog: "+err.Error(), "system")
+	c.app.ShowModelPicker(items, func(item widgets.PaletteItem) {
+		modelID := item.ID
+		if id, ok := item.Data.(string); ok && strings.TrimSpace(id) != "" {
+			modelID = id
 		}
-		c.mu.Lock()
-		c.showModelPickerLocked()
-		c.mu.Unlock()
-	}()
+		c.setExecutionModel(modelID)
+	})
 }
 
 func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) ([]widgets.PaletteItem, map[string]model.ModelInfo) {
@@ -794,14 +432,73 @@ func (c *Controller) collectModelPickerItemsLocked(curated map[string]struct{}) 
 	execID := strings.TrimSpace(c.cfg.Models.Execution)
 	planID := strings.TrimSpace(c.cfg.Models.Planning)
 	reviewID := strings.TrimSpace(c.cfg.Models.Review)
-	return buildModelPickerItems(catalog.Data, c.modelMgr, execID, planID, reviewID, curated)
+
+	catalogIndex := make(map[string]model.ModelInfo, len(catalog.Data))
+	grouped := make(map[string][]model.ModelInfo)
+	for _, info := range catalog.Data {
+		catalogIndex[info.ID] = info
+		group := modelGroupKey(info.ID, c.modelMgr)
+		grouped[group] = append(grouped[group], info)
+	}
+
+	groups := make([]string, 0, len(grouped))
+	for group := range grouped {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+
+	items := make([]widgets.PaletteItem, 0, len(catalog.Data))
+	pinnedIDs := preferredModelIDs(execID, planID, reviewID, catalogIndex)
+	pinnedSet := make(map[string]struct{}, len(pinnedIDs))
+	if len(pinnedIDs) > 0 {
+		for _, modelID := range pinnedIDs {
+			info, ok := catalogIndex[modelID]
+			if !ok {
+				continue
+			}
+			pinnedSet[modelID] = struct{}{}
+			tags := modelRoleTags(modelID, execID, planID, reviewID)
+			tags = appendModelTag(tags, curated, modelID)
+			items = append(items, widgets.PaletteItem{
+				ID:          modelID,
+				Category:    "Pinned",
+				Label:       "  " + modelID,
+				Description: info.ID,
+				Shortcut:    strings.Join(tags, ","),
+				Data:        modelID,
+			})
+		}
+	}
+	for _, group := range groups {
+		models := grouped[group]
+		sort.Slice(models, func(i, j int) bool {
+			return models[i].ID < models[j].ID
+		})
+
+		for _, info := range models {
+			if _, ok := pinnedSet[info.ID]; ok {
+				continue
+			}
+			label := modelLabel(info.ID, group)
+			tags := modelRoleTags(info.ID, execID, planID, reviewID)
+			tags = appendModelTag(tags, curated, info.ID)
+			items = append(items, widgets.PaletteItem{
+				ID:          info.ID,
+				Category:    group,
+				Label:       "  " + label,
+				Description: info.ID,
+				Shortcut:    strings.Join(tags, ","),
+				Data:        info.ID,
+			})
+		}
+	}
+
+	return items, catalogIndex
 }
 
 func (c *Controller) handleModelCurate(args []string) {
 	if len(args) == 0 {
-		c.mu.Lock()
 		c.showModelCuratePickerLocked()
-		c.mu.Unlock()
 		return
 	}
 
@@ -846,22 +543,16 @@ func (c *Controller) showModelCuratePickerLocked() {
 		return
 	}
 
-	c.app.ShowModelPicker(items, ModelPickerActionToggleCurated)
-}
-
-func (c *Controller) handleModelPickerAction(action ModelPickerAction, itemID string, data any) {
-	modelID := itemID
-	if id, ok := data.(string); ok && strings.TrimSpace(id) != "" {
-		modelID = id
-	}
-	switch action {
-	case ModelPickerActionSelectExecution:
-		c.setExecutionModel(modelID)
-	case ModelPickerActionToggleCurated:
-		if c.toggleCuratedModel(modelID) {
+	c.app.ShowModelPicker(items, func(item widgets.PaletteItem) {
+		modelID := item.ID
+		if id, ok := item.Data.(string); ok && strings.TrimSpace(id) != "" {
+			modelID = id
+		}
+		changed := c.toggleCuratedModel(modelID)
+		if changed {
 			c.app.AddMessage("Curated models updated. Use /model curate save to persist.", "system")
 		}
-	}
+	})
 }
 
 func (c *Controller) toggleCuratedModel(modelID string) bool {
@@ -1049,14 +740,8 @@ func (c *Controller) setExecutionModelLocked(modelID string) {
 	}
 
 	c.cfg.Models.Execution = modelID
-	c.modelOverride = modelID
-	c.rememberRecentModel(modelID)
 	c.app.SetModelName(modelID)
-	notice := "Execution model set to " + modelID
-	if len(c.sessions) > 0 && c.sessions[c.currentSession].Streaming {
-		notice += " (applies to the next model turn; the active request continues)"
-	}
-	c.app.AddMessage(notice, "system")
+	c.app.AddMessage("Execution model set to "+modelID, "system")
 }
 
 func catalogHasModel(mgr *model.Manager, modelID string) bool {
@@ -1114,7 +799,7 @@ func modelRoleTags(modelID, execID, planID, reviewID string) []string {
 }
 
 func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model.ModelInfo) []string {
-	ids := make([]string, 0, 5)
+	ids := make([]string, 0, 4)
 	seen := make(map[string]struct{})
 	add := func(id string) {
 		id = strings.TrimSpace(id)
@@ -1136,28 +821,14 @@ func preferredModelIDs(execID, planID, reviewID string, catalog map[string]model
 	add(execID)
 	add(planID)
 	add(reviewID)
-	add("moonshotai/kimi-k3")
-	add("z-ai/glm-5.2")
-	add("moonshotai/kimi-k2.7-code")
-	add("qwen/qwen3.7-max")
+	add("moonshotai/kimi-k2-thinking")
 	return ids
 }
 
 // newSession creates a new session, clearing the current conversation.
 func (c *Controller) newSession() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// Mark old session as completed
 	oldSess := c.sessions[c.currentSession]
-	if oldSess.Compacting {
-		c.app.AddMessage("Context compaction is running. Wait for it to finish before starting a new session.", "system")
-		return
-	}
-	if oldSess.Streaming {
-		c.app.AddMessage("A response is still running. Use /cancel before starting a new session.", "system")
-		return
-	}
 	if oldSess.ID != "" {
 		_ = c.store.SetSessionStatus(oldSess.ID, storage.SessionStatusCompleted)
 	}
@@ -1182,13 +853,11 @@ func (c *Controller) newSession() {
 	}
 
 	// Create new session state and add to list
-	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, newSessionID, false, c.codeModeToolFactory, c.runLedger, c.subagentEvidence)
+	newSess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, newSessionID, false)
 	if err != nil {
 		c.app.AddMessage("Error creating session: "+err.Error(), "system")
 		return
 	}
-	configureSessionSubagentPolicy(newSess, c.evaluator)
-	c.configureSessionPermissions(newSess)
 	c.sessions = append([]*SessionState{newSess}, c.sessions...)
 	c.currentSession = 0
 	c.conversation = newSess.Conversation
@@ -1201,21 +870,285 @@ func (c *Controller) newSession() {
 	c.app.SetStatus("Ready")
 }
 
+// streamResponse handles the AI response streaming for a specific session.
+func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState) {
+	defer func() {
+		c.mu.Lock()
+		sess.Streaming = false
+		sess.Cancel = nil
+		c.mu.Unlock()
+		c.emitStreaming(sess.ID, false)
+	}()
+
+	c.app.SetStatus("Thinking...")
+	c.app.ShowThinkingIndicator()
+
+	// Add user message to session's conversation and persist
+	sess.Conversation.AddUserMessage(prompt)
+	c.saveMessage(sess.ID, "user", prompt)
+
+	modelID := c.cfg.Models.Execution
+	if modelID == "" {
+		modelID = "openai/gpt-4o"
+	}
+
+	fullResponse, usage, err := c.runToolLoop(ctx, sess, modelID)
+	c.app.RemoveThinkingIndicator()
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			c.app.SetStatus("Cancelled")
+			return
+		}
+		c.app.AddMessage(fmt.Sprintf("Error: %v", err), "system")
+		c.app.SetStatus("Error")
+		return
+	}
+
+	if fullResponse != "" {
+		c.app.AddMessage(fullResponse, "assistant")
+	}
+
+	// Update token count and cost
+	var tokens int
+	var costCents float64
+
+	if usage != nil {
+		// Use actual usage from API response
+		tokens = usage.TotalTokens
+		if c.modelMgr != nil {
+			if cost, err := c.modelMgr.CalculateCost(modelID, *usage); err == nil {
+				costCents = cost * 100 // Convert dollars to cents
+			}
+		}
+	} else {
+		// Fallback: estimate tokens from response length
+		tokens = len(fullResponse) / 4
+		// Estimate cost using model pricing if available
+		if c.modelMgr != nil {
+			if cost, err := c.modelMgr.CalculateCostFromTokens(modelID, 0, tokens); err == nil {
+				costCents = cost * 100
+			}
+		}
+	}
+	c.app.SetTokenCount(tokens, costCents)
+
+	// Check for queued messages and process them
+	if c.processMessageQueue(sess) {
+		// processMessageQueue started a new stream, don't set Ready status
+		return
+	}
+
+	// Update status only if no more queued messages
+	c.app.SetStatus("Ready")
+}
+
+func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (string, *model.Usage, error) {
+	if c.modelMgr == nil {
+		return "", nil, fmt.Errorf("model manager unavailable")
+	}
+	if sess == nil || sess.Conversation == nil {
+		return "", nil, fmt.Errorf("session unavailable")
+	}
+
+	useTools := sess.ToolRegistry != nil
+	toolChoice := "auto"
+	maxIterations := 10
+	totalUsage := model.Usage{}
+
+	for iter := 0; iter < maxIterations; iter++ {
+		if ctx.Err() != nil {
+			return "", nil, ctx.Err()
+		}
+
+		allowedTools := []string{}
+		if sess.SkillState != nil {
+			allowedTools = sess.SkillState.ToolFilter()
+		}
+
+		req := model.ChatRequest{
+			Model:    modelID,
+			Messages: c.buildMessagesForSession(sess),
+		}
+		if useTools && sess.ToolRegistry != nil {
+			tools := sess.ToolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
+			if len(tools) > 0 {
+				req.Tools = tools
+				req.ToolChoice = toolChoice
+			} else {
+				useTools = false
+			}
+		}
+		if reasoning := strings.TrimSpace(c.cfg.Models.Reasoning); reasoning != "" && c.modelMgr.SupportsReasoning(modelID) {
+			req.Reasoning = &model.ReasoningConfig{Effort: reasoning}
+		}
+
+		resp, err := c.modelMgr.ChatCompletion(ctx, req)
+		if err != nil {
+			if useTools && isToolUnsupportedError(err) {
+				useTools = false
+				continue
+			}
+			return "", nil, err
+		}
+		totalUsage = addUsage(totalUsage, resp.Usage)
+
+		if len(resp.Choices) == 0 {
+			return "", nil, fmt.Errorf("no response choices")
+		}
+
+		msg := resp.Choices[0].Message
+		if len(msg.ToolCalls) == 0 {
+			text, err := model.ExtractTextContent(msg.Content)
+			if err != nil {
+				return "", nil, err
+			}
+			sess.Conversation.AddAssistantMessageWithReasoning(text, msg.Reasoning)
+			c.saveMessage(sess.ID, "assistant", text)
+			return text, &totalUsage, nil
+		}
+
+		for i := range msg.ToolCalls {
+			if msg.ToolCalls[i].ID == "" {
+				msg.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+			}
+		}
+		sess.Conversation.AddToolCallMessage(msg.ToolCalls)
+
+		for _, tc := range msg.ToolCalls {
+			params, err := parseToolParams(tc.Function.Arguments)
+			if err != nil {
+				toolText := fmt.Sprintf("Error: invalid tool arguments: %v", err)
+				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				continue
+			}
+			if sess.ToolRegistry == nil {
+				toolText := "Error: tool registry unavailable"
+				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				continue
+			}
+			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
+				toolText := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
+				sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+				continue
+			}
+			if params == nil {
+				params = make(map[string]any)
+			}
+			if tc.ID != "" {
+				params[tool.ToolCallIDParam] = tc.ID
+			}
+
+			result, execErr := sess.ToolRegistry.Execute(tc.Function.Name, params)
+			toolText := formatToolResultForModel(result, execErr)
+			sess.Conversation.AddToolResponseMessage(tc.ID, tc.Function.Name, toolText)
+
+			if display := toolDisplayMessage(tc.Function.Name, result, execErr); display != "" {
+				c.app.AddMessage(display, "system")
+			}
+		}
+	}
+
+	return "", &totalUsage, fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
+}
+
+func parseToolParams(raw string) (map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}, nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		return nil, err
+	}
+	if params == nil {
+		params = make(map[string]any)
+	}
+	return params, nil
+}
+
+func formatToolResultForModel(result *builtin.Result, execErr error) string {
+	if execErr != nil {
+		return fmt.Sprintf("Error: %v", execErr)
+	}
+	if result == nil {
+		return "No result"
+	}
+	encoded, err := tool.ToJSON(result)
+	if err != nil {
+		return fmt.Sprintf("{\"success\":%t}", result.Success)
+	}
+	return encoded
+}
+
+func toolDisplayMessage(name string, result *builtin.Result, execErr error) string {
+	if execErr != nil {
+		return fmt.Sprintf("Error running %s: %v", name, execErr)
+	}
+	if result == nil {
+		return ""
+	}
+	if !result.Success {
+		if result.Error != "" {
+			return fmt.Sprintf("Error: %s", result.Error)
+		}
+		return "Error"
+	}
+	if name == "activate_skill" {
+		if msg, ok := result.Data["message"].(string); ok && msg != "" {
+			return msg
+		}
+	}
+	if msg, ok := result.DisplayData["message"].(string); ok && msg != "" {
+		return msg
+	}
+	if summary, ok := result.DisplayData["summary"].(string); ok && summary != "" {
+		return summary
+	}
+	return ""
+}
+
+func addUsage(total model.Usage, next model.Usage) model.Usage {
+	total.PromptTokens += next.PromptTokens
+	total.CompletionTokens += next.CompletionTokens
+	total.TotalTokens += next.TotalTokens
+	return total
+}
+
+func isToolUnsupportedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
+		return true
+	}
+	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
+		return true
+	}
+	if strings.Contains(lower, "does not support tool calling") {
+		return true
+	}
+	if strings.Contains(lower, "does not support tool response") {
+		return true
+	}
+	return false
+}
+
+func (c *Controller) emitStreaming(sessionID string, streaming bool) {
+	if c.telemetry == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	eventType := telemetry.EventModelStreamEnded
+	if streaming {
+		eventType = telemetry.EventModelStreamStarted
+	}
+	c.telemetry.Publish(telemetry.Event{
+		Type:      eventType,
+		SessionID: sessionID,
+	})
+}
+
 // buildMessagesForSession constructs the message list for the API using a specific session.
 func (c *Controller) buildMessagesForSession(sess *SessionState) []model.Message {
-	return c.buildMessagesForSessionHistory(sess, false)
-}
-
-// buildContinuationMessagesForSession constructs the message list using the
-// raw durable transcript rather than ToEfficientModelMessages's independent
-// compaction pass. A continuation-aware turn compacts once, via
-// ProjectModelMessagesForRequestPinned, so the represented/pinned suffix
-// (decision 0001) is never touched by an earlier, pin-unaware pass.
-func (c *Controller) buildContinuationMessagesForSession(sess *SessionState) []model.Message {
-	return c.buildMessagesForSessionHistory(sess, true)
-}
-
-func (c *Controller) buildMessagesForSessionHistory(sess *SessionState, rawHistory bool) []model.Message {
 	messages := []model.Message{}
 
 	// System prompt
@@ -1227,105 +1160,32 @@ func (c *Controller) buildMessagesForSessionHistory(sess *SessionState, rawHisto
 
 	// Add conversation history from session
 	if sess != nil && sess.Conversation != nil {
-		if rawHistory {
-			messages = append(messages, sess.Conversation.ToModelMessages()...)
-		} else {
-			messages = append(messages, sess.Conversation.ToEfficientModelMessages()...)
-		}
+		messages = append(messages, sess.Conversation.ToModelMessages()...)
 	}
 
-	return truncateModelToolMessages(messages, defaultTUIToolModelMaxBytes)
-}
-
-func truncateModelToolMessages(messages []model.Message, maxBytes int) []model.Message {
-	if maxBytes <= 0 {
-		return messages
-	}
-	for i := range messages {
-		if messages[i].Role != "tool" {
-			continue
-		}
-		content, ok := messages[i].Content.(string)
-		if !ok {
-			continue
-		}
-		messages[i].Content = truncateModelToolOutput(content, maxBytes)
-	}
 	return messages
-}
-
-func takePrefixBytes(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(s) <= n {
-		return s
-	}
-	cut := 0
-	for i := range s {
-		if i > n {
-			break
-		}
-		cut = i
-	}
-	if cut == 0 {
-		return ""
-	}
-	return s[:cut]
-}
-
-func takeSuffixBytes(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(s) <= n {
-		return s
-	}
-	start := len(s)
-	for i := range s {
-		if len(s)-i <= n {
-			start = i
-			break
-		}
-	}
-	return s[start:]
 }
 
 // buildSystemPrompt constructs the system prompt.
 func (c *Controller) buildSystemPrompt(sess *SessionState) string {
-	basePrompt := prompts.DefaultToolUseSystemPrompt + "\n\nIf the user asks to create a new skill, call create_skill to save it."
-	if sessionCodeModeEnabled(sess) {
-		basePrompt += "\n\n" + prompts.CodeModeSystemPrompt
-	}
-	projectRaw := ""
-	if c.projectCtx != nil {
-		projectRaw = c.projectCtx.RawContent
-	}
-	skillDescriptions := ""
-	if sess != nil && sess.SkillRegistry != nil {
-		skillDescriptions = sess.SkillRegistry.GetDescriptions()
-	}
-	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
-		Evaluator:         c.evaluator,
-		BasePrompt:        basePrompt,
-		AgentProfile:      c.agentProfile,
-		ProjectContext:    projectRaw,
-		KnowledgeContext:  c.knowledgeContext,
-		WorkDir:           c.workDir,
-		RootDir:           c.workDir,
-		SkillsDescription: skillDescriptions,
-		TaskType:          "coding",
-		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)),
-		GTSAvailable:      commandAvailable("gts"),
-	})
-}
+	prompt := "You are Buckley, an AI development assistant. "
+	prompt += "You help users with software engineering tasks including writing code, debugging, and explaining concepts. "
+	prompt += "Be concise and helpful.\n\n"
 
-func sessionCodeModeEnabled(sess *SessionState) bool {
-	if sess == nil || sess.ToolRegistry == nil {
-		return false
+	if c.projectCtx != nil && c.projectCtx.RawContent != "" {
+		prompt += "Project Context:\n" + c.projectCtx.RawContent + "\n\n"
 	}
-	_, ok := sess.ToolRegistry.Get("exec_program")
-	return ok
+
+	prompt += fmt.Sprintf("Working directory: %s\n", c.workDir)
+	prompt += "If the user asks to create a new skill, draft name/description/body and call create_skill to save it.\n"
+
+	if sess != nil && sess.SkillRegistry != nil {
+		if desc := strings.TrimSpace(sess.SkillRegistry.GetDescriptions()); desc != "" {
+			prompt += "\n" + desc + "\n"
+		}
+	}
+
+	return prompt
 }
 
 // handleFileSelect processes file selection from the picker.
@@ -1353,24 +1213,13 @@ func (c *Controller) handleShellCmd(cmd string) string {
 	return fmt.Sprintf("Would execute: %s", cmd)
 }
 
-func commandAvailable(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
 // defaultTUIMaxOutputBytes limits tool output in TUI mode.
 const defaultTUIMaxOutputBytes = 100_000
 
-// defaultTUIToolModelMaxBytes limits each tool result sent back to the model.
-const defaultTUIToolModelMaxBytes = 24 * 1024
-
 // buildRegistry creates the tool registry with all available tools.
-func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) (*tool.Registry, io.Closer) {
+func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub *telemetry.Hub, sessionID string) *tool.Registry {
 	registry := tool.NewRegistry()
-	tool.ApplyToolMiddlewareConfig(registry, cfg)
-	if cfg == nil || cfg.ToolMiddleware.MaxResultBytes <= 0 {
-		registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
-	}
+	registry.SetMaxOutputBytes(defaultTUIMaxOutputBytes)
 
 	// Configure container execution if enabled
 	if cfg != nil && workDir != "" {
@@ -1392,117 +1241,42 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
-	var hooks io.Closer
-	hooksEnabled := false
-	hooksTimeout := time.Duration(0)
-	if cfg != nil {
-		hooksEnabled = cfg.Hooks.Enabled
-		hooksTimeout = time.Duration(cfg.Hooks.DefaultTimeoutMs) * time.Millisecond
-	}
-	if hookCloser, hookErr := registry.EnableConfiguredHooks(hooksEnabled, hooksTimeout); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
-	} else if hookCloser != nil {
-		hooks = hookCloser
-	}
 
 	// Set working directory for file tools
 	if workDir != "" {
 		registry.SetWorkDir(workDir)
 	}
-	registry.EnableDynamicDiscovery(nil)
 
-	return registry, hooks
+	return registry
 }
 
-// listSessions shows persisted sessions for this project, including completed
-// sessions that can be resumed.
+// listSessions shows all active sessions for this project.
 func (c *Controller) listSessions() {
-	if c.store == nil {
-		c.app.AddMessage("Session storage unavailable", "system")
-		return
-	}
-	sessions, err := c.store.ListSessionsByRepo(c.workDir)
-	if err != nil {
-		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
+	c.mu.Lock()
+	sessions := c.sessions
+	current := c.currentSession
+	c.mu.Unlock()
+
+	if len(sessions) == 0 {
+		c.app.AddMessage("No active sessions", "system")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Saved sessions:\n")
-	visible := 0
-	for _, sess := range sessions {
-		if sess.ProjectPath != c.workDir {
-			continue
-		}
-		visible++
+	sb.WriteString("Active sessions:\n")
+	for i, sess := range sessions {
 		marker := "  "
-		if current := c.currentSessionState(); current != nil && current.ID == sess.ID {
+		if i == current {
 			marker = "→ "
 		}
-		fmt.Fprintf(&sb, "%s[%d] %s · %s · %d messages\n", marker, visible, sess.ID, sess.Status, sess.MessageCount)
+		status := ""
+		if sess.Streaming {
+			status = " (streaming...)"
+		}
+		sb.WriteString(fmt.Sprintf("%s[%d] %s%s\n", marker, i+1, sess.ID, status))
 	}
-	if visible == 0 {
-		sb.WriteString("No saved sessions for this project.\n")
-	} else {
-		sb.WriteString("\nUse /resume <number or id> to open a session.")
-	}
+	sb.WriteString("\nUse /next or /prev to switch (Alt+Right/Left)")
 	c.app.AddMessage(sb.String(), "system")
-}
-
-func (c *Controller) resumeSession(reference string) {
-	if c.store == nil {
-		c.app.AddMessage("Session storage unavailable", "system")
-		return
-	}
-	all, err := c.store.ListSessionsByRepo(c.workDir)
-	if err != nil {
-		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
-		return
-	}
-	project := make([]storage.Session, 0)
-	for _, sess := range all {
-		if sess.ProjectPath == c.workDir {
-			project = append(project, sess)
-		}
-	}
-	var target *storage.Session
-	if n, err := strconv.Atoi(strings.TrimSpace(reference)); err == nil && n > 0 && n <= len(project) {
-		target = &project[n-1]
-	} else {
-		for i := range project {
-			if project[i].ID == strings.TrimSpace(reference) {
-				target = &project[i]
-				break
-			}
-		}
-	}
-	if target == nil {
-		c.app.AddMessage("Session not found. Run /sessions and use its number or full id.", "system")
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i, sess := range c.sessions {
-		if sess.ID == target.ID {
-			c.currentSession = i
-			c.switchToSessionLocked(i)
-			return
-		}
-	}
-	if err := c.store.SetSessionStatus(target.ID, storage.SessionStatusActive); err != nil {
-		c.app.AddMessage("Could not resume session: "+err.Error(), "system")
-		return
-	}
-	sess, err := newSessionState(c.cfg, c.store, c.workDir, c.telemetry, target.ID, true, c.codeModeToolFactory, c.runLedger, c.subagentEvidence)
-	if err != nil {
-		c.app.AddMessage("Could not load session: "+err.Error(), "system")
-		return
-	}
-	configureSessionSubagentPolicy(sess, c.evaluator)
-	c.configureSessionPermissions(sess)
-	c.sessions = append([]*SessionState{sess}, c.sessions...)
-	c.currentSession = 0
-	c.switchToSessionLocked(0)
 }
 
 // nextSession switches to the next session.
@@ -1517,20 +1291,6 @@ func (c *Controller) nextSession() {
 
 	c.currentSession = (c.currentSession + 1) % len(c.sessions)
 	c.switchToSessionLocked(c.currentSession)
-}
-
-// nextSessionAndRefreshNav switches to the next session and refreshes the
-// navigator's Sessions section, for callers that cannot append the
-// refresh themselves (the Alt+Right keybind).
-func (c *Controller) nextSessionAndRefreshNav() {
-	c.nextSession()
-	c.refreshSessionNav()
-}
-
-// prevSessionAndRefreshNav is prevSession's Alt+Left counterpart.
-func (c *Controller) prevSessionAndRefreshNav() {
-	c.prevSession()
-	c.refreshSessionNav()
 }
 
 // prevSession switches to the previous session.
@@ -1566,10 +1326,16 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	if sess.Streaming {
 		statusMsg += " (response in progress)"
 	}
-	c.app.addMessageImmediately(statusMsg, "system")
+	c.app.AddMessage(statusMsg, "system")
 
 	// Replay conversation to display
-	renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
+	for _, msg := range sess.Conversation.Messages {
+		content := ""
+		if s, ok := msg.Content.(string); ok {
+			content = s
+		}
+		c.app.AddMessage(content, msg.Role)
+	}
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")
@@ -1591,29 +1357,23 @@ func (c *Controller) Stop() {
 		if sess.Cancel != nil {
 			sess.Cancel()
 		}
-		if sess.permissionBroker != nil {
-			sess.permissionBroker.close()
-		}
-		if sess.ToolRegistry != nil {
-			_ = sess.ToolRegistry.Close()
-		}
 	}
 	c.mu.Unlock()
 	c.app.Quit()
 }
 
-// saveLatestConversationMessage persists the newest model-visible turn for a session.
-func (c *Controller) saveLatestConversationMessage(sess *SessionState) {
-	if c == nil || c.store == nil || sess == nil || sess.Conversation == nil {
+// saveMessage persists a message to storage.
+func (c *Controller) saveMessage(sessionID, role, content string) {
+	if c.store == nil {
 		return
 	}
-	if len(sess.Conversation.Messages) == 0 {
-		return
+	msg := &storage.Message{
+		SessionID: sessionID,
+		Role:      role,
+		Content:   content,
+		Timestamp: time.Now(),
 	}
-	msg := sess.Conversation.Messages[len(sess.Conversation.Messages)-1]
-	if err := sess.Conversation.SaveMessage(c.store, msg); err != nil {
-		c.app.AddMessage("Error saving chat turn: "+err.Error(), "system")
-	}
+	_ = c.store.SaveMessage(msg) // Ignore errors for now
 }
 
 // handleReview reviews the current git diff in conversation.
@@ -1630,9 +1390,6 @@ func (c *Controller) handleReview() {
 		return
 	}
 
-	// Shape through diffsignal: low-signal noise summarised, budget enforced.
-	diff = shapeDiff(diff, diffsignal.ReviewDiffBudget)
-
 	// Build review prompt
 	prompt := fmt.Sprintf(`Please review the following code changes and provide feedback:
 
@@ -1647,7 +1404,16 @@ Focus on:
 
 Be specific with file:line references. Flag critical issues first.`, "```diff\n"+diff+"\n```")
 
-	c.startSessionPrompt("/review", prompt)
+	// Display as user message and stream response
+	c.app.AddMessage("/review", "user")
+
+	sess := c.sessions[c.currentSession]
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.Cancel = cancel
+	sess.Streaming = true
+	c.emitStreaming(sess.ID, true)
+
+	go c.streamResponse(ctx, prompt, sess)
 }
 
 // handleCommit generates a commit message for staged changes.
@@ -1663,9 +1429,6 @@ func (c *Controller) handleCommit() {
 		c.app.AddMessage("No staged changes. Use `git add` to stage files first.", "system")
 		return
 	}
-
-	// Shape through diffsignal: low-signal noise summarised, budget enforced.
-	diff = shapeDiff(diff, diffsignal.CommitDiffBudget)
 
 	// Get recent commit messages for style reference
 	recentCommits := c.getRecentCommits(5)
@@ -1687,18 +1450,41 @@ Requirements:
 
 Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recentCommits)
 
-	c.startSessionPrompt("/commit", prompt)
+	// Display as user message and stream response
+	c.app.AddMessage("/commit", "user")
+
+	sess := c.sessions[c.currentSession]
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.Cancel = cancel
+	sess.Streaming = true
+	c.emitStreaming(sess.ID, true)
+
+	go c.streamResponse(ctx, prompt, sess)
 }
 
 func (c *Controller) handleSkillCommand(args []string) {
-	sess := c.currentSessionState()
+	sess := c.sessions[c.currentSession]
 	if sess == nil || sess.SkillRegistry == nil || sess.SkillState == nil {
 		c.app.AddMessage("Skill system unavailable in this session.", "system")
 		return
 	}
 
 	if len(args) == 0 || strings.EqualFold(args[0], "list") {
-		c.app.AddMessage(formatSkillList(sess.SkillRegistry), "system")
+		names := make([]string, 0)
+		for _, s := range sess.SkillRegistry.List() {
+			names = append(names, s.GetName())
+		}
+		sort.Strings(names)
+		if len(names) == 0 {
+			c.app.AddMessage("No skills available.", "system")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("Available skills:\n")
+		for _, name := range names {
+			b.WriteString("- " + name + "\n")
+		}
+		c.app.AddMessage(strings.TrimSpace(b.String()), "system")
 		return
 	}
 
@@ -1708,81 +1494,43 @@ func (c *Controller) handleSkillCommand(args []string) {
 		return
 	}
 
-	content, err := activateSessionSkill(sess, name)
-	if err != nil {
-		c.app.AddMessage(err.Error(), "system")
-		return
+	tool := &builtin.SkillActivationTool{
+		Registry:     sess.SkillRegistry,
+		Conversation: sess.SkillState,
 	}
-	c.app.AddMessage(content, "system")
-}
-
-func (c *Controller) currentSessionState() *SessionState {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.currentSession < 0 || c.currentSession >= len(c.sessions) {
-		return nil
-	}
-	return c.sessions[c.currentSession]
-}
-
-func formatSkillList(registry *skill.Registry) string {
-	names := make([]string, 0)
-	for _, s := range registry.List() {
-		names = append(names, s.GetName())
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return "No skills available."
-	}
-
-	var b strings.Builder
-	b.WriteString("Available skills:\n")
-	for _, name := range names {
-		b.WriteString("- " + name + "\n")
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func activateSessionSkill(sess *SessionState, name string) (string, error) {
-	if sess == nil || sess.ToolRegistry == nil {
-		return "", fmt.Errorf("Error activating skill %q: tool registry unavailable", name)
-	}
-	result, err := sess.ToolRegistry.ExecuteWithContext(context.Background(), "activate_skill", map[string]any{
+	result, err := tool.Execute(map[string]any{
 		"action": "activate",
 		"skill":  name,
 		"scope":  "user request",
 	})
 	if err != nil {
-		return "", fmt.Errorf("Error activating skill %q: %v", name, err)
+		c.app.AddMessage(fmt.Sprintf("Error activating skill %q: %v", name, err), "system")
+		return
 	}
-	content, ok := formatSkillActivationResult(name, result)
-	if !ok {
-		return "", fmt.Errorf("Error activating skill %q.", name)
-	}
-	return content, nil
-}
-
-func formatSkillActivationResult(name string, result *builtin.Result) (string, bool) {
 	if result == nil || !result.Success {
 		if result != nil && result.Error != "" {
-			return fmt.Sprintf("Error activating skill %q: %s", name, result.Error), true
+			c.app.AddMessage(fmt.Sprintf("Error activating skill %q: %s", name, result.Error), "system")
+			return
 		}
-		return "", false
+		c.app.AddMessage(fmt.Sprintf("Error activating skill %q.", name), "system")
+		return
 	}
 
 	message, _ := result.Data["message"].(string)
 	content, _ := result.Data["content"].(string)
 	if content != "" && message != "" {
-		return message + "\n\n" + content, true
+		c.app.AddMessage(message+"\n\n"+content, "system")
+		return
 	}
 	if content != "" {
-		return content, true
+		c.app.AddMessage(content, "system")
+		return
 	}
 	if message != "" {
-		return message, true
+		c.app.AddMessage(message, "system")
+		return
 	}
-	return fmt.Sprintf("Skill %q activated.", name), true
+	c.app.AddMessage(fmt.Sprintf("Skill %q activated.", name), "system")
 }
 
 // getGitDiff returns the combined staged and unstaged diff.
@@ -1846,13 +1594,10 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 
 	// Mark as acknowledged
 	queued.Acknowledged = true
-	sess.DisableToolsNextTurn = queued.DisableTools
+
 	// Show acknowledgment in UI
 	remaining := len(sess.MessageQueue)
 	ackMsg := fmt.Sprintf("Processing queued message from %s", queued.Timestamp.Format("15:04:05"))
-	if queued.Steering {
-		ackMsg = fmt.Sprintf("Applying steering from %s", queued.Timestamp.Format("15:04:05"))
-	}
 	if remaining > 0 {
 		ackMsg += fmt.Sprintf(" (%d more queued)", remaining)
 	}

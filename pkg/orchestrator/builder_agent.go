@@ -11,20 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/buckley/pkg/agentloop"
-	"m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/encoding/toon"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/paths"
-	"m31labs.dev/buckley/pkg/skill"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/artifact"
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/encoding/toon"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/paths"
+	"github.com/draco/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
 )
-
-// ContextEnricher produces an optional code-intelligence section for LLM prompts.
-// If nil or if it returns an empty string, no enrichment is appended.
-type ContextEnricher func(ctx context.Context, taskType string, files []string) string
 
 // BuilderAgent encapsulates implementation generation, tool execution, and telemetry.
 type BuilderAgent struct {
@@ -35,8 +30,6 @@ type BuilderAgent struct {
 	workflow     *WorkflowManager
 	logger       *builderLogger
 	resultCodec  *toon.Codec
-	enricher     ContextEnricher
-	resolver     *model.Resolver
 }
 
 // BuilderResult captures the outcome of a builder run.
@@ -93,37 +86,6 @@ func NewBuilderAgent(plan *Plan, cfg *config.Config, client ModelClient, registr
 		logger:       newBuilderLogger(plan),
 		resultCodec:  toon.New(cfg.Encoding.UseToon),
 	}
-}
-
-// SetResolver attaches a model resolver for arbiter-based model selection.
-func (a *BuilderAgent) SetResolver(r *model.Resolver) {
-	if a == nil {
-		return
-	}
-	a.resolver = r
-}
-
-// resolveModel returns the model ID for the execution phase.
-func (a *BuilderAgent) resolveModel() string {
-	if a.resolver != nil {
-		return a.resolver.Resolve("execution")
-	}
-	return a.config.Models.Execution
-}
-
-func (a *BuilderAgent) resolveReasoningEffort() string {
-	if a == nil {
-		return ""
-	}
-	return model.ResolveReasoningEffort(a.config, a.modelClient, nil, a.resolveModel(), "execution")
-}
-
-// SetEnricher attaches an optional code-intelligence enricher.
-func (a *BuilderAgent) SetEnricher(fn ContextEnricher) {
-	if a == nil {
-		return
-	}
-	a.enricher = fn
 }
 
 // Build generates and applies an implementation for the provided task.
@@ -295,13 +257,6 @@ func (a *BuilderAgent) emitBuilderEvent(task *Task, eventType telemetry.EventTyp
 func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	prompt := buildImplementationPrompt(task)
 
-	// Append GTS code intelligence if available
-	if a.enricher != nil {
-		if section := a.enricher(context.Background(), "implementation", task.Files); section != "" {
-			prompt += "\n\n" + section
-		}
-	}
-
 	systemMessage := "You are an expert software engineer. Use the available tools to implement tasks. Run commands with run_shell, read/write files with file tools, check git status, etc. Prefer running actual commands over generating fake output.\n\nFor analysis tasks: Just run the commands and report results - you don't need to create files.\nFor implementation tasks: After running any necessary commands, provide code in markdown blocks with filepath: headers."
 	if a.workflow != nil {
 		if a.workflow.skillRegistry != nil {
@@ -337,36 +292,22 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	})
 
 	req := model.ChatRequest{
-		Model:       a.resolveModel(),
+		Model:       a.config.Models.Execution,
 		Messages:    messages,
 		ToolChoice:  "auto",
 		Temperature: 0.2,
-	}
-	if effort := a.resolveReasoningEffort(); effort != "" {
-		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
 	// Use streaming to handle tool calls
 	return a.generateWithTools(req, task)
 }
 
-// generateWithTools drives the builder's model-and-tool turn loop through
-// the shared turn engine (pkg/agentloop.Controller), which now owns request
-// projection (replacing the direct conversation.CompactModelMessagesForRequest
-// call), tool-call ID backfill, and the round/repeat guard.
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
 	ctx := context.Background()
-	const maxIterations = 10 // Prevent infinite loops
+	maxIterations := 10 // Prevent infinite loops
 	messages := req.Messages
-	if req.SessionID == "" {
-		req.SessionID = fmt.Sprintf("builder-%d", time.Now().UnixNano())
-	}
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
-	contextWindow := 0
-	if provider, ok := a.modelClient.(model.ContextWindowProvider); ok {
-		contextWindow, _ = provider.GetContextLength(req.Model)
-	}
 
 	if a.workflow != nil {
 		skillState = a.workflow.skillState
@@ -385,139 +326,83 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 	}
 
-	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
-		var allowedTools []string
+	for iter := 0; iter < maxIterations; iter++ {
+		allowedTools := []string{}
 		if skillState != nil {
 			allowedTools = skillState.ToolFilter()
 		}
 
-		roundReq := req
 		if a.toolRegistry != nil {
 			tools := a.toolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
 			if len(tools) > 0 {
-				roundReq.Tools = tools
-				roundReq.ToolChoice = "auto"
+				req.Tools = tools
+				req.ToolChoice = "auto"
 			} else {
-				roundReq.Tools = nil
-				roundReq.ToolChoice = "none"
+				req.Tools = nil
+				req.ToolChoice = "none"
 			}
 		}
-		roundReq.Messages = messages
-		return roundReq, nil
-	}
 
-	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, chatReq model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
-		resp, err := a.modelClient.ChatCompletion(ctx, chatReq)
-		if err == nil {
-			return resp, nil
-		}
-		// A provider may return billable content alongside a stream or
-		// transport error. Let Controller persist/account that fragment before
-		// deciding whether the turn is incomplete; never discard it here.
-		if resp != nil {
-			return resp, fmt.Errorf("model call failed after partial response: %w", err)
-		}
-		if a.toolRegistry != nil && isToolUnsupportedError(err) {
-			// The model rejected the tool schema outright: retry this round
-			// once with tools off instead of failing the turn.
-			retryReq := chatReq
-			retryReq.Tools = nil
-			retryReq.ToolChoice = "none"
-			resp, err = a.modelClient.ChatCompletion(ctx, retryReq)
-			if err != nil {
-				return nil, fmt.Errorf("model call failed: %w", err)
+		// Update request with current messages
+		req.Messages = messages
+
+		// Call model
+		resp, err := a.modelClient.ChatCompletion(ctx, req)
+		if err != nil {
+			if a.toolRegistry != nil && isToolUnsupportedError(err) {
+				req.Tools = nil
+				req.ToolChoice = "none"
+				continue
 			}
-			return resp, nil
+			return "", fmt.Errorf("model call failed: %w", err)
 		}
-		return nil, fmt.Errorf("model call failed: %w", err)
-	})
-
-	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
-		var allowedTools []string
-		if skillState != nil {
-			allowedTools = skillState.ToolFilter()
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("no response choices from model")
 		}
 
-		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
-		for _, tc := range calls {
+		choice := resp.Choices[0]
+
+		// If no tool calls, we're done
+		if len(choice.Message.ToolCalls) == 0 {
+			return model.ExtractTextContent(choice.Message.Content)
+		}
+
+		// Add assistant message with tool calls
+		for i := range choice.Message.ToolCalls {
+			if choice.Message.ToolCalls[i].ID == "" {
+				choice.Message.ToolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+			}
+		}
+		messages = append(messages, choice.Message)
+
+		// Execute each tool call
+		for _, tc := range choice.Message.ToolCalls {
 			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
-				outcomes = append(outcomes, agentloop.ToolOutcome{
-					Content: fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name),
-					Success: false,
-					Error:   fmt.Sprintf("tool %s not allowed by active skills", tc.Function.Name),
+				result := fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name)
+				messages = append(messages, model.Message{
+					Role:       "tool",
+					Content:    result,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
 				})
 				continue
 			}
 			result, err := a.executeToolCall(tc, task)
-			success := err == nil
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
-			errorText := ""
-			if err != nil {
-				errorText = err.Error()
-			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: result, Success: success, Error: errorText})
-		}
-		return outcomes, nil
-	})
 
-	history := agentloop.HistorySinkFunc(func(msg model.Message) {
-		messages = append(messages, msg)
-	})
-
-	// This loop never had stagnation detection, only the flat maxIterations
-	// ceiling: raise every repeat/cycle threshold above maxIterations so the
-	// Governor's round limit is the only thing that can stop tool execution.
-	// Controller then reserves one no-tools synthesis from the collected evidence.
-	governor := agentloop.New(agentloop.Config{
-		MaxRounds:          maxIterations,
-		MaxToolCalls:       maxIterations * 8,
-		ExactRepeatLimit:   maxIterations + 1,
-		OutcomeRepeatLimit: maxIterations + 1,
-		CycleMaxLength:     1,
-		CycleRepeats:       maxIterations + 1,
-	})
-
-	controller, err := agentloop.NewController(agentloop.ControllerConfig{
-		Governor:       governor,
-		FinalizeOnStop: true,
-		BuildRequest:   buildRequest,
-		CallModel:      callModel,
-		DispatchTools:  dispatchTools,
-		History:        history,
-		ContextWindow:  func(modelID string) int { return contextWindow },
-	})
-	if err != nil {
-		return "", err
-	}
-
-	result, err := controller.Run(ctx)
-	if err != nil {
-		if result != nil && result.Termination.Kind != "" {
-			a.logEvent(task.ID, builderEventToolResult, map[string]string{
-				"status":             "incomplete_after_harness_stop",
-				"termination_kind":   result.Termination.Kind,
-				"termination_reason": result.Termination.Reason,
-				"finalization_error": result.Termination.FinalizationError,
+			// Add tool response message
+			messages = append(messages, model.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
 			})
 		}
-		return "", err
 	}
-	if err := result.RequireConclusive(); err != nil {
-		return "", err
-	}
-	if result.FinishReason == agentloop.FinishReasonEmptyChoices {
-		return "", fmt.Errorf("no response choices from model")
-	}
-	if result.Termination.Kind != "" {
-		a.logEvent(task.ID, builderEventToolResult, map[string]string{
-			"status":             "finalized_after_harness_stop",
-			"termination_kind":   result.Termination.Kind,
-			"termination_reason": result.Termination.Reason,
-		})
-	}
-	return model.ExtractTextContent(result.Message.Content)
+
+	return "", fmt.Errorf("max tool calling iterations (%d) exceeded", maxIterations)
 }
 
 func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, error) {

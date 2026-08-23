@@ -6,13 +6,6 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
-  # Build (without deploying) on documentation pull requests. Without
-  # this a docs-only PR reports no checks at all, so a broken nav link or
-  # a missing page is only discovered after it lands on main.
-  pull_request:
-    paths:
-      - 'docs/**'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,40 +15,47 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  pages:
-    name: Pages
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # The Pages environment and deployment apply to main only; a pull
-    # request run builds and stops.
-    environment: ${{ github.event_name == 'push' && 'github-pages' || '' }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: docs/package-lock.json
 
-      - name: Build docs
-        working-directory: docs
-        run: |
-          npm ci
-          npm run build
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
 
-      - name: Upload Pages artifact
-        if: github.event_name == 'push'
+      - name: Install dependencies
+        run: npm ci
+        working-directory: docs
+
+      - name: Build with VitePress
+        run: npm run build
+        working-directory: docs
+
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/.vitepress/dist
 
-      - name: Deploy Pages
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
         id: deployment
-        if: github.event_name == 'push'
         uses: actions/deploy-pages@v4

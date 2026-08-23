@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
+	acppb "github.com/draco/buckley/pkg/acp/proto"
+	"github.com/draco/buckley/pkg/bus"
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/coordination/coordinator"
+	"github.com/draco/buckley/pkg/coordination/events"
+	"github.com/draco/buckley/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/emptypb"
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
-	"m31labs.dev/buckley/pkg/coordination/events"
-	"m31labs.dev/buckley/pkg/storage"
 )
 
 // Test helper to create a server with all dependencies

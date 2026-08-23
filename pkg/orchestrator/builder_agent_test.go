@@ -3,17 +3,15 @@ package orchestrator
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/model"
+	orchmocks "github.com/draco/buckley/pkg/orchestrator/mocks"
+	"github.com/draco/buckley/pkg/tool"
+	"github.com/draco/buckley/pkg/tool/builtin"
 	"go.uber.org/mock/gomock"
-	"m31labs.dev/buckley/pkg/agentloop"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/model"
-	orchmocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
-	"m31labs.dev/buckley/pkg/tool"
-	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 func TestBuilderGenerateWithTools_AppendsToolResultsAndContinues(t *testing.T) {
@@ -207,7 +205,7 @@ func TestBuilderGenerateWithTools_ToolErrorDoesNotBlockProgress(t *testing.T) {
 	}
 }
 
-func TestBuilderGenerateWithTools_FinalizesAfterMaxIterations(t *testing.T) {
+func TestBuilderGenerateWithTools_StopsAfterMaxIterations(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -250,60 +248,14 @@ func TestBuilderGenerateWithTools_FinalizesAfterMaxIterations(t *testing.T) {
 	}
 
 	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(loopResp, nil).Times(10)
-	var finalReq model.ChatRequest
-	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
-			finalReq = req
-			return &model.ChatResponse{
-				Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "synthesized from evidence"}}},
-				Usage:   model.Usage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25},
-			}, nil
-		},
-	)
 
-	out, err := agent.generateWithTools(model.ChatRequest{
+	_, err := agent.generateWithTools(model.ChatRequest{
 		Model:      cfg.Models.Execution,
 		Messages:   []model.Message{{Role: "system", Content: "sys"}, {Role: "user", Content: "prompt"}},
 		ToolChoice: "auto",
 	}, task)
-	if err != nil {
-		t.Fatalf("generateWithTools: %v", err)
-	}
-	if out != "synthesized from evidence" {
-		t.Fatalf("output = %q, want synthesized final answer", out)
-	}
-	if len(finalReq.Tools) != 0 || finalReq.ToolChoice != "none" {
-		t.Fatalf("finalization request still exposed tools: choice=%q tools=%d", finalReq.ToolChoice, len(finalReq.Tools))
-	}
-	if !strings.Contains(fmt.Sprint(finalReq.Messages[len(finalReq.Messages)-1].Content), "stopped further tool execution") {
-		t.Fatalf("finalization request omitted stop context: %#v", finalReq.Messages)
-	}
-}
-
-func TestBuilderGenerateWithTools_FinalizationFailureIsIncomplete(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockModel := orchmocks.NewMockModelClient(ctrl)
-	mockModel.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
-	cfg := config.DefaultConfig()
-	cfg.Models.Execution = "mock-exec"
-	agent := NewBuilderAgent(&Plan{ID: "p1", FeatureName: "Feature"}, cfg, mockModel, tool.NewEmptyRegistry(), nil)
-
-	toolCall := &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
-		ID: "loop", Type: "function", Function: model.FunctionCall{Name: "missing", Arguments: `{}`},
-	}}}}}}
-	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(toolCall, nil).Times(10)
-	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(
-		&model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant"}}}}, nil,
-	)
-
-	_, err := agent.generateWithTools(model.ChatRequest{
-		Model: cfg.Models.Execution, Messages: []model.Message{{Role: "user", Content: "prompt"}},
-	}, &Task{ID: "1", Title: "Task"})
-	var incomplete *agentloop.IncompleteTurnError
-	if !errors.As(err, &incomplete) {
-		t.Fatalf("error = %v, want IncompleteTurnError", err)
+	if err == nil || !strings.Contains(err.Error(), "max tool calling iterations") {
+		t.Fatalf("expected max iteration error, got %v", err)
 	}
 }
 

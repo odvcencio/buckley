@@ -3,10 +3,11 @@ package model
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/draco/buckley/pkg/config"
 	"go.uber.org/mock/gomock"
-	"m31labs.dev/buckley/pkg/config"
 )
 
 func TestManagerGetModelInfo_FromCatalog(t *testing.T) {
@@ -360,8 +361,8 @@ func TestManagerChatCompletionStream_NoProvider(t *testing.T) {
 
 	chunkChan, errChan := manager.ChatCompletionStream(ctx, req)
 
-	if chunkChan == nil {
-		t.Error("Expected non-nil (closed) chunk channel for missing provider")
+	if chunkChan != nil {
+		t.Error("Expected nil chunk channel for missing provider")
 	}
 
 	// Should receive error
@@ -457,6 +458,13 @@ func TestManagerInitialize_ProviderError(t *testing.T) {
 	}
 }
 
+// TestManagerInitialize_InvalidConfiguredModel verifies that an explicitly
+// configured model missing from the discovered catalog fails Initialize()
+// loudly instead of being silently swapped for a different model. Silently
+// substituting "provider/valid-model" for a typo'd/removed
+// "provider/invalid-model" is exactly the landmine this behavior guards
+// against: the user (or config file) asked for a specific model, and Buckley
+// must not quietly run a different one.
 func TestManagerInitialize_InvalidConfiguredModel(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -484,11 +492,15 @@ func TestManagerInitialize_InvalidConfiguredModel(t *testing.T) {
 	}
 
 	err := manager.Initialize()
-	if err != nil {
-		t.Fatalf("Initialize returned unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected Initialize() to fail for an unavailable configured execution model, got nil")
+	}
+	if !strings.Contains(err.Error(), "provider/invalid-model") {
+		t.Fatalf("expected error to name the unavailable model, got: %v", err)
 	}
 
-	if manager.config.Models.Execution != "provider/valid-model" {
-		t.Fatalf("expected execution model to fallback to provider/valid-model, got %s", manager.config.Models.Execution)
+	// The config must not have been silently mutated to a different model.
+	if manager.config.Models.Execution != "provider/invalid-model" {
+		t.Fatalf("expected execution model to remain unchanged after failed validation, got %s", manager.config.Models.Execution)
 	}
 }

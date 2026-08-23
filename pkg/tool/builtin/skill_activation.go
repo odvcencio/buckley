@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/skill"
 )
 
 // SkillActivationTool allows the AI to activate and deactivate workflow skills
@@ -38,7 +38,7 @@ func (t *SkillActivationTool) Name() string {
 }
 
 func (t *SkillActivationTool) Description() string {
-	return "Activate or deactivate workflow skills for structured guidance."
+	return "Activate or deactivate workflow skills to receive structured guidance. Use this when you recognize a pattern that matches an available skill (TDD, debugging, planning, etc.). Skills can also be manually activated by the user via /skill command or automatically during phase transitions."
 }
 
 func (t *SkillActivationTool) Parameters() ParameterSchema {
@@ -51,11 +51,11 @@ func (t *SkillActivationTool) Parameters() ParameterSchema {
 			},
 			"skill": {
 				Type:        "string",
-				Description: "Name of the skill",
+				Description: "Name of the skill to activate/deactivate (e.g., 'test-driven-development', 'systematic-debugging')",
 			},
 			"scope": {
 				Type:        "string",
-				Description: "Context for activation (optional for deactivate)",
+				Description: "Description of the activation context (e.g., 'implementing user auth', 'debugging login flow'). Optional for deactivate.",
 			},
 		},
 		Required: []string{"action", "skill"},

@@ -20,24 +20,23 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	acppb "github.com/draco/buckley/pkg/acp/proto"
+	"github.com/draco/buckley/pkg/agent"
+	"github.com/draco/buckley/pkg/bus"
+	"github.com/draco/buckley/pkg/config"
+	"github.com/draco/buckley/pkg/coordination/coordinator"
+	"github.com/draco/buckley/pkg/coordination/security"
+	"github.com/draco/buckley/pkg/mission"
+	"github.com/draco/buckley/pkg/model"
+	"github.com/draco/buckley/pkg/orchestrator"
+	"github.com/draco/buckley/pkg/rlm"
+	"github.com/draco/buckley/pkg/storage"
+	"github.com/draco/buckley/pkg/telemetry"
+	"github.com/draco/buckley/pkg/tool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
-	acppb "m31labs.dev/buckley/pkg/acp/proto"
-	"m31labs.dev/buckley/pkg/agent"
-	"m31labs.dev/buckley/pkg/bus"
-	"m31labs.dev/buckley/pkg/config"
-	"m31labs.dev/buckley/pkg/coordination/coordinator"
-	"m31labs.dev/buckley/pkg/coordination/security"
-	"m31labs.dev/buckley/pkg/graft"
-	"m31labs.dev/buckley/pkg/mission"
-	"m31labs.dev/buckley/pkg/model"
-	"m31labs.dev/buckley/pkg/orchestrator"
-	"m31labs.dev/buckley/pkg/rlm"
-	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
 )
 
 // Server implements the Zed ACP gRPC service.
@@ -568,15 +567,12 @@ func extractMessageText(msg model.Message) string {
 // buildRLMRuntime constructs an RLM runtime for ACP requests.
 func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(), error) {
 	registry := tool.NewRegistry()
-	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
 	registry.EnableMissionControl(missionStore, agentID, requireApproval, 15*time.Minute)
 	registry.UpdateMissionSession(sessionID)
-
-	graftClient := graft.NewClient(s.projectRoot, "buckley-acp")
 
 	runtime, err := rlm.NewRuntime(resolveRLMConfig(s.cfg), rlm.RuntimeDeps{
 		Models:       s.models,
@@ -586,7 +582,6 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 		Bus:          s.messageBus,
 		Telemetry:    s.telemetryHub,
 		SessionID:    sessionID,
-		GraftClient:  graftClient,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -620,16 +615,6 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 	}
 	base.Coordinator.StreamPartials = rlmCfg.Coordinator.StreamPartials
 
-	if strings.TrimSpace(rlmCfg.SubAgent.Model) != "" {
-		base.SubAgent.Model = rlmCfg.SubAgent.Model
-	}
-	if rlmCfg.SubAgent.MaxConcurrent != 0 {
-		base.SubAgent.MaxConcurrent = rlmCfg.SubAgent.MaxConcurrent
-	}
-	if rlmCfg.SubAgent.Timeout != 0 {
-		base.SubAgent.Timeout = rlmCfg.SubAgent.Timeout
-	}
-
 	if rlmCfg.Scratchpad.MaxEntriesMemory != 0 {
 		base.Scratchpad.MaxEntriesMemory = rlmCfg.Scratchpad.MaxEntriesMemory
 	}
@@ -645,14 +630,51 @@ func resolveRLMConfig(cfg *config.Config) rlm.Config {
 	base.Scratchpad.PersistArtifacts = rlmCfg.Scratchpad.PersistArtifacts
 	base.Scratchpad.PersistDecisions = rlmCfg.Scratchpad.PersistDecisions
 
+	if len(rlmCfg.Tiers) > 0 {
+		if base.Tiers == nil {
+			base.Tiers = make(map[rlm.Weight]rlm.TierConfig)
+		}
+		for name, tier := range rlmCfg.Tiers {
+			weight := rlm.Weight(strings.ToLower(strings.TrimSpace(name)))
+			if weight == "" {
+				continue
+			}
+			base.Tiers[weight] = mergeRLMConfigTier(base.Tiers[weight], tier)
+		}
+	}
+
 	base.Normalize()
+	return base
+}
+
+func mergeRLMConfigTier(base rlm.TierConfig, override config.RLMTierConfig) rlm.TierConfig {
+	if strings.TrimSpace(override.Model) != "" {
+		base.Model = override.Model
+	}
+	if strings.TrimSpace(override.Provider) != "" {
+		base.Provider = override.Provider
+	}
+	if override.Models != nil {
+		base.Models = append([]string{}, override.Models...)
+	}
+	if override.MaxCostPerMillion != 0 {
+		base.MaxCostPerMillion = override.MaxCostPerMillion
+	}
+	if override.MinContextWindow != 0 {
+		base.MinContextWindow = override.MinContextWindow
+	}
+	if override.Prefer != nil {
+		base.Prefer = append([]string{}, override.Prefer...)
+	}
+	if override.Requires != nil {
+		base.Requires = append([]string{}, override.Requires...)
+	}
 	return base
 }
 
 // buildOrchestratorContext constructs a fresh orchestrator stack for ACP requests.
 func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestrator.Orchestrator, func(), error) {
 	registry := tool.NewRegistry()
-	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 
 	missionStore := mission.NewStore(s.store.DB())
@@ -674,7 +696,7 @@ func (s *Server) buildOrchestratorContext(sessionID, agentID string) (*orchestra
 		s.liveMux.Unlock()
 	}
 
-	orch := orchestrator.NewOrchestrator(s.store, s.models, registry, s.cfg, workflow, planStore, nil, nil)
+	orch := orchestrator.NewOrchestrator(s.store, s.models, registry, s.cfg, workflow, planStore)
 
 	cleanup := func() {}
 	return orch, cleanup, nil
@@ -843,7 +865,6 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	}
 
 	registry := tool.NewRegistry()
-	tool.ApplyToolMiddlewareConfig(registry, s.cfg)
 	registry.ConfigureContainers(s.cfg, s.projectRoot)
 	missionStore := mission.NewStore(s.store.DB())
 	requireApproval := strings.ToLower(s.cfg.Orchestrator.TrustLevel) != "autonomous"
@@ -874,7 +895,7 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	for k, v := range req.Parameters {
 		params[k] = v
 	}
-	res, err := registry.ExecuteWithContext(stream.Context(), req.Tool, params)
+	res, err := registry.Execute(req.Tool, params)
 	if err != nil {
 		_ = stream.Send(&acppb.ToolExecutionEvent{ExecutionId: req.Tool, Status: "failed", Output: err.Error(), Timestamp: timestamppb.Now()})
 		return statusError(codes.Internal, err.Error())

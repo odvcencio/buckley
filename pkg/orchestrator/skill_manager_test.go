@@ -6,7 +6,7 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"m31labs.dev/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/skill"
 )
 
 func setupSkillManagerTest(t *testing.T) (*gomock.Controller, *MockSkillRegistry, *MockSkillConversation, *SkillManager) {

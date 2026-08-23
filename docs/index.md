@@ -3,11 +3,11 @@ layout: home
 
 hero:
   name: Buckley
-  text: Tool-first AI agent harness for serious repository work
-  tagline: Durable sessions, governed tools, capable subagents, and one shared runtime across terminal, browser, ACP, and LSP.
+  text: AI dev assistant that remembers what you're doing
+  tagline: Sessions survive crashes. Four trust levels. Loop detection. Multi-model experiments. Built by someone who uses it daily.
   image:
     src: /logo.jpg
-    alt: Buckley tool-first AI agent harness
+    alt: Buckley - your AI development companion
   actions:
     - theme: brand
       text: Get Started
@@ -35,79 +35,44 @@ features:
   - icon: 🔓
     title: No Vendor Lock-in
     details: OpenRouter, OpenAI, Anthropic, Google, or local Ollama. Your choice, always.
-  - icon: ✨
-    title: Code-Aware Terminal Chat
-    details: Tree-sitter highlights supported fenced code blocks. Multiline input and code copying keep technical conversations fluid.
 ---
 
 ## Quick Start
 
 ```bash
-go install m31labs.dev/buckley/cmd/buckley@v0.7.0
-export OPENROUTER_API_KEY="your-key"
+# Install
+go install github.com/odvcencio/buckley/cmd/buckley@latest
+
+# Configure
+export OPENROUTER_API_KEY="your-key-here"
+
+# Run
 buckley
 ```
 
-## Core Concepts
+## Why Buckley?
 
-### Five Ways to Use It
+Most AI coding tools are black boxes. You type something, magic happens (or doesn't), and you hope for the best.
 
-| Mode | Command | Use Case |
-|------|---------|----------|
-| **TUI** | `buckley` | Interactive terminal with streaming and approvals |
-| **One-shot** | `buckley -p "inspect this repo"` | Scriptable task execution |
-| **GoSX** | `buckley serve --browser` | Local Mission Control with live agent telemetry |
-| **ACP** | `buckley acp` | ACP-compatible editor agent over stdio |
-| **LSP** | `buckley lsp` | Coordinator-backed LSP editor bridge |
+Buckley is different:
 
-### The Workflow
+- **Transparent** - See exactly what the AI is thinking and doing
+- **Recoverable** - Sessions persist to SQLite, survive crashes, resume cleanly
+- **Controlled** - Human-in-the-loop approvals before any file changes
+- **Smart** - Self-healing execution with loop detection so you don't burn tokens on infinite retries
 
-1. **Plan** - `/plan "add user auth"` breaks work into tasks
-2. **Execute** - `/execute` runs tasks with self-healing retries
-3. **Review** - AI reviews changes before you merge
-
-### One-Shot Commands
-
-```bash
-buckley commit    # AI-generated commit message from staged changes
-buckley pr        # AI-generated PR description
-buckley review    # Code review current changes
-buckley review-pr 123 # Review a GitHub PR, CI, and unresolved feedback
-buckley buckbot repo # Repository-wide advisory review
-buckley hunt      # Scan codebase for improvements
-buckley dream     # Architectural analysis
-```
-
-Local reviews exclude untracked files by default. Repeat `buckley review --scope worktree --include-untracked path/to/new.go` to explicitly allowlist filtered untracked text for model input; inspect each path for secrets first. PR reviews fail closed unless the local checkout is at the captured PR head. Primary, retry, and approval-critic passes reuse the same immutable verification snapshot. Codex receives a self-contained captured-commit workspace, and approval requires trusted JSONL command events proving classifiable build and test runs over the changed source paths. API-backed tools are confined to an independently materialized copy and can execute only deterministic build/test/check plans with source read-only, private temporary output, a scrubbed environment, and network disabled; API approval requires successful same-toolchain build and test calls covering every changed source package. Project-wide review is explicitly advisory and cannot issue an approval verdict. The interactive TUI highlights supported code fences with Tree-sitter; use `Shift+Enter` for a newline and `Alt+C` to copy the latest code block. Conversation projection keeps the largest compacted history that fits the current provider request.
-
-## Configuration
-
-Buckley looks for config in order:
-1. `~/.buckley/config.yaml` (user defaults)
-2. `./.buckley/config.yaml` (project overrides)
-3. Environment variables (highest priority)
-
-Minimal config - just set your API key:
-
-```yaml
-# ~/.buckley/config.yaml
-providers:
-  openrouter:
-    api_key: ${OPENROUTER_API_KEY}
-```
+Built because existing tools weren't good enough. Used daily. Still being improved.
 
 ## Documentation
 
-| Page | What's There |
-|------|--------------|
-| [CLI Reference](./CLI.md) | Commands, flags, shortcuts |
-| [Configuration](./CONFIGURATION.md) | All config options |
-| [Running Goals](./goals.md) | Durable long-horizon work |
-| [Code Mode](./code-mode.md) | Audited repository analysis |
-| [Troubleshooting](./troubleshooting.md) | Symptoms and fixes |
-| [Mission Control](./MISSION_CONTROL.md) | Browser interface and telemetry |
-| [Editor Integration](./ACP.md) | Zed ACP (optional LSP bridge) |
+| Section | What's Inside |
+|---------|---------------|
+| [CLI Reference](./CLI.md) | Commands, flags, and shortcuts |
+| [Configuration](./CONFIGURATION.md) | Config files, env vars, model setup |
+| [Error Handling](./ERRORS.md) | Error types and troubleshooting |
 
 ## Open Source
 
-MIT licensed. [GitHub](https://github.com/odvcencio/buckley).
+MIT licensed. Contributions welcome. Built in Go.
+
+[View on GitHub →](https://github.com/odvcencio/buckley)

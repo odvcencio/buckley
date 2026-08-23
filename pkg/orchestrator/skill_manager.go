@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"fmt"
 
-	"m31labs.dev/buckley/pkg/skill"
+	"github.com/draco/buckley/pkg/skill"
 )
 
 // SkillManager handles skill activation during workflow phases
