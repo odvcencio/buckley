@@ -1,0 +1,143 @@
+--- a/grep/where.go
++++ b/grep/where.go
+@@ -1,5 +1,6 @@
+ package grep
+ 
+ import (
++	"fmt"
+ 	"strings"
+ )
+@@ -12,7 +13,7 @@
+ // CompileWhere compiles a where clause expression into a predicate over
+ // captures.
+ func CompileWhere(where string) (func(*Capture) bool, error) {
+-	clauses := splitClauses(where)
++	clauses, err := splitClauses(where)
++	if err != nil {
++		return nil, err
++	}
+ 	var preds []func(*Capture) bool
+ 	for _, cl := range clauses {
+ 		p, err := compileClause(strings.TrimSpace(cl))
+@@ -30,32 +31,55 @@
+ }
+ 
+ // splitClauses splits a where expression on ; and newline separators,
+-// honoring single- and double-quoted arguments.
+-func splitClauses(s string) []string {
++// honoring single- and double-quoted arguments. A quote only opens a
++// quoted region when it begins an argument (i.e. directly follows an
++// opening parenthesis or a comma, modulo whitespace); apostrophes inside
++// unquoted words such as don't are left alone. An unterminated quote is
++// an error.
++func splitClauses(s string) ([]string, error) {
+ 	var clauses []string
+ 	var cur strings.Builder
+ 	var quote byte
+ 	var bs int
+ 	for i := 0; i < len(s); i++ {
+ 		c := s[i]
+ 		switch {
+ 		case quote != 0:
+ 			cur.WriteByte(c)
+ 			if c == '\\' {
+ 				bs++
+ 				continue
+ 			}
+ 			if c == quote && bs%2 == 0 {
+ 				quote = 0
+ 			}
+ 			bs = 0
+ 		case c == '"' || c == '\'':
++			if !atArgumentStart(cur.String()) {
++				cur.WriteByte(c)
++				continue
++			}
+ 			quote = c
+ 			bs = 0
+ 			cur.WriteByte(c)
+ 		case c == ';' || c == '\n':
+ 			clauses = append(clauses, cur.String())
+ 			cur.Reset()
+ 		default:
+ 			cur.WriteByte(c)
+ 		}
+ 	}
++	if quote != 0 {
++		return nil, fmt.Errorf("unterminated %c quote in where clause", quote)
++	}
+ 	clauses = append(clauses, cur.String())
+-	return clauses
++	return clauses, nil
+ }
++
++// atArgumentStart reports whether the text accumulated so far ends in a
++// position where a new argument may begin: right after '(' or ',', or at
++// the very start of the clause stream.
++func atArgumentStart(acc string) bool {
++	i := len(acc) - 1
++	for i >= 0 && (acc[i] == ' ' || acc[i] == '\t' || acc[i] == '\r' || acc[i] == '\n') {
++		i--
++	}
++	if i < 0 {
++		return true
++	}
++	return acc[i] == '(' || acc[i] == ','
++}
+ 
+ // stripQuotes removes surrounding matching quotes from s and unescapes
+ // escaped occurrences of that same quote character.
+--- a/grep/where_test.go
++++ b/grep/where_test.go
+@@ -1,6 +1,7 @@
+ package grep
+ 
+ import (
++	"strings"
+ 	"testing"
+ )
+@@ -40,10 +41,14 @@
+ }
+ 
+ func TestSplitClausesBackslashBeforeQuote(t *testing.T) {
+-	got := splitClauses(`contains($NAME, \\b"x;y")`)
+-	want := []string{`contains($NAME, \b"x;y")`}
++	got, err := splitClauses(`contains($NAME, "\\") ; contains($NAME, "a;b")`)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	want := []string{`contains($NAME, "\\") `, ` contains($NAME, "a;b")`}
+ 	if len(got) != len(want) {
+ 		t.Fatalf("got %d clauses, want %d", len(got), len(want))
+ 	}
+ 	for i := range want {
+ 		if got[i] != want[i] {
+ 			t.Errorf("clause %d: got %q, want %q", i, got[i], want[i])
+ 		}
+ 	}
+ }
++
++func TestCompileWhereApostropheInUnquotedArg(t *testing.T) {
++	pred, err := CompileWhere(`contains($NAME, don't); contains($NAME, stop)`)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	cap := &Capture{Name: "NAME", Text: "don't stop"}
++	if !pred(cap) {
++		t.Fatalf("expected match for %q", cap.Text)
++	}
++	cap2 := &Capture{Name: "NAME", Text: "don't go"}
++	if pred(cap2) {
++		t.Fatalf("expected no match for %q", cap2.Text)
++	}
++}
++
++func TestCompileWhereUnterminatedQuoteWithSeparator(t *testing.T) {
++	_, err := CompileWhere(`contains($NAME, "a;b)`)
++	if err == nil {
++		t.Fatal("expected error for unterminated quote containing separator")
++	}
++	if !strings.Contains(err.Error(), "unterminated") {
++		t.Fatalf("got error %v, want unterminated-quote error", err)
++	}
++}

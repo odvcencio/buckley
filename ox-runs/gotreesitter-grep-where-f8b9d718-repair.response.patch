@@ -1,0 +1,108 @@
+diff --git a/grep/where.go b/grep/where.go
+--- a/grep/where.go
++++ b/grep/where.go
+@@ -62,8 +62,38 @@
+ }
+ 
+-// splitClauses splits a where string on semicolons and newlines.
++// splitClauses splits a where string on semicolons and newlines that occur
++// outside of single- or double-quoted arguments. A quote preceded by an odd
++// run of backslashes is escaped and does not terminate the argument; an even
++// run does not escape it.
+ func splitClauses(s string) []string {
+-	// Replace newlines with semicolons, then split.
+-	s = strings.ReplaceAll(s, "\n", ";")
+-	return strings.Split(s, ";")
++	var clauses []string
++	var cur strings.Builder
++	var quote byte
++	var bs int
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		switch {
++		case quote != 0:
++			cur.WriteByte(c)
++			if c == '\\' {
++				bs++
++				continue
++			}
++			if c == quote && bs%2 == 0 {
++				quote = 0
++			}
++			bs = 0
++		case c == '"' || c == '\'':
++			quote = c
++			bs = 0
++			cur.WriteByte(c)
++		case c == ';' || c == '\n':
++			clauses = append(clauses, cur.String())
++			cur.Reset()
++		default:
++			cur.WriteByte(c)
++		}
++	}
++	clauses = append(clauses, cur.String())
++	return clauses
+ }
+diff --git a/grep/where_test.go b/grep/where_test.go
+--- a/grep/where_test.go
++++ b/grep/where_test.go
+@@ -181,7 +181,58 @@
+ 	if filter(r3, nil, nil) {
+ 		t.Error("expected filter to NOT match myHelper (does not contain Func)")
+ 	}
+ }
+ 
++func TestCompileWhere_QuotedSeparators(t *testing.T) {
++	match := func(where, text string) bool {
++		filter, err := CompileWhere(where)
++		if err != nil {
++			t.Fatalf("unexpected error for %q: %v", where, err)
++		}
++		r := &Result{Captures: map[string]Capture{
++			"NAME": {Name: "NAME", Text: []byte(text)},
++		}}
++		return filter(r, nil, nil)
++	}
++
++	// Quoted separators stay within one clause.
++	if !match(`contains($NAME, "a;b")`, "a;b") {
++		t.Error("double-quoted semicolon should stay in one clause")
++	}
++	if !match(`contains($NAME, 'a;b')`, "a;b") {
++		t.Error("single-quoted semicolon should stay in one clause")
++	}
++	if !match("contains($NAME, \"a\nb\")", "a\nb") {
++		t.Error("double-quoted newline should stay in one clause")
++	}
++	if !match("contains($NAME, 'a\nb')", "a\nb") {
++		t.Error("single-quoted newline should stay in one clause")
++	}
++
++	// Backslash-escaped matching quote, separator later in same argument.
++	if !match(`contains($NAME, "a\";b")`, `a";b`) {
++		t.Error("escaped double quote should not close the argument")
++	}
++	if !match(`contains($NAME, 'a\';b')`, `a';b`) {
++		t.Error("escaped single quote should not close the argument")
++	}
++
++	// An even run of backslashes does not escape the following quote.
++	if !match(`contains($NAME, "a\\b"); contains($NAME, "c")`, `a\\bc`) {
++		t.Error("even backslash run should not falsely escape the quote")
++	}
++
++	// Ordinary separators still split into ANDed clauses.
++	if !match(`contains($NAME, "f"); not contains($NAME, "t")`, "foo") {
++		t.Error("semicolon should split clauses")
++	}
++	if !match("contains($NAME, \"f\")\nnot contains($NAME, \"t\")", "foo") {
++		t.Error("newline should split clauses")
++	}
++	if match(`contains($NAME, "f"); not contains($NAME, "t")`, "tofu") {
++		t.Error("clauses should be ANDed")
++	}
++}
++
+ func TestCompileWhere_MissingCapture(t *testing.T) {
+ 	filter, err := CompileWhere(`contains($MISSING, "hello")`)
