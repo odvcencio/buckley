@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -9,7 +11,21 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/tools"
+	"m31labs.dev/buckley/pkg/transparency"
 )
+
+type invalidCommitInvoker struct {
+	calls int
+}
+
+func (i *invalidCommitInvoker) Invoke(context.Context, string, string, tools.Definition, *transparency.ContextAudit) (*oneshot.Result, *transparency.Trace, error) {
+	i.calls++
+	return &oneshot.Result{ToolCall: &tools.ToolCall{
+		Name:      "generate_commit",
+		Arguments: json.RawMessage(`{"action":"invalid","subject":"bad","body":[]}`),
+	}}, nil, nil
+}
 
 func TestParseCommitCommandOptions(t *testing.T) {
 	t.Setenv(envCommitBackend, "")
@@ -81,6 +97,25 @@ func TestParseCommitCommandOptionsCanDisableContextTrailer(t *testing.T) {
 	}
 }
 
+func TestParseCommitCommandOptions_APIPreservesExplicitModelAndDefaultPush(t *testing.T) {
+	t.Setenv(envCommitBackend, "")
+	t.Setenv(envOneshotBackend, "")
+
+	opts, err := parseCommitCommandOptions([]string{
+		"-backend", "api",
+		"-model", "openai/gpt-5.6-luna-pro",
+	})
+	if err != nil {
+		t.Fatalf("parseCommitCommandOptions() error = %v", err)
+	}
+	if opts.backend != oneshotBackendAPI || opts.model != "openai/gpt-5.6-luna-pro" {
+		t.Fatalf("backend/model = %q/%q, want api/openai/gpt-5.6-luna-pro", opts.backend, opts.model)
+	}
+	if !opts.push {
+		t.Fatal("push = false, want normal default push semantics")
+	}
+}
+
 func TestCollectStagedChangeMetadataIsOpaque(t *testing.T) {
 	repo := setupTwoAreaRepo(t)
 	oldWd, _ := os.Getwd()
@@ -134,5 +169,24 @@ func TestCommitDefinition(t *testing.T) {
 	}
 	if len(scoped.paths) != 1 || scoped.paths[0] != "a" {
 		t.Fatalf("scoped paths = %#v, want [a]", scoped.paths)
+	}
+}
+
+func TestFrameworkCommitRunner_APIValidationDoesNotRetry(t *testing.T) {
+	invoker := &invalidCommitInvoker{}
+	runner := &frameworkCommitRunner{
+		framework:  oneshot.NewFramework(invoker, nil),
+		def:        commands.CommitDefinition{},
+		maxRetries: 1,
+	}
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result == nil || result.Error == nil {
+		t.Fatalf("result = %#v, want validation failure", result)
+	}
+	if invoker.calls != 1 {
+		t.Fatalf("invocations = %d, want exactly one", invoker.calls)
 	}
 }

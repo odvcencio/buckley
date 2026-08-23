@@ -79,8 +79,9 @@ type commitCommandRuntime struct {
 
 // frameworkCommitRunner adapts oneshot.Framework to the commitRunner interface.
 type frameworkCommitRunner struct {
-	framework *oneshot.Framework
-	def       oneshot.Definition
+	framework  *oneshot.Framework
+	def        oneshot.Definition
+	maxRetries int
 }
 
 func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, error) {
@@ -88,7 +89,7 @@ func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, erro
 	if def == nil {
 		def = commands.CommitDefinition{}
 	}
-	fwResult, err := r.framework.Run(ctx, def, oneshot.RunOpts{})
+	fwResult, err := r.framework.Run(ctx, def, oneshot.RunOpts{MaxRetries: r.maxRetries})
 	if err != nil {
 		return &commitRunResult{Error: err}, nil
 	}
@@ -158,9 +159,6 @@ func runCommitCommand(args []string) error {
 	opts, err := parseCommitCommandOptions(args)
 	if err != nil {
 		return err
-	}
-	if opts.backend == oneshotBackendAPI {
-		return unavailableOneshotCommandAPIError("commit")
 	}
 
 	if err := prepareCommitIndex(opts); err != nil {
@@ -301,11 +299,15 @@ func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, 
 	}
 
 	framework := oneshot.NewFramework(invoker, nil)
+	maxRetries := 0
+	if opts.backend == oneshotBackendAPI {
+		maxRetries = 1
+	}
 	runtime := &commitCommandRuntime{
 		backend: opts.backend,
 		modelID: modelID,
 		ledger:  ledger,
-		runner:  &frameworkCommitRunner{framework: framework, def: commitDefinition(opts.paths)},
+		runner:  &frameworkCommitRunner{framework: framework, def: commitDefinition(opts.paths), maxRetries: maxRetries},
 	}
 	return runtime, cleanup, nil
 }
@@ -964,17 +966,22 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		branch, err = exec.CommandContext(branchCtx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	}
 	if err != nil {
-		return nil // Skip push if we can't get branch
+		return fmt.Errorf("%s push failed: resolve current branch: %w", vcs, err)
 	}
 	branchName := strings.TrimSpace(string(branch))
 	if branchName == "" || branchName == "HEAD" {
-		return nil // Detached HEAD, skip push
+		return fmt.Errorf("%s push failed: current checkout is detached", vcs)
 	}
 
 	// Check if remote exists
 	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
 	if remote == "" {
 		remote = "origin"
+	}
+	resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer resolveCancel()
+	if err := protectedPushBranch(resolveCtx, remote, branchName); err != nil {
+		return fmt.Errorf("%s push blocked: %w", vcs, err)
 	}
 
 	// Push (network op: 60s)
@@ -1012,8 +1019,21 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 	if useGraft {
 		gitPush := exec.CommandContext(pushCtx, "git", "push", "--quiet", "-u", remote, branchName)
 		gitPush.Stdout = io.Discard
-		gitPush.Stderr = io.Discard
-		_ = gitPush.Run() // best-effort mirror
+		var stderr bytes.Buffer
+		gitPush.Stderr = &stderr
+		if err := gitPush.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("git push failed: %w: %s", err, detail)
+			}
+			return fmt.Errorf("git push failed: %w", err)
+		}
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer verifyCancel()
+	if err := verifyPushedCommit(verifyCtx, remote, branchName); err != nil {
+		return fmt.Errorf("%s push verification failed: %w", vcs, err)
 	}
 
 	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1027,6 +1047,102 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		termOut.Success("Pushed: %s to %s/%s", hash, remote, branchName)
 	} else {
 		termOut.Success("Pushed to %s/%s", remote, branchName)
+	}
+	return nil
+}
+
+func protectedPushBranch(ctx context.Context, remote, branch string) error {
+	branch = strings.TrimSpace(branch)
+	switch strings.ToLower(branch) {
+	case "main", "master", "trunk":
+		return fmt.Errorf("refusing direct push to protected branch %q", branch)
+	}
+
+	defaultBranch, err := resolveRemoteDefaultBranch(ctx, remote)
+	if err != nil {
+		return fmt.Errorf("resolve remote default branch: %w", err)
+	}
+	if branch == defaultBranch {
+		return fmt.Errorf("refusing direct push to remote default branch %q", branch)
+	}
+	return nil
+}
+
+func resolveRemoteDefaultBranch(ctx context.Context, remote string) (string, error) {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return "", fmt.Errorf("remote is empty")
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", remote, "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("query %s HEAD: %w", remote, err)
+	}
+	return parseRemoteDefaultBranch(output)
+}
+
+func parseRemoteDefaultBranch(output []byte) (string, error) {
+	const prefix = "refs/heads/"
+	var (
+		branch   string
+		objectID string
+	)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "ref:" {
+			if branch != "" || len(fields) != 3 || fields[2] != "HEAD" || !strings.HasPrefix(fields[1], prefix) {
+				return "", fmt.Errorf("malformed HEAD symref")
+			}
+			branch = strings.TrimPrefix(fields[1], prefix)
+			if strings.TrimSpace(branch) == "" {
+				return "", fmt.Errorf("malformed HEAD symref")
+			}
+			continue
+		}
+		if objectID != "" || len(fields) != 2 || fields[1] != "HEAD" || !validRemoteObjectID(fields[0]) {
+			return "", fmt.Errorf("malformed HEAD symref")
+		}
+		objectID = fields[0]
+	}
+	if branch == "" {
+		return "", fmt.Errorf("HEAD symref is missing")
+	}
+	if objectID == "" {
+		return "", fmt.Errorf("HEAD object is missing")
+	}
+	return branch, nil
+}
+
+func validRemoteObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func verifyPushedCommit(ctx context.Context, remote, branch string) error {
+	local, err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "HEAD^{commit}").Output()
+	if err != nil {
+		return fmt.Errorf("resolve local HEAD: %w", err)
+	}
+	remoteRef := fmt.Sprintf("refs/remotes/%s/%s^{commit}", remote, branch)
+	pushed, err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", remoteRef).Output()
+	if err != nil {
+		return fmt.Errorf("resolve %s/%s: %w", remote, branch, err)
+	}
+	localHash := strings.TrimSpace(string(local))
+	remoteHash := strings.TrimSpace(string(pushed))
+	if localHash == "" || remoteHash == "" || localHash != remoteHash {
+		return fmt.Errorf("%s/%s is %s, want %s", remote, branch, remoteHash, localHash)
 	}
 	return nil
 }

@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+type backendCompletionClient struct{}
+
+func (*backendCompletionClient) ChatCompletion(context.Context, model.ChatRequest) (*model.ChatResponse, error) {
+	return nil, nil
+}
 
 func TestResolveOneshotBackendPrecedence(t *testing.T) {
 	t.Setenv(envOneshotBackend, "claude")
@@ -57,6 +65,41 @@ func TestResolveCommitModelIDUsesUtilityOnlyForAPI(t *testing.T) {
 	}
 	if got := resolveCommitModelID("openai/gpt-explicit", cfg, oneshot.CLIBackendCodex); got != "gpt-explicit" {
 		t.Fatalf("explicit CLI model = %q, want stripped provider prefix", got)
+	}
+	if got := resolveCommitModelID("openai/gpt-5.6-luna-pro", cfg, oneshotBackendAPI); got != "openai/gpt-5.6-luna-pro" {
+		t.Fatalf("explicit API model = %q, want exact OpenRouter model", got)
+	}
+}
+
+func TestNewOneshotToolInvoker_APIUsesDirectOpenRouterJSONClient(t *testing.T) {
+	previous := oneshotOpenRouterClientFn
+	t.Cleanup(func() { oneshotOpenRouterClientFn = previous })
+	calls := 0
+	client := &backendCompletionClient{}
+	mgr := &model.Manager{}
+	oneshotOpenRouterClientFn = func(got *model.Manager) (model.CompletionClient, error) {
+		calls++
+		if got != mgr {
+			t.Fatalf("manager = %p, want %p", got, mgr)
+		}
+		return client, nil
+	}
+	invoker, err := newOneshotToolInvoker(
+		oneshotBackendAPI,
+		"openai/gpt-5.6-luna-pro",
+		nil,
+		mgr,
+		transparency.ModelPricing{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newOneshotToolInvoker: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OpenRouter client selections = %d, want 1", calls)
+	}
+	if _, ok := invoker.(*oneshot.OpenRouterJSONInvoker); !ok {
+		t.Fatalf("invoker type = %T, want *oneshot.OpenRouterJSONInvoker", invoker)
 	}
 }
 
