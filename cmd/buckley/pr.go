@@ -86,6 +86,9 @@ func runPRCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	if opts.backend == oneshotBackendAPI {
+		return unavailableOneshotCommandAPIError("pr")
+	}
 
 	runtime, cleanup, err := newPRCommandRuntime(opts)
 	defer cleanup()
@@ -153,14 +156,14 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 		OutputPerMillion: 15.0,
 	}
 	if opts.backend == oneshotBackendAPI && mgr != nil {
-		if info, err := mgr.GetModelInfo(modelID); err == nil {
+		if info, err := oneshotModelInfoFn(mgr, modelID); err == nil {
 			pricing.InputPerMillion = info.Pricing.Prompt
 			pricing.OutputPerMillion = info.Pricing.Completion
 		}
 	}
 
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvokerFn(opts.backend, modelID, cfg, mgr, pricing, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err

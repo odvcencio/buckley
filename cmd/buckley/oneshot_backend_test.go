@@ -7,6 +7,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 func TestResolveOneshotBackendPrecedence(t *testing.T) {
@@ -56,6 +57,34 @@ func TestResolveCommitModelIDUsesUtilityOnlyForAPI(t *testing.T) {
 	}
 	if got := resolveCommitModelID("openai/gpt-explicit", cfg, oneshot.CLIBackendCodex); got != "gpt-explicit" {
 		t.Fatalf("explicit CLI model = %q, want stripped provider prefix", got)
+	}
+}
+
+func TestNewOneshotToolInvoker_CLIBackendsConstruct(t *testing.T) {
+	tests := []struct {
+		backend string
+		modelID string
+	}{
+		{backend: oneshot.CLIBackendCodex, modelID: "gpt-test"},
+		{backend: oneshot.CLIBackendClaude, modelID: "claude-test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.backend, func(t *testing.T) {
+			invoker, err := newOneshotToolInvoker(
+				tt.backend,
+				tt.modelID,
+				config.DefaultConfig(),
+				nil,
+				transparency.ModelPricing{},
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("newOneshotToolInvoker: %v", err)
+			}
+			if invoker == nil {
+				t.Fatal("CLI backend returned a nil invoker")
+			}
+		})
 	}
 }
 
