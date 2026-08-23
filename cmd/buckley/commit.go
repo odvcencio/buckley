@@ -159,9 +159,6 @@ func runCommitCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.backend == oneshotBackendAPI {
-		return unavailableOneshotCommandAPIError("commit")
-	}
 
 	if err := prepareCommitIndex(opts); err != nil {
 		return err

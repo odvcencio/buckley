@@ -128,12 +128,16 @@ func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *mod
 				providerID = routed
 			}
 		}
+		client, err := strictZDROneshotClientForProvider(mgr, modelID, providerID)
+		if err != nil {
+			return nil, err
+		}
 		reasoning := ""
 		if cfg != nil && mgr != nil {
 			reasoning = model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "execution")
 		}
 		return oneshot.NewInvoker(oneshot.InvokerConfig{
-			Client:          mgr,
+			Client:          client,
 			Model:           modelID,
 			Provider:        providerID,
 			ReasoningEffort: reasoning,
