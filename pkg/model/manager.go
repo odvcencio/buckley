@@ -295,6 +295,20 @@ func (m *Manager) ProviderIDForModel(modelID string) string {
 	return ""
 }
 
+// OpenRouterCompletionClient returns the configured OpenRouter provider
+// directly so exact-route callers cannot be redirected through model routing,
+// fallback chains, prompt caching, or native CLI providers.
+func (m *Manager) OpenRouterCompletionClient() (CompletionClient, error) {
+	if m == nil {
+		return nil, fmt.Errorf("model manager is nil")
+	}
+	provider, ok := m.providers["openrouter"]
+	if !ok || provider == nil {
+		return nil, fmt.Errorf("openrouter provider is not configured")
+	}
+	return provider, nil
+}
+
 // RoutingHooks exposes the model routing hook registry.
 func (m *Manager) RoutingHooks() *RoutingHooks {
 	if m == nil {

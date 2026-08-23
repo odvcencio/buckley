@@ -481,6 +481,26 @@ func TestProviderIDForModelUsesCatalogAndRouting(t *testing.T) {
 	}
 }
 
+func TestOpenRouterCompletionClient_SelectsOnlyOpenRouter(t *testing.T) {
+	openRouter := &stubProvider{id: "openrouter"}
+	mgr := &Manager{providers: map[string]Provider{
+		"openrouter": openRouter,
+		"codex":      &stubProvider{id: "codex"},
+	}}
+
+	client, err := mgr.OpenRouterCompletionClient()
+	if err != nil {
+		t.Fatalf("OpenRouterCompletionClient: %v", err)
+	}
+	if client != openRouter {
+		t.Fatalf("client = %T, want configured OpenRouter provider", client)
+	}
+
+	if _, err := (&Manager{providers: map[string]Provider{"codex": &stubProvider{id: "codex"}}}).OpenRouterCompletionClient(); err == nil {
+		t.Fatal("expected missing OpenRouter provider to fail closed")
+	}
+}
+
 func TestChatCompletionNormalizesModelID(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{

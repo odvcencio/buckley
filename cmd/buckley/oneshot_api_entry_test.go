@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -50,17 +52,28 @@ func (c *oneshotAPIEntryCalls) assertZero(t *testing.T) {
 	}
 }
 
-func TestRunCommitCommand_APIFailsClosedBeforeDependencies(t *testing.T) {
+func TestRunCommitCommand_APIEntersDependencyInitialization(t *testing.T) {
 	calls := installOneshotAPIEntrySpies(t)
-	err := runCommitCommand([]string{"-backend", "api"})
+	repo := setupTwoAreaRepo(t)
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	err = runCommitCommand([]string{"-backend", "api", "-dry-run", "-model", "openai/gpt-5.6-luna-pro"})
 	if err == nil {
-		t.Fatal("expected commit API backend to fail closed")
+		t.Fatal("expected dependency spy to stop command")
 	}
-	want := "buckley commit API backend unavailable: governed commit model data policy is not installed; use --backend codex or --backend claude"
-	if err.Error() != want {
-		t.Fatalf("error = %q, want %q", err, want)
+	if !strings.Contains(err.Error(), "init dependencies: unexpected dependency initialization") {
+		t.Fatalf("error = %q, want dependency initialization failure", err)
 	}
-	calls.assertZero(t)
+	if calls.dependenciesAndCatalog != 1 || calls.modelInfo != 0 || calls.invoker != 0 {
+		t.Fatalf("calls = %+v, want API command to reach dependency initialization once", calls)
+	}
 }
 
 func TestRunPRCommand_APIFailsClosedBeforeDependencies(t *testing.T) {

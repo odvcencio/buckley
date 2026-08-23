@@ -27,6 +27,9 @@ var (
 	oneshotModelInfoFn = func(mgr *model.Manager, modelID string) (*model.ModelInfo, error) {
 		return mgr.GetModelInfo(modelID)
 	}
+	oneshotOpenRouterClientFn = func(mgr *model.Manager) (model.CompletionClient, error) {
+		return mgr.OpenRouterCompletionClient()
+	}
 	newOneshotToolInvokerFn = newOneshotToolInvoker
 )
 
@@ -122,24 +125,25 @@ func unavailableOneshotCommandAPIError(command string) error {
 func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *model.Manager, pricing transparency.ModelPricing, ledger *transparency.CostLedger) (oneshot.ToolInvoker, error) {
 	switch backend {
 	case oneshotBackendAPI:
-		providerID := "openrouter"
-		if mgr != nil {
-			if routed := mgr.ProviderIDForModel(modelID); routed != "" {
-				providerID = routed
-			}
+		if mgr == nil {
+			return nil, fmt.Errorf("commit API backend requires an OpenRouter model manager")
+		}
+		client, err := oneshotOpenRouterClientFn(mgr)
+		if err != nil {
+			return nil, fmt.Errorf("commit API backend requires OpenRouter: %w", err)
 		}
 		reasoning := ""
-		if cfg != nil && mgr != nil {
+		if cfg != nil {
 			reasoning = model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "execution")
 		}
-		return oneshot.NewInvoker(oneshot.InvokerConfig{
-			Client:          mgr,
+		return oneshot.NewOpenRouterJSONInvoker(oneshot.InvokerConfig{
+			Client:          client,
 			Model:           modelID,
-			Provider:        providerID,
+			Provider:        "openrouter",
 			ReasoningEffort: reasoning,
 			Pricing:         pricing,
 			Ledger:          ledger,
-		}), nil
+		})
 	case oneshot.CLIBackendCodex, oneshot.CLIBackendClaude:
 		return oneshot.NewCLIInvoker(oneshot.CLIInvokerConfig{
 			Backend:         backend,
