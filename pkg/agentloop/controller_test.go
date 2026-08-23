@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/model"
@@ -29,6 +30,20 @@ func textResponse(content string, usage model.Usage) *model.ChatResponse {
 		Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: content}}},
 		Usage:   usage,
 	}
+}
+
+// withoutTransportBackoff swaps the package-level transport-retry sleep for
+// an instant stand-in that returns immediately without waiting in real
+// time, restoring the original on test cleanup. Tests that deliberately
+// exhaust or exercise transport-retry classification use this so they stay
+// fast instead of sleeping through the real (near-30s-and-up) backoff.
+func withoutTransportBackoff(t *testing.T) {
+	t.Helper()
+	orig := transportRetrySleep
+	transportRetrySleep = func(ctx context.Context, attempt int) error {
+		return ctx.Err()
+	}
+	t.Cleanup(func() { transportRetrySleep = orig })
 }
 
 func toolCallResponse(callID, toolName, args string, usage model.Usage) *model.ChatResponse {
@@ -449,6 +464,7 @@ func TestController_EmptyOrTruncatedTerminalCandidateIsIncomplete(t *testing.T) 
 		{name: "truncated", choice: model.Choice{Message: model.Message{Role: "assistant", Content: "partial"}, FinishReason: "length"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			withoutTransportBackoff(t)
 			ctrl, err := NewController(ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
 					return model.ChatRequest{Model: "test-model"}, nil
@@ -1824,8 +1840,10 @@ func TestController_EmptyFirstRoundRetriesWithNudge(t *testing.T) {
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
 			if modelCalls == 1 {
-				// Reasoning-only first turn: tool-free, empty content.
-				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}}}, nil
+				// Reasoning-only first turn: tool-free, empty content, but the
+				// model genuinely ran (nonzero billed usage) -- this must take
+				// the immediate corrective-nudge path, not transport-retry.
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}}, Usage: model.Usage{CompletionTokens: 5, TotalTokens: 5}, UsagePresent: true}, nil
 			}
 			for _, msg := range req.Messages {
 				if text, _ := model.ExtractTextContent(msg.Content); strings.Contains(text, "not usable") {
@@ -1873,8 +1891,15 @@ func TestController_FinalizationRetriesEmptyFinalThenSucceeds(t *testing.T) {
 			case 1:
 				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
 			case 2:
-				// First final: well-formed transport, empty text.
-				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "   "}}}}, nil
+				// First final: well-formed transport, empty text, but the
+				// model genuinely ran (nonzero billed usage) -- this must
+				// take the immediate corrective-nudge path, not
+				// transport-retry.
+				return &model.ChatResponse{
+					Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: "   "}}},
+					Usage:        model.Usage{CompletionTokens: 4, TotalTokens: 4},
+					UsagePresent: true,
+				}, nil
 			default:
 				for _, msg := range req.Messages {
 					if text, _ := model.ExtractTextContent(msg.Content); strings.Contains(text, "not a usable final answer") {
@@ -1941,12 +1966,18 @@ func TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning(t *testi
 			// Every attempt is tool-free with empty content; every attempt
 			// also carries reasoning text, so an early promotion (a bug)
 			// would return "reasoning attempt 1" instead of exhausting the
-			// two bounded retries first.
-			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
-				Role:      "assistant",
-				Content:   "",
-				Reasoning: fmt.Sprintf("reasoning attempt %d", modelCalls),
-			}}}}, nil
+			// two bounded retries first. Nonzero, present usage keeps this
+			// on the immediate corrective-nudge path rather than
+			// transport-retry: the model genuinely ran every time.
+			return &model.ChatResponse{
+				Choices: []model.Choice{{Message: model.Message{
+					Role:      "assistant",
+					Content:   "",
+					Reasoning: fmt.Sprintf("reasoning attempt %d", modelCalls),
+				}}},
+				Usage:        model.Usage{CompletionTokens: 2, TotalTokens: 2},
+				UsagePresent: true,
+			}, nil
 		}),
 		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
 			return nil, nil
@@ -2011,14 +2042,24 @@ func TestController_FinalizationRetriesExhaustThenFallsBackToReasoning(t *testin
 			case 4:
 				// maxFinalizationAttempts=3: the final finalization attempt
 				// (model call 4) carries the answer only in
-				// reasoning_details, with content still empty.
-				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
-					Role:             "assistant",
-					Content:          "",
-					ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "final reasoning answer"}},
-				}}}}, nil
+				// reasoning_details, with content still empty. Nonzero,
+				// present usage keeps every attempt on the corrective-nudge
+				// path rather than transport-retry.
+				return &model.ChatResponse{
+					Choices: []model.Choice{{Message: model.Message{
+						Role:             "assistant",
+						Content:          "",
+						ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "final reasoning answer"}},
+					}}},
+					Usage:        model.Usage{CompletionTokens: 3, TotalTokens: 3},
+					UsagePresent: true,
+				}, nil
 			default:
-				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}}}, nil
+				return &model.ChatResponse{
+					Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}},
+					Usage:        model.Usage{CompletionTokens: 1, TotalTokens: 1},
+					UsagePresent: true,
+				}, nil
 			}
 		}),
 		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
@@ -2039,6 +2080,225 @@ func TestController_FinalizationRetriesExhaustThenFallsBackToReasoning(t *testin
 	}
 	if result.Content != "final reasoning answer" || result.CompletionStatus != CompletionConclusive {
 		t.Fatalf("result=%+v, want the reasoning_details fallback text", result)
+	}
+}
+
+// TestController_TransportFailureEmptyResponseRetriesWithBackoffThenSucceeds
+// covers the OpenRouter early-200 transport failure shell from the
+// stealth/ox-alpha incident: an empty tool-free reply with no usage object
+// at all (UsagePresent stays false, the JSON-decode default when the wire
+// response never carried a "usage" key) must retry with backoff -- not the
+// immediate corrective nudge -- and recover once the transport starts
+// answering again, well within the bounded retry budget.
+func TestController_TransportFailureEmptyResponseRetriesWithBackoffThenSucceeds(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls <= 2 {
+				// No usage object at all: OpenRouter's early-committed-200
+				// transport failure shell.
+				return &model.ChatResponse{Choices: []model.Choice{{
+					Message:            model.Message{Role: "assistant", Content: nil},
+					NativeFinishReason: "network_error",
+				}}}, nil
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "recovered after transport retries"}}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want recovery once the transport starts answering", runErr)
+	}
+	if result.Content != "recovered after transport retries" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 3 {
+		t.Fatalf("model_calls = %d, want 3 (two transport failures + the recovered reply)", modelCalls)
+	}
+}
+
+// TestController_TransportFailureExhaustsWithoutTakingTheNudgePath covers
+// the constraint that a transport-classified empty response never falls
+// through to the immediate corrective-nudge retry once its own backoff
+// budget is exhausted: it fails outright (no reasoning to fall back to
+// here), and the model is called exactly 1 (initial) + maxTransportRetries
+// times, never the smaller maxEmptyTerminalRetries-bounded count a nudge
+// path would produce.
+func TestController_TransportFailureExhaustsWithoutTakingTheNudgePath(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			return &model.ChatResponse{Choices: []model.Choice{{
+				Message:            model.Message{Role: "assistant", Content: nil},
+				NativeFinishReason: "network_error",
+			}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if result.CompletionStatus != CompletionIncomplete || result.FinishReason != FinishReasonInvalidCompletion {
+		t.Fatalf("result=%+v, want an explicit incomplete candidate once transport retries are exhausted", result)
+	}
+	if modelCalls != 1+maxTransportRetries {
+		t.Fatalf("model_calls = %d, want %d (1 initial + maxTransportRetries)", modelCalls, 1+maxTransportRetries)
+	}
+	if len(history.messages) != 0 {
+		t.Fatalf("history=%+v, want no corrective-nudge messages appended for a transport-classified failure", history.messages)
+	}
+}
+
+// TestController_GenuinelyEmptyWithUsageTakesNudgeNotTransportRetry is the
+// direct contrast case: a tool-free empty reply that carries confirmed
+// nonzero usage is a genuine (if unhelpful) model answer, not a transport
+// failure, so it must take the pre-existing immediate corrective-nudge path
+// (no backoff wait, bounded at maxEmptyTerminalRetries) rather than the
+// transport-retry classification. transportRetrySleep is deliberately left
+// wired to its real implementation -- if this test ever misclassifies into
+// the transport-retry bucket, it will time out instead of passing fast.
+func TestController_GenuinelyEmptyWithUsageTakesNudgeNotTransportRetry(t *testing.T) {
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return &model.ChatResponse{
+					Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}},
+					Usage:        model.Usage{PromptTokens: 20, CompletionTokens: 8, TotalTokens: 28},
+					UsagePresent: true,
+				}, nil
+			}
+			for _, msg := range req.Messages {
+				if text, _ := model.ExtractTextContent(msg.Content); strings.Contains(text, "not usable") {
+					return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "answered on the nudge"}}}}, nil
+				}
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "unexpected: no nudge seen"}}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if result.Content != "answered on the nudge" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 2 {
+		t.Fatalf("model_calls = %d, want 2 (immediate nudge retry, no backoff)", modelCalls)
+	}
+}
+
+// TestController_SharedPoolRateLimitRetriesWithBackoffAndNeverAbortsOnFirst
+// covers OpenRouter's non-standard 429
+// {"limit_source":"upstream_provider_shared_pool"} response: an upstream
+// provider's own shared quota, not an OpenRouter-side limit, which must
+// never abort the run on its first occurrence.
+func TestController_SharedPoolRateLimitRetriesWithBackoffAndNeverAbortsOnFirst(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return nil, &model.APIError{StatusCode: 429, LimitSource: model.SharedPoolLimitSource, Message: "upstream provider rate limit"}
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "answered after the shared-pool 429"}}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want the shared-pool 429 to retry rather than abort the run", runErr)
+	}
+	if result.Content != "answered after the shared-pool 429" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 2 {
+		t.Fatalf("model_calls = %d, want 2 (one shared-pool 429 + the recovered reply)", modelCalls)
+	}
+}
+
+// TestController_FinalizationSharedPoolRateLimitRetriesThenSucceeds mirrors
+// the live-round shared-pool 429 case for finalizeStoppedTurn: a 429 during
+// final synthesis retries with backoff instead of failing the turn.
+func TestController_FinalizationSharedPoolRateLimitRetriesThenSucceeds(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
+			case 2:
+				return nil, &model.APIError{StatusCode: 429, LimitSource: model.SharedPoolLimitSource, Message: "upstream provider rate limit"}
+			default:
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "final synthesis after the shared-pool 429"}}}}, nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "evidence", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want the shared-pool 429 to retry finalization rather than fail it", runErr)
+	}
+	if result.Content != "final synthesis after the shared-pool 429" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 3 {
+		t.Fatalf("model_calls = %d, want 3 (tool round + one shared-pool 429 + the recovered final synthesis)", modelCalls)
 	}
 }
 
@@ -2263,6 +2523,33 @@ func TestController_RecordsRunLedgerEvents(t *testing.T) {
 	}
 	if !sawStarted || !sawCompleted {
 		t.Fatalf("expected model.request_started and model.request_completed events, got %+v", events)
+	}
+}
+
+// TestTransportRetryBackoff_StartsNearThirtySecondsAndGrows covers the
+// shape required for the transport-retry backoff: the first attempt centers
+// near 30s, later attempts grow, and every attempt stays within
+// transportRetryMaxInterval plus its jitter headroom.
+func TestTransportRetryBackoff_StartsNearThirtySecondsAndGrows(t *testing.T) {
+	first := transportRetryBackoff(1)
+	if first < 15*time.Second || first > 40*time.Second {
+		t.Fatalf("transportRetryBackoff(1) = %s, want roughly near 30s", first)
+	}
+	for attempt := 1; attempt <= maxTransportRetries; attempt++ {
+		delay := transportRetryBackoff(attempt)
+		if delay <= 0 {
+			t.Fatalf("transportRetryBackoff(%d) = %s, want positive", attempt, delay)
+		}
+		// Growth is exponential with jitter, so a later attempt is not
+		// guaranteed to exceed an earlier one on every draw, but the
+		// backoff must never run away past its cap plus jitter headroom.
+		if delay > transportRetryMaxInterval+transportRetryMaxInterval/2 {
+			t.Fatalf("transportRetryBackoff(%d) = %s, exceeded the capped ceiling", attempt, delay)
+		}
+	}
+	zero := transportRetryBackoff(0)
+	if zero < 15*time.Second || zero > 40*time.Second {
+		t.Fatalf("transportRetryBackoff(0) = %s, want it to normalize to attempt 1's range", zero)
 	}
 }
 

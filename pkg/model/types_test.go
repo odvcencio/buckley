@@ -237,6 +237,110 @@ func TestMessage_MarshalJSONPreservesReasoning(t *testing.T) {
 	}
 }
 
+// TestChoice_UnmarshalJSONCapturesNativeFinishReason covers the OpenRouter
+// early-200 transport failure shell from the stealth/ox-alpha incident:
+// choices[0].native_finish_reason is "network_error" beside the normalized
+// finish_reason, and must survive decoding so callers can classify it.
+func TestChoice_UnmarshalJSONCapturesNativeFinishReason(t *testing.T) {
+	raw := `{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop","native_finish_reason":"network_error"}`
+	var choice Choice
+	if err := json.Unmarshal([]byte(raw), &choice); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if choice.FinishReason != "stop" {
+		t.Fatalf("finish_reason = %q, want stop", choice.FinishReason)
+	}
+	if choice.NativeFinishReason != "network_error" {
+		t.Fatalf("native_finish_reason = %q, want network_error", choice.NativeFinishReason)
+	}
+}
+
+// TestChatResponse_UsagePresent covers the three shapes that matter for
+// distinguishing an OpenRouter early-200 transport failure shell (no usage
+// object at all) from an honest, literally-zero usage object, and from
+// Buckley's own durable evidence envelope re-marshaling a response that
+// already carries an explicit usage_present flag.
+func TestChatResponse_UsagePresent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "usage key absent -- the transport failure shell",
+			raw:  `{"id":"gen-1","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop","native_finish_reason":"network_error"}]}`,
+			want: false,
+		},
+		{
+			name: "usage key null",
+			raw:  `{"id":"gen-1","choices":[],"usage":null}`,
+			want: false,
+		},
+		{
+			name: "usage key present with literal zero fields",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+			want: true,
+		},
+		{
+			name: "usage key present with nonzero fields",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			want: true,
+		},
+		{
+			name: "explicit usage_present false wins over a re-marshaled usage key",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"usage_present":false}`,
+			want: false,
+		},
+		{
+			name: "explicit usage_present true is trusted even with zero usage",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"usage_present":true}`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp ChatResponse
+			if err := json.Unmarshal([]byte(tt.raw), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if resp.UsagePresent != tt.want {
+				t.Fatalf("UsagePresent = %v, want %v", resp.UsagePresent, tt.want)
+			}
+		})
+	}
+}
+
+// TestChatResponse_UsagePresentRoundTripsThroughMarshal covers the case that
+// motivated the explicit usage_present-key precedence rule: Buckley's own
+// durable evidence envelope always re-marshals a ChatResponse, which always
+// emits a literal "usage" object (Usage has no omitempty) regardless of
+// whether the original wire response ever had one. Without trusting the
+// explicit key on the second decode, every replayed absent-usage response
+// would silently flip to "present" on replay.
+func TestChatResponse_UsagePresentRoundTripsThroughMarshal(t *testing.T) {
+	original := ChatResponse{
+		Choices:      []Choice{{Message: Message{Role: "assistant"}, NativeFinishReason: "network_error"}},
+		UsagePresent: false,
+	}
+	blob, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"usage":{`) {
+		t.Fatalf("expected the re-marshal to always emit a literal usage object, got: %s", blob)
+	}
+	var decoded ChatResponse
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.UsagePresent {
+		t.Fatalf("UsagePresent = true after round-trip, want false to survive despite the re-marshaled usage object")
+	}
+	if decoded.Choices[0].NativeFinishReason != "network_error" {
+		t.Fatalf("native_finish_reason did not round-trip: %+v", decoded.Choices[0])
+	}
+}
+
 func TestReasoningDetail_RoundTripsUnknownFields(t *testing.T) {
 	raw := `{"type":"reasoning.encrypted","data":"abc","signature":null,"id":"r1","format":"anthropic-claude-v1","index":0,"provider_field":{"x":1}}`
 	var detail ReasoningDetail

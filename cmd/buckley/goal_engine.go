@@ -70,9 +70,22 @@ func newGoalTurnEngine(cfg *config.Config, mgr *model.Manager, registry *tool.Re
 	if mgr != nil {
 		// Durable goals own their lifetime through the run context and controller.
 		// A second provider HTTP deadline can discard a slow but healthy model
-		// response before the durable retry owner can checkpoint it.
+		// response before the durable retry owner can checkpoint it. Confirmed
+		// during the stealth/ox-alpha empty-response incident (healthy-but-queued
+		// responses took 249s): this disables the client-side read deadline
+		// entirely on the goal path, which is stricter than any 300s floor would
+		// be. Every provider client's own default (model.defaultTimeout) is
+		// already 5 minutes, above the 300s floor, for every path that does not
+		// go through here.
 		mgr.SetRequestTimeout(0)
 	}
+	// TODO(endpoint-health-gate): a pre-launch admission check that probes
+	// OpenRouter endpoint health (or recent native_finish_reason/limit_source
+	// failure rates) before a goal run commits to a route belongs here, ahead
+	// of the first model round. Needs a design pass (decision on freshness
+	// window, failure-rate threshold, and fail-open vs fail-closed semantics)
+	// before implementation; intentionally not built as part of the
+	// stealth/ox-alpha empty-response hardening.
 	engine, err := rules.NewDefaultEngine()
 	if err != nil {
 		engine = nil

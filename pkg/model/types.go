@@ -173,12 +173,52 @@ type ChatRequest struct {
 
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
-	ID                string                     `json:"id"`
-	Model             string                     `json:"model"`
-	Choices           []Choice                   `json:"choices"`
-	Usage             Usage                      `json:"usage"`
+	ID      string   `json:"id"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+	// UsagePresent distinguishes a wire response that never carried a "usage"
+	// object (OpenRouter's early-committed-200 network failure shell -- see
+	// the stealth/ox-alpha empty-response incident) from one that carried an
+	// honest, literally-zero usage object. Usage alone renders both as
+	// 0/0/0, which made the two indistinguishable in evidence and let a
+	// transport failure masquerade as a clean, tokenless stop. UnmarshalJSON
+	// derives this from the raw payload; callers that build a ChatResponse
+	// directly (tests, in-process fixtures) must set it explicitly.
+	UsagePresent      bool                       `json:"usage_present"`
 	Error             *ErrorDetail               `json:"error,omitempty"`
 	ExecutionEvidence []CommandExecutionEvidence `json:"execution_evidence,omitempty"`
+}
+
+// UnmarshalJSON decodes a ChatResponse and derives UsagePresent. When the
+// payload already carries an explicit "usage_present" key -- true once this
+// response has round-tripped through Buckley's own durable evidence
+// envelope, which always re-marshals a literal "usage" object regardless of
+// whether the original wire response had one -- that explicit value wins.
+// Otherwise (a raw provider response, or evidence recorded before this
+// field existed) presence is derived from whether the "usage" key itself
+// appears in the payload at all.
+func (r *ChatResponse) UnmarshalJSON(data []byte) error {
+	type chatResponseAlias ChatResponse
+	var aux chatResponseAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	var probe struct {
+		Usage        json.RawMessage `json:"usage"`
+		UsagePresent *bool           `json:"usage_present"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if probe.UsagePresent != nil {
+		aux.UsagePresent = *probe.UsagePresent
+	} else {
+		trimmed := bytes.TrimSpace(probe.Usage)
+		aux.UsagePresent = len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+	}
+	*r = ChatResponse(aux)
+	return nil
 }
 
 // CommandExecutionEvidence records a native provider command event. ExitCode
@@ -196,9 +236,18 @@ type CommandExecutionEvidence struct {
 
 // Choice represents a completion choice
 type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
+	Index   int     `json:"index"`
+	Message Message `json:"message"`
+	// FinishReason is OpenRouter's (or the upstream OpenAI-compatible
+	// provider's) normalized stop reason.
+	FinishReason string `json:"finish_reason"`
+	// NativeFinishReason is the upstream provider's own, unnormalized stop
+	// reason, which OpenRouter passes through beside FinishReason. A 200
+	// response whose network transport to the upstream provider failed after
+	// OpenRouter had already committed the status line reports
+	// "network_error" here with an empty message and no usage object; that
+	// value is otherwise indistinguishable from a genuine empty completion.
+	NativeFinishReason string `json:"native_finish_reason,omitempty"`
 }
 
 // StreamChunk represents a single chunk from a streaming chat completion.
@@ -1256,6 +1305,11 @@ func (p *ModelPricing) UnmarshalJSON(data []byte) error {
 type ErrorResponse struct {
 	Error              ErrorDetail     `json:"error"`
 	OpenRouterMetadata json.RawMessage `json:"openrouter_metadata,omitempty"`
+	// LimitSource identifies a non-standard OpenRouter 429 body carrying only
+	// {"limit_source":"upstream_provider_shared_pool"} -- no "error" envelope
+	// at all -- when an upstream provider's own shared rate-limit pool, not
+	// OpenRouter itself, rejected the request.
+	LimitSource string `json:"limit_source,omitempty"`
 }
 
 // ErrorDetail contains error information
@@ -1303,6 +1357,21 @@ type APIError struct {
 	RequestID  string
 	Retryable  bool
 	RetryAfter time.Duration
+	// LimitSource carries OpenRouter's non-standard 429 `limit_source` field
+	// (see ErrorResponse.LimitSource). Empty for every other error shape.
+	LimitSource string
+}
+
+// SharedPoolLimitSource is the OpenRouter `limit_source` value that marks a
+// 429 as an upstream provider's own shared rate-limit pool rejecting the
+// request, distinct from an OpenRouter-side limit. It must never abort a run
+// on its first occurrence; see (*APIError).IsSharedPoolRateLimit.
+const SharedPoolLimitSource = "upstream_provider_shared_pool"
+
+// IsSharedPoolRateLimit reports whether this is OpenRouter's non-standard
+// {"limit_source":"upstream_provider_shared_pool"} 429 body.
+func (e *APIError) IsSharedPoolRateLimit() bool {
+	return e != nil && e.StatusCode == 429 && e.LimitSource == SharedPoolLimitSource
 }
 
 // Error implements the error interface

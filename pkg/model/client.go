@@ -19,6 +19,14 @@ import (
 
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
+	// defaultTimeout is the read deadline for the underlying http.Client
+	// (Client, and every other provider adapter's own client -- see
+	// provider_openai.go, provider_anthropic.go, provider_google.go,
+	// provider_ollama.go, provider_litellm.go). It must stay at or above 300s:
+	// the stealth/ox-alpha empty-response incident observed a healthy-but-queued
+	// response take 249s. The goal path additionally calls SetTimeout(0) to
+	// disable this deadline entirely (see cmd/buckley/goal_engine.go), so a
+	// durable goal run is never bound by it at all.
 	defaultTimeout = 5 * time.Minute
 
 	// Rate limiting: OpenRouter allows ~200 requests/minute for most tiers
@@ -679,9 +687,15 @@ func (c *Client) parseError(resp *http.Response) error {
 		}
 	}
 
-	// Use parsed error message if available, fallback to status
+	// Use parsed error message if available, fallback to status. OpenRouter's
+	// non-standard shared-pool 429 body carries no "error" envelope at all
+	// (just {"limit_source":"upstream_provider_shared_pool"}), so an empty
+	// message with a populated LimitSource still gets a message that names
+	// the actual condition instead of a bare status line.
 	message := errResp.Error.Message
-	if message == "" {
+	if message == "" && errResp.LimitSource != "" {
+		message = fmt.Sprintf("upstream provider rate limit (limit_source: %s)", errResp.LimitSource)
+	} else if message == "" {
 		message = resp.Status
 	}
 	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
@@ -699,15 +713,16 @@ func (c *Client) parseError(resp *http.Response) error {
 	}
 
 	return &APIError{
-		StatusCode: resp.StatusCode,
-		Message:    message,
-		Type:       errResp.Error.Type,
-		Code:       errResp.Error.Code,
-		Provider:   provider,
-		Details:    details,
-		RequestID:  requestID,
-		Retryable:  retryable,
-		RetryAfter: retryAfter,
+		StatusCode:  resp.StatusCode,
+		Message:     message,
+		Type:        errResp.Error.Type,
+		Code:        errResp.Error.Code,
+		Provider:    provider,
+		Details:     details,
+		RequestID:   requestID,
+		Retryable:   retryable,
+		RetryAfter:  retryAfter,
+		LimitSource: errResp.LimitSource,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"reflect"
 	"strings"
 	"sync"
@@ -646,6 +647,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 	}()
 
 	emptyTerminalRetries := 0
+	transportTerminalRetries := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -733,6 +735,18 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			if errors.As(roundErr, &ceilingErr) {
 				return c.stopForCostLimit(ctx, result, ceilingErr, result.Rounds)
 			}
+			// OpenRouter's shared-pool 429 (an upstream provider's own quota,
+			// not an OpenRouter-side limit) must never abort the run on its
+			// first occurrence: back off and retry like any other
+			// transport-classified failure.
+			if isSharedPoolRateLimitErr(roundErr) && transportTerminalRetries < maxTransportRetries {
+				transportTerminalRetries++
+				c.recordDecision(ctx, "transport_retry", roundErr.Error())
+				if waitErr := transportRetrySleep(ctx, transportTerminalRetries); waitErr != nil {
+					return result, errors.Join(roundErr, waitErr)
+				}
+				continue
+			}
 			return result, roundErr
 		}
 		var resp *model.ChatResponse
@@ -762,6 +776,43 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		if len(msg.ToolCalls) == 0 {
 			text, candidateErr := validateTerminalCandidate(choice)
 			if candidateErr != nil {
+				// An empty reply with no confirmed usage (or an explicit
+				// native_finish_reason "network_error") is a transport
+				// failure, not a model answer -- see the constants above.
+				// Retry it with backoff, completely separate from the
+				// immediate corrective nudge below, and never fall through
+				// to that nudge: a model that never ran gets nothing to
+				// nudge.
+				if isTransportFailureCandidate(choice, resp) {
+					if transportTerminalRetries < maxTransportRetries {
+						transportTerminalRetries++
+						c.recordDecision(ctx, "transport_retry", candidateErr.Error())
+						if waitErr := transportRetrySleep(ctx, transportTerminalRetries); waitErr != nil {
+							result.FinishReason = FinishReasonInvalidCompletion
+							result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
+							return result, waitErr
+						}
+						continue
+					}
+					c.recordDecision(ctx, "transport_retry_exhausted", candidateErr.Error())
+					if fallback := reasoningFallbackText(msg); fallback != "" {
+						msg.Content = fallback
+						result.Message = msg
+						result.Content = fallback
+						result.CompletionStatus = CompletionConclusive
+						c.recordDecision(ctx, "reasoning_fallback_final", candidateErr.Error())
+						if c.cfg.History != nil {
+							c.cfg.History.Append(msg)
+						}
+						return result, nil
+					}
+					result.FinishReason = FinishReasonInvalidCompletion
+					result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
+					if c.cfg.Governor.ToolCalls() > 0 {
+						return c.finalizeStoppedTurn(ctx, result, result.Rounds)
+					}
+					return result, nil
+				}
 				// A tool-free reply with unusable text (empty, or truncated)
 				// on a live round gets a bounded corrective retry before the
 				// turn is surrendered. Some models emit reasoning-only turns
@@ -967,6 +1018,7 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 	}
 
 	var malformedCause error
+	transportRetries := 0
 	for attempt := 1; attempt <= maxFinalizationAttempts; attempt++ {
 		if attempt > 1 {
 			if c.cfg.MaxModelRequests > 0 && result.ModelRequests >= c.cfg.MaxModelRequests {
@@ -1024,6 +1076,20 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 			return failed, errors.Join(incompleteErr, roundErr)
 		}
 		if roundErr != nil {
+			// OpenRouter's shared-pool 429 (an upstream provider's own
+			// quota, not an OpenRouter-side limit) must never abort
+			// finalization on its first occurrence: back off and retry
+			// instead of failing the turn.
+			if isSharedPoolRateLimitErr(roundErr) && transportRetries < maxTransportRetries {
+				transportRetries++
+				c.recordDecision(ctx, "transport_retry", roundErr.Error())
+				if waitErr := transportRetrySleep(ctx, transportRetries); waitErr != nil {
+					failed, incompleteErr := c.failFinalization(ctx, result, errors.Join(roundErr, waitErr))
+					return failed, errors.Join(incompleteErr, roundErr, waitErr)
+				}
+				attempt--
+				continue
+			}
 			failed, incompleteErr := c.failFinalization(ctx, result, roundErr)
 			return failed, errors.Join(incompleteErr, roundErr)
 		}
@@ -1041,6 +1107,41 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 				malformedCause = fmt.Errorf("model requested %d tool call(s) while tools were disabled", len(message.ToolCalls))
 			} else if text, err := validateTerminalCandidate(choice); err != nil {
 				malformedCause = err
+				// An empty final reply with no confirmed usage (or an
+				// explicit native_finish_reason "network_error") is a
+				// transport failure, not a malformed answer. Back off and
+				// retry it on its own bounded budget, separate from and
+				// never falling through to the ordinary corrective-nudge
+				// attempts below: a model that never ran gets nothing to
+				// nudge.
+				if isTransportFailureCandidate(choice, response) {
+					if transportRetries < maxTransportRetries {
+						transportRetries++
+						c.recordDecision(ctx, "transport_retry", malformedCause.Error())
+						if waitErr := transportRetrySleep(ctx, transportRetries); waitErr != nil {
+							failed, incompleteErr := c.failFinalization(ctx, result, errors.Join(malformedCause, waitErr))
+							return failed, errors.Join(incompleteErr, malformedCause, waitErr)
+						}
+						attempt--
+						continue
+					}
+					c.recordDecision(ctx, "transport_retry_exhausted", malformedCause.Error())
+					if fallback := reasoningFallbackText(message); fallback != "" {
+						if message.Role == "" {
+							message.Role = "assistant"
+						}
+						message.Content = fallback
+						result.Message = message
+						result.Content = fallback
+						result.CompletionStatus = CompletionConclusive
+						c.recordDecision(ctx, "reasoning_fallback_final", malformedCause.Error())
+						if c.cfg.History != nil {
+							c.cfg.History.Append(message)
+						}
+						return result, nil
+					}
+					return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", malformedCause))
+				}
 				// The corrective nudges above already gave the model every
 				// chance to answer in plain content. On the last attempt
 				// only, fall back to reasoning/thinking text rather than
@@ -1096,6 +1197,135 @@ const maxFinalizationAttempts = 3
 // returns a tool-free reply with no usable text. Each retry appends a
 // corrective user message and consumes normal round budget.
 const maxEmptyTerminalRetries = 2
+
+// Transport-retry classification and backoff.
+//
+// OpenRouter can commit an HTTP 200 status line before dispatch to the
+// upstream provider fails; the body that follows is a shell:
+// choices[0].native_finish_reason is "network_error", message content is
+// null, and there is no usage object at all (OpenRouter never wrote a
+// generation record for it). Rendering absent usage as 0/0/0 made this
+// indistinguishable from a genuine, tokenless empty stop, so it used to take
+// the immediate corrective-nudge retry (a couple of bounded, un-delayed
+// attempts) meant for a model that really did answer with nothing. That is
+// wrong for a transport failure: retrying instantly just re-hits the same
+// congested/failing path. This bucket instead waits with exponential
+// backoff and jitter before each retry, and is never used once a response
+// carries confirmed nonzero token usage.
+//
+// The same backoff also covers OpenRouter's 429
+// {"limit_source":"upstream_provider_shared_pool"} response (an upstream
+// provider's own shared quota, not an OpenRouter-side limit): it must never
+// abort a run on its first occurrence.
+const (
+	// maxTransportRetries bounds backoff retries for a transport-classified
+	// failure (empty response with no confirmed usage, native_finish_reason
+	// "network_error", or an upstream shared-pool 429). It is independent of
+	// maxEmptyTerminalRetries and maxFinalizationAttempts.
+	maxTransportRetries = 4
+	// transportRetryInitialInterval is the base backoff for the first
+	// transport retry; calculateBackoff's jitter centers the actual first
+	// delay near this value.
+	transportRetryInitialInterval = 30 * time.Second
+	// transportRetryMaxInterval caps backoff growth across attempts.
+	transportRetryMaxInterval = 5 * time.Minute
+	// transportRetryMultiplier is the exponential growth factor per attempt.
+	transportRetryMultiplier = 2.0
+	// transportFailureFinishReason is the OpenRouter native_finish_reason
+	// value confirmed for the early-200 upstream network failure shell.
+	transportFailureFinishReason = "network_error"
+)
+
+// transportRetrySleep blocks until the backoff for the given 1-based attempt
+// elapses, or ctx is canceled first. It is a package variable so tests can
+// replace it and avoid sleeping in real time; production leaves it as the
+// exponential-backoff-with-jitter implementation below.
+var transportRetrySleep = func(ctx context.Context, attempt int) error {
+	delay := transportRetryBackoff(attempt)
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// transportRetryBackoff calculates the delay before the next transport-retry
+// attempt using exponential backoff with jitter, shaped like
+// (*model.Client).calculateBackoff: it starts near
+// transportRetryInitialInterval, never exceeds transportRetryMaxInterval,
+// and adds jitter of up to half the capped delay so concurrent turns do not
+// retry in lockstep.
+func transportRetryBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		attempt = 1
+	}
+	delay := float64(transportRetryInitialInterval)
+	for i := 1; i < attempt; i++ {
+		delay *= transportRetryMultiplier
+	}
+	delay = math.Min(delay, float64(transportRetryMaxInterval))
+	jitter := rand.Float64() * delay * 0.5
+	delay = delay*0.75 + jitter
+	return time.Duration(delay)
+}
+
+// isTransportFinishReason reports whether a choice's native_finish_reason
+// names a known transport failure rather than a model-produced stop.
+func isTransportFinishReason(nativeFinishReason string) bool {
+	return strings.EqualFold(strings.TrimSpace(nativeFinishReason), transportFailureFinishReason)
+}
+
+// isTransportFailureCandidate reports whether a tool-free, empty-text
+// candidate looks like the OpenRouter early-200 transport failure rather
+// than a genuine model answer with no text. It never fires for a truncated
+// finish reason -- that is a distinct, already-handled failure mode -- and
+// it never fires once the response carries confirmed nonzero token usage,
+// which is the one signal a transport failure cannot fake. Deliberately not
+// gated on response.UsagePresent: that flag records whether the wire
+// response carried a usage object at all (see ChatResponse.UsagePresent),
+// which is valuable ledger evidence, but every non-OpenRouter provider
+// adapter -- and every test double -- constructs *model.ChatResponse Go
+// literals directly and has no reason to set it, so treating "unset" as
+// "confirmed absent" here would misclassify their genuine, billed replies.
+// Token counts of zero cover both an honestly-absent usage object and one
+// that is literally all-zero; the task's own corrective-nudge carve-out
+// ("usage present and tokens nonzero") already draws the line there.
+func isTransportFailureCandidate(choice model.Choice, response *model.ChatResponse) bool {
+	if isTruncatedFinishReason(choice.FinishReason) {
+		return false
+	}
+	if isTransportFinishReason(choice.NativeFinishReason) {
+		return true
+	}
+	if response == nil {
+		return true
+	}
+	usage := response.Usage
+	return usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0
+}
+
+// isSharedPoolRateLimitErr unwraps err looking for an OpenRouter 429 whose
+// body is {"limit_source":"upstream_provider_shared_pool"}: an upstream
+// provider's own shared quota, not an OpenRouter-side limit.
+func isSharedPoolRateLimitErr(err error) bool {
+	var apiErr *model.APIError
+	return errors.As(err, &apiErr) && apiErr.IsSharedPoolRateLimit()
+}
+
+// firstResponseChoice returns response's first choice, or nil when the
+// response or its choices are absent.
+func firstResponseChoice(response *model.ChatResponse) *model.Choice {
+	if response == nil || len(response.Choices) == 0 {
+		return nil
+	}
+	return &response.Choices[0]
+}
 
 func validateTerminalCandidate(choice model.Choice) (string, error) {
 	if isTruncatedFinishReason(choice.FinishReason) {
@@ -2104,6 +2334,14 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	completed["phase"] = stepKind
 	completed["prompt_tokens"] = response.Usage.PromptTokens
 	completed["completion_tokens"] = response.Usage.CompletionTokens
+	// usage_present distinguishes a response that never carried a usage
+	// object (an OpenRouter early-200 transport failure shell) from one
+	// with an honest, literally-zero usage object -- both otherwise render
+	// as 0/0/0 above.
+	completed["usage_present"] = response.UsagePresent
+	if choice := firstResponseChoice(response); choice != nil && choice.NativeFinishReason != "" {
+		completed["native_finish_reason"] = choice.NativeFinishReason
+	}
 	if costRecorded {
 		completed[modelResponseCostMetadataKey] = chargedCostUSD
 	}

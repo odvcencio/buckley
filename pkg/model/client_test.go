@@ -1180,6 +1180,51 @@ func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *tes
 	}
 }
 
+// TestClient_ChatCompletion_SharedPoolRateLimitIsClassified covers
+// OpenRouter's non-standard 429 body -- just
+// {"limit_source":"upstream_provider_shared_pool"}, no "error" envelope at
+// all -- for an upstream provider's own shared quota rejecting the request.
+// parseError must still surface it as a structured, classifiable *APIError
+// instead of losing the condition in a bare status-line message.
+func TestClient_ChatCompletion_SharedPoolRateLimitIsClassified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"limit_source":"upstream_provider_shared_pool"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          2,
+	})
+	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err == nil {
+		t.Fatal("expected a shared-pool rate-limit error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("errors.As(APIError) failed for %T: %v", err, err)
+	}
+	if apiErr.StatusCode != 429 {
+		t.Fatalf("StatusCode = %d, want 429", apiErr.StatusCode)
+	}
+	if apiErr.LimitSource != SharedPoolLimitSource {
+		t.Fatalf("LimitSource = %q, want %q", apiErr.LimitSource, SharedPoolLimitSource)
+	}
+	if !apiErr.IsSharedPoolRateLimit() {
+		t.Fatalf("IsSharedPoolRateLimit() = false, want true for %+v", apiErr)
+	}
+	if !strings.Contains(apiErr.Message, "upstream_provider_shared_pool") {
+		t.Fatalf("Message = %q, want it to name the limit_source instead of a bare status line", apiErr.Message)
+	}
+}
+
 // TestDefaultRetryConfig tests the default retry configuration
 func TestDefaultRetryConfig(t *testing.T) {
 	config := DefaultRetryConfig()

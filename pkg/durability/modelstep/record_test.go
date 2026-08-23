@@ -17,8 +17,9 @@ func validBlockedReplayFixture(t *testing.T) (runledger.ExecutionStep, evidence.
 	providerError := NormalizeErrorText(rawProviderError)
 	body, err := EncodeResponse(ResponseEnvelope{
 		Response: &model.ChatResponse{
-			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "durable partial"}}},
-			Usage:   model.Usage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
+			Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: "durable partial"}}},
+			Usage:        model.Usage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
+			UsagePresent: true,
 		},
 		ChargedCostUSD: 0.42,
 		CostRecorded:   true,
@@ -148,5 +149,49 @@ func TestDurableRecords_RejectInvalidCausesResponseAndAccounting(t *testing.T) {
 	invalid.Response = nil
 	if _, err := EncodeResponse(invalid); err == nil || !strings.Contains(err.Error(), "has no response") {
 		t.Fatalf("response shape error = %v", err)
+	}
+}
+
+// TestEncodeDecodeResponse_PreservesNativeFinishReasonAndUsagePresent covers
+// the stealth/ox-alpha empty-response incident's two durable-evidence
+// requirements: native_finish_reason survives into the recorded
+// buckley.model-response/v1 envelope, and a response with no usage object
+// (the OpenRouter early-200 transport failure shell) stays distinguishable
+// from one with an honest, literally-zero usage object after a full
+// encode/decode round trip through evidence.
+func TestEncodeDecodeResponse_PreservesNativeFinishReasonAndUsagePresent(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		usagePresent bool
+	}{
+		{name: "usage absent -- the transport failure shell", usagePresent: false},
+		{name: "usage present with literal zero fields", usagePresent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			envelope := ResponseEnvelope{
+				Response: &model.ChatResponse{
+					Choices: []model.Choice{{
+						Message:            model.Message{Role: "assistant", Content: nil},
+						FinishReason:       "stop",
+						NativeFinishReason: "network_error",
+					}},
+					UsagePresent: tt.usagePresent,
+				},
+			}
+			body, err := EncodeResponse(envelope)
+			if err != nil {
+				t.Fatalf("EncodeResponse: %v", err)
+			}
+			decoded, err := DecodeResponse(body)
+			if err != nil {
+				t.Fatalf("DecodeResponse: %v", err)
+			}
+			if decoded.Response.Choices[0].NativeFinishReason != "network_error" {
+				t.Fatalf("native_finish_reason = %q, want network_error", decoded.Response.Choices[0].NativeFinishReason)
+			}
+			if decoded.Response.UsagePresent != tt.usagePresent {
+				t.Fatalf("UsagePresent = %v, want %v", decoded.Response.UsagePresent, tt.usagePresent)
+			}
+		})
 	}
 }

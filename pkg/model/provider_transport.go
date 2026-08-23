@@ -406,7 +406,9 @@ func parseProviderError(resp *http.Response) *APIError {
 	}
 
 	message := errResp.Error.Message
-	if message == "" {
+	if message == "" && errResp.LimitSource != "" {
+		message = fmt.Sprintf("upstream provider rate limit (limit_source: %s)", errResp.LimitSource)
+	} else if message == "" {
 		message = resp.Status
 	}
 	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
@@ -415,15 +417,16 @@ func parseProviderError(resp *http.Response) *APIError {
 	}
 
 	return &APIError{
-		StatusCode: resp.StatusCode,
-		Message:    message,
-		Type:       errResp.Error.Type,
-		Code:       errResp.Error.Code,
-		Provider:   provider,
-		Details:    details,
-		RequestID:  requestID,
-		Retryable:  retryable,
-		RetryAfter: retryAfter,
+		StatusCode:  resp.StatusCode,
+		Message:     message,
+		Type:        errResp.Error.Type,
+		Code:        errResp.Error.Code,
+		Provider:    provider,
+		Details:     details,
+		RequestID:   requestID,
+		Retryable:   retryable,
+		RetryAfter:  retryAfter,
+		LimitSource: errResp.LimitSource,
 	}
 }
 

@@ -41,8 +41,9 @@ func putPartialModelResponse(t *testing.T, ctx context.Context, ev evidence.Stor
 	t.Helper()
 	body, err := modelstep.EncodeResponse(modelstep.ResponseEnvelope{
 		Response: &model.ChatResponse{
-			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "partial"}}},
-			Usage:   model.Usage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5},
+			Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: "partial"}}},
+			Usage:        model.Usage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5},
+			UsagePresent: true,
 		},
 		ChargedCostUSD: 0.25,
 		CostRecorded:   true,
