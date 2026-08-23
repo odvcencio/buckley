@@ -12,6 +12,7 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
 func TestParseReviewPRCommandOptions(t *testing.T) {
@@ -176,9 +177,28 @@ func TestBoundPRApprovalCriticUsesOnePassOnlyForAuthoritativeCI(t *testing.T) {
 		criticMaxIterations: 2,
 		criticMaxToolCalls:  2,
 	}
+	expectation := reviewpolicy.CIAdmissionExpectation{Identity: reviewpolicy.CIAdmissionIdentity{
+		Host:       "github.com",
+		Repository: "m31labs/buckley",
+		PRNumber:   208,
+		BaseBranch: "main",
+		BaseSHA:    "base-sha",
+		HeadBranch: "topic",
+		HeadSHA:    "head-sha",
+	}}
+	receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+		Expectation:               expectation,
+		RequiredContextsAvailable: true,
+		RequiredContexts:          []reviewpolicy.CIRequiredContext{{Name: "required/unit", State: "SUCCESS"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	passing := boundPRApprovalCritic(base, commands.ReviewPRDef{
-		CIStatus:     "passing (3/3)",
-		CIProvenance: "pull request head",
+		CIStatus:               "passing (3/3)",
+		CIProvenance:           "pull request head",
+		CIAdmission:            receipt,
+		CIAdmissionExpectation: expectation,
 	})
 	if passing.criticMaxIterations != 1 || passing.criticMaxToolCalls != 0 {
 		t.Fatalf("passing CI critic = %#v, want one direct pass without a tool-call cap", passing)

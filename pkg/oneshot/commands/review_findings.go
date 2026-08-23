@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
 // reviewFindingsRegexCache holds regexps compiled from a caller-supplied
@@ -186,6 +187,8 @@ type ReviewValidationOptions struct {
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
+	CIAdmission                 reviewpolicy.CIAdmissionReceipt
+	CIAdmissionExpectation      reviewpolicy.CIAdmissionExpectation
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	RequirePassingRemoteCI      bool
@@ -390,15 +393,18 @@ func validateApprovalRemoteCI(opts ReviewValidationOptions) error {
 	}
 	switch opts.CIProvenance {
 	case prCISourceHead:
-		return nil
 	case prCISourceBase:
 		if !reviewChangedFilesDocumentationOnly(opts.ChangedFiles) {
 			return fmt.Errorf("immutable-base CI can authorize only a documentation-only approval")
 		}
-		return nil
 	default:
 		return fmt.Errorf("an approval requires explicit remote CI provenance, got %q", opts.CIProvenance)
 	}
+	expectation := ciAdmissionExpectationForChangedFiles(opts.CIAdmissionExpectation, opts.ChangedFiles)
+	if err := opts.CIAdmission.Authorize(expectation); err != nil {
+		return fmt.Errorf("an approval requires a current canonical CI admission receipt: %w", err)
+	}
+	return nil
 }
 
 func validateApprovalDisposition(parsed *ParsedReview) error {

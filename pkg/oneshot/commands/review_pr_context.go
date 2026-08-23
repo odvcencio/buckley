@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/reviewpolicy"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -68,6 +69,7 @@ type PRContext struct {
 	Checks                  []PRCheck
 	CIProvenance            string
 	CIRevision              string
+	CIAdmission             reviewpolicy.CIAdmissionReceipt
 	Files                   []string
 	AgentsMD                string
 	CheckoutSHA             string
@@ -378,6 +380,14 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 			prCtx.addStatus("CI checks", "complete", detail, false)
 		}
 	}
+	ciAdmission, admissionErr := capturePRCIAdmission(deps.run, target, pr, files)
+	if admissionErr != nil {
+		recordPRContextFailure(prCtx, audit, "CI admission", admissionErr)
+	} else {
+		prCtx.CIAdmission = ciAdmission.Receipt
+		addPRCIAdmissionStatus(prCtx, ciAdmission)
+		audit.Add("CI admission", reviewEstimateTokens(string(ciAdmission.Receipt.Reason)+ciAdmission.Receipt.Digest))
+	}
 
 	assemblePRAgentsContext(prCtx, audit, deps)
 	assemblePRCanopyContext(opts.Context, prCtx, audit, deps.collectCanopy)
@@ -563,16 +573,16 @@ func defaultPRCommandRunner(name string, args ...string) ([]byte, error) {
 
 func normalizePRCommandResult(name string, args []string, output []byte, err error) ([]byte, error) {
 	if err != nil {
-		// `gh pr checks` deliberately exits 8 while checks are pending, even
-		// when it emitted the complete JSON requested by --json. Preserve that
-		// state-bearing payload so review-pr can report a blocked review instead
-		// of aborting before analysis.
+		// `gh pr checks` exits nonzero for pending or failing checks even when it
+		// emitted the complete JSON requested by --json. Preserve that
+		// state-bearing payload so admission can distinguish an observed failure
+		// from unavailable evidence.
 		var status interface{ ExitCode() int }
 		if isJSONPRChecksCommand(name, args) && errors.As(err, &status) {
 			switch {
-			case status.ExitCode() == 8 && json.Valid(output):
+			case (status.ExitCode() == 1 || status.ExitCode() == 8) && json.Valid(output):
 				return output, nil
-			case status.ExitCode() == 1 && isNoPRChecksReported(output):
+			case status.ExitCode() == 1 && isNoPRChecksReported(args, output):
 				// `gh pr checks --json` emits prose rather than [] when a branch
 				// has no check runs. Preserve that stable empty state as JSON so
 				// initial capture and revalidation compare empty against empty.
@@ -588,11 +598,15 @@ func normalizePRCommandResult(name string, args []string, output []byte, err err
 	return output, nil
 }
 
-func isNoPRChecksReported(output []byte) bool {
-	const (
-		prefix = "no checks reported on the '"
-		suffix = "' branch"
-	)
+func isNoPRChecksReported(args []string, output []byte) bool {
+	prefix := "no checks reported on the '"
+	for _, arg := range args {
+		if arg == "--required" {
+			prefix = "no required checks reported on the '"
+			break
+		}
+	}
+	const suffix = "' branch"
 	detail := strings.TrimSpace(string(output))
 	if !strings.HasPrefix(detail, prefix) || !strings.HasSuffix(detail, suffix) {
 		return false
@@ -773,6 +787,7 @@ type prMetadataSnapshot struct {
 
 type prEvidenceSnapshot struct {
 	Metadata                prMetadataSnapshot
+	CIAdmission             reviewpolicy.CIAdmissionReceipt
 	CIStatus                string
 	CIProvenance            string
 	CIRevision              string
@@ -882,6 +897,10 @@ func revalidatePRContext(ctx *PRContext, run prCommandRunner) (string, error) {
 	if run == nil {
 		return "", fmt.Errorf("PR metadata runner is missing")
 	}
+	admissionExpectation := ctx.CIAdmissionExpectation()
+	if err := ctx.CIAdmission.ValidateFor(admissionExpectation); err != nil {
+		return "", fmt.Errorf("captured CI admission receipt is not valid for this PR snapshot: %w", err)
+	}
 
 	target := ctx.target
 	if target.Number == 0 {
@@ -900,7 +919,7 @@ func revalidatePRContext(ctx *PRContext, run prCommandRunner) (string, error) {
 		return changed, nil
 	}
 
-	current, err := fetchPRReviewEvidence(run, target, currentMetadata, captured.CIProvenance)
+	current, err := fetchPRReviewEvidence(run, target, currentMetadata, captured.CIProvenance, admissionExpectation.TestReachability)
 	if err != nil {
 		return "", fmt.Errorf("re-fetch PR review evidence: %w", err)
 	}
@@ -983,13 +1002,28 @@ func snapshotPRContextEvidence(ctx *PRContext) prEvidenceSnapshot {
 			ReviewDecision: ctx.PR.ReviewDecision,
 		}
 	}
-	return newPREvidenceSnapshot(metadata, ctx.Checks, ctx.CIProvenance, ctx.CIRevision, ctx.Comments, ctx.Reviews, ctx.InlineComments, ctx.ResolvedThreadsFiltered)
+	return newPREvidenceSnapshot(metadata, ctx.CIAdmission, ctx.Checks, ctx.CIProvenance, ctx.CIRevision, ctx.Comments, ctx.Reviews, ctx.InlineComments, ctx.ResolvedThreadsFiltered)
 }
 
-func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prMetadataSnapshot, capturedCISource string) (prEvidenceSnapshot, error) {
+func fetchPRReviewEvidence(
+	run prCommandRunner,
+	target prReference,
+	metadata prMetadataSnapshot,
+	capturedCISource string,
+	reachability reviewpolicy.CIReachabilityRequest,
+) (prEvidenceSnapshot, error) {
 	checks, ciSource, ciRevision, err := refetchPRCIEvidence(run, target, metadata, capturedCISource)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("CI checks: %w", err)
+	}
+	requiredContexts, requiredErr := getPRRequiredContexts(run, target)
+	admission, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
+		Expectation:               prCIAdmissionExpectationForMetadata(metadata, reachability),
+		RequiredContextsAvailable: requiredErr == nil,
+		RequiredContexts:          requiredContexts,
+	})
+	if err != nil {
+		return prEvidenceSnapshot{}, fmt.Errorf("CI admission: %w", err)
 	}
 	feedbackTarget := target
 	feedbackTarget.Number = metadata.Number
@@ -1026,11 +1060,12 @@ func fetchPRReviewEvidence(run prCommandRunner, target prReference, metadata prM
 	if changed := describePRMetadataChanges(metadata, metadataAfter); changed != "" {
 		return prEvidenceSnapshot{}, fmt.Errorf("PR metadata changed during evidence re-fetch: %s", changed)
 	}
-	return newPREvidenceSnapshot(metadataAfter, checks, ciSource, ciRevision, commentResult.Comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
+	return newPREvidenceSnapshot(metadataAfter, admission, checks, ciSource, ciRevision, commentResult.Comments, reviews, inline.Comments, inline.ResolvedThreadsFiltered), nil
 }
 
 func newPREvidenceSnapshot(
 	metadata prMetadataSnapshot,
+	ciAdmission reviewpolicy.CIAdmissionReceipt,
 	checks []PRCheck,
 	ciProvenance string,
 	ciRevision string,
@@ -1046,6 +1081,7 @@ func newPREvidenceSnapshot(
 	}).feedbackIDs()
 	return prEvidenceSnapshot{
 		Metadata:                metadata,
+		CIAdmission:             ciAdmission,
 		CIStatus:                summarizePRChecks(checks),
 		CIProvenance:            ciProvenance,
 		CIRevision:              ciRevision,
@@ -1076,6 +1112,21 @@ func describePREvidenceChanges(captured, current prEvidenceSnapshot) string {
 	}
 	if captured.ChecksFingerprint != current.ChecksFingerprint {
 		changes = append(changes, "CI check outcomes changed")
+	}
+	if captured.CIAdmission.RequiredContextsFingerprint != current.CIAdmission.RequiredContextsFingerprint {
+		changes = append(changes, "required CI contexts changed")
+	}
+	if captured.CIAdmission.Digest != current.CIAdmission.Digest {
+		if captured.CIAdmission.Decision != current.CIAdmission.Decision || captured.CIAdmission.Reason != current.CIAdmission.Reason {
+			changes = append(changes, fmt.Sprintf("CI admission %s/%s -> %s/%s",
+				captured.CIAdmission.Decision,
+				captured.CIAdmission.Reason,
+				current.CIAdmission.Decision,
+				current.CIAdmission.Reason,
+			))
+		} else {
+			changes = append(changes, "CI admission receipt changed")
+		}
 	}
 	if captured.CommentIDsFingerprint != current.CommentIDsFingerprint {
 		changes = append(changes, "top-level comment IDs changed")
