@@ -968,9 +968,10 @@ type BuckbotConfig struct {
 	Model       string `yaml:"model"`
 	CriticModel string `yaml:"critic_model"`
 	Reasoning   string `yaml:"reasoning"`
-	// OpenRouterPrivacyFallback is opt-in because falling back from ZDR to
-	// data_collection=deny deliberately relaxes a strict ZDR requirement.
-	// Supported value: zdr_then_data_collection_deny.
+	// OpenRouterPrivacyFallback retains the legacy
+	// zdr_then_data_collection_deny value for parsing compatibility, but the
+	// policy is inert and cannot authorize a privacy downgrade. Strict ZDR is
+	// the only dispatchable posture until a trusted host mints OSS admission.
 	OpenRouterPrivacyFallback string `yaml:"openrouter_privacy_fallback"`
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.

@@ -328,11 +328,32 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 		Metadata:            map[string]string{"surface": "test"},
 		Trace:               map[string]string{"trace_id": "trace-1"},
 		CacheControl:        &CacheControl{Type: "ephemeral", TTL: "1h"},
+		OpenRouterRetention: OpenRouterRetentionNonZDR,
+		RetryMode:           RequestRetrySingleAttempt,
+		openRouterAdmission: &openRouterOSSAdmission{},
 	}
 
 	blob, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(blob, &wire); err != nil {
+		t.Fatalf("decode request JSON: %v", err)
+	}
+	for _, key := range []string{
+		"OpenRouterRetention",
+		"open_router_retention",
+		"openrouter_retention",
+		"RetryMode",
+		"retry_mode",
+		"openRouterAdmission",
+		"open_router_admission",
+		"openrouter_admission",
+	} {
+		if _, leaked := wire[key]; leaked {
+			t.Fatalf("internal request key %q leaked into %#v", key, wire)
+		}
 	}
 	out := string(blob)
 	for _, want := range []string{
@@ -347,6 +368,11 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %s in %s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"openrouter_retention", "retry_mode", "openRouterAdmission"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("internal request contract %q leaked into %s", forbidden, out)
 		}
 	}
 }

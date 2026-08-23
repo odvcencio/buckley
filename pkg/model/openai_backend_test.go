@@ -91,14 +91,14 @@ func TestOpenAIModelRoutingUsesOpenRouterFallback(t *testing.T) {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	if _, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: modelID}); err != nil {
+	if _, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{Model: modelID})); err != nil {
 		t.Fatalf("ChatCompletion() error = %v", err)
 	}
 	if got := openRouter.lastRequest.Model; got != modelID {
 		t.Fatalf("OpenRouter model = %q, want %q", got, modelID)
 	}
 
-	if _, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: "gpt-5.4"}); err != nil {
+	if _, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{Model: "gpt-5.4"})); err != nil {
 		t.Fatalf("ChatCompletion(raw model) error = %v", err)
 	}
 	if got := openRouter.lastRequest.Model; got != modelID {

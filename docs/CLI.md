@@ -205,15 +205,22 @@ review runtime as `review` and `review-pr`, while making the review intent
 explicit in scripts, CI, and team workflows.
 
 Unless overridden with `--model` or `BUCKLEY_MODEL_REVIEW`, Buckbot uses
-`deepseek/deepseek-v4-pro-0813` through OpenRouter. The account's privacy and
-guardrail settings must allow a matching endpoint.
+`deepseek/deepseek-v4-pro-0813` through OpenRouter. That model selection does
+not currently authorize or send an OpenRouter request.
 
-If the configured Buckbot policy is
-`openrouter_privacy_fallback: zdr_then_data_collection_deny`, Buckley tries a
-ZDR route first and retries one policy-filtered 404 with
-`data_collection: deny`. This makes DeepSeek usable when it has no ZDR route,
-but it is not equivalent to ZDR; leave the setting disabled for strict
-zero-retention reviews.
+The legacy Buckbot setting
+`openrouter_privacy_fallback: zdr_then_data_collection_deny` remains parseable
+so existing configuration loads, but it is inert: Buckley never retries a ZDR
+request as a data-collecting request.
+
+In this release, the OpenRouter-backed CLI (including one-shot and review
+commands), interactive TUI, ACP, and RLM surfaces do not construct an explicit
+strict-ZDR request, and no trusted host admission path is wired into them.
+Their OpenRouter turns therefore fail locally at the Manager boundary before a
+provider adapter or HTTP request is called. OpenRouter endpoint, privacy, and
+guardrail settings cannot make these local surfaces dispatch. Dispatch remains
+blocked until a trusted host constructs an exact strict-ZDR request or a later
+admitted request.
 
 ```bash
 buckley buckbot                         # review current local scope

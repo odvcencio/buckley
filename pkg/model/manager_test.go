@@ -100,7 +100,7 @@ func TestChatCompletionPreservesResponseAlongsideProviderError(t *testing.T) {
 		modelProviders: map[string]string{"deepseek/deepseek-v4-pro-0813": "openrouter"},
 	}
 
-	resp, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"})
+	resp, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"}))
 	if !errors.Is(err, providerErr) {
 		t.Fatalf("ChatCompletion error = %v, want provider error", err)
 	}
@@ -134,13 +134,13 @@ func TestChatCompletionRetriesAffordableOpenRouterOutputWithoutChangingModel(t *
 	}
 
 	reasoning := &ReasoningConfig{MaxTokens: 3000}
-	resp, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+	resp, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model:      "x-ai/grok-4.6",
 		MaxTokens:  32768,
 		Reasoning:  reasoning,
 		Messages:   []Message{{Role: "user", Content: "review"}},
 		ToolChoice: "none",
-	})
+	}))
 	if err != nil || resp == nil {
 		t.Fatalf("ChatCompletion() = %#v, %v", resp, err)
 	}
@@ -176,7 +176,7 @@ func TestChatCompletionDoesNotRetryGenericPaymentFailure(t *testing.T) {
 		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
 	}
 
-	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768})
+	_, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768}))
 	if err == nil {
 		t.Fatal("expected payment failure")
 	}
@@ -223,10 +223,10 @@ func TestChatCompletionStreamRetriesAffordableOutputBeforeFirstChunk(t *testing.
 		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
 	}
 
-	chunks, errs := mgr.ChatCompletionStream(context.Background(), ChatRequest{
+	chunks, errs := mgr.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model:     "x-ai/grok-4.6",
 		MaxTokens: 32768,
-	})
+	}))
 	var content string
 	for chunk := range chunks {
 		for _, choice := range chunk.Choices {
@@ -266,7 +266,7 @@ func TestChatCompletionStreamNeverRetriesAfterFirstChunk(t *testing.T) {
 		modelProviders: map[string]string{"x-ai/grok-4.6": "openrouter"},
 	}
 
-	chunks, errs := mgr.ChatCompletionStream(context.Background(), ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768})
+	chunks, errs := mgr.ChatCompletionStream(context.Background(), strictZDRTestRequest(ChatRequest{Model: "x-ai/grok-4.6", MaxTokens: 32768}))
 	for range chunks {
 	}
 	var gotErr error
@@ -612,7 +612,7 @@ func TestChatCompletionRejectsNilResponse(t *testing.T) {
 	}
 }
 
-func TestChatCompletionAppliesOpenRouterFallbackChain(t *testing.T) {
+func TestChatCompletionStrictZDROverridesOpenRouterFallbackChain(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{
 			Execution:       "z-ai/glm-5.2",
@@ -651,19 +651,18 @@ func TestChatCompletionAppliesOpenRouterFallbackChain(t *testing.T) {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	_, err := mgr.ChatCompletion(context.Background(), ChatRequest{
+	_, err := mgr.ChatCompletion(context.Background(), strictZDRTestRequest(ChatRequest{
 		Model: "z-ai/glm-5.2",
-	})
+	}))
 	if err != nil {
 		t.Fatalf("ChatCompletion() error = %v", err)
 	}
 
-	want := []string{"z-ai/glm-5.2", "moonshotai/kimi-k2.7-code", "qwen/qwen3.7-max"}
-	if fmt.Sprint(prov.lastRequest.Models) != fmt.Sprint(want) {
-		t.Fatalf("fallback models=%v want %v", prov.lastRequest.Models, want)
+	if len(prov.lastRequest.Models) != 0 || prov.lastRequest.Model != "z-ai/glm-5.2" {
+		t.Fatalf("strict-ZDR route = model:%q fallbacks:%v, want exact model", prov.lastRequest.Model, prov.lastRequest.Models)
 	}
-	if prov.lastRequest.Provider["allow_fallbacks"] != true {
-		t.Fatalf("expected allow_fallbacks=true, got %#v", prov.lastRequest.Provider)
+	if prov.lastRequest.Provider["allow_fallbacks"] != false || prov.lastRequest.Provider["zdr"] != true {
+		t.Fatalf("strict-ZDR provider policy = %#v, want no fallback", prov.lastRequest.Provider)
 	}
 }
 
