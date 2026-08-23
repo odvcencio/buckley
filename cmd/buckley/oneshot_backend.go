@@ -23,6 +23,13 @@ const (
 	envClaudeCommand  = "BUCKLEY_CLAUDE_COMMAND"
 )
 
+var (
+	oneshotModelInfoFn = func(mgr *model.Manager, modelID string) (*model.ModelInfo, error) {
+		return mgr.GetModelInfo(modelID)
+	}
+	newOneshotToolInvokerFn = newOneshotToolInvoker
+)
+
 func resolveOneshotBackend(commandName, flagValue string) (string, error) {
 	value := strings.TrimSpace(flagValue)
 	if value == "" {
@@ -108,6 +115,10 @@ func explicitModelID(flagValue, envName string) string {
 	return strings.TrimSpace(os.Getenv(envName))
 }
 
+func unavailableOneshotCommandAPIError(command string) error {
+	return fmt.Errorf("buckley %s API backend unavailable: governed %s model data policy is not installed; use --backend codex or --backend claude", command, command)
+}
+
 func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *model.Manager, pricing transparency.ModelPricing, ledger *transparency.CostLedger) (oneshot.ToolInvoker, error) {
 	switch backend {
 	case oneshotBackendAPI:
@@ -121,12 +132,8 @@ func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *mod
 		if cfg != nil && mgr != nil {
 			reasoning = model.ResolveReasoningEffort(cfg, mgr, nil, modelID, "execution")
 		}
-		client, err := oneshotClientForProvider(mgr, modelID, providerID)
-		if err != nil {
-			return nil, err
-		}
 		return oneshot.NewInvoker(oneshot.InvokerConfig{
-			Client:          client,
+			Client:          mgr,
 			Model:           modelID,
 			Provider:        providerID,
 			ReasoningEffort: reasoning,
