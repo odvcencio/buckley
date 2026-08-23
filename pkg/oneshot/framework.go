@@ -120,6 +120,11 @@ type RunOpts struct {
 	// Guidance is optional extra text appended to the user prompt on retry
 	// when the model fails to call the tool.
 	Guidance string
+
+	// ContextSnapshot supplies already gathered, immutable context. When set,
+	// Framework never calls Definition.ContextSources or reads live workspace
+	// state.
+	ContextSnapshot *ContextSnapshot
 }
 
 // RunResult contains the outcome of a framework execution.
@@ -176,8 +181,14 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		return nil, fmt.Errorf("invoker is required")
 	}
 
-	// 1. Build context from definition's sources
-	gathered, err := BuildContext(def.ContextSources(), opts.ContextOpts)
+	// 1. Build context from definition's sources, or use a sealed snapshot.
+	var gathered *Context
+	var err error
+	if opts.ContextSnapshot != nil {
+		gathered, err = opts.ContextSnapshot.context()
+	} else {
+		gathered, err = BuildContext(def.ContextSources(), opts.ContextOpts)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("build context: %w", err)
 	}

@@ -2,6 +2,10 @@ package main
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -50,17 +54,46 @@ func (c *oneshotAPIEntryCalls) assertZero(t *testing.T) {
 	}
 }
 
-func TestRunCommitCommand_APIFailsClosedBeforeDependencies(t *testing.T) {
+func TestRunCommitCommand_APIEntersGovernedRuntime(t *testing.T) {
 	calls := installOneshotAPIEntrySpies(t)
-	err := runCommitCommand([]string{"-backend", "api"})
+	repo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	runGit("init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "change.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "change.txt")
+
+	previousWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	err = runCommitCommand([]string{"-backend", "api"})
 	if err == nil {
-		t.Fatal("expected commit API backend to fail closed")
+		t.Fatal("expected dependency sentinel error")
 	}
-	want := "buckley commit API backend unavailable: governed commit model data policy is not installed; use --backend codex or --backend claude"
-	if err.Error() != want {
-		t.Fatalf("error = %q, want %q", err, want)
+	if !strings.Contains(err.Error(), "init dependencies: unexpected dependency initialization") {
+		t.Fatalf("error = %q, want dependency sentinel", err)
 	}
-	calls.assertZero(t)
+	if calls.dependenciesAndCatalog != 1 || calls.modelInfo != 0 || calls.invoker != 0 {
+		t.Fatalf("calls = %+v, want exactly one dependency initialization", calls)
+	}
 }
 
 func TestRunPRCommand_APIFailsClosedBeforeDependencies(t *testing.T) {
