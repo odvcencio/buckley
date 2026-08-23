@@ -28,6 +28,9 @@ func TestOneUseOSSOpenRouterClient_ExactBoundRequestAndContext(t *testing.T) {
 		t.Fatalf("NewOneUseOSSOpenRouterClient: %v", err)
 	}
 	t.Cleanup(func() { _ = governed.Close() })
+	if got := governed.client.ossHTTPClient.Timeout; got != oxAlphaOneUseTransportTimeout {
+		t.Fatalf("OSS transport timeout = %v, want %v", got, oxAlphaOneUseTransportTimeout)
+	}
 
 	boundPrompt[0] = 'X'
 	admitted, err := governed.admit(t.Context())

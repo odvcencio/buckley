@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
-const OxAlphaOpenRouterModelID = "stealth/ox-alpha"
+const (
+	OxAlphaOpenRouterModelID      = "stealth/ox-alpha"
+	oxAlphaOneUseTransportTimeout = 15 * time.Minute
+)
 
 var ErrOpenRouterOSSOneUseSpent = errors.New("model: openrouter oss one-use client is spent")
 
@@ -52,6 +56,10 @@ func NewOneUseOSSOpenRouterClient(apiKey, baseURL, modelID string, rule *workspa
 	}
 
 	client := NewClientWithOptions(apiKey, baseURL, ClientOptions{NetworkLogsEnabled: false})
+	// Ox Alpha can take longer than the generic five-minute provider timeout
+	// for a full non-streaming patch. Keep transport lifetime above the CLI's
+	// bounded request context so that the caller remains the retry-free owner.
+	client.SetTimeout(oxAlphaOneUseTransportTimeout)
 	governed := &OneUseOSSOpenRouterClient{
 		provider:  &OpenRouterProvider{client: client},
 		client:    client,
