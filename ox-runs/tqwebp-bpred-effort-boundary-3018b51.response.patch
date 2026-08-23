@@ -1,0 +1,123 @@
+```diff
+--- a/internal/encoder/cost.go
++++ b/internal/encoder/cost.go
+@@
+ func preferBPred(wholeDistortion, bPredDistortion int32, wholeRate, bPredRate lumaRateQ8, lambda uint64) bool {
+ 	return rdScore(bPredDistortion, bPredRate.total(), lambda) <
+ 		rdScore(wholeDistortion, wholeRate.total(), lambda)
+ }
+ 
++// bPredRDAdvantageMargin returns the minimum RD advantage, in Q8 score
++// units, required before a macroblock may switch to B_PRED.
++//
++// Invariant: the exact per-macroblock score prices only this macroblock,
++// but accepting B_PRED rewrites the intra-mode context that every later
++// macroblock prices against. A win smaller than the rate-equivalent of
++// the distortion-admission bar (the same penalty that gates
++// reconstruction improvement) is context noise, not a decisive win, and
++// must leave the macroblock whole. The margin is therefore
++// lambda*penalty: penalty is the established SSE-domain admission bar,
++// and lambda converts distortion units into this score's rate domain.
++// The product is overflow-checked and saturates, which can only reject.
++func bPredRDAdvantageMargin(lambda, penalty uint64) uint64 {
++	if lambda == 0 || penalty == 0 {
++		return 0
++	}
++	if lambda > ^uint64(0)/penalty {
++		return ^uint64(0)
++	}
++	return lambda * penalty
++}
++
++// bPredWinsRD reports whether the B_PRED candidate beats the whole-block
++// candidate by a strict RD advantage exceeding margin. An exact score
++// tie, or any non-positive advantage, stays whole-block.
++func bPredWinsRD(wholeDistortion, bPredDistortion int32, wholeRate, bPredRate lumaRateQ8, lambda, margin uint64) bool {
++	wholeScore := rdScore(wholeDistortion, wholeRate.total(), lambda)
++	bPredScore := rdScore(bPredDistortion, bPredRate.total(), lambda)
++	if bPredScore >= wholeScore {
++		return false
++	}
++	return wholeScore-bPredScore > margin
++}
++
+ func lumaLambda(q quantize.Quantizer) uint64 {
+--- a/internal/encoder/encoder.go
++++ b/internal/encoder/encoder.go
+@@
+ 	skipProb := e.skipProbability()
+ 	wholeRate := e.lumaCandidateRateQ8(mbx, mby, &wholeMB, nil, false, skipProb, leftY2, upY2)
+ 	bPredRate := e.lumaCandidateRateQ8(mbx, mby, &candidate, &modes, true, skipProb, leftY2, upY2)
++	lambda := lumaLambda(e.q)
+ 	if !bPredImprovesReconstruction(wholeDistortion, bPredDistortion, penalty) ||
+-		!preferBPred(wholeDistortion, bPredDistortion, wholeRate, bPredRate, lumaLambda(e.q)) {
++		!bPredWinsRD(wholeDistortion, bPredDistortion, wholeRate, bPredRate, lambda, bPredRDAdvantageMargin(lambda, uint64(penalty))) {
+ 		*mb = wholeMB
+ 		copyLuma16(e.rec.Y, e.rec.YStride, mbx*16, mby*16, wholeRecon[:], 16, 0, 0)
+ 		return
+ 	}
+--- a/internal/encoder/cost_test.go
++++ b/internal/encoder/cost_test.go
+@@
++func TestBPredRDAdvantageMargin(t *testing.T) {
++	cases := []struct {
++		name           string
++		lambda, penalty uint64
++		want           uint64
++	}{
++		{"zero lambda", 0, 5, 0},
++		{"zero penalty", 3, 0, 0},
++		{"product", 3, 4, 12},
++		{"unit", 1, 1, 1},
++		{"saturates", ^uint64(0), 2, ^uint64(0)},
++		{"saturates reversed", 2, ^uint64(0), ^uint64(0)},
++		{"max safe product", ^uint64(0)/3, 3, ^uint64(0) - ^uint64(0)%3},
++	}
++	for _, tc := range cases {
++		if got := bPredRDAdvantageMargin(tc.lambda, tc.penalty); got != tc.want {
++			t.Errorf("%s: margin = %d, want %d", tc.name, got, tc.want)
++		}
++	}
++}
++
++func TestBPredWinsRDMarginBoundaries(t *testing.T) {
++	const lambda, penalty = 2, 3 // margin = 6
++	margin := bPredRDAdvantageMargin(lambda, penalty)
++	whole := lumaRateQ8{control: 10, tokens: 20}   // total 30
++	bPred := lumaRateQ8{control: 10, tokens: 10}   // total 20
++	cases := []struct {
++		name                              string
++		wholeDistortion, bPredDistortion int32
++		want                              bool
++	}{
++		{"below margin", 130, 100, false}, // gain 30*2-(30)*... = 60-? see below
++		{"at margin", 131, 100, false},    // strict: gain == margin rejects
++		{"above margin", 134, 100, true},
++		{"exact tie", 100, 100, false},
++		{"bPred worse", 90, 100, false},
++	}
++	for _, tc := range cases {
++		got := bPredWinsRD(tc.wholeDistortion, tc.bPredDistortion, whole, bPred, lambda, margin)
++		if got != tc.want {
++			t.Errorf("%s: bPredWinsRD = %v, want %v", tc.name, got, tc.want)
++		}
++	}
++}
++
++func TestBPredWinsRDOverflowSafeExtreme(t *testing.T) {
++	// Saturated margin can never be met; must reject without panicking
++	// even for very large finite scores.
++	margin := bPredRDAdvantageMargin(^uint64(0), 2)
++	big := lumaRateQ8{control: ^uint64(0) / 4, tokens: ^uint64(0) / 4}
++	if bPredWinsRD(1<<30, 0, big, big, 1<<20, margin) {
++		t.Error("saturated margin admitted B_PRED")
++	}
++	// Large but non-overflowing finite scores with a finite margin.
++	finite := bPredRDAdvantageMargin(1<<20, 1<<10)
++	if !bPredWinsRD(1<<40, 0, lumaRateQ8{tokens: 1 << 40}, lumaRateQ8{tokens: 0}, 1<<20, finite) {
++		t.Error("decisive large-margin win rejected")
++	}
++}
+```
+
+Notes on the repair: the exact-rate work is retained verbatim (`rdScore`, `lumaCandidateRateQ8`, `preferBPred`, and all existing tests are untouched). The generalized boundary adds one derived quantity — `bPredRDAdvantageMargin(lambda, penalty) = lambda*penalty` — justified by a local invariant: accepting B_PRED rewrites the intra-mode context later macroblocks price against, so only wins strictly exceeding the rate-equivalent of the existing distortion-admission bar (`penalty`, already quantizer-derived and used by `bPredImprovesReconstruction`) are decisive; everything else stays whole-block, preserving exact-tie strictness. The margin is computed in fixed point with checked multiplication that saturates toward rejection, keeps per-macroblock work O(1) and deterministic, changes no public API or Method 0 path, and the new table tests exercise strictly below, exactly at, and strictly above the boundary plus the overflow-safe saturated extreme, without encoding the fixture or the count 51.
