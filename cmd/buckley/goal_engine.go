@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // Goal-engine tool names. These two tools exist only inside goal turns:
@@ -79,6 +81,7 @@ type goalTurnState struct {
 	completedSummary string
 	blocker          *taskstate.Blocker
 	stateChanged     bool
+	evidenceParts    []string
 }
 
 // RunTurn implements goalloop.TurnEngine.
@@ -127,6 +130,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		return outcomes, nil
 	})
 	observeOutcome := func(_ context.Context, call model.ToolCall, outcome agentloop.ToolOutcome, replayed bool) error {
+		state.evidenceParts = append(state.evidenceParts, goalEvidencePart(call, outcome))
 		if !replayed {
 			return nil
 		}
@@ -150,7 +154,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 			needs, _ := params["needs"].(string)
 			state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
 		default:
-			if outcome.EffectClass != "" && outcome.EffectClass != string(tool.ImpactReadOnly) && outcome.EffectClass != "control" {
+			if outcome.Success && outcome.EffectClass != "" && outcome.EffectClass != string(tool.ImpactReadOnly) && outcome.EffectClass != "control" {
 				state.stateChanged = true
 			}
 		}
@@ -192,12 +196,13 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	}
 
 	outcome := goalloop.TurnOutcome{
-		Rounds:           result.Rounds,
-		ToolCalls:        result.ToolCalls,
-		PromptTokens:     result.Usage.PromptTokens,
-		CompletionTokens: result.Usage.CompletionTokens,
-		StateChanged:     state.stateChanged,
-		Blocker:          state.blocker,
+		Rounds:              result.Rounds,
+		ToolCalls:           result.ToolCalls,
+		PromptTokens:        result.Usage.PromptTokens,
+		CompletionTokens:    result.Usage.CompletionTokens,
+		StateChanged:        state.stateChanged,
+		EvidenceFingerprint: goalEvidenceFingerprint(state.evidenceParts),
+		Blocker:             state.blocker,
 	}
 	if cost, err := e.mgr.CalculateCost(modelID, result.Usage); err == nil {
 		outcome.SpentUSD = cost
@@ -219,6 +224,27 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		outcome.Summary = summary
 	}
 	return outcome, nil
+}
+
+func goalEvidencePart(call model.ToolCall, outcome agentloop.ToolOutcome) string {
+	arguments := strings.TrimSpace(call.Function.Arguments)
+	if arguments != "" {
+		var decoded any
+		if json.Unmarshal([]byte(arguments), &decoded) == nil {
+			if canonical, err := json.Marshal(decoded); err == nil {
+				arguments = string(canonical)
+			}
+		}
+	}
+	return fmt.Sprintf("%s\x00%s\x00%t\x00%s", strings.TrimSpace(call.Function.Name), arguments, outcome.Success, strings.TrimSpace(outcome.Content))
+}
+
+func goalEvidenceFingerprint(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1e")))
+	return fmt.Sprintf("sha256:%x", sum)
 }
 
 func toolCallParams(call model.ToolCall) map[string]any {
@@ -271,27 +297,37 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 	effectClass := string(tool.ImpactDestructive)
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
 		effectClass = string(tool.GetMetadata(registered).Impact)
-		if tool.GetMetadata(registered).Impact != tool.ImpactReadOnly {
-			state.stateChanged = true
-		}
 	}
 	result, err := e.registry.ExecuteWithContext(ctx, call.Function.Name, params)
 	if err != nil {
-		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass}
+		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), Error: err.Error(), EffectClass: effectClass}
 	}
 	if result == nil {
 		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass}
 	}
 	content := formatACPToolResult(result, nil)
 	yield := tool.ResultYieldForTool(call.Function.Name, result, nil)
+	if result.Success && effectClass != string(tool.ImpactReadOnly) {
+		state.stateChanged = true
+	}
 	return agentloop.ToolOutcome{
 		Content:       content,
 		Success:       result.Success,
+		Error:         result.Error,
+		Stderr:        toolResultString(result, "stderr"),
 		EffectClass:   effectClass,
 		YieldObserved: yield.Observed,
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,
 	}
+}
+
+func toolResultString(result *builtin.Result, key string) string {
+	if result == nil || result.Data == nil {
+		return ""
+	}
+	value, _ := result.Data[key].(string)
+	return value
 }
 
 // storeCompletionEvidence persists the completion summary as an evidence

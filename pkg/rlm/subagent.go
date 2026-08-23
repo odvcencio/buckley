@@ -161,6 +161,8 @@ type SubAgentToolCall struct {
 	Name      string
 	Arguments string
 	Result    string
+	Error     string
+	Stderr    string
 	Data      map[string]any
 	Success   bool
 	Duration  time.Duration
@@ -451,7 +453,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
 		for i, tr := range toolResults {
-			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success}
+			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
 		}
 		return outcomes, nil
 	})
@@ -894,6 +896,7 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 				Name:      name,
 				Arguments: call.Function.Arguments,
 				Result:    fmt.Sprintf("tool call budget exhausted after %d calls; synthesize the final answer from completed evidence", a.maxToolCalls),
+				Error:     "tool call budget exhausted",
 				Success:   false,
 			}
 			toolResults = append(toolResults, toolCall)
@@ -905,6 +908,7 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 				Name:      name,
 				Arguments: call.Function.Arguments,
 				Result:    fmt.Sprintf("verification budget exhausted after %d call; synthesize from existing CI and source evidence", a.maxVerificationCalls),
+				Error:     "verification budget exhausted",
 				Success:   false,
 			}
 			toolResults = append(toolResults, toolCall)
@@ -932,6 +936,7 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 				Name:      name,
 				Arguments: call.Function.Arguments,
 				Result:    fmt.Sprintf("invalid arguments: %v", err),
+				Error:     fmt.Sprintf("invalid arguments: %v", err),
 				Success:   false,
 			})
 			continue
@@ -960,11 +965,14 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 
 		if err != nil {
 			toolCall.Result = fmt.Sprintf("execution error: %v", err)
+			toolCall.Error = err.Error()
 			toolCall.Success = false
 		} else {
 			toolCall.Success = res != nil && res.Success
 			if res != nil {
 				toolCall.Data = cloneToolResultData(res.Data)
+				toolCall.Error = res.Error
+				toolCall.Stderr, _ = res.Data["stderr"].(string)
 			}
 			toolCall.Result = formatToolResult(res)
 		}

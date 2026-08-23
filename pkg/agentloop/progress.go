@@ -71,6 +71,10 @@ type ProgressState struct {
 	YieldObservedCalls        int
 	ZeroYieldCalls            int
 	ConsecutiveZeroYieldCalls int
+	// NoProgressTurns is the durable consecutive-turn streak maintained by
+	// the goal loop. Unlike per-turn repetition signals, it survives worker
+	// and workflow restarts.
+	NoProgressTurns int
 }
 
 // ProgressSnapshot is the provider-neutral operation summary accumulated by
@@ -270,6 +274,14 @@ func (c ProgressController) Decide(state ProgressState, counters FuseCounters) P
 	verify := state.StateChanged && state.VerificationDebt > thresholds.VerifyDebt
 	step("verification_debt", verify,
 		fmt.Sprintf("verification debt %.2f above %.2f after state change", state.VerificationDebt, thresholds.VerifyDebt), DecideVerify)
+
+	durablePark := state.NoProgressTurns >= 3
+	step("durable_no_progress_park", durablePark,
+		fmt.Sprintf("%d consecutive turns produced no new evidence or state change; park instead of burn", state.NoProgressTurns), DecidePark)
+
+	durableReplan := state.NoProgressTurns >= 2
+	step("durable_no_progress_replan", durableReplan,
+		fmt.Sprintf("%d consecutive turns produced the same evidence without a state change; checkpoint and replan", state.NoProgressTurns), DecideReplan)
 
 	replan := state.Repetition >= thresholds.ReplanRepetition &&
 		state.EvidenceObserved && state.EvidenceNovelty <= thresholds.LowNovelty

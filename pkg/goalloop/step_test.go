@@ -165,3 +165,76 @@ func TestLoop_RecordDurableTurnRetryIsIdempotent(t *testing.T) {
 		t.Fatalf("durable turn events = %d, want 1", len(events))
 	}
 }
+
+func TestLoop_TurnStepPersistsNoProgressAcrossCheckpoint(t *testing.T) {
+	t.Parallel()
+	engine := &scriptedEngine{outcomes: []TurnOutcome{
+		{Rounds: 1, ToolCalls: 1, EvidenceFingerprint: "sha256:same", Summary: "inspected"},
+		{Rounds: 1, ToolCalls: 1, EvidenceFingerprint: "sha256:same", Summary: "inspected"},
+		{Rounds: 1, ToolCalls: 1, EvidenceFingerprint: "sha256:same", Summary: "inspected"},
+	}}
+	loop, _ := newTestLoop(t, Config{Engine: engine})
+	ctx := context.Background()
+	intake, err := loop.Start(ctx, Goal{Statement: "finish unattended", Posture: "overnight"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	taskID := intake.Tasks[0].TaskID
+	seed, err := loop.SeedTask(ctx, taskID, intake.Tasks[0].Spec)
+	if err != nil {
+		t.Fatalf("SeedTask: %v", err)
+	}
+
+	first, err := loop.TurnStep(ctx, TurnStepRequest{
+		RunID: intake.RunID, TaskID: taskID, Goal: intake.Goal, Spec: intake.Tasks[0].Spec,
+		Generation: seed.Generation, Drive: seed.Drive,
+	})
+	if err != nil {
+		t.Fatalf("first TurnStep: %v", err)
+	}
+	if first.Kind != StepContinue || first.Drive.NoProgressTurns != 1 {
+		t.Fatalf("first step = %+v, want continue with streak 1", first)
+	}
+
+	second, err := loop.TurnStep(ctx, TurnStepRequest{
+		RunID: intake.RunID, TaskID: taskID, Goal: intake.Goal, Spec: intake.Tasks[0].Spec,
+		Generation: seed.Generation, TurnIndex: 1, Drive: first.Drive, Counters: first.Counters,
+	})
+	if err != nil {
+		t.Fatalf("second TurnStep: %v", err)
+	}
+	if second.Kind != StepYield || second.Decision != "replan" || second.Drive.NoProgressTurns != 2 {
+		t.Fatalf("second step = %+v, want durable replan at streak 2", second)
+	}
+
+	restarted, err := loop.SeedTask(ctx, taskID, intake.Tasks[0].Spec)
+	if err != nil {
+		t.Fatalf("SeedTask after replan: %v", err)
+	}
+	if restarted.Drive.NoProgressTurns != 2 || restarted.Drive.EvidenceFingerprint != "sha256:same" {
+		t.Fatalf("restarted drive = %+v, want persisted streak and fingerprint", restarted.Drive)
+	}
+
+	third, err := loop.TurnStep(ctx, TurnStepRequest{
+		RunID: intake.RunID, TaskID: taskID, Goal: intake.Goal, Spec: intake.Tasks[0].Spec,
+		Generation: restarted.Generation, Drive: restarted.Drive,
+	})
+	if err != nil {
+		t.Fatalf("third TurnStep: %v", err)
+	}
+	if third.Kind != StepPark || third.Decision != "park" || third.Status != taskstate.StatusParked {
+		t.Fatalf("third step = %+v, want park at streak 3", third)
+	}
+}
+
+func TestDriveState_StateChangeResetsNoProgress(t *testing.T) {
+	drive := &driveState{lastEvidenceFingerprint: "sha256:same", noProgressTurns: 2}
+	drive.observeHarnessProgress(TurnOutcome{StateChanged: true, EvidenceFingerprint: "sha256:same"})
+	if drive.noProgressTurns != 0 {
+		t.Fatalf("noProgressTurns = %d, want reset", drive.noProgressTurns)
+	}
+	drive.observeHarnessProgress(TurnOutcome{EvidenceFingerprint: "sha256:new"})
+	if drive.noProgressTurns != 1 || drive.lastEvidenceFingerprint != "sha256:new" {
+		t.Fatalf("drive = %+v, want novel evidence streak 1", drive)
+	}
+}

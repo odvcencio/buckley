@@ -290,6 +290,8 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 			outcomes = append(outcomes, agentloop.ToolOutcome{
 				Content:       modelResult,
 				Success:       success,
+				Error:         toolLoopResultError(result, execErr),
+				Stderr:        toolLoopResultString(result, "stderr"),
 				YieldObserved: yield.Observed,
 				YieldCount:    yield.Count,
 				YieldUnit:     yield.Unit,
@@ -325,6 +327,24 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 			return window
 		},
 	})
+}
+
+func toolLoopResultError(result *builtin.Result, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if result == nil {
+		return "tool returned no result"
+	}
+	return result.Error
+}
+
+func toolLoopResultString(result *builtin.Result, key string) string {
+	if result == nil || result.Data == nil {
+		return ""
+	}
+	value, _ := result.Data[key].(string)
+	return value
 }
 
 // callToolLoopTurn executes one model turn, using the continuation-aware

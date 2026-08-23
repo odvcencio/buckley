@@ -56,6 +56,7 @@ type Event struct {
 	FinishReason string   `json:"finish_reason,omitempty"`
 	StopReason   string   `json:"stop_reason,omitempty"`
 	Error        string   `json:"error,omitempty"`
+	Stderr       string   `json:"stderr,omitempty"`
 	EvidenceIDs  []string `json:"evidence_ids,omitempty"`
 }
 

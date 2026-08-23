@@ -54,7 +54,17 @@ type CheckpointState struct {
 	Questions   []Question          `json:"questions,omitempty"`
 	Spend       Spend               `json:"spend"`
 	Files       []string            `json:"files,omitempty"`
+	Harness     *HarnessProgress    `json:"harness_progress,omitempty"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+}
+
+// HarnessProgress is provider-neutral loop state that must survive a goal
+// worker restart. It is deliberately separate from the agent-authored summary
+// and next actions: models may propose work, but only the harness updates these
+// deterministic counters.
+type HarnessProgress struct {
+	EvidenceFingerprint string `json:"evidence_fingerprint,omitempty"`
+	NoProgressTurns     int    `json:"no_progress_turns,omitempty"`
 }
 
 // CompletedItem is one evidence-linked completed claim. Claims require

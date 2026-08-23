@@ -197,6 +197,8 @@ func runReviewCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := newReviewCommandContext(time.Now(), opts.timeout)
+	defer cancel()
 
 	primaryModelOverride := strings.TrimSpace(opts.model)
 	if primaryModelOverride == "" {
@@ -218,8 +220,9 @@ func runReviewCommand(args []string) error {
 	}
 	defer runtime.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
-	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("review deadline exhausted during initialization: %w", err)
+	}
 
 	if !quietMode {
 		printReviewModelSelection(runtime)

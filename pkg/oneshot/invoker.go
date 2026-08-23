@@ -643,10 +643,12 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			})
 
 			result, execErr := executor.Execute(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			errorText := ""
 			if execErr != nil {
 				result = fmt.Sprintf("Error: %v", execErr)
+				errorText = execErr.Error()
 			}
-			outcomes[i] = agentloop.ToolOutcome{Content: result, Success: execErr == nil}
+			outcomes[i] = agentloop.ToolOutcome{Content: result, Success: execErr == nil, Error: errorText}
 		}
 		return outcomes, nil
 	})

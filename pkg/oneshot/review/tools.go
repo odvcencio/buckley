@@ -19,6 +19,8 @@ type VerificationTools struct {
 	workDir string
 }
 
+const reviewReadFilePageLines = 100
+
 // NewVerificationTools creates verification tools rooted at workDir.
 func NewVerificationTools(workDir string) *VerificationTools {
 	if workDir == "" {
@@ -32,7 +34,7 @@ func (v *VerificationTools) Definitions() []tools.Definition {
 	return []tools.Definition{
 		{
 			Name:        "read_file",
-			Description: "Read the contents of a file. Use this to verify claims about code structure, function definitions, or implementation details.",
+			Description: "Read a bounded page of a file. Returns at most 100 lines and a continuation line when more content remains.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
@@ -174,7 +176,7 @@ func (v *VerificationTools) readFile(params map[string]any) (string, error) {
 	// Handle line ranges
 	lines := strings.Split(string(content), "\n")
 	startLine := 1
-	endLine := len(lines)
+	endLine := 0
 
 	if sl, ok := params["start_line"].(float64); ok && sl > 0 {
 		startLine = int(sl)
@@ -186,6 +188,12 @@ func (v *VerificationTools) readFile(params map[string]any) (string, error) {
 	// Clamp
 	if startLine < 1 {
 		startLine = 1
+	}
+	if endLine == 0 {
+		endLine = startLine + reviewReadFilePageLines - 1
+	}
+	if endLine-startLine+1 > reviewReadFilePageLines {
+		return "", fmt.Errorf("read_file supports pages of at most %d lines; continue with start_line", reviewReadFilePageLines)
 	}
 	if endLine > len(lines) {
 		endLine = len(lines)
@@ -200,6 +208,9 @@ func (v *VerificationTools) readFile(params map[string]any) (string, error) {
 
 	for i := startLine - 1; i < endLine; i++ {
 		sb.WriteString(fmt.Sprintf("%4d: %s\n", i+1, lines[i]))
+	}
+	if endLine < len(lines) {
+		sb.WriteString(fmt.Sprintf("\nContinue with start_line=%d (maximum %d lines per page).\n", endLine+1, reviewReadFilePageLines))
 	}
 
 	return sb.String(), nil

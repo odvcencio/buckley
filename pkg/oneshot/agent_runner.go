@@ -106,6 +106,8 @@ type AgentToolCall struct {
 	Name      string
 	Arguments string
 	Result    string
+	Error     string
+	Stderr    string
 	Data      map[string]any
 	Success   bool
 	Duration  time.Duration
@@ -488,6 +490,8 @@ func convertAgentToolCalls(calls []rlm.SubAgentToolCall) []AgentToolCall {
 			Name:      call.Name,
 			Arguments: call.Arguments,
 			Result:    call.Result,
+			Error:     call.Error,
+			Stderr:    call.Stderr,
 			Data:      call.Data,
 			Success:   call.Success,
 			Duration:  call.Duration,

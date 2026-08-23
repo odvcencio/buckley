@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,15 @@ import (
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+func TestNewReviewCommandContextConsumesElapsedSetupTime(t *testing.T) {
+	ctx, cancel := newReviewCommandContext(time.Now().Add(-2*time.Second), time.Second)
+	defer cancel()
+	<-ctx.Done()
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
+	}
+}
 
 func expectExactCriticDependencyInitialization(t *testing.T, expected string) error {
 	t.Helper()
