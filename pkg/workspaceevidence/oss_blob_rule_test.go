@@ -109,6 +109,64 @@ func TestEvaluateCanonicalOSSLicense_DoesNotUseEvidenceHint(t *testing.T) {
 	}
 }
 
+func TestMintTrackedPromptOSSBlobRule_AllowsAppliedApache20License(t *testing.T) {
+	const eosLicenseBlobOID = "97f06839de1194d942d90a956354c1d1f8d5111d"
+	prompt := []byte("Repair strict Eos string escapes.\n")
+	_, _, evidence := newOSSBlobRuleTestRepo(
+		t,
+		"LICENSE",
+		eosApache20License(),
+		"evidence/tasks/strict-string-escapes.md",
+		prompt,
+	)
+	if evidence.blobOID != eosLicenseBlobOID {
+		t.Fatalf("license blob OID = %s, want exact Eos blob %s", evidence.blobOID, eosLicenseBlobOID)
+	}
+
+	rule, gotPrompt, err := MintTrackedPromptOSSBlobRule(t.Context(), evidence, "evidence/tasks/strict-string-escapes.md")
+	if err != nil {
+		t.Fatalf("MintTrackedPromptOSSBlobRule() error = %v", err)
+	}
+	if !bytes.Equal(gotPrompt, prompt) {
+		t.Fatalf("prompt = %q, want exact committed bytes %q", gotPrompt, prompt)
+	}
+	if _, err := rule.ClaimForDispatch(t.Context(), gotPrompt); err != nil {
+		t.Fatalf("ClaimForDispatch() error = %v", err)
+	}
+}
+
+func TestEvaluateCanonicalOSSLicense_RejectsAlteredAppliedApache20License(t *testing.T) {
+	license := eosApache20License()
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "mutated terms",
+			content: strings.Replace(license, "shall mean the terms and conditions", "may mean the terms and conditions", 1),
+		},
+		{
+			name:    "mutated boilerplate",
+			content: strings.Replace(license, "distributed under the License", "distributed under this License", 1),
+		},
+		{
+			name:    "proprietary copyright tail",
+			content: strings.Replace(license, "Copyright 2026 Oscar Villavicencio", "Copyright 2026 Oscar Villavicencio. All rights reserved.", 1),
+		},
+		{
+			name:    "arbitrary trailing restriction",
+			content: license + "\nCommercial use requires written permission.\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := evaluateCanonicalOSSLicense([]byte(tt.content)); ok || got != "" {
+				t.Fatalf("altered Apache decision = %q, %v", got, ok)
+			}
+		})
+	}
+}
+
 func TestMintTrackedPromptOSSBlobRule_RejectsUnboundPaths(t *testing.T) {
 	root, _, evidence := newOSSBlobRuleTestRepo(
 		t,
@@ -386,4 +444,17 @@ func newOSSBlobRuleTestRepo(t *testing.T, licensePath, license, promptPath strin
 		t.Fatal(err)
 	}
 	return root, commit, evidence
+}
+
+func eosApache20License() string {
+	canonical := strings.TrimPrefix(apache20CanonicalText, "\n")
+	terms, _, ok := strings.Cut(canonical, "\n\n   APPENDIX: How to apply the Apache License to your work.")
+	if !ok {
+		panic("canonical Apache-2.0 terms marker is missing")
+	}
+	_, boilerplate, ok := strings.Cut(canonical, "   Copyright [yyyy] [name of copyright owner]")
+	if !ok {
+		panic("canonical Apache-2.0 copyright template is missing")
+	}
+	return terms + "\n\n   Copyright 2026 Oscar Villavicencio" + boilerplate + "\n"
 }

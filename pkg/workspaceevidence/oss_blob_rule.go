@@ -204,7 +204,7 @@ func evaluateCanonicalOSSLicense(content []byte) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if normalized == collapseLicenseWhitespace(apache20CanonicalText) {
+	if matchesCanonicalApache20License(lines, normalized) {
 		return "Apache-2.0", true
 	}
 	if body, ok := bodyAfterCopyright(lines, []string{"MIT License", "The MIT License (MIT)"}, false); ok &&
@@ -220,6 +220,53 @@ func evaluateCanonicalOSSLicense(content []byte) (string, bool) {
 		return "BSD-3-Clause", true
 	}
 	return "", false
+}
+
+func matchesCanonicalApache20License(lines []string, normalized string) bool {
+	canonicalLines, canonical, err := normalizedLicenseText([]byte(apache20CanonicalText))
+	if err != nil {
+		return false
+	}
+	if normalized == canonical {
+		return true
+	}
+
+	const (
+		termsEnd          = "END OF TERMS AND CONDITIONS"
+		copyrightTemplate = "Copyright [yyyy] [name of copyright owner]"
+	)
+	actualTermsEnd := licenseLineIndex(lines, termsEnd)
+	canonicalTermsEnd := licenseLineIndex(canonicalLines, termsEnd)
+	if actualTermsEnd < 0 || canonicalTermsEnd < 0 ||
+		collapseLicenseWhitespace(strings.Join(lines[:actualTermsEnd+1], "\n")) !=
+			collapseLicenseWhitespace(strings.Join(canonicalLines[:canonicalTermsEnd+1], "\n")) {
+		return false
+	}
+
+	copyrightLine := skipBlankLicenseLines(lines, actualTermsEnd+1)
+	if copyrightLine >= len(lines) || !validCopyrightNotice(lines[copyrightLine]) {
+		return false
+	}
+	actualBoilerplate := skipBlankLicenseLines(lines, copyrightLine+1)
+	templateLine := licenseLineIndex(canonicalLines, copyrightTemplate)
+	if actualBoilerplate >= len(lines) || templateLine < 0 {
+		return false
+	}
+	canonicalBoilerplate := skipBlankLicenseLines(canonicalLines, templateLine+1)
+	if canonicalBoilerplate >= len(canonicalLines) {
+		return false
+	}
+	return collapseLicenseWhitespace(strings.Join(lines[actualBoilerplate:], "\n")) ==
+		collapseLicenseWhitespace(strings.Join(canonicalLines[canonicalBoilerplate:], "\n"))
+}
+
+func licenseLineIndex(lines []string, target string) int {
+	for i, line := range lines {
+		if line == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func canonicalOSSPromptPath(value string) (string, error) {
