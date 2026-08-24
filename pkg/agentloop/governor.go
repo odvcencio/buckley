@@ -160,7 +160,16 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 
 	actionKey := digest(name + "\x00" + arguments)
 	exactKey := digest(actionKey + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
-	outcomeKey := digest(name + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
+	// A successful result is evidence about the specific action that produced
+	// it. Different searches can legitimately return the same empty result,
+	// and treating those as one repeated outcome can stop broad discovery
+	// before the agent reaches an edit. Failed outcomes remain argument-agnostic
+	// so changing paths or queries cannot evade a persistent tool failure.
+	outcomeScope := name
+	if success {
+		outcomeScope += "\x00" + arguments
+	}
+	outcomeKey := digest(outcomeScope + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
 
 	g.toolCalls++
 	g.exactCounts[exactKey]++

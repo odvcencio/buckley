@@ -79,6 +79,21 @@ func TestGovernorDetectsRepeatedOutcomeWithChangingArguments(t *testing.T) {
 	}
 }
 
+func TestGovernorAllowsSuccessfulEmptySearchesWithChangingArguments(t *testing.T) {
+	config := DefaultConfig()
+	config.ExactRepeatLimit = 20
+	config.CycleRepeats = 10
+	config.OutcomeRepeatLimit = 4
+	governor := New(config)
+
+	for _, pattern := range []string{"MeshVertices", "drawElements", "drawIndexed", "setIndexBuffer", "retainedGeometry"} {
+		decision := governor.Observe("search_text", `{"pattern":"`+pattern+`"}`, "no matches", true)
+		if decision.Stop || decision.Nudge != "" {
+			t.Fatalf("successful search %q = %+v, want no intervention", pattern, decision)
+		}
+	}
+}
+
 func TestGovernorEnforcesRoundAndToolLimits(t *testing.T) {
 	governor := New(Config{
 		MaxRounds:          2,
