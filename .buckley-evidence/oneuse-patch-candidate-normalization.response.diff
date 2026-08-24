@@ -1,0 +1,555 @@
+--- a/cmd/buckley-ox-once/main.go
++++ b/cmd/buckley-ox-once/main.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"errors"
+ 	"flag"
+@@ -40,44 +41,50 @@ func run() error {
+-	var repoRoot, exactHead, promptPath, outputPath string
+-	flag.StringVar(&repoRoot, "repo", "", "canonical clean Git worktree root")
+-	flag.StringVar(&exactHead, "head", "", "exact full HEAD commit OID")
+-	flag.StringVar(&promptPath, "prompt", "", "repo-relative prompt blob committed at --head")
+-	flag.StringVar(&outputPath, "output", "", "exclusive output file")
+-	flag.Parse()
+-
+-	if repoRoot == "" || exactHead == "" || promptPath == "" || outputPath == "" {
+-		return errors.New("--repo, --head, --prompt, and --output are required")
+-	}
+-	canonicalRoot, err := canonicalDirectory(repoRoot)
+-	if err != nil {
+-		return err
+-	}
+-	if err := requireExactCleanHead(canonicalRoot, exactHead); err != nil {
+-		return err
+-	}
+-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+-	defer cancel()
+-	rule, prompt, err := formTrackedOSSPrompt(ctx, canonicalRoot, exactHead, promptPath)
+-	if err != nil {
+-		return err
+-	}
+-	cfg, err := config.Load()
+-	if err != nil {
+-		return fmt.Errorf("load Buckley config: %w", err)
+-	}
+-	provider := cfg.Providers.OpenRouter
+-	client, err := model.NewOneUseOSSOpenRouterClient(provider.APIKey, provider.BaseURL, model.OxAlphaOpenRouterModelID, rule, prompt)
+-	if err != nil {
+-		return err
+-	}
+-	defer client.Close()
+-
+-	response, err := client.CompletePatch(ctx)
+-	if err != nil {
+-		return fmt.Errorf("Ox Alpha request failed: %w", err)
+-	}
+-	content, err := oxAlphaPatchText(response)
+-	if err != nil {
+-		return err
+-	}
+-	if err := writeExclusiveOutput(outputPath, []byte(content)); err != nil {
+-		return err
+-	}
+-	if err := validatePatchResponse(ctx, canonicalRoot, []byte(content)); err != nil {
+-		return fmt.Errorf("raw Ox Alpha response preserved at %s: %w", outputPath, err)
+-	}
+-	fmt.Printf("saved one Ox Alpha response for %s at %s\n", exactHead, outputPath)
+-	return nil
+-}
++	var repoRoot, exactHead, promptPath, outputPath, candidatePath string
++	flag.StringVar(&repoRoot, "repo", "", "canonical clean Git worktree root")
++	flag.StringVar(&exactHead, "head", "", "exact full HEAD commit OID")
++	flag.StringVar(&promptPath, "prompt", "", "repo-relative prompt blob committed at --head")
++	flag.StringVar(&outputPath, "output", "", "exclusive raw output file")
++	flag.StringVar(&candidatePath, "candidate", "", "exclusive normalized candidate patch file")
++	flag.Parse()
++
++	if repoRoot == "" || exactHead == "" || promptPath == "" || outputPath == "" || candidatePath == "" {
++		return errors.New("--repo, --head, --prompt, --output, and --candidate are required")
++	}
++	if err := requireDistinctPaths(outputPath, candidatePath); err != nil {
++		return err
++	}
++	if err := requireAbsentPath(outputPath); err != nil {
++		return err
++	}
++	if err := requireAbsentPath(candidatePath); err != nil {
++		return err
++	}
++	canonicalRoot, err := canonicalDirectory(repoRoot)
++	if err != nil {
++		return err
++	}
++	if err := requireExactCleanHead(canonicalRoot, exactHead); err != nil {
++		return err
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
++	defer cancel()
++	rule, prompt, err := formTrackedOSSPrompt(ctx, canonicalRoot, exactHead, promptPath)
++	if err != nil {
++		return err
++	}
++	cfg, err := config.Load()
++	if err != nil {
++		return fmt.Errorf("load Buckley config: %w", err)
++	}
++	provider := cfg.Providers.OpenRouter
++	client, err := model.NewOneUseOSSOpenRouterClient(provider.APIKey, provider.BaseURL, model.OxAlphaOpenRouterModelID, rule, prompt)
++	if err != nil {
++		return err
++	}
++	defer client.Close()
++
++	response, err := client.CompletePatch(ctx)
++	if err != nil {
++		return fmt.Errorf("Ox Alpha request failed: %w", err)
++	}
++	content, err := oxAlphaPatchText(response)
++	if err != nil {
++		return err
++	}
++	if err := writeExclusiveOutput(outputPath, []byte(content)); err != nil {
++		return err
++	}
++	candidate, err := normalizePatchCandidate([]byte(content))
++	if err != nil {
++		return fmt.Errorf("raw Ox Alpha response preserved at %s: candidate rejected: %w", outputPath, err)
++	}
++	if err := validatePatchCandidate(ctx, canonicalRoot, candidate); err != nil {
++		return fmt.Errorf("raw Ox Alpha response preserved at %s: candidate rejected: %w", outputPath, err)
++	}
++	if err := writeExclusiveOutput(candidatePath, candidate); err != nil {
++		return fmt.Errorf("raw Ox Alpha response preserved at %s: %w", outputPath, err)
++	}
++	fmt.Printf("saved one Ox Alpha response for %s at %s\n", exactHead, outputPath)
++	fmt.Printf("saved normalized candidate patch at %s\n", candidatePath)
++	return nil
++}
++
++func requireDistinctPaths(outputPath, candidatePath string) error {
++	if outputPath == candidatePath {
++		return errors.New("--output and --candidate must be distinct paths")
++	}
++	return nil
++}
++
++func requireAbsentPath(path string) error {
++	switch _, err := os.Lstat(path); {
++	case err == nil:
++		return fmt.Errorf("refusing to overwrite existing path: %s", path)
++	case !os.IsNotExist(err):
++		return err
++	}
++	return nil
++}
++
++// normalizePatchCandidate derives the candidate patch from the raw assistant
++// content using only bounded, deterministic transformations: stripping exactly
++// one whole-response ```diff fence, and appending exactly one final newline
++// when the last byte is not already a newline. No other bytes are rewritten.
++func normalizePatchCandidate(raw []byte) ([]byte, error) {
++	if bytes.IndexByte(raw, 0x00) >= 0 {
++		return nil, errors.New("response contains NUL bytes")
++	}
++	body := raw
++	if bytes.HasPrefix(raw, []byte("```diff\n")) {
++		inner := bytes.TrimSuffix(raw[len("```diff\n"):], []byte("\n"))
++		if !bytes.HasSuffix(inner, []byte("\n```")) {
++			return nil, errors.New("unclosed ```diff fence")
++		}
++		body = inner[:len(inner)-len("\n```")]
++	} else if bytes.Contains(raw, []byte("```")) {
++		return nil, errors.New("unsupported fence label or stray backticks in bare response")
++	}
++	if len(bytes.TrimSpace(body)) == 0 {
++		return nil, errors.New("empty patch body")
++	}
++	if bytes.Contains(body, []byte("```")) {
++		return nil, errors.New("nested or multiple fences")
++	}
++	if !bytes.HasPrefix(body, []byte("diff --git ")) {
++		return nil, errors.New(`patch does not begin with "diff --git "`)
++	}
++	for _, marker := range []string{"--- ", "+++ ", "@@ "} {
++		if !bytes.Contains(body, []byte(marker)) {
++			return nil, fmt.Errorf("syntactically incomplete patch: missing %q section", marker)
++		}
++	}
++	candidate := body
++	if !bytes.HasSuffix(candidate, []byte("\n")) {
++		candidate = append(append([]byte(nil), candidate...), '\n')
++	}
++	return candidate, nil
++}
+ 
+-func validatePatchResponse(ctx context.Context, root string, content []byte) error {
+-	if !bytes.HasPrefix(content, []byte("diff --git ")) {
+-		return errors.New(`content does not begin with "diff --git "`)
+-	}
+-	if !bytes.HasSuffix(content, []byte("\n")) {
+-		return errors.New("content does not end with a newline")
+-	}
+-
+-	cmd := exec.CommandContext(ctx, "git", "-C", root, "apply", "--check", "--whitespace=nowarn", "-")
+-	cmd.Stdin = bytes.NewReader(content)
+-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+-	var stderr bytes.Buffer
+-	cmd.Stderr = &stderr
+-	if err := cmd.Run(); err != nil {
+-		detail := strings.TrimSpace(stderr.String())
+-		const maxDetailBytes = 512
+-		if len(detail) > maxDetailBytes {
+-			detail = detail[:maxDetailBytes]
+-		}
+-		if detail == "" {
+-			detail = err.Error()
+-		}
+-		return fmt.Errorf("git apply --check rejected response: %s", detail)
+-	}
+-	return nil
+-}
++// validatePatchCandidate checks the normalized candidate against the exact
++// clean repository. --recount tolerates stale numeric hunk counts only;
++// path lookup and source context are unchanged, and neither the index nor
++// the worktree is modified.
++func validatePatchCandidate(ctx context.Context, root string, candidate []byte) error {
++	cmd := exec.CommandContext(ctx, "git", "-C", root, "apply", "--check", "--recount", "--whitespace=nowarn", "-")
++	cmd.Stdin = bytes.NewReader(candidate)
++	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		detail := strings.TrimSpace(stderr.String())
++		const maxDetailBytes = 512
++		if len(detail) > maxDetailBytes {
++			detail = detail[:maxDetailBytes]
++		}
++		if detail == "" {
++			detail = err.Error()
++		}
++		return fmt.Errorf("git apply --check --recount rejected candidate: %s", detail)
++	}
++	return nil
++}
+--- a/cmd/buckley-ox-once/main_test.go
++++ b/cmd/buckley-ox-once/main_test.go
+@@ -1,60 +1,320 @@
+-func TestValidatePatchResponse(t *testing.T) {
+-	tests := []struct {
+-		name    string
+-		content string
+-		wantErr bool
+-	}{
+-		{name: "applicable diff", content: applicableDiff},
+-		{name: "fenced prose prefix", content: "```diff\n" + applicableDiff + "```\n", wantErr: true},
+-		{name: "missing final newline", content: strings.TrimSuffix(applicableDiff, "\n"), wantErr: true},
+-		{
+-			name:    "truncated hunk",
+-			content: strings.Replace(applicableDiff, "+return an applicable unified diff\n", "", 1),
+-			wantErr: true,
+-		},
+-		{
+-			name:    "wrong hunk counts",
+-			content: strings.Replace(applicableDiff, "@@ -1 +1 @@", "@@ -1,2 +1,2 @@", 1),
+-			wantErr: true,
+-		},
+-		{
+-			name:    "nonexistent context",
+-			content: strings.Replace(applicableDiff, "-return a unified diff\n", "-absent line\n", 1),
+-			wantErr: true,
+-		},
+-	}
+-	// Each case invokes validatePatchResponse against a fresh exact fixture
+-	// and asserts that validation never changes the worktree.
+-}
++const (
++	applicableDiff = "diff --git a/sample.txt b/sample.txt\n" +
++		"--- a/sample.txt\n" +
++		"+++ b/sample.txt\n" +
++		"@@ -1 +1 @@\n" +
++		"-return a unified diff\n" +
++		"+return an applicable unified diff\n"
++
++	staleCountDiff = "diff --git a/sample.txt b/sample.txt\n" +
++		"--- a/sample.txt\n" +
++		"+++ b/sample.txt\n" +
++		"@@ -1,4 +1,4 @@\n" +
++		"-return a unified diff\n" +
++		"+return an applicable unified diff\n"
++
++	fencedApplicableDiff = "```diff\n" + applicableDiff + "```\n"
++)
++
++func newFixtureRepo(t *testing.T) string {
++	t.Helper()
++	root := t.TempDir()
++	git := func(args ...string) {
++		t.Helper()
++		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
++		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
++		if out, err := cmd.CombinedOutput(); err != nil {
++			t.Fatalf("git %v: %v: %s", args, err, out)
++		}
++	}
++	git("init", "-q")
++	git("config", "user.email", "test@example.com")
++	git("config", "user.name", "Test")
++	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("return a unified diff\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	git("add", "sample.txt")
++	git("commit", "-qm", "fixture")
++	return root
++}
++
++func worktreeDirty(t *testing.T, root string) bool {
++	t.Helper()
++	cmd := exec.Command("git", "-C", root, "status", "--porcelain")
++	out, err := cmd.Output()
++	if err != nil {
++		t.Fatalf("git status: %v", err)
++	}
++	return len(bytes.TrimSpace(out)) > 0
++}
++
++func TestNormalizePatchCandidate(t *testing.T) {
++	tests := []struct {
++		name       string
++		raw        string
++		want       string
++		wantErr    bool
++		wantChange bool // normalization changed bytes
++	}{
++		{name: "bare applicable diff", raw: applicableDiff, want: applicableDiff},
++		{name: "whole-response diff fence", raw: fencedApplicableDiff, want: applicableDiff, wantChange: true},
++		{name: "fence without final newline", raw: "```diff\n" + strings.TrimSuffix(applicableDiff, "\n") + "```", want: applicableDiff, wantChange: true},
++		{name: "missing final newline", raw: strings.TrimSuffix(applicableDiff, "\n"), want: applicableDiff, wantChange: true},
++		{name: "stale hunk counts", raw: staleCountDiff, want: staleCountDiff},
++		{name: "leading prose", raw: "Here is the patch:\n" + applicableDiff, wantErr: true},
++		{name: "trailing prose", raw: applicableDiff + "Hope that helps.\n", wantErr: true},
++		{name: "unsupported fence label", raw: "```text\n" + applicableDiff + "```\n", wantErr: true},
++		{name: "multiple fences", raw: fencedApplicableDiff + fencedApplicableDiff, wantErr: true},
++		{name: "nested fence", raw: "```diff\n```diff\n" + applicableDiff + "```\n```\n", wantErr: true},
++		{name: "unclosed fence", raw: "```diff\n" + applicableDiff, wantErr: true},
++		{name: "empty fence body", raw: "```diff\n```\n", wantErr: true},
++		{name: "empty bare response", raw: "", wantErr: true},
++		{name: "backticks in bare response", raw: "```" + applicableDiff, wantErr: true},
++		{name: "NUL content", raw: applicableDiff + "\x00", wantErr: true},
++		{name: "malformed header", raw: strings.Replace(applicableDiff, "diff --git a/sample.txt b/sample.txt\n", "diff --git broken\n", 1), wantErr: true},
++		{name: "truncated no hunk", raw: "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n", wantErr: true},
++		{name: "truncated header only", raw: "diff --git a/sample.txt b/sample.txt\n", wantErr: true},
++		{name: "whitespace prefix", raw: " " + applicableDiff, wantErr: true},
++	}
++	for _, tc := range tests {
++		tc := tc
++		t.Run(tc.name, func(t *testing.T) {
++			got, err := normalizePatchCandidate([]byte(tc.raw))
++			if tc.wantErr {
++				if err == nil {
++					t.Fatalf("expected error, got candidate %q", got)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatalf("unexpected error: %v", err)
++			}
++			if string(got) != tc.want {
++				t.Fatalf("candidate mismatch:\n got %q\nwant %q", got, tc.want)
++			}
++			repeat, err := normalizePatchCandidate([]byte(tc.raw))
++			if err != nil || !bytes.Equal(repeat, got) {
++				t.Fatalf("derivation not deterministic: %q, %v", repeat, err)
++			}
++			changed := !bytes.Equal([]byte(tc.raw), got)
++			if changed != tc.wantChange {
++				t.Fatalf("changed = %v, want %v", changed, tc.wantChange)
++			}
++		})
++	}
++}
++
++func TestValidatePatchCandidate(t *testing.T) {
++	root := newFixtureRepo(t)
++	ctx := context.Background()
++	if err := validatePatchCandidate(ctx, root, []byte(applicableDiff)); err != nil {
++		t.Fatalf("clean diff rejected: %v", err)
++	}
++	if err := validatePatchCandidate(ctx, root, []byte(staleCountDiff)); err != nil {
++		t.Fatalf("stale-count diff rejected despite --recount: %v", err)
++	}
++	badContext := strings.Replace(applicableDiff, "-return a unified diff\n", "-absent line\n", 1)
++	if err := validatePatchCandidate(ctx, root, []byte(badContext)); err == nil {
++		t.Fatal("nonexistent source context accepted")
++	}
++	truncated := strings.Replace(applicableDiff, "+return an applicable unified diff\n", "", 1)
++	if err := validatePatchCandidate(ctx, root, []byte(truncated)); err == nil {
++		t.Fatal("truncated hunk accepted")
++	}
++	if worktreeDirty(t, root) {
++		t.Fatal("validation modified the worktree")
++	}
++}
++
++func TestRequireDistinctPaths(t *testing.T) {
++	if err := requireDistinctPaths("/tmp/out", "/tmp/out"); err == nil {
++		t.Fatal("identical paths accepted")
++	}
++	if err := requireDistinctPaths("/tmp/out", "/tmp/cand"); err != nil {
++		t.Fatalf("distinct paths rejected: %v", err)
++	}
++}
++
++func TestRequireAbsentPath(t *testing.T) {
++	dir := t.TempDir()
++	file := filepath.Join(dir, "raw.out")
++	if err := os.WriteFile(file, []byte("keep"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := requireAbsentPath(file); err == nil {
++		t.Fatal("existing regular file accepted")
++	}
++	data, err := os.ReadFile(file)
++	if err != nil || string(data) != "keep" {
++		t.Fatalf("existing file modified: %q, %v", data, err)
++	}
++	sub := filepath.Join(dir, "subdir")
++	if err := os.Mkdir(sub, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if err := requireAbsentPath(sub); err == nil {
++		t.Fatal("existing directory accepted")
++	}
++	target := filepath.Join(dir, "target")
++	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	link := filepath.Join(dir, "link")
++	if err := os.Symlink(target, link); err != nil {
++		t.Fatal(err)
++	}
++	if err := requireAbsentPath(link); err == nil {
++		t.Fatal("existing symlink accepted")
++	}
++	data, err = os.ReadFile(target)
++	if err != nil || string(data) != "target" {
++		t.Fatalf("symlink target modified: %q, %v", data, err)
++	}
++	if err := requireAbsentPath(filepath.Join(dir, "missing")); err != nil {
++		t.Fatalf("absent path rejected: %v", err)
++	}
++}
++
++func TestWriteExclusiveOutputSymlinkRejected(t *testing.T) {
++	dir := t.TempDir()
++	target := filepath.Join(dir, "target")
++	if err := os.WriteFile(target, []byte("original"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	link := filepath.Join(dir, "out")
++	if err := os.Symlink(target, link); err != nil {
++		t.Fatal(err)
++	}
++	if err := writeExclusiveOutput(link, []byte("replacement")); err == nil {
++		t.Fatal("write through symlink accepted")
++	}
++	data, err := os.ReadFile(target)
++	if err != nil || string(data) != "original" {
++		t.Fatalf("symlink target modified: %q, %v", data, err)
++	}
++}
++
++func TestWriteExclusiveOutputPermissionsAndCleanup(t *testing.T) {
++	dir := t.TempDir()
++	path := filepath.Join(dir, "out")
++	if err := writeExclusiveOutput(path, []byte("first")); err != nil {
++		t.Fatalf("first write: %v", err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.Mode().Perm() != 0o600 {
++		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
++	}
++	if err := writeExclusiveOutput(path, []byte("second")); err == nil {
++		t.Fatal("second exclusive write accepted")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil || string(data) != "first" {
++		t.Fatalf("pre-existing output clobbered or removed: %q, %v", data, err)
++	}
++}
++
++func TestCandidateIntegrationApplyRecount(t *testing.T) {
++	root := newFixtureRepo(t)
++	raw := fencedStaleCountRaw()
++	candidate, err := normalizePatchCandidate([]byte(raw))
++	if err != nil {
++		t.Fatalf("normalize: %v", err)
++	}
++	if !bytes.Equal([]byte(raw), candidate) && bytes.Contains([]byte(raw), []byte("```")) {
++		t.Fatal("fence not stripped from candidate")
++	}
++	ctx := context.Background()
++	if err := validatePatchCandidate(ctx, root, candidate); err != nil {
++		t.Fatalf("candidate rejected: %v", err)
++	}
++	if worktreeDirty(t, root) {
++		t.Fatal("validation left the worktree dirty")
++	}
++	apply := exec.Command("git", "-C", root, "apply", "--recount", "--whitespace=nowarn", "-")
++	apply.Stdin = bytes.NewReader(candidate)
++	apply.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
++	if out, err := apply.CombinedOutput(); err != nil {
++		t.Fatalf("real apply failed: %v: %s", err, out)
++	}
++	data, err := os.ReadFile(filepath.Join(root, "sample.txt"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if want := "return an applicable unified diff\n"; string(data) != want {
++		t.Fatalf("applied content = %q, want %q", data, want)
++	}
++}
++
++func fencedStaleCountRaw() string {
++	return "```diff\n" + staleCountDiff + "```\n"
++}
++
++func TestRawPreservationByteIdentity(t *testing.T) {
++	dir := t.TempDir()
++	cases := map[string]string{
++		"bare":   applicableDiff,
++		"fenced": fencedApplicableDiff,
++		"noeol":  strings.TrimSuffix(applicableDiff, "\n"),
++		"stale":  staleCountDiff,
++	}
++	for name, raw := range cases {
++		path := filepath.Join(dir, name+".raw")
++		if err := writeExclusiveOutput(path, []byte(raw)); err != nil {
++			t.Fatalf("%s: %v", name, err)
++		}
++		got, err := os.ReadFile(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, []byte(raw)) {
++			t.Fatalf("%s: raw output not byte-identical", name)
++		}
++		sum := sha256.Sum256(got)
++		cand, err := normalizePatchCandidate(got)
++		if err != nil {
++			t.Fatalf("%s: normalize: %v", name, err)
++		}
++		csum := sha256.Sum256(cand)
++		same := sum == csum
++		changed := !bytes.Equal(got, cand)
++		if same == changed {
++			t.Fatalf("%s: sha equality %v inconsistent with byte change %v", name, same, changed)
++		}
++	}
++}
