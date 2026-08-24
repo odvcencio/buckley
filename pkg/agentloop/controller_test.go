@@ -2171,6 +2171,120 @@ func TestController_TransportFailureExhaustsWithoutTakingTheNudgePath(t *testing
 	}
 }
 
+// TestController_TransportFailureZeroCompletionTokensWithNonzeroPromptTokensRetriesWithBackoff
+// covers the classifier gap behind the 2026-08-23 incident autopsy: a
+// response can legitimately bill nonzero prompt tokens for a request whose
+// generation never started (the prompt was priced before the transport
+// failure occurred), so requiring PromptTokens==0 too -- the pre-fix
+// all-zero gate -- would let a nonzero prompt count defeat transport
+// classification for what is still, by every other signal (no text, no
+// completion tokens, no native_finish_reason), a degenerate transport-class
+// response. It must take the backoff retry path, not the immediate
+// corrective nudge.
+func TestController_TransportFailureZeroCompletionTokensWithNonzeroPromptTokensRetriesWithBackoff(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls <= 2 {
+				// Nonzero prompt tokens (the prompt was billed before
+				// generation failed), zero completion tokens, and no
+				// native_finish_reason at all: the pre-fix all-zero gate
+				// would have missed this and taken the immediate nudge path.
+				return &model.ChatResponse{
+					Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: nil}}},
+					Usage:        model.Usage{PromptTokens: 500, CompletionTokens: 0, TotalTokens: 500},
+					UsagePresent: true,
+				}, nil
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "recovered after transport retries"}}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want recovery once the transport starts answering", runErr)
+	}
+	if result.Content != "recovered after transport retries" || result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("result=%+v", result)
+	}
+	if modelCalls != 3 {
+		t.Fatalf("model_calls = %d, want 3 (two transport failures + the recovered reply)", modelCalls)
+	}
+	// Only the final, successful assistant message should be appended --
+	// never a corrective-nudge user message, which would mean the response
+	// took the immediate-nudge path instead of the backoff-retry path.
+	for _, msg := range history.messages {
+		if msg.Role == "user" {
+			t.Fatalf("history=%+v, want no corrective-nudge user message for a transport-classified failure", history.messages)
+		}
+	}
+}
+
+// TestController_TransportFailureExhaustsWithFinalizeOnStopStillAttemptsFinalization
+// covers the actual defect behind the 2026-08-23
+// run_01M0RGJE21TW6HVH59DKCNME3Q / run_01M0RGF3Z9HZNZSK65ZZNV5FZQ incident: a
+// turn whose very first round hits the OpenRouter transport-failure shell on
+// every attempt, with zero tool calls made anywhere in the turn before
+// transport retries exhaust. finalizeStoppedTurn used to be gated on
+// Governor.ToolCalls() > 0 here -- appropriate for a deliberate governor
+// stop with nothing new to summarize, but wrong for a transport outage that
+// has nothing to do with tool-call history. That gate turned an ordinary,
+// several-minute intermittent OpenRouter degradation into an unrecoverable
+// run death (goal_engine's RequireConclusive check surfaced it as
+// "agentloop: incomplete turn: model returned a final response without
+// text") instead of the graceful finalization retry every other stop path
+// already gets.
+func TestController_TransportFailureExhaustsWithFinalizeOnStopStillAttemptsFinalization(t *testing.T) {
+	withoutTransportBackoff(t)
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		FinalizeOnStop: true,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls <= 1+maxTransportRetries {
+				return &model.ChatResponse{Choices: []model.Choice{{
+					Message:            model.Message{Role: "assistant", Content: nil},
+					NativeFinishReason: "network_error",
+				}}}, nil
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "recovered during finalization"}}}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run error = %v, want finalizeStoppedTurn to recover even with zero tool calls made", runErr)
+	}
+	if result.CompletionStatus != CompletionConclusive || result.Content != "recovered during finalization" {
+		t.Fatalf("result=%+v, want a conclusive answer from the finalization attempt", result)
+	}
+	if !result.Termination.FinalizationAttempted {
+		t.Fatalf("result.Termination=%+v, want FinalizationAttempted", result.Termination)
+	}
+	wantCalls := 1 + maxTransportRetries + 1
+	if modelCalls != wantCalls {
+		t.Fatalf("model_calls = %d, want %d (main-loop transport exhaustion + one recovered finalization attempt)", modelCalls, wantCalls)
+	}
+}
+
 // TestController_GenuinelyEmptyWithUsageTakesNudgeNotTransportRetry is the
 // direct contrast case: a tool-free empty reply that carries confirmed
 // nonzero usage is a genuine (if unhelpful) model answer, not a transport

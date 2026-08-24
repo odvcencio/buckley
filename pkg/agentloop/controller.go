@@ -808,10 +808,20 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 					}
 					result.FinishReason = FinishReasonInvalidCompletion
 					result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
-					if c.cfg.Governor.ToolCalls() > 0 {
-						return c.finalizeStoppedTurn(ctx, result, result.Rounds)
-					}
-					return result, nil
+					// Unlike a deliberate governor stop (cost ceiling, loop
+					// guard, step cap), a transport-exhausted turn has made no
+					// genuine progress to gate a summary on -- there is
+					// nothing about ToolCalls()==0 that says another attempt
+					// is wasted, and finalizeStoppedTurn carries its own
+					// fresh transport-backoff budget (maxTransportRetries
+					// again), which is exactly what a still-recovering
+					// upstream needs. Gating this on prior tool calls turned
+					// an intermittent, several-minute OpenRouter network_error
+					// burst that hit round 1 into an unrecoverable run death
+					// (2026-08-23 run_01M0RGJE21TW6HVH59DKCNME3Q,
+					// run_01M0RGF3Z9HZNZSK65ZZNV5FZQ) instead of the graceful,
+					// evidence-preserving stop every other guard path gets.
+					return c.finalizeStoppedTurn(ctx, result, result.Rounds)
 				}
 				// A tool-free reply with unusable text (empty, or truncated)
 				// on a live round gets a bounded corrective retry before the
@@ -1285,17 +1295,26 @@ func isTransportFinishReason(nativeFinishReason string) bool {
 // candidate looks like the OpenRouter early-200 transport failure rather
 // than a genuine model answer with no text. It never fires for a truncated
 // finish reason -- that is a distinct, already-handled failure mode -- and
-// it never fires once the response carries confirmed nonzero token usage,
-// which is the one signal a transport failure cannot fake. Deliberately not
-// gated on response.UsagePresent: that flag records whether the wire
-// response carried a usage object at all (see ChatResponse.UsagePresent),
-// which is valuable ledger evidence, but every non-OpenRouter provider
-// adapter -- and every test double -- constructs *model.ChatResponse Go
-// literals directly and has no reason to set it, so treating "unset" as
-// "confirmed absent" here would misclassify their genuine, billed replies.
-// Token counts of zero cover both an honestly-absent usage object and one
-// that is literally all-zero; the task's own corrective-nudge carve-out
-// ("usage present and tokens nonzero") already draws the line there.
+// it never fires once the response carries confirmed nonzero *completion*
+// token usage, which is the one signal a transport failure cannot fake: a
+// response that never reached generation cannot have billed completion
+// tokens no matter what its prompt accounting says. Deliberately not gated
+// on response.UsagePresent: that flag records whether the wire response
+// carried a usage object at all (see ChatResponse.UsagePresent), which is
+// valuable ledger evidence, but every non-OpenRouter provider adapter -- and
+// every test double -- constructs *model.ChatResponse Go literals directly
+// and has no reason to set it, so treating "unset" as "confirmed absent"
+// here would misclassify their genuine, billed replies.
+//
+// The gate checks CompletionTokens alone, not the older all-zero
+// (prompt/completion/total) requirement: a provider can legitimately bill
+// nonzero prompt tokens for a request whose generation never started (the
+// prompt was received and priced before the transport failure occurred), so
+// requiring PromptTokens==0 too let a nonzero prompt count defeat this
+// classification for what is still, by every other signal, a degenerate
+// transport-class response. completion_tokens==0 with no usable text is the
+// one condition the corrective-nudge carve-out ("usage present and
+// completion tokens nonzero") explicitly leaves for this bucket.
 func isTransportFailureCandidate(choice model.Choice, response *model.ChatResponse) bool {
 	if isTruncatedFinishReason(choice.FinishReason) {
 		return false
@@ -1306,8 +1325,7 @@ func isTransportFailureCandidate(choice model.Choice, response *model.ChatRespon
 	if response == nil {
 		return true
 	}
-	usage := response.Usage
-	return usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0
+	return response.Usage.CompletionTokens == 0
 }
 
 // isSharedPoolRateLimitErr unwraps err looking for an OpenRouter 429 whose
