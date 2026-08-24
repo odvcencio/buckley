@@ -104,6 +104,9 @@ func (p *OpenAIProvider) SupportsContinuation(modelID string) bool {
 // returns the full canonical item window as opaque provider continuation state.
 func (p *OpenAIProvider) ChatCompletionWithContinuation(ctx context.Context, continuationReq ContinuationRequest) (*ContinuationResponse, error) {
 	req := continuationReq.Request
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	canonicalModel := openAIContinuationModelID(req.Model)
 	if !p.SupportsContinuation(canonicalModel) {
 		return nil, fmt.Errorf("openai continuation is not supported for model %s", req.Model)

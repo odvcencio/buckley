@@ -142,6 +142,9 @@ func (cc *ContinuationCoordinator) Hit() bool {
 // (and any persisted state) so the caller can retry through the normal
 // ChatCompletion path -- a broken continuation never fails the turn.
 func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if req.openRouterAdmission != nil {
+		return nil, fmt.Errorf("%w: continuation is forbidden", errOpenRouterOSSAdmissionInvalid)
+	}
 	if cc == nil || cc.manager == nil {
 		return nil, fmt.Errorf("continuation coordinator unavailable")
 	}

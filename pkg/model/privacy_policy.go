@@ -47,6 +47,9 @@ func validateOpenRouterRetryMode(mode RequestRetryMode) error {
 
 func validateModelDispatch(req ChatRequest, providerID string) error {
 	if providerID != "openrouter" {
+		if req.openRouterAdmission != nil {
+			return rejectOpenRouterOSSAdmissionForProvider(req, providerID)
+		}
 		return nil
 	}
 	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
@@ -107,6 +110,9 @@ func validateOpenRouterPrivacy(req ChatRequest) error {
 	}
 
 	if zdr {
+		if req.openRouterAdmission != nil && req.openRouterAdmission.policy != openRouterAdmissionPolicyStrictZDR {
+			return fmt.Errorf("%w: an oss non-zdr admission cannot authorize strict zdr", errOpenRouterOSSAdmissionInvalid)
+		}
 		if hasCollection || req.OpenRouterRetention == OpenRouterRetentionNonZDR {
 			return fmt.Errorf("%w: strict zdr conflicts with non-zdr policy", ErrOpenRouterPrivacyContract)
 		}
@@ -114,7 +120,7 @@ func validateOpenRouterPrivacy(req ChatRequest) error {
 		if !exact || allowFallbacks || len(req.Models) != 0 {
 			return fmt.Errorf("%w: strict zdr requires one exact no-fallback route", ErrOpenRouterPrivacyContract)
 		}
-		return nil
+		return validateOpenRouterOSSRequestPolicy(req)
 	}
 	if req.OpenRouterRetention == OpenRouterRetentionZDR {
 		return fmt.Errorf("%w: strict zdr requires provider zdr=true", ErrOpenRouterPrivacyContract)
@@ -130,7 +136,7 @@ func validateOpenRouterPrivacy(req ChatRequest) error {
 	if req.OpenRouterRetention != OpenRouterRetentionNonZDR || !hasZDR || zdr || !hasCollection || collection != "deny" {
 		return fmt.Errorf("%w: admitted non-zdr requests require explicit zdr=false and data_collection=deny", ErrOpenRouterPrivacyContract)
 	}
-	return nil
+	return validateOpenRouterOSSRequestPolicy(req)
 }
 
 func streamErrorChannels(err error) (<-chan StreamChunk, <-chan error) {

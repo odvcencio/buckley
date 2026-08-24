@@ -128,6 +128,9 @@ func (p *CodexCLIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion runs a non-streaming Codex CLI chat turn.
 func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	if p == nil {
 		return nil, fmt.Errorf("codex provider is nil")
 	}
@@ -289,6 +292,9 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 
 // ChatCompletionStream emits the non-streaming result as a single chunk.
 func (p *CodexCLIProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)
 	go func() {

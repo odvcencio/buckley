@@ -3,11 +3,9 @@
 //
 // RootLicenseBlobEvidence is dormant local evidence, not an OSS decision,
 // approval, capability, or no-ZDR authority. Its detected SPDX value is only a
-// heuristic hint. Before a trusted coordinator may mint one-use no-ZDR
-// authority, a future, separately formed and host-sealed OSSBlobRule must bind
-// the exact content and blob identities, rule version, repository scope, and
-// run scope. This package intentionally provides no OSSBlobRule constructor or
-// authority-minting path.
+// heuristic hint. A trusted coordinator may mint one-use no-ZDR authority only
+// through a separately formed, host-sealed OSSBlobRule that binds the exact
+// content and blob identities, rule version, repository scope, and run scope.
 package workspaceevidence
 
 import (

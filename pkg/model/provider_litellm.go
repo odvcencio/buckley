@@ -89,6 +89,9 @@ func (p *LiteLLMProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a non-streaming request.
 func (p *LiteLLMProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	req.Model = strings.TrimPrefix(req.Model, "litellm/")
 	req.Stream = false
 	return p.invoke(ctx, req)
@@ -96,6 +99,9 @@ func (p *LiteLLMProvider) ChatCompletion(ctx context.Context, req ChatRequest) (
 
 // ChatCompletionStream streams responses from LiteLLM.
 func (p *LiteLLMProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	req.Model = strings.TrimPrefix(req.Model, "litellm/")
 	req.Stream = true
 	chunkChan := make(chan StreamChunk, 10)

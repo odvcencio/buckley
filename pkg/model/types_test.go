@@ -330,7 +330,6 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 		CacheControl:        &CacheControl{Type: "ephemeral", TTL: "1h"},
 		OpenRouterRetention: OpenRouterRetentionNonZDR,
 		RetryMode:           RequestRetrySingleAttempt,
-		openRouterAdmission: &openRouterOSSAdmission{},
 	}
 
 	blob, err := json.Marshal(req)

@@ -338,10 +338,17 @@ func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatRes
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
+	req.Stream = false
+	if err := validateOpenRouterOSSManagerDispatch(req, provider, false); err != nil {
 		return nil, err
 	}
-	resp, err := chatCompletionWithAffordableOutputRetry(ctx, provider, req)
+	var resp *ChatResponse
+	var err error
+	if req.openRouterAdmission != nil {
+		resp, err = provider.ChatCompletion(ctx, req)
+	} else {
+		resp, err = chatCompletionWithAffordableOutputRetry(ctx, provider, req)
+	}
 	if err != nil {
 		// Preserve a provider response returned alongside an error. Streaming
 		// and some native adapters can have billable usage/content before a
@@ -397,6 +404,9 @@ func (m *Manager) SupportsContinuation(modelID string) bool {
 // SupportsContinuation first and fall back to ChatCompletion otherwise.
 func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuationReq ContinuationRequest) (*ContinuationResponse, error) {
 	req := continuationReq.Request
+	if req.openRouterAdmission != nil {
+		return nil, fmt.Errorf("%w: continuation is forbidden", errOpenRouterOSSAdmissionInvalid)
+	}
 	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
@@ -411,7 +421,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
+	if err := validateOpenRouterOSSManagerDispatch(req, provider, false); err != nil {
 		return nil, err
 	}
 	continuationReq.Request = req
@@ -464,8 +474,12 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 	req = applyProviderTransforms(req, provider.ID())
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
-	if err := validateModelDispatch(req, provider.ID()); err != nil {
+	req.Stream = true
+	if err := validateOpenRouterOSSManagerDispatch(req, provider, true); err != nil {
 		return streamErrorChannels(err)
+	}
+	if req.openRouterAdmission != nil {
+		return provider.ChatCompletionStream(ctx, req)
 	}
 	if provider.ID() != "openrouter" {
 		return provider.ChatCompletionStream(ctx, req)
@@ -608,6 +622,9 @@ func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
 }
 
 func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
+	if req.openRouterAdmission != nil {
+		return req
+	}
 	var cfg config.PromptCacheConfig
 	if m != nil && m.config != nil {
 		cfg = m.config.PromptCache

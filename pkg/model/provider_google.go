@@ -105,6 +105,9 @@ func (p *GoogleProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion runs a completion request.
 func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return nil, err
+	}
 	if len(req.Tools) > 0 {
 		return nil, fmt.Errorf("google provider does not support tool calling yet")
 	}
@@ -132,6 +135,9 @@ func (p *GoogleProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 // It calls ChatCompletion synchronously and wraps the full response as a single StreamChunk.
 // This is a compatibility fallback; true streaming requires native API support.
 func (p *GoogleProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	if err := rejectOpenRouterOSSAdmissionForProvider(req, p.ID()); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 1)
 	errChan := make(chan error, 1)
 	go func() {

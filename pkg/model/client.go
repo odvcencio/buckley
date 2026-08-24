@@ -68,6 +68,7 @@ type Client struct {
 	apiKey         string
 	baseURL        string
 	httpClient     *http.Client
+	ossHTTPClient  *http.Client
 	transport      *LoggingTransport
 	catalog        *ModelCatalog
 	catalogAge     time.Time
@@ -115,7 +116,7 @@ func NewClientWithOptions(apiKey string, baseURL string, opts ClientOptions) *Cl
 		retryConfig = DefaultRetryConfig()
 	}
 
-	return &Client{
+	client := &Client{
 		apiKey:         apiKey,
 		baseURL:        baseURL,
 		transport:      transport,
@@ -127,6 +128,14 @@ func NewClientWithOptions(apiKey string, baseURL string, opts ClientOptions) *Cl
 		},
 		retryConfig: retryConfig,
 	}
+	// Admission binds the exact final wire bytes, so this path bypasses the
+	// optional logging wrapper that buffers and reconstructs request bodies.
+	client.ossHTTPClient = &http.Client{
+		Timeout:       defaultTimeout,
+		Transport:     baseTransport,
+		CheckRedirect: rejectOpenRouterRedirect,
+	}
+	return client
 }
 
 // Close closes the client and its resources
@@ -156,6 +165,9 @@ func (c *Client) ResetCircuitBreaker() {
 func (c *Client) SetTimeout(timeout time.Duration) {
 	if c.httpClient != nil {
 		c.httpClient.Timeout = timeout
+	}
+	if c.ossHTTPClient != nil {
+		c.ossHTTPClient.Timeout = timeout
 	}
 }
 
@@ -373,6 +385,12 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 		return nil, err
 	}
 	req.Stream = false
+	if req.openRouterAdmission != nil {
+		return c.chatCompletionWithOSSAdmission(ctx, req)
+	}
+	if err := validateModelDispatch(req, "openrouter"); err != nil {
+		return nil, err
+	}
 
 	var result *ChatResponse
 
@@ -498,6 +516,13 @@ func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
 		return streamErrorChannels(err)
 	}
+	req.Stream = true
+	if req.openRouterAdmission != nil {
+		return c.chatCompletionStreamWithOSSAdmission(ctx, req)
+	}
+	if err := validateModelDispatch(req, "openrouter"); err != nil {
+		return streamErrorChannels(err)
+	}
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
@@ -598,6 +623,165 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		return nil
 	}
 
+}
+
+func (c *Client) prepareOSSAdmissionRequest(req ChatRequest, stream bool) ([]byte, string, http.Header, error) {
+	if c == nil {
+		return nil, "", nil, fmt.Errorf("%w: openrouter client is unavailable", errOpenRouterOSSAdmissionInvalid)
+	}
+	req.Stream = stream
+	body, err := marshalOpenRouterOSSFinalWire(req)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	route := openRouterChatRoute(c)
+	admission := req.openRouterAdmission
+	if admission == nil || admission.provider == nil {
+		return nil, "", nil, fmt.Errorf("%w: provider binding is unavailable", errOpenRouterOSSAdmissionInvalid)
+	}
+	pinnedHeaders := admission.headers.Clone()
+	if err := validateOpenRouterOSSAdmission(req, admission.provider, c, c.ossHTTPClient, route, stream, pinnedHeaders, body); err != nil {
+		return nil, "", nil, err
+	}
+	if !admission.inFlight.CompareAndSwap(false, true) {
+		return nil, "", nil, errOpenRouterOSSAdmissionInFlight
+	}
+	return body, route, pinnedHeaders, nil
+}
+
+func (c *Client) revalidateOSSAdmissionBeforeDispatch(req ChatRequest, body []byte, route string, stream bool, httpClient *http.Client, headers http.Header) error {
+	currentBody, err := marshalOpenRouterOSSFinalWire(req)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(body, currentBody) {
+		return fmt.Errorf("%w: final wire request changed before dispatch", errOpenRouterOSSAdmissionInvalid)
+	}
+	admission := req.openRouterAdmission
+	if admission == nil || admission.provider == nil {
+		return fmt.Errorf("%w: provider binding is unavailable", errOpenRouterOSSAdmissionInvalid)
+	}
+	return validateOpenRouterOSSAdmission(req, admission.provider, c, httpClient, route, stream, headers, body)
+}
+
+func (c *Client) runOSSAdmission(ctx context.Context, req ChatRequest, body []byte, route string, stream bool, headers http.Header, consume func(*http.Response) error) error {
+	admission := req.openRouterAdmission
+	if admission == nil {
+		return fmt.Errorf("%w: capability is unavailable", errOpenRouterOSSAdmissionInvalid)
+	}
+	defer admission.inFlight.Store(false)
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.rateLimiter != nil {
+		if err := c.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait: %w", err)
+		}
+	}
+
+	call := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		httpClient := c.ossHTTPClient
+		if err := c.revalidateOSSAdmissionBeforeDispatch(req, body, route, stream, httpClient, headers); err != nil {
+			return err
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("creating admitted openrouter request: %w", err)
+		}
+		httpReq.Header = headers
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if httpReq.Method != http.MethodPost || httpReq.URL.String() != route {
+			return fmt.Errorf("%w: constructed request route mismatch", errOpenRouterOSSAdmissionInvalid)
+		}
+		if err := validateOpenRouterOSSAdmission(req, admission.provider, c, httpClient, route, stream, httpReq.Header, body); err != nil {
+			return err
+		}
+		if !admission.consumed.CompareAndSwap(false, true) {
+			return errOpenRouterOSSAdmissionSpent
+		}
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("dispatching admitted openrouter request: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return c.parseError(resp)
+		}
+		return consume(resp)
+	}
+	if c.circuitBreaker == nil {
+		return call()
+	}
+	return c.circuitBreaker.Call(call)
+}
+
+func (c *Client) chatCompletionWithOSSAdmission(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	body, route, headers, err := c.prepareOSSAdmissionRequest(req, false)
+	if err != nil {
+		return nil, err
+	}
+	var result *ChatResponse
+	err = c.runOSSAdmission(ctx, req, body, route, false, headers, func(resp *http.Response) error {
+		var chatResp ChatResponse
+		if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		if chatResp.Error != nil {
+			message := strings.TrimSpace(chatResp.Error.Message)
+			if message == "" {
+				message = "provider returned an error response"
+			}
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Message:    message,
+				Type:       chatResp.Error.Type,
+				Code:       chatResp.Error.Code,
+				Retryable:  false,
+			}
+		}
+		if len(chatResp.Choices) == 0 {
+			return NoResponseChoicesError(req, &chatResp)
+		}
+		result = &chatResp
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (c *Client) chatCompletionStreamWithOSSAdmission(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	body, route, headers, err := c.prepareOSSAdmissionRequest(req, true)
+	if err != nil {
+		return streamErrorChannels(err)
+	}
+	chunkChan := make(chan StreamChunk, 10)
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(errChan)
+		defer close(chunkChan)
+		err := c.runOSSAdmission(ctx, req, body, route, true, headers, func(resp *http.Response) error {
+			events, streamErr := c.parseSSEStreamWithEventCount(ctx, resp.Body, chunkChan)
+			if streamErr != nil {
+				return fmt.Errorf("parsing SSE stream: %w", streamErr)
+			}
+			if events == 0 {
+				return fmt.Errorf("parsing SSE stream: no events received")
+			}
+			return nil
+		})
+		if err != nil {
+			errChan <- err
+		}
+	}()
+	return chunkChan, errChan
 }
 
 // parseSSEStream parses Server-Sent Events stream.
@@ -791,7 +975,13 @@ func (c *Client) ValidateAPIKey() error {
 
 	// Try a minimal completion to verify full access
 	req := ChatRequest{
-		Model: "openai/gpt-3.5-turbo",
+		Model:               "openai/gpt-3.5-turbo",
+		OpenRouterRetention: OpenRouterRetentionZDR,
+		RetryMode:           RequestRetrySingleAttempt,
+		Provider: map[string]any{
+			"zdr":             true,
+			"allow_fallbacks": false,
+		},
 		Messages: []Message{
 			{Role: "user", Content: "Hi"},
 		},
