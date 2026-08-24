@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/agentspec"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
@@ -92,6 +93,46 @@ func TestOneShotProtocolToolFiltersPreserveControlTools(t *testing.T) {
 	if got := ensureRequiredOneShotTools([]string{}, true, true); !reflect.DeepEqual(got, []string{"submit_artifact", "exec_program"}) {
 		t.Fatalf("required control tools = %v", got)
 	}
+}
+
+func TestRemoveImplicitExternalCLIModelTools(t *testing.T) {
+	t.Run("api one-shot stays on its model transport", func(t *testing.T) {
+		registry := tool.NewRegistry()
+		removeImplicitExternalCLIModelTools(registry, nil, nil)
+		for _, name := range []string{"invoke_claude", "invoke_codex"} {
+			if _, ok := registry.Get(name); ok {
+				t.Fatalf("%s remains available without an explicit opt-in", name)
+			}
+		}
+		if _, ok := registry.Get("invoke_buckley"); !ok {
+			t.Fatal("API-native Buckley delegation was removed")
+		}
+	})
+
+	t.Run("agent profile can opt into one exact CLI", func(t *testing.T) {
+		registry := tool.NewRegistry()
+		profile := &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{
+			Allow: []string{"invoke_claude"},
+		}}}
+		removeImplicitExternalCLIModelTools(registry, profile, nil)
+		if _, ok := registry.Get("invoke_claude"); !ok {
+			t.Fatal("explicitly allowed invoke_claude was removed")
+		}
+		if _, ok := registry.Get("invoke_codex"); ok {
+			t.Fatal("unrequested invoke_codex remains available")
+		}
+	})
+
+	t.Run("child contract allowlist can opt in", func(t *testing.T) {
+		registry := tool.NewRegistry()
+		removeImplicitExternalCLIModelTools(registry, nil, []string{"invoke_codex"})
+		if _, ok := registry.Get("invoke_codex"); !ok {
+			t.Fatal("explicitly allowed invoke_codex was removed")
+		}
+		if _, ok := registry.Get("invoke_claude"); ok {
+			t.Fatal("unrequested invoke_claude remains available")
+		}
+	})
 }
 
 func TestOneShotBehaviorProfileUsesDurableStoreWithoutConfigPin(t *testing.T) {

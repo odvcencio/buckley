@@ -443,6 +443,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	removeImplicitExternalCLIModelTools(registry, agentProfile, allowedTools)
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
@@ -2114,6 +2115,30 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 		return nil
 	}
 	return subtractToolNames(allowed, denied)
+}
+
+// removeImplicitExternalCLIModelTools keeps an API one-shot run on its selected
+// model transport. Legacy CLI delegation changes model backends, so it is not
+// part of the implicit full tool pool. An agent profile or child contract can
+// still opt in by naming the exact tool in its allowlist.
+func removeImplicitExternalCLIModelTools(registry *tool.Registry, profile *agentspec.RuntimeProfile, explicitAllowed []string) {
+	if registry == nil {
+		return
+	}
+	explicit := make(map[string]struct{})
+	for _, name := range cleanToolNames(explicitAllowed) {
+		explicit[name] = struct{}{}
+	}
+	if profile != nil && profile.Spec != nil {
+		for _, name := range cleanToolNames(profile.Spec.Tools.Allow) {
+			explicit[name] = struct{}{}
+		}
+	}
+	for _, name := range []string{"invoke_claude", "invoke_codex"} {
+		if _, allowed := explicit[name]; !allowed {
+			registry.Remove(name)
+		}
+	}
 }
 
 func toolsForTier(registry *tool.Registry, tier string) []string {
