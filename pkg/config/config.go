@@ -15,7 +15,7 @@ const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
 	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
-	defaultOpenRouterCommitModel  = "qwen/qwen3.7-flash"
+	defaultOpenRouterCommitModel  = "qwen/qwen3.8-flash"
 	legacyOpenRouterCommitModel   = "qwen/qwen3.7-plus"
 	defaultBuckbotModel           = "deepseek/deepseek-v4-pro-0813"
 	defaultBuckbotCriticModel     = "qwen/qwen3.8-max"
@@ -298,19 +298,21 @@ func (c *Config) GetUtilityTodoPlanModel() string {
 // ProviderConfig defines provider settings and API keys. Every section
 // below is hook-owned in config_env.go (envOpenRouterProvider,
 // envOpenAIProvider, envAnthropicProvider, envGoogleProvider,
-// envOllamaProvider, envLiteLLMProvider, envCodexProvider) instead of
+// envOllamaProvider, envOpenAICompatibleProvider, envLegacyLiteLLMProvider,
+// envCodexProvider) instead of
 // tag-dispatched: ProviderSettings is reused across five providers with
 // different env var names and different implicit-enable rules per
 // provider, so a struct tag on the shared type can't express it.
 type ProviderConfig struct {
-	OpenRouter   ProviderSettings  `yaml:"openrouter"`
-	OpenAI       ProviderSettings  `yaml:"openai"`
-	Anthropic    ProviderSettings  `yaml:"anthropic"`
-	Google       ProviderSettings  `yaml:"google"`
-	Ollama       ProviderSettings  `yaml:"ollama"`
-	LiteLLM      LiteLLMConfig     `yaml:"litellm"`
-	Codex        CodexConfig       `yaml:"codex"`
-	ModelRouting map[string]string `yaml:"model_routing"` // Maps model prefix to provider
+	OpenRouter       ProviderSettings       `yaml:"openrouter"`
+	OpenAI           ProviderSettings       `yaml:"openai"`
+	Anthropic        ProviderSettings       `yaml:"anthropic"`
+	Google           ProviderSettings       `yaml:"google"`
+	Ollama           ProviderSettings       `yaml:"ollama"`
+	OpenAICompatible OpenAICompatibleConfig `yaml:"openai_compatible"`
+	LiteLLM          LiteLLMConfig          `yaml:"litellm"`
+	Codex            CodexConfig            `yaml:"codex"`
+	ModelRouting     map[string]string      `yaml:"model_routing"` // Maps model prefix to provider
 }
 
 // ProviderSettings contains settings for a specific provider
@@ -320,15 +322,20 @@ type ProviderSettings struct {
 	BaseURL string `yaml:"base_url"` // Optional custom base URL
 }
 
-// LiteLLMConfig configures the LiteLLM proxy provider.
-type LiteLLMConfig struct {
-	Enabled   bool                 `yaml:"enabled"`
-	BaseURL   string               `yaml:"base_url"`
-	APIKey    string               `yaml:"api_key"`
-	Models    []string             `yaml:"models"`
-	Fallbacks map[string][]string  `yaml:"fallbacks"`
-	Router    *LiteLLMRouterConfig `yaml:"router"`
+// OpenAICompatibleConfig configures an OpenAI-compatible API provider.
+type OpenAICompatibleConfig struct {
+	Enabled             bool                          `yaml:"enabled"`
+	BaseURL             string                        `yaml:"base_url"`
+	APIKey              string                        `yaml:"api_key"`
+	Models              []string                      `yaml:"models"`
+	SupportedParameters map[string][]string           `yaml:"supported_parameters"`
+	ContextLengths      map[string]int                `yaml:"context_lengths"`
+	Fallbacks           map[string][]string           `yaml:"fallbacks"`
+	Router              *OpenAICompatibleRouterConfig `yaml:"router"`
 }
+
+// LiteLLMConfig is the deprecated name for OpenAICompatibleConfig.
+type LiteLLMConfig = OpenAICompatibleConfig
 
 // CodexConfig configures Codex CLI as a chat provider.
 type CodexConfig struct {
@@ -337,13 +344,16 @@ type CodexConfig struct {
 	Models  []string `yaml:"models"`
 }
 
-// LiteLLMRouterConfig defines routing behavior for LiteLLM proxies.
-type LiteLLMRouterConfig struct {
+// OpenAICompatibleRouterConfig defines routing behavior for compatible proxies.
+type OpenAICompatibleRouterConfig struct {
 	Strategy       string   `yaml:"strategy"`
 	NumRetries     int      `yaml:"num_retries"`
 	TimeoutSeconds int      `yaml:"timeout_seconds"`
 	FallbackModels []string `yaml:"fallback_models"`
 }
+
+// LiteLLMRouterConfig is the deprecated name for OpenAICompatibleRouterConfig.
+type LiteLLMRouterConfig = OpenAICompatibleRouterConfig
 
 // PromptCacheConfig controls provider prompt caching options.
 type PromptCacheConfig struct {

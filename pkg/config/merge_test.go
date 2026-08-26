@@ -204,3 +204,40 @@ func TestMergeConfigsModelRoutingMergesPerKey(t *testing.T) {
 		t.Errorf("expected built-in openai/ routing entry to survive the per-key merge")
 	}
 }
+
+func TestMergeConfigsOpenAICompatibleSupportedParameters(t *testing.T) {
+	base := DefaultConfig()
+	override := &Config{Providers: ProviderConfig{OpenAICompatible: OpenAICompatibleConfig{
+		SupportedParameters: map[string][]string{"glm-5.3-flash": {"tools"}},
+		ContextLengths:      map[string]int{"glm-5.3-flash": 204800},
+	}}}
+	raw := map[string]any{
+		"providers": map[string]any{
+			"openai_compatible": map[string]any{
+				"supported_parameters": map[string]any{"glm-5.3-flash": []any{"tools"}},
+				"context_lengths":      map[string]any{"glm-5.3-flash": 204800},
+			},
+		},
+	}
+
+	mergeConfigs(base, override, raw, false)
+
+	parameters := base.Providers.OpenAICompatible.SupportedParameters["glm-5.3-flash"]
+	if len(parameters) != 1 || parameters[0] != "tools" {
+		t.Fatalf("supported parameters = %v, want [tools]", parameters)
+	}
+	if !base.Providers.OpenAICompatible.Enabled {
+		t.Fatal("an explicit OpenAI-compatible supported_parameters map should enable the provider")
+	}
+	if got := base.Providers.OpenAICompatible.ContextLengths["glm-5.3-flash"]; got != 204800 {
+		t.Fatalf("context length = %d, want 204800", got)
+	}
+	override.Providers.OpenAICompatible.ContextLengths["glm-5.3-flash"] = 1
+	if base.Providers.OpenAICompatible.ContextLengths["glm-5.3-flash"] != 204800 {
+		t.Fatal("merged context lengths alias the override")
+	}
+	override.Providers.OpenAICompatible.SupportedParameters["glm-5.3-flash"][0] = "reasoning"
+	if parameters[0] != "tools" {
+		t.Fatal("merged supported parameters alias the override")
+	}
+}

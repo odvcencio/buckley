@@ -13,14 +13,84 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 )
 
-func newTestLiteLLMProvider(baseURL string) *LiteLLMProvider {
-	return NewLiteLLMProvider(config.LiteLLMConfig{BaseURL: baseURL, APIKey: "test-key"}, false)
+func newTestOpenAICompatibleProvider(baseURL string) *OpenAICompatibleProvider {
+	return NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{BaseURL: baseURL, APIKey: "test-key"}, false)
 }
 
-// TestLiteLLMProvider_ChatCompletionRetriesTransientError proves the
+func TestOpenAICompatibleProvider_ConfiguredSupportedParametersApplyToStaticCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "catalog unavailable", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Models:  []string{"glm-5.3-flash"},
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash": {"tools"},
+		},
+		ContextLengths: map[string]int{"glm-5.3-flash": 204800},
+	}, false)
+	provider.httpClient = server.Client()
+
+	catalog, err := provider.FetchCatalog()
+	if err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+	if len(catalog.Data) != 1 {
+		t.Fatalf("catalog = %+v, want one static model", catalog.Data)
+	}
+	if catalog.Data[0].ID != "openai_compatible/glm-5.3-flash" {
+		t.Fatalf("model ID = %q, want canonical provider prefix", catalog.Data[0].ID)
+	}
+	if catalog.Data[0].ContextLength != 204800 {
+		t.Fatalf("context length = %d, want 204800", catalog.Data[0].ContextLength)
+	}
+	if got := catalog.Data[0].SupportedParameters; len(got) != 1 || got[0] != "tools" {
+		t.Fatalf("supported parameters = %v, want [tools]", got)
+	}
+}
+
+func TestLiteLLMLegacyAlias_ConfiguredSupportedParametersAugmentModelInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/model/info" {
+			t.Fatalf("path = %q, want /model/info", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"model_name":"glm-5.3-flash","model_info":{"mode":"chat","supports_function_calling":true}}]}`)
+	}))
+	defer server.Close()
+
+	provider := NewLiteLLMProvider(config.LiteLLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"litellm/glm-5.3-flash": {"reasoning", "tools", " "},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	catalog, err := provider.FetchCatalog()
+	if err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+	got := catalog.Data[0].SupportedParameters
+	want := []string{"tools", "functions", "reasoning"}
+	if len(got) != len(want) {
+		t.Fatalf("supported parameters = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("supported parameters = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestOpenAICompatibleProvider_ChatCompletionRetriesTransientError proves the
 // migration onto the shared ProviderTransport: a transient 429 is retried
 // and recovered inside ChatCompletion instead of surfacing to the caller.
-func TestLiteLLMProvider_ChatCompletionRetriesTransientError(t *testing.T) {
+func TestOpenAICompatibleProvider_ChatCompletionRetriesTransientError(t *testing.T) {
 	var requests int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
@@ -41,7 +111,7 @@ func TestLiteLLMProvider_ChatCompletionRetriesTransientError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := newTestLiteLLMProvider(server.URL)
+	provider := newTestOpenAICompatibleProvider(server.URL)
 	provider.httpClient = server.Client()
 	provider.transport.SetRetryConfig(RetryConfig{
 		MaxRetries:          3,
@@ -52,7 +122,7 @@ func TestLiteLLMProvider_ChatCompletionRetriesTransientError(t *testing.T) {
 	})
 
 	resp, err := provider.ChatCompletion(context.Background(), ChatRequest{
-		Model:    "litellm/test-model",
+		Model:    "openai_compatible/test-model",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -66,10 +136,10 @@ func TestLiteLLMProvider_ChatCompletionRetriesTransientError(t *testing.T) {
 	}
 }
 
-// TestLiteLLMProvider_ChatCompletionSurfacesStructuredError proves a
+// TestOpenAICompatibleProvider_ChatCompletionSurfacesStructuredError proves a
 // non-retryable error status becomes a structured *APIError instead of the
 // prior implementation's plain fmt.Errorf(status, body).
-func TestLiteLLMProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
+func TestOpenAICompatibleProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -77,11 +147,11 @@ func TestLiteLLMProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := newTestLiteLLMProvider(server.URL)
+	provider := newTestOpenAICompatibleProvider(server.URL)
 	provider.httpClient = server.Client()
 
 	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
-		Model:    "litellm/test-model",
+		Model:    "openai_compatible/test-model",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -96,11 +166,11 @@ func TestLiteLLMProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
 	}
 }
 
-// TestLiteLLMProvider_ChatCompletionStreamDetectsMalformedChunk proves the
+// TestOpenAICompatibleProvider_ChatCompletionStreamDetectsMalformedChunk proves the
 // migration onto the shared SSE parser: a malformed chunk in the middle of a
 // stream is now a hard error instead of being silently skipped by the prior
 // hand-rolled parser's `continue` on decode failure.
-func TestLiteLLMProvider_ChatCompletionStreamDetectsMalformedChunk(t *testing.T) {
+func TestOpenAICompatibleProvider_ChatCompletionStreamDetectsMalformedChunk(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
@@ -115,11 +185,11 @@ func TestLiteLLMProvider_ChatCompletionStreamDetectsMalformedChunk(t *testing.T)
 	}))
 	defer server.Close()
 
-	provider := newTestLiteLLMProvider(server.URL)
+	provider := newTestOpenAICompatibleProvider(server.URL)
 	provider.httpClient = server.Client()
 
 	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
-		Model:    "litellm/test-model",
+		Model:    "openai_compatible/test-model",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 

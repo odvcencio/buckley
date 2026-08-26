@@ -75,7 +75,7 @@ func TestQwenFlashUsesInDepthOutputChecklist(t *testing.T) {
 	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
 		depth:              reviewDepthInDepth,
 		sizeClass:          "project",
-		modelID:            "qwen/qwen3.7-flash",
+		modelID:            "qwen/qwen3.8-flash",
 		reasoningMaxTokens: qwenBroadReasoning,
 	})
 	for _, want := range []string{

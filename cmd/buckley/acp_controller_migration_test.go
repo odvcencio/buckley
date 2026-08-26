@@ -550,7 +550,7 @@ func TestRunACPLoop_GovernorStopsRepeatingToolLoop(t *testing.T) {
 	}
 }
 
-func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
+func TestRunACPLoop_OpenAICompatibleFinalizationPreservesNoToolIntent(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -559,9 +559,9 @@ func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/model/info":
+		case "/models":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"model_name":"test-model","model_info":{"mode":"chat","max_input_tokens":128000,"input_cost_per_token":0.000001,"output_cost_per_token":0.000002,"supports_function_calling":true}}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"test-model"}]}`)
 			return
 		case "/chat/completions":
 		default:
@@ -577,7 +577,7 @@ func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
 			finalizationBodies = append(finalizationBodies, bodyText)
 			mu.Unlock()
 			_, _ = io.WriteString(w, "data: "+
-				`{"id":"chatcmpl-final","model":"test-model","choices":[{"index":0,"delta":{"content":"LiteLLM final synthesis."},"finish_reason":"stop"}],"usage":{"prompt_tokens":140,"completion_tokens":20,"total_tokens":160}}`+
+				`{"id":"chatcmpl-final","model":"test-model","choices":[{"index":0,"delta":{"content":"Compatible final synthesis."},"finish_reason":"stop"}],"usage":{"prompt_tokens":140,"completion_tokens":20,"total_tokens":160}}`+
 				"\n\n")
 		} else {
 			_, _ = io.WriteString(w, "data: "+
@@ -589,10 +589,12 @@ func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	cfg := config.DefaultConfig()
-	cfg.Providers.LiteLLM.Enabled = true
-	cfg.Providers.LiteLLM.APIKey = "test-key"
-	cfg.Providers.LiteLLM.BaseURL = server.URL
-	cfg.Models.DefaultProvider = "litellm"
+	cfg.Providers.OpenAICompatible.Enabled = true
+	cfg.Providers.OpenAICompatible.APIKey = "test-key"
+	cfg.Providers.OpenAICompatible.BaseURL = server.URL
+	cfg.Providers.OpenAICompatible.Models = []string{"test-model"}
+	cfg.Providers.OpenAICompatible.SupportedParameters = map[string][]string{"test-model": {"tools"}}
+	cfg.Models.DefaultProvider = "openai_compatible"
 	mgr, err := model.NewManager(cfg)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -604,15 +606,15 @@ func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
 	probe := &acpProbeTool{}
 	registry := tool.NewEmptyRegistry()
 	registry.Register(probe)
-	conv := conversation.New("session-litellm-finalize")
+	conv := conversation.New("session-compatible-finalize")
 	conv.AddUserMessage("keep probing")
 
 	text, err := runACPLoop(
 		context.Background(), cfg, mgr, conv, registry, nil, engine,
-		"litellm/test-model", "", "session-litellm-finalize", nil,
+		"openai_compatible/test-model", "", "session-compatible-finalize", nil,
 		func(string, ...interface{}) {}, (&collectingStream{}).fn,
 	)
-	if err != nil || text != "LiteLLM final synthesis." {
+	if err != nil || text != "Compatible final synthesis." {
 		t.Fatalf("runACPLoop = %q, %v", text, err)
 	}
 	if probe.callCount() != 3 {
@@ -625,7 +627,7 @@ func TestRunACPLoop_LiteLLMFinalizationPreservesNoToolIntent(t *testing.T) {
 		t.Fatalf("finalization requests = %d, want exactly one", len(bodies))
 	}
 	if !strings.Contains(bodies[0], `"name":"_noop"`) || !strings.Contains(bodies[0], `"tool_choice":"none"`) {
-		t.Fatalf("LiteLLM finalization lost compatibility noop or forced no-tool choice:\n%s", bodies[0])
+		t.Fatalf("OpenAI-compatible finalization lost compatibility noop or forced no-tool choice:\n%s", bodies[0])
 	}
 }
 

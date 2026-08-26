@@ -88,7 +88,7 @@ models:
 
   # Utility models for lightweight tasks
   utility:
-    commit: qwen/qwen3.7-flash
+    commit: qwen/qwen3.8-flash
     pr: qwen/qwen3.6-flash
     compaction: qwen/qwen3.6-flash
     todo_plan: qwen/qwen3.6-flash
@@ -103,7 +103,7 @@ models:
 | `review` | `z-ai/glm-5.2` |
 | `default_provider` | `openrouter` |
 | `reasoning` | `""` (auto-detect) |
-| `utility.commit` | `qwen/qwen3.7-flash` |
+| `utility.commit` | `qwen/qwen3.8-flash` |
 | `utility.pr` | `qwen/qwen3.6-flash` |
 | `utility.compaction` | `qwen/qwen3.6-flash` |
 | `utility.todo_plan` | `qwen/qwen3.6-flash` |
@@ -249,7 +249,7 @@ Provider prompt caching controls.
 ```yaml
 prompt_cache:
   enabled: true
-  providers: [openrouter, litellm, openai]
+  providers: [openrouter, openai_compatible, openai]
   system_messages: 2
   tail_messages: 8
   key: "project-cache-key"
@@ -258,7 +258,7 @@ prompt_cache:
 
 **Selection & behavior:**
 - If `providers` is empty, caching applies to any provider that supports it.
-- `openrouter` and `litellm` trim messages to the last `system_messages` + `tail_messages` for OpenAI-compatible caching.
+- `openrouter` and `openai_compatible` trim messages to the last `system_messages` + `tail_messages` for compatible caching.
 - `openai` uses `prompt_cache_key` and `prompt_cache_retention` (no message trimming).
 - Per-request `prompt_cache` settings override config defaults.
 

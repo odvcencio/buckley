@@ -61,6 +61,15 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 		providers["ollama"] = NewOllamaProvider(cfg.Providers.Ollama.BaseURL, networkLogsEnabled)
 	}
 
+	if cfg.Providers.OpenAICompatible.Enabled {
+		if strings.TrimSpace(cfg.Providers.OpenAICompatible.BaseURL) == "" {
+			return nil, fmt.Errorf("openai_compatible provider requires base_url")
+		}
+		providers["openai_compatible"] = NewOpenAICompatibleProvider(cfg.Providers.OpenAICompatible, networkLogsEnabled)
+	}
+
+	// Keep existing LiteLLM configurations routable while new generic
+	// OpenAI-compatible endpoints use the canonical provider name.
 	if cfg.Providers.LiteLLM.Enabled {
 		providers["litellm"] = NewLiteLLMProvider(cfg.Providers.LiteLLM, networkLogsEnabled)
 	}
@@ -72,7 +81,7 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 	}
 
 	if len(providers) == 0 {
-		return nil, fmt.Errorf("no providers configured; set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY) or enable BUCKLEY_OLLAMA_ENABLED/BUCKLEY_LITELLM_ENABLED/BUCKLEY_CODEX_ENABLED")
+		return nil, fmt.Errorf("no providers configured; set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY) or enable BUCKLEY_OLLAMA_ENABLED/BUCKLEY_OPENAI_COMPATIBLE_ENABLED/BUCKLEY_CODEX_ENABLED")
 	}
 
 	return providers, nil
