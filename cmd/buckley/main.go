@@ -232,7 +232,7 @@ func main() {
 	}
 
 	if !cfg.Providers.HasReadyProvider() {
-		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_LITELLM_ENABLED=1).")
+		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_OPENAI_COMPATIBLE_ENABLED=1).")
 		os.Exit(2)
 	}
 
@@ -1014,7 +1014,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	}
 
 	if !cfg.Providers.HasReadyProvider() {
-		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_LITELLM_ENABLED"), 2)
+		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_OPENAI_COMPATIBLE_ENABLED"), 2)
 	}
 
 	// Create model manager
@@ -1294,7 +1294,7 @@ func runConfigCheck() error {
 		fmt.Println("✗ No provider configured")
 		fmt.Println()
 		fmt.Println(`To fix: export OPENROUTER_API_KEY="<YOUR_OPENROUTER_API_KEY>"`)
-		fmt.Println("Or enable a local provider (BUCKLEY_OLLAMA_ENABLED=1 or BUCKLEY_LITELLM_ENABLED=1).")
+		fmt.Println("Or enable a local provider (BUCKLEY_OLLAMA_ENABLED=1 or BUCKLEY_OPENAI_COMPATIBLE_ENABLED=1).")
 		fmt.Println("Get a key at: https://openrouter.ai/keys")
 		return withExitCode(fmt.Errorf("no providers configured"), 2)
 	}

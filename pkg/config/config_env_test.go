@@ -61,6 +61,18 @@ func TestApplyEnvOverridesLiteLLMFallbackAsymmetry(t *testing.T) {
 	}
 }
 
+func TestApplyEnvOverridesOpenAICompatible(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("BUCKLEY_OPENAI_COMPATIBLE_BASE_URL", "https://compatible.example/v1")
+	t.Setenv("BUCKLEY_OPENAI_COMPATIBLE_API_KEY", "compatible-key")
+	ApplyEnvOverridesForTest(cfg)
+
+	got := cfg.Providers.OpenAICompatible
+	if !got.Enabled || got.BaseURL != "https://compatible.example/v1" || got.APIKey != "compatible-key" {
+		t.Fatalf("OpenAI-compatible env config = %+v", got)
+	}
+}
+
 // TestApplyEnvOverridesExperimentPositiveOnlyGuards asserts a zero or
 // negative value for the four guarded experiment env vars is treated as
 // unset (the default survives), matching the pre-reflection `n > 0` /

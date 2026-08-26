@@ -319,6 +319,8 @@ func isQwenReviewModel(modelID string) bool {
 		strings.HasSuffix(modelID, "/qwen3.7-plus") ||
 		modelID == "qwen/qwen3.7-flash" ||
 		strings.HasSuffix(modelID, "/qwen3.7-flash") ||
+		modelID == "qwen/qwen3.8-flash" ||
+		strings.HasSuffix(modelID, "/qwen3.8-flash") ||
 		modelID == "qwen/qwen3.8-max" ||
 		strings.HasSuffix(modelID, "/qwen3.8-max")
 }

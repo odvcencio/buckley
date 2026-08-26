@@ -5,7 +5,7 @@ import "strings"
 // ReadyProviders returns identifiers for providers that have usable configuration.
 func (p *ProviderConfig) ReadyProviders() []string {
 	var providers []string
-	for _, providerID := range []string{"openrouter", "openai", "anthropic", "google", "ollama", "litellm", "codex"} {
+	for _, providerID := range []string{"openrouter", "openai", "anthropic", "google", "ollama", "openai_compatible", "litellm", "codex"} {
 		if p.ready(providerID) {
 			providers = append(providers, providerID)
 		}
@@ -39,6 +39,8 @@ func (p *ProviderConfig) ready(providerID string) bool {
 		return p.Google.Enabled && p.Google.APIKey != ""
 	case "ollama":
 		return p.Ollama.Enabled
+	case "openai_compatible":
+		return p.OpenAICompatible.Enabled && strings.TrimSpace(p.OpenAICompatible.BaseURL) != ""
 	case "litellm":
 		return p.LiteLLM.Enabled
 	case "codex":
@@ -81,7 +83,7 @@ func (c *Config) preferredReadyProvider() string {
 		return providerID
 	}
 
-	for _, providerID := range []string{"openai", "anthropic", "google", "litellm", "ollama", "codex"} {
+	for _, providerID := range []string{"openai", "anthropic", "google", "openai_compatible", "litellm", "ollama", "codex"} {
 		if c.Providers.ready(providerID) {
 			return providerID
 		}

@@ -339,7 +339,8 @@ func needsNoopToolForHistory(req ChatRequest, providerID string) bool {
 	if len(req.Tools) > 0 {
 		return false
 	}
-	if !strings.Contains(strings.ToLower(providerID), "litellm") {
+	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	if providerID != "openai_compatible" && providerID != "litellm" {
 		return false
 	}
 	return hasToolCallHistory(req.Messages)

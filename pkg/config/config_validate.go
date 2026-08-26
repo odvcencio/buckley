@@ -319,6 +319,9 @@ func (c *Config) ValidationWarnings() []string {
 	if c.Providers.Google.APIKey != "" && os.Getenv("GOOGLE_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: Google API key is loaded from a configuration file. Consider using GOOGLE_API_KEY environment variable instead.")
 	}
+	if c.Providers.OpenAICompatible.APIKey != "" && os.Getenv("BUCKLEY_OPENAI_COMPATIBLE_API_KEY") == "" {
+		warnings = append(warnings, "SECURITY: OpenAI-compatible API key is loaded from a configuration file. Consider using BUCKLEY_OPENAI_COMPATIBLE_API_KEY instead.")
+	}
 	if c.Providers.LiteLLM.APIKey != "" && os.Getenv("BUCKLEY_LITELLM_API_KEY") == "" && os.Getenv("LITELLM_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: LiteLLM API key is loaded from a configuration file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")
 	}

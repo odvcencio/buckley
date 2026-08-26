@@ -72,9 +72,10 @@ var mergeStrategies = map[string]mergeStrategy{
 
 	// Provider sections where an API key, base URL, command, or model list
 	// implicitly enables the provider when "enabled" itself isn't set.
-	"providers.ollama":  mergeOllamaProvider,
-	"providers.litellm": mergeLiteLLMProvider,
-	"providers.codex":   mergeCodexProvider,
+	"providers.ollama":            mergeOllamaProvider,
+	"providers.openai_compatible": mergeOpenAICompatibleProvider,
+	"providers.litellm":           mergeOpenAICompatibleProvider,
+	"providers.codex":             mergeCodexProvider,
 
 	// Treated as one atomic unit when present, not merged field-by-field.
 	"batch.job_template.resources": mergeWholeValueIfPresent,
@@ -382,19 +383,21 @@ func mergeOllamaProvider(ctx mergeCtx, base, override reflect.Value, path []stri
 	}
 }
 
-// mergeLiteLLMProvider merges providers.litellm, mirroring
-// mergeProviderConfig's LiteLLM block: base_url/api_key/models/fallbacks/
-// router merge individually when present in raw (fallbacks with the same
+// mergeOpenAICompatibleProvider merges an OpenAI-compatible provider block:
+// base_url/api_key/models/supported_parameters/context_lengths/fallbacks/router merge
+// individually when present in raw (fallbacks with the same
 // tri-state nil/empty/populated handling as mergeMapPerKeyTriState), and
 // -- when "enabled" itself isn't set -- any of those other fields being
 // present implicitly enables the provider.
-func mergeLiteLLMProvider(ctx mergeCtx, base, override reflect.Value, path []string) {
-	b := base.Addr().Interface().(*LiteLLMConfig)
-	o := override.Interface().(LiteLLMConfig)
+func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, path []string) {
+	b := base.Addr().Interface().(*OpenAICompatibleConfig)
+	o := override.Interface().(OpenAICompatibleConfig)
 
 	baseURLSet := boolFieldSet(ctx.raw, sub(path, "base_url")...)
 	apiKeySet := boolFieldSet(ctx.raw, sub(path, "api_key")...)
 	modelsSet := boolFieldSet(ctx.raw, sub(path, "models")...)
+	supportedParametersSet := boolFieldSet(ctx.raw, sub(path, "supported_parameters")...)
+	contextLengthsSet := boolFieldSet(ctx.raw, sub(path, "context_lengths")...)
 	fallbacksSet := boolFieldSet(ctx.raw, sub(path, "fallbacks")...)
 	routerSet := boolFieldSet(ctx.raw, sub(path, "router")...)
 	enabledSet := boolFieldSet(ctx.raw, sub(path, "enabled")...)
@@ -407,6 +410,12 @@ func mergeLiteLLMProvider(ctx mergeCtx, base, override reflect.Value, path []str
 	}
 	if modelsSet {
 		b.Models = append([]string{}, o.Models...)
+	}
+	if supportedParametersSet {
+		b.SupportedParameters = cloneStringSliceMap(o.SupportedParameters)
+	}
+	if contextLengthsSet {
+		b.ContextLengths = cloneStringIntMap(o.ContextLengths)
 	}
 	if fallbacksSet {
 		switch {
@@ -428,9 +437,31 @@ func mergeLiteLLMProvider(ctx mergeCtx, base, override reflect.Value, path []str
 	}
 	if enabledSet {
 		b.Enabled = o.Enabled
-	} else if apiKeySet || baseURLSet || modelsSet || fallbacksSet || routerSet {
+	} else if apiKeySet || baseURLSet || modelsSet || supportedParametersSet || contextLengthsSet || fallbacksSet || routerSet {
 		b.Enabled = true
 	}
+}
+
+func cloneStringIntMap(source map[string]int) map[string]int {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]int, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneStringSliceMap(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string][]string, len(source))
+	for key, values := range source {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
 }
 
 // mergeCodexProvider merges providers.codex, mirroring

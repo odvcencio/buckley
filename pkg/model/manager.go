@@ -722,7 +722,7 @@ func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatReque
 	}
 
 	switch providerID {
-	case "openrouter", "litellm":
+	case "openrouter", "openai_compatible", "litellm":
 		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
 			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
 		}

@@ -22,7 +22,7 @@ const (
 	// defaultTimeout is the read deadline for the underlying http.Client
 	// (Client, and every other provider adapter's own client -- see
 	// provider_openai.go, provider_anthropic.go, provider_google.go,
-	// provider_ollama.go, provider_litellm.go). It must stay at or above 300s:
+	// provider_ollama.go, provider_openai_compatible.go). It must stay at or above 300s:
 	// the stealth/ox-alpha empty-response incident observed a healthy-but-queued
 	// response take 249s. The goal path additionally calls SetTimeout(0) to
 	// disable this deadline entirely (see cmd/buckley/goal_engine.go), so a

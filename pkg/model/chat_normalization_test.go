@@ -151,7 +151,7 @@ func TestApplyProviderTransformsScrubsAnthropicToolIDs(t *testing.T) {
 	}
 }
 
-func TestApplyProviderTransformsAddsLiteLLMNoopToolForToolHistory(t *testing.T) {
+func TestApplyProviderTransformsAddsCompatibleNoopToolForToolHistory(t *testing.T) {
 	req := ChatRequest{
 		Model: "litellm/claude",
 		Messages: []Message{
@@ -173,24 +173,27 @@ func TestApplyProviderTransformsAddsLiteLLMNoopToolForToolHistory(t *testing.T) 
 		},
 	}
 
-	got := applyProviderTransforms(req, "litellm")
-
-	if len(got.Tools) != 1 {
-		t.Fatalf("expected one noop tool, got %+v", got.Tools)
-	}
-	fn, ok := got.Tools[0]["function"].(map[string]any)
-	if !ok {
-		t.Fatalf("noop tool missing function payload: %+v", got.Tools[0])
-	}
-	if fn["name"] != "_noop" {
-		t.Fatalf("noop tool name=%v want _noop", fn["name"])
-	}
-	if got.ToolChoice != "auto" {
-		t.Fatalf("tool choice=%q want auto", got.ToolChoice)
+	for _, providerID := range []string{"openai_compatible", "litellm"} {
+		t.Run(providerID, func(t *testing.T) {
+			got := applyProviderTransforms(req, providerID)
+			if len(got.Tools) != 1 {
+				t.Fatalf("expected one noop tool, got %+v", got.Tools)
+			}
+			fn, ok := got.Tools[0]["function"].(map[string]any)
+			if !ok {
+				t.Fatalf("noop tool missing function payload: %+v", got.Tools[0])
+			}
+			if fn["name"] != "_noop" {
+				t.Fatalf("noop tool name=%v want _noop", fn["name"])
+			}
+			if got.ToolChoice != "auto" {
+				t.Fatalf("tool choice=%q want auto", got.ToolChoice)
+			}
+		})
 	}
 }
 
-func TestApplyProviderTransformsPreservesLiteLLMNoToolFinalizationIntent(t *testing.T) {
+func TestApplyProviderTransformsPreservesCompatibleNoToolFinalizationIntent(t *testing.T) {
 	req := ChatRequest{
 		Model:      "litellm/claude",
 		ToolChoice: "none",
@@ -211,13 +214,16 @@ func TestApplyProviderTransformsPreservesLiteLLMNoToolFinalizationIntent(t *test
 		},
 	}
 
-	got := applyProviderTransforms(req, "litellm")
-
-	if len(got.Tools) != 1 {
-		t.Fatalf("expected compatibility noop tool, got %+v", got.Tools)
-	}
-	if got.ToolChoice != "none" {
-		t.Fatalf("tool choice=%q want explicit no-tool finalization intent", got.ToolChoice)
+	for _, providerID := range []string{"openai_compatible", "litellm"} {
+		t.Run(providerID, func(t *testing.T) {
+			got := applyProviderTransforms(req, providerID)
+			if len(got.Tools) != 1 {
+				t.Fatalf("expected compatibility noop tool, got %+v", got.Tools)
+			}
+			if got.ToolChoice != "none" {
+				t.Fatalf("tool choice=%q want explicit no-tool finalization intent", got.ToolChoice)
+			}
+		})
 	}
 }
 

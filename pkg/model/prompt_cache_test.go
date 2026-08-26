@@ -7,7 +7,7 @@ import (
 )
 
 func TestApplyPromptCache_OpenAICompatibleProviders(t *testing.T) {
-	providers := []string{"openrouter", "litellm"}
+	providers := []string{"openrouter", "openai_compatible", "litellm"}
 	for _, providerID := range providers {
 		t.Run(providerID, func(t *testing.T) {
 			cfg := &config.Config{

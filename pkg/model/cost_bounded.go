@@ -25,7 +25,7 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 	}
 
 	switch providerID {
-	case "openrouter", "litellm":
+	case "openrouter", "openai_compatible", "litellm":
 		req.MaxTokens = allowance
 		req.MaxCompletionTokens = 0
 		if providerID == "openrouter" {
@@ -92,7 +92,7 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		return 0, err
 	}
 	switch providerID {
-	case "openrouter", "litellm", "openai", "anthropic", "ollama", "google":
+	case "openrouter", "openai_compatible", "litellm", "openai", "anthropic", "ollama", "google":
 	case "codex":
 		return 0, fmt.Errorf("cost-bounded requests are unavailable for native Codex: provider pricing is not observable")
 	default:

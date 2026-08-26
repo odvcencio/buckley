@@ -26,7 +26,7 @@ type HeaderFunc func(*http.Request)
 // OpenRouter path -- retry-before-body on 429/5xx, a rate limiter, a circuit
 // breaker, structured *APIError, and Client's SSE parse semantics (error on
 // a malformed chunk, in-band error detection) -- so the direct-HTTP
-// providers (OpenAI, Anthropic, Google, LiteLLM) do not each hand-roll their
+// providers (OpenAI, Anthropic, Google, OpenAI-compatible) do not each hand-roll their
 // own. It takes the *http.Client per call instead of owning one, so a
 // provider's own httpClient field (swappable in tests) stays the single
 // source of truth for the client actually used.
