@@ -123,9 +123,8 @@ func TestReadFileTool(t *testing.T) {
 		}
 
 		for name, params := range map[string]map[string]any{
-			"zero start":      {"path": testFile, "start_line": 0},
-			"reverse range":   {"path": testFile, "start_line": 2, "end_line": 1},
-			"oversized range": {"path": testFile, "start_line": 1, "end_line": 101},
+			"zero start":    {"path": testFile, "start_line": 0},
+			"reverse range": {"path": testFile, "start_line": 2, "end_line": 1},
 		} {
 			t.Run(name, func(t *testing.T) {
 				result, err := tool.Execute(params)
@@ -136,6 +135,30 @@ func TestReadFileTool(t *testing.T) {
 					t.Fatalf("expected page validation error, got %+v", result)
 				}
 			})
+		}
+	})
+
+	t.Run("clamps oversized explicit page with continuation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "oversized-page.txt")
+		lines := make([]string, 700)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line %d", i+1)
+		}
+		if err := os.WriteFile(testFile, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+
+		result, err := tool.Execute(map[string]any{"path": testFile, "start_line": 1, "end_line": 700})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected clamped success, got %s", result.Error)
+		}
+		page := result.DisplayData["page"].(map[string]any)
+		if page["end_line"] != 500 || page["next_start_line"] != 501 || page["has_more"] != true {
+			t.Fatalf("page metadata = %#v", page)
 		}
 	})
 
