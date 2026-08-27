@@ -158,6 +158,30 @@ func TestApprovalMiddleware_DeniesDotEnvReadInYoloMode(t *testing.T) {
 	}
 }
 
+func TestHeadlessPermissionMiddleware_DeniesAgentHarnessShellInYoloMode(t *testing.T) {
+	sessionCfg := config.DefaultConfig()
+	sessionCfg.Approval.Mode = "yolo"
+	gate := buildHeadlessPermissionGate(
+		sessionCfg,
+		policy.PostureInteractive,
+		&storage.Session{ProjectPath: "/workspace"},
+		nil,
+		policy.NewParkedDecisionLog(),
+	)
+
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&builtin.ShellCommandTool{})
+	registry.Use(tool.NewPermissionMiddleware(gate))
+
+	result, err := registry.Execute("run_shell", map[string]any{"command": "buckley -p inspect"})
+	if err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	if result == nil || result.Success || !strings.Contains(result.Error, "permission denied") {
+		t.Fatalf("expected agent harness invocation to be denied, got %#v", result)
+	}
+}
+
 // TestHeadlessPermissionMiddleware_InteractivePostureDefersToExistingFlow
 // confirms the same outward-bash command is not blocked at the permission
 // layer under the default interactive posture (today's behavior): the

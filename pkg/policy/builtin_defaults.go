@@ -17,6 +17,7 @@ const (
 // bash commands run outside the workspace.
 func BuiltinDefaultRules() []PermissionRule {
 	return []PermissionRule{
+		{ID: "builtin.deny-agent-harness-shell", Tool: "run_shell", CommandClass: CommandClassAgentHarness, Action: PermissionDeny},
 		{ID: "builtin.deny-dotenv", Tool: "*", ArgPattern: "**/.env", Action: PermissionDeny},
 		{ID: "builtin.deny-dotenv-variant", Tool: "*", ArgPattern: "**/.env.*", Action: PermissionDeny},
 		{ID: "builtin.deny-credentials", Tool: "*", ArgPattern: "**/*credentials*", Action: PermissionDeny},
@@ -59,6 +60,7 @@ func EvaluateBuiltinDefaultsArbiter(evaluator types.RuleEvaluator, req Permissio
 		"tool":               req.Tool,
 		"category":           req.Category,
 		"arg":                req.Arg,
+		"command_class":      req.CommandClass,
 		"workspace_relative": req.WorkspaceRelative,
 		"posture":            req.Posture,
 	})
@@ -72,12 +74,13 @@ func EvaluateBuiltinDefaultsArbiter(evaluator types.RuleEvaluator, req Permissio
 	ruleID, _ := result.Params["rule_id"].(string)
 	toolPattern, _ := result.Params["tool_pattern"].(string)
 	argPattern, _ := result.Params["arg_pattern"].(string)
+	commandClass, _ := result.Params["command_class"].(string)
 	outsideWorkspaceOnly, _ := result.Params["outside_workspace_only"].(bool)
 	// A matched outcome without its stable rule identity is unsafe for
 	// scoped approval caching: two unrelated asks could otherwise collapse
 	// into the same empty rule scope. Treat incomplete outcomes as an
 	// unavailable strategy and use the Go rules, which carry the metadata.
-	if ruleID == "" || toolPattern == "" || argPattern == "" {
+	if ruleID == "" || toolPattern == "" || (argPattern == "" && commandClass == "") {
 		return PermissionDecision{}, false
 	}
 	return PermissionDecision{
@@ -87,6 +90,7 @@ func EvaluateBuiltinDefaultsArbiter(evaluator types.RuleEvaluator, req Permissio
 			ID:                   ruleID,
 			Tool:                 toolPattern,
 			ArgPattern:           argPattern,
+			CommandClass:         commandClass,
 			Action:               PermissionAction(action),
 			OutsideWorkspaceOnly: outsideWorkspaceOnly,
 		},

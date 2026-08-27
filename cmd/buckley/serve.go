@@ -37,10 +37,19 @@ const (
 	envBuckleyPrintIPCToken = "BUCKLEY_PRINT_GENERATED_IPC_TOKEN"
 )
 
-var serveLoadConfigFn = config.Load
+var serveLoadConfigFn = serveDefaultLoadConfig
 var serveInitStoreFn = initIPCStore
 var serveNewServerFn = func(cfg ipc.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, appCfg *config.Config, workflow *orchestrator.WorkflowManager, models *model.Manager) ipcServer {
 	return ipc.NewServer(cfg, store, telemetryHub, commandGateway, planStore, appCfg, workflow, models)
+}
+
+// serveDefaultLoadConfig honors the global --config value parsed in main.go,
+// falling back to the default user/project config hierarchy when unset.
+func serveDefaultLoadConfig() (*config.Config, error) {
+	if configPath != "" {
+		return config.LoadFromPath(configPath)
+	}
+	return config.Load()
 }
 
 type serveCommandOptions struct {

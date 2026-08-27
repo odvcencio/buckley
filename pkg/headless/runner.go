@@ -68,30 +68,6 @@ const (
 	EventWarning            = "warning"
 )
 
-// defaultHeadlessSystemPrompt provides core agent instructions for headless sessions.
-// This ensures models understand how to use tools and continue working on tasks.
-const defaultHeadlessSystemPrompt = `You are an AI development assistant with access to various tools.
-
-CRITICAL BEHAVIOR:
-- You MUST use tools to complete tasks, not just describe what you would do
-- Continue calling tools until the task is fully complete
-- Do not stop after one tool call if more work is needed
-- After each tool result, evaluate if more actions are required
-
-TOOL USAGE:
-- Use search_text to find files and code locations
-- Use read_file to examine file contents
-- Use edit_file to make changes
-- Use run_shell for commands, builds, and tests
-- Chain multiple tool calls as needed
-
-ANTI-PATTERNS TO AVOID:
-- Do NOT respond with just text when tools are needed
-- Do NOT stop after acknowledging a task without executing it
-- Do NOT describe what you would do without actually doing it
-
-Always take action with tools. If you're uncertain, use tools to investigate.`
-
 // RunnerEvent represents an event emitted during conversation processing.
 type RunnerEvent struct {
 	Type      string         `json:"type"`
@@ -1404,7 +1380,8 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 				if r.store != nil {
 					decidedBy := "system"
 					riskScore := 0
-					if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
+					auditApprovalID, approvalDecision, score := r.approvalAuditMetadata(approvalID)
+					if approvalDecision != "" || score != 0 {
 						if approvalDecision != "" {
 							decidedBy = approvalDecision
 						}
@@ -1412,7 +1389,7 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 					}
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: approvalID,
+						ApprovalID: auditApprovalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1453,10 +1430,10 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 					},
 				})
 				if r.store != nil {
-					decidedBy, riskScore := r.approvalAuditFields(approvalID)
+					auditApprovalID, decidedBy, riskScore := r.approvalAuditMetadata(approvalID)
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: approvalID,
+						ApprovalID: auditApprovalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1501,10 +1478,10 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 		duration := time.Since(startTime)
 
 		// Log to audit trail
-		decidedBy, riskScore := r.approvalAuditFields(approvalID)
+		auditApprovalID, decidedBy, riskScore := r.approvalAuditMetadata(approvalID)
 		auditEntry := &storage.ToolAuditEntry{
 			SessionID:  r.sessionID,
-			ApprovalID: approvalID,
+			ApprovalID: auditApprovalID,
 			ToolName:   tc.Function.Name,
 			ToolInput:  tc.Function.Arguments,
 			RiskScore:  riskScore,
@@ -1573,15 +1550,15 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 	return outcomes, nil
 }
 
-func (r *Runner) approvalAuditFields(approvalID string) (string, int) {
+func (r *Runner) approvalAuditMetadata(approvalID string) (string, string, int) {
 	if r == nil || r.store == nil || strings.TrimSpace(approvalID) == "" {
-		return "", 0
+		return "", "", 0
 	}
 	approval, err := r.store.GetPendingApproval(approvalID)
 	if err != nil || approval == nil {
-		return "", 0
+		return "", "", 0
 	}
-	return approval.DecidedBy, approval.RiskScore
+	return approval.ID, approval.DecidedBy, approval.RiskScore
 }
 
 // evaluatePolicy runs the policy engine to determine if approval is needed.
@@ -2827,7 +2804,7 @@ func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCt
 
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
 		Evaluator:        evaluator,
-		BasePrompt:       defaultIfEmpty(basePrompt, defaultHeadlessSystemPrompt),
+		BasePrompt:       defaultIfEmpty(basePrompt, prompts.DefaultToolUseSystemPrompt),
 		AgentProfile:     agentProfile,
 		ProjectContext:   projectRaw,
 		KnowledgeContext: knowledgeContext,

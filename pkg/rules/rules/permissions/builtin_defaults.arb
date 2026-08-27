@@ -3,6 +3,7 @@ outcome PermissionOutcome {
     rule_id: string
     tool_pattern: string
     arg_pattern: string
+    command_class: string
     outside_workspace_only: bool
 }
 
@@ -11,12 +12,25 @@ outcome PermissionOutcome {
 // pkg/policy/builtin_defaults_test.go.
 strategy builtin_defaults_policy returns PermissionOutcome {
     when {
+        tool == "run_shell"
+        and command_class == "agent_harness"
+    } then DenyAgentHarnessShell {
+        action: "deny",
+        rule_id: "builtin.deny-agent-harness-shell",
+        tool_pattern: "run_shell",
+        arg_pattern: "",
+        command_class: "agent_harness",
+        outside_workspace_only: false,
+    }
+
+    when {
         arg matches "(^|/)\.env$"
     } then DenyDotEnv {
         action: "deny",
         rule_id: "builtin.deny-dotenv",
         tool_pattern: "*",
         arg_pattern: "**/.env",
+        command_class: "",
         outside_workspace_only: false,
     }
 
@@ -27,6 +41,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.deny-dotenv-variant",
         tool_pattern: "*",
         arg_pattern: "**/.env.*",
+        command_class: "",
         outside_workspace_only: false,
     }
 
@@ -37,6 +52,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.deny-credentials",
         tool_pattern: "*",
         arg_pattern: "**/*credentials*",
+        command_class: "",
         outside_workspace_only: false,
     }
 
@@ -47,6 +63,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.deny-id-rsa",
         tool_pattern: "*",
         arg_pattern: "**/id_rsa*",
+        command_class: "",
         outside_workspace_only: false,
     }
 
@@ -59,6 +76,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-rm-rf",
         tool_pattern: "run_shell",
         arg_pattern: "*rm -rf*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -71,6 +89,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-rm-r-f",
         tool_pattern: "run_shell",
         arg_pattern: "*rm -r -f*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -83,6 +102,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-force-push-long",
         tool_pattern: "run_shell",
         arg_pattern: "*git push*--force*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -95,6 +115,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-force-push-short",
         tool_pattern: "run_shell",
         arg_pattern: "*git push*-f*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -107,6 +128,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-curl-sh",
         tool_pattern: "run_shell",
         arg_pattern: "*curl*|*sh*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -119,6 +141,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-shell-curl-bash",
         tool_pattern: "run_shell",
         arg_pattern: "*curl*|*bash*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -131,6 +154,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "builtin.ask-code-rm-rf",
         tool_pattern: "run_code",
         arg_pattern: "*rm -rf*",
+        command_class: "",
         outside_workspace_only: true,
     }
 
@@ -139,6 +163,7 @@ strategy builtin_defaults_policy returns PermissionOutcome {
         rule_id: "",
         tool_pattern: "",
         arg_pattern: "",
+        command_class: "",
         outside_workspace_only: false,
     }
 }
