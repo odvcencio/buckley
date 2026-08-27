@@ -678,6 +678,16 @@ func TestHandleToolCallsPersistsModelVisibleToolTurns(t *testing.T) {
 	if err := runner.handleToolCalls(context.Background(), msg); err != nil {
 		t.Fatalf("handleToolCalls: %v", err)
 	}
+	auditEntries, err := store.GetAuditLog("s1", 10)
+	if err != nil {
+		t.Fatalf("GetAuditLog: %v", err)
+	}
+	if len(auditEntries) != 1 {
+		t.Fatalf("expected one non-approval tool audit entry, got %d", len(auditEntries))
+	}
+	if auditEntries[0].ApprovalID != "" {
+		t.Fatalf("non-approval audit entry references approval %q", auditEntries[0].ApprovalID)
+	}
 
 	loaded := conversation.New("s1")
 	if err := loaded.LoadFromStorage(store); err != nil {

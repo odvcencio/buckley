@@ -996,6 +996,13 @@ func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
 	if registry == nil || policy == nil {
 		return
 	}
+	if policy.AllowedTools != nil {
+		// An explicit allowlist is the complete provider-visible working set,
+		// including specialized tools that dynamic discovery normally hides.
+		// Filtering below still removes denied tools and keeps discover_tools
+		// available only when the caller explicitly allowed it.
+		registry.EnableDynamicDiscovery(policy.AllowedTools)
+	}
 
 	allowed := make(map[string]struct{})
 	for _, name := range policy.AllowedTools {
