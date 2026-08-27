@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -94,7 +95,7 @@ func TestRequestACPToolPermission_ReadOnlyToolNeverAsks(t *testing.T) {
 	t.Parallel()
 
 	registry := tool.NewRegistry()
-	allowed, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("read_file"), map[string]any{"path": "a.go"}, "", nil)
+	allowed, reason := requestACPToolPermission(context.Background(), nil, nil, registry, "sess-1", acpTestToolCall("read_file"), map[string]any{"path": "a.go"}, "", nil)
 	if !allowed {
 		t.Fatalf("read-only tool should never be denied, reason=%q", reason)
 	}
@@ -107,13 +108,13 @@ func TestRequestACPToolPermission_NoAgentUsesFallbackPolicy(t *testing.T) {
 
 	// edit_file is a modifying (non-destructive) tool: the fallback policy
 	// auto-approves it.
-	allowed, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
+	allowed, reason := requestACPToolPermission(context.Background(), nil, nil, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
 	if !allowed {
 		t.Fatalf("expected fallback to auto-approve a modifying tool, reason=%q", reason)
 	}
 
 	// run_shell is destructive: the fallback policy denies it.
-	allowed, reason = requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "rm -rf /"}, "", nil)
+	allowed, reason = requestACPToolPermission(context.Background(), nil, nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "rm -rf /"}, "", nil)
 	if allowed {
 		t.Fatal("expected fallback to deny a destructive tool")
 	}
@@ -129,7 +130,7 @@ func TestRequestACPToolPermission_ClientAllows(t *testing.T) {
 	respondToNextPermissionRequestWith(client, "allow")
 
 	registry := tool.NewRegistry()
-	allowed, reason := requestACPToolPermission(context.Background(), agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go test ./..."}, "", nil)
+	allowed, reason := requestACPToolPermission(context.Background(), nil, agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go test ./..."}, "", nil)
 	if !allowed {
 		t.Fatalf("expected the client's allow decision to be honored, reason=%q", reason)
 	}
@@ -142,7 +143,7 @@ func TestRequestACPToolPermission_ClientDenies(t *testing.T) {
 	respondToNextPermissionRequestWith(client, "reject")
 
 	registry := tool.NewRegistry()
-	allowed, reason := requestACPToolPermission(context.Background(), agent, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
+	allowed, reason := requestACPToolPermission(context.Background(), nil, agent, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
 	if allowed {
 		t.Fatal("expected the client's reject decision to be honored")
 	}
@@ -158,7 +159,7 @@ func TestRequestACPToolPermission_ClientCancels(t *testing.T) {
 	respondToNextPermissionRequestWith(client, "cancelled")
 
 	registry := tool.NewRegistry()
-	allowed, reason := requestACPToolPermission(context.Background(), agent, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
+	allowed, reason := requestACPToolPermission(context.Background(), nil, agent, registry, "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
 	if allowed {
 		t.Fatal("a cancelled permission request must not be treated as allowed")
 	}
@@ -190,7 +191,7 @@ func TestRequestACPToolPermission_TimeoutFallsBackWithoutDeadlock(t *testing.T) 
 
 	registry := tool.NewRegistry()
 	start := time.Now()
-	allowed, reason := requestACPToolPermissionWithTimeout(context.Background(), agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "rm -rf /"}, "", logf, 100*time.Millisecond)
+	allowed, reason := requestACPToolPermissionWithTimeout(context.Background(), nil, agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "rm -rf /"}, "", logf, 100*time.Millisecond)
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("took %s, want a bounded wait", elapsed)
 	}
@@ -202,5 +203,53 @@ func TestRequestACPToolPermission_TimeoutFallsBackWithoutDeadlock(t *testing.T) 
 	}
 	if len(warnings) == 0 {
 		t.Fatal("expected a logged warning when falling back after a failed client request")
+	}
+}
+
+func TestRequestACPToolPermission_OneShotShellApprovalModes(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	tests := []struct {
+		name    string
+		cfg     *config.Config
+		command string
+		want    bool
+	}{
+		{name: "safe allows read-only search", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "safe"}}, command: "rg TODO ./pkg", want: true},
+		{name: "ask requires a client for read-only shell", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "ask"}}, command: "rg TODO ./pkg", want: false},
+		{name: "safe requires a client for workspace build", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "safe"}}, command: "go build ./...", want: false},
+		{name: "auto allows workspace test", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "auto"}}, command: "go test ./...", want: true},
+		{name: "auto allows workspace build", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "auto"}}, command: "go build ./...", want: true},
+		{name: "auto refuses external write", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "auto"}}, command: "touch /tmp/buckley-oneshot-out", want: false},
+		{name: "auto refuses network by default", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "auto"}}, command: "curl https://example.com", want: false},
+		{name: "auto permits configured network", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "auto", AllowNetwork: true}}, command: "curl https://example.com", want: true},
+		{name: "yolo follows existing full autonomy semantics", cfg: &config.Config{Approval: config.ApprovalConfig{Mode: "yolo"}}, command: "rm -rf ./build", want: true},
+		{name: "nil config defaults to safe", cfg: nil, command: "rg TODO ./pkg", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			allowed, reason := requestACPToolPermission(context.Background(), tt.cfg, nil, tool.NewRegistry(), "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": tt.command}, workspace, nil)
+			if allowed != tt.want {
+				t.Fatalf("allowed=%v, want %v, reason=%q", allowed, tt.want, reason)
+			}
+			if !allowed && reason == "" {
+				t.Fatal("expected a denial reason")
+			}
+		})
+	}
+}
+
+func TestRequestACPToolPermission_NonShellToolsKeepLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []string{"", "ask", "safe", "auto", "yolo"} {
+		cfg := &config.Config{Approval: config.ApprovalConfig{Mode: mode}}
+		allowed, reason := requestACPToolPermission(context.Background(), cfg, nil, tool.NewRegistry(), "sess-1", acpTestToolCall("edit_file"), map[string]any{"path": "a.go"}, "", nil)
+		if !allowed {
+			t.Fatalf("mode %q: legacy modifying fallback denied: %s", mode, reason)
+		}
 	}
 }

@@ -99,13 +99,10 @@ func TestRemoveImplicitExternalCLIModelTools(t *testing.T) {
 	t.Run("api one-shot stays on its model transport", func(t *testing.T) {
 		registry := tool.NewRegistry()
 		removeImplicitExternalCLIModelTools(registry, nil, nil)
-		for _, name := range []string{"invoke_claude", "invoke_codex"} {
+		for _, name := range []string{"invoke_claude", "invoke_codex", "invoke_buckley"} {
 			if _, ok := registry.Get(name); ok {
 				t.Fatalf("%s remains available without an explicit opt-in", name)
 			}
-		}
-		if _, ok := registry.Get("invoke_buckley"); !ok {
-			t.Fatal("API-native Buckley delegation was removed")
 		}
 	})
 
@@ -121,16 +118,22 @@ func TestRemoveImplicitExternalCLIModelTools(t *testing.T) {
 		if _, ok := registry.Get("invoke_codex"); ok {
 			t.Fatal("unrequested invoke_codex remains available")
 		}
+		if _, ok := registry.Get("invoke_buckley"); ok {
+			t.Fatal("unrequested invoke_buckley remains available")
+		}
 	})
 
 	t.Run("child contract allowlist can opt in", func(t *testing.T) {
 		registry := tool.NewRegistry()
-		removeImplicitExternalCLIModelTools(registry, nil, []string{"invoke_codex"})
+		removeImplicitExternalCLIModelTools(registry, nil, []string{"invoke_codex", "invoke_buckley"})
 		if _, ok := registry.Get("invoke_codex"); !ok {
 			t.Fatal("explicitly allowed invoke_codex was removed")
 		}
 		if _, ok := registry.Get("invoke_claude"); ok {
 			t.Fatal("unrequested invoke_claude remains available")
+		}
+		if _, ok := registry.Get("invoke_buckley"); !ok {
+			t.Fatal("explicitly allowed invoke_buckley was removed")
 		}
 	})
 }

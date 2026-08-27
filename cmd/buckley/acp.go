@@ -21,6 +21,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/acp"
 	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/approval"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
@@ -1322,7 +1323,7 @@ func newACPLoopController(
 			if ctx.Err() != nil {
 				return outcomes, ctx.Err()
 			}
-			outcomes = append(outcomes, dispatchACPToolCall(ctx, registry, evaluator, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
+			outcomes = append(outcomes, dispatchACPToolCall(ctx, cfg, registry, evaluator, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
 		}
 		state.toolsExecuted = true
 		return outcomes, nil
@@ -1811,7 +1812,7 @@ func soleKnownACPToolInvocationMarkup(text string, registry *tool.Registry) (str
 // notification. It returns the model-facing text as an agentloop.ToolOutcome
 // -- the Controller appends it to the conversation via the History sink, so
 // this function no longer writes to the transcript itself.
-func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator types.RuleEvaluator, stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) agentloop.ToolOutcome {
+func dispatchACPToolCall(ctx context.Context, cfg *config.Config, registry *tool.Registry, evaluator types.RuleEvaluator, stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string, sessionID string, agent *acp.Agent, logf func(string, ...interface{})) agentloop.ToolOutcome {
 	params, err := parseACPToolParams(tc.Function.Arguments)
 	if err != nil {
 		rawParams := map[string]any{"raw": tc.Function.Arguments}
@@ -1835,7 +1836,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		return agentloop.ToolOutcome{Content: toolText}
 	}
 
-	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
+	if allowed, reason := requestACPToolPermission(ctx, cfg, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
 		toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
 		result := &builtin.Result{Success: false, Error: toolText}
 		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
@@ -1909,11 +1910,8 @@ func acpRiskLabel(impact tool.Impact) string {
 	}
 }
 
-// acpFallbackPermissionDecision is Buckley's default policy when no live
-// client answer is available: auto-approve low/medium risk, deny high/
-// destructive. It backs both the AgentHandlers.OnRequestPermission
-// callback and requestACPToolPermission's no-client-response fallback, so
-// the two paths can never diverge.
+// acpFallbackPermissionDecision is Buckley's legacy coarse risk policy for
+// non-shell tools when no live client is available.
 func acpFallbackPermissionDecision(risk string) bool {
 	switch risk {
 	case "high", "destructive":
@@ -1923,11 +1921,44 @@ func acpFallbackPermissionDecision(risk string) bool {
 	}
 }
 
+func acpOneShotApprovalMode(cfg *config.Config) approval.Mode {
+	if cfg != nil {
+		if mode, err := approval.ParseMode(cfg.Approval.Mode); err == nil {
+			return mode
+		}
+	}
+	return approval.ModeSafe
+}
+
+func acpOneShotShellPermission(cfg *config.Config, tc model.ToolCall, params map[string]any, workDir string) (bool, string) {
+	command, _ := params["command"].(string)
+	mode := acpOneShotApprovalMode(cfg)
+	approvalCtx := approval.Context{WorkspacePath: workDir}
+	if cfg != nil {
+		approvalCtx.TrustedPaths = cfg.Approval.TrustedPaths
+		approvalCtx.DeniedPaths = cfg.Approval.DeniedPaths
+		approvalCtx.AllowNetwork = cfg.Approval.AllowNetwork
+	}
+	result := approval.Check(mode, approval.Request{
+		Operation: approval.ClassifyCommand(command),
+		Command:   command,
+		Tool:      tc.Function.Name,
+	}, approvalCtx)
+	switch result.Decision {
+	case approval.DecisionAllow:
+		return true, ""
+	case approval.DecisionDeny:
+		return false, fmt.Sprintf("denied by approval policy (%s mode): %s", mode, result.Reason)
+	default:
+		return false, fmt.Sprintf("requires approval in %s mode (%s) and no interactive client is attached", mode, result.Reason)
+	}
+}
+
 // requestACPToolPermission decides whether a tool call may proceed, using
 // the default client-response timeout (acpPermissionRequestTimeout). See
 // requestACPToolPermissionWithTimeout for the full behavior.
-func requestACPToolPermission(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{})) (allowed bool, reason string) {
-	return requestACPToolPermissionWithTimeout(ctx, agent, registry, sessionID, tc, params, workDir, logf, acpPermissionRequestTimeout)
+func requestACPToolPermission(ctx context.Context, cfg *config.Config, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{})) (allowed bool, reason string) {
+	return requestACPToolPermissionWithTimeout(ctx, cfg, agent, registry, sessionID, tc, params, workDir, logf, acpPermissionRequestTimeout)
 }
 
 // requestACPToolPermissionWithTimeout decides whether a tool call may
@@ -1939,12 +1970,12 @@ func requestACPToolPermission(ctx context.Context, agent *acp.Agent, registry *t
 // session/request_permission request and honors the client's
 // allow/deny/cancelled decision. If the client can't be reached (no
 // attached agent, send failure, or timeout) it logs a warning and falls
-// back to Buckley's default risk policy rather than blocking the turn
-// forever or crashing the tool call. A prompt-turn cancellation (ctx done)
+// back to the configured approval policy for shell commands and the legacy
+// risk policy for other tools. A prompt-turn cancellation (ctx done)
 // does not fall back to auto-approval -- it stops the tool call outright.
 // The timeout parameter exists mainly so tests don't have to wait out
 // acpPermissionRequestTimeout to exercise the fallback path.
-func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{}), timeout time.Duration) (allowed bool, reason string) {
+func requestACPToolPermissionWithTimeout(ctx context.Context, cfg *config.Config, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{}), timeout time.Duration) (allowed bool, reason string) {
 	impact := acpToolRiskImpact(registry, tc.Function.Name)
 	if impact == tool.ImpactReadOnly {
 		return true, ""
@@ -1975,15 +2006,18 @@ func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, 
 			return false, "prompt cancelled before permission was granted"
 		}
 		if logf != nil {
-			logf("session/request_permission failed for %s: %v; falling back to default risk policy", tc.Function.Name, err)
+			logf("session/request_permission failed for %s: %v; falling back to local approval policy", tc.Function.Name, err)
 		}
 	}
 
-	risk := acpRiskLabel(impact)
-	if !acpFallbackPermissionDecision(risk) {
-		return false, fmt.Sprintf("denied by default risk policy (%s risk, no client response)", risk)
+	if tc.Function.Name == "run_shell" {
+		return acpOneShotShellPermission(cfg, tc, params, workDir)
 	}
-	return true, ""
+	risk := acpRiskLabel(impact)
+	if acpFallbackPermissionDecision(risk) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("denied by default risk policy (%s risk, no client response)", risk)
 }
 
 func parseACPToolParams(raw string) (map[string]any, error) {

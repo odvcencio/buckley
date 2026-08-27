@@ -20,7 +20,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Each page is at most 100 lines; use next_start_line from the result to continue."
+	return "Read file contents in bounded, 1-indexed line pages. Pages default to 100 lines; explicit ranges are capped at 500 lines and return next_start_line when more remains."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -37,7 +37,7 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			},
 			"end_line": {
 				Type:        "number",
-				Description: "Last line to return (1-indexed, inclusive; defaults to start_line + 99)",
+				Description: "Last line to return (1-indexed, inclusive; defaults to start_line + 99; explicit ranges are capped at 500 lines)",
 			},
 		},
 		Required: []string{"path"},
@@ -127,7 +127,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	return result, nil
 }
 
-const readFilePageLines = 100
+const (
+	readFileDefaultPageLines = 100
+	readFileMaxPageLines     = 500
+)
 
 func fileLines(content string) []string {
 	if content == "" {
@@ -150,7 +153,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 		}
 	}
 
-	endLine = startLine + readFilePageLines - 1
+	endLine = startLine + readFileDefaultPageLines - 1
 	if value, ok := params["end_line"]; ok {
 		explicitPage = true
 		endLine, err = readFileLineNumber("end_line", value)
@@ -161,8 +164,8 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 	if endLine < startLine {
 		return 0, 0, false, fmt.Errorf("end_line must be greater than or equal to start_line")
 	}
-	if endLine-startLine+1 > readFilePageLines {
-		return 0, 0, false, fmt.Errorf("read_file supports pages of at most %d lines; use next_start_line to continue", readFilePageLines)
+	if endLine-startLine+1 > readFileMaxPageLines {
+		endLine = startLine + readFileMaxPageLines - 1
 	}
 	if totalLines == 0 {
 		if startLine != 1 {
