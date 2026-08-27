@@ -2134,7 +2134,7 @@ func removeImplicitExternalCLIModelTools(registry *tool.Registry, profile *agent
 			explicit[name] = struct{}{}
 		}
 	}
-	for _, name := range []string{"invoke_claude", "invoke_codex"} {
+	for _, name := range []string{"invoke_claude", "invoke_codex", "invoke_buckley"} {
 		if _, allowed := explicit[name]; !allowed {
 			registry.Remove(name)
 		}
