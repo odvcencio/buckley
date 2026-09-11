@@ -160,6 +160,11 @@ func (p *OpenAIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 	if info, ok := openAIModelIndex[modelID]; ok {
 		return &info, nil
 	}
+	if !strings.Contains(modelID, "/") {
+		if info, ok := openAIModelIndex["openai/"+modelID]; ok {
+			return &info, nil
+		}
+	}
 	// Forward-compatible fallback: unknown IDs stay usable with minimal metadata.
 	return &ModelInfo{ID: modelID, Name: modelID}, nil
 }

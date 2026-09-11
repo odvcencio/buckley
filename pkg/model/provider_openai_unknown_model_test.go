@@ -41,6 +41,27 @@ func TestOpenAIProvider_GetModelInfo_UnknownModernModel(t *testing.T) {
 	}
 }
 
+func TestOpenAIProvider_GetModelInfo_UnqualifiedCuratedModel(t *testing.T) {
+	p := NewOpenAIProvider("test-key", "", false)
+
+	info, err := p.GetModelInfo("gpt-4o")
+	if err != nil {
+		t.Fatalf("GetModelInfo(unqualified curated model) returned error: %v", err)
+	}
+	if info == nil {
+		t.Fatal("GetModelInfo(unqualified curated model) returned nil info")
+	}
+	if info.ID != "openai/gpt-4o" {
+		t.Errorf("info.ID = %q, want %q", info.ID, "openai/gpt-4o")
+	}
+	if info.Name != "GPT-4o" {
+		t.Errorf("info.Name = %q, want curated name %q", info.Name)
+	}
+	if info.ContextLength != 128000 {
+		t.Errorf("info.ContextLength = %d, want 128000", info.ContextLength)
+	}
+}
+
 func TestOpenAIProvider_GetModelInfo_EmptyAndWhitespaceIDs(t *testing.T) {
 	p := NewOpenAIProvider("test-key", "", false)
 
