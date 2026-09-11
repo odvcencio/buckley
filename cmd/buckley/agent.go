@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/agentspec"
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 	projectcontext "m31labs.dev/buckley/pkg/context"
@@ -1001,38 +1002,46 @@ func runAgentCheck(args []string) error {
 }
 
 type agentRunOptions struct {
-	agentPath  string
-	project    bool
-	specSelect string
-	subagent   string
-	task       string
-	model      string
-	toolTier   string
-	dryRun     bool
-	jsonOutput bool
+	agentPath         string
+	project           bool
+	specSelect        string
+	subagent          string
+	task              string
+	model             string
+	toolTier          string
+	maxOutputTokens   int
+	maxToolCalls      int
+	maxElapsedSeconds int
+	taskIntent        agentloop.TaskIntent
+	taskIntentSet     bool
+	dryRun            bool
+	jsonOutput        bool
 }
 
 type agentRunPreviewSnapshot struct {
-	Source          string   `json:"source,omitempty"`
-	Agent           string   `json:"agent,omitempty"`
-	Subagent        string   `json:"subagent"`
-	Project         bool     `json:"project,omitempty"`
-	SpecSelector    string   `json:"spec_selector,omitempty"`
-	AgentPath       string   `json:"agent_path,omitempty"`
-	Model           string   `json:"model"`
-	ToolTier        string   `json:"tool_tier"`
-	ToolFilter      string   `json:"tool_filter"`
-	AllowedTools    []string `json:"allowed_tools"`
-	DeniedTools     []string `json:"denied_tools,omitempty"`
-	Skills          []string `json:"skills,omitempty"`
-	ApprovalMode    string   `json:"approval_mode,omitempty"`
-	MaxToolCalls    int      `json:"max_tool_calls,omitempty"`
-	ResolvedTier    string   `json:"resolved_tier,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	StepCap         int      `json:"step_cap,omitempty"`
-	OutputSchema    string   `json:"output_schema,omitempty"`
-	Instructions    bool     `json:"instructions"`
-	Task            string   `json:"task"`
+	Source            string   `json:"source,omitempty"`
+	Agent             string   `json:"agent,omitempty"`
+	Subagent          string   `json:"subagent"`
+	Project           bool     `json:"project,omitempty"`
+	SpecSelector      string   `json:"spec_selector,omitempty"`
+	AgentPath         string   `json:"agent_path,omitempty"`
+	Model             string   `json:"model"`
+	ToolTier          string   `json:"tool_tier"`
+	ToolFilter        string   `json:"tool_filter"`
+	AllowedTools      []string `json:"allowed_tools"`
+	DeniedTools       []string `json:"denied_tools,omitempty"`
+	MaxOutputTokens   int      `json:"max_output_tokens"`
+	Skills            []string `json:"skills,omitempty"`
+	ApprovalMode      string   `json:"approval_mode,omitempty"`
+	MaxToolCalls      int      `json:"max_tool_calls,omitempty"`
+	MaxElapsedSeconds int      `json:"max_elapsed_seconds,omitempty"`
+	ResolvedTier      string   `json:"resolved_tier,omitempty"`
+	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
+	StepCap           int      `json:"step_cap,omitempty"`
+	OutputSchema      string   `json:"output_schema,omitempty"`
+	TaskIntent        string   `json:"task_intent,omitempty"`
+	Instructions      bool     `json:"instructions"`
+	Task              string   `json:"task"`
 }
 
 func runAgentRun(args []string) error {
@@ -1061,6 +1070,7 @@ func runAgentRun(args []string) error {
 	if opts.toolTier != "" {
 		subProfile.Spec.Tools.Tier = opts.toolTier
 	}
+	opts.taskIntent = agentRunTaskIntent(opts, subProfile)
 	if opts.dryRun {
 		if opts.jsonOutput {
 			enc := json.NewEncoder(os.Stdout)
@@ -1084,7 +1094,7 @@ func runAgentRun(args []string) error {
 	restoreModelOverride := applyCommandModelOverride(modelOverride)
 	defer restoreModelOverride()
 
-	cfg, mgr, store, err := initDependenciesFn()
+	cfg, mgr, store, err := initAgentRunDependencies(modelOverride)
 	if err != nil {
 		return err
 	}
@@ -1107,15 +1117,17 @@ func runAgentRun(args []string) error {
 	}
 	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	allowedTools := append([]string(nil), subProfile.Spec.Tools.Allow...)
-	limits := acpLoopLimits{}
+	limits, err := resolveAgentRunLoopLimits(subProfile, childContract, contractPresent)
+	if err != nil {
+		return err
+	}
 	outputSchema := ""
 	if contractPresent {
-		limits, err = acpLoopLimitsFromChildContract(childContract)
-		if err != nil {
-			return err
-		}
 		outputSchema = strings.TrimSpace(childContract.OutputSchema)
 	}
+	limits.MaxOutputTokens = opts.maxOutputTokens
+	limits.TaskIntent = opts.taskIntent
+	limits = applyAgentRunExplicitLimits(limits, opts)
 	if outputSchema == "" && subProfile != nil && subProfile.Spec != nil {
 		outputSchema = strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"])
 	}
@@ -1124,6 +1136,16 @@ func runAgentRun(args []string) error {
 		return withExitCode(fmt.Errorf("agent run failed"), exitCode)
 	}
 	return nil
+}
+
+func applyAgentRunExplicitLimits(limits acpLoopLimits, opts agentRunOptions) acpLoopLimits {
+	if opts.maxToolCalls > 0 {
+		limits.MaxToolCalls = minPositiveChildLimit(limits.MaxToolCalls, opts.maxToolCalls)
+	}
+	if opts.maxElapsedSeconds > 0 {
+		limits.MaxElapsedSeconds = minPositiveChildLimit(limits.MaxElapsedSeconds, opts.maxElapsedSeconds)
+	}
+	return limits
 }
 
 func acpLoopLimitsFromChildContract(contract subagent.ChildContract) (acpLoopLimits, error) {
@@ -1154,6 +1176,33 @@ func minPositiveChildLimit(values ...int) int {
 	return minimum
 }
 
+// resolveAgentRunLoopLimits resolves the tool-call budget for an agent run.
+// Without a child contract, the profile policy cap applies on its own with
+// legacy governor semantics. With a child contract, the contract budget is
+// narrowed by the profile policy: a positive profile cap can only tighten the
+// contract, and zero on either side means "no explicit limit at that layer".
+func resolveAgentRunLoopLimits(profile *agentspec.RuntimeProfile, contract subagent.ChildContract, contractPresent bool) (acpLoopLimits, error) {
+	profileCap := 0
+	if profile != nil && profile.Spec != nil {
+		profileCap = profile.Spec.Policies.MaxToolCalls
+	}
+	if profileCap < 0 {
+		return acpLoopLimits{}, fmt.Errorf("subagent profile max_tool_calls must not be negative")
+	}
+	if !contractPresent {
+		return acpLoopLimits{MaxToolCalls: profileCap}, nil
+	}
+	if contract.Budget.MaxToolCalls < 0 {
+		return acpLoopLimits{}, fmt.Errorf("subagent child contract max_tool_calls must not be negative")
+	}
+	limits, err := acpLoopLimitsFromChildContract(contract)
+	if err != nil {
+		return acpLoopLimits{}, err
+	}
+	limits.MaxToolCalls = minPositiveChildLimit(profileCap, contract.Budget.MaxToolCalls)
+	return limits, nil
+}
+
 func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	fs := flag.NewFlagSet("agent run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -1162,6 +1211,10 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	subagent := fs.String("subagent", "", "subagent name from the agent spec")
 	modelID := fs.String("model", "", "override model for this subagent task")
 	toolTier := fs.String("tool-tier", "", "override tool tier: none, read_only, standard, or full")
+	maxOutputTokens := fs.Int("max-output-tokens", 0, "maximum output tokens per model request (0 = unlimited)")
+	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum tool calls for this run (0 = no additional limit)")
+	maxElapsedSeconds := fs.Int("max-elapsed-seconds", 0, "maximum wall-clock seconds for this run (0 = no additional limit)")
+	taskIntentFlag := fs.String("task-intent", "", "task intent: unknown, read_only, or mutation")
 	noTools := fs.Bool("no-tools", false, "run without tools")
 	dryRun := fs.Bool("dry-run", false, "show resolved subagent invocation without calling the model")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON dry-run preview")
@@ -1169,19 +1222,46 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return agentRunOptions{}, err
 	}
+	if *maxOutputTokens < 0 {
+		return agentRunOptions{}, fmt.Errorf("--max-output-tokens must be zero or greater")
+	}
+	if *maxToolCalls < 0 {
+		return agentRunOptions{}, fmt.Errorf("--max-tool-calls must be zero or greater")
+	}
+	if *maxElapsedSeconds < 0 {
+		return agentRunOptions{}, fmt.Errorf("--max-elapsed-seconds must be zero or greater")
+	}
+	taskIntentSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "task-intent" {
+			taskIntentSet = true
+		}
+	})
+	if taskIntentSet && strings.TrimSpace(*taskIntentFlag) == "" {
+		return agentRunOptions{}, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
+	}
+	taskIntent, err := agentloop.ParseTaskIntent(*taskIntentFlag)
+	if err != nil {
+		return agentRunOptions{}, fmt.Errorf("invalid --task-intent: %w", err)
+	}
 	if err := normalizeJSONFormatFlag(*format, jsonOutput); err != nil {
 		return agentRunOptions{}, err
 	}
 
 	rest := fs.Args()
 	opts := agentRunOptions{
-		project:    *projectSpec || strings.TrimSpace(*specSelect) != "",
-		specSelect: strings.TrimSpace(*specSelect),
-		subagent:   strings.TrimSpace(*subagent),
-		model:      strings.TrimSpace(*modelID),
-		toolTier:   strings.TrimSpace(*toolTier),
-		dryRun:     *dryRun,
-		jsonOutput: *jsonOutput,
+		project:           *projectSpec || strings.TrimSpace(*specSelect) != "",
+		specSelect:        strings.TrimSpace(*specSelect),
+		subagent:          strings.TrimSpace(*subagent),
+		model:             strings.TrimSpace(*modelID),
+		toolTier:          strings.TrimSpace(*toolTier),
+		maxOutputTokens:   *maxOutputTokens,
+		maxToolCalls:      *maxToolCalls,
+		maxElapsedSeconds: *maxElapsedSeconds,
+		taskIntent:        taskIntent,
+		taskIntentSet:     taskIntentSet,
+		dryRun:            *dryRun,
+		jsonOutput:        *jsonOutput,
 	}
 	if opts.jsonOutput && !opts.dryRun {
 		return agentRunOptions{}, fmt.Errorf("agent run --json requires --dry-run")
@@ -1301,6 +1381,10 @@ func applyAgentRunChildContract(profile *agentspec.RuntimeProfile, contract suba
 	if contract.StepCap > 0 {
 		spec.Metadata["buckley.step_cap"] = strconv.Itoa(contract.StepCap)
 	}
+	if contract.Budget.MaxToolCalls > 0 {
+		spec.Policies.MaxToolCalls = minPositiveChildLimit(spec.Policies.MaxToolCalls, contract.Budget.MaxToolCalls)
+	}
+
 	if outputSchema := strings.TrimSpace(contract.OutputSchema); outputSchema != "" {
 		spec.Metadata["buckley.output_schema"] = outputSchema
 		spec.Instructions.Prompt = appendAgentRunPrompt(spec.Instructions.Prompt, agentRunOutputSchemaPrompt(outputSchema))
@@ -1457,6 +1541,10 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 	if snapshot.MaxToolCalls > 0 {
 		fmt.Fprintf(&b, "Max tool calls: %d\n", snapshot.MaxToolCalls)
 	}
+	if snapshot.MaxElapsedSeconds > 0 {
+		fmt.Fprintf(&b, "Max elapsed seconds: %d\n", snapshot.MaxElapsedSeconds)
+	}
+	fmt.Fprintf(&b, "Max output tokens: %d\n", snapshot.MaxOutputTokens)
 	if snapshot.ResolvedTier != "" {
 		fmt.Fprintf(&b, "Resolved tier: %s\n", snapshot.ResolvedTier)
 	}
@@ -1469,6 +1557,9 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 	if snapshot.OutputSchema != "" {
 		fmt.Fprintf(&b, "Output schema: %s\n", snapshot.OutputSchema)
 	}
+	if snapshot.TaskIntent != "" {
+		fmt.Fprintf(&b, "Task intent: %s\n", snapshot.TaskIntent)
+	}
 	if snapshot.Instructions {
 		b.WriteString("Instructions: yes\n")
 	}
@@ -1477,14 +1568,17 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 }
 
 func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.RuntimeProfile) agentRunPreviewSnapshot {
+	taskIntent := agentRunTaskIntent(opts, profile)
 	snapshot := agentRunPreviewSnapshot{
-		Subagent:     strings.TrimSpace(opts.subagent),
-		Project:      opts.project,
-		SpecSelector: strings.TrimSpace(opts.specSelect),
-		AgentPath:    strings.TrimSpace(opts.agentPath),
-		Model:        previewAgentRunModel(opts, profile),
-		ToolTier:     previewAgentRunToolTier(profile),
-		Task:         strings.TrimSpace(opts.task),
+		Subagent:        strings.TrimSpace(opts.subagent),
+		Project:         opts.project,
+		SpecSelector:    strings.TrimSpace(opts.specSelect),
+		AgentPath:       strings.TrimSpace(opts.agentPath),
+		Model:           previewAgentRunModel(opts, profile),
+		ToolTier:        previewAgentRunToolTier(profile),
+		MaxOutputTokens: opts.maxOutputTokens,
+		TaskIntent:      string(taskIntent),
+		Task:            strings.TrimSpace(opts.task),
 	}
 	if profile != nil {
 		snapshot.Source = strings.TrimSpace(profile.SourcePath)
@@ -1498,7 +1592,8 @@ func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.Runti
 		snapshot.Skills = append([]string(nil), profile.Spec.Skills...)
 		sort.Strings(snapshot.Skills)
 		snapshot.ApprovalMode = strings.TrimSpace(profile.Spec.Policies.ApprovalMode)
-		snapshot.MaxToolCalls = profile.Spec.Policies.MaxToolCalls
+		snapshot.MaxToolCalls = minPositiveChildLimit(profile.Spec.Policies.MaxToolCalls, opts.maxToolCalls)
+		snapshot.MaxElapsedSeconds = opts.maxElapsedSeconds
 		snapshot.ResolvedTier = strings.TrimSpace(profile.Spec.Metadata["buckley.resolved_tier"])
 		snapshot.ReasoningEffort = strings.TrimSpace(profile.Spec.Metadata["buckley.reasoning_effort"])
 		snapshot.OutputSchema = strings.TrimSpace(profile.Spec.Metadata["buckley.output_schema"])
@@ -1509,7 +1604,29 @@ func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.Runti
 	} else {
 		snapshot.ToolFilter = "unrestricted"
 	}
+	previewLimits := applyOneShotTaskIntentDefaults(acpLoopLimits{
+		MaxToolCalls:      snapshot.MaxToolCalls,
+		MaxElapsedSeconds: snapshot.MaxElapsedSeconds,
+		MaxOutputTokens:   snapshot.MaxOutputTokens,
+		TaskIntent:        taskIntent,
+	})
+	snapshot.MaxToolCalls = previewLimits.MaxToolCalls
+	snapshot.MaxElapsedSeconds = previewLimits.MaxElapsedSeconds
+	snapshot.MaxOutputTokens = previewLimits.MaxOutputTokens
+
 	return snapshot
+}
+
+func agentRunTaskIntent(opts agentRunOptions, profile *agentspec.RuntimeProfile) agentloop.TaskIntent {
+	if opts.taskIntentSet || (opts.taskIntent != "" && opts.taskIntent != agentloop.UnknownIntent) {
+		return opts.taskIntent
+	}
+	switch previewAgentRunToolTier(profile) {
+	case "none", "read_only":
+		return agentloop.ReadOnlyIntent
+	default:
+		return agentloop.UnknownIntent
+	}
 }
 
 func previewAgentRunModel(opts agentRunOptions, profile *agentspec.RuntimeProfile) string {
