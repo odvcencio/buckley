@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -153,10 +154,14 @@ func (p *OpenAIProvider) FetchCatalog() (*ModelCatalog, error) {
 
 // GetModelInfo returns static metadata for a given model.
 func (p *OpenAIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
+	if strings.TrimSpace(modelID) == "" {
+		return nil, fmt.Errorf("openai model not found: %s", modelID)
+	}
 	if info, ok := openAIModelIndex[modelID]; ok {
 		return &info, nil
 	}
-	return nil, fmt.Errorf("openai model not found: %s", modelID)
+	// Forward-compatible fallback: unknown IDs stay usable with minimal metadata.
+	return &ModelInfo{ID: modelID, Name: modelID}, nil
 }
 
 // ChatCompletion executes a completion request via OpenAI.
