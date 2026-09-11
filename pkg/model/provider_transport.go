@@ -17,6 +17,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Internal wire safety cap only; this is not a task/tool-call governance budget.
+const maxStreamingToolCallIndex = 1024
+
 // HeaderFunc sets provider-specific headers (auth scheme, API version, and
 // so on) on an outgoing request. It runs after Content-Type is already set
 // to application/json.
@@ -136,6 +139,41 @@ func (t *ProviderTransport) waitForRateLimit(ctx context.Context) error {
 	return nil
 }
 
+// waitBeforeProviderRetry sleeps for the computed retry backoff before a
+// subsequent attempt. Attempt 0 performs no wait. On cancellation it returns
+// the context error joined with the last failure so both causes stay visible.
+func (t *ProviderTransport) waitBeforeProviderRetry(ctx context.Context, attempt int, lastErr error) error {
+	if attempt <= 0 {
+		return nil
+	}
+	delay := t.calculateRetryDelay(attempt, lastErr)
+	select {
+	case <-ctx.Done():
+		return errors.Join(ctx.Err(), lastErr)
+	case <-time.After(delay):
+	}
+	return nil
+}
+
+// newProviderRequest builds the JSON request shared by Do, DoStream, and
+// Stream: Content-Type is always application/json, Accept is set to
+// text/event-stream only for streaming requests, and setHeaders (when
+// non-nil) runs last so providers can override or extend them.
+func newProviderRequest(ctx context.Context, method, url string, body []byte, stream bool, setHeaders HeaderFunc) (*http.Request, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+	if setHeaders != nil {
+		setHeaders(httpReq)
+	}
+	return httpReq, nil
+}
+
 func (t *ProviderTransport) runWithBreaker(call func() error) error {
 	if t == nil || t.circuitBreaker == nil {
 		return call()
@@ -158,22 +196,13 @@ func (t *ProviderTransport) Do(ctx context.Context, httpClient *http.Client, met
 	call := func() error {
 		var lastErr error
 		for attempt := 0; ; attempt++ {
-			if attempt > 0 {
-				delay := t.calculateRetryDelay(attempt, lastErr)
-				select {
-				case <-ctx.Done():
-					return errors.Join(ctx.Err(), lastErr)
-				case <-time.After(delay):
-				}
+			if err := t.waitBeforeProviderRetry(ctx, attempt, lastErr); err != nil {
+				return err
 			}
 
-			httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+			httpReq, err := newProviderRequest(ctx, method, url, body, false, setHeaders)
 			if err != nil {
-				return fmt.Errorf("creating request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			if setHeaders != nil {
-				setHeaders(httpReq)
+				return err
 			}
 
 			if err := t.waitForRateLimit(ctx); err != nil {
@@ -232,23 +261,13 @@ func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Clien
 	call := func() error {
 		var lastErr error
 		for attempt := 0; ; attempt++ {
-			if attempt > 0 {
-				delay := t.calculateRetryDelay(attempt, lastErr)
-				select {
-				case <-ctx.Done():
-					return errors.Join(ctx.Err(), lastErr)
-				case <-time.After(delay):
-				}
+			if err := t.waitBeforeProviderRetry(ctx, attempt, lastErr); err != nil {
+				return err
 			}
 
-			httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+			httpReq, err := newProviderRequest(ctx, method, url, body, true, setHeaders)
 			if err != nil {
-				return fmt.Errorf("creating request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			httpReq.Header.Set("Accept", "text/event-stream")
-			if setHeaders != nil {
-				setHeaders(httpReq)
+				return err
 			}
 
 			if err := t.waitForRateLimit(ctx); err != nil {
@@ -300,23 +319,13 @@ func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client,
 	call := func() error {
 		var lastErr error
 		for attempt := 0; ; attempt++ {
-			if attempt > 0 {
-				delay := t.calculateRetryDelay(attempt, lastErr)
-				select {
-				case <-ctx.Done():
-					return errors.Join(ctx.Err(), lastErr)
-				case <-time.After(delay):
-				}
+			if err := t.waitBeforeProviderRetry(ctx, attempt, lastErr); err != nil {
+				return err
 			}
 
-			httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+			httpReq, err := newProviderRequest(ctx, method, url, body, true, setHeaders)
 			if err != nil {
-				return fmt.Errorf("creating request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			httpReq.Header.Set("Accept", "text/event-stream")
-			if setHeaders != nil {
-				setHeaders(httpReq)
+				return err
 			}
 			if err := t.waitForRateLimit(ctx); err != nil {
 				return err
@@ -493,6 +502,10 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 				Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
 			}
 		}
+		if err := validateStreamingToolCallIndices(chunk); err != nil {
+			return events, err
+		}
+		chunk.ExecutionIdentity = observedExecutionIdentity(chunk.ID, chunk.Model, nil)
 
 		select {
 		case chunkChan <- chunk:
@@ -506,4 +519,20 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 		return events, fmt.Errorf("reading stream: %w", err)
 	}
 	return events, io.ErrUnexpectedEOF
+}
+
+func validateStreamingToolCallIndices(chunk StreamChunk) error {
+	for _, choice := range chunk.Choices {
+		for _, toolCall := range choice.Delta.ToolCalls {
+			if toolCall.Index < 0 {
+				return fmt.Errorf("streaming protocol violation: tool call index %d is negative", toolCall.Index)
+			}
+			// The accumulator stores tool calls by dense slice index. A sparse
+			// untrusted index can otherwise force excessive allocation.
+			if toolCall.Index > maxStreamingToolCallIndex {
+				return fmt.Errorf("streaming protocol violation: tool call index %d exceeds maximum supported index %d", toolCall.Index, maxStreamingToolCallIndex)
+			}
+		}
+	}
+	return nil
 }
