@@ -1005,10 +1005,30 @@ func (m *Manager) SupportsVision(modelID string) bool {
 		return false
 	}
 
-	// Check if modality includes image support
-	modality := info.Architecture.Modality
-	return modality == "text+image" || modality == "multimodal" ||
-		modality == "text+image->text" || modality == "image+text->text"
+	return modalityAcceptsImageInput(info.Architecture.Modality)
+}
+
+// modalityAcceptsImageInput reports whether an architecture modality string
+// advertises image input. For "input->output" forms only the input side is
+// inspected, so output-only forms such as "text->image" do not qualify.
+func modalityAcceptsImageInput(modality string) bool {
+	modality = strings.ToLower(strings.TrimSpace(modality))
+	if modality == "" {
+		return false
+	}
+	if modality == "multimodal" {
+		return true
+	}
+	inputs := modality
+	if idx := strings.Index(modality, "->"); idx >= 0 {
+		inputs = modality[:idx]
+	}
+	for _, token := range strings.Split(inputs, "+") {
+		if strings.TrimSpace(token) == "image" {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsReasoning checks if a model supports reasoning parameter
