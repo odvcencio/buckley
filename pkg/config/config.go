@@ -229,6 +229,7 @@ type SlackConfig struct {
 type ModelConfig struct {
 	Planning        string              `yaml:"planning" env:"BUCKLEY_MODEL_PLANNING"`
 	Execution       string              `yaml:"execution" env:"BUCKLEY_MODEL_EXECUTION"`
+	Light           string              `yaml:"light" env:"BUCKLEY_MODEL_LIGHT"`
 	Review          string              `yaml:"review" env:"BUCKLEY_MODEL_REVIEW"`
 	Curated         []string            `yaml:"curated"`
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
