@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1943,9 +1942,7 @@ func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error)
 		return false
 	}
 	safe := acpEveryErrorLeaf(err, func(leaf error) bool {
-		value := reflect.ValueOf(leaf)
-		exactUnexpectedEOF := value.IsValid() && value.Comparable() && leaf == io.ErrUnexpectedEOF
-		return exactUnexpectedEOF || isUsageTrackingUnavailableError(leaf)
+		return leaf == io.ErrUnexpectedEOF || isUsageTrackingUnavailableError(leaf)
 	})
 	return safe && ctx.Err() == nil
 }

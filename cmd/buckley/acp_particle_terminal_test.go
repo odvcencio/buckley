@@ -977,6 +977,30 @@ func TestACPStreamRetryCandidate_PartialRequiresSafeCause(t *testing.T) {
 	}
 }
 
+type acpNonComparableLeafError struct {
+	payloads []string
+}
+
+func (e *acpNonComparableLeafError) Error() string { return "non-comparable leaf failure" }
+
+func TestACPStreamRetryCandidate_NonComparableLeafIsNotRetryable(t *testing.T) {
+	nonComparable := &acpNonComparableLeafError{payloads: []string{"chunk"}}
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{name: "bare non-comparable leaf", cause: nonComparable},
+		{name: "joined eof and non-comparable leaf", cause: errors.Join(io.ErrUnexpectedEOF, nonComparable)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if acpStreamRetryCandidate(context.Background(), acpStreamTurn{}, tt.cause) {
+				t.Fatalf("acpStreamRetryCandidate(cause=%v) = true, want false", tt.cause)
+			}
+		})
+	}
+}
+
 func TestDrainACPStreamTurn_ObservedToolDeltaInAnyChoiceForbidsRetry(t *testing.T) {
 	chunks := make(chan model.StreamChunk, 1)
 	chunks <- model.StreamChunk{Choices: []model.StreamChoice{
