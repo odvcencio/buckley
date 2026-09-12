@@ -263,7 +263,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "go", args...)
 
 	case "jest":
-		args := []string{"test"}
+		args := []string{"test", "--"}
 		if coverage {
 			args = append(args, "--coverage")
 		}
