@@ -39,6 +39,10 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 				Type:        "number",
 				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Larger ranges are capped to 100 lines per page.",
 			},
+			"line_numbers": {
+				Type:        "boolean",
+				Description: "Prefix each DisplayData content line with its absolute line number (default: false)",
+			},
 		},
 		Required: []string{"path"},
 	}
@@ -85,8 +89,27 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	numbered := false
+	if value, ok := params["line_numbers"]; ok {
+		typed, isBool := value.(bool)
+		if !isBool {
+			return &Result{Success: false, Error: "line_numbers parameter must be a boolean"}, nil
+		}
+		numbered = typed
+	}
+
 	pageLines := lines[startLine-1 : endLine]
 	pageContent := strings.Join(pageLines, "\n")
+	if numbered {
+		var sb strings.Builder
+		for i, line := range pageLines {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "%d: %s", startLine+i, line)
+		}
+		pageContent = sb.String()
+	}
 	hasMore := endLine < len(lines)
 	page := map[string]any{
 		"start_line":  startLine,
@@ -97,7 +120,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	if hasMore {
 		page["next_start_line"] = endLine + 1
 	}
-	shouldAbridge := explicitPage || hasMore
+	shouldAbridge := explicitPage || hasMore || numbered
 
 	result := &Result{
 		Success: true,
