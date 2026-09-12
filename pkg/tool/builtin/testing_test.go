@@ -20,7 +20,7 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, exitCode, duration, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
+	_, exitCode, duration, _, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled error, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 
 func TestRunTestsToolUnsupportedFramework(t *testing.T) {
 	tool := &RunTestsTool{}
-	_, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
+	_, _, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
 	if err == nil {
 		t.Fatalf("expected error for unsupported framework")
 	}

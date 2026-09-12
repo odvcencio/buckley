@@ -15,10 +15,9 @@ import (
 
 // Pre-compiled regex patterns for test output parsing.
 var (
-	jestResultsRe  = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
-	pytestResultRe = regexp.MustCompile(`(\d+)\s+(\w+)`)
-	cargoResultRe  = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
-	goPackageRe    = regexp.MustCompile(`package\s+(\w+)`)
+	jestResultsRe = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
+	cargoResultRe = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+	goPackageRe   = regexp.MustCompile(`package\s+(\w+)`)
 )
 
 // RunTestsTool runs tests with smart filtering and reporting
@@ -124,7 +123,7 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	framework := t.detectTestFramework(absTestPath)
 
 	// Run tests
-	output, exitCode, duration, err := t.runTestsForFramework(ctx, framework, testPath, pattern, coverage, verbose)
+	output, exitCode, duration, pytestReport, err := t.runTestsForFramework(ctx, framework, testPath, pattern, coverage, verbose)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -135,7 +134,13 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	// Parse results
 	passed, failed, skipped := t.parseTestResults(framework, output)
 	verificationError := ""
-	if framework == "go" || framework == "cargo" {
+	if pytestReport != nil {
+		passed, failed, skipped = pytestReport.passed, pytestReport.failed, pytestReport.skipped
+		if exitCode == 0 && !pytestReport.complete {
+			verificationError = "pytest did not produce a complete JUnit report"
+		}
+	}
+	if framework == "go" || framework == "cargo" || framework == "pytest" {
 		if framework == "go" {
 			report := parseGoTestOutput(output)
 			passed, failed, skipped = report.passed, report.failed, report.skipped
@@ -236,10 +241,11 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 	return "unknown"
 }
 
-func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path, pattern string, coverage, verbose bool) (string, int, float64, error) {
+func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path, pattern string, coverage, verbose bool) (string, int, float64, *pytestTestReport, error) {
 	var (
 		cmd *exec.Cmd
 	)
+	var reportPath string
 
 	switch framework {
 	case "go":
@@ -270,7 +276,13 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "npm", args...)
 
 	case "pytest":
-		args := []string{}
+		dir, err := os.MkdirTemp("", "buckley-pytest-report-")
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("create pytest report directory: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		reportPath = filepath.Join(dir, "junit.xml")
+		args := []string{"--junitxml", reportPath}
 		if coverage {
 			args = append(args, "--cov")
 		}
@@ -291,7 +303,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "cargo", args...)
 
 	default:
-		return "", 1, 0, fmt.Errorf("unsupported test framework: %s", framework)
+		return "", 1, 0, nil, fmt.Errorf("unsupported test framework: %s", framework)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -311,17 +323,25 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	exitCode := 0
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return stdout.String() + stderr.String(), 1, duration, fmt.Errorf("test run exceeded timeout")
+			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run exceeded timeout")
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return "", 1, duration, err
+			return "", 1, duration, nil, err
 		}
 	}
 
 	output := stdout.String() + stderr.String()
-	return output, exitCode, duration, nil
+	var report *pytestTestReport
+	if reportPath != "" {
+		parsed := pytestTestReport{}
+		if raw, err := os.ReadFile(reportPath); err == nil {
+			parsed = parsePytestReport(raw)
+		}
+		report = &parsed
+	}
+	return output, exitCode, duration, report, nil
 }
 
 func localGoTestPath(path string) string {
@@ -336,8 +356,6 @@ func (t *RunTestsTool) parseTestResults(framework, output string) (passed, faile
 	switch framework {
 	case "jest":
 		return t.parseJestResults(output)
-	case "pytest":
-		return t.parsePytestResults(output)
 	case "cargo":
 		return t.parseCargoResults(output)
 	default:
@@ -351,25 +369,6 @@ func (t *RunTestsTool) parseJestResults(output string) (passed, failed, skipped 
 		fmt.Sscanf(matches[1], "%d", &failed)
 		fmt.Sscanf(matches[2], "%d", &passed)
 		fmt.Sscanf(matches[3], "%d", &skipped)
-	}
-	return
-}
-
-func (t *RunTestsTool) parsePytestResults(output string) (passed, failed, skipped int) {
-	matches := pytestResultRe.FindAllStringSubmatch(output, -1)
-	for _, match := range matches {
-		if len(match) == 3 {
-			count := 0
-			fmt.Sscanf(match[1], "%d", &count)
-			switch match[2] {
-			case "passed":
-				passed += count
-			case "failed":
-				failed += count
-			case "skipped":
-				skipped += count
-			}
-		}
 	}
 	return
 }
