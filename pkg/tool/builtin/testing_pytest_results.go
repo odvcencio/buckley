@@ -6,12 +6,7 @@ import (
 	"io"
 )
 
-type pytestTestReport struct {
-	passed, failed, skipped int
-	complete                bool
-}
-
-func parsePytestReport(raw []byte) pytestTestReport {
+func parsePytestReport(raw []byte) testReport {
 	var root struct {
 		XMLName xml.Name `xml:"testsuites"`
 		Suites  []struct {
@@ -24,7 +19,7 @@ func parsePytestReport(raw []byte) pytestTestReport {
 	}
 	decoder := xml.NewDecoder(bytes.NewReader(raw))
 	if err := decoder.Decode(&root); err != nil || len(root.Suites) == 0 {
-		return pytestTestReport{}
+		return testReport{}
 	}
 	for {
 		token, err := decoder.Token()
@@ -32,19 +27,19 @@ func parsePytestReport(raw []byte) pytestTestReport {
 			break
 		}
 		if err != nil {
-			return pytestTestReport{}
+			return testReport{}
 		}
 		switch value := token.(type) {
 		case xml.CharData:
 			if len(bytes.TrimSpace(value)) != 0 {
-				return pytestTestReport{}
+				return testReport{}
 			}
 		case xml.Comment, xml.ProcInst:
 		default:
-			return pytestTestReport{}
+			return testReport{}
 		}
 	}
-	report := pytestTestReport{complete: true}
+	report := testReport{complete: true}
 	for _, suite := range root.Suites {
 		for _, tc := range suite.Cases {
 			switch {

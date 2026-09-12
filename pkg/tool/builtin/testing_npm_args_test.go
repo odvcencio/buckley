@@ -25,7 +25,11 @@ func TestRunTestsTool_NpmArguments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Cleanup(func() { execCommandContext = exec.CommandContext })
 			execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				if name != "npm" || !reflect.DeepEqual(args, tc.want) {
+				if name != "npm" || len(args) < 5 || !reflect.DeepEqual(args[:4], []string{"test", "--", "--json", "--outputFile"}) || !filepath.IsAbs(args[4]) {
+					t.Fatalf("bad report flags: %s %q", name, args)
+				}
+				forwarded := append(append([]string{}, args[:2]...), args[5:]...)
+				if !reflect.DeepEqual(forwarded, tc.want) {
 					t.Fatalf("command=%s %q want npm %q", name, args, tc.want)
 				}
 				return exec.CommandContext(ctx, "sh", "-c", "exit 0")
@@ -50,7 +54,9 @@ func TestRunTestsTool_RealNpmArgumentForwarding(t *testing.T) {
 		"package.json": `{"name":"buckley-npm-args","version":"1.0.0","private":true,"scripts":{"test":"node verify-args.cjs"}}`,
 		"verify-args.cjs": `const assert = require('node:assert/strict');
 const expected = ['--coverage', '--verbose', '-t', '^specific case$'];
-assert.deepEqual(process.argv.slice(2), expected);
+assert.deepEqual(process.argv.slice(2, 4), ['--json', '--outputFile']);
+assert.ok(require('node:path').isAbsolute(process.argv[4]));
+assert.deepEqual(process.argv.slice(5), expected);
 console.log('received exact requested options');
 `,
 	} {

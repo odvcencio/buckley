@@ -12,12 +12,12 @@ import (
 func TestParsePytestReport(t *testing.T) {
 	for _, tc := range []struct {
 		raw  string
-		want pytestTestReport
+		want testReport
 	}{
-		{raw: `<testsuites><testsuite><testcase/><testcase><failure>999 passed</failure><error/></testcase><testcase><skipped/></testcase></testsuite><testsuite><testcase/></testsuite></testsuites>`, want: pytestTestReport{passed: 2, failed: 1, skipped: 1, complete: true}},
-		{raw: `<testsuites><testsuite tests="999" failures="0"><testcase><error/></testcase></testsuite></testsuites>`, want: pytestTestReport{failed: 1, complete: true}},
-		{raw: `<testsuites><testsuite><system-out>99 passed</system-out></testsuite></testsuites>`, want: pytestTestReport{complete: true}},
-		{raw: "<testsuites><testsuite/></testsuites>\n<!-- done -->", want: pytestTestReport{complete: true}},
+		{raw: `<testsuites><testsuite><testcase/><testcase><failure>999 passed</failure><error/></testcase><testcase><skipped/></testcase></testsuite><testsuite><testcase/></testsuite></testsuites>`, want: testReport{passed: 2, failed: 1, skipped: 1, complete: true}},
+		{raw: `<testsuites><testsuite tests="999" failures="0"><testcase><error/></testcase></testsuite></testsuites>`, want: testReport{failed: 1, complete: true}},
+		{raw: `<testsuites><testsuite><system-out>99 passed</system-out></testsuite></testsuites>`, want: testReport{complete: true}},
+		{raw: "<testsuites><testsuite/></testsuites>\n<!-- done -->", want: testReport{complete: true}},
 		{raw: `<testsuites><testsuite><testcase>`},
 		{raw: `<testsuite><testcase/></testsuite>`},
 		{raw: `<testsuites/>`},
