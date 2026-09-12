@@ -607,6 +607,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr), limits)
 	if err != nil {
 		codeModeFailure = err
+		if outputSchema == artifactv1.SchemaVersion {
+			return printOneShotArtifactFailure(artifactSubmission, err)
+		}
 		return printOneShotFailure(responseText, err)
 	}
 
@@ -614,15 +617,13 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		artifact, artifactErr := resolveOneShotArtifact(responseText, artifactContract, artifactSubmission)
 		if artifactErr != nil {
 			codeModeFailure = artifactErr
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", artifactErr)
-			return 1
+			return printOneShotArtifactFailure(artifactSubmission, artifactErr)
 		}
 		artifactJSON, renderErr := artifactv1.RenderJSON(artifact)
 		artifactErr = renderErr
 		if artifactErr != nil {
 			codeModeFailure = fmt.Errorf("render artifact output: %w", artifactErr)
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", codeModeFailure)
-			return 1
+			return printOneShotArtifactFailure(artifactSubmission, codeModeFailure)
 		}
 		responseText = string(artifactJSON)
 	}
@@ -779,6 +780,28 @@ func printOneShotFailure(responseText string, err error) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+	return 1
+}
+
+func printOneShotArtifactFailure(submission *builtin.ArtifactSubmission, err error) int {
+	var incomplete *agentloop.IncompleteTurnError
+	isIncomplete := errors.As(err, &incomplete)
+
+	artifact := submission.RecoveryArtifact()
+	status := artifact.Status
+	if artifactJSON, renderErr := artifactv1.RenderJSON(artifact); renderErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: rendering recovery artifact: %v\n", renderErr)
+	} else {
+		fmt.Println(string(artifactJSON))
+	}
+
+	if isIncomplete {
+		notice := agentloop.PresentIncompleteResult(err)
+		fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1; code=%s)\n", status, notice.Code)
+		fmt.Fprintln(os.Stderr, "Incomplete turn; captured evidence preserved in recovery artifact.")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1)\nError: %v\n", status, err)
 	return 1
 }
 
