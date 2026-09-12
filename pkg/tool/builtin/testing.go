@@ -149,10 +149,12 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 			verificationError = framework + " did not produce a complete structured test report"
 		}
 	}
+	var goFailures []string
 	if framework == "go" {
 		report := parseGoTestOutput(output)
 		passed, failed, skipped = report.passed, report.failed, report.skipped
 		output = report.output
+		goFailures = report.failures
 		if exitCode == 0 && !report.complete {
 			verificationError = "go test did not produce a complete test report"
 		}
@@ -197,18 +199,24 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 		}
 
 		// Extract failure details
-		failureDetails := t.extractFailures(framework, output)
+		var failureDetails []string
+		if framework == "go" {
+			failureDetails = goFailures
+		} else {
+			failureDetails = t.extractFailures(framework, output)
+		}
 
 		result.DisplayData = map[string]any{
-			"exit_code": exitCode,
-			"error":     result.Error,
-			"framework": framework,
-			"passed":    passed,
-			"failed":    failed,
-			"skipped":   skipped,
-			"duration":  duration,
-			"summary":   summary,
-			"failures":  failureDetails,
+			"exit_code":   exitCode,
+			"error":       result.Error,
+			"framework":   framework,
+			"passed":      passed,
+			"failed":      failed,
+			"skipped":     skipped,
+			"duration":    duration,
+			"summary":     summary,
+			"failures":    failureDetails,
+			"output_tail": outputTail(output, verificationTailBytes),
 		}
 	}
 
@@ -434,12 +442,6 @@ func (t *RunTestsTool) extractFailures(framework, output string) []string {
 	lines := strings.Split(output, "\n")
 
 	switch framework {
-	case "go":
-		for _, line := range lines {
-			if strings.Contains(line, "--- FAIL:") {
-				failures = append(failures, strings.TrimSpace(line))
-			}
-		}
 	case "jest", "pytest":
 		inFailure := false
 		for _, line := range lines {
