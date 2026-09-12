@@ -439,6 +439,9 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	if !strings.HasSuffix(rawPatch, "\n") {
+		if _, err := unifiedPatchHeaderPaths(rawPatch); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 		rawPatch += "\n"
 	}
 
