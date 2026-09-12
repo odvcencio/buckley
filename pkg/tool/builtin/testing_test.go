@@ -68,13 +68,13 @@ func TestDetectTestFrameworkGoMod(t *testing.T) {
 }
 
 func TestParseGoTestResults(t *testing.T) {
-	tool := &RunTestsTool{}
-	output := `--- PASS: TestOne
---- FAIL: TestTwo
---- SKIP: TestThree
---- PASS: TestFour`
-	passed, failed, skipped := tool.parseGoTestResults(output)
-	if passed != 2 || failed != 1 || skipped != 1 {
-		t.Fatalf("unexpected counts: pass=%d fail=%d skip=%d", passed, failed, skipped)
+	output := `{"Action":"pass","Package":"p","Test":"TestOne"}
+{"Action":"fail","Package":"p","Test":"TestTwo"}
+{"Action":"skip","Package":"p","Test":"TestThree"}
+{"Action":"pass","Package":"p","Test":"TestFour"}
+{"Action":"fail","Package":"p"}`
+	report := parseGoTestOutput(output)
+	if !report.complete || report.passed != 2 || report.failed != 1 || report.skipped != 1 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }

@@ -15,9 +15,6 @@ import (
 
 // Pre-compiled regex patterns for test output parsing.
 var (
-	goTestPassedRe = regexp.MustCompile(`--- PASS:`)
-	goTestFailedRe = regexp.MustCompile(`--- FAIL:`)
-	goTestSkipRe   = regexp.MustCompile(`--- SKIP:`)
 	jestResultsRe  = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
 	pytestResultRe = regexp.MustCompile(`(\d+)\s+(\w+)`)
 	cargoResultRe  = regexp.MustCompile(`(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
@@ -133,9 +130,31 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 
 	// Parse results
 	passed, failed, skipped := t.parseTestResults(framework, output)
+	verificationError := ""
+	if framework == "go" {
+		report := parseGoTestOutput(output)
+		passed, failed, skipped = report.passed, report.failed, report.skipped
+		output = report.output
+		if exitCode == 0 {
+			switch {
+			case !report.complete:
+				verificationError = "go test did not produce a complete test report"
+			case failed > 0:
+				verificationError = "go test reported failed tests"
+			case passed+skipped == 0:
+				verificationError = "go test ran no tests; check the path and pattern"
+			case passed == 0:
+				verificationError = "go test skipped every test; no passing tests verified"
+			}
+		}
+	}
+	if exitCode != 0 {
+		verificationError = fmt.Sprintf("test command exited with code %d", exitCode)
+	}
 
 	result := &Result{
-		Success: exitCode == 0,
+		Success: exitCode == 0 && verificationError == "",
+		Error:   verificationError,
 		Data: map[string]any{
 			"framework": framework,
 			"path":      testPath,
@@ -154,14 +173,16 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	if len(output) > 5000 {
 		result.ShouldAbridge = true
 		summary := fmt.Sprintf("✓ %d passed, ✗ %d failed, ⊘ %d skipped (%.2fs)", passed, failed, skipped, duration)
-		if failed > 0 {
-			summary = "Tests FAILED: " + summary
+		if !result.Success {
+			summary = "Tests FAILED: " + result.Error + "; " + summary
 		}
 
 		// Extract failure details
 		failureDetails := t.extractFailures(framework, output)
 
 		result.DisplayData = map[string]any{
+			"exit_code": exitCode,
+			"error":     result.Error,
 			"framework": framework,
 			"passed":    passed,
 			"failed":    failed,
@@ -215,7 +236,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 
 	switch framework {
 	case "go":
-		args := []string{"test"}
+		args := []string{"test", "-json"}
 		if coverage {
 			args = append(args, "-cover")
 		}
@@ -306,8 +327,6 @@ func localGoTestPath(path string) string {
 
 func (t *RunTestsTool) parseTestResults(framework, output string) (passed, failed, skipped int) {
 	switch framework {
-	case "go":
-		return t.parseGoTestResults(output)
 	case "jest":
 		return t.parseJestResults(output)
 	case "pytest":
@@ -317,13 +336,6 @@ func (t *RunTestsTool) parseTestResults(framework, output string) (passed, faile
 	default:
 		return 0, 0, 0
 	}
-}
-
-func (t *RunTestsTool) parseGoTestResults(output string) (passed, failed, skipped int) {
-	passed = len(goTestPassedRe.FindAllString(output, -1))
-	failed = len(goTestFailedRe.FindAllString(output, -1))
-	skipped = len(goTestSkipRe.FindAllString(output, -1))
-	return
 }
 
 func (t *RunTestsTool) parseJestResults(output string) (passed, failed, skipped int) {
