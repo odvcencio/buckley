@@ -19,6 +19,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
@@ -36,6 +37,7 @@ type Runner struct {
 	planStore orchestrator.PlanStore
 	telemetry *telemetry.Hub
 	bus       bus.MessageBus
+	engine    *rules.Engine
 
 	runtime     *rlm.Runtime
 	currentPlan *orchestrator.Plan
@@ -43,8 +45,27 @@ type Runner struct {
 	graftClient *graft.Client
 }
 
-// New constructs an RLM runner with the full runtime wired.
-func New(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore) *Runner {
+// Option configures a Runner before its runtime is initialized.
+type Option func(*Runner)
+
+// WithRulesEngine supplies the optional Arbiter engine used by coordinated
+// execution policy hooks. A nil engine preserves the legacy fail-open behavior.
+func WithRulesEngine(engine *rules.Engine) Option {
+	return func(r *Runner) {
+		r.engine = engine
+	}
+}
+
+// WithGraftClient supplies the optional Graft client before the runtime is
+// initialized.
+func WithGraftClient(client *graft.Client) Option {
+	return func(r *Runner) {
+		r.graftClient = client
+	}
+}
+
+// New constructs a runner with the full coordinator–worker runtime wired.
+func New(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore, opts ...Option) *Runner {
 	r := &Runner{
 		store:     store,
 		models:    mgr,
@@ -52,6 +73,11 @@ func New(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg 
 		cfg:       cfg,
 		workflow:  workflow,
 		planStore: planStore,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
 	}
 
 	// Create the planner for plan generation
@@ -82,7 +108,9 @@ func (r *Runner) SetBus(b bus.MessageBus) {
 	r.bus = b
 }
 
-// SetGraftClient configures graft coordination for subagent lifecycle.
+// SetGraftClient stores the Graft client for a runtime that has not yet been
+// initialized. It remains for legacy callers, but does not rebind an already
+// initialized runtime; use WithGraftClient when constructing an eager runner.
 func (r *Runner) SetGraftClient(client *graft.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -115,6 +143,7 @@ func (r *Runner) initRuntime() error {
 		Bus:         r.bus,
 		Telemetry:   r.telemetry,
 		UseToon:     r.cfg != nil && r.cfg.Encoding.UseToon,
+		Engine:      r.engine,
 		GraftClient: r.graftClient,
 	})
 	if err != nil {
