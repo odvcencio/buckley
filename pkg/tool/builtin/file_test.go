@@ -123,9 +123,8 @@ func TestReadFileTool(t *testing.T) {
 		}
 
 		for name, params := range map[string]map[string]any{
-			"zero start":      {"path": testFile, "start_line": 0},
-			"reverse range":   {"path": testFile, "start_line": 2, "end_line": 1},
-			"oversized range": {"path": testFile, "start_line": 1, "end_line": 101},
+			"zero start":    {"path": testFile, "start_line": 0},
+			"reverse range": {"path": testFile, "start_line": 2, "end_line": 1},
 		} {
 			t.Run(name, func(t *testing.T) {
 				result, err := tool.Execute(params)

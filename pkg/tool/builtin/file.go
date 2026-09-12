@@ -20,7 +20,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Each page is at most 100 lines; use next_start_line from the result to continue."
+	return "Read file contents in bounded, 1-indexed line pages. Oversized ranges return the first 100 lines; use next_start_line from the result to continue."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -37,7 +37,7 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			},
 			"end_line": {
 				Type:        "number",
-				Description: "Last line to return (1-indexed, inclusive; defaults to start_line + 99)",
+				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Larger ranges are capped to 100 lines per page.",
 			},
 		},
 		Required: []string{"path"},
@@ -162,7 +162,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 		return 0, 0, false, fmt.Errorf("end_line must be greater than or equal to start_line")
 	}
 	if endLine-startLine+1 > readFilePageLines {
-		return 0, 0, false, fmt.Errorf("read_file supports pages of at most %d lines; use next_start_line to continue", readFilePageLines)
+		endLine = startLine + readFilePageLines - 1
 	}
 	if totalLines == 0 {
 		if startLine != 1 {
