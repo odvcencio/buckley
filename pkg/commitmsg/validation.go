@@ -112,7 +112,11 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		if hasCommitControl(bullet) {
 			return fmt.Errorf("body contains control characters")
 		}
-		if NormalizeBullet(bullet) != "" {
+		normalized := NormalizeBullet(bullet)
+		if strings.HasPrefix(normalized, "<arg_value>") {
+			return fmt.Errorf("body starts with tool markup; quote literal tags with backticks")
+		}
+		if normalized != "" {
 			nonEmptyBody++
 		}
 	}
