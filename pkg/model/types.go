@@ -171,6 +171,18 @@ type ChatRequest struct {
 	ReviewSnapshot *ReviewSnapshot `json:"-"`
 }
 
+// ModelAttemptEvidence records bounded, durable evidence about a single model
+// attempt. It deliberately carries no prompt, message, completion content,
+// reasoning, error text, or arbitrary metadata -- only usage, presence,
+// finish reason, and completeness flags.
+type ModelAttemptEvidence struct {
+	Usage             Usage              `json:"usage"`
+	UsagePresent      bool               `json:"usage_present"`
+	FinishReason      string             `json:"finish_reason,omitempty"`
+	Incomplete        bool               `json:"incomplete"`
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
+}
+
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
 	ID      string   `json:"id"`
@@ -188,6 +200,7 @@ type ChatResponse struct {
 	UsagePresent      bool                       `json:"usage_present"`
 	Error             *ErrorDetail               `json:"error,omitempty"`
 	ExecutionEvidence []CommandExecutionEvidence `json:"execution_evidence,omitempty"`
+	AttemptEvidence   []ModelAttemptEvidence     `json:"attempt_evidence,omitempty"`
 	ExecutionIdentity *ExecutionIdentity         `json:"execution_identity,omitempty"`
 }
 
@@ -477,6 +490,10 @@ type Usage struct {
 	PromptTokensDetails    *PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
 	CompletionTokenDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
 	CacheWriteTokens       int                     `json:"cache_write_tokens,omitempty"`
+	// Estimated is true when Buckley derived the counts locally because the
+	// provider did not return usage. Estimated usage is useful for context and
+	// telemetry, but must not be treated as an authoritative provider invoice.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 type PromptTokensDetails struct {
@@ -494,6 +511,7 @@ func AddUsage(total Usage, next Usage) Usage {
 	total.CompletionTokens += next.CompletionTokens
 	total.TotalTokens += next.TotalTokens
 	total.CacheWriteTokens += next.CacheWriteTokens
+	total.Estimated = total.Estimated || next.Estimated
 	if next.PromptTokensDetails != nil {
 		if total.PromptTokensDetails == nil {
 			total.PromptTokensDetails = &PromptTokensDetails{}
@@ -507,6 +525,26 @@ func AddUsage(total Usage, next Usage) Usage {
 		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
 	}
 	return total
+}
+
+// EstimateChatUsage derives a best-effort request/response token count for a
+// completed chat round whose provider omitted usage. It uses the same local
+// JSON-envelope byte estimator as admission control and deliberately marks the
+// result non-authoritative. Callers enforcing a dollar ceiling must charge a
+// conservative pre-dispatch reservation instead of pricing this estimate.
+func EstimateChatUsage(req ChatRequest, response Message) Usage {
+	promptTokens := EstimateRequestTokens(req).Total
+	responseBytes := estimateMessageBytes(response)
+	completionTokens := responseBytes / 4
+	if completionTokens == 0 && responseBytes > 0 {
+		completionTokens = 1
+	}
+	return Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		Estimated:        true,
+	}
 }
 
 // RequestTokenEstimate describes the approximate model input footprint.

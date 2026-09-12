@@ -2,6 +2,7 @@ package experiment
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -111,6 +112,7 @@ func TestExperimentExecutor_ExecuteRejectsIncompleteCompletions(t *testing.T) {
 		response   string
 		finish     string
 		reasonPart string
+		wantOutput string
 	}{
 		{
 			name: "truncated terminal answer",
@@ -122,6 +124,7 @@ func TestExperimentExecutor_ExecuteRejectsIncompleteCompletions(t *testing.T) {
 			}`,
 			finish:     agentloop.FinishReasonInvalidCompletion,
 			reasonPart: "truncated",
+			wantOutput: "useful but unfinished",
 		},
 		{
 			name: "empty terminal answer",
@@ -173,8 +176,8 @@ func TestExperimentExecutor_ExecuteRejectsIncompleteCompletions(t *testing.T) {
 			if result.Success {
 				t.Fatal("Success = true, want the incomplete controller result to fail the experiment")
 			}
-			if result.Output != "" {
-				t.Fatalf("Output = %q, want no projected terminal answer", result.Output)
+			if result.Output != tt.wantOutput {
+				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
 			}
 
 			var incomplete *agentloop.IncompleteTurnError
@@ -193,8 +196,14 @@ func TestExperimentExecutor_ExecuteRejectsIncompleteCompletions(t *testing.T) {
 
 func TestExperimentExecutor_ExecutePreservesGuardOutputOnFailure(t *testing.T) {
 	requestCount := 0
+	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		bodies = append(bodies, string(body))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, fmt.Sprintf(`{
 			"id":"chatcmpl-tool-%d",
@@ -223,25 +232,26 @@ func TestExperimentExecutor_ExecutePreservesGuardOutputOnFailure(t *testing.T) {
 		t.Fatal("Success = true, want the guard-stopped experiment to fail")
 	}
 	if strings.TrimSpace(result.Output) == "" {
-		t.Fatal("Output is empty, want the controller's useful guard-stop content")
+		t.Fatal("Output is empty, want retained public unexecuted-call evidence")
 	}
-	if !strings.Contains(result.Output, "Buckley stopped") {
-		t.Fatalf("Output = %q, want guard-stop explanation", result.Output)
+	if !strings.Contains(result.Output, "unexecuted tool call") {
+		t.Fatalf("Output = %q, want retained public unexecuted-call evidence", result.Output)
 	}
 
 	var incomplete *agentloop.IncompleteTurnError
 	if !errors.As(result.Error, &incomplete) {
 		t.Fatalf("Error = %T %v, want *agentloop.IncompleteTurnError", result.Error, result.Error)
 	}
-	if incomplete.FinishReason != agentloop.FinishReasonLoopGuard {
-		t.Fatalf("FinishReason = %q, want %q", incomplete.FinishReason, agentloop.FinishReasonLoopGuard)
+	if incomplete.FinishReason != agentloop.FinishReasonInvalidCompletion || incomplete.Code != "unoffered_tool_call" {
+		t.Fatalf("incomplete result = %+v, want invalid unoffered-tool-call completion", incomplete)
 	}
-	if !strings.Contains(incomplete.Reason, "10-round harness limit") {
-		t.Fatalf("Reason = %q, want the controller's guard termination metadata", incomplete.Reason)
+	if got := result.Metrics["tool_calls"]; got != 0 {
+		t.Fatalf("tool_calls = %d, want zero: the filtered registry supplied no schemas, so returned calls must remain control-only", got)
 	}
-	if got := result.Metrics["tool_calls"]; got != 10 {
-		t.Fatalf("tool_calls = %d, want 10", got)
+	if requestCount != 1 || len(bodies) != 1 {
+		t.Fatalf("provider requests = %d bodies=%d, want only the unsafe response-producing request", requestCount, len(bodies))
 	}
+	assertRequestOmitsTools(t, 1, bodies[0])
 }
 
 func TestExperimentExecutor_RunConversationPreservesTokenCapFailure(t *testing.T) {
@@ -289,4 +299,18 @@ func newOpenAIExperimentExecutor(t *testing.T, baseURL string, configure func(*c
 		t.Fatalf("NewManager: %v", err)
 	}
 	return &experimentExecutor{config: cfg, modelManager: mgr}
+}
+
+func assertRequestOmitsTools(t *testing.T, index int, body string) {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decode request %d: %v", index, err)
+	}
+	if _, ok := decoded["tools"]; ok {
+		t.Fatalf("request %d included tools: %s", index, body)
+	}
+	if _, ok := decoded["tool_choice"]; ok {
+		t.Fatalf("request %d included tool_choice: %s", index, body)
+	}
 }

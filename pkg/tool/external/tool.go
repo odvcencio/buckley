@@ -63,6 +63,10 @@ func (et *ExternalTool) Name() string {
 	return et.manifest.Name
 }
 
+func (et *ExternalTool) ConservativeMutation() bool {
+	return true
+}
+
 // Description returns the tool description
 func (et *ExternalTool) Description() string {
 	return et.manifest.Description

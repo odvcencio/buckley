@@ -195,3 +195,40 @@ func TestEncodeDecodeResponse_PreservesNativeFinishReasonAndUsagePresent(t *test
 		})
 	}
 }
+
+func TestEncodeDecodeResponse_PreservesResponseToolsOfferedTriState(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	for _, tt := range []struct {
+		name         string
+		offered      *bool
+		fieldPresent bool
+	}{
+		{name: "absent", offered: nil, fieldPresent: false},
+		{name: "false", offered: &falseValue, fieldPresent: true},
+		{name: "true", offered: &trueValue, fieldPresent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := EncodeResponse(ResponseEnvelope{
+				Response:             &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "response"}}}},
+				ResponseToolsOffered: tt.offered,
+			})
+			if err != nil {
+				t.Fatalf("EncodeResponse: %v", err)
+			}
+			if got := strings.Contains(string(body), "response_tools_offered"); got != tt.fieldPresent {
+				t.Fatalf("field present=%v body=%s, want %v", got, body, tt.fieldPresent)
+			}
+			decoded, err := DecodeResponse(body)
+			if err != nil {
+				t.Fatalf("DecodeResponse: %v", err)
+			}
+			if (decoded.ResponseToolsOffered != nil) != (tt.offered != nil) {
+				t.Fatalf("decoded offer=%v, want presence=%v", decoded.ResponseToolsOffered, tt.offered != nil)
+			}
+			if tt.offered != nil && *decoded.ResponseToolsOffered != *tt.offered {
+				t.Fatalf("decoded offer=%v, want %v", *decoded.ResponseToolsOffered, *tt.offered)
+			}
+		})
+	}
+}

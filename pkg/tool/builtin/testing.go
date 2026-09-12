@@ -31,6 +31,10 @@ func (t *RunTestsTool) Name() string {
 	return "run_tests"
 }
 
+func (t *RunTestsTool) TrustedVerification() bool {
+	return true
+}
+
 func (t *RunTestsTool) Description() string {
 	return "Run tests with optional path and pattern filtering. Auto-detects test framework."
 }
