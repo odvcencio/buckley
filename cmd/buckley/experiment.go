@@ -75,7 +75,7 @@ func runExperimentRun(args []string) error {
 	fs.StringVar(&prompt, "prompt", "", "Task prompt")
 
 	var criteriaFlags stringSliceFlag
-	fs.Var(&criteriaFlags, "criteria", "Success criteria (type:target, repeatable)")
+	fs.Var(&criteriaFlags, "criteria", "Success criteria (type:target, repeatable); command/test_pass receive model output on stdin")
 
 	timeout := fs.Duration("timeout", 0, "Timeout per variant (default from config)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "Maximum concurrent variants")
