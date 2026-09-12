@@ -42,7 +42,14 @@ func (r *Registry) ExecuteWithContext(ctx context.Context, name string, params m
 	if exec == nil {
 		return nil, fmt.Errorf("tool executor not initialized")
 	}
-	return exec(execCtx)
+	result, err := exec(execCtx)
+	if err != nil {
+		return result, err
+	}
+	r.mu.RLock()
+	sourceCapture := r.artifactSources
+	r.mu.RUnlock()
+	return captureArtifactSource(execCtx, result, sourceCapture), nil
 }
 
 func (r *Registry) executorForCall() Executor {

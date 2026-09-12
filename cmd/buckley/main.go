@@ -528,6 +528,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		if artifactContract.Mode == artifactv1.OutputSubmitArtifact {
 			artifactSubmission = &builtin.ArtifactSubmission{}
 			registry.Register(&builtin.SubmitArtifactTool{Submission: artifactSubmission})
+			registry.SetArtifactSourceCapture(artifactSubmission)
 		}
 	}
 	autoCodeMode := protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"

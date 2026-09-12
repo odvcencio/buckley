@@ -14,28 +14,51 @@ import (
 // object: evidence persistence remains the responsibility of the caller that
 // owns the run lifecycle.
 type ArtifactSubmission struct {
-	mu        sync.RWMutex
-	artifact  artifactv1.Artifact
-	submitted bool
+	mu          sync.RWMutex
+	artifact    artifactv1.Artifact
+	submitted   bool
+	sources     map[string]capturedSource
+	sourceBytes int
 }
 
 // Submit records a validated artifact. Repeated submissions fail closed so a
 // provider cannot silently replace its final result after the fact.
 func (s *ArtifactSubmission) Submit(artifact artifactv1.Artifact) error {
+	return s.SubmitWithSources(artifact, nil)
+}
+
+// SubmitWithSources materializes selected read snapshots before validation.
+// It neither upgrades the model's completion status nor verifies its summary.
+func (s *ArtifactSubmission) SubmitWithSources(artifact artifactv1.Artifact, refs []string) error {
 	if s == nil {
 		return fmt.Errorf("artifact submission sink is required")
-	}
-	artifact, err := artifactv1.NormalizeAndValidate(artifact)
-	if err != nil {
-		return fmt.Errorf("validate submitted artifact: %w", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.submitted {
 		return fmt.Errorf("artifact was already submitted")
 	}
+	artifact, err := s.appendCapturedSources(artifact, refs)
+	if err != nil {
+		return err
+	}
+	artifact, err = artifactv1.NormalizeAndValidate(artifact)
+	if err != nil {
+		return fmt.Errorf("validate submitted artifact: %w", err)
+	}
+	if len(refs) > 0 {
+		encoded, err := json.Marshal(artifact)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > artifactv1.MaxProviderBytes {
+			return fmt.Errorf("captured artifact exceeds %d bytes; select fewer source_refs", artifactv1.MaxProviderBytes)
+		}
+	}
 	s.artifact = artifact
 	s.submitted = true
+	s.sources = nil
+	s.sourceBytes = 0
 	return nil
 }
 
@@ -71,6 +94,10 @@ func (t *SubmitArtifactTool) Parameters() ParameterSchema {
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
+			"source_refs": {
+				Type: "array", Description: "Optional source_ref IDs returned by read_file in this run. Buckley copies those captured pages into a source table without rereading files. Leave artifact blocks and evidence_refs empty when using this; source bytes are preserved, but summary accuracy and item coverage remain the caller's responsibility.",
+				Items: &PropertySchema{Type: "string", Description: "source_ref from a successful read"},
+			},
 			"artifact": {
 				RawSchema:   artifactv1.JSONSchema(),
 				Type:        "object",
@@ -101,9 +128,17 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("invalid buckley.artifact/v1 submission: %v", err)}, nil
 	}
-	if err := t.Submission.Submit(artifact); err != nil {
+	var refs []string
+	if rawRefs, present := params["source_refs"]; present {
+		refs, err = parseSourceRefs(rawRefs)
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+	}
+	if err := t.Submission.SubmitWithSources(artifact, refs); err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
+	artifact, _ = t.Submission.Artifact()
 	return &Result{
 		Success: true,
 		Data: map[string]any{
