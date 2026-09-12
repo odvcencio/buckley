@@ -17,14 +17,17 @@ var commitActions = commitmsg.AllowedActions
 type CommitDefinition struct{}
 
 // CommitResult is the strongly-typed result of generate_commit.
+//
+// Body and Issues reuse the PR list decoder to accept scalar model output.
+// JSON encoding remains array-shaped; validation still checks the contents.
 type CommitResult struct {
-	Action         string   `json:"action"`
-	Scope          string   `json:"scope,omitempty"`
-	Subject        string   `json:"subject"`
-	Body           []string `json:"body"`
-	Breaking       bool     `json:"breaking,omitempty"`
-	BreakingReason string   `json:"breaking_reason,omitempty"`
-	Issues         []string `json:"issues,omitempty"`
+	Action         string     `json:"action"`
+	Scope          string     `json:"scope,omitempty"`
+	Subject        string     `json:"subject"`
+	Body           StringList `json:"body"`
+	Breaking       bool       `json:"breaking,omitempty"`
+	BreakingReason string     `json:"breaking_reason,omitempty"`
+	Issues         StringList `json:"issues,omitempty"`
 }
 
 // Header formats the commit header line.

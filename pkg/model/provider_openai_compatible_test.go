@@ -2,10 +2,12 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -233,6 +235,416 @@ func TestLiteLLMLegacyAlias_ConfiguredSupportedParametersAugmentModelInfo(t *tes
 	}
 }
 
+func TestOpenAICompatibleProvider_ReasoningEffortUsesConfiguredTopLevelField(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("path = %q, want /chat/completions", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"openai_compatible/glm-5.3-flash": {"reasoning_effort"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/glm-5.3-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "low"},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := captured["reasoning_effort"]; got != "low" {
+		t.Fatalf("reasoning_effort = %v, want low", got)
+	}
+	if _, ok := captured["reasoning"]; ok {
+		t.Fatalf("request should not include nested reasoning when reasoning_effort is used: %#v", captured["reasoning"])
+	}
+}
+
+func TestOpenAICompatibleProvider_ReasoningEffortDropsTokenBudgetBeforeTopLevelConversion(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash": {"reasoning_effort"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/glm-5.3-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "low", MaxTokens: 128},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := captured["reasoning_effort"]; got != "low" {
+		t.Fatalf("reasoning_effort = %v, want low", got)
+	}
+	if _, ok := captured["reasoning"]; ok {
+		t.Fatalf("request should not include nested reasoning when effort is converted: %#v", captured["reasoning"])
+	}
+}
+
+func TestOpenAICompatibleProvider_ReasoningTokenBudgetOnlyPreservesNestedReasoning(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash": {"reasoning_effort"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/glm-5.3-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{MaxTokens: 128},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if _, ok := captured["reasoning_effort"]; ok {
+		t.Fatalf("request should not synthesize reasoning_effort without an effort: %#v", captured["reasoning_effort"])
+	}
+	reasoning, ok := captured["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("request should keep nested reasoning, got %#v", captured["reasoning"])
+	}
+	if _, ok := reasoning["effort"]; ok {
+		t.Fatalf("reasoning.effort should be omitted for token-budget-only requests: %#v", reasoning)
+	}
+	if reasoning["max_tokens"] != float64(128) {
+		t.Fatalf("reasoning.max_tokens = %#v, want 128", reasoning["max_tokens"])
+	}
+}
+
+func TestOpenAICompatibleProvider_StreamReasoningEffortDropsTokenBudget(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"test-id\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"provider-neutral-model": {"reasoning_effort"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+	chunks, errs := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:     "openai_compatible/provider-neutral-model",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "medium", MaxTokens: 2048},
+	})
+	drainTestChatStream(t, chunks, errs)
+
+	if captured["reasoning_effort"] != "medium" {
+		t.Fatalf("reasoning_effort = %#v, want medium", captured["reasoning_effort"])
+	}
+	if _, ok := captured["reasoning"]; ok {
+		t.Fatalf("stream request retained nested reasoning after effort conversion: %#v", captured)
+	}
+}
+
+func TestOpenAICompatibleProvider_ReasoningEffortOmittedWhenUnsupported(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := newTestOpenAICompatibleProvider(server.URL)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/glm-5.3-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "low"},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if _, ok := captured["reasoning_effort"]; ok {
+		t.Fatalf("request should not include unsupported reasoning_effort: %#v", captured["reasoning_effort"])
+	}
+	if _, ok := captured["reasoning"]; !ok {
+		t.Fatalf("request should keep nested reasoning for providers without reasoning_effort support")
+	}
+}
+
+func TestOpenAICompatibleProvider_ReasoningContentWireMappingIsCapabilityGated(t *testing.T) {
+	rawReasoning := "思\n\n\n考\n\n\n alpha\n\n\n beta\n\n\n γ\n\n\n delta\n\n\n epsilon\n\n\n zeta\n\n\n eta\n\n\n."
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash": {"tools", "reasoning_effort", "reasoning_content"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/glm-5.3-flash",
+		Reasoning: &ReasoningConfig{Effort: "low"},
+		Messages: []Message{
+			{Role: "user", Content: "start"},
+			{
+				Role:      "assistant",
+				Content:   "",
+				Reasoning: rawReasoning,
+				ToolCalls: []ToolCall{{
+					ID:   "call_α",
+					Type: "function",
+					Function: FunctionCall{
+						Name:      "read_fixture",
+						Arguments: `{"path":"fixtures/未知.txt"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_α", Name: "read_fixture", Content: `{"nonce":"値-123"}`},
+		},
+		Tools: []map[string]any{{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "read_fixture",
+				"description": "read one fixture",
+				"parameters": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"path": map[string]any{"type": "string"}},
+					"required":   []any{"path"},
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := captured["reasoning_effort"]; got != "low" {
+		t.Fatalf("reasoning_effort = %v, want low", got)
+	}
+	messages := captured["messages"].([]any)
+	assistant := messages[1].(map[string]any)
+	if got := assistant["reasoning_content"]; got != rawReasoning {
+		t.Fatalf("reasoning_content changed:\n got %#v\nwant %q", got, rawReasoning)
+	}
+	if _, ok := assistant["reasoning"]; ok {
+		t.Fatalf("assistant message should not emit generic reasoning field: %#v", assistant["reasoning"])
+	}
+	toolCalls := assistant["tool_calls"].([]any)
+	call := toolCalls[0].(map[string]any)
+	if call["id"] != "call_α" {
+		t.Fatalf("tool call id = %v, want call_α", call["id"])
+	}
+	fn := call["function"].(map[string]any)
+	if fn["name"] != "read_fixture" || fn["arguments"] != `{"path":"fixtures/未知.txt"}` {
+		t.Fatalf("tool call function = %#v", fn)
+	}
+	tool := messages[2].(map[string]any)
+	if tool["tool_call_id"] != "call_α" || tool["content"] != `{"nonce":"値-123"}` {
+		t.Fatalf("tool result did not round-trip: %#v", tool)
+	}
+}
+
+func TestOpenAICompatibleProvider_ReasoningContentNotSentWithoutCapability(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"glm-5.3-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash": {"tools"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model: "openai_compatible/glm-5.3-flash",
+		Messages: []Message{{
+			Role:      "assistant",
+			Content:   "answer",
+			Reasoning: "private",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	messages := captured["messages"].([]any)
+	assistant := messages[0].(map[string]any)
+	if _, ok := assistant["reasoning_content"]; ok {
+		t.Fatalf("reasoning_content leaked without capability: %#v", assistant)
+	}
+	if got := assistant["reasoning"]; got != "private" {
+		t.Fatalf("direct provider fallback reasoning = %v, want generic reasoning", got)
+	}
+}
+
+func TestOpenAICompatibleProvider_DiscoveredReasoningCapabilitiesAffectWireRequest(t *testing.T) {
+	captured := make(map[string]map[string]any)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/models":
+			_, _ = io.WriteString(w, `{"data":[
+				{"id":"discovered-reasoning","supported_parameters":["reasoning_effort","reasoning_content"]},
+				{"id":"tools-only","supported_parameters":["tools"]}
+			]}`)
+		case "/chat/completions":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			modelID, _ := payload["model"].(string)
+			captured[modelID] = payload
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-1",
+				"model":"test-model",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+			}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := newTestOpenAICompatibleProvider(server.URL)
+	provider.httpClient = server.Client()
+	if _, err := provider.FetchCatalog(); err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+
+	for _, modelID := range []string{"discovered-reasoning", "tools-only"} {
+		_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+			Model:     "openai_compatible/" + modelID,
+			Reasoning: &ReasoningConfig{Effort: "medium"},
+			Messages: []Message{{
+				Role:      "assistant",
+				Content:   "answer",
+				Reasoning: "private",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ChatCompletion(%q) error = %v", modelID, err)
+		}
+	}
+
+	discovered := captured["discovered-reasoning"]
+	if got := discovered["reasoning_effort"]; got != "medium" {
+		t.Fatalf("discovered reasoning_effort = %v, want medium", got)
+	}
+	if _, ok := discovered["reasoning"]; ok {
+		t.Fatalf("discovered request should translate nested reasoning: %#v", discovered)
+	}
+	discoveredAssistant := discovered["messages"].([]any)[0].(map[string]any)
+	if got := discoveredAssistant["reasoning_content"]; got != "private" {
+		t.Fatalf("discovered reasoning_content = %v, want private", got)
+	}
+	if _, ok := discoveredAssistant["reasoning"]; ok {
+		t.Fatalf("discovered assistant should omit generic reasoning: %#v", discoveredAssistant)
+	}
+
+	unsupported := captured["tools-only"]
+	if _, ok := unsupported["reasoning_effort"]; ok {
+		t.Fatalf("unsupported request should omit reasoning_effort: %#v", unsupported)
+	}
+	if _, ok := unsupported["reasoning"]; !ok {
+		t.Fatalf("unsupported request should preserve nested reasoning: %#v", unsupported)
+	}
+	unsupportedAssistant := unsupported["messages"].([]any)[0].(map[string]any)
+	if _, ok := unsupportedAssistant["reasoning_content"]; ok {
+		t.Fatalf("unsupported assistant should omit reasoning_content: %#v", unsupportedAssistant)
+	}
+	if got := unsupportedAssistant["reasoning"]; got != "private" {
+		t.Fatalf("unsupported assistant reasoning = %v, want private", got)
+	}
+}
+
 // TestOpenAICompatibleProvider_ChatCompletionRetriesTransientError proves the
 // migration onto the shared ProviderTransport: a transient 429 is retried
 // and recovered inside ChatCompletion instead of surfacing to the caller.
@@ -379,4 +791,562 @@ loop:
 	if gotErr == nil {
 		t.Fatal("expected the malformed chunk to surface as an error, not be silently skipped")
 	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamIdleTimeoutAfterPartialChunk(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(100 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:           server.URL,
+		APIKey:            "test-key",
+		StreamIdleTimeout: 25 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var gotFirst bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content == "hi" {
+				gotFirst = true
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for idle error")
+		}
+	}
+	if !gotFirst {
+		t.Fatal("expected first chunk before idle timeout")
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "stream idle timeout") {
+		t.Fatalf("error = %v, want stream idle timeout", gotErr)
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want no replay after partial stream", got)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamReasoningContentResetsIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think\"},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(20 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"more\"},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(20 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:           server.URL,
+		APIKey:            "test-key",
+		StreamIdleTimeout: 35 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var gotReasoning bool
+	var gotContent bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Reasoning != "" {
+					gotReasoning = true
+				}
+				if choice.Delta.Content == "done" {
+					gotContent = true
+				}
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for completed stream")
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("stream error = %v, want nil", gotErr)
+	}
+	if !gotReasoning || !gotContent {
+		t.Fatalf("gotReasoning=%v gotContent=%v, want both", gotReasoning, gotContent)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamHeartbeatOnlyDoesNotResetIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, ": heartbeat\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(80 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:           server.URL,
+		APIKey:            "test-key",
+		StreamIdleTimeout: 25 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err := waitForStreamError(t, errChan); err == nil || !strings.Contains(err.Error(), "stream idle timeout") {
+		t.Fatalf("error = %v, want stream idle timeout", err)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamIdleTimeoutBeforeHeadersCancelsRequest(t *testing.T) {
+	cancelled := make(chan struct{})
+	var requests int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&requests, 1)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+			return nil, r.Context().Err()
+		case <-time.After(time.Second):
+			t.Fatal("request context was not cancelled")
+			return nil, nil
+		}
+	})
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:           "http://example.test",
+		APIKey:            "test-key",
+		StreamIdleTimeout: 25 * time.Millisecond,
+	}, false)
+	provider.httpClient = &http.Client{Transport: transport}
+
+	_, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err := waitForStreamError(t, errChan); err == nil || !strings.Contains(err.Error(), "stream idle timeout") {
+		t.Fatalf("error = %v, want stream idle timeout", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe request cancellation")
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want one cancelled request", got)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamFirstContentTimeoutReasoningOnlyCancelsRequest(t *testing.T) {
+	cancelled := make(chan struct{}, 1)
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for {
+			_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				select {
+				case cancelled <- struct{}{}:
+				default:
+				}
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:                   server.URL,
+		APIKey:                    "test-key",
+		StreamIdleTimeout:         30 * time.Millisecond,
+		StreamFirstContentTimeout: 75 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var gotReasoning bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				gotReasoning = gotReasoning || choice.Delta.Reasoning != ""
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for first content timeout")
+		}
+	}
+	if !gotReasoning {
+		t.Fatal("expected reasoning-only chunks before first content timeout")
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "stream first content timeout") {
+		t.Fatalf("error = %v, want stream first content timeout", gotErr)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe request cancellation")
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want no replay after a reasoning stream event", got)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamFirstContentReasoningChunkLimitCancelsRequest(t *testing.T) {
+	cancelled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for {
+			_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				select {
+				case cancelled <- struct{}{}:
+				default:
+				}
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:                              server.URL,
+		APIKey:                               "test-key",
+		StreamFirstContentTimeout:            time.Second,
+		StreamFirstContentMaxReasoningChunks: 2,
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err := waitForStreamError(t, errChan); err == nil || !strings.Contains(err.Error(), "stream first content reasoning chunk limit exceeded (3 > 2)") {
+		t.Fatalf("error = %v, want first content reasoning chunk limit error", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe request cancellation")
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamFirstContentTimeoutContentDisarms(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		time.Sleep(10 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"start\"},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(90 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:                   server.URL,
+		APIKey:                    "test-key",
+		StreamFirstContentTimeout: 50 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var gotStart, gotDone bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				gotStart = gotStart || choice.Delta.Content == "start"
+				gotDone = gotDone || choice.Delta.Content == "done"
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for content-disarmed stream")
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("stream error = %v, want nil", gotErr)
+	}
+	if !gotStart || !gotDone {
+		t.Fatalf("gotStart=%v gotDone=%v, want both", gotStart, gotDone)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamFirstContentTimeoutToolCallDisarms(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		time.Sleep(10 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(90 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:                   server.URL,
+		APIKey:                    "test-key",
+		StreamFirstContentTimeout: 50 * time.Millisecond,
+	}, false)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+
+	var gotToolCall, gotDone bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				gotToolCall = gotToolCall || len(choice.Delta.ToolCalls) > 0
+				gotDone = gotDone || choice.Delta.Content == "done"
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for tool-call-disarmed stream")
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("stream error = %v, want nil", gotErr)
+	}
+	if !gotToolCall || !gotDone {
+		t.Fatalf("gotToolCall=%v gotDone=%v, want both", gotToolCall, gotDone)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamFirstContentTimeoutBeforeHeadersCancelsRequest(t *testing.T) {
+	cancelled := make(chan struct{})
+	var requests int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&requests, 1)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+			return nil, r.Context().Err()
+		case <-time.After(time.Second):
+			t.Fatal("request context was not cancelled")
+			return nil, nil
+		}
+	})
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL:                   "http://example.test",
+		APIKey:                    "test-key",
+		StreamFirstContentTimeout: 25 * time.Millisecond,
+	}, false)
+	provider.httpClient = &http.Client{Transport: transport}
+
+	_, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err := waitForStreamError(t, errChan); err == nil || !strings.Contains(err.Error(), "stream first content timeout") {
+		t.Fatalf("error = %v, want stream first content timeout", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe request cancellation")
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want one cancelled request", got)
+	}
+}
+
+func TestOpenAICompatibleProvider_ChatCompletionStreamDefaultZeroIdleAllowsSlowStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		time.Sleep(50 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"slow\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := newTestOpenAICompatibleProvider(server.URL)
+	provider.httpClient = server.Client()
+
+	chunkChan, errChan := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	var gotContent bool
+	var gotErr error
+	timeout := time.After(time.Second)
+	for chunkChan != nil || errChan != nil {
+		select {
+		case chunk, ok := <-chunkChan:
+			if !ok {
+				chunkChan = nil
+				continue
+			}
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content == "slow" {
+				gotContent = true
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			gotErr = err
+		case <-timeout:
+			t.Fatal("timeout waiting for slow stream")
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("stream error = %v, want nil", gotErr)
+	}
+	if !gotContent {
+		t.Fatal("expected slow content with default zero idle timeout")
+	}
+}
+
+func waitForStreamError(t *testing.T, errChan <-chan error) error {
+	t.Helper()
+	select {
+	case err, ok := <-errChan:
+		if !ok {
+			return nil
+		}
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for stream error")
+		return nil
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

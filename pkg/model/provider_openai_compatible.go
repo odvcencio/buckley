@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -14,19 +15,23 @@ import (
 
 // OpenAICompatibleProvider connects to an OpenAI-compatible chat API.
 type OpenAICompatibleProvider struct {
-	providerID    string
-	modelPrefix   string
-	liteLLMInfo   bool
-	baseURL       string
-	apiKey        string
-	httpClient    *http.Client
-	transport     *ProviderTransport
-	modelCache    []ModelInfo
-	cacheTTL      time.Duration
-	cacheTime     time.Time
-	staticModels  []string
-	staticParams  map[string][]string
-	staticContext map[string]int
+	providerID                           string
+	modelPrefix                          string
+	liteLLMInfo                          bool
+	baseURL                              string
+	apiKey                               string
+	httpClient                           *http.Client
+	transport                            *ProviderTransport
+	modelCacheMu                         sync.RWMutex
+	modelCache                           []ModelInfo
+	cacheTTL                             time.Duration
+	cacheTime                            time.Time
+	staticModels                         []string
+	staticParams                         map[string][]string
+	staticContext                        map[string]int
+	streamIdle                           time.Duration
+	streamFirstContent                   time.Duration
+	streamFirstContentMaxReasoningChunks int
 }
 
 // LiteLLMProvider is the deprecated name for OpenAICompatibleProvider.
@@ -50,17 +55,20 @@ func newOpenAICompatibleProvider(providerID string, liteLLMInfo bool, cfg config
 	baseURL = strings.TrimRight(baseURL, "/")
 	transport := NewLoggingTransportWithEnabled(nil, networkLogsEnabled)
 	return &OpenAICompatibleProvider{
-		providerID:    providerID,
-		modelPrefix:   providerID + "/",
-		liteLLMInfo:   liteLLMInfo,
-		baseURL:       baseURL,
-		apiKey:        strings.TrimSpace(cfg.APIKey),
-		httpClient:    &http.Client{Timeout: defaultTimeout, Transport: transport},
-		transport:     NewProviderTransport(ProviderTransportOptions{}),
-		cacheTTL:      5 * time.Minute,
-		staticModels:  cfg.Models,
-		staticParams:  cfg.SupportedParameters,
-		staticContext: cfg.ContextLengths,
+		providerID:                           providerID,
+		modelPrefix:                          providerID + "/",
+		liteLLMInfo:                          liteLLMInfo,
+		baseURL:                              baseURL,
+		apiKey:                               strings.TrimSpace(cfg.APIKey),
+		httpClient:                           &http.Client{Timeout: defaultTimeout, Transport: transport},
+		transport:                            NewProviderTransport(ProviderTransportOptions{}),
+		cacheTTL:                             5 * time.Minute,
+		staticModels:                         cfg.Models,
+		staticParams:                         cfg.SupportedParameters,
+		staticContext:                        cfg.ContextLengths,
+		streamIdle:                           cfg.StreamIdleTimeout,
+		streamFirstContent:                   cfg.StreamFirstContentTimeout,
+		streamFirstContentMaxReasoningChunks: cfg.StreamFirstContentMaxReasoningChunks,
 	}
 }
 
@@ -71,9 +79,13 @@ func (p *OpenAICompatibleProvider) ID() string {
 
 // FetchCatalog returns model metadata from the compatible API.
 func (p *OpenAICompatibleProvider) FetchCatalog() (*ModelCatalog, error) {
+	p.modelCacheMu.RLock()
 	if time.Since(p.cacheTime) < p.cacheTTL && len(p.modelCache) > 0 {
-		return &ModelCatalog{Data: p.modelCache}, nil
+		models := p.modelCache
+		p.modelCacheMu.RUnlock()
+		return &ModelCatalog{Data: models}, nil
 	}
+	p.modelCacheMu.RUnlock()
 
 	var (
 		models []ModelInfo
@@ -98,8 +110,10 @@ func (p *OpenAICompatibleProvider) FetchCatalog() (*ModelCatalog, error) {
 		models = p.buildStaticModels()
 	}
 
+	p.modelCacheMu.Lock()
 	p.modelCache = models
 	p.cacheTime = time.Now()
+	p.modelCacheMu.Unlock()
 	return &ModelCatalog{Data: models}, nil
 }
 
@@ -380,7 +394,7 @@ func (p *OpenAICompatibleProvider) setAuthHeaders(req *http.Request) {
 }
 
 func (p *OpenAICompatibleProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", p.compatiblePayload(req), p.setAuthHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -389,9 +403,253 @@ func (p *OpenAICompatibleProvider) invoke(ctx context.Context, req ChatRequest) 
 	if err := json.Unmarshal(data, &chatResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
+	chatResp.AttemptEvidence = nil
+	chatResp.ExecutionIdentity = observedExecutionIdentity(chatResp.ID, chatResp.Model, nil)
 	return &chatResp, nil
 }
 
 func (p *OpenAICompatibleProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
-	return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders, chunkChan)
+	payload := p.compatiblePayload(req)
+	if p.streamIdle <= 0 && p.streamFirstContent <= 0 && p.streamFirstContentMaxReasoningChunks <= 0 {
+		return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", payload, p.setAuthHeaders, chunkChan)
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	providerChunkStream := make(chan StreamChunk, 10)
+	providerErrStream := make(chan error, 1)
+	go func(providerChunks chan<- StreamChunk, errChan chan<- error) {
+		errChan <- p.transport.Stream(streamCtx, p.httpClient, "POST", p.baseURL+"/chat/completions", payload, p.setAuthHeaders, providerChunks)
+		close(providerChunks)
+		close(errChan)
+	}(providerChunkStream, providerErrStream)
+	var providerChunks <-chan StreamChunk = providerChunkStream
+	var errChan <-chan error = providerErrStream
+
+	var (
+		idleTimer          *time.Timer
+		idleTimerC         <-chan time.Time
+		firstContentTimer  *time.Timer
+		firstContentTimerC <-chan time.Time
+	)
+	if p.streamIdle > 0 {
+		idleTimer = time.NewTimer(p.streamIdle)
+		idleTimerC = idleTimer.C
+		defer idleTimer.Stop()
+	}
+	if p.streamFirstContent > 0 {
+		firstContentTimer = time.NewTimer(p.streamFirstContent)
+		firstContentTimerC = firstContentTimer.C
+		defer firstContentTimer.Stop()
+	}
+	firstContentPending := p.streamFirstContent > 0 || p.streamFirstContentMaxReasoningChunks > 0
+	firstContentReasoningChunks := 0
+	var terminalErr error
+	for providerChunks != nil || errChan != nil {
+		select {
+		case chunk, ok := <-providerChunks:
+			if !ok {
+				providerChunks = nil
+				continue
+			}
+			if firstContentPending {
+				if streamChunkHasUsableInitialResponse(chunk) {
+					if firstContentTimer != nil && !stopTimer(firstContentTimer) {
+						return p.streamFirstContentTimeoutError()
+					}
+					firstContentPending = false
+					firstContentTimer = nil
+					firstContentTimerC = nil
+				} else if p.streamFirstContentMaxReasoningChunks > 0 && streamChunkHasReasoning(chunk) {
+					firstContentReasoningChunks++
+					if firstContentReasoningChunks > p.streamFirstContentMaxReasoningChunks {
+						return p.streamFirstContentReasoningChunkLimitError(firstContentReasoningChunks)
+					}
+				}
+			}
+			if idleTimer != nil && streamChunkHasMeaningfulDelta(chunk) {
+				resetTimer(idleTimer, p.streamIdle)
+			}
+			select {
+			case chunkChan <- chunk:
+			case <-firstContentTimerC:
+				return p.streamFirstContentTimeoutError()
+			case <-idleTimerC:
+				return fmt.Errorf("%s stream idle timeout after %s", p.providerID, p.streamIdle)
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case err, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			if err != nil {
+				terminalErr = err
+			}
+			errChan = nil
+		case <-firstContentTimerC:
+			return p.streamFirstContentTimeoutError()
+		case <-idleTimerC:
+			return fmt.Errorf("%s stream idle timeout after %s", p.providerID, p.streamIdle)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return terminalErr
+}
+
+func (p *OpenAICompatibleProvider) streamFirstContentTimeoutError() error {
+	return fmt.Errorf("%s stream first content timeout after %s", p.providerID, p.streamFirstContent)
+}
+
+func (p *OpenAICompatibleProvider) streamFirstContentReasoningChunkLimitError(observed int) error {
+	return fmt.Errorf("%s stream first content reasoning chunk limit exceeded (%d > %d)", p.providerID, observed, p.streamFirstContentMaxReasoningChunks)
+}
+
+type openAICompatibleReasoningEffortPayload struct {
+	ChatRequest
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+type openAICompatibleWirePayload struct {
+	ChatRequest
+	Messages        []openAICompatibleWireMessage `json:"messages"`
+	ReasoningEffort string                        `json:"reasoning_effort,omitempty"`
+}
+
+type openAICompatibleWireMessage struct {
+	Role             string            `json:"role"`
+	Content          any               `json:"content,omitempty"`
+	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
+}
+
+func (p *OpenAICompatibleProvider) compatiblePayload(req ChatRequest) any {
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	reasoningEffort := ""
+	if req.Reasoning != nil && p.supportsConfiguredParameter(req.Model, "reasoning_effort") {
+		if req.Reasoning.MaxTokens == 0 && req.Reasoning.Exclude == nil && (req.Reasoning.Enabled == nil || *req.Reasoning.Enabled) {
+			reasoningEffort = strings.ToLower(strings.TrimSpace(req.Reasoning.Effort))
+			if reasoningEffort != "" {
+				req.Reasoning = nil
+			}
+		}
+	}
+
+	if p.supportsConfiguredParameter(req.Model, "reasoning_content") {
+		return openAICompatibleWirePayload{
+			ChatRequest:     req,
+			Messages:        openAICompatibleWireMessages(req.Messages),
+			ReasoningEffort: reasoningEffort,
+		}
+	}
+	if reasoningEffort == "" {
+		return req
+	}
+	return openAICompatibleReasoningEffortPayload{
+		ChatRequest:     req,
+		ReasoningEffort: reasoningEffort,
+	}
+}
+
+func openAICompatibleWireMessages(messages []Message) []openAICompatibleWireMessage {
+	if messages == nil {
+		return nil
+	}
+	out := make([]openAICompatibleWireMessage, 0, len(messages))
+	for _, msg := range messages {
+		wire := openAICompatibleWireMessage{
+			Role:             msg.Role,
+			Content:          msg.Content,
+			ToolCalls:        msg.ToolCalls,
+			ToolCallID:       msg.ToolCallID,
+			Name:             msg.Name,
+			ReasoningDetails: msg.ReasoningDetails,
+		}
+		if msg.Role == "assistant" {
+			wire.ReasoningContent = msg.Reasoning
+		}
+		out = append(out, wire)
+	}
+	return out
+}
+
+func (p *OpenAICompatibleProvider) supportsConfiguredParameter(modelID, parameter string) bool {
+	parameter = strings.TrimSpace(parameter)
+	if parameter == "" {
+		return false
+	}
+	modelID = strings.TrimSpace(modelID)
+	canonical := modelID
+	if !strings.HasPrefix(canonical, p.modelPrefix) {
+		canonical = p.modelPrefix + canonical
+	}
+	if containsString(p.mergeConfiguredParameters(canonical, nil), parameter) {
+		return true
+	}
+	p.modelCacheMu.RLock()
+	defer p.modelCacheMu.RUnlock()
+	for _, info := range p.modelCache {
+		if info.ID == canonical && containsString(info.SupportedParameters, parameter) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkHasMeaningfulDelta(chunk StreamChunk) bool {
+	for _, choice := range chunk.Choices {
+		delta := choice.Delta
+		if delta.Content != "" || delta.Reasoning != "" || len(delta.ReasoningDetails) > 0 || len(delta.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkHasUsableInitialResponse(chunk StreamChunk) bool {
+	for _, choice := range chunk.Choices {
+		delta := choice.Delta
+		if delta.Content != "" || len(delta.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkHasReasoning(chunk StreamChunk) bool {
+	for _, choice := range chunk.Choices {
+		delta := choice.Delta
+		if delta.Reasoning != "" || len(delta.ReasoningDetails) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func stopTimer(timer *time.Timer) bool {
+	if timer == nil || timer.Stop() {
+		return true
+	}
+	select {
+	case <-timer.C:
+		return false
+	default:
+		return true
+	}
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(duration)
 }
