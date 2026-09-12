@@ -363,6 +363,9 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	}
 	if cmd != nil {
 		cmd.Env = mergeEnv(cmd.Env, t.env)
+		if framework == "pytest" {
+			cmd.Env = mergeEnv(cmd.Env, map[string]string{"PYTHONDONTWRITEBYTECODE": "1"})
+		}
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
