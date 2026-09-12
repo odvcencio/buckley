@@ -2978,6 +2978,11 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		if strings.TrimSpace(decision.Nudge) != "" {
 			content += "\n\n" + decision.Nudge
 		}
+		if index == len(state.calls)-1 && !decision.Stop && !stopDecision.Stop {
+			if remaining := c.cfg.Governor.RemainingToolCalls(); remaining >= 1 && remaining <= 3 {
+				content += fmt.Sprintf("\n\nHarness budget: %d tool calls remain. Reserve enough for any required verification after your last edit; report unverified work as incomplete.", remaining)
+			}
+		}
 		if c.cfg.History != nil {
 			c.cfg.History.Append(model.Message{
 				Role:       "tool",
