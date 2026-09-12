@@ -148,19 +148,8 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")
 	}
 
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0,
-		OutputPerMillion: 15.0,
-	}
-	if opts.backend == oneshotBackendAPI && mgr != nil {
-		if info, err := mgr.GetModelInfo(modelID); err == nil {
-			pricing.InputPerMillion = info.Pricing.Prompt
-			pricing.OutputPerMillion = info.Pricing.Completion
-		}
-	}
-
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err

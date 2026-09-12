@@ -34,6 +34,9 @@ type Trace struct {
 	// Cost in USD
 	Cost float64 `json:"cost"`
 
+	// CostUnknown means Cost is only the known subtotal, not a complete price.
+	CostUnknown bool `json:"cost_unknown,omitempty"`
+
 	// Request contains the raw request (for --trace mode)
 	Request *RequestTrace `json:"request,omitempty"`
 
@@ -180,6 +183,12 @@ func (tb *TraceBuilder) Complete(tokens TokenUsage, cost float64) *Trace {
 	return &tb.trace
 }
 
+// WithCostUnknown marks pricing provenance without discarding known subtotals.
+func (tb *TraceBuilder) WithCostUnknown(unknown bool) *TraceBuilder {
+	tb.trace.CostUnknown = unknown
+	return tb
+}
+
 // WithToolCalls adds tool calls to the trace.
 func (tb *TraceBuilder) WithToolCalls(calls []tools.ToolCall) *TraceBuilder {
 	tb.trace.ToolCalls = calls
@@ -248,6 +257,7 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 	aggregate.Duration = 0
 	aggregate.Tokens = TokenUsage{}
 	aggregate.Cost = 0
+	aggregate.CostUnknown = false
 	aggregate.Attempts = valid
 	for _, attempt := range valid {
 		trace := attempt.Trace
@@ -257,6 +267,7 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 		aggregate.Tokens.Reasoning += trace.Tokens.Reasoning
 		aggregate.Tokens.CachedInput += trace.Tokens.CachedInput
 		aggregate.Cost += trace.Cost
+		aggregate.CostUnknown = aggregate.CostUnknown || trace.CostUnknown
 	}
 	return &aggregate
 }

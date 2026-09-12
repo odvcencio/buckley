@@ -37,7 +37,8 @@ type CostEntry struct {
 	Tokens TokenUsage `json:"tokens"`
 
 	// Cost in USD
-	Cost float64 `json:"cost"`
+	Cost        float64 `json:"cost"`
+	CostUnknown bool    `json:"cost_unknown,omitempty"`
 
 	// Latency of the request
 	Latency time.Duration `json:"latency"`
@@ -132,20 +133,33 @@ func (cl *CostLedger) TodayTotal() float64 {
 
 // Summary returns a human-readable cost summary.
 type CostSummary struct {
-	SessionCost     float64    `json:"session_cost"`
-	TodayCost       float64    `json:"today_cost"`
-	SessionTokens   TokenUsage `json:"session_tokens"`
-	InvocationCount int        `json:"invocation_count"`
+	SessionCost        float64    `json:"session_cost"`
+	SessionCostUnknown bool       `json:"session_cost_unknown,omitempty"`
+	TodayCost          float64    `json:"today_cost"`
+	TodayCostUnknown   bool       `json:"today_cost_unknown,omitempty"`
+	SessionTokens      TokenUsage `json:"session_tokens"`
+	InvocationCount    int        `json:"invocation_count"`
 }
 
 // Summary returns aggregated cost data.
 func (cl *CostLedger) Summary() CostSummary {
-	return CostSummary{
-		SessionCost:     cl.SessionTotal(),
-		TodayCost:       cl.TodayTotal(),
-		SessionTokens:   cl.SessionTokens(),
-		InvocationCount: cl.InvocationCount(),
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	summary := CostSummary{InvocationCount: len(cl.entries)}
+	for _, entry := range cl.entries {
+		summary.SessionCost += entry.Cost
+		summary.SessionCostUnknown = summary.SessionCostUnknown || entry.CostUnknown
+		summary.SessionTokens.Input += entry.Tokens.Input
+		summary.SessionTokens.Output += entry.Tokens.Output
+		summary.SessionTokens.Reasoning += entry.Tokens.Reasoning
+		summary.SessionTokens.CachedInput += entry.Tokens.CachedInput
+		if entry.Timestamp.UTC().Truncate(24 * time.Hour).Equal(today) {
+			summary.TodayCost += entry.Cost
+			summary.TodayCostUnknown = summary.TodayCostUnknown || entry.CostUnknown
+		}
 	}
+	return summary
 }
 
 // ModelPricing contains per-model pricing information.

@@ -108,7 +108,7 @@ func explicitModelID(flagValue, envName string) string {
 	return strings.TrimSpace(os.Getenv(envName))
 }
 
-func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *model.Manager, pricing transparency.ModelPricing, ledger *transparency.CostLedger) (oneshot.ToolInvoker, error) {
+func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *model.Manager, ledger *transparency.CostLedger) (oneshot.ToolInvoker, error) {
 	switch backend {
 	case oneshotBackendAPI:
 		providerID := "openrouter"
@@ -125,12 +125,21 @@ func newOneshotToolInvoker(backend, modelID string, cfg *config.Config, mgr *mod
 		if err != nil {
 			return nil, err
 		}
+		var pricing transparency.ModelPricing
+		pricingUnknown := true
+		if mgr != nil {
+			if info, infoErr := mgr.GetModelInfo(modelID); infoErr == nil && info != nil && info.PricingKnown {
+				pricing = transparency.ModelPricing{InputPerMillion: info.Pricing.Prompt, OutputPerMillion: info.Pricing.Completion}
+				pricingUnknown = false
+			}
+		}
 		return oneshot.NewInvoker(oneshot.InvokerConfig{
 			Client:          client,
 			Model:           modelID,
 			Provider:        providerID,
 			ReasoningEffort: reasoning,
 			Pricing:         pricing,
+			PricingUnknown:  pricingUnknown,
 			Ledger:          ledger,
 		}), nil
 	case oneshot.CLIBackendCodex, oneshot.CLIBackendClaude:

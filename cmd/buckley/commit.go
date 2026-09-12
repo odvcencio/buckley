@@ -279,19 +279,8 @@ func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, 
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
 	}
 
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0,
-		OutputPerMillion: 15.0,
-	}
-	if opts.backend == oneshotBackendAPI && mgr != nil {
-		if info, err := mgr.GetModelInfo(modelID); err == nil {
-			pricing.InputPerMillion = info.Pricing.Prompt
-			pricing.OutputPerMillion = info.Pricing.Completion
-		}
-	}
-
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -544,7 +533,7 @@ func printCost(trace *transparency.Trace, ledger *transparency.CostLedger) {
 	}
 
 	summary := ledger.Summary()
-	costLine := fmt.Sprintf("Cost: $%.4f · Session: $%.4f", trace.Cost, summary.SessionCost)
+	costLine := formatTraceCostLine(trace, summary)
 
 	termOut.Dim("%s", tokensLine)
 	termOut.Dim("%s", costLine)
@@ -555,8 +544,7 @@ func printError(err error, trace *transparency.Trace) {
 	termOut.Error("%s", err.Error())
 
 	if trace != nil {
-		termOut.Dim("Tokens used: %d · Cost: $%.4f (still charged)",
-			trace.Tokens.Total(), trace.Cost)
+		termOut.Dim("%s", formatTraceErrorUsageLine(trace))
 	}
 }
 
