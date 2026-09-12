@@ -173,19 +173,20 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 		}
 	}
 
-	endLine = startLine + readFilePageLines - 1
+	pageEnd := startLine + min(readFilePageLines-1, math.MaxInt-startLine)
+	endLine = pageEnd
 	if value, ok := params["end_line"]; ok {
 		explicitPage = true
 		endLine, err = readFileLineNumber("end_line", value)
 		if err != nil {
 			return 0, 0, false, err
 		}
+		if endLine > pageEnd {
+			endLine = pageEnd
+		}
 	}
 	if endLine < startLine {
 		return 0, 0, false, fmt.Errorf("end_line must be greater than or equal to start_line")
-	}
-	if endLine-startLine+1 > readFilePageLines {
-		endLine = startLine + readFilePageLines - 1
 	}
 	if totalLines == 0 {
 		if startLine != 1 {
@@ -203,6 +204,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 }
 
 func readFileLineNumber(name string, value any) (int, error) {
+	const positiveIntegerError = "%s parameter must be a positive integer"
 	var number float64
 	switch typed := value.(type) {
 	case float64:
@@ -210,20 +212,26 @@ func readFileLineNumber(name string, value any) (int, error) {
 	case float32:
 		number = float64(typed)
 	case int:
-		number = float64(typed)
+		if typed < 1 {
+			return 0, fmt.Errorf(positiveIntegerError, name)
+		}
+		return typed, nil
 	case int64:
-		number = float64(typed)
+		if typed < 1 || typed > int64(math.MaxInt) {
+			return 0, fmt.Errorf(positiveIntegerError, name)
+		}
+		return int(typed), nil
 	case json.Number:
 		parsed, err := typed.Int64()
-		if err != nil {
-			return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+		if err != nil || parsed < 1 || parsed > int64(math.MaxInt) {
+			return 0, fmt.Errorf(positiveIntegerError, name)
 		}
-		number = float64(parsed)
+		return int(parsed), nil
 	default:
-		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+		return 0, fmt.Errorf(positiveIntegerError, name)
 	}
-	if number < 1 || math.Trunc(number) != number || number > math.MaxInt {
-		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+	if number < 1 || math.Trunc(number) != number || number >= math.Ldexp(1, strconv.IntSize-1) {
+		return 0, fmt.Errorf(positiveIntegerError, name)
 	}
 	return int(number), nil
 }
