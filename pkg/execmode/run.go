@@ -286,6 +286,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 )
 
 var client = &http.Client{Transport: &http.Transport{
@@ -325,6 +326,18 @@ func ReadFile(path string) (content string, truncated bool, err error) {
 	}
 	err = call("/v1/files/read", map[string]any{"path": path}, &out)
 	return out.Content, out.Truncated, err
+}
+
+// ReadFileChunk returns up to 256 KiB of a workspace-relative file starting
+// at byte offset. Continue large files by advancing offset by int64(len(data))
+// until truncated is false.
+func ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error) {
+	var out struct {
+		Data      []byte ` + "`json:\"data\"`" + `
+		Truncated bool   ` + "`json:\"truncated\"`" + `
+	}
+	err = call("/v1/files/read", map[string]any{"path": path, "offset": strconv.FormatInt(offset, 10)}, &out)
+	return out.Data, out.Truncated, err
 }
 
 type listPage struct {
@@ -396,12 +409,13 @@ func SearchTextGlob(pattern, glob string) ([]Match, bool, error) {
 // whole model turns (the first live run spent seven).
 const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.ReadFile(path string) (content string, truncated bool, err error)\n" +
+	"  caps.ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error)\n" +
 	"  caps.ListDir(dir string) (entries []string, err error)        // one level; dirs end in \"/\"\n" +
 	"  caps.WalkDir(dir string) (entries []string, err error)        // whole tree, workspace-relative paths\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
 	"  type Match struct { File string; Line int; Text string }\n" +
-	"Paths are workspace-relative. One program may make at most 32 broker operations; paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
+	"Paths are workspace-relative. One program may make at most 32 broker operations; paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Large files: use ReadFileChunk and continue by advancing offset by int64(len(data)) until truncated is false; every call counts toward the 32-operation budget, so check errors and stop promptly. Chunk reads do not pin a file snapshot. Data is raw bytes, so carry a line split across chunk boundaries when doing line-based extraction. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
 	"import (\n\t\"fmt\"\n\n\t\"execprogram/caps\"\n)\n\n" +
 	"func main() {\n" +
