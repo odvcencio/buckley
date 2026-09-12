@@ -1787,10 +1787,9 @@ func (c *Coordinator) storeTerminalReport(ctx context.Context, spec agentcoord.A
 	return []string{raw.ID, typed.ID}, nil
 }
 
-// terminalArtifact gives a child-produced Artifact v1 precedence when it
-// conforms, while retaining the coordinator's authoritative run state and a
-// raw evidence link. Text-only workers receive a generated typed result with
-// a visible schema diagnostic rather than silently losing their output.
+// terminalArtifact retains child output and raw evidence; execution failures
+// take precedence, and completed execution does not promote incomplete or
+// nonconforming requested-schema output.
 func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot Snapshot, raw artifactv1.EvidenceRef) (artifactv1.Artifact, error) {
 	run := c.agentRunFromSnapshot(snapshot)
 	run.Task = spec
@@ -1799,7 +1798,7 @@ func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot S
 		return artifactv1.Artifact{}, err
 	}
 	artifact := generated
-	if strings.TrimSpace(spec.OutputSchema) == artifactv1.SchemaVersion && strings.TrimSpace(snapshot.Output) != "" {
+	if strings.TrimSpace(spec.OutputSchema) == artifactv1.SchemaVersion {
 		decoded, report, decodeErr := artifactv1.DecodeProviderOutput(context.Background(), []byte(snapshot.Output), artifactv1.OutputPromptJSON, artifactv1.DecodeOptions{MaxRepairAttempts: 1})
 		if decodeErr == nil {
 			artifact = decoded
@@ -1811,6 +1810,8 @@ func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot S
 				})
 			}
 		} else {
+			artifact.Status = artifactv1.StatusIncomplete
+			artifact.IncompleteReasons = append(artifact.IncompleteReasons, "subagent output did not conform to requested artifact schema")
 			artifact.Diagnostics = append(artifact.Diagnostics, artifactv1.Diagnostic{
 				Level:   "warning",
 				Code:    "subagent.output_schema",
@@ -1818,7 +1819,12 @@ func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot S
 			})
 		}
 	}
-	artifact.Status = artifactStatusFromSnapshot(snapshot.State)
+	if generated.Status != artifactv1.StatusCompleted {
+		artifact.Status = generated.Status
+	}
+	if artifact.Status == artifactv1.StatusCompleted && len(artifact.IncompleteReasons) > 0 {
+		artifact.Status = artifactv1.StatusIncomplete
+	}
 	if artifact.Metadata == nil {
 		artifact.Metadata = make(map[string]string)
 	}
@@ -1827,17 +1833,6 @@ func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot S
 	artifact.EvidenceRefs = append(artifact.EvidenceRefs, raw)
 	artifact.ArtifactID = ""
 	return artifactv1.NormalizeAndValidate(artifact)
-}
-
-func artifactStatusFromSnapshot(state State) artifactv1.ArtifactStatus {
-	switch state {
-	case StateCompleted:
-		return artifactv1.StatusCompleted
-	case StateFailed, StateCancelled:
-		return artifactv1.StatusFailed
-	default:
-		return artifactv1.StatusIncomplete
-	}
 }
 
 func (c *Coordinator) finishDurably(ctx context.Context, spec agentcoord.AgentTaskSpec, snapshot Snapshot, refs []string, durabilityErr error) error {

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"strings"
 )
 
@@ -411,12 +412,7 @@ func cloneArtifact(a Artifact) Artifact {
 	a.EvidenceRefs = cloneEvidence(a.EvidenceRefs)
 	a.NextActions = cloneActions(a.NextActions)
 	a.IncompleteReasons = append([]string(nil), a.IncompleteReasons...)
-	if a.Metadata != nil {
-		a.Metadata = make(map[string]string, len(a.Metadata))
-		for key, value := range a.Metadata {
-			a.Metadata[key] = value
-		}
-	}
+	a.Metadata = maps.Clone(a.Metadata)
 	return a
 }
 
