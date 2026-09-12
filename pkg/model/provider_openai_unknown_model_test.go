@@ -55,7 +55,7 @@ func TestOpenAIProvider_GetModelInfo_UnqualifiedCuratedModel(t *testing.T) {
 		t.Errorf("info.ID = %q, want %q", info.ID, "openai/gpt-4o")
 	}
 	if info.Name != "GPT-4o" {
-		t.Errorf("info.Name = %q, want curated name %q", info.Name)
+		t.Errorf("info.Name = %q, want curated name %q", info.Name, "GPT-4o")
 	}
 	if info.ContextLength != 128000 {
 		t.Errorf("info.ContextLength = %d, want 128000", info.ContextLength)

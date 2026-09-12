@@ -188,6 +188,7 @@ type ChatResponse struct {
 	UsagePresent      bool                       `json:"usage_present"`
 	Error             *ErrorDetail               `json:"error,omitempty"`
 	ExecutionEvidence []CommandExecutionEvidence `json:"execution_evidence,omitempty"`
+	ExecutionIdentity *ExecutionIdentity         `json:"execution_identity,omitempty"`
 }
 
 // UnmarshalJSON decodes a ChatResponse and derives UsagePresent. When the
@@ -252,11 +253,12 @@ type Choice struct {
 
 // StreamChunk represents a single chunk from a streaming chat completion.
 type StreamChunk struct {
-	ID      string         `json:"id"`
-	Model   string         `json:"model"`
-	Choices []StreamChoice `json:"choices"`
-	Usage   *Usage         `json:"usage,omitempty"` // Only present in final chunk
-	Error   *ErrorDetail   `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
+	ID                string             `json:"id"`
+	Model             string             `json:"model"`
+	Choices           []StreamChoice     `json:"choices"`
+	Usage             *Usage             `json:"usage,omitempty"` // Only present in final chunk
+	Error             *ErrorDetail       `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
 }
 
 // StreamChoice represents a streaming choice
