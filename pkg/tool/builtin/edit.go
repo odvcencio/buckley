@@ -22,7 +22,7 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Edit a file by replacing exact text matches. Shows diff preview."
+	return "Make a targeted edit by replacing exact text in one file; prefer this to apply_patch for small local edits. Read the current text first and include enough context for a unique match. Returns a diff of the change."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
@@ -35,7 +35,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"old_string": {
 				Type:        "string",
-				Description: "Text to find (exact match)",
+				Description: "Exact existing text, including whitespace. Must match exactly once unless replace_all is true.",
 			},
 			"new_string": {
 				Type:        "string",
@@ -43,7 +43,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 			},
 			"replace_all": {
 				Type:        "boolean",
-				Description: "Replace all occurrences (default: first only)",
+				Description: "Replace every exact occurrence. Default false requires one unique match; ambiguous matches are rejected without editing.",
 				Default:     false,
 			},
 		},

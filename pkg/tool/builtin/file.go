@@ -438,6 +438,10 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	if !strings.HasSuffix(rawPatch, "\n") {
+		rawPatch += "\n"
+	}
+
 	strip := 0
 	if v, exists := params["strip"]; exists {
 		var parsedStrip int
