@@ -72,17 +72,9 @@ func (t *SubmitArtifactTool) Parameters() ParameterSchema {
 		Type: "object",
 		Properties: map[string]PropertySchema{
 			"artifact": {
+				RawSchema:   artifactv1.JSONSchema(),
 				Type:        "object",
 				Description: "A complete buckley.artifact/v1 object",
-				Properties: map[string]PropertySchema{
-					"schema_version": {Type: "string", Description: "Must be buckley.artifact/v1"},
-					"artifact_id":    {Type: "string", Description: "Stable artifact identifier"},
-					"kind":           {Type: "string", Description: "Artifact kind"},
-					"status":         {Type: "string", Description: "Artifact lifecycle status"},
-					"title":          {Type: "string", Description: "Short result title"},
-					"summary":        {Type: "string", Description: "Bounded result summary"},
-				},
-				Required: []string{"schema_version", "artifact_id", "kind", "status", "title", "summary"},
 			},
 		},
 		Required:             []string{"artifact"},
