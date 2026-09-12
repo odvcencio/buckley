@@ -306,7 +306,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "pytest", args...)
 
 	case "cargo":
-		args := []string{"test"}
+		args := []string{"test", "--manifest-path", filepath.Join(path, "Cargo.toml")}
 		if pattern != "" {
 			args = append(args, pattern)
 		}
