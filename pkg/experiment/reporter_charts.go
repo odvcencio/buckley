@@ -3,6 +3,7 @@ package experiment
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -197,10 +198,21 @@ func (r *TerminalReporter) renderCostChart(report *ComparisonReport) {
 	var maxCost float64
 
 	for _, v := range report.Variants {
-		entries = append(entries, costEntry{modelID: v.ModelID + " / " + v.RunID, cost: v.Metrics.TotalCost})
-		if v.Metrics.TotalCost > maxCost {
-			maxCost = v.Metrics.TotalCost
+		cost := v.Metrics.TotalCost
+		if v.Status != RunCompleted || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+			fmt.Fprintf(r.out, "%s / %s cost unknown or incomplete (not compared)\n", v.ModelID, v.RunID)
+			continue
 		}
+		entries = append(entries, costEntry{modelID: v.ModelID + " / " + v.RunID, cost: cost})
+		if cost > maxCost {
+			maxCost = cost
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(r.out, "No comparable cost evidence.")
+		fmt.Fprintln(r.out)
+		return
 	}
 
 	// Sort by cost descending
@@ -254,9 +266,6 @@ func (r *TerminalReporter) renderBar(modelID string, value, maxValue float64, wi
 	label := modelID
 	bar := r.buildBar(value, maxValue, width)
 	valueStr := fmt.Sprintf(format, value)
-	if value == 0 {
-		valueStr = "$0.00"
-	}
 	fmt.Fprintf(r.out, "%-14s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.costStyle, valueStr))
 }
 
