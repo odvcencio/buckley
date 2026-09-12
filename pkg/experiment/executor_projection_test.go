@@ -79,6 +79,8 @@ func TestExperimentExecutor_RunConversationProjectsLargeTranscript(t *testing.T)
 	cfg.Providers.OpenAI.APIKey = "test-key"
 	cfg.Providers.OpenAI.BaseURL = server.URL
 	cfg.Models.DefaultProvider = "openai"
+	// Fund the large synthetic transcript so this test isolates projection.
+	cfg.Experiment.MaxCostPerRun = 10
 
 	mgr, err := model.NewManager(cfg)
 	if err != nil {
