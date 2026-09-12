@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -458,6 +459,15 @@ func TestSessionExecEffectAdversarial_SessionAmbiguityFencesWorkersAcrossStores(
 	}
 	t.Cleanup(func() { _ = second.Close() })
 
+	var now int64
+	if err := first.db.QueryRow("SELECT " + sessionExecNowMillisSQL).Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(now)
+	first.sessionExecClock = clock.Load
+	second.sessionExecClock = clock.Load
+
 	commandA := claimAdversarialEffectCommand(t, first, sessionID, "effect-barrier-a", "owner-a", 80*time.Millisecond)
 	permitA := beginAdversarialEffect(t, first, commandA, "effect-barrier-a-step")
 
@@ -503,7 +513,7 @@ func TestSessionExecEffectAdversarial_SessionAmbiguityFencesWorkersAcrossStores(
 		t.Fatal(err)
 	}
 
-	waitAdversarialEffectExpiry(t, permitA)
+	clock.Store(permitA.ExpiresAt.UnixMilli())
 	type operationResult struct {
 		name string
 		err  error

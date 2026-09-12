@@ -464,7 +464,7 @@ func (s *Store) withSessionExecObservation(ctx context.Context, fn func(*session
 			began = err == nil
 		}
 		if err == nil {
-			bound := &sessionExecConn{ctx: ctx, conn: conn}
+			bound := &sessionExecConn{ctx: ctx, conn: conn, clock: s.sessionExecClock}
 			err = fn(bound)
 			if err == nil {
 				_, err = conn.ExecContext(ctx, `COMMIT`)

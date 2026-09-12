@@ -24,6 +24,11 @@ type Store struct {
 	observers  []Observer
 	observerMu sync.RWMutex
 	stmtCache  stmtCache
+
+	// sessionExecClock, when non-nil, overrides the database clock used by
+	// session execution reads and writes. Nil uses SQLite time. The hook must
+	// be installed before concurrent use of the store.
+	sessionExecClock func() int64
 }
 
 // ErrStoreClosed indicates the underlying database connection is unavailable.

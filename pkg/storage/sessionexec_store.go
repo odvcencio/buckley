@@ -170,8 +170,9 @@ func ensureSessionEffectPermitSchema(db MigrationDB) error {
 }
 
 type sessionExecConn struct {
-	ctx  context.Context
-	conn *sql.Conn
+	ctx   context.Context
+	conn  *sql.Conn
+	clock func() int64
 }
 
 func (db *sessionExecConn) exec(query string, args ...any) (sql.Result, error) {
@@ -201,7 +202,7 @@ func (s *Store) withSessionExecWrite(ctx context.Context, fn func(*sessionExecCo
 			return fmt.Errorf("acquire session command connection: %w", err)
 		}
 		if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err == nil {
-			bound := &sessionExecConn{ctx: ctx, conn: conn}
+			bound := &sessionExecConn{ctx: ctx, conn: conn, clock: s.sessionExecClock}
 			err = fn(bound)
 			if err == nil {
 				_, err = conn.ExecContext(ctx, `COMMIT`)
@@ -233,6 +234,9 @@ func (s *Store) withSessionExecWrite(ctx context.Context, fn func(*sessionExecCo
 }
 
 func sessionExecNowMillis(db *sessionExecConn) (int64, error) {
+	if db.clock != nil {
+		return db.clock(), nil
+	}
 	var now int64
 	if err := db.queryRow(`SELECT ` + sessionExecNowMillisSQL).Scan(&now); err != nil {
 		return 0, fmt.Errorf("read database time: %w", err)
