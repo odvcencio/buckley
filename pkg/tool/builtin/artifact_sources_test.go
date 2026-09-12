@@ -9,6 +9,44 @@ import (
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
 
+func TestCapturedSourceClaimsRequireHostMaterialization(t *testing.T) {
+	for _, kind := range []string{"captured_source", " captured_source ", "CAPTURED_SOURCE"} {
+		t.Run(kind, func(t *testing.T) {
+			sink := &ArtifactSubmission{}
+			ref, err := sink.CaptureReadSource(sourceReadResult("/source", "host bytes\n", 1, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact := artifactv1.New(artifactv1.KindAnalysis, artifactv1.StatusCompleted, "Source claim", "model summary")
+			artifact.EvidenceRefs = []artifactv1.EvidenceRef{{ID: ref, Kind: kind, URI: "file:///source#L1-L1"}}
+			if err := sink.Submit(artifact); err == nil || !strings.Contains(err.Error(), "source_refs") {
+				t.Fatalf("model-authored capture claim accepted or unclear error: %v", err)
+			}
+			toolResult, toolErr := (&SubmitArtifactTool{Submission: sink}).Execute(map[string]any{"artifact": artifact})
+			if toolErr != nil || toolResult == nil || toolResult.Success || !strings.Contains(toolResult.Error, "source_refs") {
+				t.Fatalf("tool accepted claim or lost correction: %+v, %v", toolResult, toolErr)
+			}
+			if _, ok := sink.Artifact(); ok {
+				t.Fatal("rejected claim finalized the sink")
+			}
+			artifact.EvidenceRefs = nil
+			if err := sink.SubmitWithSources(artifact, []string{ref}); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := sink.Artifact()
+			if !ok || len(got.Blocks) != 1 || got.Blocks[0].Table.Rows[0][4] != "host bytes\n" || got.EvidenceRefs[0].Kind != "captured_source" {
+				t.Fatalf("host capture lost: %+v", got)
+			}
+		})
+	}
+	artifact := artifactv1.New(artifactv1.KindAnalysis, artifactv1.StatusIncomplete, "Citation", "unverified ordinary reference")
+	artifact.IncompleteReasons = []string{"context missing"}
+	artifact.EvidenceRefs = []artifactv1.EvidenceRef{{ID: "model-ref", Kind: "file", URI: "file:///source"}}
+	if err := (&ArtifactSubmission{}).Submit(artifact); err != nil {
+		t.Fatalf("ordinary model citation rejected: %v", err)
+	}
+}
+
 func TestSubmitArtifactTool_MisplacedSourceRefsCanBeCorrected(t *testing.T) {
 	for _, nestedNull := range []bool{false, true} {
 		for _, rootPresent := range []bool{false, true} {

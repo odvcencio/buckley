@@ -155,6 +155,11 @@ func capturedReadPage(data map[string]any) (capturedSource, error) {
 // appendCapturedSources runs under the submission lock. Source fields are
 // generated from captured bytes, not from model-authored paths or excerpts.
 func (s *ArtifactSubmission) appendCapturedSources(artifact artifactv1.Artifact, refs []string) (artifactv1.Artifact, error) {
+	for _, ref := range artifact.EvidenceRefs {
+		if strings.EqualFold(strings.TrimSpace(ref.Kind), "captured_source") {
+			return artifact, fmt.Errorf("captured_source evidence is host-owned; use source_refs from read_file and leave artifact evidence_refs empty")
+		}
+	}
 	if len(refs) == 0 {
 		return artifact, nil
 	}

@@ -1054,7 +1054,14 @@ func resolveOneShotArtifact(response string, contract artifactv1.OutputContract,
 		}
 		return artifactv1.Artifact{}, fmt.Errorf("required artifact output is invalid: %w", err)
 	}
-	return artifact, nil
+	if submission == nil {
+		submission = &builtin.ArtifactSubmission{}
+	}
+	if err := submission.Submit(artifact); err != nil {
+		return artifactv1.Artifact{}, fmt.Errorf("finalize artifact output: %w", err)
+	}
+	detached, _ := submission.Artifact()
+	return detached, nil
 }
 
 func runPlanCommand(args []string) error {
