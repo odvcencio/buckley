@@ -2981,6 +2981,11 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		if index == len(state.calls)-1 && !decision.Stop && !stopDecision.Stop {
 			if remaining := c.cfg.Governor.RemainingToolCalls(); remaining >= 1 && remaining <= 3 {
 				content += fmt.Sprintf("\n\nHarness budget: %d tool calls remain. Reserve enough for any required verification after your last edit; report unverified work as incomplete.", remaining)
+				if contract, enabled := c.completionContract(); enabled {
+					if err := contract.evaluate(progress.Snapshot()); err != nil {
+						content += "\nCompletion evidence: " + PresentIncompleteResult(err).Reason
+					}
+				}
 			}
 		}
 		if c.cfg.History != nil {
