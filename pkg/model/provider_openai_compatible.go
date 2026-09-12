@@ -187,9 +187,9 @@ func (p *OpenAICompatibleProvider) fetchModelInfo() ([]ModelInfo, error) {
 		Data []struct {
 			ModelName string `json:"model_name"`
 			ModelInfo struct {
-				ID                      string  `json:"id"`
 				MaxTokens               int     `json:"max_tokens"`
 				MaxInputTokens          int     `json:"max_input_tokens"`
+				MaxOutputTokens         int     `json:"max_output_tokens"`
 				InputCostPerToken       float64 `json:"input_cost_per_token"`
 				OutputCostPerToken      float64 `json:"output_cost_per_token"`
 				Mode                    string  `json:"mode"`
@@ -210,18 +210,15 @@ func (p *OpenAICompatibleProvider) fetchModelInfo() ([]ModelInfo, error) {
 		}
 
 		contextLength := m.ModelInfo.MaxInputTokens
-		if contextLength == 0 {
+		if contextLength <= 0 {
 			contextLength = m.ModelInfo.MaxTokens
 		}
-		if contextLength == 0 {
-			contextLength = 8192
-		}
-		contextLength = p.configuredContextLength(p.modelPrefix+m.ModelName, contextLength)
 
 		info := ModelInfo{
-			ID:            p.modelPrefix + m.ModelName,
-			Name:          m.ModelName,
-			ContextLength: contextLength,
+			ID:                  m.ModelName,
+			Name:                m.ModelName,
+			ContextLength:       contextLength,
+			MaxCompletionTokens: max(m.ModelInfo.MaxOutputTokens, 0),
 			Pricing: ModelPricing{
 				Prompt:     m.ModelInfo.InputCostPerToken * 1_000_000,
 				Completion: m.ModelInfo.OutputCostPerToken * 1_000_000,
@@ -230,14 +227,13 @@ func (p *OpenAICompatibleProvider) fetchModelInfo() ([]ModelInfo, error) {
 		if m.ModelInfo.SupportsFunctionCalling {
 			info.SupportedParameters = []string{"tools", "functions"}
 		}
-		info.SupportedParameters = p.mergeConfiguredParameters(info.ID, info.SupportedParameters)
 		if m.ModelInfo.SupportsVision {
 			info.Architecture = Architecture{Modality: "text+image"}
-		} else {
-			info.Architecture = Architecture{Modality: "text"}
 		}
 
-		models = append(models, info)
+		if normalized, ok := p.normalizeFetchedModelInfo(openAICompatibleFetchedModel{ModelInfo: info}); ok {
+			models = append(models, normalized)
+		}
 	}
 
 	return models, nil
