@@ -330,7 +330,7 @@ func TestRalphOutbox_ConcurrentDuplicateWaitsForOneDelivery(t *testing.T) {
 	}
 }
 
-func TestRalphOutbox_SinkInstallationDrainsMoreThanOneBoundedBatch(t *testing.T) {
+func TestRalphOutbox_RecoveryDrainsMoreThanOneBoundedBatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ralph-multibatch.db")
 	store, err := New(path)
 	if err != nil {
@@ -366,7 +366,13 @@ func TestRalphOutbox_SinkInstallationDrainsMoreThanOneBoundedBatch(t *testing.T)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	recovered := &recordingRalphSink{}
-	reopened.SetRalphSink(recovered)
+	// Test batch traversal independently of sink installation's two-second
+	// best-effort window, which cannot guarantee throughput under load.
+	recoveryCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := reopened.drainRalphOutbox(recoveryCtx, recovered, 64); err != nil {
+		t.Fatalf("multi-batch recovery: %v", err)
+	}
 	if recovered.calls.Load() != backlog {
 		t.Fatalf("multi-batch recovery calls=%d, want %d", recovered.calls.Load(), backlog)
 	}
@@ -376,6 +382,59 @@ func TestRalphOutbox_SinkInstallationDrainsMoreThanOneBoundedBatch(t *testing.T)
 	}
 	if remaining != 0 {
 		t.Fatalf("undelivered multi-batch rows=%d", remaining)
+	}
+}
+
+func TestRalphOutbox_CancelledRecoveryPreservesPendingForRetry(t *testing.T) {
+	store := newMailboxTestStore(t)
+	run, err := store.StartRun(t.Context(), AgentRun{RunID: "run-ralph-mid-cancel", SessionID: "session-ralph-mid-cancel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetRalphSink(&recordingRalphSink{fail: true})
+	for index := 0; index < 3; index++ {
+		_, err := store.Append(t.Context(), Event{
+			ID:    StableEventID("ralph-mid-cancel", run.RunID, fmt.Sprint(index)),
+			RunID: run.RunID, Type: EventDurableTurn,
+		})
+		if !errors.Is(err, ErrRalphDualWriteFailed) {
+			t.Fatalf("seed event %d: %v", index, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var delivered atomic.Int32
+	sink := ralphSinkFunc(func(context.Context, Event) error {
+		delivered.Add(1)
+		cancel()
+		return nil
+	})
+	if err := store.drainRalphOutbox(ctx, sink, 64); !errors.Is(err, context.Canceled) {
+		t.Fatalf("partial recovery = %v, want context cancellation", err)
+	}
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("delivered before cancellation = %d, want 1", got)
+	}
+	var pending int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM run_event_ralph_outbox WHERE state <> 'delivered'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 2 {
+		t.Fatalf("pending after cancellation = %d, want 2", pending)
+	}
+	recovered := &recordingRalphSink{}
+	if err := store.drainRalphOutbox(t.Context(), recovered, 64); err != nil {
+		t.Fatalf("resume recovery: %v", err)
+	}
+	if got := recovered.calls.Load(); got != 2 {
+		t.Fatalf("retried deliveries = %d, want only the 2 pending events", got)
+	}
+	var completed, maxAttempts int
+	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(attempt_count) FROM run_event_ralph_outbox WHERE state = 'delivered'`).Scan(&completed, &maxAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if completed != 3 || maxAttempts != 2 {
+		t.Fatalf("completed=%d max attempts=%d, want all 3 with one failed and one successful attempt each", completed, maxAttempts)
 	}
 }
 
