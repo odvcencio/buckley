@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -294,14 +295,20 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(full)
+	f, err := os.Open(full)
 	if err != nil {
 		return nil, err
 	}
-	truncated := false
-	if len(data) > maxReadBytes {
+	defer f.Close()
+	// Read at most one byte past the cap so an exactly maxReadBytes file
+	// still reports truncated=false without pulling the whole file in.
+	data, readErr := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
+	if readErr != nil {
+		return nil, readErr
+	}
+	truncated := len(data) > maxReadBytes
+	if truncated {
 		data = data[:maxReadBytes]
-		truncated = true
 	}
 	return map[string]any{"content": string(data), "truncated": truncated}, nil
 }
