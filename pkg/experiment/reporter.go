@@ -101,10 +101,10 @@ func (r *Reporter) ComparisonMarkdown(exp *Experiment) (string, error) {
 	}
 
 	b.WriteString("## Rankings\n\n")
-	b.WriteString("| Rank | Variant | Model | Score | Cost | Duration |\n")
-	b.WriteString("|------|---------|-------|-------|------|----------|\n")
+	b.WriteString("| Rank | Run | Variant | Model | Status | Evidence | Score | Cost | Duration |\n")
+	b.WriteString("|------|-----|---------|-------|--------|----------|-------|------|----------|\n")
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.VariantID)
+		v := findVariantReport(report.Variants, ranking.RunID)
 		if v == nil {
 			continue
 		}
@@ -113,14 +113,19 @@ func (r *Reporter) ComparisonMarkdown(exp *Experiment) (string, error) {
 			cost = fmt.Sprintf("$%.4f", v.Metrics.TotalCost)
 		}
 		duration := formatDurationMs(v.Metrics.DurationMs)
-		fmt.Fprintf(&b, "| %d | %s | %s | %.1f%% | %s | %s |\n",
-			ranking.Rank, v.VariantName, v.ModelID, ranking.Score*100, cost, duration)
+		rank := fmt.Sprintf("%d", ranking.Rank)
+		if ranking.Rank == 0 {
+			rank = "-"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %.1f%% | %s | %s |\n",
+			rank, v.RunID, v.VariantName, v.ModelID, v.Status, v.VerificationStatus, ranking.Score*100, cost, duration)
 	}
 
 	b.WriteString("\n## Variant Details\n\n")
 	for _, v := range report.Variants {
-		fmt.Fprintf(&b, "### %s (%s)\n\n", v.VariantName, v.ModelID)
+		fmt.Fprintf(&b, "### %s / %s (%s)\n\n", v.VariantName, v.RunID, v.ModelID)
 		fmt.Fprintf(&b, "- **Status:** %s\n", v.Status)
+		fmt.Fprintf(&b, "- **Evidence:** %s\n", v.VerificationStatus)
 		fmt.Fprintf(&b, "- **Score:** %.1f%%\n", v.CriteriaScore*100)
 		fmt.Fprintf(&b, "- **Tokens:** %d prompt + %d completion\n",
 			v.Metrics.PromptTokens, v.Metrics.CompletionTokens)
@@ -134,6 +139,9 @@ func (r *Reporter) ComparisonMarkdown(exp *Experiment) (string, error) {
 		}
 		if len(v.CriteriaFailed) > 0 {
 			fmt.Fprintf(&b, "- **Failed:** %s\n", strings.Join(v.CriteriaFailed, ", "))
+		}
+		if len(v.CriteriaPending) > 0 {
+			fmt.Fprintf(&b, "- **Pending review:** %s\n", strings.Join(v.CriteriaPending, ", "))
 		}
 		if v.Error != "" {
 			fmt.Fprintf(&b, "- **Error:** %s\n", v.Error)
@@ -167,6 +175,11 @@ func formatDurationMs(ms int64) string {
 }
 
 func findVariantReport(reports []VariantReport, id string) *VariantReport {
+	for i := range reports {
+		if reports[i].RunID == id {
+			return &reports[i]
+		}
+	}
 	for i := range reports {
 		if reports[i].VariantID == id {
 			return &reports[i]

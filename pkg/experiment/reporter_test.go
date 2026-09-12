@@ -271,10 +271,10 @@ func TestComparisonMarkdown(t *testing.T) {
 				"**Hypothesis:** Model A is faster",
 				"**Task:** test prompt",
 				"## Rankings",
-				"| Rank | Variant | Model | Score | Cost | Duration |",
+				"| Rank | Run | Variant | Model | Status | Evidence | Score | Cost | Duration |",
 				"## Variant Details",
-				"### variant-1 (gpt-4)",
-				"### variant-2 (claude-3)",
+				"### variant-1 / run-1 (gpt-4)",
+				"### variant-2 / run-2 (claude-3)",
 			},
 		},
 	}
