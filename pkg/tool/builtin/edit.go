@@ -22,10 +22,25 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Make a targeted edit by replacing exact text in one file; prefer this to apply_patch for small local edits. Read the current text first and include enough context for a unique match. Returns a diff of the change."
+	return "Replace exact text in one file. Use old_string/new_string for one replacement, or edits for several sequential replacements in one call. Read current text first; all matches must succeed before any write. Returns one combined diff."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
+	replacement := map[string]PropertySchema{
+		"old_string": {
+			Type:        "string",
+			Description: "Exact existing text, including whitespace. Must match exactly once unless replace_all is true.",
+		},
+		"new_string": {
+			Type:        "string",
+			Description: "Text to replace old_string with",
+		},
+		"replace_all": {
+			Type:        "boolean",
+			Description: "Replace every exact occurrence. Default false requires one unique match; ambiguous matches are rejected without editing.",
+			Default:     false,
+		},
+	}
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
@@ -33,21 +48,16 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 				Type:        "string",
 				Description: "Path to the file to edit",
 			},
-			"old_string": {
-				Type:        "string",
-				Description: "Exact existing text, including whitespace. Must match exactly once unless replace_all is true.",
-			},
-			"new_string": {
-				Type:        "string",
-				Description: "Text to replace old_string with",
-			},
-			"replace_all": {
-				Type:        "boolean",
-				Description: "Replace every exact occurrence. Default false requires one unique match; ambiguous matches are rejected without editing.",
-				Default:     false,
+			"old_string":  replacement["old_string"],
+			"new_string":  replacement["new_string"],
+			"replace_all": replacement["replace_all"],
+			"edits": {
+				Type:        "array",
+				Description: "Non-empty list applied in order to one file, with no write if any edit fails. Use instead of top-level old_string, new_string and replace_all.",
+				Items:       &PropertySchema{Type: "object", Properties: replacement, Required: []string{"old_string", "new_string"}},
 			},
 		},
-		Required: []string{"path", "old_string", "new_string"},
+		Required: []string{"path"},
 	}
 }
 
@@ -60,25 +70,17 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	oldString, ok := params["old_string"].(string)
-	if !ok {
-		return &Result{
-			Success: false,
-			Error:   "old_string parameter must be a string",
-		}, nil
-	}
-
-	newString, ok := params["new_string"].(string)
-	if !ok {
-		return &Result{
-			Success: false,
-			Error:   "new_string parameter must be a string",
-		}, nil
-	}
-
-	replaceAll := false
-	if ra, ok := params["replace_all"].(bool); ok {
-		replaceAll = ra
+	edits := []any{params}
+	if raw, batch := params["edits"]; batch {
+		for _, key := range []string{"old_string", "new_string", "replace_all"} {
+			if _, mixed := params[key]; mixed {
+				return &Result{Success: false, Error: "edits cannot be combined with top-level replacement fields"}, nil
+			}
+		}
+		edits, ok = raw.([]any)
+		if !ok || len(edits) == 0 {
+			return &Result{Success: false, Error: "edits must be a non-empty array of replacement objects"}, nil
+		}
 	}
 
 	absPath, err := resolvePath(t.workDir, path)
@@ -106,28 +108,35 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 	oldContent := string(content)
 
-	// Check if old_string exists in content
-	if !strings.Contains(oldContent, oldString) {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("old_string not found in file. Make sure the text matches exactly including whitespace."),
-		}, nil
-	}
-
-	// Check for uniqueness if not replacing all
-	if !replaceAll && strings.Count(oldContent, oldString) > 1 {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("old_string appears %d times in the file. Either provide a more specific string or use replace_all=true", strings.Count(oldContent, oldString)),
-		}, nil
-	}
-
-	// Perform replacement
-	var newContent string
-	if replaceAll {
-		newContent = strings.ReplaceAll(oldContent, oldString, newString)
-	} else {
-		newContent = strings.Replace(oldContent, oldString, newString, 1)
+	newContent, replacements := oldContent, 0
+	for i, raw := range edits {
+		edit, ok := raw.(map[string]any)
+		if !ok {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d must be a replacement object", i+1)}, nil
+		}
+		oldString, ok := edit["old_string"].(string)
+		if !ok {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string parameter must be a string", i+1)}, nil
+		}
+		newString, ok := edit["new_string"].(string)
+		if !ok {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: new_string parameter must be a string", i+1)}, nil
+		}
+		replaceAll, _ := edit["replace_all"].(bool)
+		count := strings.Count(newContent, oldString)
+		if count == 0 {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string not found in file. Make sure the text matches exactly including whitespace.", i+1)}, nil
+		}
+		if !replaceAll && count > 1 {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string appears %d times in the file. Either provide a more specific string or use replace_all=true", i+1, count)}, nil
+		}
+		if replaceAll {
+			newContent = strings.ReplaceAll(newContent, oldString, newString)
+		} else {
+			newContent = strings.Replace(newContent, oldString, newString, 1)
+			count = 1
+		}
+		replacements += count
 	}
 
 	// Generate diff preview
@@ -164,11 +173,6 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
 		}, nil
-	}
-
-	replacements := 1
-	if replaceAll {
-		replacements = strings.Count(oldContent, oldString)
 	}
 
 	summary := fmt.Sprintf("✓ Edited %s (+%d/-%d lines, %d replacement%s)",
