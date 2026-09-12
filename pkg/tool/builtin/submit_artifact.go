@@ -120,6 +120,11 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 	if t == nil || t.Submission == nil {
 		return nil, fmt.Errorf("submit_artifact requires an artifact submission sink")
 	}
+	if artifactMap, ok := params["artifact"].(map[string]any); ok {
+		if _, misplaced := artifactMap["source_refs"]; misplaced {
+			return &Result{Success: false, Error: "source_refs belongs beside artifact, not inside it; move source_refs to the top-level tool arguments and leave artifact.blocks and artifact.evidence_refs empty"}, nil
+		}
+	}
 	raw, err := json.Marshal(map[string]any{"artifact": params["artifact"]})
 	if err != nil {
 		return &Result{Success: false, Error: "artifact parameter is not JSON-serializable"}, nil

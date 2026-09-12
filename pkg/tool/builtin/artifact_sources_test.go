@@ -9,6 +9,56 @@ import (
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
 
+func TestSubmitArtifactTool_MisplacedSourceRefsCanBeCorrected(t *testing.T) {
+	for _, nestedNull := range []bool{false, true} {
+		for _, rootPresent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("null=%t/root=%t", nestedNull, rootPresent), func(t *testing.T) {
+				sink := &ArtifactSubmission{}
+				ref, err := sink.CaptureReadSource(sourceReadResult("/source", "\tvalue\n", 1, 1))
+				if err != nil {
+					t.Fatal(err)
+				}
+				artifact := map[string]any{
+					"schema_version": artifactv1.SchemaVersion, "artifact_id": "misplaced-ref",
+					"kind": "source-extract", "status": "incomplete", "title": "Source",
+					"summary": "one requested item missing", "incomplete_reasons": []string{"missing item"},
+					"source_refs": []string{ref},
+					"blocks":      []any{map[string]any{"kind": "prose", "text": "model-written excerpt"}},
+				}
+				if nestedNull {
+					artifact["source_refs"] = nil
+				}
+				params := map[string]any{"artifact": artifact}
+				if rootPresent {
+					params["source_refs"] = []string{ref}
+				}
+				tool := &SubmitArtifactTool{Submission: sink}
+				result, err := tool.Execute(params)
+				if err != nil || result == nil || result.Success || !strings.Contains(result.Error, "source_refs belongs beside artifact") || !strings.Contains(result.Error, "artifact.blocks and artifact.evidence_refs empty") {
+					t.Fatalf("missing actionable correction: result=%+v err=%v", result, err)
+				}
+				if _, ok := sink.Artifact(); ok {
+					t.Fatal("malformed submission finalized the sink")
+				}
+				if _, ok := artifact["source_refs"]; !ok {
+					t.Fatal("tool silently removed the malformed field")
+				}
+				delete(artifact, "source_refs")
+				delete(artifact, "blocks")
+				params["source_refs"] = []string{ref}
+				result, err = tool.Execute(params)
+				if err != nil || result == nil || !result.Success {
+					t.Fatalf("corrected submission rejected: result=%+v err=%v", result, err)
+				}
+				got, ok := sink.Artifact()
+				if !ok || got.Status != artifactv1.StatusIncomplete || len(got.IncompleteReasons) != 1 || len(got.Blocks) != 1 || got.Blocks[0].Table == nil || got.Blocks[0].Table.Rows[0][4] != "\tvalue\n" {
+					t.Fatalf("correction lost captured bytes or missing-item status: %+v", got)
+				}
+			})
+		}
+	}
+}
+
 func sourceReadResult(path, content string, start, end int) *Result {
 	return &Result{Success: true, Data: map[string]any{"path": path, "content": content, "page": map[string]any{"start_line": start, "end_line": end}}}
 }

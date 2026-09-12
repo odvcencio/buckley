@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/agentspec"
+	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
 
 func TestSourceExtractorTemplate(t *testing.T) {
@@ -18,6 +19,9 @@ func TestSourceExtractorTemplate(t *testing.T) {
 	profile, err := agentspec.LoadRuntimeProfile(filepath.Join(filepath.Dir(source), "..", "..", "templates", "agents", "source-extractor.yaml"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := profile.Spec.Metadata["buckley.output_schema"]; got != artifactv1.SchemaVersion {
+		t.Fatalf("root output schema = %q, want %q", got, artifactv1.SchemaVersion)
 	}
 	profile, err = profile.SubagentProfile("extract")
 	if err != nil {
@@ -40,12 +44,18 @@ func TestSourceExtractorTemplate(t *testing.T) {
 		if !reflect.DeepEqual(preview.AllowedTools, []string{"read_file", "search_text"}) {
 			t.Fatalf("unexpected tools: %v", preview.AllowedTools)
 		}
+		if preview.OutputSchema != artifactv1.SchemaVersion {
+			t.Fatalf("extract worker lost captured-source output contract: %+v", preview)
+		}
 		if preview.MaxToolCalls != wantLimit {
 			t.Fatalf("max calls=%d, want%d", preview.MaxToolCalls, wantLimit)
 		}
 		if preview.Model != "openai_compatible/future-model (flag override)" {
 			t.Fatalf("model override lost: %s", preview.Model)
 		}
+	}
+	if profile.Spec.Sandbox.Mode != "workspace" {
+		t.Fatalf("source worker sandbox = %q, want workspace", profile.Spec.Sandbox.Mode)
 	}
 	prompt := profile.Spec.Instructions.Prompt
 	if strings.TrimSpace(prompt) == "" || strings.Contains(prompt, "TODO") || strings.Contains(prompt, `\n`) {
