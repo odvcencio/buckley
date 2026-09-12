@@ -68,13 +68,13 @@ func TestParseJestReport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := parseJestReport(raw); got != tc.want {
+			if got := parseJestReport(raw, ""); got != tc.want {
 				t.Fatalf("got=%+v want=%+v", got, tc.want)
 			}
 		})
 	}
 	for _, raw := range []string{`{}`, `null`, `{"success":true`, `{} {}`} {
-		if got := parseJestReport([]byte(raw)); got.complete {
+		if got := parseJestReport([]byte(raw), ""); got.complete {
 			t.Fatalf("accepted malformed report %q: %+v", raw, got)
 		}
 	}
@@ -94,6 +94,7 @@ func TestRunTestsTool_JestReport(t *testing.T) {
 		{name: "missing", missing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
 			t.Cleanup(func() { execCommandContext = exec.CommandContext })
 			var reportPath string
 			execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -102,14 +103,15 @@ func TestRunTestsTool_JestReport(t *testing.T) {
 				}
 				reportPath = args[4]
 				if !tc.missing {
-					raw, _ := json.Marshal(jestReportFixture(tc.statuses...))
+					fixture := jestReportFixture(tc.statuses...)
+					fixture["testResults"].([]any)[0].(map[string]any)["name"] = filepath.Join(dir, "sample.test.js")
+					raw, _ := json.Marshal(fixture)
 					if err := os.WriteFile(reportPath, raw, 0600); err != nil {
 						t.Fatal(err)
 					}
 				}
 				return exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$1"`, "test", strings.Repeat("Tests: 999 passed\n", 400))
 			}
-			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{}`), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -178,4 +180,35 @@ test.todo('unfinished');
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 	})
+}
+
+func TestParseJestReportRequestedPath(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "selected.test.js")
+	for _, tc := range []struct {
+		name, requested string
+		valid           bool
+	}{
+		{name: file, requested: root, valid: true},
+		{name: file, requested: file, valid: true},
+		{name: filepath.Join(root, "sub", "nested.test.js"), requested: root, valid: true},
+		{name: root + "-other/selected.test.js", requested: root},
+		{name: filepath.Join(filepath.Dir(root), "outside.test.js"), requested: root},
+		{name: file + ".other", requested: file},
+		{name: "selected.test.js", requested: root},
+		{name: "", requested: root},
+	} {
+		t.Run(tc.name+"/"+tc.requested, func(t *testing.T) {
+			fixture := jestReportFixture("passed")
+			fixture["testResults"].([]any)[0].(map[string]any)["name"] = tc.name
+			raw, err := json.Marshal(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := parseJestReport(raw, tc.requested)
+			if got.complete != tc.valid || (tc.valid && got.passed != 1) || (!tc.valid && !strings.Contains(got.verificationError, "outside the requested path")) {
+				t.Fatalf("report=%+v valid=%v", got, tc.valid)
+			}
+		})
+	}
 }

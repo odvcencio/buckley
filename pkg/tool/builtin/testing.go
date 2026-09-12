@@ -145,7 +145,7 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	if structuredReport != nil {
 		passed, failed, skipped = structuredReport.passed, structuredReport.failed, structuredReport.skipped
 		verificationError = structuredReport.verificationError
-		if exitCode == 0 && !structuredReport.complete {
+		if exitCode == 0 && !structuredReport.complete && verificationError == "" {
 			verificationError = framework + " did not produce a complete structured test report"
 		}
 	}
@@ -217,6 +217,12 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 
 func (t *RunTestsTool) detectTestFramework(path string) string {
 	// Check for framework indicators
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		switch filepath.Ext(path) {
+		case ".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs":
+			return "jest"
+		}
+	}
 	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
 		return "go"
 	}
@@ -235,14 +241,25 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 	}
 
 	// Fallback: check for test files
-	if files, _ := filepath.Glob(filepath.Join(path, "*_test.go")); len(files) > 0 {
-		return "go"
+	table := []struct {
+		pattern   string
+		framework string
+	}{
+		{"*_test.go", "go"},
+		{"*.test.js", "jest"},
+		{"test_*.py", "pytest"},
 	}
-	if files, _ := filepath.Glob(filepath.Join(path, "*.test.js")); len(files) > 0 {
-		return "jest"
-	}
-	if files, _ := filepath.Glob(filepath.Join(path, "test_*.py")); len(files) > 0 {
-		return "pytest"
+	if entries, err := os.ReadDir(path); err == nil {
+		for _, candidate := range table {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				if matched, _ := filepath.Match(candidate.pattern, entry.Name()); matched {
+					return candidate.framework
+				}
+			}
+		}
 	}
 
 	return "unknown"
@@ -253,6 +270,8 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd *exec.Cmd
 	)
 	var reportPath string
+	var jestPath string
+	commandDir := strings.TrimSpace(t.workDir)
 
 	if framework == "pytest" || framework == "jest" {
 		dir, err := os.MkdirTemp("", "buckley-test-report-")
@@ -279,6 +298,21 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "go", args...)
 
 	case "jest":
+		resolved, err := resolvePath(t.workDir, path)
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("resolving jest test path: %w", err)
+		}
+		jestPath = resolved
+		info, err := os.Stat(jestPath)
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("stat jest test path: %w", err)
+		}
+		if info.IsDir() {
+			commandDir = jestPath
+		} else {
+			commandDir = filepath.Dir(jestPath)
+		}
+
 		args := []string{"test", "--", "--json", "--outputFile", reportPath}
 		if coverage {
 			args = append(args, "--coverage")
@@ -288,6 +322,11 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		}
 		if pattern != "" {
 			args = append(args, "-t", pattern)
+		}
+		if info.IsDir() {
+			args = append(args, "^"+regexp.QuoteMeta(strings.TrimSuffix(filepath.ToSlash(jestPath), "/")+"/"))
+		} else {
+			args = append(args, "^"+regexp.QuoteMeta(filepath.ToSlash(jestPath))+"$")
 		}
 		cmd = execCommandContext(ctx, "npm", args...)
 
@@ -317,8 +356,8 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	}
 
 	var stdout, stderr bytes.Buffer
-	if strings.TrimSpace(t.workDir) != "" && cmd != nil {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	if cmd != nil {
+		cmd.Dir = commandDir
 	}
 	if cmd != nil {
 		cmd.Env = mergeEnv(cmd.Env, t.env)
@@ -348,7 +387,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		parsed := testReport{}
 		if raw, err := os.ReadFile(reportPath); err == nil {
 			if framework == "jest" {
-				parsed = parseJestReport(raw)
+				parsed = parseJestReport(raw, jestPath)
 			} else {
 				parsed = parsePytestReport(raw)
 			}

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,7 +29,11 @@ func TestRunTestsTool_NpmArguments(t *testing.T) {
 				if name != "npm" || len(args) < 5 || !reflect.DeepEqual(args[:4], []string{"test", "--", "--json", "--outputFile"}) || !filepath.IsAbs(args[4]) {
 					t.Fatalf("bad report flags: %s %q", name, args)
 				}
-				forwarded := append(append([]string{}, args[:2]...), args[5:]...)
+				cwd, err := filepath.Abs(".")
+				if err != nil || args[len(args)-1] != "^"+regexp.QuoteMeta(filepath.ToSlash(cwd)+"/") {
+					t.Fatalf("bad literal path filter: %q err=%v", args, err)
+				}
+				forwarded := append(append([]string{}, args[:2]...), args[5:len(args)-1]...)
 				if !reflect.DeepEqual(forwarded, tc.want) {
 					t.Fatalf("command=%s %q want npm %q", name, args, tc.want)
 				}
@@ -56,7 +61,10 @@ func TestRunTestsTool_RealNpmArgumentForwarding(t *testing.T) {
 const expected = ['--coverage', '--verbose', '-t', '^specific case$'];
 assert.deepEqual(process.argv.slice(2, 4), ['--json', '--outputFile']);
 assert.ok(require('node:path').isAbsolute(process.argv[4]));
-assert.deepEqual(process.argv.slice(5), expected);
+assert.deepEqual(process.argv.slice(5, -1), expected);
+const filter = new RegExp(process.argv.at(-1));
+assert.ok(filter.test(process.cwd() + '/case.test.js'));
+assert.ok(!filter.test(process.cwd() + '-other/case.test.js'));
 console.log('received exact requested options');
 `,
 	} {

@@ -1,8 +1,12 @@
 package builtin
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"path/filepath"
+	"strings"
+)
 
-func parseJestReport(raw []byte) testReport {
+func parseJestReport(raw []byte, requestedPath string) testReport {
 	var root struct {
 		Success         *bool `json:"success"`
 		WasInterrupted  *bool `json:"wasInterrupted"`
@@ -12,6 +16,7 @@ func parseJestReport(raw []byte) testReport {
 		NumTodoTests    *int  `json:"numTodoTests"`
 		NumTotalTests   *int  `json:"numTotalTests"`
 		TestResults     *[]struct {
+			Name             string `json:"name"`
 			AssertionResults *[]struct {
 				Status   string          `json:"status"`
 				WouldRun json.RawMessage `json:"wouldRun"`
@@ -33,6 +38,12 @@ func parseJestReport(raw []byte) testReport {
 	}
 	var passed, failed, skipped int
 	for _, tr := range *root.TestResults {
+		if requestedPath != "" {
+			rel, err := filepath.Rel(requestedPath, tr.Name)
+			if !filepath.IsAbs(tr.Name) || err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return testReport{verificationError: "jest report includes tests outside the requested path"}
+			}
+		}
 		if tr.AssertionResults == nil {
 			return testReport{}
 		}
