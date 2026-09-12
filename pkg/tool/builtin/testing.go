@@ -221,6 +221,8 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 		switch filepath.Ext(path) {
 		case ".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs":
 			return "jest"
+		case ".py":
+			return "pytest"
 		}
 	}
 	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
