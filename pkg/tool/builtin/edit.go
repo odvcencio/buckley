@@ -29,7 +29,7 @@ func (t *EditFileTool) Parameters() ParameterSchema {
 	replacement := map[string]PropertySchema{
 		"old_string": {
 			Type:        "string",
-			Description: "Exact existing text, including whitespace. Must match exactly once unless replace_all is true.",
+			Description: "Exact existing text to replace. Prefer the smallest unique substring; omit surrounding indentation or context when it is not changing. Whitespace inside the selected text must match exactly.",
 		},
 		"new_string": {
 			Type:        "string",
