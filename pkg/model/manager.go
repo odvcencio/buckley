@@ -277,22 +277,34 @@ func (m *Manager) lookupModelInfoForRoute(route ModelRoute) (*ModelInfo, error) 
 	if provider == nil {
 		return nil, fmt.Errorf("provider not configured: %s", providerID)
 	}
-	for _, candidate := range m.modelInfoCandidatesForRoute(providerID, selectedModel) {
+	candidates := m.modelInfoCandidatesForRoute(providerID, selectedModel)
+	info, _ := m.lookupModelInfoCandidates(providerID, provider, candidates)
+	if info == nil {
+		return nil, fmt.Errorf("model metadata unavailable")
+	}
+	return info, nil
+}
+
+func (m *Manager) lookupModelInfoCandidates(providerID string, provider Provider, candidates []string) (*ModelInfo, string) {
+	for _, candidate := range candidates {
 		m.catalogMu.RLock()
 		info, ok := m.catalog[candidate]
 		owner := m.modelProviders[candidate]
 		m.catalogMu.RUnlock()
 		if ok && (owner == "" || owner == providerID) {
-			return &info, nil
+			return &info, "catalog"
 		}
 	}
-	for _, candidate := range m.modelInfoCandidatesForRoute(providerID, selectedModel) {
+	if provider == nil {
+		return nil, "metadata_unavailable"
+	}
+	for _, candidate := range candidates {
 		info, err := provider.GetModelInfo(candidate)
 		if err == nil && info != nil {
-			return info, nil
+			return info, "provider"
 		}
 	}
-	return nil, fmt.Errorf("model metadata unavailable")
+	return nil, "metadata_unavailable"
 }
 
 func (m *Manager) lookupModelInfo(modelID string) (*ModelInfo, string, string, error) {
@@ -301,28 +313,14 @@ func (m *Manager) lookupModelInfo(modelID string) (*ModelInfo, string, string, e
 	if provider != nil {
 		providerID = provider.ID()
 	}
-	for _, candidate := range m.modelInfoCandidates(modelID) {
-		m.catalogMu.RLock()
-		info, ok := m.catalog[candidate]
-		owner := m.modelProviders[candidate]
-		if ok && (owner == "" || owner == providerID) {
-			m.catalogMu.RUnlock()
-			return &info, providerID, "catalog", nil
-		}
-		m.catalogMu.RUnlock()
+	candidates := m.modelInfoCandidates(modelID)
+	info, source := m.lookupModelInfoCandidates(providerID, provider, candidates)
+	if info != nil {
+		return info, providerID, source, nil
 	}
-
 	if provider == nil {
 		return nil, providerID, "metadata_unavailable", fmt.Errorf("no provider configured for model %s", modelID)
 	}
-
-	for _, candidate := range m.modelInfoCandidates(modelID) {
-		info, err := provider.GetModelInfo(candidate)
-		if err == nil {
-			return info, providerID, "provider", nil
-		}
-	}
-
 	return nil, providerID, "metadata_unavailable", fmt.Errorf("model not found: %s", modelID)
 }
 
