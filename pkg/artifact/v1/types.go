@@ -281,23 +281,19 @@ func normalizeBlock(block Block) Block {
 	for i := range block.Facts {
 		block.Facts[i] = normalizeFact(block.Facts[i])
 	}
+	// Labels and presentation fields are trimmed; literal payloads (table cells,
+	// code/diff content, fact values) are preserved verbatim so content-derived
+	// IDs and rendered output stay faithful to the producer.
 	if block.Table != nil {
 		for i := range block.Table.Headers {
 			block.Table.Headers[i] = strings.TrimSpace(block.Table.Headers[i])
 		}
-		for row := range block.Table.Rows {
-			for column := range block.Table.Rows[row] {
-				block.Table.Rows[row][column] = strings.TrimSpace(block.Table.Rows[row][column])
-			}
-		}
 	}
 	if block.Code != nil {
 		block.Code.Language = strings.TrimSpace(block.Code.Language)
-		block.Code.Content = strings.TrimRight(block.Code.Content, "\n")
 	}
 	if block.Diff != nil {
 		block.Diff.Path = strings.TrimSpace(block.Diff.Path)
-		block.Diff.Content = strings.TrimRight(block.Diff.Content, "\n")
 	}
 	for i := range block.Checklist {
 		block.Checklist[i].Text = strings.TrimSpace(block.Checklist[i].Text)
@@ -328,7 +324,6 @@ func normalizeBlock(block Block) Block {
 
 func normalizeFact(fact Fact) Fact {
 	fact.Label = strings.TrimSpace(fact.Label)
-	fact.Value = strings.TrimSpace(fact.Value)
 	return fact
 }
 
