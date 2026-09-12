@@ -19,7 +19,7 @@ func TestReadEditContextPreservesWhitespace(t *testing.T) {
 				t.Cleanup(func() { SetResultEncoding(true) })
 				root := t.TempDir()
 				path := filepath.Join(root, "sample.go")
-				source := strings.Join([]string{"package sample", "func run() {", "\tif true {", "\t\tvalue := \"old\"", "\t}", "}", ""}, newline)
+				source := strings.Join([]string{"package sample", "func run() {", "\tif true {", "\t\tliteral := \"\\n\"", "\t\tvalue := \"old\"", "\t}", "}", ""}, newline)
 				if err := os.WriteFile(path, []byte(source), 0600); err != nil {
 					t.Fatal(err)
 				}

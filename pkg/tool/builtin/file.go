@@ -20,7 +20,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Oversized ranges return the first 100 lines; use next_start_line from the result to continue."
+	return "Read file contents in bounded, 1-indexed line pages. Oversized ranges return the first 100 lines; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
