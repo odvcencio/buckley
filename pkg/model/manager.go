@@ -178,8 +178,10 @@ func (m *Manager) RefreshProviderCatalog(providerID string) error {
 	m.catalogMu.Lock()
 	defer m.catalogMu.Unlock()
 	for _, modelID := range m.providerModels[providerID] {
-		delete(m.catalog, modelID)
-		delete(m.modelProviders, modelID)
+		if m.modelProviders[modelID] == providerID {
+			delete(m.catalog, modelID)
+			delete(m.modelProviders, modelID)
+		}
 	}
 	modelIDs := make([]string, 0, len(catalog.Data))
 	for _, info := range catalog.Data {
@@ -242,28 +244,86 @@ func fetchCatalogWithTimeout(provider Provider, timeout time.Duration) (*ModelCa
 
 // GetModelInfo returns information about a model
 func (m *Manager) GetModelInfo(modelID string) (*ModelInfo, error) {
+	info, _, _, err := m.lookupModelInfo(modelID)
+	return info, err
+}
+
+// GetModelInfoForRoute returns metadata for an already-selected provider/model
+// route without re-running routing hooks. Callers that have governed a route
+// must use this method rather than looking up the requested alias again.
+func (m *Manager) GetModelInfoForRoute(route ModelRoute) (*ModelInfo, error) {
+	providerID := strings.TrimSpace(route.ProviderID)
+	selectedModel := strings.TrimSpace(route.SelectedModel)
+	if m == nil {
+		return nil, fmt.Errorf("model manager unavailable")
+	}
+	if providerID == "" || selectedModel == "" {
+		return nil, fmt.Errorf("malformed model route: provider=%q selected_model=%q", providerID, selectedModel)
+	}
+	info, err := m.lookupModelInfoForRoute(route)
+	if err != nil {
+		return nil, fmt.Errorf("model metadata unavailable for route provider=%q selected_model=%q: %w", providerID, selectedModel, err)
+	}
+	return info, nil
+}
+
+func (m *Manager) lookupModelInfoForRoute(route ModelRoute) (*ModelInfo, error) {
+	providerID := strings.TrimSpace(route.ProviderID)
+	selectedModel := strings.TrimSpace(route.SelectedModel)
+	if m == nil || providerID == "" || selectedModel == "" {
+		return nil, fmt.Errorf("model metadata unavailable")
+	}
+	provider := m.providers[providerID]
+	if provider == nil {
+		return nil, fmt.Errorf("provider not configured: %s", providerID)
+	}
+	for _, candidate := range m.modelInfoCandidatesForRoute(providerID, selectedModel) {
+		m.catalogMu.RLock()
+		info, ok := m.catalog[candidate]
+		owner := m.modelProviders[candidate]
+		m.catalogMu.RUnlock()
+		if ok && (owner == "" || owner == providerID) {
+			return &info, nil
+		}
+	}
+	for _, candidate := range m.modelInfoCandidatesForRoute(providerID, selectedModel) {
+		info, err := provider.GetModelInfo(candidate)
+		if err == nil && info != nil {
+			return info, nil
+		}
+	}
+	return nil, fmt.Errorf("model metadata unavailable")
+}
+
+func (m *Manager) lookupModelInfo(modelID string) (*ModelInfo, string, string, error) {
+	provider := m.providerForModel(modelID)
+	providerID := ""
+	if provider != nil {
+		providerID = provider.ID()
+	}
 	for _, candidate := range m.modelInfoCandidates(modelID) {
 		m.catalogMu.RLock()
-		if info, ok := m.catalog[candidate]; ok {
+		info, ok := m.catalog[candidate]
+		owner := m.modelProviders[candidate]
+		if ok && (owner == "" || owner == providerID) {
 			m.catalogMu.RUnlock()
-			return &info, nil
+			return &info, providerID, "catalog", nil
 		}
 		m.catalogMu.RUnlock()
 	}
 
-	provider := m.providerForModel(modelID)
 	if provider == nil {
-		return nil, fmt.Errorf("no provider configured for model %s", modelID)
+		return nil, providerID, "metadata_unavailable", fmt.Errorf("no provider configured for model %s", modelID)
 	}
 
 	for _, candidate := range m.modelInfoCandidates(modelID) {
 		info, err := provider.GetModelInfo(candidate)
 		if err == nil {
-			return info, nil
+			return info, providerID, "provider", nil
 		}
 	}
 
-	return nil, fmt.Errorf("model not found: %s", modelID)
+	return nil, providerID, "metadata_unavailable", fmt.Errorf("model not found: %s", modelID)
 }
 
 // GetCatalog returns the merged model catalog
@@ -344,11 +404,12 @@ func (m *Manager) SetOpenRouterPrivacyFallback(policy OpenRouterPrivacyFallback)
 
 // ChatCompletion performs a chat completion routed to the proper provider
 func (m *Manager) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	requestedModel := strings.TrimSpace(req.Model)
 	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
-	return m.chatCompletionResolved(ctx, req, selectedModel, provider)
+	return m.chatCompletionResolved(ctx, req, requestedModel, selectedModel, provider)
 }
 
 // ResolveModelRoute returns the same route selection ChatCompletion uses,
@@ -369,16 +430,22 @@ func (m *Manager) ChatCompletionForRoute(ctx context.Context, req ChatRequest, e
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
-	if strings.TrimSpace(req.Model) != expected.RequestedModel || selected != expected.SelectedModel || provider.ID() != expected.ProviderID {
+	if !routeMatchesRequest(req.Model, selected, provider.ID(), expected) {
 		return nil, fmt.Errorf("model route changed before dispatch")
 	}
-	return m.chatCompletionResolved(ctx, req, selected, provider)
+	return m.chatCompletionResolved(ctx, req, strings.TrimSpace(req.Model), selected, provider)
 }
 
-func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, selectedModel string, provider Provider) (*ChatResponse, error) {
+func routeMatchesRequest(requestedModel, selectedModel, providerID string, expected ModelRoute) bool {
+	return strings.TrimSpace(requestedModel) == expected.RequestedModel &&
+		selectedModel == expected.SelectedModel &&
+		providerID == expected.ProviderID
+}
+
+func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, requestedModel, selectedModel string, provider Provider) (*ChatResponse, error) {
 	req.Model = selectedModel
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
+	req = applyProviderTransformsWithOptions(req, provider.ID(), m.providerTransformOptions(provider, selectedModel))
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	privacyRetry := false
@@ -403,11 +470,13 @@ func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, s
 		// and some native adapters can have billable usage/content before a
 		// transport or validation failure; Controller must persist/account it
 		// instead of turning it into a bare retryable error.
+		stampChatResponseExecutionIdentity(resp, requestedModel, selectedModel, provider.ID())
 		return resp, err
 	}
 	if resp == nil {
 		return nil, NilChatResponseError(req)
 	}
+	stampChatResponseExecutionIdentity(resp, requestedModel, selectedModel, provider.ID())
 	if len(resp.Choices) == 0 {
 		return resp, NoResponseChoicesError(req, resp)
 	}
@@ -446,6 +515,20 @@ func (m *Manager) SupportsContinuation(modelID string) bool {
 	return client.SupportsContinuation(selectedModel)
 }
 
+// SupportsContinuationForRoute reports continuation support for an exact
+// pre-resolved route.
+func (m *Manager) SupportsContinuationForRoute(route ModelRoute) bool {
+	if m == nil || strings.TrimSpace(route.ProviderID) == "" || strings.TrimSpace(route.SelectedModel) == "" {
+		return false
+	}
+	provider := m.providers[route.ProviderID]
+	client, ok := provider.(ContinuationClient)
+	if !ok {
+		return false
+	}
+	return client.SupportsContinuation(route.SelectedModel)
+}
+
 // ChatCompletionWithContinuation performs a continuation-aware chat completion
 // routed to the provider selected for the model, applying the same request
 // transforms as ChatCompletion. It returns an error if the resolved provider
@@ -453,17 +536,37 @@ func (m *Manager) SupportsContinuation(modelID string) bool {
 // SupportsContinuation first and fall back to ChatCompletion otherwise.
 func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuationReq ContinuationRequest) (*ContinuationResponse, error) {
 	req := continuationReq.Request
+	requestedModel := strings.TrimSpace(req.Model)
 	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
 	}
+	return m.chatCompletionWithContinuationResolved(ctx, continuationReq, requestedModel, selectedModel, provider)
+}
+
+// ChatCompletionWithContinuationForRoute dispatches a continuation-aware turn
+// only if the current authoritative route still matches the governed route.
+func (m *Manager) ChatCompletionWithContinuationForRoute(ctx context.Context, continuationReq ContinuationRequest, expected ModelRoute) (*ContinuationResponse, error) {
+	req := continuationReq.Request
+	selectedModel, provider := m.resolveModel(req.Model)
+	if provider == nil {
+		return nil, fmt.Errorf("no provider configured for model %s", req.Model)
+	}
+	if !routeMatchesRequest(req.Model, selectedModel, provider.ID(), expected) {
+		return nil, fmt.Errorf("model route changed before dispatch")
+	}
+	return m.chatCompletionWithContinuationResolved(ctx, continuationReq, strings.TrimSpace(req.Model), selectedModel, provider)
+}
+
+func (m *Manager) chatCompletionWithContinuationResolved(ctx context.Context, continuationReq ContinuationRequest, requestedModel, selectedModel string, provider Provider) (*ContinuationResponse, error) {
+	req := continuationReq.Request
 	client, ok := provider.(ContinuationClient)
 	if !ok {
 		return nil, fmt.Errorf("provider %s does not support continuation", provider.ID())
 	}
 	req.Model = selectedModel
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
+	req = applyProviderTransformsWithOptions(req, provider.ID(), m.providerTransformOptions(provider, selectedModel))
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	privacyRetry := false
@@ -481,7 +584,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 	)
 	for attempt := 0; ; attempt++ {
 		resp, err = client.ChatCompletionWithContinuation(ctx, continuationReq)
-		if err == nil || provider.ID() != "openrouter" || continuationReq.Request.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
+		if err == nil || resp != nil || provider.ID() != "openrouter" || continuationReq.Request.RetryMode != RequestRetryDefault || attempt >= maxAffordableOutputRetries {
 			break
 		}
 		affordable, ok := affordableOutputTokenLimit(err)
@@ -502,11 +605,15 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 		}
 	}
 	if err != nil {
+		if resp != nil {
+			stampChatResponseExecutionIdentity(resp.Response, requestedModel, selectedModel, provider.ID())
+		}
 		return resp, err
 	}
 	if resp == nil || resp.Response == nil {
 		return nil, fmt.Errorf("empty continuation response for model %s", req.Model)
 	}
+	stampChatResponseExecutionIdentity(resp.Response, requestedModel, selectedModel, provider.ID())
 	if len(resp.Response.Choices) == 0 {
 		return resp, NoResponseChoicesError(req, resp.Response)
 	}
@@ -515,6 +622,7 @@ func (m *Manager) ChatCompletionWithContinuation(ctx context.Context, continuati
 
 // ChatCompletionStream performs a streaming chat completion
 func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	requestedModel := strings.TrimSpace(req.Model)
 	selectedModel, provider := m.resolveModel(req.Model)
 	if provider == nil {
 		chunkChan := make(chan StreamChunk)
@@ -524,9 +632,39 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 		close(errChan)
 		return chunkChan, errChan
 	}
+	return m.chatCompletionStreamResolved(ctx, req, requestedModel, selectedModel, provider)
+}
+
+// ChatCompletionStreamForRoute dispatches a streaming turn only if the current
+// authoritative route still matches the governed route.
+func (m *Manager) ChatCompletionStreamForRoute(ctx context.Context, req ChatRequest, expected ModelRoute) (<-chan StreamChunk, <-chan error) {
+	requestedModel := strings.TrimSpace(req.Model)
+	selectedModel, provider := m.resolveModel(req.Model)
+	if provider == nil {
+		chunkChan := make(chan StreamChunk)
+		close(chunkChan)
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("no provider configured for model %s", req.Model)
+		close(errChan)
+		return chunkChan, errChan
+	}
+	if !routeMatchesRequest(req.Model, selectedModel, provider.ID(), expected) {
+		chunkChan := make(chan StreamChunk)
+		close(chunkChan)
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("model route changed before dispatch")
+		close(errChan)
+		return chunkChan, errChan
+	}
+	return m.chatCompletionStreamResolved(ctx, req, requestedModel, selectedModel, provider)
+}
+
+// chatCompletionStreamResolved dispatches a streaming turn for an already
+// resolved model and provider.
+func (m *Manager) chatCompletionStreamResolved(ctx context.Context, req ChatRequest, requestedModel, selectedModel string, provider Provider) (<-chan StreamChunk, <-chan error) {
 	req.Model = selectedModel
 	req = m.applyFallbackChain(req, selectedModel, provider.ID())
-	req = applyProviderTransforms(req, provider.ID())
+	req = applyProviderTransformsWithOptions(req, provider.ID(), m.providerTransformOptions(provider, selectedModel))
 	req = m.applyPromptCache(req, provider.ID())
 	req.Model = normalizeModelForProvider(req.Model, provider.ID())
 	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
@@ -538,20 +676,21 @@ func (m *Manager) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-
 		return chunkChan, errChan
 	}
 	if provider.ID() != "openrouter" {
-		return provider.ChatCompletionStream(ctx, req)
+		chunks, errs := provider.ChatCompletionStream(ctx, req)
+		return stampStreamChunks(ctx, chunks, errs, requestedModel, selectedModel, provider.ID())
 	}
 	privacyRetry := false
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
 	}
-	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req, privacyRetry)
+	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req, privacyRetry, requestedModel, selectedModel)
 }
 
 // chatCompletionStreamWithAffordableOutputRetry retries only a provider
 // rejection that arrives before the first stream chunk. Once any content,
 // reasoning, usage, or tool-call delta has been observed, replaying the request
 // could duplicate externally visible work and the original error is final.
-func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest, privacyRetry bool) (<-chan StreamChunk, <-chan error) {
+func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider Provider, req ChatRequest, privacyRetry bool, requestedModel, selectedModel string) (<-chan StreamChunk, <-chan error) {
 	chunksOut := make(chan StreamChunk, 10)
 	errorsOut := make(chan error, 1)
 
@@ -579,6 +718,7 @@ func chatCompletionStreamWithAffordableOutputRetry(ctx context.Context, provider
 						continue
 					}
 					sawChunk = true
+					stampStreamChunkExecutionIdentity(&chunk, requestedModel, selectedModel, provider.ID())
 					select {
 					case chunksOut <- chunk:
 					case <-ctx.Done():
@@ -686,11 +826,39 @@ func requestDisablesFallbacks(req ChatRequest) bool {
 }
 
 func applyProviderTransforms(req ChatRequest, providerID string) ChatRequest {
-	req = normalizeProviderChatRequest(req, providerID)
+	return applyProviderTransformsWithOptions(req, providerID, providerTransformOptions{})
+}
+
+func applyProviderTransformsWithOptions(req ChatRequest, providerID string, opts providerTransformOptions) ChatRequest {
+	req = normalizeProviderChatRequestWithOptions(req, providerID, opts)
 	if providerID == "openrouter" && len(req.Transforms) == 0 {
 		req.Transforms = []string{"middle-out"}
 	}
 	return req
+}
+
+func (m *Manager) providerTransformOptions(provider Provider, selectedModel string) providerTransformOptions {
+	return providerTransformOptions{
+		PreserveReasoningMessages: providerSupportsParameter(provider, selectedModel, "reasoning_content"),
+	}
+}
+
+func providerSupportsParameter(provider Provider, selectedModel, parameter string) bool {
+	if provider == nil {
+		return false
+	}
+	switch provider.ID() {
+	case "openai_compatible", "litellm":
+	default:
+		return false
+	}
+	checker, ok := provider.(interface {
+		supportsConfiguredParameter(modelID, parameter string) bool
+	})
+	if !ok {
+		return false
+	}
+	return checker.supportsConfiguredParameter(selectedModel, parameter)
 }
 
 func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {
@@ -792,12 +960,34 @@ func (m *Manager) resolveModel(modelID string) (string, Provider) {
 }
 
 func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
+	if providerID, _, ok := m.explicitProviderQualifiedModel(modelID); ok {
+		return providerID, true
+	}
+	if m.config == nil {
+		return "", false
+	}
 	for prefix, providerID := range m.config.Providers.ModelRouting {
 		if strings.HasPrefix(modelID, prefix) {
 			return providerID, true
 		}
 	}
 	return "", false
+}
+
+func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, upstreamModelID string, ok bool) {
+	if m == nil {
+		return "", "", false
+	}
+	providerID, upstreamModelID, ok = strings.Cut(strings.TrimSpace(modelID), "/")
+	providerID = strings.TrimSpace(providerID)
+	upstreamModelID = strings.TrimSpace(upstreamModelID)
+	if !ok || providerID == "" || upstreamModelID == "" {
+		return "", "", false
+	}
+	if _, configured := m.providers[providerID]; !configured {
+		return "", "", false
+	}
+	return providerID, upstreamModelID, true
 }
 
 func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
@@ -968,9 +1158,16 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 }
 
 func (m *Manager) modelAvailable(modelID string) bool {
+	providerID := ""
+	if provider := m.providerForModel(modelID); provider != nil {
+		providerID = provider.ID()
+	}
 	for _, candidate := range m.modelInfoCandidates(modelID) {
 		m.catalogMu.RLock()
-		if _, ok := m.catalog[candidate]; ok {
+		_, found := m.catalog[candidate]
+		owner := m.modelProviders[candidate]
+		providerAdvertisesCandidate := providerID != "" && containsString(m.providerModels[providerID], candidate)
+		if (found && (owner == "" || owner == providerID)) || providerAdvertisesCandidate {
 			m.catalogMu.RUnlock()
 			return true
 		}
@@ -984,6 +1181,24 @@ func (m *Manager) GetContextLength(modelID string) (int, error) {
 	info, err := m.GetModelInfo(modelID)
 	if err != nil {
 		return 0, err
+	}
+	return info.ContextLength, nil
+}
+
+// GetContextLengthForRoute returns the context length for an already-selected
+// provider/model route without re-running routing hooks.
+func (m *Manager) GetContextLengthForRoute(route ModelRoute) (int, error) {
+	providerID := strings.TrimSpace(route.ProviderID)
+	selectedModel := strings.TrimSpace(route.SelectedModel)
+	if m == nil {
+		return 0, fmt.Errorf("model manager unavailable")
+	}
+	if providerID == "" || selectedModel == "" {
+		return 0, fmt.Errorf("malformed model route: provider=%q selected_model=%q", providerID, selectedModel)
+	}
+	info, _, err := m.modelCapabilityInfoForRoute(route)
+	if err != nil {
+		return 0, fmt.Errorf("context length unavailable for route provider=%q selected_model=%q: %w", providerID, selectedModel, err)
 	}
 	return info.ContextLength, nil
 }
@@ -1041,18 +1256,13 @@ func modalityAcceptsImageInput(modality string) bool {
 
 // SupportsReasoning checks if a model supports reasoning parameter
 func (m *Manager) SupportsReasoning(modelID string) bool {
-	info, err := m.GetModelInfo(modelID)
-	if err != nil {
-		return false
-	}
+	return m.ResolveReasoningCapability(modelID).Supported()
+}
 
-	// Check supported_parameters from catalog
-	for _, param := range info.SupportedParameters {
-		if param == "reasoning" {
-			return true
-		}
-	}
-	return false
+// SupportsReasoningForRoute reports reasoning support for an exact
+// pre-resolved route.
+func (m *Manager) SupportsReasoningForRoute(route ModelRoute) bool {
+	return m.ResolveReasoningCapabilityForRoute(route).Supported()
 }
 
 // SupportsTools checks if a model supports function/tool calling
@@ -1065,17 +1275,13 @@ func (m *Manager) SupportsTools(modelID string) bool {
 // method so a model that supports tools is not assumed to support every tool
 // control field.
 func (m *Manager) SupportsParameter(modelID, parameter string) bool {
-	info, err := m.GetModelInfo(modelID)
-	if err != nil {
-		return false
-	}
-	parameter = strings.TrimSpace(parameter)
-	for _, candidate := range info.SupportedParameters {
-		if candidate == parameter {
-			return true
-		}
-	}
-	return false
+	return m.ResolveParameterCapability(modelID, parameter).Supported()
+}
+
+// SupportsParameterForRoute reports selected-route parameter support without
+// falling back to the requested alias.
+func (m *Manager) SupportsParameterForRoute(route ModelRoute, parameter string) bool {
+	return m.ResolveParameterCapabilityForRoute(route, parameter).Supported()
 }
 
 // GetVisionFallbackModel returns a fallback model for vision tasks
@@ -1123,6 +1329,10 @@ func (m *Manager) modelInfoCandidates(modelID string) []string {
 	}
 
 	add(modelID)
+	if _, upstreamModelID, ok := m.explicitProviderQualifiedModel(modelID); ok {
+		add(upstreamModelID)
+		return candidates
+	}
 	if strings.Contains(modelID, "/") {
 		return candidates
 	}
@@ -1282,7 +1492,11 @@ var thinkTagPattern = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
 // ExtractThinkingContent extracts thinking/reasoning text from message content parts.
 func ExtractThinkingContent(text string) (thinking string, content string) {
 	matches := thinkTagPattern.FindAllStringSubmatch(text, -1)
+	openStart := strings.Index(strings.ToLower(text), "<think>")
 	if len(matches) == 0 {
+		if openStart >= 0 {
+			return strings.TrimSpace(text[openStart+len("<think>"):]), strings.TrimSpace(text[:openStart])
+		}
 		return "", text
 	}
 
@@ -1296,6 +1510,10 @@ func ExtractThinkingContent(text string) (thinking string, content string) {
 
 	// Remove thinking tags from content
 	content = thinkTagPattern.ReplaceAllString(text, "")
+	if openStart := strings.Index(strings.ToLower(content), "<think>"); openStart >= 0 {
+		thinkingParts = append(thinkingParts, strings.TrimSpace(content[openStart+len("<think>"):]))
+		content = content[:openStart]
+	}
 	content = strings.TrimSpace(content)
 
 	thinking = strings.Join(thinkingParts, "\n\n")

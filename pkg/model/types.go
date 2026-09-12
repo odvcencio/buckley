@@ -161,6 +161,17 @@ type ChatRequest struct {
 	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
 	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
 	PromptCache          *PromptCache      `json:"-"`
+	// Route is the authoritative provider/model decision used when this
+	// request was built. It lets dispatch fail closed if routing hooks drift
+	// before provider invocation, and it never enters provider JSON.
+	Route ModelRoute `json:"-"`
+	// ToolsCatalogConfirmedUnavailable is an internal semantic marker set
+	// when Buckley deliberately omitted tool schemas because authoritative
+	// provider metadata for the exact selected route confirms neither tools
+	// nor functions are advertised. Provider compatibility transforms use it
+	// to avoid reintroducing synthetic tool schemas after surprise tool-call
+	// rejection history. It never enters provider JSON.
+	ToolsCatalogConfirmedUnavailable bool `json:"-"`
 	// RetryMode is an internal execution contract. It never enters provider
 	// JSON; launch admission uses single_attempt so Dapr remains the sole retry
 	// owner for model effects.
@@ -286,8 +297,36 @@ type MessageDelta struct {
 	Role             string            `json:"role,omitempty"`
 	Content          string            `json:"content,omitempty"`
 	Reasoning        string            `json:"reasoning,omitempty"`         // For thinking/reasoning models
+	ReasoningContent bool              `json:"-"`                           // True when Reasoning came from provider-native reasoning_content
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter's reasoning_details format
 	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+}
+
+func (d *MessageDelta) UnmarshalJSON(data []byte) error {
+	type messageDeltaWithReasoning struct {
+		Role             string            `json:"role,omitempty"`
+		Content          string            `json:"content,omitempty"`
+		Reasoning        string            `json:"reasoning,omitempty"`
+		ReasoningContent string            `json:"reasoning_content,omitempty"`
+		ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
+		ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+	}
+	var aux messageDeltaWithReasoning
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	d.Role = aux.Role
+	d.Content = aux.Content
+	d.Reasoning = aux.Reasoning
+	if d.Reasoning == "" {
+		d.Reasoning = aux.ReasoningContent
+		d.ReasoningContent = aux.ReasoningContent != ""
+	} else {
+		d.ReasoningContent = false
+	}
+	d.ReasoningDetails = aux.ReasoningDetails
+	d.ToolCalls = aux.ToolCalls
+	return nil
 }
 
 // ReasoningDetail represents a reasoning block from OpenRouter's reasoning_details format.
@@ -1200,6 +1239,11 @@ type ModelInfo struct {
 	Created             int64           `json:"created"` // Unix timestamp
 	Architecture        Architecture    `json:"architecture,omitempty"`
 	SupportedParameters []string        `json:"supported_parameters,omitempty"`
+	// supportedParametersComplete means supported_parameters was advertised as
+	// a complete provider list. supportedParameterEvidence records individual
+	// parameters whose support was explicitly stated by partial metadata.
+	supportedParametersComplete bool
+	supportedParameterEvidence  map[string]struct{}
 }
 
 // UnmarshalJSON accepts the common top-level catalog shape and OpenRouter's
@@ -1217,7 +1261,13 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	rawPricing, pricingPresent := fields["pricing"]
+	rawSupportedParameters, supportedParametersPresent := fields["supported_parameters"]
+	rawComplete, completePresent := fields["x_buckley_supported_parameters_complete"]
+	rawEvidence, evidencePresent := fields["x_buckley_supported_parameter_evidence"]
 	delete(fields, "pricing")
+	delete(fields, "supported_parameters")
+	delete(fields, "x_buckley_supported_parameters_complete")
+	delete(fields, "x_buckley_supported_parameter_evidence")
 	type modelInfoAlias ModelInfo
 	var base modelInfoAlias
 	baseData, err := json.Marshal(fields)
@@ -1236,6 +1286,33 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = ModelInfo(base)
+	supportedParametersMalformed := false
+	if supportedParametersPresent {
+		trimmed := bytes.TrimSpace(rawSupportedParameters)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+			params, ok := decodeSupportedParameterStrings(trimmed)
+			if ok {
+				m.SupportedParameters = params
+				m.supportedParametersComplete = true
+			} else {
+				m.SupportedParameters = nil
+				m.supportedParametersComplete = false
+				supportedParametersMalformed = true
+			}
+		}
+	}
+	if completePresent && !supportedParametersMalformed {
+		var complete bool
+		if err := json.Unmarshal(rawComplete, &complete); err == nil {
+			m.supportedParametersComplete = complete
+		}
+	}
+	if evidencePresent && !supportedParametersMalformed {
+		var evidence []string
+		if err := json.Unmarshal(rawEvidence, &evidence); err == nil {
+			m.setSupportedParameterEvidence(evidence...)
+		}
+	}
 	if pricingPresent {
 		m.RawPricingJSON = append(json.RawMessage(nil), rawPricing...)
 		// Keep ordinary cost behavior for conventional pricing, while ignoring
@@ -1253,6 +1330,50 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 		m.MaxCompletionTokens = capabilities.TopProvider.MaxCompletionTokens
 	}
 	return nil
+}
+
+func decodeSupportedParameterStrings(data []byte) ([]string, bool) {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, false
+	}
+	params := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = bytes.TrimSpace(item)
+		if len(item) == 0 || item[0] != '"' {
+			return nil, false
+		}
+		var param string
+		if err := json.Unmarshal(item, &param); err != nil {
+			return nil, false
+		}
+		params = append(params, param)
+	}
+	return params, true
+}
+
+func (m ModelInfo) MarshalJSON() ([]byte, error) {
+	type modelInfoAlias ModelInfo
+	type modelInfoWire struct {
+		modelInfoAlias
+		SupportedParameters         []string `json:"supported_parameters,omitempty"`
+		SupportedParametersComplete *bool    `json:"x_buckley_supported_parameters_complete,omitempty"`
+		SupportedParameterEvidence  []string `json:"x_buckley_supported_parameter_evidence,omitempty"`
+	}
+	wire := modelInfoWire{modelInfoAlias: modelInfoAlias(m)}
+	wire.modelInfoAlias.SupportedParameters = nil
+	if len(m.SupportedParameters) > 0 || m.supportedParametersComplete {
+		wire.SupportedParameters = append([]string(nil), m.SupportedParameters...)
+	}
+	if m.supportedParametersComplete {
+		value := true
+		wire.SupportedParametersComplete = &value
+	} else if len(m.SupportedParameters) > 0 || len(m.supportedParameterEvidence) > 0 {
+		value := false
+		wire.SupportedParametersComplete = &value
+	}
+	wire.SupportedParameterEvidence = m.supportedParameterEvidenceList()
+	return json.Marshal(wire)
 }
 
 func rejectDuplicateTopLevelJSONKeys(data []byte) error {

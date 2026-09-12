@@ -217,6 +217,8 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 	if err := json.Unmarshal(data, &chatResp); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
+	chatResp.AttemptEvidence = nil
+	chatResp.ExecutionIdentity = observedExecutionIdentity(chatResp.ID, chatResp.Model, nil)
 
 	return &chatResp, nil
 }

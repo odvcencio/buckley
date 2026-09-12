@@ -39,10 +39,12 @@ func ReleaseStreamAccumulator(a *StreamAccumulator) {
 type StreamAccumulator struct {
 	content          []byte
 	reasoning        []byte
+	reasoningContent bool
 	reasoningDetails []ReasoningDetail
 	toolCalls        []ToolCall
 	usage            *Usage
 	role             string
+	identity         *ExecutionIdentity
 }
 
 // NewStreamAccumulator creates a new accumulator for streaming responses.
@@ -52,6 +54,7 @@ func NewStreamAccumulator() *StreamAccumulator {
 
 // Add processes a streaming chunk and accumulates its contents.
 func (a *StreamAccumulator) Add(chunk StreamChunk) {
+	mergeExecutionIdentity(&a.identity, chunk.ExecutionIdentity)
 	// OpenRouter can send usage in a terminal chunk with no choices.
 	if chunk.Usage != nil {
 		a.usage = chunk.Usage
@@ -76,6 +79,9 @@ func (a *StreamAccumulator) Add(chunk StreamChunk) {
 	// Accumulate reasoning/thinking content
 	if delta.Reasoning != "" {
 		a.reasoning = append(a.reasoning, delta.Reasoning...)
+		if delta.ReasoningContent {
+			a.reasoningContent = true
+		}
 	}
 	if len(delta.ReasoningDetails) > 0 {
 		a.reasoningDetails = append(a.reasoningDetails, delta.ReasoningDetails...)
@@ -128,13 +134,22 @@ func (a *StreamAccumulator) accumulateToolCall(delta ToolCallDelta) {
 
 // Message returns the accumulated message.
 func (a *StreamAccumulator) Message() Message {
+	reasoning := a.messageReasoning()
 	return Message{
 		Role:             a.role,
 		Content:          string(a.content),
-		Reasoning:        NormalizeReasoningText(string(a.reasoning)),
+		Reasoning:        reasoning,
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        a.toolCalls,
 	}
+}
+
+func (a *StreamAccumulator) messageReasoning() string {
+	reasoning := string(a.reasoning)
+	if a.reasoningContent {
+		return reasoning
+	}
+	return NormalizeReasoningText(reasoning)
 }
 
 // Content returns the accumulated text content.
@@ -145,6 +160,11 @@ func (a *StreamAccumulator) Content() string {
 // Reasoning returns the accumulated reasoning/thinking content.
 func (a *StreamAccumulator) Reasoning() string {
 	return NormalizeReasoningText(string(a.reasoning))
+}
+
+// ExecutionIdentity returns the accumulated model execution identity, if any.
+func (a *StreamAccumulator) ExecutionIdentity() *ExecutionIdentity {
+	return cloneExecutionIdentity(a.identity)
 }
 
 // NormalizeReasoningText removes provider chunk separators that occasionally
@@ -299,10 +319,12 @@ func (a *StreamAccumulator) Usage() *Usage {
 func (a *StreamAccumulator) Reset() {
 	a.content = a.content[:0]
 	a.reasoning = a.reasoning[:0]
+	a.reasoningContent = false
 	a.reasoningDetails = nil
 	a.toolCalls = nil
 	a.usage = nil
 	a.role = ""
+	a.identity = nil
 }
 
 // Kimi K2 special token markers for tool calls
@@ -454,7 +476,7 @@ func (a *StreamAccumulator) FinalizeWithTokenParsing() Message {
 	return Message{
 		Role:             a.role,
 		Content:          content,
-		Reasoning:        NormalizeReasoningText(string(a.reasoning)),
+		Reasoning:        a.messageReasoning(),
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        toolCalls,
 	}

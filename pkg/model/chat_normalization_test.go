@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -227,6 +228,49 @@ func TestApplyProviderTransformsPreservesCompatibleNoToolFinalizationIntent(t *t
 	}
 }
 
+func TestApplyProviderTransformsSuppressesCompatibleNoopForCatalogConfirmedToollessRequest(t *testing.T) {
+	req := ChatRequest{
+		Model:                            "litellm/o1-mini",
+		ToolChoice:                       "auto",
+		ToolsCatalogConfirmedUnavailable: true,
+		Messages: []Message{
+			{Role: "user", Content: "inspect"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{{
+					ID:   "call-1",
+					Type: "function",
+					Function: FunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"README.md"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call-1", Name: "read_file", Content: "rejected"},
+		},
+	}
+
+	for _, providerID := range []string{"openai_compatible", "litellm"} {
+		t.Run(providerID, func(t *testing.T) {
+			got := applyProviderTransforms(req, providerID)
+			if len(got.Tools) != 0 {
+				t.Fatalf("tools = %+v, want none", got.Tools)
+			}
+			if got.ToolChoice != "" {
+				t.Fatalf("tool choice = %q, want omitted", got.ToolChoice)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			if strings.Contains(string(encoded), "ToolsCatalogConfirmedUnavailable") ||
+				strings.Contains(string(encoded), "tools_catalog") {
+				t.Fatalf("internal marker leaked into JSON: %s", encoded)
+			}
+		})
+	}
+}
+
 func TestApplyProviderTransformsDropsToolChoiceWithoutTools(t *testing.T) {
 	req := ChatRequest{
 		Model:      "x-ai/grok-4.5",
@@ -240,6 +284,67 @@ func TestApplyProviderTransformsDropsToolChoiceWithoutTools(t *testing.T) {
 
 	if got.ToolChoice != "" {
 		t.Fatalf("tool choice=%q want omitted when tools are absent", got.ToolChoice)
+	}
+}
+
+func TestApplyProviderTransformsReasoningEffortWinsOverTokenBudget(t *testing.T) {
+	originalReasoning := &ReasoningConfig{Effort: " Medium ", MaxTokens: 2048}
+	req := ChatRequest{
+		Model:     "google/gemini-3.8-flash",
+		Reasoning: originalReasoning,
+		Messages:  []Message{{Role: "user", Content: "review this"}},
+	}
+
+	got := applyProviderTransforms(req, "openrouter")
+
+	if got.Reasoning == nil {
+		t.Fatal("Reasoning = nil, want effort-only reasoning")
+	}
+	if got.Reasoning == originalReasoning {
+		t.Fatalf("Reasoning reused caller pointer, want cloned config")
+	}
+	if got.Reasoning.Effort != "medium" || got.Reasoning.MaxTokens != 0 {
+		t.Fatalf("Reasoning = %+v, want effort medium without max_tokens", got.Reasoning)
+	}
+	if originalReasoning.Effort != " Medium " || originalReasoning.MaxTokens != 2048 {
+		t.Fatalf("original reasoning mutated: %+v", originalReasoning)
+	}
+}
+
+func TestApplyProviderTransformsPreservesReasoningTokenBudgetOnly(t *testing.T) {
+	req := ChatRequest{
+		Model:     "anthropic/claude-test",
+		Reasoning: &ReasoningConfig{MaxTokens: 2048},
+		Messages:  []Message{{Role: "user", Content: "review this"}},
+	}
+
+	got := applyProviderTransforms(req, "openrouter")
+
+	if got.Reasoning == nil || got.Reasoning.Effort != "" || got.Reasoning.MaxTokens != 2048 {
+		t.Fatalf("Reasoning = %+v, want token-budget-only reasoning preserved", got.Reasoning)
+	}
+}
+
+func TestNormalizeReasoningConfigIsNilSafeAndIdempotent(t *testing.T) {
+	if got := NormalizeReasoningConfig(nil); got != nil {
+		t.Fatalf("NormalizeReasoningConfig(nil) = %+v, want nil", got)
+	}
+
+	enabled := true
+	original := &ReasoningConfig{Effort: " Medium ", MaxTokens: 2048, Enabled: &enabled}
+	first := NormalizeReasoningConfig(original)
+	second := NormalizeReasoningConfig(first)
+	if first == nil || second == nil || first == original || second == first {
+		t.Fatalf("normalization must return independent non-nil copies: original=%p first=%p second=%p", original, first, second)
+	}
+	if first.Effort != "medium" || first.MaxTokens != 0 || second.Effort != "medium" || second.MaxTokens != 0 {
+		t.Fatalf("repeated normalization changed envelope: first=%+v second=%+v", first, second)
+	}
+	if first.Enabled == nil || second.Enabled == nil || first.Enabled == original.Enabled || second.Enabled == first.Enabled || !*second.Enabled {
+		t.Fatalf("normalization did not safely clone enabled pointers: original=%+v first=%+v second=%+v", original, first, second)
+	}
+	if original.Effort != " Medium " || original.MaxTokens != 2048 {
+		t.Fatalf("normalization mutated caller envelope: %+v", original)
 	}
 }
 
@@ -296,5 +401,97 @@ func TestApplyProviderTransformsPreservesOpenRouterReasoningDetails(t *testing.T
 	}
 	if len(got.Messages[1].ReasoningDetails) != 1 || got.Messages[1].ReasoningDetails[0].Text != "thinking" {
 		t.Fatalf("expected reasoning details to be preserved, got %+v", got.Messages[1].ReasoningDetails)
+	}
+}
+
+func TestApplyProviderTransformsPreservesConfiguredCompatibleReasoningExactly(t *testing.T) {
+	raw := "思\n\n\n考\n\n\n alpha\n\n\n beta\n\n\n γ\n\n\n delta\n\n\n epsilon\n\n\n zeta\n\n\n eta\n\n\n."
+	req := ChatRequest{
+		Model: "openai_compatible/glm-5.3-flash",
+		Messages: []Message{
+			{Role: "user", Content: "start"},
+			{
+				Role:      "assistant",
+				Content:   "",
+				Reasoning: raw,
+				ToolCalls: []ToolCall{{
+					ID:   "call_α",
+					Type: "function",
+					Function: FunctionCall{
+						Name:      "read_fixture",
+						Arguments: `{"path":"fixtures/未知.txt"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_α", Name: "read_fixture", Content: `{"nonce":"値-123"}`},
+		},
+	}
+
+	got := applyProviderTransformsWithOptions(req, "openai_compatible", providerTransformOptions{PreserveReasoningMessages: true})
+
+	if len(got.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3: %+v", len(got.Messages), got.Messages)
+	}
+	assistant := got.Messages[1]
+	if assistant.Reasoning != raw {
+		t.Fatalf("reasoning changed:\n got %q\nwant %q", assistant.Reasoning, raw)
+	}
+	if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != "call_α" ||
+		assistant.ToolCalls[0].Function.Arguments != `{"path":"fixtures/未知.txt"}` {
+		t.Fatalf("tool call did not round-trip: %+v", assistant.ToolCalls)
+	}
+	if got.Messages[2].ToolCallID != "call_α" {
+		t.Fatalf("tool_call_id = %q, want call_α", got.Messages[2].ToolCallID)
+	}
+}
+
+func TestApplyProviderTransformsStripsCompatibleReasoningWithoutOptIn(t *testing.T) {
+	req := ChatRequest{
+		Model: "openai_compatible/glm-5.3-flash",
+		Messages: []Message{{
+			Role:      "assistant",
+			Content:   "answer",
+			Reasoning: "private",
+		}},
+	}
+
+	got := applyProviderTransforms(req, "openai_compatible")
+
+	if len(got.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(got.Messages))
+	}
+	if got.Messages[0].Reasoning != "" {
+		t.Fatalf("reasoning leaked without opt-in: %+v", got.Messages[0])
+	}
+}
+
+func TestApplyProviderTransformsDoesNotPromoteConfiguredReasoningOnlyAssistantToContent(t *testing.T) {
+	req := ChatRequest{
+		Model: "openai_compatible/glm-5.3-flash",
+		Messages: []Message{
+			{Role: "user", Content: "start"},
+			{
+				Role:      "assistant",
+				Content:   "",
+				Reasoning: "private\n\n\n chain\n\n\n raw\n\n\n bytes\n\n\n stay\n\n\n private\n\n\n across\n\n\n tool\n\n\n turn",
+			},
+			{Role: "tool", ToolCallID: "missing", Name: "read_fixture", Content: "orphan"},
+		},
+	}
+
+	got := applyProviderTransformsWithOptions(req, "openai_compatible", providerTransformOptions{PreserveReasoningMessages: true})
+
+	if len(got.Messages) < 2 {
+		t.Fatalf("messages = %d, want preserved assistant", len(got.Messages))
+	}
+	assistant := got.Messages[1]
+	if assistant.Role != "assistant" {
+		t.Fatalf("message[1] role = %q, want assistant: %+v", assistant.Role, got.Messages)
+	}
+	if !messageContentEmpty(assistant.Content) {
+		t.Fatalf("private reasoning was promoted to visible content: %#v", assistant.Content)
+	}
+	if !strings.Contains(assistant.Reasoning, "raw") {
+		t.Fatalf("reasoning continuity was not preserved: %+v", assistant)
 	}
 }

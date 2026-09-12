@@ -35,6 +35,55 @@ func TestStreamAccumulator_TextContent(t *testing.T) {
 	}
 }
 
+func TestStreamAccumulatorExecutionIdentity_MergesTailAndPreservesFirstObservedConflict(t *testing.T) {
+	acc := NewStreamAccumulator()
+	acc.Add(StreamChunk{
+		ExecutionIdentity: &ExecutionIdentity{
+			RequestedModel: "requested/model",
+			SelectedModel:  "selected/model",
+			ProviderID:     "openrouter",
+			ResponseModel:  "first-reported-model",
+		},
+		Choices: []StreamChoice{{Delta: MessageDelta{Content: "ok"}}},
+	})
+	acc.Add(StreamChunk{
+		ExecutionIdentity: &ExecutionIdentity{
+			ResponseModel: "conflicting-late-model",
+			ResponseID:    "tail-response-id",
+		},
+		Usage: &Usage{TotalTokens: 3},
+	})
+
+	identity := acc.ExecutionIdentity()
+	if identity == nil {
+		t.Fatal("missing execution identity")
+	}
+	if identity.RequestedModel != "requested/model" || identity.SelectedModel != "selected/model" || identity.ProviderID != "openrouter" {
+		t.Fatalf("route identity = %+v", identity)
+	}
+	if identity.ResponseModel != "" || !identity.Conflicted {
+		t.Fatalf("identity = %+v, want response model cleared and conflict flagged", identity)
+	}
+	if identity.ResponseID != "tail-response-id" {
+		t.Fatalf("response id = %q, want metadata-only tail to fill missing value", identity.ResponseID)
+	}
+	if got := acc.Usage(); got == nil || got.TotalTokens != 3 {
+		t.Fatalf("usage = %#v", got)
+	}
+}
+
+func TestStreamAccumulatorExecutionIdentity_ResetClearsPooledIdentity(t *testing.T) {
+	acc := AcquireStreamAccumulator()
+	acc.Add(StreamChunk{ExecutionIdentity: &ExecutionIdentity{RequestedModel: "first"}})
+	ReleaseStreamAccumulator(acc)
+
+	reused := AcquireStreamAccumulator()
+	defer ReleaseStreamAccumulator(reused)
+	if got := reused.ExecutionIdentity(); got != nil {
+		t.Fatalf("pooled identity = %+v, want nil after reset", got)
+	}
+}
+
 func TestStreamAccumulator_Reasoning(t *testing.T) {
 	acc := NewStreamAccumulator()
 
@@ -51,6 +100,35 @@ func TestStreamAccumulator_Reasoning(t *testing.T) {
 
 	if got := acc.Reasoning(); got != "Let me think about this..." {
 		t.Errorf("Reasoning() = %q, want %q", got, "Let me think about this...")
+	}
+}
+
+func TestStreamAccumulator_PreservesReasoningContentExactlyForProviderContinuity(t *testing.T) {
+	raw := "思\n\n\n考\n\n\n alpha\n\n\n beta\n\n\n γ\n\n\n delta\n\n\n epsilon\n\n\n zeta\n\n\n eta\n\n\n."
+	acc := NewStreamAccumulator()
+	acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Role: "assistant", Reasoning: raw[:len(raw)/2], ReasoningContent: true}}}})
+	acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Reasoning: raw[len(raw)/2:], ReasoningContent: true, Content: "done"}}}})
+
+	if got := acc.Reasoning(); got == raw {
+		t.Fatalf("Reasoning() should keep display normalization, got raw text")
+	}
+	msg := acc.Message()
+	if msg.Reasoning != raw {
+		t.Fatalf("Message().Reasoning changed exact reasoning_content bytes:\n got %q\nwant %q", msg.Reasoning, raw)
+	}
+	finalized := acc.FinalizeWithTokenParsing()
+	if finalized.Reasoning != raw {
+		t.Fatalf("FinalizeWithTokenParsing().Reasoning changed exact reasoning_content bytes:\n got %q\nwant %q", finalized.Reasoning, raw)
+	}
+}
+
+func TestStreamAccumulator_NormalizesCanonicalReasoningStream(t *testing.T) {
+	raw := "I\n now\n have\n a\n full\n picture\n of\n the\n latest\n release\n v\n0\n.\n46\n.\n0\n and\n can\n answer\n."
+	acc := NewStreamAccumulator()
+	acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Role: "assistant", Reasoning: raw}}}})
+
+	if got := acc.Message().Reasoning; got == raw || got != NormalizeReasoningText(raw) {
+		t.Fatalf("Message().Reasoning = %q, want normalized canonical reasoning", got)
 	}
 }
 
