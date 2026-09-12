@@ -13,6 +13,7 @@ import (
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelprofile"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/rules"
@@ -206,7 +207,7 @@ func runReviewPRCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	runtime, err := newReviewCommandRuntime(cfg, mgr, store)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -372,6 +373,7 @@ type automatedReviewOptions struct {
 	reasoningEffort            string
 	reasoningMaxTokens         int
 	maxOutputTokens            int
+	reviewBehavior             *modelprofile.ReviewBehavior
 	depth                      reviewDepth
 	adaptiveCodexModel         bool
 	adaptiveReasoning          bool
@@ -514,19 +516,29 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 }
 
 func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider {
+	return reviewContextProvidersForBehavior(modelID, nil)
+}
+
+func reviewContextProvidersForBehavior(modelID string, behavior *modelprofile.ReviewBehavior) []commands.PRContextProvider {
 	providers := []commands.PRContextProvider{knowledgehyphae.NewReviewContextProvider()}
-	if isQwenReviewModel(modelID) {
+	opts := automatedReviewOptions{modelID: modelID, reviewBehavior: behavior}
+	if effective := effectiveReviewBehavior(opts); effective != nil && effective.WorkflowRiskSignals {
 		providers = append(providers, commands.NewWorkflowRiskContextProvider())
 	}
 	return providers
 }
 
 func reviewSupportingContextBudget(modelID string, requested int) int {
+	return reviewSupportingContextBudgetForBehavior(modelID, requested, nil)
+}
+
+func reviewSupportingContextBudgetForBehavior(modelID string, requested int, behavior *modelprofile.ReviewBehavior) int {
 	if requested > 0 {
 		return requested
 	}
-	if isDeepSeekV4ProReviewModel(modelID) {
-		return deepSeekSupportingContext
+	opts := automatedReviewOptions{modelID: modelID, reviewBehavior: behavior}
+	if effective := effectiveReviewBehavior(opts); effective != nil && effective.SupportingContextTokens > 0 {
+		return effective.SupportingContextTokens
 	}
 	return 0
 }
@@ -544,11 +556,11 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 
 	contextOpts := commands.DefaultPRContextOptions()
 	contextOpts.Context = ctx
-	contextOpts.Providers = reviewContextProvidersForModel(opts.modelID)
+	contextOpts.Providers = reviewContextProvidersForBehavior(opts.modelID, opts.reviewBehavior)
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
 	}
-	if supportingContext := reviewSupportingContextBudget(opts.modelID, opts.maxSupportingContextTokens); supportingContext > 0 {
+	if supportingContext := reviewSupportingContextBudgetForBehavior(opts.modelID, opts.maxSupportingContextTokens, opts.reviewBehavior); supportingContext > 0 {
 		contextOpts.MaxSupportingContextTokens = supportingContext
 	}
 	prCtx, audit, err := commands.AssemblePRContextWithOptions(prRef, contextOpts)

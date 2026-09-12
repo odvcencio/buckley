@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestMergeConfigsFixesZeroOverrideBug proves the reflection-driven walker
 // closes the zero-override gap PR #105's review flagged: several
@@ -239,5 +242,107 @@ func TestMergeConfigsOpenAICompatibleSupportedParameters(t *testing.T) {
 	override.Providers.OpenAICompatible.SupportedParameters["glm-5.3-flash"][0] = "reasoning"
 	if parameters[0] != "tools" {
 		t.Fatal("merged supported parameters alias the override")
+	}
+}
+
+func TestMergeConfigsOpenAICompatibleStreamTimeouts(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		rawProvider   map[string]any
+		overrideIdle  time.Duration
+		overrideFirst time.Duration
+		wantIdle      time.Duration
+		wantFirst     time.Duration
+	}{
+		{
+			name: "both timeouts",
+			rawProvider: map[string]any{
+				"stream_idle_timeout":          "45s",
+				"stream_first_content_timeout": "60s",
+			},
+			overrideIdle:  45 * time.Second,
+			overrideFirst: time.Minute,
+			wantIdle:      45 * time.Second,
+			wantFirst:     time.Minute,
+		},
+		{
+			name: "idle timeout only",
+			rawProvider: map[string]any{
+				"stream_idle_timeout": "45s",
+			},
+			overrideIdle: 45 * time.Second,
+			wantIdle:     45 * time.Second,
+			wantFirst:    17 * time.Second,
+		},
+		{
+			name: "first content timeout only",
+			rawProvider: map[string]any{
+				"stream_first_content_timeout": "60s",
+			},
+			overrideFirst: time.Minute,
+			wantIdle:      11 * time.Second,
+			wantFirst:     time.Minute,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := DefaultConfig()
+			base.Providers.OpenAICompatible.BaseURL = "https://existing.example/v1"
+			base.Providers.OpenAICompatible.Models = []string{"existing-model"}
+			base.Providers.OpenAICompatible.StreamIdleTimeout = 11 * time.Second
+			base.Providers.OpenAICompatible.StreamFirstContentTimeout = 17 * time.Second
+
+			override := &Config{Providers: ProviderConfig{OpenAICompatible: OpenAICompatibleConfig{
+				Models:                    []string{"unmentioned-model"},
+				StreamIdleTimeout:         tt.overrideIdle,
+				StreamFirstContentTimeout: tt.overrideFirst,
+			}}}
+			raw := map[string]any{
+				"providers": map[string]any{
+					"openai_compatible": tt.rawProvider,
+				},
+			}
+
+			mergeConfigs(base, override, raw, false)
+
+			if got := base.Providers.OpenAICompatible.StreamIdleTimeout; got != tt.wantIdle {
+				t.Fatalf("stream idle timeout = %s, want %s", got, tt.wantIdle)
+			}
+			if got := base.Providers.OpenAICompatible.StreamFirstContentTimeout; got != tt.wantFirst {
+				t.Fatalf("stream first content timeout = %s, want %s", got, tt.wantFirst)
+			}
+			if base.Providers.OpenAICompatible.Enabled {
+				t.Fatal("timeout-only override should preserve the existing implicit-enable behavior")
+			}
+			if got := base.Providers.OpenAICompatible.BaseURL; got != "https://existing.example/v1" {
+				t.Fatalf("base URL = %q, want existing value", got)
+			}
+			if got := base.Providers.OpenAICompatible.Models; len(got) != 1 || got[0] != "existing-model" {
+				t.Fatalf("models = %v, want existing model", got)
+			}
+		})
+	}
+}
+
+func TestMergeConfigsOpenAICompatibleFirstContentReasoningChunkLimit(t *testing.T) {
+	base := DefaultConfig()
+	base.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks = 128
+	override := &Config{Providers: ProviderConfig{OpenAICompatible: OpenAICompatibleConfig{
+		StreamFirstContentMaxReasoningChunks: 256,
+	}}}
+	raw := map[string]any{
+		"providers": map[string]any{
+			"openai_compatible": map[string]any{
+				"stream_first_content_max_reasoning_chunks": 256,
+			},
+		},
+	}
+
+	mergeConfigs(base, override, raw, false)
+
+	if got := base.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks; got != 256 {
+		t.Fatalf("stream first content reasoning chunk limit = %d, want 256", got)
+	}
+	if base.Providers.OpenAICompatible.Enabled {
+		t.Fatal("reasoning chunk limit-only override should preserve the existing implicit-enable behavior")
 	}
 }

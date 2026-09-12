@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidateReportsFirstViolationInOriginalOrder locks in the
@@ -91,5 +92,47 @@ func TestValidateRejectsNonFinitePublicAgentCostLimits(t *testing.T) {
 	}
 	if err := DefaultConfig().Validate(); err != nil {
 		t.Fatalf("zero/default budgets rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsNegativeOpenAICompatibleStreamIdleTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Providers.OpenAICompatible.StreamIdleTimeout = -time.Second
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.openai_compatible.stream_idle_timeout") {
+		t.Fatalf("Validate error = %v, want openai-compatible stream idle timeout error", err)
+	}
+
+	cfg = DefaultConfig()
+	cfg.Providers.LiteLLM.StreamIdleTimeout = -time.Second
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.litellm.stream_idle_timeout") {
+		t.Fatalf("Validate error = %v, want litellm stream idle timeout error", err)
+	}
+}
+
+func TestValidateRejectsNegativeOpenAICompatibleFirstContentTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Providers.OpenAICompatible.StreamFirstContentTimeout = -time.Second
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.openai_compatible.stream_first_content_timeout") {
+		t.Fatalf("Validate error = %v, want openai-compatible first content timeout error", err)
+	}
+
+	cfg = DefaultConfig()
+	cfg.Providers.LiteLLM.StreamFirstContentTimeout = -time.Second
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.litellm.stream_first_content_timeout") {
+		t.Fatalf("Validate error = %v, want litellm first content timeout error", err)
+	}
+}
+
+func TestValidateRejectsNegativeOpenAICompatibleFirstContentReasoningChunkLimit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.openai_compatible.stream_first_content_max_reasoning_chunks") {
+		t.Fatalf("Validate error = %v, want openai-compatible first content reasoning chunk limit error", err)
+	}
+
+	cfg = DefaultConfig()
+	cfg.Providers.LiteLLM.StreamFirstContentMaxReasoningChunks = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.litellm.stream_first_content_max_reasoning_chunks") {
+		t.Fatalf("Validate error = %v, want litellm first content reasoning chunk limit error", err)
 	}
 }

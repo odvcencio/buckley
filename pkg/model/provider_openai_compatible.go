@@ -250,30 +250,77 @@ func (p *OpenAICompatibleProvider) fetchModels() ([]ModelInfo, error) {
 	}
 
 	var result struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []openAICompatibleFetchedModel `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
 	models := make([]ModelInfo, 0, len(result.Data))
-	for _, m := range result.Data {
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
+	for _, fetched := range result.Data {
+		info, ok := p.normalizeFetchedModelInfo(fetched)
+		if !ok {
 			continue
 		}
-		info := ModelInfo{
-			ID:            p.modelPrefix + id,
-			Name:          id,
-			ContextLength: p.configuredContextLength(p.modelPrefix+id, 8192),
-			Architecture:  Architecture{Modality: "text"},
-		}
-		info.SupportedParameters = p.mergeConfiguredParameters(info.ID, nil)
 		models = append(models, info)
 	}
 	return models, nil
+}
+
+type openAICompatibleFetchedModel struct {
+	ModelInfo
+	MaxModelLen int `json:"max_model_len"`
+}
+
+func (m *openAICompatibleFetchedModel) UnmarshalJSON(data []byte) error {
+	var info ModelInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
+	}
+	var extra struct {
+		MaxModelLen int `json:"max_model_len"`
+	}
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	m.ModelInfo = info
+	m.MaxModelLen = extra.MaxModelLen
+	return nil
+}
+
+func (p *OpenAICompatibleProvider) normalizeFetchedModelInfo(fetched openAICompatibleFetchedModel) (ModelInfo, bool) {
+	info := fetched.ModelInfo
+	rawID := strings.TrimSpace(info.ID)
+	if rawID == "" {
+		return ModelInfo{}, false
+	}
+
+	id := rawID
+	if !strings.HasPrefix(id, p.modelPrefix) {
+		id = p.modelPrefix + id
+	}
+
+	name := strings.TrimSpace(info.Name)
+	if name == "" {
+		name = rawID
+	}
+	info.ID = id
+	info.Name = strings.TrimPrefix(name, p.modelPrefix)
+
+	contextLength := info.ContextLength
+	if contextLength <= 0 {
+		contextLength = fetched.MaxModelLen
+	}
+	if contextLength <= 0 {
+		contextLength = 8192
+	}
+	info.ContextLength = p.configuredContextLength(info.ID, contextLength)
+
+	if info.Architecture.Modality == "" {
+		info.Architecture.Modality = "text"
+	}
+	info.SupportedParameters = p.mergeConfiguredParameters(info.ID, info.SupportedParameters)
+	return info, true
 }
 
 func (p *OpenAICompatibleProvider) buildStaticModels() []ModelInfo {

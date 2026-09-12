@@ -12,9 +12,12 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelprofile"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/protocol"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -212,7 +215,7 @@ func runReviewCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	runtime, err := newReviewCommandRuntime(cfg, mgr, store)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -352,7 +355,7 @@ func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
 	cfg.Providers.Codex.Models = append(cfg.Providers.Codex.Models, normalized)
 }
 
-func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCommandRuntime, error) {
+func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, store *storage.Store) (*reviewCommandRuntime, error) {
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
@@ -402,6 +405,15 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 	policy.reasoningEffort = reasoningEffort
 	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
 	policy.engine = arbEngine
+	if behavior, found, err := reviewBehaviorProfile(cfg, mgr, store, modelID, policy.adaptiveCodexModel); err != nil {
+		_ = registry.Close()
+		if durableCleanup != nil {
+			durableCleanup()
+		}
+		return nil, fmt.Errorf("resolve review behavior profile: %w", err)
+	} else if found {
+		policy.reviewBehavior = behavior
+	}
 	criticModel, criticReasoning, dedicatedCritic := resolveReviewCriticRuntime(cfg, mgr, modelID, reasoningEffort)
 	if dedicatedCritic {
 		criticRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
@@ -429,6 +441,28 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager) (*reviewCom
 		policy:          policy,
 		durableCleanup:  durableCleanup,
 	}, nil
+}
+
+func reviewBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *storage.Store, modelID string, adaptiveModel bool) (*modelprofile.ReviewBehavior, bool, error) {
+	modelID = strings.TrimSpace(modelID)
+	if adaptiveModel || cfg == nil || strings.ToLower(strings.TrimSpace(cfg.AdaptiveProtocol.Mode)) != protocol.ModeDynamic {
+		return nil, false, nil
+	}
+	if source, ok := cfg.AdaptiveProtocol.Profiles[modelID]; ok {
+		profile, err := protocolProfileFromConfig(modelID, mgr, source)
+		if err != nil || profile.Review == nil {
+			return nil, profile.Review != nil, err
+		}
+		return modelprofile.NormalizeReviewBehavior(profile.Review), true, nil
+	}
+	if store == nil {
+		return nil, false, nil
+	}
+	profile, found, err := storage.NewBehaviorProfileStore(store).Promoted(context.Background(), modelID)
+	if err != nil || !found || profile.Review == nil {
+		return nil, found && profile.Review != nil, err
+	}
+	return modelprofile.NormalizeReviewBehavior(profile.Review), true, nil
 }
 
 func resolveReviewCriticRuntime(cfg *config.Config, checker model.ReasoningChecker, primaryModel, primaryReasoning string) (string, string, bool) {

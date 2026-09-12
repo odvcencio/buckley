@@ -328,6 +328,13 @@ func TestManagerCalculateBoundedCost_RequiresAuthoritativePricingAndUsage(t *tes
 			wantErr:    "reported no token counts",
 		},
 		{
+			name:       "locally estimated usage",
+			providerID: "openai",
+			info:       positive,
+			usage:      Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, Estimated: true},
+			wantErr:    "not authoritative",
+		},
+		{
 			name:       "cache-write usage",
 			providerID: "openai",
 			info:       positive,

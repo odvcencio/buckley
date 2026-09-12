@@ -325,14 +325,17 @@ type ProviderSettings struct {
 
 // OpenAICompatibleConfig configures an OpenAI-compatible API provider.
 type OpenAICompatibleConfig struct {
-	Enabled             bool                          `yaml:"enabled"`
-	BaseURL             string                        `yaml:"base_url"`
-	APIKey              string                        `yaml:"api_key"`
-	Models              []string                      `yaml:"models"`
-	SupportedParameters map[string][]string           `yaml:"supported_parameters"`
-	ContextLengths      map[string]int                `yaml:"context_lengths"`
-	Fallbacks           map[string][]string           `yaml:"fallbacks"`
-	Router              *OpenAICompatibleRouterConfig `yaml:"router"`
+	Enabled                              bool                          `yaml:"enabled"`
+	BaseURL                              string                        `yaml:"base_url"`
+	APIKey                               string                        `yaml:"api_key"`
+	Models                               []string                      `yaml:"models"`
+	SupportedParameters                  map[string][]string           `yaml:"supported_parameters"`
+	ContextLengths                       map[string]int                `yaml:"context_lengths"`
+	StreamIdleTimeout                    time.Duration                 `yaml:"stream_idle_timeout"`
+	StreamFirstContentTimeout            time.Duration                 `yaml:"stream_first_content_timeout"`
+	StreamFirstContentMaxReasoningChunks int                           `yaml:"stream_first_content_max_reasoning_chunks"`
+	Fallbacks                            map[string][]string           `yaml:"fallbacks"`
+	Router                               *OpenAICompatibleRouterConfig `yaml:"router"`
 }
 
 // LiteLLMConfig is the deprecated name for OpenAICompatibleConfig.

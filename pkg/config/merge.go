@@ -384,11 +384,13 @@ func mergeOllamaProvider(ctx mergeCtx, base, override reflect.Value, path []stri
 }
 
 // mergeOpenAICompatibleProvider merges an OpenAI-compatible provider block:
-// base_url/api_key/models/supported_parameters/context_lengths/fallbacks/router merge
-// individually when present in raw (fallbacks with the same
+// base_url/api_key/models/supported_parameters/context_lengths/stream_idle_timeout/
+// stream_first_content_timeout/stream_first_content_max_reasoning_chunks/
+// fallbacks/router merge individually when present
+// in raw (fallbacks with the same
 // tri-state nil/empty/populated handling as mergeMapPerKeyTriState), and
-// -- when "enabled" itself isn't set -- any of those other fields being
-// present implicitly enables the provider.
+// -- when "enabled" itself isn't set -- the existing connection and model
+// settings (not stream timeouts) implicitly enable the provider.
 func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, path []string) {
 	b := base.Addr().Interface().(*OpenAICompatibleConfig)
 	o := override.Interface().(OpenAICompatibleConfig)
@@ -398,6 +400,9 @@ func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, p
 	modelsSet := boolFieldSet(ctx.raw, sub(path, "models")...)
 	supportedParametersSet := boolFieldSet(ctx.raw, sub(path, "supported_parameters")...)
 	contextLengthsSet := boolFieldSet(ctx.raw, sub(path, "context_lengths")...)
+	streamIdleTimeoutSet := boolFieldSet(ctx.raw, sub(path, "stream_idle_timeout")...)
+	streamFirstContentTimeoutSet := boolFieldSet(ctx.raw, sub(path, "stream_first_content_timeout")...)
+	streamFirstContentMaxReasoningChunksSet := boolFieldSet(ctx.raw, sub(path, "stream_first_content_max_reasoning_chunks")...)
 	fallbacksSet := boolFieldSet(ctx.raw, sub(path, "fallbacks")...)
 	routerSet := boolFieldSet(ctx.raw, sub(path, "router")...)
 	enabledSet := boolFieldSet(ctx.raw, sub(path, "enabled")...)
@@ -416,6 +421,15 @@ func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, p
 	}
 	if contextLengthsSet {
 		b.ContextLengths = cloneStringIntMap(o.ContextLengths)
+	}
+	if streamIdleTimeoutSet {
+		b.StreamIdleTimeout = o.StreamIdleTimeout
+	}
+	if streamFirstContentTimeoutSet {
+		b.StreamFirstContentTimeout = o.StreamFirstContentTimeout
+	}
+	if streamFirstContentMaxReasoningChunksSet {
+		b.StreamFirstContentMaxReasoningChunks = o.StreamFirstContentMaxReasoningChunks
 	}
 	if fallbacksSet {
 		switch {

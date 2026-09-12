@@ -7,8 +7,8 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelprofile"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
-	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 )
 
@@ -36,6 +36,13 @@ const (
 	// evidence. The runner clamps this to the provider's advertised maximum.
 	projectReviewOutputTokenBudget = 32768
 )
+
+func effectiveReviewBehavior(opts automatedReviewOptions) *modelprofile.ReviewBehavior {
+	if opts.reviewBehavior != nil {
+		return modelprofile.NormalizeReviewBehavior(opts.reviewBehavior)
+	}
+	return modelprofile.DefaultReviewBehaviorForModel(opts.modelID)
+}
 
 // reviewDepth controls how much evidence a review is expected to collect
 // before it synthesizes a verdict. Spot is the compatibility/default mode;
@@ -248,30 +255,22 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 			opts.reasoningEffort = codexReviewReasoningForSize(plan.sizeClass)
 		}
 	}
-	if isQwenReviewModel(opts.modelID) {
+	behavior := effectiveReviewBehavior(opts)
+	if behavior != nil {
 		if opts.adaptiveReasoning {
-			opts.reasoningMaxTokens = qwenReviewReasoningForSize(plan.sizeClass)
+			opts.reasoningMaxTokens = reviewBehaviorTokenBudget(behavior.ReasoningMaxTokensBySize, plan.sizeClass, opts.reasoningMaxTokens)
 		} else {
-			opts.reasoningMaxTokens = qwenReviewReasoningForEffort(opts.reasoningEffort)
+			opts.reasoningMaxTokens = reviewBehaviorTokenBudget(behavior.ReasoningMaxTokensByEffort, opts.reasoningEffort, opts.reasoningMaxTokens)
 		}
+		minExploration := time.Duration(behavior.MinExplorationTimeoutSeconds) * time.Second
 		// A zero exploration timeout is intentional for project reviews: the
 		// outer review deadline and synthesis reserve are the only boundaries.
-		// Preserve it instead of reintroducing a hidden Qwen-only ceiling.
-		if opts.explorationTimeout > 0 && opts.explorationTimeout < qwenReviewExploration {
-			opts.explorationTimeout = qwenReviewExploration
+		if opts.explorationTimeout > 0 && minExploration > 0 && opts.explorationTimeout < minExploration {
+			opts.explorationTimeout = minExploration
 		}
-		if opts.criticExploration < qwenCriticExploration {
-			opts.criticExploration = qwenCriticExploration
-		}
-	}
-	if isDeepSeekV4ProReviewModel(opts.modelID) {
-		if opts.adaptiveReasoning {
-			opts.reasoningMaxTokens = deepSeekReviewReasoningForSize(plan.sizeClass)
-		} else {
-			opts.reasoningMaxTokens = deepSeekReviewReasoningForEffort(opts.reasoningEffort)
-		}
-		if opts.explorationTimeout > 0 && opts.explorationTimeout < deepSeekReviewExploration {
-			opts.explorationTimeout = deepSeekReviewExploration
+		minCriticExploration := time.Duration(behavior.MinCriticExplorationTimeoutSeconds) * time.Second
+		if minCriticExploration > 0 && opts.criticExploration < minCriticExploration {
+			opts.criticExploration = minCriticExploration
 		}
 	}
 	// In-depth is the completion-first mode. It removes generated plan caps,
@@ -291,6 +290,16 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 		opts.criticExploration = 0
 	}
 	return opts
+}
+
+func reviewBehaviorTokenBudget(values map[string]int, key string, fallback int) int {
+	if len(values) == 0 {
+		return fallback
+	}
+	if value := values[strings.ToLower(strings.TrimSpace(key))]; value > 0 {
+		return value
+	}
+	return fallback
 }
 
 func (opts automatedReviewOptions) withVerificationTargetBudget(changedFiles []string) automatedReviewOptions {
@@ -313,72 +322,6 @@ func (opts automatedReviewOptions) withVerificationTargetBudget(changedFiles []s
 	return opts
 }
 
-func isQwenReviewModel(modelID string) bool {
-	modelID = strings.ToLower(strings.TrimSpace(modelID))
-	return modelID == "qwen/qwen3.7-plus" ||
-		strings.HasSuffix(modelID, "/qwen3.7-plus") ||
-		modelID == "qwen/qwen3.7-flash" ||
-		strings.HasSuffix(modelID, "/qwen3.7-flash") ||
-		modelID == "qwen/qwen3.8-flash" ||
-		strings.HasSuffix(modelID, "/qwen3.8-flash") ||
-		modelID == "qwen/qwen3.8-max" ||
-		strings.HasSuffix(modelID, "/qwen3.8-max")
-}
-
-func isDeepSeekV4ProReviewModel(modelID string) bool {
-	return strings.EqualFold(strings.TrimSpace(modelID), deepSeekV4ProReviewModel)
-}
-
-func deepSeekReviewReasoningForSize(sizeClass string) int {
-	switch strings.ToLower(strings.TrimSpace(sizeClass)) {
-	case "focused":
-		return deepSeekFocusedReasoning
-	case "broad", "project":
-		return deepSeekBroadReasoning
-	default:
-		return deepSeekStandardReasoning
-	}
-}
-
-func deepSeekReviewReasoningForEffort(effort string) int {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal":
-		return 1024
-	case "low":
-		return 2048
-	case "high", "xhigh":
-		return deepSeekBroadReasoning
-	default:
-		return 4096
-	}
-}
-
-func qwenReviewReasoningForSize(sizeClass string) int {
-	switch strings.ToLower(strings.TrimSpace(sizeClass)) {
-	case "focused":
-		return qwenFocusedReasoning
-	case "broad", "project":
-		return qwenBroadReasoning
-	default:
-		return qwenStandardReasoning
-	}
-}
-
-func qwenReviewReasoningForEffort(effort string) int {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal":
-		return 512
-	case "low":
-		return 1024
-	case "high":
-		return 4096
-	case "xhigh":
-		return 8192
-	default:
-		return 2048
-	}
-}
-
 func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
 	toolLimit := "no per-review tool-call cap"
 	if opts.maxToolCalls > 0 {
@@ -398,7 +341,7 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 	}
 	profile := prompt + fmt.Sprintf(`
 
-## Qwen Review Profile
+## Review Behavior Profile
 
 - Scope: %s. Thinking budget: %d tokens per turn. Limits: %s, %s, %s.
 - Read deterministic evidence before summarizing the diff. Treat hypotheses as tests, but treat provider-labeled violations as demonstrated defects unless exact counterevidence disproves them.
@@ -407,10 +350,6 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 - Use the supplied diff and harness-collected verification evidence first. Spend tool calls on focused inspections for named invariants; do not repeat successful searches or verification.
 - Finish evidence collection within %s and reserve the final %d seconds for synthesis.
 - Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
-- Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
-- Start exactly once with one ## Grade: heading. Never restart, repeat, or append a second copy of the review.
-- Put each Finding ID in exactly one Verdict list: CRITICAL and MAJOR are Blockers; MINOR is a Suggestion. Never list the same ID in both.
-- APPROVE only after the strongest concrete failure is DISPROVED. Otherwise return the evidence-supported non-approval verdict.
 `,
 		strings.ToUpper(opts.sizeClass),
 		opts.reasoningMaxTokens,
@@ -421,10 +360,24 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 		int(opts.synthesisLead/time.Second),
 		reviewOutputBudgetText(opts),
 	)
+	if isProjectReviewSize(opts.sizeClass) {
+		profile += `
+- Follow the advisory project-health response schema from the system prompt. Start exactly once with ## Project Health and return only that complete report.
+- This mode is advisory only; never issue a merge verdict.
+`
+	} else {
+		profile += `
+- Follow the exact response schema from the system prompt. Account for every changed file, copy Feedback IDs exactly, cite immutable CI precisely, and return only the final review.
+- Start exactly once with one ## Grade: heading.
+- Missing, pending, or unavailable verification without a proved defect requires Grade B and NEEDS DISCUSSION with Blockers NONE.
+- Put each Finding ID in exactly one Verdict list: CRITICAL and MAJOR are Blockers; MINOR is a Suggestion. Never list the same ID in both.
+- APPROVE only after the strongest concrete failure is DISPROVED. Otherwise return the evidence-supported non-approval verdict.
+`
+	}
 	if normalizedReviewDepth(opts.depth) == reviewDepthInDepth {
 		profile += `
 
-## Qwen In-Depth Output Checklist
+## Evidence-First In-Depth Checklist
 
 - Before the final answer, perform at least one real ` + "`run_verification`" + ` call when that tool is available.
 - The final answer must contain the literal headings ` + "`## Evidence Collected`" + `, ` + "`## Verification Ledger`" + `, and ` + "`## Coverage`" + `, plus ` + "`Completeness: COMPLETE`" + `. Never omit these headings to save tokens; a partial declaration is rejected.
@@ -434,99 +387,66 @@ func appendQwenReviewExecutionPlan(prompt string, opts automatedReviewOptions) s
 }
 
 func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) string {
-	if isQwenReviewModel(opts.modelID) {
+	behavior := effectiveReviewBehavior(opts)
+	if behavior != nil && behavior.Profile == modelprofile.ReviewProfileEvidenceFirst {
 		return appendReviewDepthInstructions(appendQwenReviewExecutionPlan(prompt, opts), opts)
 	}
-	turnLimit := "There is no hard per-review model-turn cap; continue until the review is complete or normal timeout/safety controls apply."
+	turnLimit := "unlimited"
 	if opts.maxIterations > 0 {
-		turnLimit = fmt.Sprintf("Use at most %d model turns.", opts.maxIterations)
+		turnLimit = fmt.Sprintf("%d", opts.maxIterations)
 	}
-	toolLimit := fmt.Sprintf("Use at most %d total inspection or verification calls.", opts.maxToolCalls)
-	if opts.maxToolCalls <= 0 {
-		toolLimit = "There is no per-review tool-call cap; continue evidence collection until the review is complete or normal timeout/safety controls apply."
+	toolLimit := "unlimited"
+	if opts.maxToolCalls > 0 {
+		toolLimit = fmt.Sprintf("%d", opts.maxToolCalls)
 	}
-	explorationLimit := "until the synthesis reserve or outer deadline requires finalization"
-	if opts.explorationTimeout > 0 {
-		explorationLimit = fmt.Sprintf("%d seconds", int(opts.explorationTimeout/time.Second))
-	}
-	verificationLimit := "There is no separate verification-call cap; retry failed or inconclusive required targets when useful."
+	verificationLimit := "unlimited when offered"
 	if opts.maxVerificationCalls > 0 {
-		verificationLimit = fmt.Sprintf("Use at most %d verification calls.", opts.maxVerificationCalls)
+		verificationLimit = fmt.Sprintf("%d when offered", opts.maxVerificationCalls)
+	}
+	explorationLimit := "outer deadline"
+	if opts.explorationTimeout > 0 {
+		explorationLimit = fmt.Sprintf("%ds", int(opts.explorationTimeout/time.Second))
+	}
+	verificationTimeout := "outer deadline"
+	if opts.verificationTimeout > 0 {
+		verificationTimeout = fmt.Sprintf("%ds", int(opts.verificationTimeout/time.Second))
+	}
+	reasoningEffort := strings.ToUpper(strings.TrimSpace(opts.reasoningEffort))
+	if reasoningEffort == "" {
+		reasoningEffort = "PROVIDER DEFAULT"
+	}
+	reasoningBudget := "provider default"
+	if opts.reasoningMaxTokens > 0 {
+		reasoningBudget = fmt.Sprintf("%s/%d tokens per turn", reasoningEffort, opts.reasoningMaxTokens)
 	}
 	planPrompt := prompt + fmt.Sprintf(`
 
-## Bounded Review Plan
+## Review Runtime
 
-- Size class: %s
-- Model: %s
-- Reasoning effort: %s
-- Limit each model turn to %d reasoning tokens.
-- Final response budget: %s. Use compact ledgers, but never omit required sections to fit.
-- %s
-- %s
-- %s
-- Limit each verification command to %d seconds.
-- Finish evidence collection within %s.
-- Keep the final %d seconds for a complete verdict.
-- Return only the final review.
-- Start the first line with "## Grade:".
-- In "## CI Status", write "- Build: STATE" and "- Tests: STATE".
-- Do not bold the Build or Tests labels.
-- When no feedback IDs exist, write exactly "- **Feedback disposition**: `+"`NONE_SUPPLIED`"+` — no prior feedback was supplied."
-- When feedback IDs exist, use `+"`DISPOSITIONED`"+` and copy every exact ID.
-- Omit a candidate finding when your own analysis disproves or withdraws it.
-- Omit future-hardening and style observations from Findings. Put them in Remarks.
-- Copy every source identifier and registry key exactly from inspected evidence.
-- Compare measurements only when their workload labels and settings match.
-- List MINOR findings as Suggestions, not Blockers.
-- Use REQUEST CHANGES only with a Blocker or proved current failure.
-- Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION.
-- Keep a pending or unavailable CI condition in CI Status and Remarks, not Blockers or Findings.
-- For that case, write "- **Recommendation**: NEEDS DISCUSSION" and "- **Blockers**: NONE".
-- Never write NEEDS DISCUSSION as the Blockers value.
-- Cite supplied commands and results even when this review makes no duplicate tool call.
-- Missing duplicate verification alone requires Grade B with NEEDS DISCUSSION, not Grade C.
-- Write the Falsification conclusion as one bare token with no words after it.
-`+prompts.RuleFindingsRequireProvedFalsification+`
-`+prompts.RuleDisprovedOrUnresolvedGoesToRemarks+`
-- Require a current failing input, violated invariant, failing check, or reproducible behavior for every Finding.
-- Treat CONFIRMED_PASS as authoritative for the behavior that its focused command exercises.
-- Never let a filename, field-visibility, or source-shape heuristic override a passing focused test.
-- Treat INCONCLUSIVE, timeout, cancellation, and unavailable verification as unknown evidence, never proof of failure.
-- Report an INCONCLUSIVE verification as UNAVAILABLE in Build and Tests. INCONCLUSIVE is not an output state.
-- Treat repository verification directives as execution policy. Never replace a required Docker or CI gate with a host command.
-- A self-selected verification timeout is a review limitation. It cannot create a Finding, Blocker, FAIL state, or Grade C.
-- Use exact Go test names. The verification tool anchors the complete -run alternation.
-- For Go approval evidence, use the harness-collected run_verification kind=test result. Go kind=build does not execute tests.
-`+prompts.RuleUseHarnessVerificationEvidence+`
-- Omit ASD-STE100, comment-length, wording, naming, and style observations from every section.
-- Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks.
-- Do not expose analysis, repair commentary, progress text, or a plan.
-- Keep the final review concise enough to fit the output limit.
-- Inspect the supplied diff and structural evidence before you call a tool.
-- Do not read a changed file when the supplied diff already shows the required lines.
-- Use tools only for omitted definitions, callers, invariants, or targeted verification.
-- Before approval, trace changed state through each cache, dispatch gate, and fast path that can bypass it.
-- Do not treat direct helper tests as proof that production dispatch reaches the changed behavior.
-- Do not repeat equivalent searches, builds, or tests.
-- If required evidence cannot fit or project guidance forbids it, finish with a non-approval verdict.
+- Scope: %s; model: %s.
+- Budgets: reasoning %s; output %s; model turns %s; tool calls %s.
+- Deadlines: evidence %s; verification %s per call; synthesis reserve %ds.
+- Verification: Buckley owns the supplied baseline; focused retry capacity is %s.
 `,
 		strings.ToUpper(opts.sizeClass),
 		opts.modelID,
-		strings.ToUpper(opts.reasoningEffort),
-		opts.reasoningMaxTokens,
+		reasoningBudget,
 		reviewOutputBudgetText(opts),
 		turnLimit,
 		toolLimit,
-		verificationLimit,
-		int(opts.verificationTimeout/time.Second),
 		explorationLimit,
+		verificationTimeout,
 		int(opts.synthesisLead/time.Second),
+		verificationLimit,
 	)
-	if isDeepSeekV4ProReviewModel(opts.modelID) {
+	if !isProjectReviewSize(opts.sizeClass) {
+		planPrompt += `- Verdict mapping: missing, pending, or unavailable verification without a proved defect requires Grade B and NEEDS DISCUSSION with Blockers NONE; CRITICAL/MAJOR findings are Blockers; MINOR findings are Suggestions.
+`
+	}
+	if behavior != nil && behavior.Profile == modelprofile.ReviewProfileStructuredCodeReview {
 		planPrompt += `
 
-## DeepSeek V4 Pro Profile
+## Structured Code Review Profile
 
 - Use the structured tool-call channel exclusively. Never encode a tool invocation as XML, pseudo-tags, or assistant prose; if a tool result is needed, issue the real tool call.
 - When ` + "`exec_program`" + ` is offered, prefer one read-only code-mode program for broad inventory, joins, and cross-references, then use narrow tool calls for follow-up evidence. Never assume code mode exists when it is not offered.
@@ -536,6 +456,10 @@ func appendReviewExecutionPlan(prompt string, opts automatedReviewOptions) strin
 `
 	}
 	return appendReviewDepthInstructions(planPrompt, opts)
+}
+
+func isProjectReviewSize(sizeClass string) bool {
+	return strings.EqualFold(strings.TrimSpace(sizeClass), "project")
 }
 
 // appendReviewDepthInstructions is deliberately layered after the provider
@@ -550,7 +474,7 @@ func appendReviewDepthInstructions(prompt string, opts automatedReviewOptions) s
 
 - Use two passes: first map the relevant state and call sites, then falsify the highest-risk hypotheses.
 - For every proposed finding, trace the changed behavior through its definition, callers, configuration, failure path, and the nearest relevant test or executable check.
-- Make the focused verification attempts required by the captured repository gate. If a required gate is unavailable, retry or let the harness fail closed; never emit a caveated completion.
+- Make the focused run_verification attempts required by the captured repository gate. If a required gate is unavailable, retry or let the harness fail closed; never emit a caveated completion.
 - Keep a compact verification ledger in the final review. Every finding must point to a ledger entry marked ` + "`SUPPORTED`" + `, ` + "`DISPROVED`" + `, or ` + "`UNAVAILABLE`" + `.
 - Cover the complete balanced scope: every changed file plus its direct callers, configuration gates, failure path, and nearest relevant test. Generated/vendor/build output may be excluded only when it is explicitly outside that scope.
 - End with ` + "`Completeness: COMPLETE`" + `. If this scope cannot be completed, continue gathering evidence or let the harness fail the pass; do not emit a partial review.

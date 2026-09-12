@@ -52,6 +52,152 @@ func TestOpenAICompatibleProvider_ConfiguredSupportedParametersApplyToStaticCata
 	}
 }
 
+func TestOpenAICompatibleProvider_FetchModelsPreservesAdvertisedMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("path = %q, want /models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[
+			{
+				"id":"glm-5.3-flash",
+				"name":"GLM Flash",
+				"description":"fast thinking model",
+				"context_length":1048576,
+				"max_completion_tokens":32768,
+				"created":1790000000,
+				"architecture":{"modality":"text+image","tokenizer":"test-tokenizer"},
+				"supported_parameters":["tools","reasoning_effort"]
+			},
+			{
+				"id":"openai_compatible/prefixed-model",
+				"name":"openai_compatible/Prefixed Model",
+				"context_length":512,
+				"supported_parameters":["tools"]
+			}
+		]}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"glm-5.3-flash":                    {"reasoning_content", "tools", " "},
+			"openai_compatible/prefixed-model": {"parallel_tool_calls"},
+		},
+		ContextLengths: map[string]int{"openai_compatible/glm-5.3-flash": 2048000},
+	}, false)
+	provider.httpClient = server.Client()
+
+	catalog, err := provider.FetchCatalog()
+	if err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+	if len(catalog.Data) != 2 {
+		t.Fatalf("catalog = %+v, want two fetched models", catalog.Data)
+	}
+
+	got := catalog.Data[0]
+	if got.ID != "openai_compatible/glm-5.3-flash" {
+		t.Fatalf("model ID = %q, want canonical provider prefix", got.ID)
+	}
+	if got.Name != "GLM Flash" {
+		t.Fatalf("model name = %q, want provider-advertised name", got.Name)
+	}
+	if got.Description != "fast thinking model" || got.Created != 1790000000 {
+		t.Fatalf("model metadata = %+v, want description and created preserved", got)
+	}
+	if got.ContextLength != 2048000 {
+		t.Fatalf("context length = %d, want configured override 2048000", got.ContextLength)
+	}
+	if got.MaxCompletionTokens != 32768 {
+		t.Fatalf("max completion tokens = %d, want 32768", got.MaxCompletionTokens)
+	}
+	if got.Architecture.Modality != "text+image" || got.Architecture.Tokenizer != "test-tokenizer" {
+		t.Fatalf("architecture = %+v, want provider-advertised architecture preserved", got.Architecture)
+	}
+	wantParams := []string{"tools", "reasoning_effort", "reasoning_content"}
+	if len(got.SupportedParameters) != len(wantParams) {
+		t.Fatalf("supported parameters = %v, want %v", got.SupportedParameters, wantParams)
+	}
+	for i := range wantParams {
+		if got.SupportedParameters[i] != wantParams[i] {
+			t.Fatalf("supported parameters = %v, want %v", got.SupportedParameters, wantParams)
+		}
+	}
+
+	got = catalog.Data[1]
+	if got.ID != "openai_compatible/prefixed-model" {
+		t.Fatalf("prefixed model ID = %q, want no double prefix", got.ID)
+	}
+	if got.Name != "Prefixed Model" {
+		t.Fatalf("prefixed model name = %q, want display name without provider prefix", got.Name)
+	}
+	wantParams = []string{"tools", "parallel_tool_calls"}
+	if len(got.SupportedParameters) != len(wantParams) {
+		t.Fatalf("prefixed supported parameters = %v, want %v", got.SupportedParameters, wantParams)
+	}
+	for i := range wantParams {
+		if got.SupportedParameters[i] != wantParams[i] {
+			t.Fatalf("prefixed supported parameters = %v, want %v", got.SupportedParameters, wantParams)
+		}
+	}
+}
+
+func TestOpenAICompatibleProvider_FetchModelsAcceptsMaxModelLenAndMinimalID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("path = %q, want /models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[
+			{"id":"minimal","architecture":{"tokenizer":"partial-tokenizer"}},
+			{"id":"long-context","max_model_len":262144,"top_provider":{"max_completion_tokens":16384}}
+		]}`)
+	}))
+	defer server.Close()
+
+	provider := newTestOpenAICompatibleProvider(server.URL)
+	provider.httpClient = server.Client()
+
+	catalog, err := provider.FetchCatalog()
+	if err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+	if len(catalog.Data) != 2 {
+		t.Fatalf("catalog = %+v, want two fetched models", catalog.Data)
+	}
+
+	minimal := catalog.Data[0]
+	if minimal.ID != "openai_compatible/minimal" || minimal.Name != "minimal" {
+		t.Fatalf("minimal model = %+v, want prefixed ID and raw name", minimal)
+	}
+	if minimal.ContextLength != 8192 {
+		t.Fatalf("minimal context length = %d, want default 8192", minimal.ContextLength)
+	}
+	if minimal.Architecture.Modality != "text" {
+		t.Fatalf("minimal architecture = %+v, want text default", minimal.Architecture)
+	}
+	if minimal.Architecture.Tokenizer != "partial-tokenizer" {
+		t.Fatalf("minimal tokenizer = %q, want preserved provider metadata", minimal.Architecture.Tokenizer)
+	}
+	if len(minimal.SupportedParameters) != 0 {
+		t.Fatalf("minimal supported parameters = %v, want none", minimal.SupportedParameters)
+	}
+
+	longContext := catalog.Data[1]
+	if longContext.ID != "openai_compatible/long-context" || longContext.Name != "long-context" {
+		t.Fatalf("long context model = %+v, want prefixed ID and raw name", longContext)
+	}
+	if longContext.ContextLength != 262144 {
+		t.Fatalf("long context length = %d, want max_model_len 262144", longContext.ContextLength)
+	}
+	if longContext.MaxCompletionTokens != 16384 {
+		t.Fatalf("long context max completion tokens = %d, want top_provider 16384", longContext.MaxCompletionTokens)
+	}
+}
+
 func TestLiteLLMLegacyAlias_ConfiguredSupportedParametersAugmentModelInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/model/info" {

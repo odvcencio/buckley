@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -43,6 +44,18 @@ func acpSSEChunk(t *testing.T, w io.Writer, content, reasoning, finishReason str
 	}
 	b.WriteString(`}]}`)
 	_, _ = io.WriteString(w, "data: "+b.String()+"\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func acpSSEJSON(t *testing.T, w io.Writer, payload any) {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal SSE payload: %v", err)
+	}
+	_, _ = io.WriteString(w, "data: "+string(data)+"\n\n")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -314,7 +327,7 @@ func TestRunACPLoop_RejectsProviderTruncationFinishReason(t *testing.T) {
 	if err == nil || !errors.As(err, &incomplete) || !strings.Contains(err.Error(), "truncated at its output limit") {
 		t.Fatalf("error = %v, want provider truncation rejected as incomplete", err)
 	}
-	if text != "" {
-		t.Fatalf("text = %q, want no conclusive answer", text)
+	if text != "partial answer" {
+		t.Fatalf("text = %q, want preserved incomplete draft", text)
 	}
 }

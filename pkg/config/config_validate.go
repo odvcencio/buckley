@@ -19,6 +19,7 @@ var configValidators = []func(*Config) error{
 	validateTrustLevel,
 	validateExecutionModes,
 	validateReasoning,
+	validateOpenAICompatible,
 	validateApprovalMode,
 	validateSandbox,
 	validateToolMiddleware,
@@ -93,6 +94,28 @@ func validateReasoning(c *Config) error {
 	}
 	if !validReasoning[reasoning] {
 		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
+	}
+	return nil
+}
+
+func validateOpenAICompatible(c *Config) error {
+	if c.Providers.OpenAICompatible.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_max_reasoning_chunks must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_max_reasoning_chunks must be >= 0")
 	}
 	return nil
 }
