@@ -400,7 +400,7 @@ func (t *PatchFileTool) Name() string {
 }
 
 func (t *PatchFileTool) Description() string {
-	return "Apply a unified diff patch to modify files, with configurable path stripping (-pN)."
+	return "Apply a standard unified diff with ---/+++ file headers and counted @@ hunks. The *** Begin Patch format is not supported. Keep patches small and read current lines before editing."
 }
 
 func (t *PatchFileTool) Parameters() ParameterSchema {
@@ -409,7 +409,7 @@ func (t *PatchFileTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"patch": {
 				Type:        "string",
-				Description: "Unified diff/patch content to apply",
+				Description: "Standard unified diff, for example:\n--- path/to/file\n+++ path/to/file\n@@ -1 +1 @@\n-old line\n+new line\nUse --- /dev/null when adding a file, and count every line in each hunk. For a/ and b/ path prefixes, set strip to 1.",
 			},
 			"strip": {
 				Type:        "integer",
