@@ -143,7 +143,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		cmd = exec.CommandContext(ctx, "rg", args...)
 		toolName = "rg"
 	} else {
-		args := []string{"-n", "-r", "-H", "-Z", "--exclude-dir=.git", "--binary-files=without-match"}
+		args := []string{"-E", "-n", "-r", "-H", "-Z", "--exclude-dir=.git", "--binary-files=without-match"}
 		if !caseSensitive {
 			args = append(args, "-i")
 		}
