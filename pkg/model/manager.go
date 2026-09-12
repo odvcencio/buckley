@@ -847,6 +847,14 @@ func (m *Manager) GetPricing(modelID string) (*ModelPricing, error) {
 	if err != nil {
 		return nil, err
 	}
+	if info == nil {
+		return nil, fmt.Errorf("model pricing unavailable for %s", modelID)
+	}
+	pricing := info.Pricing
+	if !finiteNonNegative(pricing.Prompt) || !finiteNonNegative(pricing.Completion) ||
+		(!info.PricingKnown && (pricing.Prompt == 0 || pricing.Completion == 0)) {
+		return nil, fmt.Errorf("model pricing unavailable for %s: prices must be finite, non-negative, and explicitly known when zero", modelID)
+	}
 	return &info.Pricing, nil
 }
 
