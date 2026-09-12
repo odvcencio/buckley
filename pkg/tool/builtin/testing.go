@@ -17,7 +17,7 @@ import (
 var (
 	jestResultsRe  = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
 	pytestResultRe = regexp.MustCompile(`(\d+)\s+(\w+)`)
-	cargoResultRe  = regexp.MustCompile(`(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+	cargoResultRe  = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
 	goPackageRe    = regexp.MustCompile(`package\s+(\w+)`)
 )
 
@@ -135,20 +135,23 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	// Parse results
 	passed, failed, skipped := t.parseTestResults(framework, output)
 	verificationError := ""
-	if framework == "go" {
-		report := parseGoTestOutput(output)
-		passed, failed, skipped = report.passed, report.failed, report.skipped
-		output = report.output
-		if exitCode == 0 {
-			switch {
-			case !report.complete:
+	if framework == "go" || framework == "cargo" {
+		if framework == "go" {
+			report := parseGoTestOutput(output)
+			passed, failed, skipped = report.passed, report.failed, report.skipped
+			output = report.output
+			if exitCode == 0 && !report.complete {
 				verificationError = "go test did not produce a complete test report"
+			}
+		}
+		if exitCode == 0 && verificationError == "" {
+			switch {
 			case failed > 0:
-				verificationError = "go test reported failed tests"
+				verificationError = framework + " test reported failed tests"
 			case passed+skipped == 0:
-				verificationError = "go test ran no tests; check the path and pattern"
+				verificationError = framework + " test ran no tests; check the path and pattern"
 			case passed == 0:
-				verificationError = "go test skipped every test; no passing tests verified"
+				verificationError = framework + " test skipped every test; no passing tests verified"
 			}
 		}
 	}
@@ -372,11 +375,17 @@ func (t *RunTestsTool) parsePytestResults(output string) (passed, failed, skippe
 }
 
 func (t *RunTestsTool) parseCargoResults(output string) (passed, failed, skipped int) {
-	matches := cargoResultRe.FindStringSubmatch(output)
-	if len(matches) == 4 {
-		fmt.Sscanf(matches[1], "%d", &passed)
-		fmt.Sscanf(matches[2], "%d", &failed)
-		fmt.Sscanf(matches[3], "%d", &skipped)
+	for _, matches := range cargoResultRe.FindAllStringSubmatch(output, -1) {
+		if len(matches) != 4 {
+			continue
+		}
+		var p, f, s int
+		fmt.Sscanf(matches[1], "%d", &p)
+		fmt.Sscanf(matches[2], "%d", &f)
+		fmt.Sscanf(matches[3], "%d", &s)
+		passed += p
+		failed += f
+		skipped += s
 	}
 	return
 }
