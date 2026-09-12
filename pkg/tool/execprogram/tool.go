@@ -18,6 +18,7 @@ import (
 type ProgramTool struct {
 	runner    *execmode.Runner
 	evidence  evidence.Store
+	ledger    runledger.Store
 	runID     string
 	sessionID string
 }
@@ -69,6 +70,7 @@ func NewProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.St
 	return &ProgramTool{
 		runner:    runner,
 		evidence:  ev,
+		ledger:    ledger,
 		runID:     runID,
 		sessionID: sessionID,
 	}, nil
@@ -162,6 +164,21 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		return nil, fmt.Errorf("exec_program: store program evidence: %w", err)
 	}
 
+	startedEvent, err := t.ledger.Append(ctx, runledger.Event{
+		Type:        "exec_program.started",
+		SessionID:   t.sessionID,
+		RunID:       t.runID,
+		EvidenceIDs: []string{program.ID},
+		Payload: map[string]any{
+			"language":         language,
+			"program_evidence": program.ID,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exec_program: append started event: %w", err)
+	}
+	executionID := startedEvent.ID
+
 	started := time.Now()
 	var result execmode.Result
 	if language == "fw" {
@@ -187,6 +204,7 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		return nil, fmt.Errorf("exec_program: store output evidence: %w", evidenceErr)
 	}
 	data := map[string]any{
+		"execution_id":     executionID,
 		"stdout":           result.Stdout,
 		"stderr":           result.Stderr,
 		"exit_code":        result.ExitCode,
@@ -210,6 +228,26 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 			message += "; "
 		}
 		message += truncatedMsg
+	}
+	if _, err := t.ledger.Append(ctx, runledger.Event{
+		Type:        "exec_program.finished",
+		SessionID:   t.sessionID,
+		RunID:       t.runID,
+		EvidenceIDs: []string{program.ID, output.ID},
+		Payload: map[string]any{
+			"execution_id":     executionID,
+			"program_evidence": program.ID,
+			"output_evidence":  output.ID,
+			"language":         language,
+			"exit_code":        result.ExitCode,
+			"success":          message == "",
+			"error":            message,
+			"duration_ms":      data["duration_ms"],
+			"stdout_truncated": result.StdoutTruncated,
+			"stderr_truncated": result.StderrTruncated,
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("exec_program: append finished event: %w", err)
 	}
 	return &builtin.Result{Success: message == "", Error: message, Data: data}, nil
 }

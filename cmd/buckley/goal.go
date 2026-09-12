@@ -268,6 +268,16 @@ func runGoalAudit(args []string) error {
 				goalAuditField(ev.Payload["reason_code"], 64))
 		case ev.Type == runledger.EventControllerDecision:
 			line = fmt.Sprintf("decide %-12s %s", ev.Payload["decision"], truncate(fmt.Sprint(ev.Payload["reason"]), 90))
+		case ev.Type == "exec_program.started":
+			line = fmt.Sprintf("exec start id=%s program=%s",
+				goalAuditField(ev.ID, 128),
+				goalAuditField(ev.Payload["program_evidence"], 64))
+		case ev.Type == "exec_program.finished":
+			line = fmt.Sprintf("exec finish id=%s success=%s exit=%s output=%s",
+				goalAuditField(ev.Payload["execution_id"], 128),
+				goalAuditField(fmt.Sprint(ev.Payload["success"]), 16),
+				goalAuditField(fmt.Sprint(ev.Payload["exit_code"]), 16),
+				goalAuditField(ev.Payload["output_evidence"], 64))
 		case strings.HasPrefix(ev.Type, "model.") || strings.HasPrefix(ev.Type, "tool."):
 			line = fmt.Sprintf("%-28s step=%s attempt=%v", ev.Type, truncate(fmt.Sprint(ev.Payload["step_id"]), 72), ev.Payload["attempt"])
 		case strings.HasPrefix(ev.Type, "budget."):

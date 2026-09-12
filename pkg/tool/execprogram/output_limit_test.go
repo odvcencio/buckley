@@ -70,6 +70,25 @@ func main(){fmt.Print(strings.Repeat("x",%d));fmt.Fprint(os.Stderr,strings.Repea
 			if tc.exit != 0 && !strings.Contains(result.Error, "program exited") {
 				t.Fatalf("lost process error: %q", result.Error)
 			}
+			events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: run.RunID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, event := range events {
+				if event.Type != "exec_program.finished" || event.Payload["execution_id"] != result.Data["execution_id"] {
+					continue
+				}
+				found = true
+				if event.Payload["success"] != result.Success || event.Payload["error"] != result.Error ||
+					fmt.Sprint(event.Payload["exit_code"]) != fmt.Sprint(result.Data["exit_code"]) ||
+					event.Payload["stdout_truncated"] != stdoutTruncated || event.Payload["stderr_truncated"] != stderrTruncated {
+					t.Fatalf("ledger outcome disagrees with tool result: %+v", event.Payload)
+				}
+			}
+			if !found {
+				t.Fatal("missing finished execution outcome")
+			}
 			stdout, _ := result.Data["stdout"].(string)
 			stderr, _ := result.Data["stderr"].(string)
 			if len(stdout) != min(tc.stdout, limit) || len(stderr) != min(tc.stderr, limit) {
