@@ -173,44 +173,43 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 	output, evidenceErr := t.evidence.Put(ctx, evidence.Object{
 		Kind:       evidence.KindToolResult,
 		MediaType:  "text/plain",
-		InlineBody: []byte(fmt.Sprintf("exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s", result.ExitCode, result.Stdout, result.Stderr)),
+		InlineBody: []byte(fmt.Sprintf("exit=%d\nstdout_truncated=%t\nstderr_truncated=%t\n--- stdout ---\n%s\n--- stderr ---\n%s", result.ExitCode, result.StdoutTruncated, result.StderrTruncated, result.Stdout, result.Stderr)),
 		Metadata: map[string]any{
 			evidence.MetaRunID:     t.runID,
 			evidence.MetaSessionID: t.sessionID,
 			"surface":              "exec_program",
 			"program_evidence":     program.ID,
+			"stdout_truncated":     result.StdoutTruncated,
+			"stderr_truncated":     result.StderrTruncated,
 		},
 	})
 	if evidenceErr != nil {
 		return nil, fmt.Errorf("exec_program: store output evidence: %w", evidenceErr)
 	}
-	if err != nil {
-		return &builtin.Result{
-			Success: false,
-			Error:   err.Error(),
-			Data: map[string]any{
-				"stderr":          result.Stderr,
-				"stdout":          result.Stdout,
-				"output_evidence": output.ID,
-			},
-		}, nil
-	}
 	data := map[string]any{
 		"stdout":           result.Stdout,
+		"stderr":           result.Stderr,
 		"exit_code":        result.ExitCode,
 		"duration_ms":      time.Since(started).Milliseconds(),
 		"program_evidence": program.ID,
 		"output_evidence":  output.ID,
+		"stdout_truncated": result.StdoutTruncated,
+		"stderr_truncated": result.StderrTruncated,
 	}
-	if result.Stderr != "" {
-		data["stderr"] = result.Stderr
+	truncated := result.StdoutTruncated || result.StderrTruncated
+	truncatedMsg := "output truncated: captured stdout/stderr exceeded the capture limit; print a smaller filtered summary of the output instead of the full text"
+	var message string
+	switch {
+	case err != nil:
+		message = err.Error()
+	case result.ExitCode != 0:
+		message = fmt.Sprintf("program exited %d", result.ExitCode)
 	}
-	if result.ExitCode != 0 {
-		return &builtin.Result{
-			Success: false,
-			Error:   fmt.Sprintf("program exited %d", result.ExitCode),
-			Data:    data,
-		}, nil
+	if truncated {
+		if message != "" {
+			message += "; "
+		}
+		message += truncatedMsg
 	}
-	return &builtin.Result{Success: true, Data: data}, nil
+	return &builtin.Result{Success: message == "", Error: message, Data: data}, nil
 }

@@ -22,10 +22,12 @@ const (
 
 // Result is one program run's outcome.
 type Result struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Duration time.Duration
+	Stdout          string
+	Stderr          string
+	ExitCode        int
+	Duration        time.Duration
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // Runner executes model-written Go programs against a jailed broker. The
@@ -168,15 +170,19 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	// WaitDelay backstops pipe readers held by orphans.
 	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedWriter{buf: &stdout}
-	cmd.Stderr = &limitedWriter{buf: &stderr}
+	stdoutW := &limitedWriter{buf: &stdout}
+	stderrW := &limitedWriter{buf: &stderr}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	started := time.Now()
 	err = cmd.Run()
 	result := Result{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		Duration: time.Since(started),
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		Duration:        time.Since(started),
+		StdoutTruncated: stdoutW.truncated,
+		StderrTruncated: stderrW.truncated,
 	}
 	if err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
@@ -235,19 +241,17 @@ func sharedGoCache() string {
 }
 
 type limitedWriter struct {
-	buf *bytes.Buffer
+	buf       *bytes.Buffer
+	truncated bool
 }
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
-	remaining := maxOutputBytes - w.buf.Len()
-	if remaining <= 0 {
-		return len(p), nil
+	keep := min(len(p), max(0, maxOutputBytes-w.buf.Len()))
+	if keep < len(p) {
+		w.truncated = true
 	}
-	if len(p) > remaining {
-		w.buf.Write(p[:remaining])
-		return len(p), nil
-	}
-	return w.buf.Write(p)
+	w.buf.Write(p[:keep])
+	return len(p), nil
 }
 
 // scaffold writes the scratch module: go.mod, the caps client package,
