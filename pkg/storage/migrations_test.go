@@ -210,3 +210,35 @@ func TestMigrationsRecoverFullyAppliedSchemaWithoutVersionRows(t *testing.T) {
 		t.Fatalf("principal columns=%d project indexes=%d, want 1/1", principalColumns, projectIndexes)
 	}
 }
+
+func TestMigrationsCreateModelBehaviorProfilePromotionsAfterCandidates(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "profiles.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	history, err := store.GetMigrationHistory()
+	if err != nil {
+		t.Fatalf("GetMigrationHistory: %v", err)
+	}
+	candidates, promotions := 0, 0
+	for _, migration := range history {
+		switch migration.Name {
+		case "model_behavior_profiles":
+			candidates = migration.Version
+		case "model_behavior_profile_promotions":
+			promotions = migration.Version
+		}
+	}
+	if candidates == 0 || promotions <= candidates {
+		t.Fatalf("migration versions candidates=%d promotions=%d, want promotions after candidates", candidates, promotions)
+	}
+	var tableCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_behavior_profile_promotions'`).Scan(&tableCount); err != nil {
+		t.Fatalf("query promotions table: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("promotions table count = %d, want 1", tableCount)
+	}
+}

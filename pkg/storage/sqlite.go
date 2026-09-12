@@ -184,6 +184,7 @@ var migrations = []SQLiteMigration{
 	{22, "session_execution_state", ensureSessionExecutionStateSchema},
 	{23, "session_effect_permits", ensureSessionEffectPermitSchema},
 	{24, "web_session_token_index", ensureWebSessionTokenIndex},
+	{25, "model_behavior_profile_promotions", ensureModelBehaviorProfilePromotionsSchema},
 }
 
 // sqliteTimestampLayout keeps every fractional second at nine digits.
@@ -303,6 +304,20 @@ func ensureModelBehaviorProfilesSchema(db MigrationDB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_model_behavior_profiles_latest ON model_behavior_profiles(model_id, measured_at, profile_version)`); err != nil {
 		return fmt.Errorf("index model_behavior_profiles: %w", err)
+	}
+	return nil
+}
+
+func ensureModelBehaviorProfilePromotionsSchema(db MigrationDB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_behavior_profile_promotions (
+		model_id TEXT PRIMARY KEY,
+		profile_version TEXT NOT NULL,
+		promoted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (model_id, profile_version)
+			REFERENCES model_behavior_profiles(model_id, profile_version)
+			ON DELETE RESTRICT
+	)`); err != nil {
+		return fmt.Errorf("create model_behavior_profile_promotions: %w", err)
 	}
 	return nil
 }

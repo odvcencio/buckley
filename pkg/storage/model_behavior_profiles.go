@@ -109,6 +109,98 @@ func (s *BehaviorProfileStore) Latest(ctx context.Context, modelID string) (mode
 	return profiles[len(profiles)-1], true, nil
 }
 
+func (s *BehaviorProfileStore) Promote(ctx context.Context, modelID, version string) error {
+	if err := profileStoreContextErr(ctx); err != nil {
+		return err
+	}
+	if s == nil || s.store == nil || s.store.db == nil {
+		return ErrStoreClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	modelID = strings.TrimSpace(modelID)
+	version = strings.TrimSpace(version)
+	if modelID == "" || version == "" {
+		return fmt.Errorf("model behavior profile promotion requires model id and profile version")
+	}
+
+	tx, err := s.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin model behavior profile promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existingVersion string
+	err = tx.QueryRowContext(ctx, `
+		SELECT profile_version
+		FROM model_behavior_profiles
+		WHERE model_id = ? AND profile_version = ?`, modelID, version).Scan(&existingVersion)
+	switch {
+	case err == sql.ErrNoRows:
+		return fmt.Errorf("model behavior profile %s version %s not found", modelID, version)
+	case err != nil:
+		return fmt.Errorf("read model behavior profile for promotion: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO model_behavior_profile_promotions (model_id, profile_version)
+		VALUES (?, ?)
+		ON CONFLICT(model_id) DO UPDATE SET
+			profile_version = excluded.profile_version,
+			promoted_at = CURRENT_TIMESTAMP
+		WHERE model_behavior_profile_promotions.profile_version <> excluded.profile_version`, modelID, version); err != nil {
+		return fmt.Errorf("promote model behavior profile: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit model behavior profile promotion: %w", err)
+	}
+	return nil
+}
+
+func (s *BehaviorProfileStore) Promoted(ctx context.Context, modelID string) (modelprofile.Profile, bool, error) {
+	if err := profileStoreContextErr(ctx); err != nil {
+		return modelprofile.Profile{}, false, err
+	}
+	if s == nil || s.store == nil || s.store.db == nil {
+		return modelprofile.Profile{}, false, ErrStoreClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return modelprofile.Profile{}, false, fmt.Errorf("model behavior profile promotion requires model id")
+	}
+
+	var version string
+	var body sql.NullString
+	err := s.store.db.QueryRowContext(ctx, `
+		SELECT promoted.profile_version, candidates.profile_json
+		FROM model_behavior_profile_promotions promoted
+		LEFT JOIN model_behavior_profiles candidates
+			ON candidates.model_id = promoted.model_id
+			AND candidates.profile_version = promoted.profile_version
+		WHERE promoted.model_id = ?`, modelID).Scan(&version, &body)
+	if err == sql.ErrNoRows {
+		return modelprofile.Profile{}, false, nil
+	}
+	if err != nil {
+		return modelprofile.Profile{}, false, fmt.Errorf("get promoted model behavior profile: %w", err)
+	}
+	if !body.Valid || strings.TrimSpace(body.String) == "" {
+		return modelprofile.Profile{}, false, fmt.Errorf("promoted model behavior profile %s version %s is dangling", modelID, version)
+	}
+	profile, err := decodeBehaviorProfile(body.String)
+	if err != nil {
+		return modelprofile.Profile{}, false, err
+	}
+	if profile.ModelID != modelID || profile.Version != version {
+		return modelprofile.Profile{}, false, fmt.Errorf("promoted model behavior profile pointer %s version %s resolved to %s version %s", modelID, version, profile.ModelID, profile.Version)
+	}
+	return profile, true, nil
+}
+
 func (s *BehaviorProfileStore) List(ctx context.Context, modelID string) ([]modelprofile.Profile, error) {
 	if err := profileStoreContextErr(ctx); err != nil {
 		return nil, err

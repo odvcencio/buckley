@@ -323,7 +323,7 @@ func TestWebSessionTokenIndexMigrationParity(t *testing.T) {
 	if _, err := store.db.Exec(`DROP INDEX idx_web_sessions_token_id`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version = 24`); err != nil {
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version >= 24`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

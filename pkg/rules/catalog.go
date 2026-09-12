@@ -67,6 +67,7 @@ var factContractSpecs = []factContractSpec{
 		field("model.native_json_schema", "bool"),
 		field("model.parallel_tool_calls", "bool"),
 		field("model.continuation", "bool"),
+		field("model.reasoning", "bool"),
 		field("model.code_mode", "bool"),
 		field("model.tool_reliability", "float64"),
 		field("model.structured_output_reliability", "float64"),

@@ -72,10 +72,10 @@ type AgentControllerEmergencyFuseConfig struct {
 }
 
 // AdaptiveProtocolConfig gates empirical model-profile protocol compilation.
-// Legacy keeps current behavior, shadow compiles receipts without applying
-// them, and dynamic applies only explicitly configured, versioned profiles.
-// This makes rollout and rollback an operator configuration change rather
-// than a model-name special case in the runtime.
+// Legacy keeps current behavior, shadow may compile the latest candidate into
+// an inert receipt, and dynamic applies only explicitly configured profiles or
+// a durable promoted-profile pointer. This makes rollout and rollback an
+// operator action rather than a model-name special case in the runtime.
 type AdaptiveProtocolConfig struct {
 	Mode          string                                `yaml:"mode" env:"BUCKLEY_ADAPTIVE_PROTOCOL_MODE"` // legacy | shadow | dynamic
 	PolicyVersion string                                `yaml:"policy_version"`
@@ -88,30 +88,44 @@ type AdaptiveProtocolConfig struct {
 // used as input to pkg/protocol. Fields are intentionally facts rather than
 // provider-name policy; evaluators can replace a profile version atomically.
 type ModelBehaviorProfileConfig struct {
-	Version                     string  `yaml:"version"`
-	Class                       string  `yaml:"class"`
-	SampleSize                  int     `yaml:"sample_size"`
-	Confidence                  float64 `yaml:"confidence"`
-	MeasuredAt                  string  `yaml:"measured_at"`
-	ToolCalls                   bool    `yaml:"tool_calls"`
-	NativeJSONSchema            bool    `yaml:"native_json_schema"`
-	ParallelToolCalls           bool    `yaml:"parallel_tool_calls"`
-	Continuation                bool    `yaml:"continuation"`
-	Reasoning                   bool    `yaml:"reasoning"`
-	CodeMode                    bool    `yaml:"code_mode"`
-	ContextWindowTokens         int     `yaml:"context_window_tokens"`
-	SafeVisibleToolCount        int     `yaml:"safe_visible_tool_count"`
-	ToolReliability             float64 `yaml:"tool_reliability"`
-	ArgumentRepairReliability   float64 `yaml:"argument_repair_reliability"`
-	StructuredOutputReliability float64 `yaml:"structured_output_reliability"`
-	ParallelCallReliability     float64 `yaml:"parallel_call_reliability"`
-	EditFidelity                float64 `yaml:"edit_fidelity"`
-	VerificationPassRate        float64 `yaml:"verification_pass_rate"`
-	EffectiveContextTokens      int     `yaml:"effective_context_tokens"`
-	ContinuationReliability     float64 `yaml:"continuation_reliability"`
-	LatencyP50MS                int64   `yaml:"latency_p50_ms"`
-	LatencyP95MS                int64   `yaml:"latency_p95_ms"`
-	CostUSDPerMTokens           float64 `yaml:"cost_usd_per_m_tokens"`
+	Version                     string                      `yaml:"version"`
+	Class                       string                      `yaml:"class"`
+	SampleSize                  int                         `yaml:"sample_size"`
+	Confidence                  float64                     `yaml:"confidence"`
+	MeasuredAt                  string                      `yaml:"measured_at"`
+	ToolCalls                   bool                        `yaml:"tool_calls"`
+	NativeJSONSchema            bool                        `yaml:"native_json_schema"`
+	ParallelToolCalls           bool                        `yaml:"parallel_tool_calls"`
+	Continuation                bool                        `yaml:"continuation"`
+	Reasoning                   bool                        `yaml:"reasoning"`
+	ReasoningEfforts            []string                    `yaml:"reasoning_efforts"`
+	CodeMode                    bool                        `yaml:"code_mode"`
+	ContextWindowTokens         int                         `yaml:"context_window_tokens"`
+	SafeVisibleToolCount        int                         `yaml:"safe_visible_tool_count"`
+	ToolReliability             float64                     `yaml:"tool_reliability"`
+	ArgumentRepairReliability   float64                     `yaml:"argument_repair_reliability"`
+	StructuredOutputReliability float64                     `yaml:"structured_output_reliability"`
+	ParallelCallReliability     float64                     `yaml:"parallel_call_reliability"`
+	EditFidelity                float64                     `yaml:"edit_fidelity"`
+	VerificationPassRate        float64                     `yaml:"verification_pass_rate"`
+	EffectiveContextTokens      int                         `yaml:"effective_context_tokens"`
+	ContinuationReliability     float64                     `yaml:"continuation_reliability"`
+	LatencyP50MS                int64                       `yaml:"latency_p50_ms"`
+	LatencyP95MS                int64                       `yaml:"latency_p95_ms"`
+	CostUSDPerMTokens           float64                     `yaml:"cost_usd_per_m_tokens"`
+	Review                      ReviewBehaviorProfileConfig `yaml:"review"`
+}
+
+// ReviewBehaviorProfileConfig carries review-command behavior for calibrated
+// and custom model profiles.
+type ReviewBehaviorProfileConfig struct {
+	Profile                            string         `yaml:"profile"`
+	WorkflowRiskSignals                bool           `yaml:"workflow_risk_signals"`
+	SupportingContextTokens            int            `yaml:"supporting_context_tokens"`
+	ReasoningMaxTokensBySize           map[string]int `yaml:"reasoning_max_tokens_by_size"`
+	ReasoningMaxTokensByEffort         map[string]int `yaml:"reasoning_max_tokens_by_effort"`
+	MinExplorationTimeoutSeconds       int            `yaml:"min_exploration_timeout_seconds"`
+	MinCriticExplorationTimeoutSeconds int            `yaml:"min_critic_exploration_timeout_seconds"`
 }
 
 // AgentOperationsConfig gates high-impact side effects the interactive agent
