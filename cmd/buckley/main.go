@@ -2307,6 +2307,9 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 		}
 		opts.codeMode = true
 	case "-p":
+		if !beforeCommand {
+			return false, nil
+		}
 		s.pending = startupPendingPrompt
 	case "--encoding":
 		if !beforeCommand {
