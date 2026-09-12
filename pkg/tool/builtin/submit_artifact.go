@@ -95,8 +95,8 @@ func (t *SubmitArtifactTool) Parameters() ParameterSchema {
 		Type: "object",
 		Properties: map[string]PropertySchema{
 			"source_refs": {
-				Type: "array", Description: "Optional source_ref IDs returned by read_file in this run. Buckley copies those captured pages into a source table without rereading files. Leave artifact blocks and evidence_refs empty when using this; source bytes are preserved, but summary accuracy and item coverage remain the caller's responsibility.",
-				Items: &PropertySchema{Type: "string", Description: "source_ref from a successful read"},
+				Type: "array", Description: "Use [\"all\"] to include every page already captured in this run without copying IDs, or list source_ref IDs from read_file for a subset. No files are read. Leave artifact blocks and evidence_refs empty. Output limits still apply; summary accuracy and coverage are not verified.",
+				Items: &PropertySchema{Type: "string", Description: "all (alone) or a source_ref from a successful read"},
 			},
 			"artifact": {
 				RawSchema:   artifactv1.JSONSchema(),

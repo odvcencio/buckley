@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -166,6 +167,17 @@ func (s *ArtifactSubmission) appendCapturedSources(artifact artifactv1.Artifact,
 	if len(refs) > maxCapturedSources {
 		return artifact, fmt.Errorf("at most %d source references may be submitted", maxCapturedSources)
 	}
+	if len(refs) == 1 && refs[0] == "all" {
+		if len(s.sources) == 0 {
+			return artifact, fmt.Errorf("no captured sources to select; capture source pages with read_file first")
+		}
+		ids := make([]string, 0, len(s.sources))
+		for id := range s.sources {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		refs = ids
+	}
 	if len(artifact.Blocks) != 0 || len(artifact.EvidenceRefs) != 0 {
 		return artifact, fmt.Errorf("with source_refs, leave artifact blocks and evidence_refs empty; Buckley fills them from captured pages")
 	}
@@ -217,6 +229,12 @@ func parseSourceRefs(raw any) ([]string, error) {
 		return nil, fmt.Errorf("too many source references")
 	}
 	for _, id := range refs {
+		if id == "all" {
+			if len(refs) == 1 {
+				continue
+			}
+			return nil, fmt.Errorf("source_refs \"all\" must be the only reference")
+		}
 		if len(id) != 68 || !strings.HasPrefix(id, "src_") {
 			return nil, fmt.Errorf("invalid source reference; use source_ref returned by read_file")
 		}

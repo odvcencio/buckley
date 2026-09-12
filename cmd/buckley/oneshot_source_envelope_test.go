@@ -18,12 +18,35 @@ func TestSubmissionFallbackPromptHasValidMinimalEnvelope(t *testing.T) {
 	if err := json.NewDecoder(strings.NewReader(artifactv1.SubmissionFallbackPrompt[start:])).Decode(&raw); err != nil {
 		t.Fatal(err)
 	}
-	a, err := resolveOneShotArtifact(string(raw), artifactv1.OutputContract{Mode: artifactv1.OutputSubmitArtifact}, nil)
+	for _, mode := range []artifactv1.OutputMode{artifactv1.OutputSubmitArtifact, artifactv1.OutputPromptJSON, artifactv1.OutputNativeJSONSchema} {
+		sink := &builtin.ArtifactSubmission{}
+		ref, err := sink.CaptureReadSource(&builtin.Result{Success: true, Data: map[string]any{"path": "/never-reread", "content": "\tcaptured\r\n", "page": map[string]any{"start_line": 1, "end_line": 1}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := resolveOneShotArtifact(string(raw), artifactv1.OutputContract{Mode: mode}, sink)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Status != artifactv1.StatusIncomplete || len(a.Blocks) != 1 || len(a.IncompleteReasons) == 0 || a.Blocks[0].Table.Rows[0][4] != "\tcaptured\r\n" || a.EvidenceRefs[0].ID != ref {
+			t.Fatalf("fallback shape lost captured bytes/identity or claimed completion: %+v", a)
+		}
+		if _, err := resolveOneShotArtifact(string(raw), artifactv1.OutputContract{Mode: mode}, nil); err == nil {
+			t.Fatal("all accepted without any captures")
+		}
+	}
+	var args map[string]any
+	if err := json.Unmarshal(raw, &args); err != nil {
+		t.Fatal(err)
+	}
+	args["source_refs"] = []string{}
+	empty, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Status != artifactv1.StatusIncomplete || len(a.Blocks) != 0 || len(a.IncompleteReasons) == 0 {
-		t.Fatalf("fallback shape invents evidence or completion: %+v", a)
+	a, err := resolveOneShotArtifact(string(empty), artifactv1.OutputContract{Mode: artifactv1.OutputSubmitArtifact}, nil)
+	if err != nil || a.Status != artifactv1.StatusIncomplete || len(a.Blocks) != 0 {
+		t.Fatalf("empty-capture fallback failed: %+v %v", a, err)
 	}
 }
 
