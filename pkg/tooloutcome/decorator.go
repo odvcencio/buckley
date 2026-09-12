@@ -65,6 +65,9 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 	if metadata.Verification {
 		outcome.VerificationObserved = true
 		outcome.VerificationPassed = execErr == nil && result != nil && result.Success
+		if outcome.StateObserved && outcome.StateChanged {
+			outcome.Content += "\n\n[Buckley verification] Workspace state changed during this check. This result does not verify the final workspace state. Inspect the change and, if safe and within the task and remaining budget, run a relevant check again. If you cannot, report verification as incomplete."
+		}
 	}
 	return outcome
 }

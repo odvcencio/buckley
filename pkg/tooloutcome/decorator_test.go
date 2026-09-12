@@ -2,9 +2,11 @@ package tooloutcome
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -207,6 +209,82 @@ func TestObservation_ReadOnlyDoesNotObserveWorkspaceState(t *testing.T) {
 	outcome := observation.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, tool.ToolMetadata{Impact: tool.ImpactReadOnly}, &builtin.Result{Success: true}, nil)
 	if outcome.StateObserved || outcome.StateChanged {
 		t.Fatalf("read-only observation = %+v, want no state observation", outcome)
+	}
+}
+
+func TestObservation_VerificationNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name, changedPath    string
+		verification, passed bool
+		execErr              error
+	}{
+		{name: "stable pass", verification: true, passed: true},
+		{name: "new lockfile", changedPath: "Cargo.lock", verification: true, passed: true},
+		{name: "tracked source changed", changedPath: "tracked.txt", verification: true, passed: true},
+		{name: "failed check changed source", changedPath: "tracked.txt", verification: true},
+		{name: "execution error changed source", changedPath: "tracked.txt", verification: true, passed: true, execErr: errors.New("execution interrupted")},
+		{name: "ordinary edit", changedPath: "tracked.txt", passed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newToolOutcomeGitRepo(t)
+			metadata := tool.ToolMetadata{Impact: tool.ImpactModifying, Verification: tc.verification}
+			if tc.verification {
+				metadata.Impact = tool.ImpactReadOnly
+			}
+			observation := BeginWithMetadata(context.Background(), root, metadata)
+			if tc.changedPath != "" {
+				if err := os.WriteFile(filepath.Join(root, tc.changedPath), []byte("changed\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const original = `{"output":"test evidence","passed":1}`
+			result := &builtin.Result{Success: tc.passed, Data: map[string]any{"output": "test evidence"}}
+			success := tc.passed && tc.execErr == nil
+			outcome := observation.Finish(context.Background(), agentloop.ToolOutcome{Content: original, Success: success}, metadata, result, tc.execErr)
+			wantNotice := tc.verification && tc.changedPath != ""
+			if strings.Contains(outcome.Content, "[Buckley verification]") != wantNotice || !strings.HasPrefix(outcome.Content, original) {
+				t.Fatalf("content=%q wantNotice=%v", outcome.Content, wantNotice)
+			}
+			if !wantNotice && outcome.Content != original {
+				t.Fatalf("unchanged result was decorated: %q", outcome.Content)
+			}
+			if outcome.Success != success || outcome.VerificationObserved != tc.verification || outcome.VerificationPassed != (tc.verification && success) || !outcome.StateObserved || outcome.StateChanged != (tc.changedPath != "") {
+				t.Fatalf("evidence flags changed: %+v", outcome)
+			}
+			if result.Success != tc.passed || result.Data["output"] != "test evidence" {
+				t.Fatal("notice mutated the underlying result")
+			}
+		})
+	}
+}
+
+func TestObservation_VerificationNoticeDoesNotDischargeVerificationDebt(t *testing.T) {
+	root := newToolOutcomeGitRepo(t)
+	metadata := tool.ToolMetadata{Impact: tool.ImpactReadOnly, Verification: true}
+	observation := BeginWithMetadata(context.Background(), root, metadata)
+	if err := os.WriteFile(filepath.Join(root, "Cargo.lock"), []byte("generated\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first := observation.Finish(context.Background(), agentloop.ToolOutcome{Content: "passed", Success: true}, metadata, &builtin.Result{Success: true}, nil)
+	if !first.StateChanged || !first.VerificationPassed || !strings.Contains(first.Content, "does not verify the final workspace state") {
+		t.Fatalf("first check=%+v", first)
+	}
+	contract := agentloop.CompletionContract{TaskIntent: agentloop.ReadOnlyIntent, RequirePostChangeVerification: true}
+	snapshot := agentloop.ProgressSnapshot{StateObservedCalls: 1, StateChangedCalls: 1, LastStateChangeSequence: 1, VerificationObservedCalls: 1, VerificationPassedCalls: 1, LastVerificationSequence: 1, LastVerificationPassed: true}
+	var contractErr *agentloop.CompletionContractError
+	if err := contract.Validate(snapshot); !errors.As(err, &contractErr) || contractErr.Reason != agentloop.CompletionMissingPostChangeVerification {
+		t.Fatalf("same-call change and verification accepted: %v", err)
+	}
+	second := BeginWithMetadata(context.Background(), root, metadata).Finish(context.Background(), agentloop.ToolOutcome{Content: "passed", Success: true}, metadata, &builtin.Result{Success: true}, nil)
+	if !second.StateObserved || second.StateChanged || !second.VerificationPassed || second.Content != "passed" {
+		t.Fatalf("stable follow-up=%+v", second)
+	}
+	snapshot.StateObservedCalls++
+	snapshot.VerificationObservedCalls++
+	snapshot.VerificationPassedCalls++
+	snapshot.LastVerificationSequence = 2
+	if err := contract.Validate(snapshot); err != nil {
+		t.Fatalf("stable follow-up rejected: %v", err)
 	}
 }
 
