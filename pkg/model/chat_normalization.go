@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -96,6 +97,13 @@ func normalizeChatMessagesWithOptions(messages []Message, providerID, modelID st
 					}
 					if strings.TrimSpace(call.Function.Arguments) == "" {
 						call.Function.Arguments = "{}"
+					} else if !strings.HasPrefix(strings.TrimSpace(call.Function.Arguments), "{") || !json.Valid([]byte(call.Function.Arguments)) {
+						// Only wrap request history; raw transcript and dispatch
+						// arguments stay unchanged.
+						wrapped, _ := json.Marshal(map[string]string{
+							"_buckley_invalid_tool_arguments": call.Function.Arguments,
+						})
+						call.Function.Arguments = string(wrapped)
 					}
 
 					toolSeq++
