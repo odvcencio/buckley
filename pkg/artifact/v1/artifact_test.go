@@ -122,6 +122,11 @@ func TestArtifactV1_NegotiatesNativeSchemaThenToolFallback(t *testing.T) {
 	if got := ArtifactPrompt("base", tool); !strings.Contains(got, "submit_artifact exactly once") || strings.Contains(got, "Return exactly one JSON") {
 		t.Fatalf("submit artifact prompt = %q", got)
 	}
+	for _, required := range []string{"If tools are disabled", "same submission arguments", "source_refs", "incomplete_reasons"} {
+		if got := ArtifactPrompt("base", tool); !strings.Contains(got, required) {
+			t.Fatalf("submit artifact fallback missing %q: %s", required, got)
+		}
+	}
 	descriptor := NegotiatedOutputDescriptor(ProviderCapabilities{ToolCalls: true})
 	if descriptor.Mode != OutputSubmitArtifact || descriptor.SubmitArtifact == nil || descriptor.SubmitArtifact.Parameters != nil || descriptor.JSONSchema != nil {
 		t.Fatalf("lightweight descriptor = %+v", descriptor)

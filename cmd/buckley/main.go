@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -588,6 +589,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	if outputSchema == artifactv1.SchemaVersion {
 		systemPrompt = artifactv1.ArtifactPrompt(systemPrompt, artifactContract)
+		limits.FinalizationInstruction = artifactv1.SubmissionFallbackPrompt
 	}
 	if instruction := oneShotProtocolExecutionContract(adaptiveProtocol); instruction != "" {
 		systemPrompt += "\n\n" + instruction
@@ -1070,7 +1072,33 @@ func resolveOneShotArtifact(response string, contract artifactv1.OutputContract,
 			return artifact, nil
 		}
 	}
-	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), []byte(response), contract.Mode, artifactv1.DecodeOptions{})
+	raw := []byte(response)
+	if len(raw) <= artifactv1.MaxProviderBytes && json.Valid(raw) {
+		decoder := json.NewDecoder(strings.NewReader(response))
+		decoder.UseNumber()
+		var params map[string]any
+		if err := decoder.Decode(&params); err == nil {
+			if _, hasRefs := params["source_refs"]; hasRefs {
+				_, hasArtifact := params["artifact"]
+				if len(params) != 2 || !hasArtifact {
+					return artifactv1.Artifact{}, fmt.Errorf("final JSON envelope must contain exactly the root keys artifact and source_refs")
+				}
+				if submission == nil {
+					submission = &builtin.ArtifactSubmission{}
+				}
+				result, err := (&builtin.SubmitArtifactTool{Submission: submission}).Execute(params)
+				if err != nil {
+					return artifactv1.Artifact{}, err
+				}
+				if !result.Success {
+					return artifactv1.Artifact{}, fmt.Errorf("%s", result.Error)
+				}
+				detached, _ := submission.Artifact()
+				return detached, nil
+			}
+		}
+	}
+	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), raw, contract.Mode, artifactv1.DecodeOptions{})
 	if err != nil {
 		if contract.Mode == artifactv1.OutputSubmitArtifact {
 			return artifactv1.Artifact{}, fmt.Errorf("required artifact output was not submitted through submit_artifact or returned as valid JSON: %w", err)

@@ -364,13 +364,18 @@ func validationDiagnostics(err error) []Diagnostic {
 	return append([]Diagnostic(nil), validation.Diagnostics...)
 }
 
+// SubmissionFallbackPrompt carries a compact valid shape into a final request
+// after the submission tool's schema has been removed.
+const SubmissionFallbackPrompt = `If tools are disabled, return only the same submission arguments as JSON, with this minimal shape: {"artifact":{"schema_version":"buckley.artifact/v1","artifact_id":"partial-handoff","kind":"subagent_result","status":"incomplete","title":"Partial handoff","summary":"Observed coverage and limitations","incomplete_reasons":["Specific unfinished work or uncertainty"]},"source_refs":[]}. Replace descriptive text with the actual result. Put actual source_ref IDs from this run in source_refs to retain captured pages; leave artifact.blocks and artifact.evidence_refs empty when selecting sources. Do not add an items field or use status complete. Do not claim coverage you have not verified. No surrounding prose or Markdown fences.`
+
 // ArtifactPrompt appends the negotiated contract to an existing model prompt
 // without making output requirements invisible in adapter-specific code.
 func ArtifactPrompt(base string, contract OutputContract) string {
 	base = strings.TrimSpace(base)
 	prompt := strings.TrimSpace(contract.Prompt)
 	if contract.Mode == OutputSubmitArtifact {
-		prompt = "When the task is complete, call submit_artifact exactly once with a complete buckley.artifact/v1 object. Do not replace that submission with prose or a Markdown fence."
+		prompt = "When the task is complete, call submit_artifact exactly once with a complete buckley.artifact/v1 object. Do not replace that submission with prose or a Markdown fence. " +
+			SubmissionFallbackPrompt
 	}
 	if prompt == "" {
 		prompt = "Produce a complete buckley.artifact/v1 result."

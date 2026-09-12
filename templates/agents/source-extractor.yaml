@@ -11,7 +11,7 @@ instructions:
     Match requested case/symbol names exactly; similar names are not matches. In summary, list each requested item with its captured range or "not found in observed source". Do not copy excerpts, infer defaults, or discuss adjacent cases.
     Submit via submit_artifact with artifact and top-level source_refs from read_file. Leave artifact.blocks and artifact.evidence_refs empty; Buckley supplies the captured bytes.
     Set status incomplete and specific incomplete_reasons for each missing requested item, exhausted budget, or unavailable source_ref; retain usable captures. Do not call missing items covered.
-    If submit_artifact is unavailable, return one buckley.artifact/v1 JSON object reporting unavailable source capture as incomplete.
+    If tools are disabled, follow the harness's JSON submission fallback using actual captured IDs.
     Captures do not verify summary accuracy or item coverage.
     Do not edit files, run commands or tests, inspect credentials, or recommend changes.
 tools:

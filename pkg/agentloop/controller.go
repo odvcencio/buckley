@@ -499,6 +499,10 @@ type ControllerConfig struct {
 	// that map a turn to a process/run lifecycle should enable this.
 	FinalizeOnStop bool
 
+	// FinalizationInstruction retains a caller-owned output contract when
+	// the final request no longer carries tool schemas. It grants no tool access.
+	FinalizationInstruction string
+
 	// MaxCostUSD is an explicit all-in, client-side per-turn admission ceiling.
 	// Zero leaves spend unbounded. CostForUsage is required when MaxCostUSD is
 	// positive. Before a real provider dispatch, Controller prices a conservative
@@ -2136,10 +2140,16 @@ func (c *Controller) buildFinalizationRequest(ctx context.Context, round int, re
 	}
 	messages := append([]model.Message(nil), req.Messages...)
 	prompt := "Buckley stopped further tool execution because " + strings.TrimSuffix(reason, ".") + ". " +
-		"Do not call tools. Use only the evidence already present in the conversation, state any remaining uncertainty, and return the most useful complete final answer you can."
+		"Do not call tools. Use only the evidence already present in the conversation; report what it supports and what remains unverified. " +
+		"Preserve the required output format, using its tools-disabled fallback if specified. " +
+		"For JSON output, return only the JSON object: no preamble, Markdown fence, or trailing commentary. " +
+		"Use the schema's exact status values, not aliases. An exhausted work budget does not prove task completion."
 	if malformedCause != nil {
 		prompt += " Your previous reply was not a usable final answer (" + malformedCause.Error() + "). " +
-			"Reply now with plain text only: the complete final synthesis. Do not call tools. Do not return an empty message."
+			"Reply now with the final synthesis in the required output format. Do not call tools. Do not return an empty message."
+	}
+	if instruction := strings.TrimSpace(c.cfg.FinalizationInstruction); instruction != "" {
+		prompt += "\n\n" + instruction
 	}
 	req.Messages = append(messages, model.Message{
 		// A terminal user message is legal across providers that reject

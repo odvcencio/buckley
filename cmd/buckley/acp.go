@@ -1154,6 +1154,7 @@ type acpLoopLimits struct {
 	// executionRoute is supplied only by a one-shot output contract that
 	// negotiated from this exact route. ACP otherwise resolves its own route.
 	executionRoute          model.ModelRoute
+	FinalizationInstruction string
 	StepCap                 int
 	MaxOutputTokens         int
 	ProtocolReasoning       *model.ReasoningConfig
@@ -1613,11 +1614,12 @@ func newACPLoopController(
 		lifecycleSessionID = strings.TrimSpace(sessionID)
 	}
 	controllerConfig := agentloop.ControllerConfig{
-		Governor:         governor,
-		StepCap:          limits.StepCap,
-		FinalizeOnStop:   true,
-		MaxCostUSD:       limits.MaxCostUSD,
-		MaxModelRequests: limits.MaxModelRequests,
+		Governor:                governor,
+		StepCap:                 limits.StepCap,
+		FinalizeOnStop:          true,
+		FinalizationInstruction: limits.FinalizationInstruction,
+		MaxCostUSD:              limits.MaxCostUSD,
+		MaxModelRequests:        limits.MaxModelRequests,
 		// Progress carries only operator-wide emergency fuses. Child task
 		// ceilings are enforced by the governor/context/cost fields, so a zero
 		// child budget never synthesizes a second hidden cap here.
