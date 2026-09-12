@@ -166,6 +166,11 @@ func assessCriteria(criteria []SuccessCriterion, evaluations []CriterionEvaluati
 		}
 		totalWeight += weight
 
+		if crit.Target == "" && !crit.targetKnownNonempty && (crit.Type == CriterionContains || crit.Type == CriterionFileExists) {
+			pending = append(pending, crit.Name+" (empty target)")
+			continue
+		}
+
 		eval, ok := evalByCriterion[crit.ID]
 		if !ok {
 			pending = append(pending, crit.Name)

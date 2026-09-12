@@ -77,6 +77,10 @@ type SuccessCriterion struct {
 	Type   CriterionType
 	Target string
 	Weight float64
+
+	// targetKnownNonempty is supplied only by validated redacted-input
+	// projections, never by task configuration.
+	targetKnownNonempty bool
 }
 
 // CriterionEvaluation records evaluation results for a run.

@@ -59,8 +59,14 @@ func EvaluateCriteria(ctx context.Context, worktreePath string, workingDir strin
 func evaluateCriterion(ctx context.Context, workDir string, output string, crit SuccessCriterion) (bool, string) {
 	switch crit.Type {
 	case CriterionContains:
+		if crit.Target == "" {
+			return false, "empty criterion target"
+		}
 		return strings.Contains(output, crit.Target), ""
 	case CriterionFileExists:
+		if crit.Target == "" {
+			return false, "empty criterion target"
+		}
 		path := crit.Target
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(workDir, path)
