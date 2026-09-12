@@ -26,13 +26,13 @@ func TestSourceExtractorTemplate(t *testing.T) {
 	if profile.Spec.Models != (agentspec.ModelSpec{}) {
 		t.Fatalf("template must not pin models: %+v", profile.Spec.Models)
 	}
-	for _, limit := range []int{0, 3, 20} {
+	for _, limit := range []int{0, 3, 8, 12, 20} {
 		preview := buildAgentRunPreviewSnapshot(agentRunOptions{
 			subagent: "extract", model: "openai_compatible/future-model", maxToolCalls: limit,
 		}, profile)
-		wantLimit := 8
-		if limit == 3 {
-			wantLimit = 3
+		wantLimit := 12
+		if limit > 0 && limit < wantLimit {
+			wantLimit = limit
 		}
 		if preview.ToolTier != "read_only" || preview.TaskIntent != "read_only" || preview.ApprovalMode != "safe" {
 			t.Fatalf("unsafe or ambiguous execution profile: %+v", preview)

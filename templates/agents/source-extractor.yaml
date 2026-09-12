@@ -18,7 +18,7 @@ tools:
   allow: [read_file, search_text]
 policies:
   approval_mode: safe
-  max_tool_calls: 8
+  max_tool_calls: 12
 sandbox:
   mode: workspace
 subagents:
