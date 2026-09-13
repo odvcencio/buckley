@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -126,12 +127,21 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 	if t == nil || t.Submission == nil {
 		return nil, fmt.Errorf("submit_artifact requires an artifact submission sink")
 	}
-	if artifactMap, ok := params["artifact"].(map[string]any); ok {
-		if _, misplaced := artifactMap["source_refs"]; misplaced {
-			return &Result{Success: false, Error: "source_refs belongs beside artifact, not inside it; move source_refs to the top-level tool arguments and leave artifact.blocks and artifact.evidence_refs empty"}, nil
+	artifactParam := params["artifact"]
+	rawRefs, refsPresent := params["source_refs"]
+	if artifactMap, ok := artifactParam.(map[string]any); ok {
+		if nested, nestedPresent := artifactMap["source_refs"]; nestedPresent {
+			if refsPresent {
+				return &Result{Success: false, Error: "source_refs supplied in two locations: provide it either beside artifact or inside artifact, not both"}, nil
+			}
+			clone := maps.Clone(artifactMap)
+			delete(clone, "source_refs")
+			artifactParam = clone
+			rawRefs = nested
+			refsPresent = true
 		}
 	}
-	raw, err := json.Marshal(map[string]any{"artifact": params["artifact"]})
+	raw, err := json.Marshal(map[string]any{"artifact": artifactParam})
 	if err != nil {
 		return &Result{Success: false, Error: "artifact parameter is not JSON-serializable"}, nil
 	}
@@ -154,7 +164,7 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 		return &Result{Success: false, Error: fmt.Sprintf("invalid buckley.artifact/v1 submission: %v", err)}, nil
 	}
 	var refs []string
-	if rawRefs, present := params["source_refs"]; present {
+	if refsPresent {
 		refs, err = parseSourceRefs(rawRefs)
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil

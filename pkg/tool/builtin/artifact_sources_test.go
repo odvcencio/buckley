@@ -47,7 +47,7 @@ func TestCapturedSourceClaimsRequireHostMaterialization(t *testing.T) {
 	}
 }
 
-func TestSubmitArtifactTool_MisplacedSourceRefsCanBeCorrected(t *testing.T) {
+func TestSubmitArtifactTool_InvalidNestedSourceRefsCanBeCorrected(t *testing.T) {
 	for _, nestedNull := range []bool{false, true} {
 		for _, rootPresent := range []bool{false, true} {
 			t.Run(fmt.Sprintf("null=%t/root=%t", nestedNull, rootPresent), func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestSubmitArtifactTool_MisplacedSourceRefsCanBeCorrected(t *testing.T) {
 				}
 				tool := &SubmitArtifactTool{Submission: sink}
 				result, err := tool.Execute(params)
-				if err != nil || result == nil || result.Success || !strings.Contains(result.Error, "source_refs belongs beside artifact") || !strings.Contains(result.Error, "artifact.blocks and artifact.evidence_refs empty") {
+				if err != nil || result == nil || result.Success || !strings.Contains(result.Error, "source_refs") {
 					t.Fatalf("missing actionable correction: result=%+v err=%v", result, err)
 				}
 				if _, ok := sink.Artifact(); ok {
