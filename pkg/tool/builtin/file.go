@@ -3,6 +3,7 @@ package builtin
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -20,7 +21,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Oversized ranges return the first 100 lines; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
+	return "Read file contents in bounded, 1-indexed line pages. Use anchor to start at a unique literal matching line in a known file. Oversized ranges return the first 100 lines; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -38,6 +39,10 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			"end_line": {
 				Type:        "number",
 				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Larger ranges are capped to 100 lines per page.",
+			},
+			"anchor": {
+				Type:        "string",
+				Description: "Literal, case-sensitive single-line substring selecting a UNIQUE matching line in the file; mutually exclusive with start_line/end_line. Returns the same 100-line page limit starting at the matched line.",
 			},
 			"line_numbers": {
 				Type:        "boolean",
@@ -84,6 +89,46 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 
 	contentStr := string(content)
 	lines := fileLines(contentStr)
+	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {
+		if _, ok := params["start_line"]; ok {
+			return &Result{Success: false, Error: "anchor is mutually exclusive with start_line"}, nil
+		}
+		if _, ok := params["end_line"]; ok {
+			return &Result{Success: false, Error: "anchor is mutually exclusive with end_line"}, nil
+		}
+		anchor, ok := anchorValue.(string)
+		if !ok {
+			return &Result{Success: false, Error: "anchor parameter must be a string"}, nil
+		}
+		if strings.TrimSpace(anchor) == "" {
+			return &Result{Success: false, Error: "anchor must contain non-whitespace characters"}, nil
+		}
+		if len(anchor) > 256 {
+			return &Result{Success: false, Error: fmt.Sprintf("anchor must be at most 256 bytes (got %d)", len(anchor))}, nil
+		}
+		if strings.ContainsAny(anchor, "\n\r") {
+			return &Result{Success: false, Error: "anchor must not contain newline characters"}, nil
+		}
+		var matches []int
+		total := 0
+		for i, line := range lines {
+			if strings.Contains(line, anchor) {
+				total++
+				if len(matches) < 8 {
+					matches = append(matches, i+1)
+				}
+			}
+		}
+		switch total {
+		case 0:
+			return &Result{Success: false, Error: fmt.Sprintf("anchor %q not found in %s", anchor, path)}, nil
+		case 1:
+			params = maps.Clone(params)
+			params["start_line"] = matches[0]
+		default:
+			return &Result{Success: false, Error: fmt.Sprintf("anchor %q matched %d lines (%v); provide explicit start_line/end_line", anchor, total, matches)}, nil
+		}
+	}
 	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
