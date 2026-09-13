@@ -190,8 +190,13 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		return req, nil
 	}
 
+	costObserved := true
+
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 		resp, err := e.modelManager.ChatCompletion(ctx, req)
+		if resp != nil && (resp.Usage.Estimated || (resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0)) {
+			costObserved = false
+		}
 		if err != nil {
 			// Preserve a response returned with a provider/transport error;
 			// Controller will account and expose it as an incomplete partial
@@ -206,16 +211,6 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		totalTokens := metrics.promptTokens + metrics.completionTokens
 		if maxTokens > 0 && totalTokens > maxTokens {
 			return nil, fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
-		}
-		if maxCost > 0 {
-			cost, costErr := e.modelManager.CalculateCostFromTokens(modelID, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-			if costErr != nil {
-				return nil, fmt.Errorf("cost tracking unavailable for model %s: %w", modelID, costErr)
-			}
-			metrics.totalCost += cost
-			if metrics.totalCost > maxCost {
-				return nil, fmt.Errorf("max cost per run exceeded (%.4f > %.4f)", metrics.totalCost, maxCost)
-			}
 		}
 		return resp, nil
 	})
@@ -258,7 +253,7 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		CycleRepeats:       maxIterations + 1,
 	})
 
-	controller, err := agentloop.NewController(agentloop.ControllerConfig{
+	controllerConfig := agentloop.ControllerConfig{
 		Governor:      governor,
 		BuildRequest:  buildRequest,
 		CallModel:     callModel,
@@ -268,12 +263,23 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 			window, _ := e.modelManager.GetContextLength(modelID)
 			return window
 		},
-	})
+	}
+	if maxCost > 0 {
+		controllerConfig.MaxCostUSD = maxCost
+		controllerConfig.CostForUsage = func(usage model.Usage) (float64, error) {
+			return e.modelManager.CalculateBoundedCost(modelID, usage)
+		}
+		controllerConfig.NormalizeCostBoundedRequest = e.modelManager.NormalizeCostBoundedRequest
+	}
+	controller, err := agentloop.NewController(controllerConfig)
 	if err != nil {
 		return "", metrics, collectFiles(filesTouched), err
 	}
 
 	result, err := controller.Run(ctx)
+	if result != nil && costObserved {
+		metrics.totalCost = result.CostUSD
+	}
 	if err != nil {
 		output := ""
 		if result != nil {

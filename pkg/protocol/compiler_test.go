@@ -55,8 +55,18 @@ func TestCompiler_WeakProfileProducesDeterministicNarrowTypedProtocol(t *testing
 	if !reflect.DeepEqual(first.VisibleTools, wantTools) {
 		t.Fatalf("weak protocol tools = %v, want coherent working set %v", first.VisibleTools, wantTools)
 	}
-	if first.Stages[1].MaxFanout != 1 || first.Stages[1].CodeMode != "suggest" || first.Output.Mode != artifactv1.OutputNativeJSONSchema {
+	if first.Stages[1].MaxTurns != 14 || first.Stages[1].MaxFanout != 1 || first.Stages[1].CodeMode != "suggest" || first.Output.Mode != artifactv1.OutputNativeJSONSchema {
 		t.Fatalf("unexpected weak execution stage/output: %+v", first)
+	}
+	wantRequest := RequestPolicy{ReasoningEffort: "medium", ReasoningMaxTokens: 2048, MaxOutputTokens: 6144}
+	if first.Stages[1].Request != wantRequest || first.Stages[1].MaxVerificationAttempts != 2 {
+		t.Fatalf("weak request envelope = %+v/%d, want %+v/2", first.Stages[1].Request, first.Stages[1].MaxVerificationAttempts, wantRequest)
+	}
+	if first.Stages[1].ReadOnlyWarningAt != 3 || first.Stages[1].ReadOnlyActionAt != 5 || first.Stages[1].MaxReadOnlyCalls != 9 {
+		t.Fatalf("weak read-only reserve = %d/%d/%d, want 3/5/9", first.Stages[1].ReadOnlyWarningAt, first.Stages[1].ReadOnlyActionAt, first.Stages[1].MaxReadOnlyCalls)
+	}
+	if architect := first.Stages[0]; architect.ReadOnlyWarningAt != 0 || architect.ReadOnlyActionAt != 0 || architect.MaxReadOnlyCalls != 0 {
+		t.Fatalf("architect stage must not carry an unreachable action boundary: %+v", architect)
 	}
 }
 
@@ -79,6 +89,10 @@ func TestCompiler_WeakReadOnlyTaskPrioritizesEvidenceTools(t *testing.T) {
 	wantTools := []string{"read_file", "search_text", "code_refs", "git_diff"}
 	if protocol.Receipt.PolicyOutcome != "weak_evidence_stages" || !reflect.DeepEqual(protocol.VisibleTools, wantTools) {
 		t.Fatalf("weak review protocol = %+v, want evidence tools %v", protocol, wantTools)
+	}
+	stage := protocol.Stages[len(protocol.Stages)-1]
+	if stage.ReadOnlyWarningAt != 0 || stage.ReadOnlyActionAt != 0 || stage.MaxReadOnlyCalls != 0 {
+		t.Fatalf("read-only task reserve = %d/%d/%d, want disabled", stage.ReadOnlyWarningAt, stage.ReadOnlyActionAt, stage.MaxReadOnlyCalls)
 	}
 }
 
@@ -114,6 +128,12 @@ func TestCompiler_FrontierParallelismIsEarnedAndRiskBounded(t *testing.T) {
 	if protocol.Receipt.PolicyOutcome != "frontier_parallel" || stage.MaxFanout != 2 || stage.CodeMode != "auto_read_only" || !stage.Continuation {
 		t.Fatalf("frontier profile did not earn bounded protocol: %+v", protocol)
 	}
+	if stage.Request != (RequestPolicy{ReasoningEffort: "high", ReasoningMaxTokens: 8192, MaxOutputTokens: 16384}) || stage.MaxVerificationAttempts != 3 {
+		t.Fatalf("frontier request envelope = %+v/%d", stage.Request, stage.MaxVerificationAttempts)
+	}
+	if stage.ReadOnlyWarningAt != 8 || stage.ReadOnlyActionAt != 14 || stage.MaxReadOnlyCalls != 20 {
+		t.Fatalf("frontier read-only reserve = %d/%d/%d, want 8/14/20", stage.ReadOnlyWarningAt, stage.ReadOnlyActionAt, stage.MaxReadOnlyCalls)
+	}
 	if len(protocol.VisibleTools) != 10 || protocol.Output.Mode != artifactv1.OutputSubmitArtifact {
 		t.Fatalf("frontier contract = %+v", protocol)
 	}
@@ -128,6 +148,79 @@ func TestCompiler_FrontierParallelismIsEarnedAndRiskBounded(t *testing.T) {
 	}
 	if riskBound.Stages[0].MaxFanout != 1 {
 		t.Fatalf("high risk must serialize work, got %+v", riskBound.Stages[0])
+	}
+}
+
+func TestCompiler_BalancedProfileUsesBalancedRequestEnvelope(t *testing.T) {
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiled, err := NewCompiler(rules.NewEngineAdapter(engine), CompilerConfig{Mode: ModeDynamic}).Compile(TaskRequest{}, testProfile(ClassBalanced))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	stage := compiled.Stages[len(compiled.Stages)-1]
+	if stage.Request != (RequestPolicy{ReasoningEffort: "medium", ReasoningMaxTokens: 4096, MaxOutputTokens: 8192}) || stage.MaxVerificationAttempts != 2 {
+		t.Fatalf("balanced request envelope = %+v/%d", stage.Request, stage.MaxVerificationAttempts)
+	}
+	if stage.ReadOnlyWarningAt != 5 || stage.ReadOnlyActionAt != 8 || stage.MaxReadOnlyCalls != 12 {
+		t.Fatalf("balanced read-only reserve = %d/%d/%d, want 5/8/12", stage.ReadOnlyWarningAt, stage.ReadOnlyActionAt, stage.MaxReadOnlyCalls)
+	}
+}
+
+func TestCompiler_ClampsPolicyReasoningToNearestSupportedEffort(t *testing.T) {
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiler := NewCompiler(rules.NewEngineAdapter(engine), CompilerConfig{Mode: ModeDynamic})
+	for _, tt := range []struct {
+		name      string
+		class     ModelClass
+		supported []string
+		want      string
+	}{
+		{name: "balanced exact", class: ClassBalanced, supported: []string{"low", "medium", "high"}, want: "medium"},
+		{name: "balanced tie prefers lower", class: ClassBalanced, supported: []string{"low", "high", "max"}, want: "low"},
+		{name: "frontier gemini-like", class: ClassFrontier, supported: []string{"low", "medium", "high"}, want: "high"},
+		{name: "frontier glm-like", class: ClassFrontier, supported: []string{"low", "high", "max"}, want: "high"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := testProfile(tt.class)
+			profile.Capabilities.ReasoningEfforts = tt.supported
+			compiled, err := compiler.Compile(TaskRequest{}, profile)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if got := compiled.Stages[len(compiled.Stages)-1].Request.ReasoningEffort; got != tt.want {
+				t.Fatalf("reasoning effort = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompiler_ReasoningEffortCapabilityOrderDoesNotChangeReceipt(t *testing.T) {
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiler := NewCompiler(rules.NewEngineAdapter(engine), CompilerConfig{Mode: ModeDynamic, PolicyVersion: "test-policy"})
+	firstProfile := testProfile(ClassBalanced)
+	firstProfile.Capabilities.ReasoningEfforts = []string{"high", "low", "medium"}
+	secondProfile := testProfile(ClassBalanced)
+	secondProfile.Capabilities.ReasoningEfforts = []string{"medium", "high", "low"}
+
+	first, err := compiler.Compile(TaskRequest{}, firstProfile)
+	if err != nil {
+		t.Fatalf("first Compile: %v", err)
+	}
+	second, err := compiler.Compile(TaskRequest{}, secondProfile)
+	if err != nil {
+		t.Fatalf("second Compile: %v", err)
+	}
+	if first.ProtocolID != second.ProtocolID || first.Receipt.ProfileDigest != second.Receipt.ProfileDigest {
+		t.Fatalf("capability order changed deterministic receipt:\nfirst=%+v\nsecond=%+v", first.Receipt, second.Receipt)
 	}
 }
 
@@ -157,6 +250,83 @@ func TestCompiler_PolicyFailureIsVisibleAndConservative(t *testing.T) {
 	execution := protocol.Stages[len(protocol.Stages)-1]
 	if protocol.Receipt.PolicySource != "fallback_policy_error" || execution.CodeMode != "suggest" || execution.MaxFanout != 1 {
 		t.Fatalf("policy fallback must stay inspectable and conservative: %+v", protocol)
+	}
+	if execution.MaxTurns != 14 || execution.Request != (RequestPolicy{ReasoningEffort: "low", ReasoningMaxTokens: 1024, MaxOutputTokens: 4096}) || execution.MaxVerificationAttempts != 1 {
+		t.Fatalf("policy fallback request envelope = maxTurns=%d request=%+v attempts=%d", execution.MaxTurns, execution.Request, execution.MaxVerificationAttempts)
+	}
+	if execution.ReadOnlyWarningAt != 3 || execution.ReadOnlyActionAt != 5 || execution.MaxReadOnlyCalls != 9 {
+		t.Fatalf("fallback read-only reserve = %d/%d/%d, want 3/5/9", execution.ReadOnlyWarningAt, execution.ReadOnlyActionAt, execution.MaxReadOnlyCalls)
+	}
+}
+
+func TestCompiler_RequestEnvelopeClampsReasoningToCapabilitiesAndOutput(t *testing.T) {
+	evaluator := fixedEvaluator{result: types.StrategyResult{Params: map[string]any{
+		"name":                      "test",
+		"max_fanout":                float64(1),
+		"reasoning_effort":          "high",
+		"reasoning_max_tokens":      float64(9000),
+		"max_output_tokens":         float64(4000),
+		"max_verification_attempts": float64(2),
+		"read_only_warning_at":      float64(9),
+		"read_only_action_at":       float64(2),
+		"max_read_only_calls":       float64(4),
+	}}}
+	compiler := NewCompiler(evaluator, CompilerConfig{Mode: ModeDynamic})
+	profile := testProfile(ClassBalanced)
+
+	compiled, err := compiler.Compile(TaskRequest{}, profile)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := compiled.Stages[len(compiled.Stages)-1].Request; got.ReasoningMaxTokens != 4000 {
+		t.Fatalf("reasoning max tokens = %d, want output-clamped 4000", got.ReasoningMaxTokens)
+	}
+	if stage := compiled.Stages[len(compiled.Stages)-1]; stage.MaxReadOnlyCalls != 0 || stage.ReadOnlyWarningAt != 0 || stage.ReadOnlyActionAt != 0 {
+		t.Fatalf("invalid read-only reserve should be disabled, got %d/%d/%d", stage.ReadOnlyWarningAt, stage.ReadOnlyActionAt, stage.MaxReadOnlyCalls)
+	}
+
+	profile.Capabilities.Reasoning = false
+	compiled, err = compiler.Compile(TaskRequest{}, profile)
+	if err != nil {
+		t.Fatalf("Compile without reasoning: %v", err)
+	}
+	got := compiled.Stages[len(compiled.Stages)-1].Request
+	if got.ReasoningEffort != "" || got.ReasoningMaxTokens != 0 || got.MaxOutputTokens != 4000 {
+		t.Fatalf("capability-clamped request = %+v", got)
+	}
+}
+
+func TestCompiler_DisablesReadOnlyReserveBeyondTurnCeiling(t *testing.T) {
+	evaluator := fixedEvaluator{result: types.StrategyResult{Params: map[string]any{
+		"name":                 "test",
+		"max_turns":            float64(4),
+		"max_fanout":           float64(1),
+		"read_only_warning_at": float64(1),
+		"read_only_action_at":  float64(2),
+		"max_read_only_calls":  float64(4),
+	}}}
+	compiled, err := NewCompiler(evaluator, CompilerConfig{Mode: ModeDynamic}).Compile(TaskRequest{}, testProfile(ClassBalanced))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	stage := compiled.Stages[len(compiled.Stages)-1]
+	if stage.ReadOnlyWarningAt != 0 || stage.ReadOnlyActionAt != 0 || stage.MaxReadOnlyCalls != 0 {
+		t.Fatalf("unreachable reserve survived the turn ceiling: %+v", stage)
+	}
+}
+
+func TestCompiler_LegacyRequestEnvelopeUsesZeroValues(t *testing.T) {
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("NewDefaultEngine: %v", err)
+	}
+	compiled, err := NewCompiler(rules.NewEngineAdapter(engine), CompilerConfig{Mode: ModeLegacy}).Compile(TaskRequest{}, testProfile(ClassFrontier))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	stage := compiled.Stages[len(compiled.Stages)-1]
+	if stage.Request != (RequestPolicy{}) || stage.MaxVerificationAttempts != 0 || stage.MaxReadOnlyCalls != 0 {
+		t.Fatalf("legacy request envelope = %+v/%d/%d, want zero values", stage.Request, stage.MaxVerificationAttempts, stage.MaxReadOnlyCalls)
 	}
 }
 
@@ -213,6 +383,14 @@ func (errorEvaluator) EvalStrategy(string, string, map[string]any) (types.Strate
 	return types.StrategyResult{}, errors.New("policy unavailable")
 }
 
+type fixedEvaluator struct {
+	result types.StrategyResult
+}
+
+func (e fixedEvaluator) EvalStrategy(string, string, map[string]any) (types.StrategyResult, error) {
+	return e.result, nil
+}
+
 func testProfile(class ModelClass) BehaviorProfile {
 	return BehaviorProfile{
 		SchemaVersion: ProfileSchemaVersion,
@@ -228,6 +406,7 @@ func testProfile(class ModelClass) BehaviorProfile {
 			NativeJSONSchema:  false,
 			ParallelToolCalls: false,
 			Continuation:      false,
+			Reasoning:         true,
 			CodeMode:          true,
 		},
 		Metrics: BehaviorMetrics{

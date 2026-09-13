@@ -86,6 +86,15 @@ adaptive_protocol:
       class: frontier
       sample_size: 120
       confidence: 0.95
+      review:
+        profile: evidence_first
+        workflow_risk_signals: true
+        supporting_context_tokens: 32000
+        reasoning_max_tokens_by_size:
+          focused: 2048
+        reasoning_max_tokens_by_effort:
+          low: 1024
+        min_exploration_timeout_seconds: 100
 
 agent_operations:
   commit_changes: true
@@ -125,6 +134,13 @@ metrics:
 	}
 	if cfg.AdaptiveProtocol.Mode != "dynamic" || !cfg.AdaptiveProtocol.AutoCodeMode || cfg.AdaptiveProtocol.Profiles["example/model"].Version != "eval-1" {
 		t.Fatalf("expected adaptive protocol override, got %+v", cfg.AdaptiveProtocol)
+	}
+	review := cfg.AdaptiveProtocol.Profiles["example/model"].Review
+	if review.Profile != "evidence_first" || !review.WorkflowRiskSignals || review.SupportingContextTokens != 32000 ||
+		review.ReasoningMaxTokensBySize["focused"] != 2048 ||
+		review.ReasoningMaxTokensByEffort["low"] != 1024 ||
+		review.MinExplorationTimeoutSeconds != 100 {
+		t.Fatalf("expected adaptive review behavior override, got %+v", review)
 	}
 	if !cfg.AgentOperations.CommitChanges {
 		t.Fatalf("expected project override to enable commit_changes")

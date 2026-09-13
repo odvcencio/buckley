@@ -21,6 +21,7 @@ func ResolvePhaseModel(cfg *config.Config, checker ReasoningChecker, engine *rul
 	resolver := NewResolver(engine, ResolverConfig{
 		Planning:  cfg.Models.Planning,
 		Execution: cfg.Models.Execution,
+		Light:     cfg.Models.Light,
 		Review:    cfg.Models.Review,
 	}, checker)
 

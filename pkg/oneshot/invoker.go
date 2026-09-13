@@ -30,12 +30,13 @@ type StreamCallback func(reasoningChunk, contentChunk string)
 
 // DefaultInvoker implements Invoker using the model client.
 type DefaultInvoker struct {
-	client    ModelClient
-	model     string
-	provider  string
-	reasoning string
-	ledger    *transparency.CostLedger
-	pricing   transparency.ModelPricing
+	client         ModelClient
+	model          string
+	provider       string
+	reasoning      string
+	ledger         *transparency.CostLedger
+	pricing        transparency.ModelPricing
+	pricingUnknown bool
 }
 
 // InvokerConfig configures the invoker.
@@ -55,6 +56,10 @@ type InvokerConfig struct {
 	// Pricing for cost calculation
 	Pricing transparency.ModelPricing
 
+	// PricingUnknown marks pricing as guessed; guessed prices must never
+	// become recorded costs.
+	PricingUnknown bool
+
 	// Ledger for tracking costs (optional)
 	Ledger *transparency.CostLedger
 }
@@ -64,14 +69,33 @@ func NewInvoker(cfg InvokerConfig) *DefaultInvoker {
 	if cfg.Provider == "" {
 		cfg.Provider = "openrouter"
 	}
-	return &DefaultInvoker{
-		client:    cfg.Client,
-		model:     cfg.Model,
-		provider:  cfg.Provider,
-		reasoning: normalizeInvokerReasoningEffort(cfg.ReasoningEffort),
-		pricing:   cfg.Pricing,
-		ledger:    cfg.Ledger,
+	if cfg.PricingUnknown {
+		cfg.Pricing = transparency.ModelPricing{}
 	}
+	return &DefaultInvoker{
+		client:         cfg.Client,
+		model:          cfg.Model,
+		provider:       cfg.Provider,
+		reasoning:      normalizeInvokerReasoningEffort(cfg.ReasoningEffort),
+		pricing:        cfg.Pricing,
+		pricingUnknown: cfg.PricingUnknown,
+		ledger:         cfg.Ledger,
+	}
+}
+
+// recordTrace records a completed trace in the cost ledger when present.
+func (inv *DefaultInvoker) recordTrace(trace *transparency.Trace) {
+	if inv.ledger == nil {
+		return
+	}
+	inv.ledger.Record(transparency.CostEntry{
+		Model:        trace.Model,
+		Tokens:       trace.Tokens,
+		Cost:         trace.Cost,
+		CostUnknown:  trace.CostUnknown,
+		Latency:      trace.Duration,
+		InvocationID: trace.ID,
+	})
 }
 
 func (inv *DefaultInvoker) requestReasoning() *model.ReasoningConfig {
@@ -96,7 +120,8 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
+		WithCostUnknown(inv.pricingUnknown)
 	builder.WithContext(audit)
 
 	// Build request
@@ -150,6 +175,7 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 			}
 			builder.WithError(err)
 			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
+			inv.recordTrace(trace)
 			return result, trace, fmt.Errorf("model request failed after partial response: %w", err)
 		}
 		builder.WithError(err)
@@ -197,16 +223,7 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 	// Complete trace
 	trace := builder.Complete(tokens, cost)
 
-	// Record in ledger if available
-	if inv.ledger != nil {
-		inv.ledger.Record(transparency.CostEntry{
-			Model:        inv.model,
-			Tokens:       tokens,
-			Cost:         cost,
-			Latency:      trace.Duration,
-			InvocationID: traceID,
-		})
-	}
+	inv.recordTrace(trace)
 
 	return result, trace, nil
 }
@@ -226,7 +243,8 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
+		WithCostUnknown(inv.pricingUnknown)
 	builder.WithContext(audit)
 
 	// Build request
@@ -312,10 +330,8 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 				cost := inv.pricing.Calculate(tokens)
 				builder.WithError(err)
 				trace := builder.Complete(tokens, cost)
-				if inv.ledger != nil {
-					inv.ledger.Record(transparency.CostEntry{Model: inv.model, Tokens: tokens, Cost: cost, Latency: trace.Duration, InvocationID: traceID})
-				}
 				if partialContent != "" || msg.Reasoning != "" || len(msg.ToolCalls) > 0 || usage != nil {
+					inv.recordTrace(trace)
 					return &Result{TextContent: partialContent}, trace, fmt.Errorf("model request failed after partial response: %w", err)
 				}
 				return nil, trace, fmt.Errorf("model request failed: %w", err)
@@ -364,16 +380,7 @@ done:
 	// Complete trace
 	trace := builder.Complete(tokens, cost)
 
-	// Record in ledger if available
-	if inv.ledger != nil {
-		inv.ledger.Record(transparency.CostEntry{
-			Model:        inv.model,
-			Tokens:       tokens,
-			Cost:         cost,
-			Latency:      trace.Duration,
-			InvocationID: traceID,
-		})
-	}
+	inv.recordTrace(trace)
 
 	return result, trace, nil
 }
@@ -384,7 +391,8 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
+		WithCostUnknown(inv.pricingUnknown)
 	builder.WithContext(audit)
 
 	// Build request (no tools)
@@ -428,6 +436,7 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 			}
 			builder.WithError(err)
 			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
+			inv.recordTrace(trace)
 			return content, trace, fmt.Errorf("model request failed after partial response: %w", err)
 		}
 		builder.WithError(err)
@@ -463,16 +472,7 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 	// Complete trace
 	trace := builder.Complete(tokens, cost)
 
-	// Record in ledger if available
-	if inv.ledger != nil {
-		inv.ledger.Record(transparency.CostEntry{
-			Model:        inv.model,
-			Tokens:       tokens,
-			Cost:         cost,
-			Latency:      trace.Duration,
-			InvocationID: traceID,
-		})
-	}
+	inv.recordTrace(trace)
 
 	return content, trace, nil
 }
@@ -569,7 +569,8 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
+		WithCostUnknown(inv.pricingUnknown)
 
 	// Convert tool definitions to OpenAI format
 	var toolSpecs []map[string]any
@@ -615,9 +616,11 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		return req, nil
 	}
 
+	var observedResponse bool
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		resp, err := inv.client.ChatCompletion(ctx, req)
 		if resp != nil {
+			observedResponse = true
 			totalTokens.Input += resp.Usage.PromptTokens
 			totalTokens.Output += resp.Usage.CompletionTokens
 			if len(resp.Choices) > 0 {
@@ -707,6 +710,9 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		}
 		cost := inv.pricing.Calculate(totalTokens)
 		trace := builder.Complete(totalTokens, cost)
+		if observedResponse {
+			inv.recordTrace(trace)
+		}
 		return content, trace, fmt.Errorf("model request failed: %w", runErr)
 	}
 	if completionErr := result.RequireConclusive(); completionErr != nil {
@@ -723,13 +729,21 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		}
 		cost := inv.pricing.Calculate(totalTokens)
 		trace := builder.Complete(totalTokens, cost)
+		if observedResponse {
+			inv.recordTrace(trace)
+		}
 		return result.Content, trace, completionErr
 	}
 
 	content, extractErr := model.ExtractTextContent(result.Message.Content)
 	if extractErr != nil {
 		builder.WithError(extractErr)
-		return "", builder.Build(), fmt.Errorf("extract final response: %w", extractErr)
+		cost := inv.pricing.Calculate(totalTokens)
+		trace := builder.Complete(totalTokens, cost)
+		if observedResponse {
+			inv.recordTrace(trace)
+		}
+		return "", trace, fmt.Errorf("extract final response: %w", extractErr)
 	}
 	builder.WithToolCalls(allToolCalls)
 	builder.WithContent(content)
@@ -743,15 +757,7 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	cost := inv.pricing.Calculate(totalTokens)
 	trace := builder.Complete(totalTokens, cost)
 
-	if inv.ledger != nil {
-		inv.ledger.Record(transparency.CostEntry{
-			Model:        inv.model,
-			Tokens:       totalTokens,
-			Cost:         cost,
-			Latency:      trace.Duration,
-			InvocationID: traceID,
-		})
-	}
+	inv.recordTrace(trace)
 
 	return content, trace, nil
 }

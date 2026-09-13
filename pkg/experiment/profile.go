@@ -99,6 +99,7 @@ func ModelCalibrations(exp *Experiment, runs []Run, evaluations map[string][]Cri
 			grouped[modelID] = calibration
 		}
 		passed := runPassesCriteria(run, exp.Criteria, evaluations[run.ID])
+		// Legacy zero costs are ambiguous; failed-run totals may be partial.
 		observation := modelprofile.Observation{
 			Succeeded:        run.Status == RunCompleted && passed,
 			LatencyMS:        run.Metrics.DurationMs,
@@ -106,7 +107,7 @@ func ModelCalibrations(exp *Experiment, runs []Run, evaluations map[string][]Cri
 			CompletionTokens: run.Metrics.CompletionTokens,
 			TokensObserved:   true,
 			CostUSD:          run.Metrics.TotalCost,
-			CostObserved:     true,
+			CostObserved:     run.Status == RunCompleted && run.Metrics.TotalCost > 0,
 		}
 		if run.Metrics.ToolCalls > 0 {
 			toolSucceeded := run.Metrics.ToolFailures == 0 && run.Metrics.ToolSuccesses > 0

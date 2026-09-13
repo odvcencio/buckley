@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -31,6 +32,27 @@ type stubStreamPlan struct {
 type refreshingStubProvider struct {
 	*stubProvider
 	refreshed ModelCatalog
+}
+
+type routeDriftContinuationProvider struct {
+	*stubProvider
+	continuationRequests []ContinuationRequest
+}
+
+func (p *routeDriftContinuationProvider) SupportsContinuation(string) bool { return true }
+
+func (p *routeDriftContinuationProvider) ChatCompletionWithContinuation(_ context.Context, req ContinuationRequest) (*ContinuationResponse, error) {
+	p.continuationRequests = append(p.continuationRequests, req)
+	return &ContinuationResponse{
+		Response: &ChatResponse{
+			Model: req.Request.Model,
+			Choices: []Choice{{
+				Message:      Message{Role: "assistant", Content: "ok"},
+				FinishReason: "stop",
+			}},
+		},
+		Continuation: &ProviderContinuation{ProviderID: p.id, ModelID: req.Request.Model},
+	}, nil
 }
 
 func (s *refreshingStubProvider) RefreshCatalog() (*ModelCatalog, error) {
@@ -349,6 +371,29 @@ func TestRefreshProviderCatalogReplacesOnlyProviderEntries(t *testing.T) {
 	}
 }
 
+func TestRefreshProviderCatalogDoesNotDeleteCollisionOwnedByAnotherProvider(t *testing.T) {
+	const sharedID = "vendor/shared-model"
+	provider := &refreshingStubProvider{
+		stubProvider: &stubProvider{id: "selected"},
+		refreshed:    ModelCatalog{},
+	}
+	otherInfo := ModelInfo{ID: sharedID, Description: "other provider metadata"}
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{"selected": provider, "other": &stubProvider{id: "other"}},
+		catalog:        map[string]ModelInfo{sharedID: otherInfo},
+		providerModels: map[string][]string{"selected": {sharedID}, "other": {sharedID}},
+		modelProviders: map[string]string{sharedID: "other"},
+	}
+
+	if err := mgr.RefreshProviderCatalog("selected"); err != nil {
+		t.Fatalf("RefreshProviderCatalog() error = %v", err)
+	}
+	if got, ok := mgr.catalog[sharedID]; !ok || got.Description != otherInfo.Description || mgr.modelProviders[sharedID] != "other" {
+		t.Fatalf("refresh deleted another provider's collision entry: info=%+v ok=%v owner=%q", got, ok, mgr.modelProviders[sharedID])
+	}
+}
+
 func TestInitializeReplacesMissingConfiguredModel(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{
@@ -481,6 +526,233 @@ func TestProviderIDForModelUsesCatalogAndRouting(t *testing.T) {
 	}
 }
 
+func TestProviderQualifiedMetadataLookupUsesCanonicalUpstreamAlias(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		providerID string
+		upstreamID string
+		requestID  string
+	}{
+		{
+			name:       "OpenRouter two-segment upstream ID",
+			providerID: "openrouter",
+			upstreamID: "google/gemini-3.8-flash",
+			requestID:  "openrouter/google/gemini-3.8-flash",
+		},
+		{
+			name:       "OpenAI-compatible one-segment upstream ID",
+			providerID: "openai_compatible",
+			upstreamID: "glm-5.3-flash",
+			requestID:  "openai_compatible/glm-5.3-flash",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info := ModelInfo{ID: tt.upstreamID, SupportedParameters: []string{"tools", "reasoning_effort"}}
+			selected := &stubProvider{id: tt.providerID, catalog: ModelCatalog{Data: []ModelInfo{info}}}
+			fallback := &stubProvider{id: "fallback"}
+			mgr := &Manager{
+				config: &config.Config{
+					Models:    config.ModelConfig{DefaultProvider: "fallback", FallbackChains: map[string][]string{}},
+					Providers: config.ProviderConfig{ModelRouting: map[string]string{}},
+				},
+				providers:      map[string]Provider{tt.providerID: selected, "fallback": fallback},
+				providerOrder:  []string{"fallback", tt.providerID},
+				catalog:        map[string]ModelInfo{tt.upstreamID: info},
+				providerModels: map[string][]string{tt.providerID: {tt.upstreamID}},
+				modelProviders: map[string]string{tt.upstreamID: tt.providerID},
+			}
+
+			route, err := mgr.ResolveModelRoute(tt.requestID)
+			if err != nil {
+				t.Fatalf("ResolveModelRoute: %v", err)
+			}
+			if route.ProviderID != tt.providerID || route.SelectedModel != tt.requestID {
+				t.Fatalf("provider-qualified route = %+v", route)
+			}
+			got, err := mgr.GetModelInfo(tt.requestID)
+			if err != nil || got.ID != tt.upstreamID {
+				t.Fatalf("GetModelInfo(%q) = %+v, %v", tt.requestID, got, err)
+			}
+			if !mgr.SupportsTools(tt.requestID) || !mgr.SupportsReasoning(tt.requestID) || !mgr.modelAvailable(tt.requestID) {
+				t.Fatalf("canonical capabilities unavailable for provider-qualified model %q", tt.requestID)
+			}
+		})
+	}
+}
+
+func TestProviderQualifiedMetadataLookupRejectsCrossProviderCatalogCollision(t *testing.T) {
+	const upstreamID = "google/gemini-3.8-flash"
+	openRouterInfo := ModelInfo{ID: upstreamID, Description: "openrouter metadata", SupportedParameters: []string{"reasoning_effort"}}
+	googleInfo := ModelInfo{ID: upstreamID, Description: "direct metadata", SupportedParameters: []string{"tools"}}
+	openRouter := &stubProvider{id: "openrouter", catalog: ModelCatalog{Data: []ModelInfo{openRouterInfo}}}
+	direct := &stubProvider{id: "google", catalog: ModelCatalog{Data: []ModelInfo{googleInfo}}}
+	mgr := &Manager{
+		config: &config.Config{
+			Models:    config.ModelConfig{DefaultProvider: "google", FallbackChains: map[string][]string{}},
+			Providers: config.ProviderConfig{ModelRouting: map[string]string{}},
+		},
+		providers:      map[string]Provider{"openrouter": openRouter, "google": direct},
+		providerOrder:  []string{"google", "openrouter"},
+		catalog:        map[string]ModelInfo{upstreamID: googleInfo},
+		providerModels: map[string][]string{"openrouter": {upstreamID}, "google": {upstreamID}},
+		modelProviders: map[string]string{upstreamID: "google"},
+	}
+
+	requestID := "openrouter/" + upstreamID
+	info, err := mgr.GetModelInfo(requestID)
+	if err != nil {
+		t.Fatalf("GetModelInfo: %v", err)
+	}
+	if info.Description != "openrouter metadata" || !mgr.SupportsReasoning(requestID) || mgr.SupportsTools(requestID) {
+		t.Fatalf("provider lock used cross-provider metadata: %+v", info)
+	}
+	if !mgr.modelAvailable(requestID) {
+		t.Fatalf("provider-specific catalog entry should remain available despite canonical ID collision")
+	}
+}
+
+func TestCanonicalMetadataLookupRejectsCrossProviderCatalogCollision(t *testing.T) {
+	const modelID = "vendor/shared-model"
+	selectedInfo := ModelInfo{ID: modelID, Description: "selected provider metadata", SupportedParameters: []string{"reasoning_effort"}}
+	collisionInfo := ModelInfo{ID: modelID, Description: "other provider metadata", SupportedParameters: []string{"tools"}}
+	selected := &stubProvider{id: "selected", catalog: ModelCatalog{Data: []ModelInfo{selectedInfo}}}
+	other := &stubProvider{id: "other", catalog: ModelCatalog{Data: []ModelInfo{collisionInfo}}}
+	mgr := &Manager{
+		config: &config.Config{
+			Models:    config.ModelConfig{DefaultProvider: "selected", FallbackChains: map[string][]string{}},
+			Providers: config.ProviderConfig{ModelRouting: map[string]string{}},
+		},
+		providers:      map[string]Provider{"selected": selected, "other": other},
+		providerOrder:  []string{"selected", "other"},
+		catalog:        map[string]ModelInfo{modelID: collisionInfo},
+		providerModels: map[string][]string{"selected": {modelID}, "other": {modelID}},
+		modelProviders: map[string]string{modelID: "other"},
+	}
+
+	info, err := mgr.GetModelInfo(modelID)
+	if err != nil {
+		t.Fatalf("GetModelInfo: %v", err)
+	}
+	if info.Description != "selected provider metadata" || !mgr.SupportsReasoning(modelID) || mgr.SupportsTools(modelID) {
+		t.Fatalf("canonical lookup used cross-provider metadata: %+v", info)
+	}
+	if !mgr.modelAvailable(modelID) {
+		t.Fatal("selected provider's canonical catalog entry should remain available after a collision")
+	}
+}
+
+func TestGetContextLengthForRouteUsesSelectedProviderMetadata(t *testing.T) {
+	const modelID = "vendor/shared-model"
+	selectedInfo := ModelInfo{ID: modelID, ContextLength: 64_000}
+	otherInfo := ModelInfo{ID: modelID, ContextLength: 8_000}
+	selected := &stubProvider{id: "selected", catalog: ModelCatalog{Data: []ModelInfo{selectedInfo}}}
+	other := &stubProvider{id: "other", catalog: ModelCatalog{Data: []ModelInfo{otherInfo}}}
+	mgr := &Manager{
+		config: &config.Config{
+			Models:    config.ModelConfig{DefaultProvider: "other", FallbackChains: map[string][]string{}},
+			Providers: config.ProviderConfig{ModelRouting: map[string]string{}},
+		},
+		providers:      map[string]Provider{"selected": selected, "other": other},
+		providerOrder:  []string{"other", "selected"},
+		catalog:        map[string]ModelInfo{modelID: otherInfo},
+		providerModels: map[string][]string{"selected": {modelID}, "other": {modelID}},
+		modelProviders: map[string]string{modelID: "other"},
+	}
+
+	legacy, err := mgr.GetContextLength(modelID)
+	if err != nil {
+		t.Fatalf("GetContextLength: %v", err)
+	}
+	if legacy != 8_000 {
+		t.Fatalf("legacy context length = %d, want other provider fixture", legacy)
+	}
+
+	got, err := mgr.GetContextLengthForRoute(ModelRoute{
+		RequestedModel: "alias/model",
+		SelectedModel:  modelID,
+		ProviderID:     "selected",
+	})
+	if err != nil {
+		t.Fatalf("GetContextLengthForRoute: %v", err)
+	}
+	if got != 64_000 {
+		t.Fatalf("route context length = %d, want selected provider metadata", got)
+	}
+}
+
+func TestRouteMetadataLookupUsesUnqualifiedSelectedModelWithoutRoutingHooks(t *testing.T) {
+	const modelID = "gpt-4o"
+	selectedInfo := ModelInfo{
+		ID:                  "selected/" + modelID,
+		ContextLength:       64_000,
+		SupportedParameters: []string{"tools"},
+		Pricing:             ModelPricing{Prompt: 3, Completion: 15},
+		PricingKnown:        true,
+	}
+	selectedInfo.markSupportedParametersComplete()
+	otherInfo := ModelInfo{ID: "other/" + modelID, ContextLength: 8_000, SupportedParameters: []string{}}
+	otherInfo.markSupportedParametersComplete()
+	selected := &stubProvider{id: "selected", catalog: ModelCatalog{Data: []ModelInfo{selectedInfo}}}
+	other := &stubProvider{id: "other", catalog: ModelCatalog{Data: []ModelInfo{otherInfo}}}
+	mgr := &Manager{
+		config: &config.Config{
+			Models:    config.ModelConfig{DefaultProvider: "other", FallbackChains: map[string][]string{}},
+			Providers: config.ProviderConfig{ModelRouting: map[string]string{}},
+		},
+		providers:      map[string]Provider{"selected": selected, "other": other},
+		providerOrder:  []string{"other", "selected"},
+		catalog:        map[string]ModelInfo{selectedInfo.ID: selectedInfo, otherInfo.ID: otherInfo},
+		providerModels: map[string][]string{"selected": {selectedInfo.ID}, "other": {otherInfo.ID}},
+		modelProviders: map[string]string{selectedInfo.ID: "selected", otherInfo.ID: "other"},
+		routingHooks:   NewRoutingHooks(),
+	}
+	var hookCalls atomic.Int64
+	mgr.routingHooks.Register(func(decision *RoutingDecision) *RoutingDecision {
+		hookCalls.Add(1)
+		decision.SelectedModel = "other/" + modelID
+		return decision
+	})
+	route := ModelRoute{RequestedModel: "alias/model", SelectedModel: modelID, ProviderID: "selected"}
+
+	gotContext, err := mgr.GetContextLengthForRoute(route)
+	if err != nil {
+		t.Fatalf("GetContextLengthForRoute: %v", err)
+	}
+	if gotContext != 64_000 {
+		t.Fatalf("route context length = %d, want selected provider metadata", gotContext)
+	}
+	gotInfo, err := mgr.GetModelInfoForRoute(route)
+	if err != nil {
+		t.Fatalf("GetModelInfoForRoute: %v", err)
+	}
+	if gotInfo.ID != selectedInfo.ID || gotInfo.Pricing != selectedInfo.Pricing || !gotInfo.PricingKnown {
+		t.Fatalf("route metadata = %+v, want selected provider metadata %+v", gotInfo, selectedInfo)
+	}
+	if got := mgr.ResolveParameterCapabilityForRoute(route, "tools"); got.State != CapabilitySupported || got.ProviderID != "selected" || got.Model != selectedInfo.ID {
+		t.Fatalf("route tools capability = %+v, want selected provider support", got)
+	}
+	if got := hookCalls.Load(); got != 0 {
+		t.Fatalf("routing hook calls = %d, want 0", got)
+	}
+}
+
+func TestGetContextLengthForRouteRejectsMalformedOrUnavailableRoute(t *testing.T) {
+	mgr := &Manager{
+		config:         &config.Config{},
+		providers:      map[string]Provider{},
+		catalog:        map[string]ModelInfo{},
+		providerModels: map[string][]string{},
+		modelProviders: map[string]string{},
+	}
+
+	if _, err := mgr.GetContextLengthForRoute(ModelRoute{SelectedModel: "model"}); err == nil || !strings.Contains(err.Error(), "malformed model route") {
+		t.Fatalf("malformed route error = %v", err)
+	}
+	if _, err := mgr.GetContextLengthForRoute(ModelRoute{SelectedModel: "model", ProviderID: "missing"}); err == nil || !strings.Contains(err.Error(), "context length unavailable") {
+		t.Fatalf("unavailable route error = %v", err)
+	}
+}
+
 func TestResolveModelRoute_ConfigRoutingOutranksCatalogAndRouteHandoffFailsClosed(t *testing.T) {
 	openRouter := &stubProvider{id: "openrouter", catalog: ModelCatalog{Data: []ModelInfo{{ID: "stealth/ox-alpha", ContextLength: 1_048_576}}}}
 	direct := &stubProvider{id: "openai", catalog: ModelCatalog{Data: []ModelInfo{{ID: "direct/model", ContextLength: 16_000}}}}
@@ -533,6 +805,85 @@ func TestResolveModelRoute_ConfigRoutingOutranksCatalogAndRouteHandoffFailsClose
 	}
 	if len(openRouter.requests) != 0 || len(direct.requests) != 0 {
 		t.Fatalf("provider requests openrouter=%d direct=%d, want zero", len(openRouter.requests), len(direct.requests))
+	}
+}
+
+func TestChatCompletionStreamForRouteFailsClosedOnRouteDrift(t *testing.T) {
+	first := &stubProvider{id: "first", catalog: ModelCatalog{Data: []ModelInfo{{ID: "first/model", ContextLength: 16_000}}}}
+	second := &stubProvider{id: "second", catalog: ModelCatalog{Data: []ModelInfo{{ID: "second/model", ContextLength: 16_000}}}}
+	mgr := &Manager{
+		config:         &config.Config{Models: config.ModelConfig{DefaultProvider: "first", FallbackChains: map[string][]string{}}},
+		providers:      map[string]Provider{"first": first, "second": second},
+		providerOrder:  []string{"first", "second"},
+		catalog:        map[string]ModelInfo{"first/model": first.catalog.Data[0], "second/model": second.catalog.Data[0]},
+		providerModels: map[string][]string{"first": {"first/model"}, "second": {"second/model"}},
+		modelProviders: map[string]string{"first/model": "first", "second/model": "second"},
+		routingHooks:   NewRoutingHooks(),
+	}
+	hookCalls := 0
+	mgr.routingHooks.Register(func(decision *RoutingDecision) *RoutingDecision {
+		hookCalls++
+		if hookCalls == 1 {
+			decision.SelectedModel = "first/model"
+		} else {
+			decision.SelectedModel = "second/model"
+		}
+		return decision
+	})
+
+	route, err := mgr.ResolveModelRoute("alias-model")
+	if err != nil {
+		t.Fatalf("ResolveModelRoute: %v", err)
+	}
+	chunks, errs := mgr.ChatCompletionStreamForRoute(context.Background(), ChatRequest{Model: "alias-model"}, route)
+	if chunk, ok := <-chunks; ok {
+		t.Fatalf("unexpected stream chunk before route mismatch: %+v", chunk)
+	}
+	err = <-errs
+	if err == nil || !strings.Contains(err.Error(), "route changed") {
+		t.Fatalf("stream route mismatch error = %v", err)
+	}
+	if _, ok := <-errs; ok {
+		t.Fatalf("stream error channel did not close")
+	}
+	if len(first.streamRequests) != 0 || len(second.streamRequests) != 0 {
+		t.Fatalf("stream provider requests first=%d second=%d, want zero", len(first.streamRequests), len(second.streamRequests))
+	}
+}
+
+func TestChatCompletionWithContinuationForRouteFailsClosedOnRouteDrift(t *testing.T) {
+	first := &routeDriftContinuationProvider{stubProvider: &stubProvider{id: "first", catalog: ModelCatalog{Data: []ModelInfo{{ID: "first/model", ContextLength: 16_000}}}}}
+	second := &stubProvider{id: "second", catalog: ModelCatalog{Data: []ModelInfo{{ID: "second/model", ContextLength: 16_000}}}}
+	mgr := &Manager{
+		config:         &config.Config{Models: config.ModelConfig{DefaultProvider: "first", FallbackChains: map[string][]string{}}},
+		providers:      map[string]Provider{"first": first, "second": second},
+		providerOrder:  []string{"first", "second"},
+		catalog:        map[string]ModelInfo{"first/model": first.catalog.Data[0], "second/model": second.catalog.Data[0]},
+		providerModels: map[string][]string{"first": {"first/model"}, "second": {"second/model"}},
+		modelProviders: map[string]string{"first/model": "first", "second/model": "second"},
+		routingHooks:   NewRoutingHooks(),
+	}
+	hookCalls := 0
+	mgr.routingHooks.Register(func(decision *RoutingDecision) *RoutingDecision {
+		hookCalls++
+		if hookCalls == 1 {
+			decision.SelectedModel = "first/model"
+		} else {
+			decision.SelectedModel = "second/model"
+		}
+		return decision
+	})
+
+	route, err := mgr.ResolveModelRoute("alias-model")
+	if err != nil {
+		t.Fatalf("ResolveModelRoute: %v", err)
+	}
+	_, err = mgr.ChatCompletionWithContinuationForRoute(context.Background(), ContinuationRequest{Request: ChatRequest{Model: "alias-model"}}, route)
+	if err == nil || !strings.Contains(err.Error(), "route changed") {
+		t.Fatalf("continuation route mismatch error = %v", err)
+	}
+	if len(first.continuationRequests) != 0 || len(second.requests) != 0 {
+		t.Fatalf("provider requests first=%d second=%d, want zero", len(first.continuationRequests), len(second.requests))
 	}
 }
 
@@ -779,7 +1130,7 @@ func TestSupportsHelpersAndCostCalculation(t *testing.T) {
 		Architecture: Architecture{
 			Modality: "text+image",
 		},
-		SupportedParameters: []string{"tools", "reasoning"},
+		SupportedParameters: []string{"tools", "reasoning_effort"},
 	}
 	prov := &stubProvider{
 		id: "p1",

@@ -3,6 +3,7 @@ package experiment
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -133,18 +134,19 @@ func (r *TerminalReporter) renderHeader(exp *Experiment) {
 
 func (r *TerminalReporter) renderResultsTable(report *ComparisonReport) {
 	// Table header
-	fmt.Fprintf(r.out, "%-20s │ %6s │ %9s │ %10s │ %8s\n",
+	fmt.Fprintf(r.out, "%-20s │ %6s │ %9s │ %10s │ %8s │ %s\n",
 		r.style(r.boldStyle, "Model"),
 		r.style(r.boldStyle, "Score"),
 		r.style(r.boldStyle, "Cost"),
 		r.style(r.boldStyle, "Duration"),
 		r.style(r.boldStyle, "Tokens"),
+		r.style(r.boldStyle, "Evidence"),
 	)
 	fmt.Fprintln(r.out, strings.Repeat("─", 20)+"─┼"+strings.Repeat("─", 8)+"┼"+
-		strings.Repeat("─", 11)+"┼"+strings.Repeat("─", 12)+"┼"+strings.Repeat("─", 10))
+		strings.Repeat("─", 11)+"┼"+strings.Repeat("─", 12)+"┼"+strings.Repeat("─", 10)+"┼"+strings.Repeat("─", 10))
 
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.VariantID)
+		v := findVariantReport(report.Variants, ranking.RunID)
 		if v == nil {
 			continue
 		}
@@ -160,8 +162,8 @@ func (r *TerminalReporter) renderResultsTable(report *ComparisonReport) {
 			indicator = r.style(r.pendingStyle, "○")
 		}
 
-		// Model name (truncate if too long)
-		modelName := truncateString(v.ModelID, 18)
+		// Keep model and run identifiers intact for repeated executions.
+		modelName := v.ModelID + " / " + v.RunID
 
 		// Score
 		score := fmt.Sprintf("%.0f%%", ranking.Score*100)
@@ -178,8 +180,8 @@ func (r *TerminalReporter) renderResultsTable(report *ComparisonReport) {
 		// Tokens
 		tokens := fmt.Sprintf("%d", v.Metrics.PromptTokens+v.Metrics.CompletionTokens)
 
-		fmt.Fprintf(r.out, "%s %-18s │ %6s │ %9s │ %10s │ %8s\n",
-			indicator, modelName, score, cost, duration, tokens)
+		fmt.Fprintf(r.out, "%s %-18s │ %6s │ %9s │ %10s │ %8s │ %s\n",
+			indicator, modelName, score, cost, duration, tokens, v.VerificationStatus)
 	}
 	fmt.Fprintln(r.out)
 }
@@ -196,10 +198,21 @@ func (r *TerminalReporter) renderCostChart(report *ComparisonReport) {
 	var maxCost float64
 
 	for _, v := range report.Variants {
-		entries = append(entries, costEntry{modelID: v.ModelID, cost: v.Metrics.TotalCost})
-		if v.Metrics.TotalCost > maxCost {
-			maxCost = v.Metrics.TotalCost
+		cost := v.Metrics.TotalCost
+		if v.Status != RunCompleted || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+			fmt.Fprintf(r.out, "%s / %s cost unknown or incomplete (not compared)\n", v.ModelID, v.RunID)
+			continue
 		}
+		entries = append(entries, costEntry{modelID: v.ModelID + " / " + v.RunID, cost: cost})
+		if cost > maxCost {
+			maxCost = cost
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(r.out, "No comparable cost evidence.")
+		fmt.Fprintln(r.out)
+		return
 	}
 
 	// Sort by cost descending
@@ -227,7 +240,7 @@ func (r *TerminalReporter) renderDurationChart(report *ComparisonReport) {
 	var maxMs int64
 
 	for _, v := range report.Variants {
-		entries = append(entries, durationEntry{modelID: v.ModelID, ms: v.Metrics.DurationMs})
+		entries = append(entries, durationEntry{modelID: v.ModelID + " / " + v.RunID, ms: v.Metrics.DurationMs})
 		if v.Metrics.DurationMs > maxMs {
 			maxMs = v.Metrics.DurationMs
 		}
@@ -241,7 +254,7 @@ func (r *TerminalReporter) renderDurationChart(report *ComparisonReport) {
 	// Render bars
 	barWidth := r.chartBarWidth()
 	for _, e := range entries {
-		label := truncateString(e.modelID, 14)
+		label := e.modelID
 		bar := r.buildBar(float64(e.ms), float64(maxMs), barWidth)
 		duration := formatDurationMs(e.ms)
 		fmt.Fprintf(r.out, "%-14s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.durationStyle, duration))
@@ -250,12 +263,9 @@ func (r *TerminalReporter) renderDurationChart(report *ComparisonReport) {
 }
 
 func (r *TerminalReporter) renderBar(modelID string, value, maxValue float64, width int, format string) {
-	label := truncateString(modelID, 14)
+	label := modelID
 	bar := r.buildBar(value, maxValue, width)
 	valueStr := fmt.Sprintf(format, value)
-	if value == 0 {
-		valueStr = "$0.00"
-	}
 	fmt.Fprintf(r.out, "%-14s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.costStyle, valueStr))
 }
 
@@ -276,61 +286,11 @@ func (r *TerminalReporter) buildBar(value, maxValue float64, width int) string {
 }
 
 func (r *TerminalReporter) renderWinner(report *ComparisonReport) {
-	if len(report.Rankings) == 0 {
+	if report == nil || report.Summary == "" {
 		return
 	}
 
-	winner := report.Rankings[0]
-	v := findVariantReport(report.Variants, winner.VariantID)
-	if v == nil {
-		return
-	}
-
-	// Determine winning reason
-	var reasons []string
-	if winner.Score >= 1.0 {
-		reasons = append(reasons, "100% score")
-	}
-
-	// Check if lowest cost among successful variants
-	lowestCost := true
-	for _, other := range report.Variants {
-		if other.VariantID != winner.VariantID &&
-			other.Status == RunCompleted &&
-			other.Metrics.TotalCost < v.Metrics.TotalCost &&
-			other.Metrics.TotalCost > 0 {
-			lowestCost = false
-			break
-		}
-	}
-	if lowestCost && v.Metrics.TotalCost > 0 {
-		reasons = append(reasons, "lowest cost")
-	}
-
-	// Check if fastest
-	fastest := true
-	for _, other := range report.Variants {
-		if other.VariantID != winner.VariantID &&
-			other.Status == RunCompleted &&
-			other.Metrics.DurationMs < v.Metrics.DurationMs {
-			fastest = false
-			break
-		}
-	}
-	if fastest && v.Metrics.DurationMs > 0 {
-		reasons = append(reasons, "fastest")
-	}
-
-	reasonStr := ""
-	if len(reasons) > 0 {
-		reasonStr = " (" + strings.Join(reasons, ", ") + ")"
-	}
-
-	fmt.Fprintf(r.out, "%s %s%s\n",
-		r.style(r.winnerStyle, "Winner:"),
-		r.style(r.boldStyle, v.ModelID),
-		r.style(r.dimStyle, reasonStr),
-	)
+	fmt.Fprintln(r.out, report.Summary)
 }
 
 func (r *TerminalReporter) style(s lipgloss.Style, text string) string {
@@ -399,7 +359,7 @@ func (r *TerminalReporter) RenderCompact(exp *Experiment) error {
 	fmt.Fprintf(r.out, "%s\n", r.statusStyle(exp.Status, fmt.Sprintf("(%s)", exp.Status)))
 
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.VariantID)
+		v := findVariantReport(report.Variants, ranking.RunID)
 		if v == nil {
 			continue
 		}
@@ -419,12 +379,13 @@ func (r *TerminalReporter) RenderCompact(exp *Experiment) error {
 			cost = r.style(r.costStyle, fmt.Sprintf("$%.4f", v.Metrics.TotalCost))
 		}
 
-		fmt.Fprintf(r.out, "  %s %s %.0f%% %s %s\n",
+		fmt.Fprintf(r.out, "  %s %s %.0f%% %s %s %s\n",
 			indicator,
-			truncateString(v.ModelID, 20),
+			v.ModelID+" / "+v.RunID,
 			ranking.Score*100,
 			formatDurationMs(v.Metrics.DurationMs),
 			cost,
+			v.VerificationStatus,
 		)
 	}
 

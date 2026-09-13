@@ -517,6 +517,15 @@ func (r Runner) runTurn(ctx context.Context, req model.ChatRequest) (*model.Chat
 		return nil, nil, err
 	}
 	ctrlResult, err := ctrl.Run(ctx)
+	if err != nil {
+		return raw, ctrlResult, err
+	}
+	if ctrlResult != nil && ctrlResult.FinishReason == agentloop.FinishReasonEmptyChoices {
+		return raw, ctrlResult, nil
+	}
+	if conclusiveErr := ctrlResult.RequireConclusive(); conclusiveErr != nil {
+		return raw, ctrlResult, conclusiveErr
+	}
 	return raw, ctrlResult, err
 }
 

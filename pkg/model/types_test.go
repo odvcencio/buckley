@@ -205,6 +205,53 @@ func TestMessage_UnmarshalJSONCapturesReasoning(t *testing.T) {
 	}
 }
 
+func TestMessageDelta_UnmarshalJSONCapturesReasoningContentAlias(t *testing.T) {
+	var chunk StreamChunk
+	raw := `{"id":"chatcmpl-1","model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"private chain","content":"final"},"finish_reason":null}]}`
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(chunk.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(chunk.Choices))
+	}
+	delta := chunk.Choices[0].Delta
+	if delta.Reasoning != "private chain" {
+		t.Fatalf("reasoning = %q, want alias content", delta.Reasoning)
+	}
+	if !delta.ReasoningContent {
+		t.Fatal("ReasoningContent = false, want true for reasoning_content alias")
+	}
+	if delta.Content != "final" {
+		t.Fatalf("content = %q, want final", delta.Content)
+	}
+}
+
+func TestMessageDelta_UnmarshalJSONKeepsCanonicalReasoningMarkerFalse(t *testing.T) {
+	var chunk StreamChunk
+	raw := `{"id":"chatcmpl-1","model":"glm","choices":[{"index":0,"delta":{"reasoning":"private chain"},"finish_reason":null}]}`
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	delta := chunk.Choices[0].Delta
+	if delta.Reasoning != "private chain" {
+		t.Fatalf("reasoning = %q, want canonical reasoning", delta.Reasoning)
+	}
+	if delta.ReasoningContent {
+		t.Fatal("ReasoningContent = true, want false for canonical reasoning")
+	}
+}
+
+func TestMessageDelta_UnmarshalJSONReasoningFieldWinsOverAlias(t *testing.T) {
+	var delta MessageDelta
+	raw := `{"reasoning":"canonical","reasoning_content":"alias","content":"done"}`
+	if err := json.Unmarshal([]byte(raw), &delta); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if delta.Reasoning != "canonical" {
+		t.Fatalf("reasoning = %q, want canonical reasoning field", delta.Reasoning)
+	}
+}
+
 func TestMessage_MarshalJSONPreservesReasoning(t *testing.T) {
 	msg := Message{
 		Role:      "assistant",
@@ -338,6 +385,75 @@ func TestChatResponse_UsagePresentRoundTripsThroughMarshal(t *testing.T) {
 	}
 	if decoded.Choices[0].NativeFinishReason != "network_error" {
 		t.Fatalf("native_finish_reason did not round-trip: %+v", decoded.Choices[0])
+	}
+}
+
+func TestChatResponse_AttemptEvidenceRoundTripsWithoutText(t *testing.T) {
+	secret := "SENTINEL-SECRET-PROMPT-TEXT"
+	evidence := []ModelAttemptEvidence{
+		{
+			Usage: Usage{
+				PromptTokens:     120,
+				CompletionTokens: 45,
+				TotalTokens:      165,
+				PromptTokensDetails: &PromptTokensDetails{
+					CachedTokens: 30,
+				},
+				CompletionTokenDetails: &CompletionTokenDetails{
+					ReasoningTokens: 12,
+				},
+				CacheWriteTokens: 7,
+			},
+			UsagePresent: true,
+			FinishReason: "stop",
+			Incomplete:   false,
+		},
+		{
+			Usage: Usage{
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				TotalTokens:      0,
+			},
+			UsagePresent: false,
+			FinishReason: "length",
+			Incomplete:   true,
+		},
+	}
+	original := ChatResponse{
+		ID:              "resp-1",
+		Model:           "test-model",
+		AttemptEvidence: evidence,
+	}
+	blob, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ChatResponse
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(decoded.AttemptEvidence, original.AttemptEvidence) {
+		t.Fatalf("attempt evidence did not round-trip: got %+v, want %+v", decoded.AttemptEvidence, original.AttemptEvidence)
+	}
+	var raw struct {
+		AttemptEvidence []map[string]json.RawMessage `json:"attempt_evidence"`
+	}
+	if err := json.Unmarshal(blob, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if len(raw.AttemptEvidence) != 2 {
+		t.Fatalf("expected 2 attempt evidence records, got %d", len(raw.AttemptEvidence))
+	}
+	allowed := map[string]bool{"usage": true, "usage_present": true, "finish_reason": true, "incomplete": true}
+	for i, obj := range raw.AttemptEvidence {
+		for k := range obj {
+			if !allowed[k] {
+				t.Fatalf("attempt evidence %d has disallowed key %q", i, k)
+			}
+		}
+	}
+	if strings.Contains(string(blob), secret) {
+		t.Fatalf("encoded JSON contains sentinel secret text")
 	}
 }
 

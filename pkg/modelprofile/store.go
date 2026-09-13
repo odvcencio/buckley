@@ -73,6 +73,9 @@ func (s *MemoryStore) Get(ctx context.Context, modelID, version string) (Profile
 	}
 	s.mu.RLock()
 	profile, ok := s.profiles[strings.TrimSpace(modelID)][strings.TrimSpace(version)]
+	if ok {
+		profile = profile.Normalize()
+	}
 	s.mu.RUnlock()
 	return profile, ok, nil
 }
@@ -96,7 +99,7 @@ func (s *MemoryStore) List(ctx context.Context, modelID string) ([]Profile, erro
 	versions := s.profiles[strings.TrimSpace(modelID)]
 	profiles := make([]Profile, 0, len(versions))
 	for _, profile := range versions {
-		profiles = append(profiles, profile)
+		profiles = append(profiles, profile.Normalize())
 	}
 	s.mu.RUnlock()
 	sort.Slice(profiles, func(i, j int) bool {

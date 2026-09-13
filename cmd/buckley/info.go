@@ -353,11 +353,11 @@ func inspectProviders(cfg *config.Config) []infoProvider {
 			BaseURL:    cfg.Providers.Ollama.BaseURL,
 		},
 		{
-			Name:       "litellm",
-			Enabled:    cfg.Providers.LiteLLM.Enabled,
-			Ready:      ready["litellm"],
-			Credential: optionalCredentialState(cfg.Providers.LiteLLM.APIKey),
-			BaseURL:    cfg.Providers.LiteLLM.BaseURL,
+			Name:       "openai_compatible",
+			Enabled:    cfg.Providers.OpenAICompatible.Enabled,
+			Ready:      ready["openai_compatible"],
+			Credential: optionalCredentialState(cfg.Providers.OpenAICompatible.APIKey),
+			BaseURL:    cfg.Providers.OpenAICompatible.BaseURL,
 		},
 		{
 			Name:       "codex",
@@ -366,6 +366,15 @@ func inspectProviders(cfg *config.Config) []infoProvider {
 			Credential: "not-required",
 			Command:    cfg.Providers.Codex.Command,
 		},
+	}
+	if cfg.Providers.LiteLLM.Enabled {
+		providers = append(providers, infoProvider{
+			Name:       "litellm (legacy)",
+			Enabled:    true,
+			Ready:      ready["litellm"],
+			Credential: optionalCredentialState(cfg.Providers.LiteLLM.APIKey),
+			BaseURL:    cfg.Providers.LiteLLM.BaseURL,
+		})
 	}
 	return providers
 }

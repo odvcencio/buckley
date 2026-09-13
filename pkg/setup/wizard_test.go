@@ -624,3 +624,17 @@ func TestIntegrationOpenRouterDependencyWithConfigFile(t *testing.T) {
 		t.Error("OpenRouter check should pass when key exists in environment")
 	}
 }
+
+// TestNewCheckerForReadyProvider verifies that a configured provider does not require OpenRouter setup.
+func TestNewCheckerForReadyProvider(t *testing.T) {
+	checker := NewCheckerForReadyProvider()
+	if checker == nil {
+		t.Fatal("NewCheckerForReadyProvider returned nil")
+	}
+	if len(checker.required) != 1 {
+		t.Fatalf("Expected only the Git dependency, got %d dependencies", len(checker.required))
+	}
+	if checker.required[0].Name != "Git" {
+		t.Fatalf("Expected the Git dependency, got %q", checker.required[0].Name)
+	}
+}

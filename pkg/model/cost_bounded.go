@@ -25,7 +25,7 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 	}
 
 	switch providerID {
-	case "openrouter", "litellm":
+	case "openrouter", "openai_compatible", "litellm":
 		req.MaxTokens = allowance
 		req.MaxCompletionTokens = 0
 		if providerID == "openrouter" {
@@ -78,7 +78,7 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 	// before dispatch. The controller can now include their bytes in its input
 	// bound, and the dispatch path's second application remains idempotent.
 	req = m.applyFallbackChain(req, selectedModel, providerID)
-	req = applyProviderTransforms(req, providerID)
+	req = applyProviderTransformsWithOptions(req, providerID, m.providerTransformOptions(m.providers[providerID], selectedModel))
 	req = m.applyPromptCache(req, providerID)
 	return req, nil
 }
@@ -92,7 +92,7 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		return 0, err
 	}
 	switch providerID {
-	case "openrouter", "litellm", "openai", "anthropic", "ollama", "google":
+	case "openrouter", "openai_compatible", "litellm", "openai", "anthropic", "ollama", "google":
 	case "codex":
 		return 0, fmt.Errorf("cost-bounded requests are unavailable for native Codex: provider pricing is not observable")
 	default:
@@ -114,6 +114,9 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 	}
 	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 {
 		return 0, fmt.Errorf("cost-bounded usage invalid for %s: token counts must be non-negative", modelID)
+	}
+	if usage.Estimated {
+		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: locally estimated token counts are not authoritative", modelID)
 	}
 	if usage.CacheWriteTokens != 0 {
 		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: authoritative cache-write pricing is unavailable", modelID)

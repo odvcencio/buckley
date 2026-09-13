@@ -29,11 +29,16 @@ func (t *SearchTextTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"query": {
 				Type:        "string",
-				Description: "Search query (regular expression by default)",
+				Description: "Search query (regular expression by default; literal text when literal is true)",
 			},
 			"path": {
 				Type:        "string",
 				Description: "Directory or file to search (defaults to current directory)",
+			},
+			"literal": {
+				Type:        "boolean",
+				Description: "Treat query as a single literal line instead of a regular expression",
+				Default:     false,
 			},
 			"case_sensitive": {
 				Type:        "boolean",
@@ -115,6 +120,19 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 
 	globs := extractGlobParams(params["glob"])
 
+	literal := false
+	if v, ok := params["literal"]; ok {
+		b, isBool := v.(bool)
+		if !isBool {
+			return &Result{Success: false, Error: "literal must be a boolean"}, nil
+		}
+		literal = b
+	}
+
+	if literal && strings.ContainsAny(query, "\r\n") {
+		return &Result{Success: false, Error: "literal query must be a single line; use separate searches for multiple lines"}, nil
+	}
+
 	useRG := toolExists("rg")
 	var cmd *exec.Cmd
 	var toolName string
@@ -126,6 +144,9 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		args := []string{
 			"--no-config", "--no-follow", "--hidden", "--glob", "!.git/**", "--with-filename", "--line-number", "--column", "--no-heading", "--color", "never",
 			"--field-match-separator=\x1e", "--field-context-separator=\x1f", "--no-context-separator",
+		}
+		if literal {
+			args = append(args, "-F")
 		}
 		if !caseSensitive {
 			args = append(args, "-i")
@@ -144,6 +165,11 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 		toolName = "rg"
 	} else {
 		args := []string{"-n", "-r", "-H", "-Z", "--exclude-dir=.git", "--binary-files=without-match"}
+		if literal {
+			args = append(args, "-F")
+		} else {
+			args = append(args, "-E")
+		}
 		if !caseSensitive {
 			args = append(args, "-i")
 		}

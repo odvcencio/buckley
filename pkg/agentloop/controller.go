@@ -60,6 +60,12 @@ type Controller struct {
 	cfg    ControllerConfig
 	runMu  sync.Mutex
 	totals controllerTotals
+	// interruptedToolRoundErr latches a tool-round interruption after at least
+	// one model-requested tool outcome may be incomplete or observer handling
+	// failed. It prevents a same-controller continuation from asking the model
+	// for a new answer while unresolved effects still require reconciliation.
+	interruptedToolRoundErr error
+	interruptedToolRound    Termination
 	// lifecycleSeq is protected by runMu because Controller serializes all
 	// Run continuations. It gives live consumers a stable order even when a
 	// surface calls Run again for a nudge or capability retry.
@@ -76,12 +82,14 @@ type Controller struct {
 // ACP may call Run repeatedly for nudges or capability recovery; those calls
 // are continuations of the same turn and must not reset all-in limits.
 type controllerTotals struct {
-	usage         model.Usage
-	costUSD       float64
-	modelRequests int
-	toolCalls     int
-	progress      ProgressSnapshot
-	startedAt     time.Time
+	usage                    model.Usage
+	costUSD                  float64
+	modelRequests            int
+	toolCalls                int
+	modelExecutions          []model.ExecutionIdentity
+	progress                 ProgressSnapshot
+	startedAt                time.Time
+	completionRepairAttempts int
 }
 
 // RequestBuilder returns the base chat request for one round. Its Messages
@@ -141,6 +149,34 @@ func (f ContextualModelCallerFunc) CallWithContext(ctx context.Context, call Mod
 	return f(ctx, call)
 }
 
+// ResponseToolOfferModelCaller is an additive ModelCaller extension for
+// callers that can retry a provider request with a different tool-offer
+// shape. ToolsOffered reports the exact request that produced Response, not
+// the Controller request that initiated the logical call. Controller uses it
+// as the effect-boundary fuse before accepting structured tool calls.
+//
+// Callers that invoke the provider exactly once with the supplied request do
+// not need this extension: Controller derives the offer state from that
+// request. A caller that internally changes Tools or ToolChoice before a
+// successful retry must implement this interface.
+type ResponseToolOfferModelCaller interface {
+	ModelCaller
+	CallWithResponseToolOffer(context.Context, ModelDispatchCall) (*model.ChatResponse, bool, error)
+}
+
+// ResponseToolOfferModelCallerFunc adapts an offer-aware model caller while
+// retaining ModelCaller compatibility for direct callers.
+type ResponseToolOfferModelCallerFunc func(context.Context, ModelDispatchCall) (*model.ChatResponse, bool, error)
+
+func (f ResponseToolOfferModelCallerFunc) Call(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
+	response, _, err := f(ctx, ModelDispatchCall{Request: req, UseContinuation: useContinuation})
+	return response, err
+}
+
+func (f ResponseToolOfferModelCallerFunc) CallWithResponseToolOffer(ctx context.Context, call ModelDispatchCall) (*model.ChatResponse, bool, error) {
+	return f(ctx, call)
+}
+
 // ToolOutcome is one dispatched tool call's result, already formatted as the
 // content a tool-role model.Message carries back to the model. Approval,
 // posture/permission gating (parked decisions pass straight through as a
@@ -158,8 +194,17 @@ type ToolOutcome struct {
 	// observation policy around this call. StateChanged is the resulting
 	// verdict. These are deliberately separate from EffectClass: permissions
 	// describe what a tool may do, while progress describes what it did.
-	StateObserved bool
-	StateChanged  bool
+	StateObserved          bool
+	StateChanged           bool
+	StateObservationFailed bool
+	StateObservationError  string
+	// VerificationObserved reports that this outcome is a verification/check
+	// result. VerificationPassed is the typed pass/fail result.
+	VerificationObserved bool
+	VerificationPassed   bool
+	// EvidenceID optionally links this outcome to a durable evidence object.
+	// Verification passes that clear completion debt should provide one.
+	EvidenceID string `json:"-"`
 	// YieldObserved reports whether the adapter can state an exact result
 	// count. A true zero is a successful empty query, not an error.
 	YieldObserved bool
@@ -310,6 +355,7 @@ const (
 // distinguish an ordinary model answer from an evidence-preserving recovery.
 type Termination struct {
 	Kind                  string
+	Code                  string
 	Reason                string
 	FinalizationAttempted bool
 	FinalizationError     string
@@ -320,6 +366,7 @@ type Termination struct {
 // could not produce a conclusive terminal answer from it.
 type IncompleteTurnError struct {
 	FinishReason      string
+	Code              string
 	Reason            string
 	FinalizationError string
 	ProviderError     string
@@ -370,7 +417,10 @@ type Result struct {
 	CostUSD float64
 	// Rounds is the number of model rounds executed (Governor.Rounds).
 	Rounds int
-	// ToolCalls is the number of tool calls dispatched across every round.
+	// ToolCalls is the number of confirmed tool outcomes observed across every
+	// round, including durable replay. Tool requests whose external outcome is
+	// still ambiguous are represented by the step journal and do not inflate
+	// this counter.
 	ToolCalls int
 	// ModelRequests counts every provider request attempted by the controller,
 	// including a reserved final synthesis request.
@@ -400,6 +450,10 @@ type Result struct {
 	// Termination records why the harness stopped and whether its reserved
 	// no-tools finalization request succeeded.
 	Termination Termination
+	// ModelExecutions records observed model-response identities in call order.
+	// Missing entries mean identity evidence was unavailable; Buckley never
+	// infers these values from the request alone.
+	ModelExecutions []model.ExecutionIdentity
 }
 
 // RequireConclusive converts Result's explicit completion projection into an
@@ -413,6 +467,7 @@ func (r *Result) RequireConclusive() error {
 	}
 	return &IncompleteTurnError{
 		FinishReason:      r.FinishReason,
+		Code:              r.Termination.Code,
 		Reason:            r.Termination.Reason,
 		FinalizationError: r.Termination.FinalizationError,
 		ProviderError:     r.Termination.ProviderError,
@@ -444,6 +499,10 @@ type ControllerConfig struct {
 	// that map a turn to a process/run lifecycle should enable this.
 	FinalizeOnStop bool
 
+	// FinalizationInstruction retains a caller-owned output contract when
+	// the final request no longer carries tool schemas. It grants no tool access.
+	FinalizationInstruction string
+
 	// MaxCostUSD is an explicit all-in, client-side per-turn admission ceiling.
 	// Zero leaves spend unbounded. CostForUsage is required when MaxCostUSD is
 	// positive. Before a real provider dispatch, Controller prices a conservative
@@ -451,7 +510,9 @@ type ControllerConfig struct {
 	// that allowance to the affordable remainder. This is not provider payment
 	// authorization: upstream invoice and accounting details observed after
 	// dispatch can differ. Completed durable steps are replayed without another
-	// reservation.
+	// reservation. When a provider omits usage for a completed response, the
+	// controller charges the full admitted reservation instead of rejecting the
+	// response or pricing a non-authoritative local token estimate.
 	// A provider response whose reported usage still crosses the ceiling is
 	// rejected before its content or tool calls can be accepted.
 	MaxCostUSD   float64
@@ -503,6 +564,10 @@ type ControllerConfig struct {
 	// richer routing (verify, replan, park) is the goal loop's job, so a
 	// shadow controller can never change engine behavior.
 	Progress *ProgressController
+	// CompletionContract, when set, validates whether a terminal assistant
+	// answer is a usable result based on typed progress evidence rather than
+	// provider names, prompt text, or final prose.
+	CompletionContract *CompletionContract
 
 	// RunLedger, when set, receives one event per model request
 	// (started/completed/failed), one per tool-dispatch batch, and one per
@@ -618,17 +683,20 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		Rounds:           c.cfg.Governor.Rounds(),
 		ToolCalls:        c.totals.toolCalls,
 		ModelRequests:    c.totals.modelRequests,
+		ModelExecutions:  modelExecutionIdentitiesForResult(c.totals.modelExecutions),
 		Progress:         c.totals.progress,
 		CompletionStatus: CompletionIncomplete,
 	}
 	started := c.totals.startedAt
 	progress := progressTracker{snapshot: c.totals.progress}
+	contract, contractEnabled := c.completionContract()
 	defer func() {
 		result.Progress = progress.Snapshot()
 		c.totals.usage = cloneControllerUsage(result.Usage)
 		c.totals.costUSD = result.CostUSD
 		c.totals.modelRequests = result.ModelRequests
 		c.totals.toolCalls = result.ToolCalls
+		c.totals.modelExecutions = cloneModelExecutionIdentities(result.ModelExecutions)
 		c.totals.progress = result.Progress
 		end := LifecycleEvent{
 			Type:         LifecycleTurnEnd,
@@ -645,6 +713,12 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 		c.emitLifecycle(end)
 	}()
+	if c.interruptedToolRoundErr != nil {
+		result.FinishReason = IncompleteToolRoundInterrupted
+		result.CompletionStatus = CompletionIncomplete
+		result.Termination = c.interruptedToolRound
+		return result, c.interruptedToolRoundErr
+	}
 
 	emptyTerminalRetries := 0
 	transportTerminalRetries := 0
@@ -766,6 +840,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		if isTruncatedFinishReason(choice.FinishReason) {
 			result.FinishReason = FinishReasonInvalidCompletion
 			result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: "model response was truncated at its output limit"}
+			preserveTruncatedPublicPrefix(result, choice)
 			if c.cfg.Governor.ToolCalls() > 0 {
 				return c.finalizeStoppedTurn(ctx, result, result.Rounds)
 			}
@@ -773,16 +848,19 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 
 		msg := choice.Message
+		if len(msg.ToolCalls) > 0 && !roundResultAllowsToolDispatch(roundResult) {
+			return c.rejectUnofferedToolCalls(ctx, result, msg, roundResult)
+		}
 		if len(msg.ToolCalls) == 0 {
 			text, candidateErr := validateTerminalCandidate(choice)
 			if candidateErr != nil {
-				// An empty reply with no confirmed usage (or an explicit
-				// native_finish_reason "network_error") is a transport
-				// failure, not a model answer -- see the constants above.
-				// Retry it with backoff, completely separate from the
-				// immediate corrective nudge below, and never fall through
-				// to that nudge: a model that never ran gets nothing to
-				// nudge.
+				// An empty reply with no confirmed generated material (or
+				// an explicit native_finish_reason "network_error") is a
+				// transport failure, not a model answer -- see the
+				// constants above. Retry it with backoff, completely
+				// separate from the immediate corrective nudge below, and
+				// never fall through to that nudge: a model that never ran
+				// gets nothing to nudge.
 				if isTransportFailureCandidate(choice, resp) {
 					if transportTerminalRetries < maxTransportRetries {
 						transportTerminalRetries++
@@ -795,17 +873,6 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 						continue
 					}
 					c.recordDecision(ctx, "transport_retry_exhausted", candidateErr.Error())
-					if fallback := reasoningFallbackText(msg); fallback != "" {
-						msg.Content = fallback
-						result.Message = msg
-						result.Content = fallback
-						result.CompletionStatus = CompletionConclusive
-						c.recordDecision(ctx, "reasoning_fallback_final", candidateErr.Error())
-						if c.cfg.History != nil {
-							c.cfg.History.Append(msg)
-						}
-						return result, nil
-					}
 					result.FinishReason = FinishReasonInvalidCompletion
 					result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
 					// Unlike a deliberate governor stop (cost ceiling, loop
@@ -840,23 +907,6 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 					}
 					continue
 				}
-				// No corrective retries left. Fall back to reasoning/thinking
-				// text rather than fail a turn that in fact carries a usable
-				// answer -- some reasoning-emitting models leave `content`
-				// empty and put their entire answer in `reasoning` (or
-				// `reasoning_details`). This only fires here, after the
-				// plain-text nudge already had its full bounded chance.
-				if fallback := reasoningFallbackText(msg); fallback != "" {
-					msg.Content = fallback
-					result.Message = msg
-					result.Content = fallback
-					result.CompletionStatus = CompletionConclusive
-					c.recordDecision(ctx, "reasoning_fallback_final", candidateErr.Error())
-					if c.cfg.History != nil {
-						c.cfg.History.Append(msg)
-					}
-					return result, nil
-				}
 				result.FinishReason = FinishReasonInvalidCompletion
 				result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Reason: candidateErr.Error()}
 				if c.cfg.Governor.ToolCalls() > 0 {
@@ -866,6 +916,21 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			}
 			result.Message = msg
 			result.Content = text
+			if contractEnabled {
+				if err := contract.evaluateFinalResponse(progress.Snapshot(), text); err != nil {
+					result.CompletionStatus = CompletionIncomplete
+					result.Termination = Termination{Kind: "completion_contract", Code: completionContractErrorCode(err), Reason: err.Error()}
+					c.recordDecision(ctx, "completion_contract_rejected", err.Error())
+					if c.totals.completionRepairAttempts < contract.MaxRepairAttempts && c.completionRepairBudgetAvailable(result) {
+						c.totals.completionRepairAttempts++
+						if c.cfg.History != nil {
+							c.cfg.History.Append(model.Message{Role: "user", Content: contract.RepairInstructionFor(err)})
+						}
+						continue
+					}
+					return result, result.RequireConclusive()
+				}
+			}
 			result.CompletionStatus = CompletionConclusive
 			if c.cfg.History != nil {
 				c.cfg.History.Append(msg)
@@ -874,7 +939,9 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 
 		msg.ToolCalls = BackfillToolCallIDs(msg.ToolCalls)
+		toolCallsClipped := false
 		if remaining := c.cfg.Governor.RemainingToolCalls(); len(msg.ToolCalls) > remaining {
+			toolCallsClipped = true
 			// Preserve a protocol-valid transcript by advertising only calls that
 			// can actually run. The complete provider response remains in durable
 			// evidence, while omitted calls never reach the dispatcher.
@@ -894,18 +961,64 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 		toolRound, err := c.prepareToolRound(ctx, msg.ToolCalls, result.Rounds)
 		if err != nil {
-			return result, err
+			result.ToolCalls += toolRound.knownOutcomeCount()
+			_, observeErr := c.observeToolRound(ctx, toolRound, &progress)
+			result.Progress = progress.Snapshot()
+			c.appendUnresolvedToolMessages(toolRound, "No confirmed result is available for this tool. Outcome unknown. Inspect state before retrying; no success or verification is established.")
+			return result, c.markToolRoundInterrupted(result, errors.Join(err, observeErr))
 		}
-		if err := c.dispatchToolRound(ctx, toolRound, result.Rounds); err != nil {
-			return result, err
-		}
-		result.ToolCalls += len(toolRound.calls)
+		dispatchErr := c.dispatchToolRound(ctx, toolRound, result.Rounds)
+		result.ToolCalls += toolRound.knownOutcomeCount()
 
-		stopDecision, err := c.observeToolRound(ctx, toolRound, &progress)
-		if err != nil {
-			return result, err
-		}
+		stopDecision, observeErr := c.observeToolRound(ctx, toolRound, &progress)
 		result.Progress = progress.Snapshot()
+		if dispatchErr != nil {
+			c.appendUnresolvedToolMessages(toolRound, "No confirmed result is available for this tool. Outcome unknown. Inspect state before retrying; no success or verification is established.")
+		}
+		if dispatchErr != nil || observeErr != nil {
+			return result, c.markToolRoundInterrupted(result, errors.Join(dispatchErr, observeErr))
+		}
+		if contractEnabled && contract.SubmittedResponse != nil && !toolCallsClipped {
+			successfulRound := true
+			for _, outcome := range toolRound.outcomes {
+				if !outcome.Success {
+					successfulRound = false
+					break
+				}
+			}
+			if successfulRound && contract.evaluate(result.Progress) == nil {
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+				text, ready := contract.SubmittedResponse()
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+				if ready && strings.TrimSpace(text) != "" && contract.evaluateFinalResponse(result.Progress, text) == nil {
+					if err := ctx.Err(); err != nil {
+						return result, err
+					}
+					if stop := c.consultProgress(ctx, result, resp.Usage, contextWindow, started); stop {
+						result.Termination = Termination{Kind: result.GuardDecision.Kind, Reason: result.GuardDecision.Reason}
+						return c.finalizeStoppedTurn(ctx, result, result.Rounds)
+					}
+					if err := ctx.Err(); err != nil {
+						return result, err
+					}
+					result.Message = model.Message{Role: "assistant", Content: text}
+					result.Content = text
+					result.CompletionStatus = CompletionConclusive
+					if c.cfg.History != nil {
+						c.cfg.History.Append(result.Message)
+					}
+					c.recordDecision(ctx, "submitted_response_completed", "accepted tool result passed the completion contract")
+					return result, nil
+				}
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+			}
+		}
 		if stopDecision.Stop {
 			result.FinishReason = FinishReasonLoopGuard
 			result.GuardDecision = stopDecision
@@ -997,6 +1110,69 @@ func cloneControllerUsage(usage model.Usage) model.Usage {
 	return usage
 }
 
+func (c *Controller) completionContract() (CompletionContract, bool) {
+	if c == nil || c.cfg.CompletionContract == nil {
+		return CompletionContract{}, false
+	}
+	return c.cfg.CompletionContract.Normalize(), true
+}
+
+func (c *Controller) completionRepairBudgetAvailable(result *Result) bool {
+	if c == nil {
+		return false
+	}
+	if c.cfg.MaxModelRequests > 0 && result != nil && result.ModelRequests >= c.cfg.MaxModelRequests {
+		return false
+	}
+	if c.cfg.MaxCostUSD > 0 && result != nil && result.CostUSD >= c.cfg.MaxCostUSD {
+		return false
+	}
+	if c.cfg.Governor != nil && c.cfg.Governor.RemainingToolCalls() <= 0 {
+		return false
+	}
+	return true
+}
+
+func (c *Controller) markToolRoundInterrupted(result *Result, cause error) error {
+	reason := "tool execution stopped after a callback, persistence, or observer path left outcome evidence unresolved"
+	termination := Termination{
+		Kind:   IncompleteToolRoundInterrupted,
+		Code:   IncompleteToolRoundInterrupted,
+		Reason: reason,
+	}
+	if result != nil {
+		result.FinishReason = IncompleteToolRoundInterrupted
+		result.CompletionStatus = CompletionIncomplete
+		result.Termination = termination
+	}
+	if c != nil {
+		c.interruptedToolRound = termination
+	}
+	var incomplete error
+	if result != nil {
+		incomplete = result.RequireConclusive()
+	} else {
+		incomplete = &IncompleteTurnError{
+			FinishReason: IncompleteToolRoundInterrupted,
+			Code:         IncompleteToolRoundInterrupted,
+			Reason:       reason,
+		}
+	}
+	err := errors.Join(incomplete, cause)
+	if c != nil {
+		c.interruptedToolRoundErr = err
+	}
+	return err
+}
+
+func completionContractErrorCode(err error) string {
+	var contractErr *CompletionContractError
+	if errors.As(err, &contractErr) && contractErr.Reason != "" {
+		return string(contractErr.Reason)
+	}
+	return "completion_contract"
+}
+
 // executeModelRound owns the durable model-step lifecycle. Keeping it outside
 // Run makes the turn loop read as the state machine it is, while preserving
 // exactly the same request evidence, replay, event, and failure semantics for
@@ -1027,29 +1203,22 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 		return c.failFinalization(ctx, result, fmt.Errorf("explicit $%.4f child limit left no spend allowance for final synthesis", c.cfg.MaxCostUSD))
 	}
 
-	var malformedCause error
+	var correctionCause error
+	var lastFailureCause error
+	finalizationOrdinal := 0
 	transportRetries := 0
 	for attempt := 1; attempt <= maxFinalizationAttempts; attempt++ {
-		if attempt > 1 {
-			if c.cfg.MaxModelRequests > 0 && result.ModelRequests >= c.cfg.MaxModelRequests {
-				return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (request limit reached before a retry)", malformedCause))
-			}
-			if c.cfg.MaxCostUSD > 0 && result.CostUSD >= c.cfg.MaxCostUSD {
-				return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (spend limit reached before a retry)", malformedCause))
-			}
+		if c.cfg.MaxModelRequests > 0 && result.ModelRequests >= c.cfg.MaxModelRequests {
+			return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (request limit reached before a retry)", finalizationRetryCause(correctionCause, lastFailureCause)))
 		}
-		req, err := c.buildFinalizationRequest(ctx, round, result.Termination.Reason)
+		if c.cfg.MaxCostUSD > 0 && result.CostUSD >= c.cfg.MaxCostUSD {
+			return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w (spend limit reached before a retry)", finalizationRetryCause(correctionCause, lastFailureCause)))
+		}
+		req, err := c.buildFinalizationRequest(ctx, round, result.Termination.Reason, correctionCause)
 		if err != nil {
 			return c.failFinalization(ctx, result, err)
 		}
-		if attempt > 1 && malformedCause != nil {
-			req.Messages = append(req.Messages, model.Message{
-				Role: "user",
-				Content: "Your previous reply was not a usable final answer (" + malformedCause.Error() + "). " +
-					"Reply now with plain text only: the complete final synthesis. Do not call tools. Do not return an empty message.",
-			})
-		}
-		roundResult, roundErr := c.executePreparedModelRound(ctx, result, req, round, "finalize", false)
+		roundResult, roundErr := c.executePreparedModelRoundWithOrdinal(ctx, result, req, round, "finalize", finalizationOrdinal, false)
 		var response *model.ChatResponse
 		if roundResult != nil {
 			response = roundResult.response
@@ -1091,6 +1260,7 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 			// finalization on its first occurrence: back off and retry
 			// instead of failing the turn.
 			if isSharedPoolRateLimitErr(roundErr) && transportRetries < maxTransportRetries {
+				lastFailureCause = roundErr
 				transportRetries++
 				c.recordDecision(ctx, "transport_retry", roundErr.Error())
 				if waitErr := transportRetrySleep(ctx, transportRetries); waitErr != nil {
@@ -1107,24 +1277,28 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 		// that is well-formed transport-wise but unusable as a final answer
 		// (no choices, tool calls while tools were disabled, empty text) is
 		// retried with a corrective nudge instead of failing the turn.
-		malformedCause = nil
+		var malformedCause error
 		if response == nil || len(response.Choices) == 0 {
 			malformedCause = fmt.Errorf("model returned no response choices")
 		} else {
 			choice := response.Choices[0]
 			message := choice.Message
+			if isTruncatedFinishReason(choice.FinishReason) {
+				preserveTruncatedPublicPrefix(result, choice)
+			}
 			if len(message.ToolCalls) > 0 {
 				malformedCause = fmt.Errorf("model requested %d tool call(s) while tools were disabled", len(message.ToolCalls))
 			} else if text, err := validateTerminalCandidate(choice); err != nil {
 				malformedCause = err
-				// An empty final reply with no confirmed usage (or an
-				// explicit native_finish_reason "network_error") is a
-				// transport failure, not a malformed answer. Back off and
+				// An empty final reply with no confirmed generated material
+				// (or an explicit native_finish_reason "network_error") is
+				// a transport failure, not a malformed answer. Back off and
 				// retry it on its own bounded budget, separate from and
 				// never falling through to the ordinary corrective-nudge
 				// attempts below: a model that never ran gets nothing to
 				// nudge.
 				if isTransportFailureCandidate(choice, response) {
+					lastFailureCause = malformedCause
 					if transportRetries < maxTransportRetries {
 						transportRetries++
 						c.recordDecision(ctx, "transport_retry", malformedCause.Error())
@@ -1132,48 +1306,12 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 							failed, incompleteErr := c.failFinalization(ctx, result, errors.Join(malformedCause, waitErr))
 							return failed, errors.Join(incompleteErr, malformedCause, waitErr)
 						}
+						finalizationOrdinal++
 						attempt--
 						continue
 					}
 					c.recordDecision(ctx, "transport_retry_exhausted", malformedCause.Error())
-					if fallback := reasoningFallbackText(message); fallback != "" {
-						if message.Role == "" {
-							message.Role = "assistant"
-						}
-						message.Content = fallback
-						result.Message = message
-						result.Content = fallback
-						result.CompletionStatus = CompletionConclusive
-						c.recordDecision(ctx, "reasoning_fallback_final", malformedCause.Error())
-						if c.cfg.History != nil {
-							c.cfg.History.Append(message)
-						}
-						return result, nil
-					}
 					return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", malformedCause))
-				}
-				// The corrective nudges above already gave the model every
-				// chance to answer in plain content. On the last attempt
-				// only, fall back to reasoning/thinking text rather than
-				// fail a turn that in fact carries a usable answer -- some
-				// reasoning-emitting models leave `content` empty and put
-				// their entire answer in `reasoning` (or
-				// `reasoning_details`).
-				if attempt == maxFinalizationAttempts {
-					if fallback := reasoningFallbackText(message); fallback != "" {
-						if message.Role == "" {
-							message.Role = "assistant"
-						}
-						message.Content = fallback
-						result.Message = message
-						result.Content = fallback
-						result.CompletionStatus = CompletionConclusive
-						c.recordDecision(ctx, "reasoning_fallback_final", malformedCause.Error())
-						if c.cfg.History != nil {
-							c.cfg.History.Append(message)
-						}
-						return result, nil
-					}
 				}
 			} else {
 				if message.Role == "" {
@@ -1181,7 +1319,14 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 				}
 				result.Message = message
 				result.Content = text
+				if contract, ok := c.completionContract(); ok {
+					if err := contract.evaluateFinalResponse(result.Progress, text); err != nil {
+						result.Termination.Code = completionContractErrorCode(err)
+						return c.failFinalization(ctx, result, err)
+					}
+				}
 				result.CompletionStatus = CompletionConclusive
+				result.Partial = false
 				if c.cfg.History != nil {
 					c.cfg.History.Append(message)
 				}
@@ -1189,12 +1334,25 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 				return result, nil
 			}
 		}
+		correctionCause = malformedCause
+		lastFailureCause = malformedCause
 		if attempt < maxFinalizationAttempts {
 			c.recordDecision(ctx, "finalization_retry", malformedCause.Error())
+			finalizationOrdinal++
 			continue
 		}
 	}
-	return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", malformedCause))
+	return c.failFinalization(ctx, result, fmt.Errorf("invalid final synthesis: %w", finalizationRetryCause(correctionCause, lastFailureCause)))
+}
+
+func finalizationRetryCause(correctionCause, lastFailureCause error) error {
+	if correctionCause != nil {
+		return correctionCause
+	}
+	if lastFailureCause != nil {
+		return lastFailureCause
+	}
+	return fmt.Errorf("unknown finalization failure")
 }
 
 // maxFinalizationAttempts bounds the corrective retries for a final synthesis
@@ -1293,18 +1451,22 @@ func isTransportFinishReason(nativeFinishReason string) bool {
 
 // isTransportFailureCandidate reports whether a tool-free, empty-text
 // candidate looks like the OpenRouter early-200 transport failure rather
-// than a genuine model answer with no text. It never fires for a truncated
-// finish reason -- that is a distinct, already-handled failure mode -- and
-// it never fires once the response carries confirmed nonzero *completion*
-// token usage, which is the one signal a transport failure cannot fake: a
-// response that never reached generation cannot have billed completion
-// tokens no matter what its prompt accounting says. Deliberately not gated
-// on response.UsagePresent: that flag records whether the wire response
-// carried a usage object at all (see ChatResponse.UsagePresent), which is
-// valuable ledger evidence, but every non-OpenRouter provider adapter -- and
-// every test double -- constructs *model.ChatResponse Go literals directly
-// and has no reason to set it, so treating "unset" as "confirmed absent"
-// here would misclassify their genuine, billed replies.
+// than a genuine model generation with no final-answer text. It never fires
+// for a truncated finish reason -- that is a distinct, already-handled
+// failure mode -- and it never fires once the response carries generated
+// material such as tool calls or reasoning. Private reasoning is evidence
+// that the model ran, but it is not answer text and must only get the
+// bounded corrective-nudge path below.
+//
+// It also never fires once the response carries confirmed nonzero
+// *completion* token usage, which is the one accounting signal a transport
+// failure cannot fake: a response that never reached generation cannot have
+// billed completion tokens no matter what its prompt accounting says.
+// Deliberately not gated on response.UsagePresent alone: that flag records
+// whether the wire response carried a usage object at all (see
+// ChatResponse.UsagePresent), which is valuable ledger evidence, but every
+// non-OpenRouter provider adapter -- and every test double -- constructs
+// *model.ChatResponse Go literals directly and has no reason to set it.
 //
 // The gate checks CompletionTokens alone, not the older all-zero
 // (prompt/completion/total) requirement: a provider can legitimately bill
@@ -1319,6 +1481,9 @@ func isTransportFailureCandidate(choice model.Choice, response *model.ChatRespon
 	if isTruncatedFinishReason(choice.FinishReason) {
 		return false
 	}
+	if hasGeneratedCandidateMaterial(choice.Message) {
+		return false
+	}
 	if isTransportFinishReason(choice.NativeFinishReason) {
 		return true
 	}
@@ -1326,6 +1491,28 @@ func isTransportFailureCandidate(choice model.Choice, response *model.ChatRespon
 		return true
 	}
 	return response.Usage.CompletionTokens == 0
+}
+
+func hasGeneratedCandidateMaterial(msg model.Message) bool {
+	if text, err := model.ExtractTextContent(msg.Content); err == nil && strings.TrimSpace(text) != "" {
+		return true
+	}
+	if len(msg.ToolCalls) > 0 {
+		return true
+	}
+	if strings.TrimSpace(msg.Reasoning) != "" {
+		return true
+	}
+	for _, detail := range msg.ReasoningDetails {
+		if strings.TrimSpace(detail.Text) != "" ||
+			strings.TrimSpace(detail.Summary) != "" ||
+			strings.TrimSpace(detail.Data) != "" ||
+			detail.Signature != nil ||
+			len(detail.Extra) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // isSharedPoolRateLimitErr unwraps err looking for an OpenRouter 429 whose
@@ -1360,29 +1547,6 @@ func validateTerminalCandidate(choice model.Choice) (string, error) {
 	return text, nil
 }
 
-// reasoningFallbackText returns a message's reasoning/thinking text, used as
-// a last-resort stand-in for an empty final answer once corrective retries
-// are exhausted. It checks the plain `reasoning` field first, falling back
-// to concatenating any `reasoning_details` text/summary blocks (OpenRouter's
-// structured reasoning format) when `reasoning` itself is empty. An empty
-// return means there is nothing to fall back to.
-func reasoningFallbackText(msg model.Message) string {
-	if text := strings.TrimSpace(msg.Reasoning); text != "" {
-		return text
-	}
-	parts := make([]string, 0, len(msg.ReasoningDetails))
-	for _, detail := range msg.ReasoningDetails {
-		if text := strings.TrimSpace(detail.Text); text != "" {
-			parts = append(parts, text)
-			continue
-		}
-		if text := strings.TrimSpace(detail.Summary); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.TrimSpace(strings.Join(parts, "\n\n"))
-}
-
 // capturePartialResponse keeps the last provider material visible even when
 // the request cannot complete. It deliberately does not append history or
 // dispatch tool calls: a response that arrived with a transport/provider
@@ -1410,13 +1574,54 @@ func (c *Controller) capturePartialResponse(result *Result, response *model.Chat
 	result.Content = fmt.Sprintf("The provider reported billable usage (%d token(s)) but returned no usable answer; Buckley preserved the raw response evidence.", response.Usage.TotalTokens)
 }
 
-func isTruncatedFinishReason(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "length", "max_tokens", "max_output_tokens":
-		return true
-	default:
-		return false
+func requestOffersTools(req model.ChatRequest) bool {
+	return len(req.Tools) > 0 && req.ToolChoice != "none"
+}
+
+func roundResultAllowsToolDispatch(roundResult *modelRoundResult) bool {
+	return roundResult != nil && roundResult.responseToolOfferKnown && roundResult.responseToolsOffered
+}
+
+func (c *Controller) rejectUnofferedToolCalls(ctx context.Context, result *Result, message model.Message, roundResult *modelRoundResult) (*Result, error) {
+	if result == nil {
+		return nil, fmt.Errorf("agentloop: reject unoffered tool calls without a result")
 	}
+	reason := fmt.Sprintf("model requested %d tool call(s) but the response-producing request did not offer tools", len(message.ToolCalls))
+	if roundResult == nil || !roundResult.responseToolOfferKnown {
+		reason = fmt.Sprintf("model requested %d tool call(s) but the response-producing request's tool offer cannot be verified", len(message.ToolCalls))
+	}
+	// The completed model step and its durable response evidence remain intact.
+	// Preserve the returned assistant message as incomplete evidence, but do not
+	// append it to history or begin a durable tool step.
+	result.Message = message
+	result.Partial = true
+	result.Content = fmt.Sprintf("Model response preserved with %d unexecuted tool call(s); %s.", len(message.ToolCalls), reason)
+	result.FinishReason = FinishReasonInvalidCompletion
+	result.CompletionStatus = CompletionIncomplete
+	result.Termination = Termination{Kind: FinishReasonInvalidCompletion, Code: "unoffered_tool_call", Reason: reason}
+	c.recordDecision(ctx, "unoffered_tool_call", reason)
+	return result, result.RequireConclusive()
+}
+
+func preserveTruncatedPublicPrefix(result *Result, choice model.Choice) {
+	if result == nil {
+		return
+	}
+	text, err := model.ExtractTextContent(choice.Message.Content)
+	if err != nil {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	result.Partial = true
+	result.Content = text
+	result.Message = model.Message{Role: "assistant", Content: text}
+}
+
+func isTruncatedFinishReason(reason string) bool {
+	return model.IsTruncatedFinishReason(reason)
 }
 
 func (c *Controller) addUsageCost(result *Result, usage model.Usage, chargedCostUSD float64, costRecorded bool, pricingError string) error {
@@ -1491,6 +1696,12 @@ type modelRoundResult struct {
 	pricingError   string
 	partial        bool
 	providerError  string
+	identity       *model.ExecutionIdentity
+	// responseToolOffer is the tool-offer decision for the exact provider
+	// request that produced response. It is persisted with the response so
+	// replay cannot widen a no-tools retry back into a dispatchable call.
+	responseToolOfferKnown bool
+	responseToolsOffered   bool
 }
 
 const (
@@ -1501,9 +1712,10 @@ const (
 )
 
 // modelResponseEvidenceEnvelope keeps the provider response and the original
-// usage-based charge calculated for that logical call in one content-addressed body.
-// Cost therefore participates in evidence identity instead of being lost when
-// the evidence store deduplicates equal response JSON with different metadata.
+// usage- or reservation-based charge for that logical call in one
+// content-addressed body. Cost therefore participates in evidence identity
+// instead of being lost when the evidence store deduplicates equal response
+// JSON with different metadata.
 type modelResponseEvidenceEnvelope = modelstep.ResponseEnvelope
 
 // blockedModelStepRecord is stored in ExecutionStep.Error only when a provider
@@ -1957,7 +2169,7 @@ func applyRequestOutputAllowance(req model.ChatRequest, allowance int) model.Cha
 	return req
 }
 
-func (c *Controller) buildFinalizationRequest(ctx context.Context, round int, reason string) (model.ChatRequest, error) {
+func (c *Controller) buildFinalizationRequest(ctx context.Context, round int, reason string, malformedCause error) (model.ChatRequest, error) {
 	req, err := c.cfg.BuildRequest(ctx, round)
 	if err != nil {
 		return model.ChatRequest{}, fmt.Errorf("agentloop: build finalization request: %w", err)
@@ -1970,12 +2182,23 @@ func (c *Controller) buildFinalizationRequest(ctx context.Context, round int, re
 		reason = "the harness stopped further tool execution"
 	}
 	messages := append([]model.Message(nil), req.Messages...)
+	prompt := "Buckley stopped further tool execution because " + strings.TrimSuffix(reason, ".") + ". " +
+		"Do not call tools. Use only the evidence already present in the conversation; report what it supports and what remains unverified. " +
+		"Preserve the required output format, using its tools-disabled fallback if specified. " +
+		"For JSON output, return only the JSON object: no preamble, Markdown fence, or trailing commentary. " +
+		"Use the schema's exact status values, not aliases. An exhausted work budget does not prove task completion."
+	if malformedCause != nil {
+		prompt += " Your previous reply was not a usable final answer (" + malformedCause.Error() + "). " +
+			"Reply now with the final synthesis in the required output format. Do not call tools. Do not return an empty message."
+	}
+	if instruction := strings.TrimSpace(c.cfg.FinalizationInstruction); instruction != "" {
+		prompt += "\n\n" + instruction
+	}
 	req.Messages = append(messages, model.Message{
 		// A terminal user message is legal across providers that reject
 		// system/developer roles after conversation or tool messages.
-		Role: "user",
-		Content: "Buckley stopped further tool execution because " + strings.TrimSuffix(reason, ".") + ". " +
-			"Do not call tools. Use only the evidence already present in the conversation, state any remaining uncertainty, and return the most useful complete final answer you can.",
+		Role:    "user",
+		Content: prompt,
 	})
 
 	contextWindow := 0
@@ -2020,7 +2243,11 @@ func (c *Controller) stopForCostLimit(ctx context.Context, result *Result, cause
 }
 
 func (c *Controller) executePreparedModelRound(ctx context.Context, result *Result, req model.ChatRequest, round int, stepKind string, useContinuation bool) (*modelRoundResult, error) {
-	stepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, round, stepKind, 0)
+	return c.executePreparedModelRoundWithOrdinal(ctx, result, req, round, stepKind, 0, useContinuation)
+}
+
+func (c *Controller) executePreparedModelRoundWithOrdinal(ctx context.Context, result *Result, req model.ChatRequest, round int, stepKind string, ordinal int, useContinuation bool) (*modelRoundResult, error) {
+	stepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, round, stepKind, ordinal)
 	// The durable input is the caller's logical request before the execution
 	// policy applies a spend-dependent output clamp. This lets a completed step
 	// replay without consulting current pricing or creating a second reservation.
@@ -2033,6 +2260,7 @@ func (c *Controller) executePreparedModelRound(ctx context.Context, result *Resu
 		if result != nil {
 			result.ModelRequests++
 		}
+		appendModelExecutionIdentity(result, blockedResult)
 		return blockedResult, err
 	}
 	if err != nil {
@@ -2053,9 +2281,12 @@ func (c *Controller) executePreparedModelRound(ctx context.Context, result *Resu
 		switch step.Status {
 		case runledger.StepCompleted:
 			roundResult, err := c.replayModelStep(ctx, stepID, step, planned)
+			appendModelExecutionIdentity(result, roundResult)
 			return roundResult, err
 		case runledger.StepBlocked:
-			return c.replayBlockedExecutionStep(ctx, step, inputDigest, req.Model, round, stepKind)
+			roundResult, err := c.replayBlockedExecutionStep(ctx, step, inputDigest, req.Model, round, stepKind)
+			appendModelExecutionIdentity(result, roundResult)
+			return roundResult, err
 		default:
 			return nil, fmt.Errorf("agentloop: model step %s returned replay for non-terminal status %q", stepID, step.Status)
 		}
@@ -2082,7 +2313,38 @@ func (c *Controller) executePreparedModelRound(ctx context.Context, result *Resu
 	if result != nil {
 		result.ModelRequests++
 	}
-	return c.callAndRecordModelStep(ctx, req, step, inputDigest, planned, round, stepKind, useContinuation)
+	roundResult, err := c.callAndRecordModelStep(ctx, req, reservation, step, inputDigest, planned, round, stepKind, useContinuation)
+	appendModelExecutionIdentity(result, roundResult)
+	return roundResult, err
+}
+
+func appendModelExecutionIdentity(result *Result, roundResult *modelRoundResult) {
+	if result == nil || roundResult == nil {
+		return
+	}
+	if roundResult.response != nil {
+		result.ModelExecutions = append(result.ModelExecutions, responseExecutionIdentities(roundResult.response)...)
+		return
+	}
+	if roundResult.identity != nil {
+		result.ModelExecutions = append(result.ModelExecutions, *roundResult.identity)
+	}
+}
+
+func cloneModelExecutionIdentities(input []model.ExecutionIdentity) []model.ExecutionIdentity {
+	if input == nil {
+		return nil
+	}
+	out := make([]model.ExecutionIdentity, len(input))
+	copy(out, input)
+	return out
+}
+
+func modelExecutionIdentitiesForResult(input []model.ExecutionIdentity) []model.ExecutionIdentity {
+	if input == nil {
+		return []model.ExecutionIdentity{}
+	}
+	return cloneModelExecutionIdentities(input)
 }
 
 func resultCostUSD(result *Result) float64 {
@@ -2177,6 +2439,11 @@ func (c *Controller) replayBlockedExecutionStep(ctx context.Context, step runled
 		roundResult.chargedCostUSD = blocked.Response.ChargedCostUSD
 		roundResult.costRecorded = blocked.Response.CostRecorded
 		roundResult.pricingError = blocked.Response.PricingError
+		roundResult.identity = responseExecutionIdentity(blocked.Response.Response)
+		roundResult.responseToolOfferKnown = blocked.Response.ResponseToolsOffered != nil
+		if blocked.Response.ResponseToolsOffered != nil {
+			roundResult.responseToolsOffered = *blocked.Response.ResponseToolsOffered
+		}
 	}
 	payload := modelStepPayload(stepID, step.Attempt, inputDigest, modelID, round, "")
 	payload["phase"] = stepKind
@@ -2186,6 +2453,7 @@ func (c *Controller) replayBlockedExecutionStep(ctx context.Context, step runled
 	if evidenceID != "" {
 		payload["response_evidence_id"] = evidenceID
 	}
+	addExecutionIdentityPayload(payload, roundResult.identity)
 	c.recordEventWithEvidence(ctx, runledger.EventModelRequestReplayed, payload, evidenceIDs(evidenceID))
 	return roundResult, replayErr
 }
@@ -2236,18 +2504,26 @@ func (c *Controller) replayModelStep(ctx context.Context, stepID string, step ru
 	if decoded.CostRecorded {
 		payload[modelResponseCostMetadataKey] = decoded.ChargedCostUSD
 	}
+	identity := responseExecutionIdentity(decoded.Response)
+	addExecutionIdentityPayload(payload, identity)
 	c.recordEventWithEvidence(ctx, runledger.EventModelRequestReplayed, payload, []string{step.OutputEvidenceID})
-	return &modelRoundResult{
-		response:       decoded.Response,
-		chargedCostUSD: decoded.ChargedCostUSD,
-		costRecorded:   decoded.CostRecorded,
-		pricingError:   decoded.PricingError,
-		partial:        decoded.Partial,
-		providerError:  decoded.ProviderError,
-	}, nil
+	roundResult := &modelRoundResult{
+		response:               decoded.Response,
+		chargedCostUSD:         decoded.ChargedCostUSD,
+		costRecorded:           decoded.CostRecorded,
+		pricingError:           decoded.PricingError,
+		partial:                decoded.Partial,
+		providerError:          decoded.ProviderError,
+		identity:               identity,
+		responseToolOfferKnown: decoded.ResponseToolsOffered != nil,
+	}
+	if decoded.ResponseToolsOffered != nil {
+		roundResult.responseToolsOffered = *decoded.ResponseToolsOffered
+	}
+	return roundResult, nil
 }
 
-func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatRequest, step runledger.ExecutionStep, inputDigest string, planned map[string]any, round int, stepKind string, useContinuation bool) (*modelRoundResult, error) {
+func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatRequest, reservation modelCostReservation, step runledger.ExecutionStep, inputDigest string, planned map[string]any, round int, stepKind string, useContinuation bool) (*modelRoundResult, error) {
 	c.recordEvent(ctx, runledger.EventModelRequestPlanned, planned)
 	c.recordEvent(ctx, runledger.EventModelRequestStarted, planned)
 	if err := c.markStepDispatched(ctx, step); err != nil {
@@ -2255,12 +2531,16 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	}
 	var response *model.ChatResponse
 	var callErr error
-	if contextual, ok := c.cfg.CallModel.(ContextualModelCaller); ok {
-		response, callErr = contextual.CallWithContext(ctx, ModelDispatchCall{
-			Request: req, UseContinuation: useContinuation,
-			RunID: c.cfg.RunID, TaskID: c.cfg.TaskID, TurnID: c.cfg.TurnID,
-			StepID: step.StepID, Kind: stepKind, Round: round,
-		})
+	responseToolsOffered := requestOffersTools(req)
+	call := ModelDispatchCall{
+		Request: req, UseContinuation: useContinuation,
+		RunID: c.cfg.RunID, TaskID: c.cfg.TaskID, TurnID: c.cfg.TurnID,
+		StepID: step.StepID, Kind: stepKind, Round: round,
+	}
+	if offerAware, ok := c.cfg.CallModel.(ResponseToolOfferModelCaller); ok {
+		response, responseToolsOffered, callErr = offerAware.CallWithResponseToolOffer(ctx, call)
+	} else if contextual, ok := c.cfg.CallModel.(ContextualModelCaller); ok {
+		response, callErr = contextual.CallWithContext(ctx, call)
 	} else {
 		response, callErr = c.cfg.CallModel.Call(ctx, req, useContinuation)
 	}
@@ -2284,37 +2564,52 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	}
 	chargedCostUSD := 0.0
 	costRecorded := false
+	reservationCharged := false
 	pricingError := ""
 	if c.cfg.CostForUsage != nil {
-		var priceErr error
-		chargedCostUSD, priceErr = c.priceUsage(response.Usage)
-		if priceErr != nil {
-			// The provider response already exists and may have incurred cost.
-			// Persist both it and the pricing failure as a completed logical step
-			// so retry fails closed without buying the response again.
-			pricingError = modelstep.NormalizeError(priceErr)
-			chargedCostUSD = 0
-		} else {
+		if c.shouldChargeModelReservation(response, reservation) {
+			// The request was admitted against this conservative envelope before
+			// dispatch. When a compatible provider omits usage, charging the full
+			// reservation keeps the ceiling fail-closed without discarding a
+			// completed response merely because exact accounting is unavailable.
+			chargedCostUSD = reservation.envelopeUSD
 			costRecorded = true
+			reservationCharged = true
+		} else {
+			var priceErr error
+			chargedCostUSD, priceErr = c.priceUsage(response.Usage)
+			if priceErr != nil {
+				// The provider response already exists and may have incurred cost.
+				// Persist both it and the pricing failure as a completed logical step
+				// so retry fails closed without buying the response again.
+				pricingError = modelstep.NormalizeError(priceErr)
+				chargedCostUSD = 0
+			} else {
+				costRecorded = true
+			}
 		}
 	}
 	responseEnvelope := modelResponseEvidenceEnvelope{
-		Version:        modelResponseEvidenceVersion,
-		Response:       response,
-		ChargedCostUSD: chargedCostUSD,
-		CostRecorded:   costRecorded,
-		PricingError:   pricingError,
-		Partial:        callErr != nil,
+		Version:              modelResponseEvidenceVersion,
+		Response:             response,
+		ResponseToolsOffered: &responseToolsOffered,
+		ChargedCostUSD:       chargedCostUSD,
+		CostRecorded:         costRecorded,
+		PricingError:         pricingError,
+		Partial:              callErr != nil,
 	}
 	if callErr != nil {
 		responseEnvelope.ProviderError = persistedProviderError
 	}
 	roundResult := &modelRoundResult{
-		response:       response,
-		chargedCostUSD: chargedCostUSD,
-		costRecorded:   costRecorded,
-		pricingError:   pricingError,
-		partial:        callErr != nil,
+		response:               response,
+		chargedCostUSD:         chargedCostUSD,
+		costRecorded:           costRecorded,
+		pricingError:           pricingError,
+		partial:                callErr != nil,
+		identity:               responseExecutionIdentity(response),
+		responseToolOfferKnown: true,
+		responseToolsOffered:   responseToolsOffered,
 	}
 	if callErr != nil {
 		// Keep callErr itself raw in the returned error chain for internal
@@ -2357,11 +2652,15 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	// with an honest, literally-zero usage object -- both otherwise render
 	// as 0/0/0 above.
 	completed["usage_present"] = response.UsagePresent
+	completed["usage_estimated"] = response.Usage.Estimated
 	if choice := firstResponseChoice(response); choice != nil && choice.NativeFinishReason != "" {
 		completed["native_finish_reason"] = choice.NativeFinishReason
 	}
 	if costRecorded {
 		completed[modelResponseCostMetadataKey] = chargedCostUSD
+	}
+	if reservationCharged {
+		completed["cost_basis"] = "reserved_envelope"
 	}
 	if pricingError != "" {
 		completed["pricing_error"] = pricingError
@@ -2373,12 +2672,79 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	if responseEvidenceID != "" {
 		completed["response_evidence_id"] = responseEvidenceID
 	}
+	addExecutionIdentityPayload(completed, roundResult.identity)
 	eventType := runledger.EventModelRequestCompleted
 	if responseEnvelope.Partial {
 		eventType = runledger.EventModelRequestFailed
 	}
 	c.recordEventWithEvidence(ctx, eventType, completed, evidenceIDs(responseEvidenceID))
 	return roundResult, callErr
+}
+
+func responseExecutionIdentity(response *model.ChatResponse) *model.ExecutionIdentity {
+	if response == nil || response.ExecutionIdentity == nil {
+		return nil
+	}
+	identity := *response.ExecutionIdentity
+	if identity == (model.ExecutionIdentity{}) {
+		return nil
+	}
+	return &identity
+}
+
+func responseExecutionIdentities(response *model.ChatResponse) []model.ExecutionIdentity {
+	if response == nil {
+		return nil
+	}
+	out := make([]model.ExecutionIdentity, 0, len(response.AttemptEvidence)+1)
+	for _, attempt := range response.AttemptEvidence {
+		if attempt.ExecutionIdentity == nil {
+			out = append(out, model.ExecutionIdentity{})
+			continue
+		}
+		out = append(out, *attempt.ExecutionIdentity)
+	}
+	if identity := responseExecutionIdentity(response); identity != nil {
+		if len(out) == 0 || out[len(out)-1] != *identity {
+			out = append(out, *identity)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, model.ExecutionIdentity{})
+	}
+	return out
+}
+
+func addExecutionIdentityPayload(payload map[string]any, identity *model.ExecutionIdentity) {
+	if payload == nil || identity == nil || *identity == (model.ExecutionIdentity{}) {
+		return
+	}
+	if identity.RequestedModel != "" {
+		payload["requested_model"] = identity.RequestedModel
+	}
+	if identity.SelectedModel != "" {
+		payload["selected_model"] = identity.SelectedModel
+	}
+	if identity.ProviderID != "" {
+		payload["provider_id"] = identity.ProviderID
+	}
+	if identity.ResponseModel != "" {
+		payload["response_model"] = identity.ResponseModel
+	}
+	if identity.ResponseID != "" {
+		payload["response_id"] = identity.ResponseID
+	}
+	if identity.Conflicted {
+		payload["execution_identity_conflicted"] = true
+	}
+}
+
+func (c *Controller) shouldChargeModelReservation(response *model.ChatResponse, reservation modelCostReservation) bool {
+	if c == nil || c.cfg.MaxCostUSD <= 0 || reservation.remainingUSD <= 0 || response == nil || response.UsagePresent {
+		return false
+	}
+	usage := response.Usage
+	return usage.Estimated || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0)
 }
 
 // toolRoundState keeps the durable state for one batch of model-requested
@@ -2390,6 +2756,7 @@ type toolRoundState struct {
 	steps          []runledger.ExecutionStep
 	outcomes       []ToolOutcome
 	replayed       []bool
+	known          []bool
 	pendingCalls   []model.ToolCall
 	pendingIndexes []int
 	records        []map[string]any
@@ -2401,17 +2768,40 @@ func newToolRoundState(calls []model.ToolCall) *toolRoundState {
 		steps:          make([]runledger.ExecutionStep, len(calls)),
 		outcomes:       make([]ToolOutcome, len(calls)),
 		replayed:       make([]bool, len(calls)),
+		known:          make([]bool, len(calls)),
 		pendingCalls:   make([]model.ToolCall, 0, len(calls)),
 		pendingIndexes: make([]int, 0, len(calls)),
 		records:        make([]map[string]any, len(calls)),
 	}
 }
 
+func (s *toolRoundState) knownOutcomeCount() int {
+	if s == nil {
+		return 0
+	}
+	count := 0
+	for _, known := range s.known {
+		if known {
+			count++
+		}
+	}
+	return count
+}
+
 func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCall, round int) (*toolRoundState, error) {
 	state := newToolRoundState(calls)
 	for index := range state.calls {
 		if err := c.prepareToolStep(ctx, state, round, index); err != nil {
-			return nil, err
+			var replayErrs []error
+			for replayIndex := 0; replayIndex < index; replayIndex++ {
+				if !state.replayed[replayIndex] {
+					continue
+				}
+				if replayErr := c.replayToolStep(ctx, state, replayIndex); replayErr != nil {
+					replayErrs = append(replayErrs, replayErr)
+				}
+			}
+			return state, errors.Join(append([]error{err}, replayErrs...)...)
 		}
 	}
 	c.recordEvent(ctx, runledger.EventToolRequested, map[string]any{
@@ -2422,13 +2812,30 @@ func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCal
 	for index := range state.calls {
 		if state.replayed[index] {
 			if err := c.replayToolStep(ctx, state, index); err != nil {
-				return nil, err
+				return state, err
 			}
 			continue
 		}
 		c.recordEvent(ctx, runledger.EventToolStarted, state.records[index])
 	}
 	return state, nil
+}
+
+func (c *Controller) appendUnresolvedToolMessages(state *toolRoundState, content string) {
+	if c == nil || c.cfg.History == nil || state == nil {
+		return
+	}
+	for index, call := range state.calls {
+		if state.known[index] {
+			continue
+		}
+		c.cfg.History.Append(model.Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Name:       call.Function.Name,
+			Content:    content,
+		})
+	}
 }
 
 func (c *Controller) prepareToolStep(ctx context.Context, state *toolRoundState, round, index int) error {
@@ -2477,7 +2884,9 @@ func (c *Controller) replayToolStep(ctx context.Context, state *toolRoundState, 
 	if err := c.loadJSONEvidence(ctx, step.OutputEvidenceID, &state.outcomes[index]); err != nil {
 		return err
 	}
+	state.outcomes[index].EvidenceID = step.OutputEvidenceID
 	state.replayed[index] = true
+	state.known[index] = true
 	record := state.records[index]
 	record["replayed"] = true
 	record["output_evidence_id"] = step.OutputEvidenceID
@@ -2566,11 +2975,19 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	if err != nil {
 		return errors.Join(err, c.blockDispatchedStep(ctx, step, err, "", ""))
 	}
+	outcome.EvidenceID = outputEvidenceID
+	state.outcomes[index] = outcome
 	record := state.records[index]
 	record["effect_class"] = outcome.EffectClass
 	record["success"] = outcome.Success
 	record["state_observed"] = outcome.StateObserved
 	record["state_changed"] = outcome.StateChanged
+	record["state_observation_failed"] = outcome.StateObservationFailed
+	if outcome.StateObservationError != "" {
+		record["state_observation_error"] = outcome.StateObservationError
+	}
+	record["verification_observed"] = outcome.VerificationObserved
+	record["verification_passed"] = outcome.VerificationPassed
 	record["yield_observed"] = outcome.YieldObserved
 	if outcome.YieldObserved {
 		record["yield_count"] = outcome.YieldCount
@@ -2582,6 +2999,7 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	if err := c.completeStep(ctx, step, outputEvidenceID, outputDigest); err != nil {
 		return errors.Join(err, c.blockDispatchedStep(ctx, step, err, outputEvidenceID, outputDigest))
 	}
+	state.known[index] = true
 	if outcome.Success {
 		c.recordEventWithEvidence(ctx, runledger.EventToolCompleted, record, evidenceIDs(outputEvidenceID))
 		return nil
@@ -2592,12 +3010,19 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 
 func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState, progress *progressTracker) (Decision, error) {
 	var stopDecision Decision
+	var observerErrs []error
+	if state == nil {
+		return stopDecision, nil
+	}
 	for index, call := range state.calls {
+		if !state.known[index] {
+			continue
+		}
 		outcome := state.outcomes[index]
 		progress.Observe(call.Function.Name, outcome)
 		if c.cfg.ObserveToolOutcome != nil {
 			if err := c.cfg.ObserveToolOutcome(ctx, call, outcome, state.replayed[index]); err != nil {
-				return Decision{}, fmt.Errorf("agentloop: observe tool %s outcome: %w", call.Function.Name, err)
+				observerErrs = append(observerErrs, fmt.Errorf("agentloop: observe tool %s outcome: %w", call.Function.Name, err))
 			}
 		}
 		content := outcome.Content
@@ -2605,6 +3030,16 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		decision = mergeGovernorDecisions(decision, c.cfg.Governor.ObserveProgress(outcome.EffectClass, outcome.Success, outcome.StateObserved, outcome.StateChanged))
 		if strings.TrimSpace(decision.Nudge) != "" {
 			content += "\n\n" + decision.Nudge
+		}
+		if index == len(state.calls)-1 && !decision.Stop && !stopDecision.Stop {
+			if remaining := c.cfg.Governor.RemainingToolCalls(); remaining >= 1 && remaining <= 3 {
+				content += fmt.Sprintf("\n\nHarness budget: %d tool calls remain. Reserve enough for any required verification after your last edit; report unverified work as incomplete.", remaining)
+				if contract, enabled := c.completionContract(); enabled {
+					if err := contract.evaluate(progress.Snapshot()); err != nil {
+						content += "\nCompletion evidence: " + PresentIncompleteResult(err).Reason
+					}
+				}
+			}
 		}
 		if c.cfg.History != nil {
 			c.cfg.History.Append(model.Message{
@@ -2618,7 +3053,7 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 			stopDecision = decision
 		}
 	}
-	return stopDecision, nil
+	return stopDecision, errors.Join(observerErrs...)
 }
 
 func mergeGovernorDecisions(current, effect Decision) Decision {
@@ -2709,7 +3144,7 @@ func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType stri
 	if c.cfg.RunLedger == nil {
 		return
 	}
-	_, _ = c.cfg.RunLedger.Append(ctx, runledger.Event{
+	event := runledger.Event{
 		Type:        eventType,
 		Timestamp:   timestamp,
 		SessionID:   c.cfg.SessionID,
@@ -2717,7 +3152,12 @@ func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType stri
 		TaskID:      c.cfg.TaskID,
 		EvidenceIDs: evidenceIDs,
 		Payload:     payload,
-	})
+	}
+	if payload != nil {
+		event.ModelID, _ = payloadExactString(payload, "model")
+		event.ProviderID, _ = payloadExactString(payload, "provider_id")
+	}
+	_, _ = c.cfg.RunLedger.Append(ctx, event)
 }
 
 func normalizedDurableEventPayload(payload map[string]any) map[string]any {
@@ -2778,6 +3218,12 @@ func lifecycleEventFromLedger(c *Controller, eventType string, timestamp time.Ti
 	event.StepID, _ = payloadString(payload, "step_id")
 	event.Phase, _ = payloadString(payload, "phase")
 	event.ModelID, _ = payloadString(payload, "model")
+	event.ProviderID, _ = payloadString(payload, "provider_id")
+	event.RequestedModel, _ = payloadString(payload, "requested_model")
+	event.SelectedModel, _ = payloadString(payload, "selected_model")
+	event.ResponseModel, _ = payloadString(payload, "response_model")
+	event.ResponseID, _ = payloadString(payload, "response_id")
+	event.ExecutionIdentityConflicted = payloadBool(payload, "execution_identity_conflicted")
 	event.ToolName, _ = payloadString(payload, "tool")
 	event.ToolCallID, _ = payloadString(payload, "call_id")
 	if event.ToolName == "" {
@@ -2807,6 +3253,7 @@ func lifecycleEventFromLedger(c *Controller, eventType string, timestamp time.Ti
 	event.Usage.PromptTokens = payloadInt(payload, "prompt_tokens")
 	event.Usage.CompletionTokens = payloadInt(payload, "completion_tokens")
 	event.Usage.TotalTokens = event.Usage.PromptTokens + event.Usage.CompletionTokens
+	event.Usage.Estimated = payloadBool(payload, "usage_estimated")
 	if event.CostUSD, _ = payloadFloat(payload, modelResponseCostMetadataKey); event.CostUSD < 0 {
 		event.CostUSD = 0
 	}
@@ -2816,6 +3263,11 @@ func lifecycleEventFromLedger(c *Controller, eventType string, timestamp time.Ti
 func payloadString(payload map[string]any, key string) (string, bool) {
 	value, ok := payload[key].(string)
 	return strings.TrimSpace(value), ok
+}
+
+func payloadExactString(payload map[string]any, key string) (string, bool) {
+	value, ok := payload[key].(string)
+	return value, ok
 }
 
 func payloadInt(payload map[string]any, key string) int {

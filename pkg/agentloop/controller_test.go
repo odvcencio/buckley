@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -62,11 +63,19 @@ func toolCallResponse(callID, toolName, args string, usage model.Usage) *model.C
 	}
 }
 
+func testToolRequest(req model.ChatRequest) model.ChatRequest {
+	if len(req.Tools) == 0 {
+		req.Tools = []map[string]any{{"type": "function", "function": map[string]any{"name": "test_tool"}}}
+		req.ToolChoice = "auto"
+	}
+	return req
+}
+
 func TestController_NormalCompletionNoToolCalls(t *testing.T) {
 	history := &recordingHistory{}
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return textResponse("hello there", model.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}), nil
@@ -98,6 +107,274 @@ func TestController_NormalCompletionNoToolCalls(t *testing.T) {
 	}
 }
 
+func TestController_CompletionContractAllowsReadOnlyAnswerWithoutChange(t *testing.T) {
+	t.Parallel()
+
+	ctrl, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{RequirePostChangeVerification: true},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("answer from existing evidence", model.Usage{}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CompletionStatus != CompletionConclusive {
+		t.Fatalf("CompletionStatus = %s", result.CompletionStatus)
+	}
+}
+
+func TestController_CompletionContractRepairsMissingPostChangeVerification(t *testing.T) {
+	t.Parallel()
+
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{RequirePostChangeVerification: true, MaxRepairAttempts: 1},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-edit", "edit_file", `{}`, model.Usage{}), nil
+			case 2:
+				return textResponse("done without verification", model.Usage{}), nil
+			case 3:
+				return toolCallResponse("call-test", "run_tests", `{}`, model.Usage{}), nil
+			default:
+				return textResponse("done after tests", model.Usage{}), nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(_ context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
+			switch calls[0].Function.Name {
+			case "edit_file":
+				return []ToolOutcome{{Content: "changed", Success: true, EffectClass: "modifying", StateObserved: true, StateChanged: true}}, nil
+			case "run_tests":
+				return []ToolOutcome{{Content: "pass", Success: true, EffectClass: "readonly", VerificationObserved: true, VerificationPassed: true}}, nil
+			default:
+				return nil, fmt.Errorf("unexpected tool %s", calls[0].Function.Name)
+			}
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CompletionStatus != CompletionConclusive || result.Content != "done after tests" || modelCalls != 4 {
+		t.Fatalf("result=%+v modelCalls=%d", result, modelCalls)
+	}
+	foundRepair := false
+	for _, msg := range history.messages {
+		if msg.Role == "user" && strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), "workspace changed after the last successful verification") {
+			foundRepair = true
+		}
+	}
+	if !foundRepair {
+		t.Fatalf("repair instruction not appended: %+v", history.messages)
+	}
+}
+
+func TestController_CompletionContractExhaustedRepairReturnsIncompleteWithCandidate(t *testing.T) {
+	t.Parallel()
+
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{RequirePostChangeVerification: true, MaxRepairAttempts: 1},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-edit", "edit_file", `{}`, model.Usage{}), nil
+			default:
+				return textResponse("still done without verification", model.Usage{}), nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "changed", Success: true, EffectClass: "modifying", StateObserved: true, StateChanged: true}}, nil
+		}),
+		History: &recordingHistory{},
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", err)
+	}
+	if result == nil || result.CompletionStatus != CompletionIncomplete || result.Content != "still done without verification" || modelCalls != 3 {
+		t.Fatalf("result=%+v modelCalls=%d", result, modelCalls)
+	}
+	if !strings.Contains(incomplete.Reason, "missing successful verification") {
+		t.Fatalf("incomplete reason = %q", incomplete.Reason)
+	}
+}
+
+func TestController_CompletionContractExplicitMutationRejectsNoChangeWithSpecificRepair(t *testing.T) {
+	t.Parallel()
+
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{
+			RequirePostChangeVerification: true,
+			RequireObservableChange:       true,
+			MaxRepairAttempts:             1,
+			TaskIntent:                    MutationIntent,
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			return textResponse(fmt.Sprintf("terminal answer %d", modelCalls), model.Usage{}), nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", err)
+	}
+	if result == nil || result.CompletionStatus != CompletionIncomplete || result.Content != "terminal answer 2" || modelCalls != 2 {
+		t.Fatalf("result=%+v modelCalls=%d", result, modelCalls)
+	}
+	if !strings.Contains(incomplete.Reason, "observable workspace change") {
+		t.Fatalf("incomplete reason = %q", incomplete.Reason)
+	}
+	if len(history.messages) != 1 || history.messages[0].Role != "user" {
+		t.Fatalf("repair history = %+v", history.messages)
+	}
+	repair := model.ExtractTextContentOrEmpty(history.messages[0].Content)
+	if !strings.Contains(repair, "requires an observable workspace change") || strings.Contains(repair, "workspace changed after") {
+		t.Fatalf("repair guidance = %q", repair)
+	}
+}
+
+func TestController_CompletionContractReadOnlyIntentStillVerifiesUnexpectedMutation(t *testing.T) {
+	t.Parallel()
+
+	history := &recordingHistory{}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{
+			RequirePostChangeVerification: true,
+			MaxRepairAttempts:             1,
+			TaskIntent:                    ReadOnlyIntent,
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-edit", "edit_file", `{}`, model.Usage{}), nil
+			case 2:
+				return textResponse("read-only answer after unexpected edit", model.Usage{}), nil
+			case 3:
+				return toolCallResponse("call-test", "run_tests", `{}`, model.Usage{}), nil
+			default:
+				return textResponse("verified read-only answer", model.Usage{}), nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(_ context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
+			switch calls[0].Function.Name {
+			case "edit_file":
+				return []ToolOutcome{{Content: "changed", Success: true, EffectClass: "modifying", StateObserved: true, StateChanged: true}}, nil
+			case "run_tests":
+				return []ToolOutcome{{Content: "pass", Success: true, EffectClass: "readonly", VerificationObserved: true, VerificationPassed: true}}, nil
+			default:
+				return nil, fmt.Errorf("unexpected tool %s", calls[0].Function.Name)
+			}
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CompletionStatus != CompletionConclusive || result.Content != "verified read-only answer" || modelCalls != 4 {
+		t.Fatalf("result=%+v modelCalls=%d", result, modelCalls)
+	}
+	foundVerificationRepair := false
+	for _, msg := range history.messages {
+		if msg.Role == "user" && strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), "workspace changed after the last successful verification") {
+			foundVerificationRepair = true
+		}
+	}
+	if !foundVerificationRepair {
+		t.Fatalf("verification repair instruction not appended: %+v", history.messages)
+	}
+}
+
+func TestController_CompletionContractStoppedFinalizationCannotBypassVerification(t *testing.T) {
+	t.Parallel()
+
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:           New(Config{MaxRounds: 10, MaxToolCalls: 1}),
+		FinalizeOnStop:     true,
+		CompletionContract: &CompletionContract{RequirePostChangeVerification: true},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return toolCallResponse("call-edit", "edit_file", `{}`, model.Usage{}), nil
+			}
+			return textResponse("final synthesis", model.Usage{}), nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "changed", Success: true, EffectClass: "modifying", StateObserved: true, StateChanged: true}}, nil
+		}),
+		History: &recordingHistory{},
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	result, err := ctrl.Run(context.Background())
+	var incomplete *IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", err)
+	}
+	if result == nil || result.CompletionStatus != CompletionIncomplete || !result.Termination.FinalizationAttempted {
+		t.Fatalf("result=%+v", result)
+	}
+	if !strings.Contains(incomplete.FinalizationError, "missing successful verification") {
+		t.Fatalf("finalization error = %q", incomplete.FinalizationError)
+	}
+}
+
 func TestController_PreservesBillablePartialResponseWhenProviderFails(t *testing.T) {
 	providerErr := errors.New("stream interrupted after provider emitted content")
 	ctrl, err := NewController(ControllerConfig{
@@ -106,7 +383,7 @@ func TestController_PreservesBillablePartialResponseWhenProviderFails(t *testing
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("partial answer", model.Usage{PromptTokens: 400, CompletionTokens: 200, TotalTokens: 600}), providerErr
@@ -138,7 +415,7 @@ func TestController_ProviderErrorProjectionIsBoundedWhileRawCauseRemainsWrapped(
 	wantProjection := modelstep.NormalizeError(providerErr)
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("partial answer", model.Usage{TotalTokens: 1}), providerErr
@@ -169,7 +446,7 @@ func TestController_AccountingFailureIsNotProviderPartial(t *testing.T) {
 			return 0, pricingErr
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("must not become a partial answer", model.Usage{TotalTokens: 77}), nil
@@ -203,7 +480,7 @@ func TestController_ProviderPartialKeepsAccountingFailureDistinct(t *testing.T) 
 			return 0, pricingErr
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("usable provider fragment", model.Usage{TotalTokens: 88}), providerErr
@@ -229,11 +506,156 @@ func TestController_ProviderPartialKeepsAccountingFailureDistinct(t *testing.T) 
 	}
 }
 
+func TestController_PersistsAttemptEvidenceAndReplaysAggregateCostOnce(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+
+	firstUsage := model.Usage{
+		PromptTokens:     11,
+		CompletionTokens: 3,
+		TotalTokens:      14,
+		PromptTokensDetails: &model.PromptTokensDetails{
+			CachedTokens: 5,
+		},
+		CacheWriteTokens: 7,
+	}
+	secondUsage := model.Usage{
+		PromptTokens:     13,
+		CompletionTokens: 4,
+		TotalTokens:      17,
+		CompletionTokenDetails: &model.CompletionTokenDetails{
+			ReasoningTokens: 2,
+		},
+	}
+	aggregate := model.AddUsage(firstUsage, secondUsage)
+	wantCost := float64(aggregate.TotalTokens) / 1000
+	firstIdentity := model.ExecutionIdentity{RequestedModel: "test-model", SelectedModel: "test-model", ProviderID: "provider-a", ResponseModel: "test-model", ResponseID: "attempt-1"}
+	secondIdentity := model.ExecutionIdentity{RequestedModel: "test-model", SelectedModel: "test-model", ProviderID: "provider-a", ResponseModel: "test-model", ResponseID: "attempt-2"}
+
+	providerCalls := 0
+	firstPriceCalls := 0
+	config := ControllerConfig{
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			firstPriceCalls++
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			return &model.ChatResponse{
+				Model: "test-model",
+				Choices: []model.Choice{{
+					Message:      model.Message{Role: "assistant", Content: "durable aggregate result"},
+					FinishReason: "stop",
+				}},
+				Usage:        aggregate,
+				UsagePresent: true,
+				AttemptEvidence: []model.ModelAttemptEvidence{
+					{Usage: firstUsage, UsagePresent: true, Incomplete: true, ExecutionIdentity: &firstIdentity},
+					{Usage: secondUsage, UsagePresent: true, FinishReason: "stop", ExecutionIdentity: &secondIdentity},
+				},
+				ExecutionIdentity: &secondIdentity,
+			}, nil
+		}),
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      "task-attempt-evidence",
+		TurnID:      "task-attempt-evidence/cp-001/turn-000",
+	}
+
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController first: %v", err)
+	}
+	firstResult, err := first.Run(ctx)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if providerCalls != 1 || firstPriceCalls != 1 {
+		t.Fatalf("first provider_calls=%d price_calls=%d, want 1 and 1", providerCalls, firstPriceCalls)
+	}
+	if !reflect.DeepEqual(firstResult.Usage, aggregate) || firstResult.CostUSD != wantCost {
+		t.Fatalf("first result usage=%+v cost=%v, want usage=%+v cost=%v", firstResult.Usage, firstResult.CostUSD, aggregate, wantCost)
+	}
+	if !reflect.DeepEqual(firstResult.ModelExecutions, []model.ExecutionIdentity{firstIdentity, secondIdentity}) {
+		t.Fatalf("first model executions = %+v, want flattened attempts without duplicate final response", firstResult.ModelExecutions)
+	}
+
+	steps, err := ledger.ListSteps(ctx, runID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("steps = %d, want exactly 1", len(steps))
+	}
+	step := steps[0]
+	if step.Status != runledger.StepCompleted || step.OutputEvidenceID == "" {
+		t.Fatalf("step = %+v, want completed with output evidence", step)
+	}
+	object, err := ev.Get(ctx, step.OutputEvidenceID)
+	if err != nil {
+		t.Fatalf("load response evidence: %v", err)
+	}
+	decoded, err := modelstep.ValidateResponseEvidence(step.OutputEvidenceID, step.OutputDigest, object)
+	if err != nil {
+		t.Fatalf("validate response evidence: %v", err)
+	}
+	if decoded.Response == nil || !decoded.Response.UsagePresent || !reflect.DeepEqual(decoded.Response.Usage, aggregate) {
+		t.Fatalf("decoded response = %+v, want present aggregate usage %+v", decoded.Response, aggregate)
+	}
+	if len(decoded.Response.AttemptEvidence) != 2 {
+		t.Fatalf("persisted attempt evidence = %d, want 2", len(decoded.Response.AttemptEvidence))
+	}
+	firstAttempt := decoded.Response.AttemptEvidence[0]
+	secondAttempt := decoded.Response.AttemptEvidence[1]
+	if !firstAttempt.UsagePresent || !firstAttempt.Incomplete || !reflect.DeepEqual(firstAttempt.Usage, firstUsage) {
+		t.Fatalf("first persisted attempt = %+v, want present incomplete usage %+v", firstAttempt, firstUsage)
+	}
+	if !secondAttempt.UsagePresent || secondAttempt.Incomplete || secondAttempt.FinishReason != "stop" || !reflect.DeepEqual(secondAttempt.Usage, secondUsage) {
+		t.Fatalf("second persisted attempt = %+v, want present complete stop usage %+v", secondAttempt, secondUsage)
+	}
+	if secondAttempt.ExecutionIdentity == nil || *secondAttempt.ExecutionIdentity != secondIdentity {
+		t.Fatalf("second persisted attempt identity = %+v, want %+v", secondAttempt.ExecutionIdentity, secondIdentity)
+	}
+
+	replayPriceCalls := 0
+	config.CostForUsage = func(model.Usage) (float64, error) {
+		replayPriceCalls++
+		return 99, nil
+	}
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		providerCalls++
+		return nil, testingError("provider should not run during attempt-evidence replay")
+	})
+	replay, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController replay: %v", err)
+	}
+	replayedResult, err := replay.Run(ctx)
+	if err != nil {
+		t.Fatalf("replay Run: %v", err)
+	}
+	if providerCalls != 1 || replayPriceCalls != 0 {
+		t.Fatalf("after replay provider_calls=%d price_calls=%d, want 1 and 0", providerCalls, replayPriceCalls)
+	}
+	if !reflect.DeepEqual(replayedResult.Usage, aggregate) || replayedResult.CostUSD != wantCost {
+		t.Fatalf("replay usage=%+v cost=%v, want usage=%+v cost=%v", replayedResult.Usage, replayedResult.CostUSD, aggregate, wantCost)
+	}
+	if !reflect.DeepEqual(replayedResult.ModelExecutions, []model.ExecutionIdentity{firstIdentity, secondIdentity}) {
+		t.Fatalf("replayed model executions = %+v, want flattened durable attempt identities", replayedResult.ModelExecutions)
+	}
+}
+
 func TestController_ReplaysBillablePartialResponseWithoutProviderRetry(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	providerCalls := 0
 	build := func(context.Context, int) (model.ChatRequest, error) {
-		return model.ChatRequest{Model: "test-model"}, nil
+		return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 	}
 	config := ControllerConfig{
 		MaxCostUSD: 1,
@@ -285,7 +707,7 @@ func TestController_LifecycleObserverIsOrderedRedactedAndIsolated(t *testing.T) 
 	)
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"}, nil
+			return testToolRequest(model.ChatRequest{Model: "deepseek/deepseek-v4-pro-0813"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			calls++
@@ -363,7 +785,7 @@ func TestController_DeferredLifecycleUsesRunAttemptsWithinOneLogicalTurn(t *test
 	modelCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -420,7 +842,7 @@ func TestController_DefaultLifecycleDoesNotEmitRunAttempts(t *testing.T) {
 	modelCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -467,7 +889,7 @@ func TestController_EmptyOrTruncatedTerminalCandidateIsIncomplete(t *testing.T) 
 			withoutTransportBackoff(t)
 			ctrl, err := NewController(ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{Model: "test-model"}, nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					return &model.ChatResponse{Choices: []model.Choice{tt.choice}}, nil
@@ -492,7 +914,7 @@ func TestController_TruncatedToolCallChoiceNeverDispatches(t *testing.T) {
 	dispatchCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			response := toolCallResponse("call-truncated", "write_file", `{}`, model.Usage{TotalTokens: 10})
@@ -526,7 +948,7 @@ func TestController_DispatchesToolsBackfillsIDsAndSumsUsage(t *testing.T) {
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, r int) (model.ChatRequest, error) {
 			round++
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			if round == 1 {
@@ -578,6 +1000,177 @@ func TestController_DispatchesToolsBackfillsIDsAndSumsUsage(t *testing.T) {
 	}
 }
 
+func TestController_UnofferedToolCallsStopBeforeHistoryOrToolSteps(t *testing.T) {
+	tests := []struct {
+		name         string
+		request      model.ChatRequest
+		wantDispatch bool
+	}{
+		{
+			name:    "no tools explicit none",
+			request: model.ChatRequest{Model: "test-model", ToolChoice: "none"},
+		},
+		{
+			name:    "no schemas omitted choice",
+			request: model.ChatRequest{Model: "test-model"},
+		},
+		{
+			name: "schemas explicit none",
+			request: model.ChatRequest{
+				Model:      "test-model",
+				Tools:      []map[string]any{{"type": "function", "function": map[string]any{"name": "modify_probe"}}},
+				ToolChoice: "none",
+			},
+		},
+		{
+			name: "offered schema dispatches normally",
+			request: model.ChatRequest{
+				Model:      "test-model",
+				Tools:      []map[string]any{{"type": "function", "function": map[string]any{"name": "modify_probe"}}},
+				ToolChoice: "auto",
+			},
+			wantDispatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger, evidenceStore, runID := newDurableControllerStores(t)
+			history := &recordingHistory{}
+			dispatches := 0
+			modelCalls := 0
+			controller, err := NewController(ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return tt.request, nil
+				},
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					modelCalls++
+					if tt.wantDispatch && modelCalls == 2 {
+						return textResponse("normal completion", model.Usage{TotalTokens: 3}), nil
+					}
+					return toolCallResponse("unexpected-call", "modify_probe", `{}`, model.Usage{TotalTokens: 2}), nil
+				}),
+				DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+					dispatches++
+					return []ToolOutcome{{Content: "probe completed", Success: true}}, nil
+				}),
+				History:     history,
+				RunLedger:   ledger,
+				Evidence:    evidenceStore,
+				StepJournal: ledger,
+				RunID:       runID,
+				SessionID:   "tool-offer-fuse",
+				TaskID:      "task-tool-offer-fuse",
+				TurnID:      "turn-tool-offer-fuse",
+			})
+			if err != nil {
+				t.Fatalf("NewController: %v", err)
+			}
+
+			result, runErr := controller.Run(t.Context())
+			steps, err := ledger.ListSteps(t.Context(), runID)
+			if err != nil {
+				t.Fatalf("ListSteps: %v", err)
+			}
+			if tt.wantDispatch {
+				if runErr != nil {
+					t.Fatalf("Run: %v", runErr)
+				}
+				if dispatches != 1 || modelCalls != 2 || result.CompletionStatus != CompletionConclusive {
+					t.Fatalf("dispatches=%d model_calls=%d result=%+v", dispatches, modelCalls, result)
+				}
+				if len(history.messages) != 3 || len(steps) != 3 || steps[1].Kind != "tool" {
+					t.Fatalf("history=%+v steps=%+v, want assistant/tool/assistant and a durable tool step", history.messages, steps)
+				}
+				return
+			}
+
+			var incomplete *IncompleteTurnError
+			if !errors.As(runErr, &incomplete) {
+				t.Fatalf("Run error = %v, want IncompleteTurnError", runErr)
+			}
+			if dispatches != 0 || modelCalls != 1 || len(history.messages) != 0 {
+				t.Fatalf("dispatches=%d model_calls=%d history=%+v, want no tool or history side effect", dispatches, modelCalls, history.messages)
+			}
+			if result.CompletionStatus != CompletionIncomplete || result.FinishReason != FinishReasonInvalidCompletion || result.Termination.Code != "unoffered_tool_call" || !result.Partial || len(result.Message.ToolCalls) != 1 {
+				t.Fatalf("result=%+v, want preserved incomplete malformed response", result)
+			}
+			if len(steps) != 1 || steps[0].Kind != "model" {
+				t.Fatalf("steps=%+v, want only the completed model-response step", steps)
+			}
+			object, err := evidenceStore.Get(t.Context(), steps[0].OutputEvidenceID)
+			if err != nil {
+				t.Fatalf("load model response evidence: %v", err)
+			}
+			decoded, err := modelstep.ValidateResponseEvidence(steps[0].OutputEvidenceID, steps[0].OutputDigest, object)
+			if err != nil {
+				t.Fatalf("validate model response evidence: %v", err)
+			}
+			if decoded.Response == nil || len(decoded.Response.Choices) != 1 || len(decoded.Response.Choices[0].Message.ToolCalls) != 1 || decoded.ResponseToolsOffered == nil || *decoded.ResponseToolsOffered {
+				t.Fatalf("decoded response=%+v offer=%v, want retained call with false offer", decoded.Response, decoded.ResponseToolsOffered)
+			}
+		})
+	}
+}
+
+func TestController_ReplayKeepsResponseProducingNoToolsDecision(t *testing.T) {
+	ledger, evidenceStore, runID := newDurableControllerStores(t)
+	request := testToolRequest(model.ChatRequest{Model: "test-model"})
+	dispatches := 0
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return request, nil
+		},
+		CallModel: ResponseToolOfferModelCallerFunc(func(context.Context, ModelDispatchCall) (*model.ChatResponse, bool, error) {
+			return toolCallResponse("retry-call", "modify_probe", `{}`, model.Usage{TotalTokens: 2}), false, nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			dispatches++
+			return []ToolOutcome{{Content: "must not execute", Success: true}}, nil
+		}),
+		RunLedger:   ledger,
+		Evidence:    evidenceStore,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "tool-offer-replay",
+		TaskID:      "task-tool-offer-replay",
+		TurnID:      "turn-tool-offer-replay",
+	}
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult, firstErr := first.Run(t.Context())
+	var incomplete *IncompleteTurnError
+	if !errors.As(firstErr, &incomplete) || firstResult.Termination.Code != "unoffered_tool_call" {
+		t.Fatalf("first result=%+v error=%v", firstResult, firstErr)
+	}
+
+	providerCalls := 0
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		providerCalls++
+		return nil, errors.New("durable replay must not call provider")
+	})
+	replay, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, replayErr := replay.Run(t.Context())
+	if !errors.As(replayErr, &incomplete) || replayed.Termination.Code != "unoffered_tool_call" {
+		t.Fatalf("replay result=%+v error=%v", replayed, replayErr)
+	}
+	if providerCalls != 0 || dispatches != 0 || replayed.ModelRequests != 1 {
+		t.Fatalf("provider_calls=%d dispatches=%d replayed=%+v", providerCalls, dispatches, replayed)
+	}
+	steps, err := ledger.ListSteps(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Kind != "model" {
+		t.Fatalf("steps=%+v, want only the replayed model-response step", steps)
+	}
+}
+
 func TestController_ContextualDispatcherCarriesStableApprovalIdentity(t *testing.T) {
 	var dispatched []ToolDispatchCall
 	round := 0
@@ -589,7 +1182,7 @@ func TestController_ContextualDispatcherCarriesStableApprovalIdentity(t *testing
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
 			round++
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			switch round {
@@ -648,7 +1241,7 @@ func TestController_ContextualModelCallerCarriesExactStepIdentity(t *testing.T) 
 	var got ModelDispatchCall
 	controller, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ContextualModelCallerFunc(func(_ context.Context, call ModelDispatchCall) (*model.ChatResponse, error) {
 			got = call
@@ -681,7 +1274,7 @@ func TestController_ContextualDispatcherStableWithoutProviderIDs(t *testing.T) {
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
 			round++
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			switch round {
@@ -752,7 +1345,7 @@ func TestController_GovernorStopsOnExactRepeat(t *testing.T) {
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 3, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 100}),
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			calls++
@@ -790,7 +1383,7 @@ func TestController_StepCapStopsBeforeGovernorDefault(t *testing.T) {
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 100}),
 		StepCap:  1,
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			calls++
@@ -892,7 +1485,7 @@ func TestController_FinalizationFailureIsExplicitlyIncomplete(t *testing.T) {
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -938,7 +1531,7 @@ func TestController_FinalizationPreservesPartialResponseAccountingAndProjection(
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -998,7 +1591,7 @@ func TestController_FinalizationAccountingFailureIsNotProviderPartial(t *testing
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1042,7 +1635,7 @@ func TestController_ReplaysPartialFinalizationWithoutProviderRetry(t *testing.T)
 	rawProviderError := "final synthesis stream ended " + secret + " " + strings.Repeat("x", modelstep.MaxPersistedErrorRunes+100)
 	persistedProviderError := modelstep.NormalizeErrorText(rawProviderError)
 	build := func(context.Context, int) (model.ChatRequest, error) {
-		return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+		return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 	}
 	config := ControllerConfig{
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 1}),
@@ -1131,7 +1724,7 @@ func TestController_EmptyChoicesAfterToolEvidenceUsesFinalization(t *testing.T) 
 	ctrl, err := NewController(ControllerConfig{
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1179,7 +1772,7 @@ func TestController_ExplicitCostCeilingDoesNotSpendAgainAfterExhaustion(t *testi
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100, Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100, Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1260,7 +1853,7 @@ func TestController_ModelRequestLimitPersistsAcrossRunContinuations(t *testing.T
 	ctrl, err := NewController(ControllerConfig{
 		MaxModelRequests: 1,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1301,7 +1894,7 @@ func TestController_OverCeilingFirstResponseCannotDispatchTools(t *testing.T) {
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1348,11 +1941,11 @@ func TestController_OverCeilingFinalizationResponseIsRejected(t *testing.T) {
 			return float64(usage.TotalTokens) / 10_000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{
+			return testToolRequest(model.ChatRequest{
 				Model:     "test-model",
 				MaxTokens: 100,
 				Messages:  append([]model.Message(nil), history.messages...),
-			}, nil
+			}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1451,6 +2044,58 @@ func TestController_CostReservationBoundsUnknownAndExplicitOutputAllowances(t *t
 	}
 }
 
+func TestController_MissingProviderUsageChargesReservationAndKeepsResponse(t *testing.T) {
+	var dispatched model.ChatRequest
+	ctrl, err := NewController(ControllerConfig{
+		MaxCostUSD: 1,
+		CostForUsage: func(usage model.Usage) (float64, error) {
+			return float64(usage.TotalTokens) / 1000, nil
+		},
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{
+				Model:     "test-model",
+				MaxTokens: 100,
+				Messages:  []model.Message{{Role: "user", Content: "answer this"}},
+			}, nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			dispatched = req
+			message := model.Message{Role: "assistant", Content: "completed response"}
+			return &model.ChatResponse{
+				Model: req.Model,
+				Choices: []model.Choice{{
+					Message:      message,
+					FinishReason: "stop",
+				}},
+				Usage:        model.EstimateChatUsage(req, message),
+				UsagePresent: false,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ctrl.Run(t.Context())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CompletionStatus != CompletionConclusive || result.Content != "completed response" {
+		t.Fatalf("result = %+v, want accepted completed response", result)
+	}
+	if !result.Usage.Estimated || result.Usage.TotalTokens <= 0 {
+		t.Fatalf("usage = %+v, want marked local estimate", result.Usage)
+	}
+	inputTokens, err := conservativeRequestInputTokenBound(dispatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReservedCost := float64(inputTokens+dispatched.MaxTokens) / 1000
+	if math.Abs(result.CostUSD-wantReservedCost) > 1e-12 {
+		t.Fatalf("cost = %v, want conservative reservation %v", result.CostUSD, wantReservedCost)
+	}
+}
+
 func TestController_CostCeilingRejectsUnpriceableImageInputBeforeDispatch(t *testing.T) {
 	modelCalls := 0
 	priceCalls := 0
@@ -1507,7 +2152,7 @@ func TestController_CostNormalizerObservesFinalAffordableAllowance(t *testing.T)
 			return req, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 2000}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 2000}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			captured = req
@@ -1551,7 +2196,7 @@ func TestNewController_RejectsNonFiniteMaxCostCeilings(t *testing.T) {
 			_, err := NewController(ControllerConfig{
 				MaxCostUSD: tt.value,
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{}, nil
+					return testToolRequest(model.ChatRequest{}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					return textResponse("unused", model.Usage{}), nil
@@ -1589,7 +2234,7 @@ func TestController_CostCeilingRejectsUntypedAndRawImageContent(t *testing.T) {
 					return 0, nil
 				},
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{Model: "vision-model", Messages: []model.Message{{Role: "user", Content: tt.content}}}, nil
+					return testToolRequest(model.ChatRequest{Model: "vision-model", Messages: []model.Message{{Role: "user", Content: tt.content}}}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					modelCalls++
@@ -1686,7 +2331,7 @@ func TestController_CostNormalizerMustBeIdempotent(t *testing.T) {
 			return req, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 10}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 10}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1725,7 +2370,7 @@ func TestController_CostAdmissionUsesNormalizedModelContext(t *testing.T) {
 			return 64
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{}, nil
+			return testToolRequest(model.ChatRequest{}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("unused", model.Usage{}), nil
@@ -1762,7 +2407,7 @@ func TestController_ConservativeInputBoundIsNotCappedByContextCatalog(t *testing
 		},
 		ContextWindow: func(string) int { return 32 },
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{}, nil
+			return testToolRequest(model.ChatRequest{}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("unused", model.Usage{}), nil
@@ -1795,7 +2440,7 @@ func TestController_FinalizationEmptyChoicesStillAccountsUsageAndCost(t *testing
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 10, Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 10, Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1835,7 +2480,7 @@ func TestController_EmptyFirstRoundRetriesWithNudge(t *testing.T) {
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1883,7 +2528,7 @@ func TestController_FinalizationRetriesEmptyFinalThenSucceeds(t *testing.T) {
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -1932,13 +2577,35 @@ func TestController_FinalizationRetriesEmptyFinalThenSucceeds(t *testing.T) {
 	}
 }
 
-// TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning covers
-// a model that leaves `content` empty on every tool-free reply but carries
-// its answer in `reasoning`. The first reply also has non-empty reasoning
-// text; the controller must NOT promote it early -- it should exhaust every
-// corrective retry first -- and only fall back to reasoning text once no
-// retries remain.
-func TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning(t *testing.T) {
+func assertNoPrivateReasoningLeak(t *testing.T, result *Result, history *recordingHistory, raw string) {
+	t.Helper()
+	if strings.Contains(result.Content, raw) || strings.Contains(model.ExtractTextContentOrEmpty(result.Message.Content), raw) {
+		t.Fatalf("private reasoning leaked through result: %+v", result)
+	}
+	if strings.Contains(result.Termination.Reason, raw) ||
+		strings.Contains(result.Termination.FinalizationError, raw) ||
+		strings.Contains(result.Termination.ProviderError, raw) ||
+		strings.Contains(result.GuardDecision.Reason, raw) {
+		t.Fatalf("private reasoning leaked through termination: %+v", result.Termination)
+	}
+	for _, msg := range history.messages {
+		if strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), raw) || strings.Contains(msg.Reasoning, raw) {
+			t.Fatalf("private reasoning leaked through history: %+v", history.messages)
+		}
+		for _, detail := range msg.ReasoningDetails {
+			if strings.Contains(detail.Text, raw) || strings.Contains(detail.Summary, raw) || strings.Contains(detail.Data, raw) {
+				t.Fatalf("private reasoning details leaked through history: %+v", history.messages)
+			}
+		}
+	}
+}
+
+// TestController_ReasoningOnlyTerminalRetriesExhaustIncomplete covers
+// Particle-style replies that carry private reasoning but no final-answer
+// content. Reasoning proves the model ran, so the controller uses the
+// bounded corrective-nudge path instead of transport backoff, but it must
+// never promote that reasoning into Result.Content or final history.
+func TestController_ReasoningOnlyTerminalRetriesExhaustIncomplete(t *testing.T) {
 	store, err := runledger.New(t.TempDir() + "/ledger.db")
 	if err != nil {
 		t.Fatalf("runledger.New: %v", err)
@@ -1950,34 +2617,153 @@ func TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning(t *testi
 		t.Fatalf("StartRun: %v", err)
 	}
 
+	for _, tt := range []struct {
+		name     string
+		response func(int) *model.ChatResponse
+		raw      string
+	}{
+		{
+			name: "zero_usage_reasoning",
+			raw:  "PRIVATE_ZERO_USAGE_REASONING",
+			response: func(call int) *model.ChatResponse {
+				return &model.ChatResponse{
+					Choices: []model.Choice{{Message: model.Message{
+						Role:      "assistant",
+						Content:   "",
+						Reasoning: fmt.Sprintf("PRIVATE_ZERO_USAGE_REASONING_%d", call),
+					}}},
+					Usage:        model.Usage{},
+					UsagePresent: true,
+				}
+			},
+		},
+		{
+			name: "nonzero_usage_reasoning",
+			raw:  "PRIVATE_NONZERO_USAGE_REASONING",
+			response: func(call int) *model.ChatResponse {
+				return &model.ChatResponse{
+					Choices: []model.Choice{{Message: model.Message{
+						Role:      "assistant",
+						Content:   "",
+						Reasoning: fmt.Sprintf("PRIVATE_NONZERO_USAGE_REASONING_%d", call),
+					}}},
+					Usage:        model.Usage{CompletionTokens: 2, TotalTokens: 2},
+					UsagePresent: true,
+				}
+			},
+		},
+		{
+			name: "missing_usage_reasoning_details",
+			raw:  "PRIVATE_REASONING_DETAILS",
+			response: func(call int) *model.ChatResponse {
+				return &model.ChatResponse{
+					Choices: []model.Choice{{Message: model.Message{
+						Role:    "assistant",
+						Content: "",
+						ReasoningDetails: []model.ReasoningDetail{{
+							Type: "reasoning.text",
+							Text: fmt.Sprintf("PRIVATE_REASONING_DETAILS_%d", call),
+						}},
+					}}},
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			history := &recordingHistory{}
+			modelCalls := 0
+			ctrl, err := NewController(ControllerConfig{
+				Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+				FinalizeOnStop: true,
+				RunLedger:      store,
+				RunID:          run.RunID,
+				SessionID:      "sess-1",
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+				},
+				CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+					modelCalls++
+					return tt.response(modelCalls), nil
+				}),
+				DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+					return nil, nil
+				}),
+				History: history,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, runErr := ctrl.Run(t.Context())
+			if runErr != nil {
+				t.Fatalf("Run: %v", runErr)
+			}
+			if result.CompletionStatus != CompletionIncomplete || result.FinishReason != FinishReasonInvalidCompletion || result.RequireConclusive() == nil {
+				t.Fatalf("result=%+v, want incomplete invalid completion", result)
+			}
+			if modelCalls != 1+maxEmptyTerminalRetries {
+				t.Fatalf("model_calls = %d, want %d (initial + corrective nudges)", modelCalls, 1+maxEmptyTerminalRetries)
+			}
+			if len(history.messages) != maxEmptyTerminalRetries {
+				t.Fatalf("history=%+v, want only corrective nudge messages", history.messages)
+			}
+			for _, msg := range history.messages {
+				if msg.Role != "user" || !strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), "not usable") {
+					t.Fatalf("history=%+v, want corrective nudge user messages", history.messages)
+				}
+			}
+			assertNoPrivateReasoningLeak(t, result, history, tt.raw)
+		})
+	}
+
+	events, err := store.ListEvents(ctx, runledger.EventQuery{RunID: run.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var sawFallbackDecision, sawEmptyRetryDecision bool
+	for _, e := range events {
+		if e.Type != runledger.EventControllerDecision {
+			continue
+		}
+		if e.Payload["kind"] == "reasoning_fallback_final" {
+			sawFallbackDecision = true
+		}
+		if e.Payload["kind"] == "empty_terminal_retry" {
+			sawEmptyRetryDecision = true
+		}
+	}
+	if sawFallbackDecision {
+		t.Fatal("reasoning-only response was promoted through reasoning_fallback_final")
+	}
+	if !sawEmptyRetryDecision {
+		t.Fatal("expected reasoning-only responses to use corrective nudge decisions")
+	}
+}
+
+func TestController_MissingUsageReasoningOnlyCorrectiveNudgeCanRecover(t *testing.T) {
 	history := &recordingHistory{}
 	modelCalls := 0
+	sawNudge := false
 	ctrl, err := NewController(ControllerConfig{
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
-		RunLedger:      store,
-		RunID:          run.RunID,
-		SessionID:      "sess-1",
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
-		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
-			// Every attempt is tool-free with empty content; every attempt
-			// also carries reasoning text, so an early promotion (a bug)
-			// would return "reasoning attempt 1" instead of exhausting the
-			// two bounded retries first. Nonzero, present usage keeps this
-			// on the immediate corrective-nudge path rather than
-			// transport-retry: the model genuinely ran every time.
-			return &model.ChatResponse{
-				Choices: []model.Choice{{Message: model.Message{
+			if modelCalls == 1 {
+				return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
 					Role:      "assistant",
 					Content:   "",
-					Reasoning: fmt.Sprintf("reasoning attempt %d", modelCalls),
-				}}},
-				Usage:        model.Usage{CompletionTokens: 2, TotalTokens: 2},
-				UsagePresent: true,
-			}, nil
+					Reasoning: "PRIVATE_CORRECTABLE_REASONING",
+				}}}}, nil
+			}
+			for _, msg := range req.Messages {
+				if strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), "not usable") {
+					sawNudge = true
+				}
+			}
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "plain final answer"}}}}, nil
 		}),
 		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
 			return nil, nil
@@ -1989,75 +2775,76 @@ func TestController_EmptyTerminalRetriesExhaustThenFallsBackToReasoning(t *testi
 	}
 	result, runErr := ctrl.Run(t.Context())
 	if runErr != nil {
-		t.Fatalf("Run error = %v, want reasoning fallback on the final retry", runErr)
+		t.Fatalf("Run: %v", runErr)
 	}
-	// maxEmptyTerminalRetries=2, so 1 initial attempt + 2 retries = 3 calls.
-	if modelCalls != 3 {
-		t.Fatalf("model_calls = %d, want 3 (initial + 2 retries)", modelCalls)
+	if result.Content != "plain final answer" || result.CompletionStatus != CompletionConclusive || modelCalls != 2 || !sawNudge {
+		t.Fatalf("result=%+v model_calls=%d saw_nudge=%v", result, modelCalls, sawNudge)
 	}
-	if result.Content != "reasoning attempt 3" || result.CompletionStatus != CompletionConclusive {
-		t.Fatalf("result=%+v, want the final attempt's reasoning text", result)
-	}
-
-	events, err := store.ListEvents(ctx, runledger.EventQuery{RunID: run.RunID})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
-	var sawFallbackDecision bool
-	for _, e := range events {
-		if e.Type != runledger.EventControllerDecision {
-			continue
-		}
-		if e.Payload["kind"] == "reasoning_fallback_final" {
-			sawFallbackDecision = true
-			if e.Payload["decision"] != "reasoning_fallback_final" {
-				t.Fatalf("decision event payload=%+v, want \"decision\" to mirror \"kind\" for audit rendering", e.Payload)
-			}
-		}
-	}
-	if !sawFallbackDecision {
-		t.Fatal("expected a reasoning_fallback_final controller.decision event on the ledger")
-	}
+	assertNoPrivateReasoningLeak(t, result, history, "PRIVATE_CORRECTABLE_REASONING")
 }
 
-// TestController_FinalizationRetriesExhaustThenFallsBackToReasoning mirrors
-// the live-round case for finalizeStoppedTurn: every finalization attempt
-// returns empty content, and only the last carries reasoning_details text
-// (no plain `reasoning` field), so the fallback must also read
-// reasoning_details.
-func TestController_FinalizationRetriesExhaustThenFallsBackToReasoning(t *testing.T) {
+func TestController_ReasoningOnlyCorrectionRespectsModelRequestLimit(t *testing.T) {
+	history := &recordingHistory{}
+	modelCalls := 0
+	dispatchCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		Governor:         New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
+		MaxModelRequests: 1,
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+		},
+		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			modelCalls++
+			return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
+				Role:      "assistant",
+				Content:   "",
+				Reasoning: "PRIVATE_CAP_REASONING",
+			}}}}, nil
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			dispatchCalls++
+			return []ToolOutcome{{Content: "must not run", Success: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := ctrl.Run(t.Context())
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if result.CompletionStatus != CompletionIncomplete || result.Termination.Kind != "model_request_limit" || result.RequireConclusive() == nil {
+		t.Fatalf("result=%+v, want incomplete model_request_limit", result)
+	}
+	if modelCalls != 1 || dispatchCalls != 0 {
+		t.Fatalf("model_calls=%d dispatch_calls=%d, want no extra model/tool effects", modelCalls, dispatchCalls)
+	}
+	assertNoPrivateReasoningLeak(t, result, history, "PRIVATE_CAP_REASONING")
+}
+
+func TestController_FinalizationReasoningOnlyExhaustsIncompleteWithoutLeak(t *testing.T) {
 	history := &recordingHistory{}
 	modelCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
 			switch modelCalls {
 			case 1:
 				return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
-			case 4:
-				// maxFinalizationAttempts=3: the final finalization attempt
-				// (model call 4) carries the answer only in
-				// reasoning_details, with content still empty. Nonzero,
-				// present usage keeps every attempt on the corrective-nudge
-				// path rather than transport-retry.
+			default:
 				return &model.ChatResponse{
 					Choices: []model.Choice{{Message: model.Message{
 						Role:             "assistant",
 						Content:          "",
-						ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "final reasoning answer"}},
+						ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "PRIVATE_FINAL_REASONING"}},
 					}}},
 					Usage:        model.Usage{CompletionTokens: 3, TotalTokens: 3},
-					UsagePresent: true,
-				}, nil
-			default:
-				return &model.ChatResponse{
-					Choices:      []model.Choice{{Message: model.Message{Role: "assistant", Content: ""}}},
-					Usage:        model.Usage{CompletionTokens: 1, TotalTokens: 1},
 					UsagePresent: true,
 				}, nil
 			}
@@ -2071,16 +2858,17 @@ func TestController_FinalizationRetriesExhaustThenFallsBackToReasoning(t *testin
 		t.Fatal(err)
 	}
 	result, runErr := ctrl.Run(t.Context())
-	if runErr != nil {
-		t.Fatalf("Run error = %v, want reasoning fallback on the final finalization attempt", runErr)
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", runErr)
 	}
-	// 1 tool round + 3 finalization attempts (2 empty, 1 reasoning fallback).
 	if modelCalls != 4 {
-		t.Fatalf("model_calls = %d, want 4", modelCalls)
+		t.Fatalf("model_calls = %d, want 4 (tool round + finalization attempts)", modelCalls)
 	}
-	if result.Content != "final reasoning answer" || result.CompletionStatus != CompletionConclusive {
-		t.Fatalf("result=%+v, want the reasoning_details fallback text", result)
+	if result.CompletionStatus != CompletionIncomplete || !result.Termination.FinalizationAttempted || result.Termination.FinalizationError == "" {
+		t.Fatalf("result=%+v, want incomplete finalization failure", result)
 	}
+	assertNoPrivateReasoningLeak(t, result, history, "PRIVATE_FINAL_REASONING")
 }
 
 // TestController_TransportFailureEmptyResponseRetriesWithBackoffThenSucceeds
@@ -2097,7 +2885,7 @@ func TestController_TransportFailureEmptyResponseRetriesWithBackoffThenSucceeds(
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2142,7 +2930,7 @@ func TestController_TransportFailureExhaustsWithoutTakingTheNudgePath(t *testing
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2188,7 +2976,7 @@ func TestController_TransportFailureZeroCompletionTokensWithNonzeroPromptTokensR
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2252,7 +3040,7 @@ func TestController_TransportFailureExhaustsWithFinalizeOnStopStillAttemptsFinal
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2299,7 +3087,7 @@ func TestController_GenuinelyEmptyWithUsageTakesNudgeNotTransportRetry(t *testin
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2346,7 +3134,7 @@ func TestController_SharedPoolRateLimitRetriesWithBackoffAndNeverAbortsOnFirst(t
 	ctrl, err := NewController(ControllerConfig{
 		Governor: New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 10, MaxToolCalls: 10}),
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2383,7 +3171,7 @@ func TestController_FinalizationSharedPoolRateLimitRetriesThenSucceeds(t *testin
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2424,7 +3212,7 @@ func TestController_ExplicitModelRequestLimitIncludesFinalSynthesis(t *testing.T
 		FinalizeOnStop:   true,
 		MaxModelRequests: 2,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2458,7 +3246,7 @@ func TestController_ParallelBatchCannotOvershootToolCeiling(t *testing.T) {
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 50, MaxToolCalls: 2}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -2510,7 +3298,7 @@ func TestController_ParallelBatchCannotOvershootToolCeiling(t *testing.T) {
 func TestController_EmptyChoicesReportsFinishReasonWithoutError(t *testing.T) {
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return &model.ChatResponse{}, nil
@@ -2533,7 +3321,7 @@ func TestController_CallModelErrorPropagates(t *testing.T) {
 	wantErr := errors.New("boom")
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return nil, wantErr
@@ -2552,7 +3340,7 @@ func TestController_CallModelErrorPropagates(t *testing.T) {
 func TestController_MissingToolDispatcherErrors(t *testing.T) {
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return toolCallResponse("call-1", "search_text", `{}`, model.Usage{}), nil
@@ -2571,7 +3359,7 @@ func TestController_ToolDispatcherErrorAbortsTurn(t *testing.T) {
 	wantErr := errors.New("approval wait cancelled")
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return toolCallResponse("call-1", "run_shell", `{}`, model.Usage{}), nil
@@ -2605,7 +3393,7 @@ func TestController_RecordsRunLedgerEvents(t *testing.T) {
 
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
 			return textResponse("done", model.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}), nil
@@ -2638,6 +3426,197 @@ func TestController_RecordsRunLedgerEvents(t *testing.T) {
 	if !sawStarted || !sawCompleted {
 		t.Fatalf("expected model.request_started and model.request_completed events, got %+v", events)
 	}
+}
+
+func TestController_RecordsAndReplaysModelExecutionIdentity(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := context.Background()
+	identity := model.ExecutionIdentity{
+		RequestedModel: "requested/model",
+		SelectedModel:  "selected/model",
+		ProviderID:     "provider-a",
+		ResponseModel:  "reported/model-v1",
+		ResponseID:     "resp-identity-1",
+	}
+	var lifecycleEvents []LifecycleEvent
+	providerCalls := 0
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "dispatch/requested-model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			response := textResponse("done", model.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2})
+			response.ExecutionIdentity = &identity
+			return response, nil
+		}),
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "sess-identity",
+		TaskID:      "task-identity",
+		TurnID:      "turn-identity",
+		LifecycleObserver: func(event LifecycleEvent) {
+			lifecycleEvents = append(lifecycleEvents, event)
+		},
+	}
+	ctrl, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	result, err := ctrl.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want live call", providerCalls)
+	}
+	if len(result.ModelExecutions) != 1 || result.ModelExecutions[0] != identity {
+		t.Fatalf("result model executions = %+v, want %+v", result.ModelExecutions, identity)
+	}
+	var liveResponse LifecycleEvent
+	for _, event := range lifecycleEvents {
+		if event.Type == LifecycleModelResponse {
+			liveResponse = event
+		}
+	}
+	if liveResponse.ModelID != "dispatch/requested-model" || liveResponse.RequestedModel != identity.RequestedModel || liveResponse.SelectedModel != identity.SelectedModel || liveResponse.ProviderID != identity.ProviderID || liveResponse.ResponseModel != identity.ResponseModel || liveResponse.ResponseID != identity.ResponseID {
+		t.Fatalf("lifecycle model response = %+v, want separate dispatch/request/response identity", liveResponse)
+	}
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var completed runledger.Event
+	for _, event := range events {
+		if event.Type == runledger.EventModelRequestCompleted {
+			completed = event
+		}
+	}
+	if completed.ModelID != "dispatch/requested-model" || completed.ProviderID != identity.ProviderID || completed.Payload["selected_model"] != identity.SelectedModel || completed.Payload["response_model"] != identity.ResponseModel || completed.Payload["response_id"] != identity.ResponseID {
+		t.Fatalf("runledger completed event = %+v", completed)
+	}
+
+	config.LifecycleObserver = nil
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		providerCalls++
+		return nil, errors.New("replay must not call provider")
+	})
+	replay, err := NewController(config)
+	if err != nil {
+		t.Fatalf("NewController replay: %v", err)
+	}
+	replayed, err := replay.Run(ctx)
+	if err != nil {
+		t.Fatalf("replay Run: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls after replay = %d, want durable replay without provider", providerCalls)
+	}
+	if len(replayed.ModelExecutions) != 1 || replayed.ModelExecutions[0] != identity {
+		t.Fatalf("replayed model executions = %+v, want old identity %+v", replayed.ModelExecutions, identity)
+	}
+}
+
+func TestController_PreservesUnknownIdentityEntryBeforeKnownResponse(t *testing.T) {
+	history := &recordingHistory{}
+	known := model.ExecutionIdentity{
+		RequestedModel: "requested/model",
+		SelectedModel:  "requested/model",
+		ProviderID:     "provider-a",
+		ResponseModel:  "requested/model",
+		ResponseID:     "resp-known",
+	}
+	modelCalls := 0
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "requested/model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			modelCalls++
+			switch modelCalls {
+			case 1:
+				return toolCallResponse("call-1", "inspect", `{}`, model.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}), nil
+			case 2:
+				response := textResponse("done", model.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2})
+				response.ExecutionIdentity = &known
+				return response, nil
+			default:
+				t.Fatalf("unexpected model call %d", modelCalls)
+				return nil, nil
+			}
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			return []ToolOutcome{{Content: "inspected", Success: true, StateObserved: true}}, nil
+		}),
+		History: history,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	result, err := ctrl.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.ModelExecutions) != 2 {
+		t.Fatalf("model executions = %+v, want unknown then known entries", result.ModelExecutions)
+	}
+	if result.ModelExecutions[0] != (model.ExecutionIdentity{}) || result.ModelExecutions[1] != known {
+		t.Fatalf("model executions = %+v, want unknown then %+v", result.ModelExecutions, known)
+	}
+}
+
+func TestController_RecordsModelExecutionIdentityFromPartialProviderError(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	identity := model.ExecutionIdentity{
+		RequestedModel: "requested/model",
+		SelectedModel:  "selected/model",
+		ProviderID:     "provider-a",
+		ResponseModel:  "reported/model",
+		ResponseID:     "resp-partial",
+	}
+	providerErr := errors.New("provider stream ended early")
+	ctrl, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return testToolRequest(model.ChatRequest{Model: "requested/model"}), nil
+		},
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			response := textResponse("partial text", model.Usage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5})
+			response.ExecutionIdentity = &identity
+			return response, providerErr
+		}),
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "sess-partial",
+		TaskID:      "task-partial",
+		TurnID:      "turn-partial",
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	result, err := ctrl.Run(context.Background())
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("Run error = %v, want provider error", err)
+	}
+	if result == nil || len(result.ModelExecutions) != 1 || result.ModelExecutions[0] != identity {
+		t.Fatalf("result model executions = %+v, want partial identity %+v", result, identity)
+	}
+	events, err := ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: runID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == runledger.EventModelRequestFailed {
+			if event.ProviderID != identity.ProviderID || event.Payload["response_id"] != identity.ResponseID {
+				t.Fatalf("failed event = %+v, want partial identity metadata", event)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing partial model.request_failed event in %+v", events)
 }
 
 // TestTransportRetryBackoff_StartsNearThirtySecondsAndGrows covers the

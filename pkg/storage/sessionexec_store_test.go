@@ -89,7 +89,7 @@ func TestSessionExecMigration_FreshUpgradeAndIdempotent(t *testing.T) {
 		t.Fatalf("upgrade migration: %v", err)
 	}
 	var version int
-	if err := db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 24 {
+	if err := db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != len(migrations) {
 		t.Fatalf("upgrade version = %d, err=%v", version, err)
 	}
 	if err := runMigrations(db); err != nil {

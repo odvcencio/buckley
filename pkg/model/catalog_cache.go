@@ -24,16 +24,18 @@ type cachePricing struct {
 // ModelCatalog/ModelInfo document that OpenRouter's catalog client already
 // produces.
 type cacheModelInfo struct {
-	ID                  string       `json:"id"`
-	Name                string       `json:"name"`
-	Description         string       `json:"description"`
-	ContextLength       int          `json:"context_length"`
-	MaxCompletionTokens int          `json:"max_completion_tokens,omitempty"`
-	Pricing             cachePricing `json:"pricing"`
-	PricingKnown        bool         `json:"pricing_known,omitempty"`
-	Created             int64        `json:"created"`
-	Architecture        Architecture `json:"architecture,omitempty"`
-	SupportedParameters []string     `json:"supported_parameters,omitempty"`
+	ID                          string       `json:"id"`
+	Name                        string       `json:"name"`
+	Description                 string       `json:"description"`
+	ContextLength               int          `json:"context_length"`
+	MaxCompletionTokens         int          `json:"max_completion_tokens,omitempty"`
+	Pricing                     cachePricing `json:"pricing"`
+	PricingKnown                bool         `json:"pricing_known,omitempty"`
+	Created                     int64        `json:"created"`
+	Architecture                Architecture `json:"architecture,omitempty"`
+	SupportedParameters         []string     `json:"supported_parameters,omitempty"`
+	SupportedParametersComplete bool         `json:"supported_parameters_complete,omitempty"`
+	SupportedParameterEvidence  []string     `json:"supported_parameter_evidence,omitempty"`
 }
 
 type cacheCatalogDoc struct {
@@ -59,7 +61,7 @@ func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 
 	out := make(map[string]ModelInfo, len(doc.Data))
 	for _, entry := range doc.Data {
-		out[entry.ID] = ModelInfo{
+		info := ModelInfo{
 			ID:                  entry.ID,
 			Name:                entry.Name,
 			Description:         entry.Description,
@@ -71,6 +73,9 @@ func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 			Architecture:        entry.Architecture,
 			SupportedParameters: entry.SupportedParameters,
 		}
+		info.supportedParametersComplete = entry.SupportedParametersComplete
+		info.setSupportedParameterEvidence(entry.SupportedParameterEvidence...)
+		out[entry.ID] = info
 	}
 	return out, nil
 }
@@ -88,16 +93,18 @@ func SaveCatalogCache(path string, catalog map[string]ModelInfo) error {
 	for _, id := range ids {
 		info := catalog[id]
 		doc.Data = append(doc.Data, cacheModelInfo{
-			ID:                  info.ID,
-			Name:                info.Name,
-			Description:         info.Description,
-			ContextLength:       info.ContextLength,
-			MaxCompletionTokens: info.MaxCompletionTokens,
-			Pricing:             cachePricing{Prompt: info.Pricing.Prompt, Completion: info.Pricing.Completion},
-			PricingKnown:        info.PricingKnown,
-			Created:             info.Created,
-			Architecture:        info.Architecture,
-			SupportedParameters: info.SupportedParameters,
+			ID:                          info.ID,
+			Name:                        info.Name,
+			Description:                 info.Description,
+			ContextLength:               info.ContextLength,
+			MaxCompletionTokens:         info.MaxCompletionTokens,
+			Pricing:                     cachePricing{Prompt: info.Pricing.Prompt, Completion: info.Pricing.Completion},
+			PricingKnown:                info.PricingKnown,
+			Created:                     info.Created,
+			Architecture:                info.Architecture,
+			SupportedParameters:         info.SupportedParameters,
+			SupportedParametersComplete: info.supportedParametersComplete,
+			SupportedParameterEvidence:  info.supportedParameterEvidenceList(),
 		})
 	}
 

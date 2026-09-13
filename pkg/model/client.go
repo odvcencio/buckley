@@ -22,7 +22,7 @@ const (
 	// defaultTimeout is the read deadline for the underlying http.Client
 	// (Client, and every other provider adapter's own client -- see
 	// provider_openai.go, provider_anthropic.go, provider_google.go,
-	// provider_ollama.go, provider_litellm.go). It must stay at or above 300s:
+	// provider_ollama.go, provider_openai_compatible.go). It must stay at or above 300s:
 	// the stealth/ox-alpha empty-response incident observed a healthy-but-queued
 	// response take 249s. The goal path additionally calls SetTimeout(0) to
 	// disable this deadline entirely (see cmd/buckley/goal_engine.go), so a
@@ -388,6 +388,7 @@ func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
 // ChatCompletion performs a non-streaming chat completion with automatic retries
 func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return nil, err
 	}
@@ -471,6 +472,8 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			if len(chatResp.Choices) == 0 {
 				return NoResponseChoicesError(req, &chatResp)
 			}
+			chatResp.AttemptEvidence = nil
+			chatResp.ExecutionIdentity = observedExecutionIdentity(chatResp.ID, chatResp.Model, nil)
 
 			result = &chatResp
 			return nil
@@ -513,6 +516,7 @@ func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 
 // ChatCompletionStream performs a streaming chat completion with automatic retries
 func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
@@ -540,6 +544,7 @@ func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 // executeStreamRequest performs the actual streaming request
 func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	req.Stream = true
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return err
 	}

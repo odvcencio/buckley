@@ -19,6 +19,7 @@ var configValidators = []func(*Config) error{
 	validateTrustLevel,
 	validateExecutionModes,
 	validateReasoning,
+	validateOpenAICompatible,
 	validateApprovalMode,
 	validateSandbox,
 	validateToolMiddleware,
@@ -93,6 +94,28 @@ func validateReasoning(c *Config) error {
 	}
 	if !validReasoning[reasoning] {
 		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
+	}
+	return nil
+}
+
+func validateOpenAICompatible(c *Config) error {
+	if c.Providers.OpenAICompatible.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_max_reasoning_chunks must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_max_reasoning_chunks must be >= 0")
 	}
 	return nil
 }
@@ -318,6 +341,9 @@ func (c *Config) ValidationWarnings() []string {
 	}
 	if c.Providers.Google.APIKey != "" && os.Getenv("GOOGLE_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: Google API key is loaded from a configuration file. Consider using GOOGLE_API_KEY environment variable instead.")
+	}
+	if c.Providers.OpenAICompatible.APIKey != "" && os.Getenv("BUCKLEY_OPENAI_COMPATIBLE_API_KEY") == "" {
+		warnings = append(warnings, "SECURITY: OpenAI-compatible API key is loaded from a configuration file. Consider using BUCKLEY_OPENAI_COMPATIBLE_API_KEY instead.")
 	}
 	if c.Providers.LiteLLM.APIKey != "" && os.Getenv("BUCKLEY_LITELLM_API_KEY") == "" && os.Getenv("LITELLM_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: LiteLLM API key is loaded from a configuration file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")

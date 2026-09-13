@@ -487,7 +487,18 @@ func TestInvokerWithTools_FinalizationFailureIsIncomplete(t *testing.T) {
 		{Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
 			ID: "call_1", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{}`},
 		}}}}}},
-		{Choices: []model.Choice{{Message: model.Message{Role: "assistant"}}}},
+		{
+			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Reasoning: "PRIVATE_ONESHOT_REASONING_1"}}},
+			Usage:   model.Usage{CompletionTokens: 1, TotalTokens: 1},
+		},
+		{
+			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Reasoning: "PRIVATE_ONESHOT_REASONING_2"}}},
+			Usage:   model.Usage{CompletionTokens: 1, TotalTokens: 1},
+		},
+		{
+			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Reasoning: "PRIVATE_ONESHOT_REASONING_3"}}},
+			Usage:   model.Usage{CompletionTokens: 1, TotalTokens: 1},
+		},
 	}}
 	invoker := NewInvoker(InvokerConfig{Client: client, Model: "test-model"})
 	executor := &mockToolExecutor{results: map[string]string{"read_file": "evidence"}}
@@ -513,6 +524,15 @@ func TestInvokerWithTools_FinalizationFailureIsIncomplete(t *testing.T) {
 	}
 	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].Name != "read_file" {
 		t.Fatalf("trace tool calls = %+v, want completed read_file call", trace.ToolCalls)
+	}
+	if client.callCount != 4 {
+		t.Fatalf("model calls = %d, want one tool round plus three finalization attempts", client.callCount)
+	}
+	if strings.Contains(content, "PRIVATE_ONESHOT_REASONING") ||
+		strings.Contains(trace.Content, "PRIVATE_ONESHOT_REASONING") ||
+		strings.Contains(trace.Error, "PRIVATE_ONESHOT_REASONING") ||
+		strings.Contains(err.Error(), "PRIVATE_ONESHOT_REASONING") {
+		t.Fatalf("private reasoning leaked: content=%q trace=%+v err=%v", content, trace, err)
 	}
 }
 

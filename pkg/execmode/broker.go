@@ -13,12 +13,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -294,14 +296,38 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(full)
+	f, err := os.Open(full)
 	if err != nil {
 		return nil, err
 	}
-	truncated := false
-	if len(data) > maxReadBytes {
+	defer f.Close()
+	// Decimal strings preserve int64 offsets through JSON without rounding.
+	raw, chunk := params["offset"]
+	if chunk {
+		s, isStr := raw.(string)
+		if !isStr {
+			return nil, fmt.Errorf("files.read offset must be a decimal string, got %T", raw)
+		}
+		off, parseErr := strconv.ParseInt(s, 10, 64)
+		if parseErr != nil || off < 0 {
+			return nil, fmt.Errorf("files.read invalid offset %q: want a non-negative decimal integer", s)
+		}
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("seek to offset %d: %w", off, err)
+		}
+	}
+	// Read at most one byte past the cap so an exactly maxReadBytes file
+	// still reports truncated=false without pulling the whole file in.
+	data, readErr := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
+	if readErr != nil {
+		return nil, readErr
+	}
+	truncated := len(data) > maxReadBytes
+	if truncated {
 		data = data[:maxReadBytes]
-		truncated = true
+	}
+	if chunk {
+		return map[string]any{"data": data, "truncated": truncated}, nil
 	}
 	return map[string]any{"content": string(data), "truncated": truncated}, nil
 }

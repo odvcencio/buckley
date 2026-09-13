@@ -20,6 +20,7 @@ func TestManagerNormalizeCostBoundedRequest_UsesProviderWireField(t *testing.T) 
 		wantMaxCompletion int
 	}{
 		{providerID: "openrouter", wantMaxTokens: 2080},
+		{providerID: "openai_compatible", wantMaxTokens: 2080},
 		{providerID: "litellm", wantMaxTokens: 2080},
 		{providerID: "openai", wantMaxCompletion: 2080},
 		{providerID: "anthropic", wantMaxTokens: 2080},
@@ -327,6 +328,13 @@ func TestManagerCalculateBoundedCost_RequiresAuthoritativePricingAndUsage(t *tes
 			wantErr:    "reported no token counts",
 		},
 		{
+			name:       "locally estimated usage",
+			providerID: "openai",
+			info:       positive,
+			usage:      Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, Estimated: true},
+			wantErr:    "not authoritative",
+		},
+		{
 			name:       "cache-write usage",
 			providerID: "openai",
 			info:       positive,
@@ -418,12 +426,12 @@ func TestOllamaCatalogMarksLocalPricingAuthoritative(t *testing.T) {
 	}
 }
 
-func TestManagerCalculateBoundedCost_RejectsUnknownZeroLiteLLMPricing(t *testing.T) {
+func TestManagerCalculateBoundedCost_RejectsUnknownZeroCompatiblePricing(t *testing.T) {
 	info := ModelInfo{ID: "proxy/model"}
-	mgr := newCostBoundedTestManager("litellm", info)
+	mgr := newCostBoundedTestManager("openai_compatible", info)
 	_, err := mgr.CalculateBoundedCost(info.ID, Usage{PromptTokens: 50, CompletionTokens: 10})
 	if err == nil || !strings.Contains(err.Error(), "zero price is not authoritative") {
-		t.Fatalf("error = %v, want unknown zero LiteLLM pricing rejected", err)
+		t.Fatalf("error = %v, want unknown zero compatible pricing rejected", err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/model"
 )
 
@@ -237,24 +238,77 @@ func TestRunnerRunAdditionalAssertionFailures(t *testing.T) {
 	}
 }
 
-func TestRunnerRunReasoningFallback(t *testing.T) {
+func TestRunnerRunReasoningOnlyIncompleteDoesNotLeak(t *testing.T) {
+	client := &fakeClient{responses: []model.ChatResponse{
+		{
+			Model: "test-model",
+			Choices: []model.Choice{{
+				Message: model.Message{Reasoning: "PRIVATE_CHATCHECK_REASONING_1"},
+			}},
+		},
+		{
+			Model: "test-model",
+			Choices: []model.Choice{{
+				Message: model.Message{Reasoning: "PRIVATE_CHATCHECK_REASONING_2"},
+			}},
+		},
+		{
+			Model: "test-model",
+			Choices: []model.Choice{{
+				Message: model.Message{Reasoning: "PRIVATE_CHATCHECK_REASONING_3"},
+			}},
+		},
+	}}
+	runner := Runner{Client: client}
+
+	result, err := runner.Run(context.Background(), Scenario{
+		Model: "test-model",
+		Turns: []Turn{{User: "hello"}},
+	})
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Run error = %v, want IncompleteTurnError", err)
+	}
+	if result == nil || result.Passed || len(result.Turns) != 1 || result.Turns[0].Passed {
+		t.Fatalf("unexpected turn result: %+v", result)
+	}
+	data, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		t.Fatalf("marshal result: %v", marshalErr)
+	}
+	if strings.Contains(string(data), "PRIVATE_CHATCHECK_REASONING") || strings.Contains(err.Error(), "PRIVATE_CHATCHECK_REASONING") {
+		t.Fatalf("private reasoning leaked: result=%s err=%v", data, err)
+	}
+}
+
+func TestRunnerRunContentWithReasoningReportsContentOnly(t *testing.T) {
 	client := &fakeClient{responses: []model.ChatResponse{{
 		Model: "test-model",
 		Choices: []model.Choice{{
-			Message: model.Message{Reasoning: "visible fallback"},
+			Message: model.Message{
+				Content:   "visible content",
+				Reasoning: "PRIVATE_CONTENT_REASONING",
+			},
 		}},
 	}}}
 	runner := Runner{Client: client}
 
 	result, err := runner.Run(context.Background(), Scenario{
 		Model: "test-model",
-		Turns: []Turn{{User: "hello", WantContains: []string{"visible fallback"}}},
+		Turns: []Turn{{User: "hello", WantContains: []string{"visible content"}}},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !result.Turns[0].Reasoning || result.Turns[0].Text != "visible fallback" {
+	if !result.Passed || !result.Turns[0].Reasoning || result.Turns[0].Text != "visible content" {
 		t.Fatalf("unexpected turn result: %+v", result.Turns[0])
+	}
+	data, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		t.Fatalf("marshal result: %v", marshalErr)
+	}
+	if strings.Contains(string(data), "PRIVATE_CONTENT_REASONING") {
+		t.Fatalf("private reasoning leaked: result=%s", data)
 	}
 }
 

@@ -107,7 +107,7 @@ func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, s
 		return Decision{
 			Kind:  "read_only_budget_warning",
 			Count: g.readOnlyCalls,
-			Nudge: "Harness checkpoint: discovery has consumed half of its bounded budget without changing state. Preserve your creative latitude, but now choose and state the smallest viable implementation slice supported by the evidence. Prefer executing that slice over broadening discovery; otherwise complete a read-only task or report a concrete blocker.",
+			Nudge: "Harness checkpoint: discovery is consuming its bounded budget without changing state. Preserve your creative latitude, but now choose and state the smallest viable implementation slice supported by the evidence. Prefer executing that slice over broadening discovery; otherwise complete a read-only task or report a concrete blocker.",
 		}
 	}
 	if g.config.ReadOnlyActionAt > 0 && g.readOnlyCalls == g.config.ReadOnlyActionAt {

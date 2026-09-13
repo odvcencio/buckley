@@ -15,23 +15,28 @@ import (
 
 // Pre-compiled regex patterns for test output parsing.
 var (
-	goTestPassedRe = regexp.MustCompile(`--- PASS:`)
-	goTestFailedRe = regexp.MustCompile(`--- FAIL:`)
-	goTestSkipRe   = regexp.MustCompile(`--- SKIP:`)
-	jestResultsRe  = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(?:(\d+)\s+skipped)?`)
-	pytestResultRe = regexp.MustCompile(`(\d+)\s+(\w+)`)
-	cargoResultRe  = regexp.MustCompile(`(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
-	goPackageRe    = regexp.MustCompile(`package\s+(\w+)`)
+	cargoResultRe = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
+	goPackageRe   = regexp.MustCompile(`package\s+(\w+)`)
 )
 
 // RunTestsTool runs tests with smart filtering and reporting
 type RunTestsTool struct{ workDirAware }
+
+type testReport struct {
+	passed, failed, skipped int
+	complete                bool
+	verificationError       string
+}
 
 // execCommandContext is overridden in tests to stub command execution.
 var execCommandContext = exec.CommandContext
 
 func (t *RunTestsTool) Name() string {
 	return "run_tests"
+}
+
+func (t *RunTestsTool) TrustedVerification() bool {
+	return true
 }
 
 func (t *RunTestsTool) Description() string {
@@ -123,7 +128,7 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	framework := t.detectTestFramework(absTestPath)
 
 	// Run tests
-	output, exitCode, duration, err := t.runTestsForFramework(ctx, framework, testPath, pattern, coverage, verbose)
+	output, exitCode, duration, structuredReport, err := t.runTestsForFramework(ctx, framework, testPath, pattern, coverage, verbose)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -132,10 +137,45 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	}
 
 	// Parse results
-	passed, failed, skipped := t.parseTestResults(framework, output)
+	passed, failed, skipped := 0, 0, 0
+	if framework == "cargo" {
+		passed, failed, skipped = t.parseCargoResults(output)
+	}
+	verificationError := ""
+	if structuredReport != nil {
+		passed, failed, skipped = structuredReport.passed, structuredReport.failed, structuredReport.skipped
+		verificationError = structuredReport.verificationError
+		if exitCode == 0 && !structuredReport.complete && verificationError == "" {
+			verificationError = framework + " did not produce a complete structured test report"
+		}
+	}
+	var goFailures []string
+	if framework == "go" {
+		report := parseGoTestOutput(output)
+		passed, failed, skipped = report.passed, report.failed, report.skipped
+		output = report.output
+		goFailures = report.failures
+		if exitCode == 0 && !report.complete {
+			verificationError = "go test did not produce a complete test report"
+		}
+	}
+	if exitCode == 0 && verificationError == "" {
+		switch {
+		case failed > 0:
+			verificationError = framework + " test reported failed tests"
+		case passed+skipped == 0:
+			verificationError = framework + " test ran no tests; check the path and pattern"
+		case passed == 0:
+			verificationError = framework + " test skipped every test; no passing tests verified"
+		}
+	}
+	if exitCode != 0 {
+		verificationError = fmt.Sprintf("test command exited with code %d", exitCode)
+	}
 
 	result := &Result{
-		Success: exitCode == 0,
+		Success: exitCode == 0 && verificationError == "",
+		Error:   verificationError,
 		Data: map[string]any{
 			"framework": framework,
 			"path":      testPath,
@@ -154,21 +194,29 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	if len(output) > 5000 {
 		result.ShouldAbridge = true
 		summary := fmt.Sprintf("✓ %d passed, ✗ %d failed, ⊘ %d skipped (%.2fs)", passed, failed, skipped, duration)
-		if failed > 0 {
-			summary = "Tests FAILED: " + summary
+		if !result.Success {
+			summary = "Tests FAILED: " + result.Error + "; " + summary
 		}
 
 		// Extract failure details
-		failureDetails := t.extractFailures(framework, output)
+		var failureDetails []string
+		if framework == "go" {
+			failureDetails = goFailures
+		} else {
+			failureDetails = t.extractFailures(framework, output)
+		}
 
 		result.DisplayData = map[string]any{
-			"framework": framework,
-			"passed":    passed,
-			"failed":    failed,
-			"skipped":   skipped,
-			"duration":  duration,
-			"summary":   summary,
-			"failures":  failureDetails,
+			"exit_code":   exitCode,
+			"error":       result.Error,
+			"framework":   framework,
+			"passed":      passed,
+			"failed":      failed,
+			"skipped":     skipped,
+			"duration":    duration,
+			"summary":     summary,
+			"failures":    failureDetails,
+			"output_tail": outputTail(output, verificationTailBytes),
 		}
 	}
 
@@ -177,6 +225,14 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 
 func (t *RunTestsTool) detectTestFramework(path string) string {
 	// Check for framework indicators
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		switch filepath.Ext(path) {
+		case ".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs":
+			return "jest"
+		case ".py":
+			return "pytest"
+		}
+	}
 	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
 		return "go"
 	}
@@ -195,27 +251,50 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 	}
 
 	// Fallback: check for test files
-	if files, _ := filepath.Glob(filepath.Join(path, "*_test.go")); len(files) > 0 {
-		return "go"
+	table := []struct {
+		pattern   string
+		framework string
+	}{
+		{"*_test.go", "go"},
+		{"*.test.js", "jest"},
+		{"test_*.py", "pytest"},
 	}
-	if files, _ := filepath.Glob(filepath.Join(path, "*.test.js")); len(files) > 0 {
-		return "jest"
-	}
-	if files, _ := filepath.Glob(filepath.Join(path, "test_*.py")); len(files) > 0 {
-		return "pytest"
+	if entries, err := os.ReadDir(path); err == nil {
+		for _, candidate := range table {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				if matched, _ := filepath.Match(candidate.pattern, entry.Name()); matched {
+					return candidate.framework
+				}
+			}
+		}
 	}
 
 	return "unknown"
 }
 
-func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path, pattern string, coverage, verbose bool) (string, int, float64, error) {
+func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path, pattern string, coverage, verbose bool) (string, int, float64, *testReport, error) {
 	var (
 		cmd *exec.Cmd
 	)
+	var reportPath string
+	var jestPath string
+	commandDir := strings.TrimSpace(t.workDir)
+
+	if framework == "pytest" || framework == "jest" {
+		dir, err := os.MkdirTemp("", "buckley-test-report-")
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("create test report directory: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		reportPath = filepath.Join(dir, "results")
+	}
 
 	switch framework {
 	case "go":
-		args := []string{"test"}
+		args := []string{"test", "-json"}
 		if coverage {
 			args = append(args, "-cover")
 		}
@@ -229,7 +308,22 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "go", args...)
 
 	case "jest":
-		args := []string{"test"}
+		resolved, err := resolvePath(t.workDir, path)
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("resolving jest test path: %w", err)
+		}
+		jestPath = resolved
+		info, err := os.Stat(jestPath)
+		if err != nil {
+			return "", 1, 0, nil, fmt.Errorf("stat jest test path: %w", err)
+		}
+		if info.IsDir() {
+			commandDir = jestPath
+		} else {
+			commandDir = filepath.Dir(jestPath)
+		}
+
+		args := []string{"test", "--", "--json", "--outputFile", reportPath}
 		if coverage {
 			args = append(args, "--coverage")
 		}
@@ -239,10 +333,15 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		if pattern != "" {
 			args = append(args, "-t", pattern)
 		}
+		if info.IsDir() {
+			args = append(args, "^"+regexp.QuoteMeta(strings.TrimSuffix(filepath.ToSlash(jestPath), "/")+"/"))
+		} else {
+			args = append(args, "^"+regexp.QuoteMeta(filepath.ToSlash(jestPath))+"$")
+		}
 		cmd = execCommandContext(ctx, "npm", args...)
 
 	case "pytest":
-		args := []string{}
+		args := []string{"--junitxml", reportPath}
 		if coverage {
 			args = append(args, "--cov")
 		}
@@ -256,25 +355,28 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "pytest", args...)
 
 	case "cargo":
-		args := []string{"test"}
+		args := []string{"test", "--manifest-path", filepath.Join(path, "Cargo.toml")}
 		if pattern != "" {
 			args = append(args, pattern)
 		}
 		cmd = execCommandContext(ctx, "cargo", args...)
 
 	default:
-		return "", 1, 0, fmt.Errorf("unsupported test framework: %s", framework)
+		return "", 1, 0, nil, fmt.Errorf("unsupported test framework: %s", framework)
 	}
 
 	var stdout, stderr bytes.Buffer
-	if strings.TrimSpace(t.workDir) != "" && cmd != nil {
-		cmd.Dir = strings.TrimSpace(t.workDir)
-	}
-	if cmd != nil {
-		cmd.Env = mergeEnv(cmd.Env, t.env)
+	cmd.Dir = commandDir
+	cmd.Env = mergeEnv(cmd.Env, t.env)
+	if framework == "pytest" {
+		cmd.Env = mergeEnv(cmd.Env, map[string]string{
+			"PYTHONDONTWRITEBYTECODE": "1",
+			"PYTHONPYCACHEPREFIX":     filepath.Join(filepath.Dir(reportPath), "pycache"),
+		})
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	configureCommandCancellation(cmd)
 
 	start := time.Now()
 	err := cmd.Run()
@@ -283,17 +385,32 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	exitCode := 0
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return stdout.String() + stderr.String(), 1, duration, fmt.Errorf("test run exceeded timeout")
+			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run exceeded timeout: %w", context.DeadlineExceeded)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run canceled: %w", context.Canceled)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return "", 1, duration, err
+			return "", 1, duration, nil, err
 		}
 	}
 
 	output := stdout.String() + stderr.String()
-	return output, exitCode, duration, nil
+	var report *testReport
+	if reportPath != "" {
+		parsed := testReport{}
+		if raw, err := os.ReadFile(reportPath); err == nil {
+			if framework == "jest" {
+				parsed = parseJestReport(raw, jestPath)
+			} else {
+				parsed = parsePytestReport(raw)
+			}
+		}
+		report = &parsed
+	}
+	return output, exitCode, duration, report, nil
 }
 
 func localGoTestPath(path string) string {
@@ -304,63 +421,18 @@ func localGoTestPath(path string) string {
 	return "./" + path
 }
 
-func (t *RunTestsTool) parseTestResults(framework, output string) (passed, failed, skipped int) {
-	switch framework {
-	case "go":
-		return t.parseGoTestResults(output)
-	case "jest":
-		return t.parseJestResults(output)
-	case "pytest":
-		return t.parsePytestResults(output)
-	case "cargo":
-		return t.parseCargoResults(output)
-	default:
-		return 0, 0, 0
-	}
-}
-
-func (t *RunTestsTool) parseGoTestResults(output string) (passed, failed, skipped int) {
-	passed = len(goTestPassedRe.FindAllString(output, -1))
-	failed = len(goTestFailedRe.FindAllString(output, -1))
-	skipped = len(goTestSkipRe.FindAllString(output, -1))
-	return
-}
-
-func (t *RunTestsTool) parseJestResults(output string) (passed, failed, skipped int) {
-	matches := jestResultsRe.FindStringSubmatch(output)
-	if len(matches) > 1 {
-		fmt.Sscanf(matches[1], "%d", &failed)
-		fmt.Sscanf(matches[2], "%d", &passed)
-		fmt.Sscanf(matches[3], "%d", &skipped)
-	}
-	return
-}
-
-func (t *RunTestsTool) parsePytestResults(output string) (passed, failed, skipped int) {
-	matches := pytestResultRe.FindAllStringSubmatch(output, -1)
-	for _, match := range matches {
-		if len(match) == 3 {
-			count := 0
-			fmt.Sscanf(match[1], "%d", &count)
-			switch match[2] {
-			case "passed":
-				passed += count
-			case "failed":
-				failed += count
-			case "skipped":
-				skipped += count
-			}
-		}
-	}
-	return
-}
-
 func (t *RunTestsTool) parseCargoResults(output string) (passed, failed, skipped int) {
-	matches := cargoResultRe.FindStringSubmatch(output)
-	if len(matches) == 4 {
-		fmt.Sscanf(matches[1], "%d", &passed)
-		fmt.Sscanf(matches[2], "%d", &failed)
-		fmt.Sscanf(matches[3], "%d", &skipped)
+	for _, matches := range cargoResultRe.FindAllStringSubmatch(output, -1) {
+		if len(matches) != 4 {
+			continue
+		}
+		var p, f, s int
+		fmt.Sscanf(matches[1], "%d", &p)
+		fmt.Sscanf(matches[2], "%d", &f)
+		fmt.Sscanf(matches[3], "%d", &s)
+		passed += p
+		failed += f
+		skipped += s
 	}
 	return
 }
@@ -370,12 +442,6 @@ func (t *RunTestsTool) extractFailures(framework, output string) []string {
 	lines := strings.Split(output, "\n")
 
 	switch framework {
-	case "go":
-		for _, line := range lines {
-			if strings.Contains(line, "--- FAIL:") {
-				failures = append(failures, strings.TrimSpace(line))
-			}
-		}
 	case "jest", "pytest":
 		inFailure := false
 		for _, line := range lines {

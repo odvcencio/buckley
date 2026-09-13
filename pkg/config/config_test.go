@@ -54,8 +54,8 @@ func TestDefaultConfig(t *testing.T) {
 			t.Fatalf("expected GLM fallback[%d] to be %s, got %s", i, want, gotFallback[i])
 		}
 	}
-	if cfg.Models.Utility.Commit != "qwen/qwen3.7-flash" {
-		t.Fatalf("expected default commit model to be qwen/qwen3.7-flash, got %s", cfg.Models.Utility.Commit)
+	if cfg.Models.Utility.Commit != "qwen/qwen3.8-flash" {
+		t.Fatalf("expected default commit model to be qwen/qwen3.8-flash, got %s", cfg.Models.Utility.Commit)
 	}
 	if cfg.Personality.QuirkProbability <= 0 || cfg.Personality.QuirkProbability >= 1 {
 		t.Fatalf("unexpected quirk probability: %f", cfg.Personality.QuirkProbability)

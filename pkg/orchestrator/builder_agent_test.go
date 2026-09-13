@@ -288,15 +288,25 @@ func TestBuilderGenerateWithTools_FinalizationFailureIsIncomplete(t *testing.T) 
 	mockModel.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
 	cfg := config.DefaultConfig()
 	cfg.Models.Execution = "mock-exec"
-	agent := NewBuilderAgent(&Plan{ID: "p1", FeatureName: "Feature"}, cfg, mockModel, tool.NewEmptyRegistry(), nil)
+	registry := tool.NewEmptyRegistry()
+	loopTool := NewMockTool(ctrl)
+	loopTool.EXPECT().Name().Return("missing").AnyTimes()
+	loopTool.EXPECT().Description().Return("loop test tool").AnyTimes()
+	loopTool.EXPECT().Parameters().Return(builtin.ParameterSchema{}).AnyTimes()
+	loopTool.EXPECT().Execute(gomock.Any()).Return(&builtin.Result{Success: true, Data: map[string]any{"ok": true}}, nil).Times(10)
+	registry.Register(loopTool)
+	agent := NewBuilderAgent(&Plan{ID: "p1", FeatureName: "Feature"}, cfg, mockModel, registry, nil)
 
 	toolCall := &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
 		ID: "loop", Type: "function", Function: model.FunctionCall{Name: "missing", Arguments: `{}`},
 	}}}}}}
 	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(toolCall, nil).Times(10)
 	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(
-		&model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant"}}}}, nil,
-	)
+		&model.ChatResponse{
+			Choices: []model.Choice{{Message: model.Message{Role: "assistant", Reasoning: "PRIVATE_BUILDER_REASONING"}}},
+			Usage:   model.Usage{CompletionTokens: 1, TotalTokens: 1},
+		}, nil,
+	).Times(3)
 
 	_, err := agent.generateWithTools(model.ChatRequest{
 		Model: cfg.Models.Execution, Messages: []model.Message{{Role: "user", Content: "prompt"}},
@@ -304,6 +314,9 @@ func TestBuilderGenerateWithTools_FinalizationFailureIsIncomplete(t *testing.T) 
 	var incomplete *agentloop.IncompleteTurnError
 	if !errors.As(err, &incomplete) {
 		t.Fatalf("error = %v, want IncompleteTurnError", err)
+	}
+	if strings.Contains(err.Error(), "PRIVATE_BUILDER_REASONING") {
+		t.Fatalf("private reasoning leaked through error: %v", err)
 	}
 }
 

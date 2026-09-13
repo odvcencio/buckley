@@ -1,0 +1,8 @@
+{
+  "schema_version": "buckley.artifact/v1",
+  "artifact_id": "source-handoff-probe-extract-source-extractor-yaml",
+  "kind": "handoff",
+  "status": "incomplete",
+  "title": "source-extractor.yaml: max_tool_calls observed; models.execution absent",
+  "summary": "Source: templates/agents/source-extractor.yaml (25 lines, read in full with line_numbers=true; no other files read, no commands run).\n\nRequested field 1: policies.max_tool_calls\n- OBSERVED: 12\n- Source lines: 19 `policies:`, 21 `  max_tool_calls: 12`\n\nRequested field 2: models.execution\n- ABSENT. No `models` key exists at any level of the file. Top-level keys observed: version (line 1), name (line 2), summary (line 3), instructions (line 4), tools (line 16), policies (line 19), sandbox (line 22), subagents (line 24).\n- No default or inherited model value was invented.\n\nincomplete_reasons:\n- models.execution not found in templates/agents/source-extractor.yaml; the requested field is absent from observed source, so the probe's two-field requirement is unmet.\n\nEvidence table:\n| file | lines | field | observed value |\n| templates/agents/source-extractor.yaml | 19,21 | policies.max_tool_calls | 12 |\n| templates/agents/source-extractor.yaml | 1-25 (whole file) | models.execution | absent |\n\nUncertainty: none for the observed absence; the file was read in full (page.total_lines=25, has_more=false)."
+}

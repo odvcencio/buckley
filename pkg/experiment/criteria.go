@@ -11,6 +11,7 @@ import (
 )
 
 // EvaluateCriteria evaluates success criteria for a run and returns evaluations.
+// Trusted commands receive the model output verbatim on stdin; it is never interpolated into commands, arguments, environment, or paths.
 func EvaluateCriteria(ctx context.Context, worktreePath string, workingDir string, output string, criteria []SuccessCriterion) []CriterionEvaluation {
 	worktreePath = strings.TrimSpace(worktreePath)
 	if worktreePath == "" || len(criteria) == 0 {
@@ -59,8 +60,14 @@ func EvaluateCriteria(ctx context.Context, worktreePath string, workingDir strin
 func evaluateCriterion(ctx context.Context, workDir string, output string, crit SuccessCriterion) (bool, string) {
 	switch crit.Type {
 	case CriterionContains:
+		if crit.Target == "" {
+			return false, "empty criterion target"
+		}
 		return strings.Contains(output, crit.Target), ""
 	case CriterionFileExists:
+		if crit.Target == "" {
+			return false, "empty criterion target"
+		}
 		path := crit.Target
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(workDir, path)
@@ -71,13 +78,13 @@ func evaluateCriterion(ctx context.Context, workDir string, output string, crit 
 		}
 		return true, ""
 	case CriterionCommand, CriterionTestPass:
-		return runCriterionCommand(ctx, workDir, crit.Target)
+		return runCriterionCommand(ctx, workDir, crit.Target, output)
 	default:
 		return false, fmt.Sprintf("unsupported criterion type: %s", crit.Type)
 	}
 }
 
-func runCriterionCommand(ctx context.Context, workDir string, command string) (bool, string) {
+func runCriterionCommand(ctx context.Context, workDir string, command string, modelOutput string) (bool, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, "empty command"
@@ -85,6 +92,11 @@ func runCriterionCommand(ctx context.Context, workDir string, command string) (b
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(modelOutput)
+	// Bound draining of inherited stdin/stdout pipes: if descendants keep them
+	// open after the verifier exits or its context expires, WaitDelay stops the
+	// wait from blocking indefinitely. This does not terminate every descendant.
+	cmd.WaitDelay = 250 * time.Millisecond
 	output, err := cmd.CombinedOutput()
 	details := strings.TrimSpace(string(output))
 	if err != nil {

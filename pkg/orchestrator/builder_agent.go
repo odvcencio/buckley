@@ -417,7 +417,7 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		if resp != nil {
 			return resp, fmt.Errorf("model call failed after partial response: %w", err)
 		}
-		if a.toolRegistry != nil && isToolUnsupportedError(err) {
+		if a.toolRegistry != nil && model.IsToolUnsupportedError(err) {
 			// The model rejected the tool schema outright: retry this round
 			// once with tools off instead of failing the turn.
 			retryReq := chatReq
@@ -900,26 +900,6 @@ func countLines(content string) int {
 		return 0
 	}
 	return len(strings.Split(content, "\n"))
-}
-
-func isToolUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
-		return true
-	}
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool calling") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool response") {
-		return true
-	}
-	return false
 }
 
 func (a *BuilderAgent) shouldPauseForArchitecturalConflict(task *Task, path string) bool {

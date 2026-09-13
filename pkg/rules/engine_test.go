@@ -2,6 +2,8 @@ package rules
 
 import (
 	"testing"
+
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // -----------------------------------------------------------------------------
@@ -75,6 +77,37 @@ func TestEngine_EvalStrategy_Approval(t *testing.T) {
 	}
 	if action != "allow" {
 		t.Errorf("got action %q, want %q", action, "allow")
+	}
+}
+
+func TestEngine_EvalStrategy_RuntimeProtocolReadOnlyReserve(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	result, err := e.EvalStrategy("runtime/protocol", "compile", map[string]any{
+		"model.class":                    "weak",
+		"model.code_mode":                true,
+		"task.class":                     "coding",
+		"task.parallelizable":            false,
+		"task.risk":                      "medium",
+		"rollout.dynamic":                true,
+		"rollout.auto_code_mode":         false,
+		"model.parallel_tool_calls":      false,
+		"model.continuation":             false,
+		"model.tool_reliability":         0.7,
+		"model.continuation_reliability": 0.0,
+	})
+	if err != nil {
+		t.Fatalf("EvalStrategy: %v", err)
+	}
+	adapted := types.StrategyResult{Params: result.Params}
+	if adapted.String("name") != "weak_typed_stages" {
+		t.Fatalf("policy outcome = %q, want weak_typed_stages", adapted.String("name"))
+	}
+	if adapted.Int("max_turns") != 14 {
+		t.Fatalf("max_turns = %d, want 14", adapted.Int("max_turns"))
+	}
+	if adapted.Int("read_only_warning_at") != 3 || adapted.Int("read_only_action_at") != 5 || adapted.Int("max_read_only_calls") != 9 {
+		t.Fatalf("read-only reserve = %d/%d/%d, want 3/5/9", adapted.Int("read_only_warning_at"), adapted.Int("read_only_action_at"), adapted.Int("max_read_only_calls"))
 	}
 }
 

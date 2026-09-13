@@ -9,6 +9,10 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 )
 
+type eventEmitterFunc func(RunnerEvent)
+
+func (f eventEmitterFunc) Emit(ev RunnerEvent) { f(ev) }
+
 func TestDurableApproval_TimerUsesCanonicalPendingBeforeAuthoritativeExpiry(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
@@ -36,6 +40,22 @@ func TestDurableApproval_TimerUsesCanonicalPendingBeforeAuthoritativeExpiry(t *t
 		approvalChan: make(chan ApprovalResponse, 1), state: StateProcessing,
 	}
 
+	updateErr := make(chan error, 1)
+	runner.emitter = eventEmitterFunc(func(ev RunnerEvent) {
+		if ev.Type != EventApprovalRequired {
+			return
+		}
+		// The event runs after capturing the local expiry, before its timer.
+		// Delay the update past that expiry to exercise a stale local timer
+		// without racing canonical expiration during fixture setup.
+		time.Sleep(time.Until(localExpiry))
+		_, err := store.DB().Exec(
+			`UPDATE pending_approvals SET expires_at = ? WHERE id = ? AND session_id = ?`,
+			time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano), candidate.ID, sessionID,
+		)
+		updateErr <- err
+	})
+
 	type result struct {
 		approved bool
 		err      error
@@ -48,24 +68,13 @@ func TestDurableApproval_TimerUsesCanonicalPendingBeforeAuthoritativeExpiry(t *t
 		resultCh <- result{approved: approved, err: err}
 	}()
 
-	waitForPendingApproval(t, store, candidate.ID)
-	deadline := time.Now().Add(time.Second)
-	for runner.GetPendingApproval() == nil && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if runner.GetPendingApproval() == nil {
-		t.Fatal("runner did not expose pending approval")
-	}
-
-	// Move only the canonical row's expiry into the future after the runner
-	// captured its local expiry. The local timer must reconcile the still
-	// pending row and keep waiting rather than returning a premature timeout.
-	authoritativeExpiry := time.Now().UTC().Add(900 * time.Millisecond)
-	if _, err := store.DB().Exec(
-		`UPDATE pending_approvals SET expires_at = ? WHERE id = ? AND session_id = ?`,
-		authoritativeExpiry.Format(time.RFC3339Nano), candidate.ID, sessionID,
-	); err != nil {
-		t.Fatalf("move canonical expiry: %v", err)
+	select {
+	case err := <-updateErr:
+		if err != nil {
+			t.Fatalf("move canonical expiry: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("approval-required event not emitted before deadline")
 	}
 	time.Sleep(300 * time.Millisecond)
 

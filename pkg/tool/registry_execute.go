@@ -16,7 +16,22 @@ func (r *Registry) Execute(name string, params map[string]any) (*builtin.Result,
 }
 
 // ExecuteWithContext executes a tool by name using the provided context.
-func (r *Registry) ExecuteWithContext(ctx context.Context, name string, params map[string]any) (*builtin.Result, error) {
+func (r *Registry) ExecuteWithContext(ctx context.Context, name string, params map[string]any) (result *builtin.Result, err error) {
+	var sourceCapture *builtin.ArtifactSubmission
+	if r != nil {
+		r.mu.RLock()
+		sourceCapture = r.artifactSources
+		r.mu.RUnlock()
+	}
+	if sourceCapture != nil {
+		defer func() {
+			if err != nil {
+				sourceCapture.RecordToolFailure(name, err.Error())
+			} else if result != nil && !result.Success {
+				sourceCapture.RecordToolFailure(name, result.Error)
+			}
+		}()
+	}
 	if name == "" {
 		return nil, fmt.Errorf("tool name cannot be empty")
 	}
@@ -42,7 +57,11 @@ func (r *Registry) ExecuteWithContext(ctx context.Context, name string, params m
 	if exec == nil {
 		return nil, fmt.Errorf("tool executor not initialized")
 	}
-	return exec(execCtx)
+	result, err = exec(execCtx)
+	if err != nil {
+		return result, err
+	}
+	return captureArtifactSource(execCtx, result, sourceCapture), nil
 }
 
 func (r *Registry) executorForCall() Executor {

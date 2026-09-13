@@ -248,14 +248,21 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 
 	resp, err := p.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
+		if resp != nil {
+			return nil, NewIncompletePlanError(publicPlanDraftFromResponse(resp), firstPlanningFinishReason(resp), err)
+		}
 		return nil, fmt.Errorf("planning request failed: %w", err)
 	}
 
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("no response from planning model")
 	}
 
 	p.sendProgress("📝 Processing plan response…")
+
+	if finishReason := firstPlanningFinishReason(resp); !planningFinishReasonIsStop(finishReason) {
+		return nil, NewIncompletePlanError(publicPlanDraftFromResponse(resp), finishReason, nil)
+	}
 
 	// 4. Parse plan from response
 	content, err := model.ExtractTextContent(resp.Choices[0].Message.Content)
@@ -324,6 +331,29 @@ func safeModelName(name string) string {
 		return "the planning model"
 	}
 	return name
+}
+
+func firstPlanningFinishReason(resp *model.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(resp.Choices[0].FinishReason)
+}
+
+func planningFinishReasonIsStop(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), "stop")
+}
+
+func publicPlanDraftFromResponse(resp *model.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	content, err := model.ExtractTextContent(resp.Choices[0].Message.Content)
+	if err != nil {
+		return ""
+	}
+	_, public := model.ExtractThinkingContent(content)
+	return strings.TrimSpace(public)
 }
 
 func (p *Planner) gatherContext() PlanContext {

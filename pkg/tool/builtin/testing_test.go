@@ -20,7 +20,7 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, exitCode, duration, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
+	_, exitCode, duration, _, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled error, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 
 func TestRunTestsToolUnsupportedFramework(t *testing.T) {
 	tool := &RunTestsTool{}
-	_, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
+	_, _, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
 	if err == nil {
 		t.Fatalf("expected error for unsupported framework")
 	}
@@ -68,13 +68,13 @@ func TestDetectTestFrameworkGoMod(t *testing.T) {
 }
 
 func TestParseGoTestResults(t *testing.T) {
-	tool := &RunTestsTool{}
-	output := `--- PASS: TestOne
---- FAIL: TestTwo
---- SKIP: TestThree
---- PASS: TestFour`
-	passed, failed, skipped := tool.parseGoTestResults(output)
-	if passed != 2 || failed != 1 || skipped != 1 {
-		t.Fatalf("unexpected counts: pass=%d fail=%d skip=%d", passed, failed, skipped)
+	output := `{"Action":"pass","Package":"p","Test":"TestOne"}
+{"Action":"fail","Package":"p","Test":"TestTwo"}
+{"Action":"skip","Package":"p","Test":"TestThree"}
+{"Action":"pass","Package":"p","Test":"TestFour"}
+{"Action":"fail","Package":"p"}`
+	report := parseGoTestOutput(output)
+	if !report.complete || report.passed != 2 || report.failed != 1 || report.skipped != 1 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }

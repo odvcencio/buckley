@@ -3,6 +3,7 @@ package builtin
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -10,17 +11,88 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/agentcoord"
 )
 
 // ReadFileTool reads a file from disk
-type ReadFileTool struct{ workDirAware }
+type ReadFileTool struct {
+	workDirAware
+	sourceScope *agentcoord.SourceScope
+}
+
+// SetSourceScope validates and installs a deep copy of the scope. A nil scope
+// restores unconstrained behavior.
+func (t *ReadFileTool) SetSourceScope(scope *agentcoord.SourceScope) error {
+	if err := agentcoord.ValidateSourceScope(scope); err != nil {
+		return err
+	}
+	t.sourceScope = agentcoord.CloneSourceScope(scope)
+	return nil
+}
+
+// sourceFileForPath matches a raw request path against the tool's source
+// scope. A nil scope returns nil (unconstrained); undeclared paths fail.
+func (t *ReadFileTool) sourceFileForPath(raw string) (*agentcoord.SourceFile, error) {
+	if t.sourceScope == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(t.workDir) == "" {
+		return nil, fmt.Errorf("source scope requires a working directory")
+	}
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return nil, fmt.Errorf("source path must be nonempty without leading or trailing whitespace")
+	}
+	base, err := filepath.Abs(t.workDir)
+	if err != nil {
+		return nil, err
+	}
+	candidate := filepath.Clean(raw)
+	if !filepath.IsAbs(raw) {
+		candidate = filepath.Join(base, raw)
+	}
+	for _, f := range t.sourceScope.Files {
+		if candidate == filepath.Join(base, f.Path) {
+			declared := f
+			return &declared, nil
+		}
+	}
+	return nil, fmt.Errorf("file %q is not declared in the source scope", raw)
+}
+
+// sourceScopePageParams rejects reads outside the declared range and supplies
+// bounded defaults without mutating the caller's parameters.
+func sourceScopePageParams(params map[string]any, selected *agentcoord.SourceFile) (map[string]any, error) {
+	if selected == nil || (selected.StartLine == 0 && selected.EndLine == 0) {
+		return params, nil
+	}
+	out := maps.Clone(params)
+	for _, selector := range []struct {
+		name     string
+		fallback int
+	}{{"start_line", selected.StartLine}, {"end_line", selected.EndLine}} {
+		line := selector.fallback
+		if value, present := params[selector.name]; present {
+			parsed, err := readFileLineNumber(selector.name, value)
+			if err != nil {
+				return nil, err
+			}
+			line = parsed
+		}
+		if line < selected.StartLine || line > selected.EndLine {
+			return nil, fmt.Errorf("%s %d is outside the declared range [%d, %d] for %q", selector.name, line, selected.StartLine, selected.EndLine, selected.Path)
+		}
+		out[selector.name] = line
+	}
+	return out, nil
+}
 
 func (t *ReadFileTool) Name() string {
 	return "read_file"
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Each page is at most 100 lines; use next_start_line from the result to continue."
+	return "Read file contents in bounded, 1-indexed line pages. Use anchor to start at a unique literal matching line in a known file. Oversized ranges return the first 100 lines; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -37,7 +109,15 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			},
 			"end_line": {
 				Type:        "number",
-				Description: "Last line to return (1-indexed, inclusive; defaults to start_line + 99)",
+				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Larger ranges are capped to 100 lines per page.",
+			},
+			"anchor": {
+				Type:        "string",
+				Description: "Literal, case-sensitive single-line substring selecting a UNIQUE matching line in the file; mutually exclusive with start_line/end_line. Returns the same 100-line page limit starting at the matched line.",
+			},
+			"line_numbers": {
+				Type:        "boolean",
+				Description: "Display-only line-number prefixes (default false). Model content remains raw; page.start_line/end_line provide the absolute range.",
 			},
 		},
 		Required: []string{"path"},
@@ -53,6 +133,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	selected, err := t.sourceFileForPath(path)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
 	absPath, err := resolvePath(t.workDir, path)
 	if err != nil {
 		return &Result{
@@ -80,14 +164,82 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 
 	contentStr := string(content)
 	lines := fileLines(contentStr)
+	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {
+		_, hasStart := params["start_line"]
+		_, hasEnd := params["end_line"]
+		if hasStart || hasEnd {
+			return &Result{Success: false, Error: "anchor is mutually exclusive with start_line/end_line; omit anchor for an explicit start_line/end_line range, or omit both line selectors for an anchor read"}, nil
+		}
+		anchor, ok := anchorValue.(string)
+		if !ok {
+			return &Result{Success: false, Error: "anchor parameter must be a string"}, nil
+		}
+		if strings.TrimSpace(anchor) == "" {
+			return &Result{Success: false, Error: "anchor must contain non-whitespace characters"}, nil
+		}
+		if len(anchor) > 256 {
+			return &Result{Success: false, Error: fmt.Sprintf("anchor must be at most 256 bytes (got %d)", len(anchor))}, nil
+		}
+		if strings.ContainsAny(anchor, "\n\r") {
+			return &Result{Success: false, Error: "anchor must not contain newline characters"}, nil
+		}
+		var matches []int
+		total := 0
+		for i, line := range lines {
+			if selected != nil && selected.StartLine > 0 && (i+1 < selected.StartLine || i+1 > selected.EndLine) {
+				continue
+			}
+			if strings.Contains(line, anchor) {
+				total++
+				if len(matches) < 8 {
+					matches = append(matches, i+1)
+				}
+			}
+		}
+		switch total {
+		case 0:
+			return &Result{Success: false, Error: fmt.Sprintf("anchor %q not found in %s", anchor, path)}, nil
+		case 1:
+			params = maps.Clone(params)
+			params["start_line"] = matches[0]
+		default:
+			return &Result{Success: false, Error: fmt.Sprintf("anchor %q matched %d lines (%v); omit anchor for start_line/end_line, or use a unique anchor", anchor, total, matches)}, nil
+		}
+	}
+	params, err = sourceScopePageParams(params, selected)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
 	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
+	numbered := false
+	if value, ok := params["line_numbers"]; ok {
+		typed, isBool := value.(bool)
+		if !isBool {
+			return &Result{Success: false, Error: "line_numbers parameter must be a boolean"}, nil
+		}
+		numbered = typed
+	}
+
 	pageLines := lines[startLine-1 : endLine]
 	pageContent := strings.Join(pageLines, "\n")
+	if numbered {
+		var sb strings.Builder
+		for i, line := range pageLines {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "%d: %s", startLine+i, line)
+		}
+		pageContent = sb.String()
+	}
 	hasMore := endLine < len(lines)
+	if selected != nil && selected.EndLine > 0 {
+		hasMore = hasMore && endLine < selected.EndLine
+	}
 	page := map[string]any{
 		"start_line":  startLine,
 		"end_line":    endLine,
@@ -97,7 +249,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	if hasMore {
 		page["next_start_line"] = endLine + 1
 	}
-	shouldAbridge := explicitPage || hasMore
+	shouldAbridge := selected != nil || explicitPage || hasMore || numbered
 
 	result := &Result{
 		Success: true,
@@ -121,6 +273,9 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 			"size":    len(content),
 			"page":    page,
 			"preview": preview,
+		}
+		if numbered {
+			result.DisplayData["line_numbers"] = true
 		}
 	}
 
@@ -150,19 +305,20 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 		}
 	}
 
-	endLine = startLine + readFilePageLines - 1
+	pageEnd := startLine + min(readFilePageLines-1, math.MaxInt-startLine)
+	endLine = pageEnd
 	if value, ok := params["end_line"]; ok {
 		explicitPage = true
 		endLine, err = readFileLineNumber("end_line", value)
 		if err != nil {
 			return 0, 0, false, err
 		}
+		if endLine > pageEnd {
+			endLine = pageEnd
+		}
 	}
 	if endLine < startLine {
 		return 0, 0, false, fmt.Errorf("end_line must be greater than or equal to start_line")
-	}
-	if endLine-startLine+1 > readFilePageLines {
-		return 0, 0, false, fmt.Errorf("read_file supports pages of at most %d lines; use next_start_line to continue", readFilePageLines)
 	}
 	if totalLines == 0 {
 		if startLine != 1 {
@@ -180,6 +336,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 }
 
 func readFileLineNumber(name string, value any) (int, error) {
+	const positiveIntegerError = "%s parameter must be a positive integer"
 	var number float64
 	switch typed := value.(type) {
 	case float64:
@@ -187,20 +344,26 @@ func readFileLineNumber(name string, value any) (int, error) {
 	case float32:
 		number = float64(typed)
 	case int:
-		number = float64(typed)
+		if typed < 1 {
+			return 0, fmt.Errorf(positiveIntegerError, name)
+		}
+		return typed, nil
 	case int64:
-		number = float64(typed)
+		if typed < 1 || typed > int64(math.MaxInt) {
+			return 0, fmt.Errorf(positiveIntegerError, name)
+		}
+		return int(typed), nil
 	case json.Number:
 		parsed, err := typed.Int64()
-		if err != nil {
-			return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+		if err != nil || parsed < 1 || parsed > int64(math.MaxInt) {
+			return 0, fmt.Errorf(positiveIntegerError, name)
 		}
-		number = float64(parsed)
+		return int(parsed), nil
 	default:
-		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+		return 0, fmt.Errorf(positiveIntegerError, name)
 	}
-	if number < 1 || math.Trunc(number) != number || number > math.MaxInt {
-		return 0, fmt.Errorf("%s parameter must be a positive integer", name)
+	if number < 1 || math.Trunc(number) != number || number >= math.Ldexp(1, strconv.IntSize-1) {
+		return 0, fmt.Errorf(positiveIntegerError, name)
 	}
 	return int(number), nil
 }
@@ -400,7 +563,7 @@ func (t *PatchFileTool) Name() string {
 }
 
 func (t *PatchFileTool) Description() string {
-	return "Apply a unified diff patch to modify files, with configurable path stripping (-pN)."
+	return "Apply a standard unified diff with ---/+++ file headers and counted @@ hunks. The *** Begin Patch format is not supported. Keep patches small and read current lines before editing."
 }
 
 func (t *PatchFileTool) Parameters() ParameterSchema {
@@ -409,7 +572,7 @@ func (t *PatchFileTool) Parameters() ParameterSchema {
 		Properties: map[string]PropertySchema{
 			"patch": {
 				Type:        "string",
-				Description: "Unified diff/patch content to apply",
+				Description: "Standard unified diff, for example:\n--- path/to/file\n+++ path/to/file\n@@ -1 +1 @@\n-old line\n+new line\nUse --- /dev/null when adding a file, and count every line in each hunk. For a/ and b/ path prefixes, set strip to 1.",
 			},
 			"strip": {
 				Type:        "integer",
@@ -436,6 +599,13 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 			Success: false,
 			Error:   fmt.Sprintf("patch too large: %d bytes (max %d)", len(rawPatch), maxPatchBytes),
 		}, nil
+	}
+
+	if !strings.HasSuffix(rawPatch, "\n") {
+		if _, err := unifiedPatchHeaderPaths(rawPatch); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		rawPatch += "\n"
 	}
 
 	strip := 0

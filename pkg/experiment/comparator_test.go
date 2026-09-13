@@ -145,21 +145,27 @@ func TestComparator_Compare_NilComparator(t *testing.T) {
 	}
 }
 
-func TestScoreCriteria(t *testing.T) {
+func TestAssessCriteria(t *testing.T) {
 	tests := []struct {
-		name        string
-		criteria    []SuccessCriterion
-		evaluations []CriterionEvaluation
-		wantScore   float64
-		wantPassed  int
-		wantFailed  int
+		name             string
+		criteria         []SuccessCriterion
+		evaluations      []CriterionEvaluation
+		wantScore        float64
+		wantPassed       int
+		wantFailed       int
+		wantPending      int
+		wantStatus       string
+		wantVerified     bool
+		wantRankEligible bool
 	}{
 		{
-			name:       "empty criteria returns 1.0",
-			criteria:   nil,
-			wantScore:  1.0,
-			wantPassed: 0,
-			wantFailed: 0,
+			name:        "empty criteria is unverified",
+			criteria:    nil,
+			wantScore:   0,
+			wantPassed:  0,
+			wantFailed:  0,
+			wantPending: 0,
+			wantStatus:  "unverified: no success criteria configured",
 		},
 		{
 			name: "all passed",
@@ -171,9 +177,12 @@ func TestScoreCriteria(t *testing.T) {
 				{CriterionID: 1, Passed: true},
 				{CriterionID: 2, Passed: true},
 			},
-			wantScore:  1.0,
-			wantPassed: 2,
-			wantFailed: 0,
+			wantScore:        1.0,
+			wantPassed:       2,
+			wantFailed:       0,
+			wantStatus:       "verified",
+			wantVerified:     true,
+			wantRankEligible: true,
 		},
 		{
 			name: "all failed",
@@ -185,9 +194,11 @@ func TestScoreCriteria(t *testing.T) {
 				{CriterionID: 1, Passed: false},
 				{CriterionID: 2, Passed: false},
 			},
-			wantScore:  0.0,
-			wantPassed: 0,
-			wantFailed: 2,
+			wantScore:        0.0,
+			wantPassed:       0,
+			wantFailed:       2,
+			wantStatus:       "evaluated: criteria failed",
+			wantRankEligible: true,
 		},
 		{
 			name: "partial pass with weights",
@@ -199,12 +210,14 @@ func TestScoreCriteria(t *testing.T) {
 				{CriterionID: 1, Passed: true},
 				{CriterionID: 2, Passed: false},
 			},
-			wantScore:  1.0 / 3.0, // 1 out of 3 weight
-			wantPassed: 1,
-			wantFailed: 1,
+			wantScore:        1.0 / 3.0, // 1 out of 3 weight
+			wantPassed:       1,
+			wantFailed:       1,
+			wantStatus:       "evaluated: criteria failed",
+			wantRankEligible: true,
 		},
 		{
-			name: "manual criteria skipped",
+			name: "manual criteria remains pending",
 			criteria: []SuccessCriterion{
 				{ID: 1, Name: "c1", Type: CriterionTestPass, Weight: 1},
 				{ID: 2, Name: "c2", Type: CriterionManual, Weight: 1},
@@ -212,9 +225,21 @@ func TestScoreCriteria(t *testing.T) {
 			evaluations: []CriterionEvaluation{
 				{CriterionID: 1, Passed: true},
 			},
-			wantScore:  1.0,
-			wantPassed: 1,
-			wantFailed: 0,
+			wantScore:        1.0,
+			wantPassed:       1,
+			wantFailed:       0,
+			wantPending:      1,
+			wantStatus:       "manual review pending",
+			wantRankEligible: true,
+		},
+		{
+			name: "manual only is not auto verified",
+			criteria: []SuccessCriterion{
+				{ID: 1, Name: "manual-check", Type: CriterionManual, Weight: 1},
+			},
+			wantScore:   0,
+			wantPending: 1,
+			wantStatus:  "manual review pending",
 		},
 		{
 			name: "zero weight defaults to 1",
@@ -226,12 +251,14 @@ func TestScoreCriteria(t *testing.T) {
 				{CriterionID: 1, Passed: true},
 				{CriterionID: 2, Passed: false},
 			},
-			wantScore:  0.5,
-			wantPassed: 1,
-			wantFailed: 1,
+			wantScore:        0.5,
+			wantPassed:       1,
+			wantFailed:       1,
+			wantStatus:       "evaluated: criteria failed",
+			wantRankEligible: true,
 		},
 		{
-			name: "missing evaluations count as failed",
+			name: "missing evaluations are pending evidence",
 			criteria: []SuccessCriterion{
 				{ID: 1, Name: "c1", Type: CriterionTestPass, Weight: 1},
 				{ID: 2, Name: "c2", Type: CriterionTestPass, Weight: 1},
@@ -240,24 +267,38 @@ func TestScoreCriteria(t *testing.T) {
 				{CriterionID: 1, Passed: true},
 				// c2 missing
 			},
-			wantScore:  0.5,
-			wantPassed: 1,
-			wantFailed: 1,
+			wantScore:   0.5,
+			wantPassed:  1,
+			wantFailed:  0,
+			wantPending: 1,
+			wantStatus:  "unverified: missing automated evaluation",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			score, passed, failed := scoreCriteria(tt.criteria, tt.evaluations)
+			got := assessCriteria(tt.criteria, tt.evaluations)
 
-			if score != tt.wantScore {
-				t.Errorf("scoreCriteria() score = %v, want %v", score, tt.wantScore)
+			if got.Score != tt.wantScore {
+				t.Errorf("assessCriteria() score = %v, want %v", got.Score, tt.wantScore)
 			}
-			if len(passed) != tt.wantPassed {
-				t.Errorf("scoreCriteria() passed count = %v, want %v", len(passed), tt.wantPassed)
+			if len(got.Passed) != tt.wantPassed {
+				t.Errorf("assessCriteria() passed count = %v, want %v", len(got.Passed), tt.wantPassed)
 			}
-			if len(failed) != tt.wantFailed {
-				t.Errorf("scoreCriteria() failed count = %v, want %v", len(failed), tt.wantFailed)
+			if len(got.Failed) != tt.wantFailed {
+				t.Errorf("assessCriteria() failed count = %v, want %v", len(got.Failed), tt.wantFailed)
+			}
+			if len(got.Pending) != tt.wantPending {
+				t.Errorf("assessCriteria() pending count = %v, want %v", len(got.Pending), tt.wantPending)
+			}
+			if got.Status != tt.wantStatus {
+				t.Errorf("assessCriteria() status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			if got.Verified != tt.wantVerified {
+				t.Errorf("assessCriteria() verified = %v, want %v", got.Verified, tt.wantVerified)
+			}
+			if got.RankEligible != tt.wantRankEligible {
+				t.Errorf("assessCriteria() rank eligible = %v, want %v", got.RankEligible, tt.wantRankEligible)
 			}
 		})
 	}
@@ -265,9 +306,11 @@ func TestScoreCriteria(t *testing.T) {
 
 func TestRankVariants(t *testing.T) {
 	tests := []struct {
-		name     string
-		reports  []VariantReport
-		wantRank []string // variant IDs in expected rank order
+		name       string
+		reports    []VariantReport
+		wantRank   []string // run IDs in expected display order
+		wantRanks  []int
+		wantWinner string
 	}{
 		{
 			name:     "empty reports returns nil",
@@ -277,34 +320,71 @@ func TestRankVariants(t *testing.T) {
 		{
 			name: "single report",
 			reports: []VariantReport{
-				{VariantID: "v1", CriteriaScore: 1.0},
+				{VariantID: "v1", RunID: "run-1", Status: RunCompleted, CriteriaScore: 1.0, Verified: true, RankEligible: true},
 			},
-			wantRank: []string{"v1"},
+			wantRank:   []string{"run-1"},
+			wantRanks:  []int{1},
+			wantWinner: "run-1",
 		},
 		{
 			name: "ranked by score (higher first)",
 			reports: []VariantReport{
-				{VariantID: "v1", CriteriaScore: 0.5},
-				{VariantID: "v2", CriteriaScore: 1.0},
-				{VariantID: "v3", CriteriaScore: 0.75},
+				{VariantID: "v1", RunID: "run-1", Status: RunCompleted, CriteriaScore: 0.5, RankEligible: true},
+				{VariantID: "v2", RunID: "run-2", Status: RunCompleted, CriteriaScore: 1.0, Verified: true, RankEligible: true},
+				{VariantID: "v3", RunID: "run-3", Status: RunCompleted, CriteriaScore: 0.75, RankEligible: true},
 			},
-			wantRank: []string{"v2", "v3", "v1"},
+			wantRank:   []string{"run-2", "run-3", "run-1"},
+			wantRanks:  []int{1, 2, 3},
+			wantWinner: "run-2",
 		},
 		{
 			name: "same score ranked by cost (lower first)",
 			reports: []VariantReport{
-				{VariantID: "v1", CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.02}},
-				{VariantID: "v2", CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01}},
+				{VariantID: "v1", RunID: "run-1", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.02}, Verified: true, RankEligible: true},
+				{VariantID: "v2", RunID: "run-2", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01}, Verified: true, RankEligible: true},
 			},
-			wantRank: []string{"v2", "v1"},
+			wantRank:   []string{"run-2", "run-1"},
+			wantRanks:  []int{1, 2},
+			wantWinner: "run-2",
 		},
 		{
 			name: "same score and cost ranked by duration (lower first)",
 			reports: []VariantReport{
-				{VariantID: "v1", CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 2000}},
-				{VariantID: "v2", CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 1000}},
+				{VariantID: "v1", RunID: "run-1", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 2000}, Verified: true, RankEligible: true},
+				{VariantID: "v2", RunID: "run-2", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 1000}, Verified: true, RankEligible: true},
 			},
-			wantRank: []string{"v2", "v1"},
+			wantRank:   []string{"run-2", "run-1"},
+			wantRanks:  []int{1, 2},
+			wantWinner: "run-2",
+		},
+		{
+			name: "failed free run cannot outrank paid verified run",
+			reports: []VariantReport{
+				{VariantID: "v1", RunID: "failed-free", Status: RunFailed, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0}},
+				{VariantID: "v2", RunID: "paid-pass", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.02}, Verified: true, RankEligible: true},
+			},
+			wantRank:   []string{"paid-pass", "failed-free"},
+			wantRanks:  []int{1, 0},
+			wantWinner: "paid-pass",
+		},
+		{
+			name: "all failed runs are unranked with no winner",
+			reports: []VariantReport{
+				{VariantID: "v1", RunID: "failed-a", Status: RunFailed, CriteriaScore: 1.0},
+				{VariantID: "v2", RunID: "failed-b", Status: RunCancelled, CriteriaScore: 1.0},
+			},
+			wantRank:  []string{"failed-a", "failed-b"},
+			wantRanks: []int{0, 0},
+		},
+		{
+			name: "repeated runs for one variant stay distinct with stable ties",
+			reports: []VariantReport{
+				{VariantID: "v1", RunID: "run-b", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 1000}, Verified: true, RankEligible: true},
+				{VariantID: "v1", RunID: "run-a", Status: RunCompleted, CriteriaScore: 1.0, Metrics: RunMetrics{TotalCost: 0.01, DurationMs: 1000}, Verified: true, RankEligible: true},
+			},
+			wantRank:   []string{"run-a", "run-b"},
+			wantRanks:  []int{1, 2},
+			wantWinner: "run-a",
 		},
 	}
 
@@ -323,13 +403,20 @@ func TestRankVariants(t *testing.T) {
 				t.Fatalf("rankVariants() count = %v, want %v", len(rankings), len(tt.wantRank))
 			}
 
+			winner := ""
 			for i, want := range tt.wantRank {
-				if rankings[i].VariantID != want {
-					t.Errorf("rankVariants()[%d].VariantID = %v, want %v", i, rankings[i].VariantID, want)
+				if rankings[i].RunID != want {
+					t.Errorf("rankVariants()[%d].RunID = %v, want %v", i, rankings[i].RunID, want)
 				}
-				if rankings[i].Rank != i+1 {
-					t.Errorf("rankVariants()[%d].Rank = %v, want %v", i, rankings[i].Rank, i+1)
+				if rankings[i].Rank != tt.wantRanks[i] {
+					t.Errorf("rankVariants()[%d].Rank = %v, want %v", i, rankings[i].Rank, tt.wantRanks[i])
 				}
+				if rankings[i].Winner {
+					winner = rankings[i].RunID
+				}
+			}
+			if winner != tt.wantWinner {
+				t.Errorf("rankVariants() winner = %q, want %q", winner, tt.wantWinner)
 			}
 		})
 	}
@@ -358,17 +445,24 @@ func TestSummarize(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name:      "missing report returns empty",
+			name:      "missing winner report returns empty",
 			exp:       &Experiment{},
-			rankings:  []Ranking{{VariantID: "v1"}},
-			reports:   []VariantReport{{VariantID: "v2"}}, // different ID
+			rankings:  []Ranking{{VariantID: "v1", RunID: "run-1", Winner: true}},
+			reports:   []VariantReport{{VariantID: "v2", RunID: "run-2"}}, // different ID
 			wantEmpty: true,
 		},
 		{
 			name:      "valid inputs returns summary",
 			exp:       &Experiment{},
-			rankings:  []Ranking{{VariantID: "v1", Score: 0.85}},
-			reports:   []VariantReport{{VariantID: "v1", VariantName: "best-variant", CriteriaScore: 0.85}},
+			rankings:  []Ranking{{VariantID: "v1", RunID: "run-1", Score: 1, Winner: true}},
+			reports:   []VariantReport{{VariantID: "v1", RunID: "run-1", VariantName: "best-variant", ModelID: "model-a", CriteriaScore: 1}},
+			wantEmpty: false,
+		},
+		{
+			name:      "no winner reports no verified winner",
+			exp:       &Experiment{},
+			rankings:  []Ranking{{VariantID: "v1", RunID: "run-1", Score: 0.85}},
+			reports:   []VariantReport{{VariantID: "v1", RunID: "run-1", VariantName: "best-variant", CriteriaScore: 0.85}},
 			wantEmpty: false,
 		},
 	}

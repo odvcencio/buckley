@@ -76,6 +76,7 @@ type Request struct {
 	// persona and caller left it unconstrained; an empty non-nil list means
 	// explicitly no tools.
 	AllowedTools []string
+	SourceScope  *agentcoord.SourceScope
 	// The remaining fields are adapter-neutral execution constraints supplied
 	// by a coordinator.
 	Effort          string
@@ -181,18 +182,19 @@ type Snapshot struct {
 	rawError string
 	// Persona, Model, and Tier are empty unless the spawn resolved a
 	// persona via SpawnOptions.Persona; see Request for their meaning.
-	Persona         string            `json:"persona,omitempty"`
-	Model           string            `json:"model,omitempty"`
-	Tier            persona.Tier      `json:"tier,omitempty"`
-	StepCap         int               `json:"step_cap,omitempty"`
-	AllowedTools    []string          `json:"allowed_tools,omitempty"`
-	Effort          string            `json:"effort,omitempty"`
-	WorkspaceClaims []string          `json:"workspace_claims,omitempty"`
-	Isolation       string            `json:"isolation,omitempty"`
-	OutputSchema    string            `json:"output_schema,omitempty"`
-	ApprovalPosture string            `json:"approval_posture,omitempty"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
-	Budget          agentcoord.Budget `json:"budget,omitempty"`
+	Persona         string                  `json:"persona,omitempty"`
+	Model           string                  `json:"model,omitempty"`
+	Tier            persona.Tier            `json:"tier,omitempty"`
+	StepCap         int                     `json:"step_cap,omitempty"`
+	AllowedTools    []string                `json:"allowed_tools,omitempty"`
+	SourceScope     *agentcoord.SourceScope `json:"source_scope,omitempty"`
+	Effort          string                  `json:"effort,omitempty"`
+	WorkspaceClaims []string                `json:"workspace_claims,omitempty"`
+	Isolation       string                  `json:"isolation,omitempty"`
+	OutputSchema    string                  `json:"output_schema,omitempty"`
+	ApprovalPosture string                  `json:"approval_posture,omitempty"`
+	TimeoutSeconds  int                     `json:"timeout_seconds,omitempty"`
+	Budget          agentcoord.Budget       `json:"budget,omitempty"`
 }
 
 // LifecycleObserver receives a copy of a child snapshot whenever its PID or
@@ -327,6 +329,7 @@ type SpawnOptions struct {
 	Tier            persona.Tier
 	SystemPrompt    string
 	AllowedTools    []string
+	SourceScope     *agentcoord.SourceScope
 	StepCap         int
 	Effort          string
 	WorkspaceClaims []string
@@ -359,6 +362,10 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 	if task == "" {
 		return Snapshot{}, fmt.Errorf("subagent task is required")
 	}
+	if err := agentcoord.ValidateSourceScope(opts.SourceScope); err != nil {
+		return Snapshot{}, fmt.Errorf("subagent source scope: %w", err)
+	}
+	opts.SourceScope = agentcoord.CloneSourceScope(opts.SourceScope)
 
 	var (
 		personaName  string
@@ -441,6 +448,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 			Tier:            tier,
 			StepCap:         stepCap,
 			AllowedTools:    copyStrings(allowedTools),
+			SourceScope:     agentcoord.CloneSourceScope(opts.SourceScope),
 			Effort:          strings.TrimSpace(opts.Effort),
 			WorkspaceClaims: copyStrings(opts.WorkspaceClaims),
 			Isolation:       strings.TrimSpace(opts.Isolation),
@@ -456,7 +464,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		commands: make(chan CommandDelivery, defaultCommandBuffer),
 	}
 	m.runs[id] = current
-	snapshot := current.snapshot
+	snapshot := cloneSnapshot(current.snapshot)
 	m.wg.Add(1)
 	m.mu.Unlock()
 
@@ -481,6 +489,7 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		SystemPrompt:    systemPrompt,
 		StepCap:         stepCap,
 		AllowedTools:    copyStrings(allowedTools),
+		SourceScope:     agentcoord.CloneSourceScope(opts.SourceScope),
 		Effort:          snapshot.Effort,
 		WorkspaceClaims: copyStrings(snapshot.WorkspaceClaims),
 		Isolation:       snapshot.Isolation,
@@ -507,7 +516,7 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	started := func(pid int) {
 		m.mu.Lock()
 		current.snapshot.PID = pid
-		snapshot := current.snapshot
+		snapshot := cloneSnapshot(current.snapshot)
 		m.mu.Unlock()
 		m.publish(telemetry.EventSubagentState, snapshot, "")
 		m.observe(snapshot)
@@ -569,7 +578,7 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	}
 	current.snapshot.rawError = rawError
 	current.snapshot.Error = telemetry.SanitizeText(rawError, 1024)
-	snapshot := current.snapshot
+	snapshot := cloneSnapshot(current.snapshot)
 	m.mu.Unlock()
 	m.publish(eventType, snapshot, snapshot.Error)
 	m.observe(snapshot)
@@ -589,7 +598,7 @@ func (m *Manager) startHeartbeat(current *run) (func() error, error) {
 	m.mu.RLock()
 	observer := m.heartbeat
 	interval := m.heartbeatInterval
-	snapshot := current.snapshot
+	snapshot := cloneSnapshot(current.snapshot)
 	m.mu.RUnlock()
 	if observer == nil || snapshot.AttemptID == "" || snapshot.LeaseGeneration <= 0 {
 		return func() error { return nil }, nil
@@ -600,7 +609,7 @@ func (m *Manager) startHeartbeat(current *run) (func() error, error) {
 	heartbeatCtx, cancelHeartbeat := context.WithCancelCause(context.Background())
 	renew := func() error {
 		m.mu.RLock()
-		currentSnapshot := current.snapshot
+		currentSnapshot := cloneSnapshot(current.snapshot)
 		m.mu.RUnlock()
 		return observer(heartbeatCtx, currentSnapshot)
 	}
@@ -765,7 +774,7 @@ func (m *Manager) List() []Snapshot {
 	m.mu.RLock()
 	out := make([]Snapshot, 0, len(m.runs))
 	for _, current := range m.runs {
-		out = append(out, current.snapshot)
+		out = append(out, cloneSnapshot(current.snapshot))
 	}
 	m.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
@@ -782,7 +791,7 @@ func (m *Manager) Status(id string) (Snapshot, bool) {
 		m.mu.RUnlock()
 		return Snapshot{}, false
 	}
-	snapshot := current.snapshot
+	snapshot := cloneSnapshot(current.snapshot)
 	m.mu.RUnlock()
 	return snapshot, true
 }
@@ -816,7 +825,7 @@ func (m *Manager) Cancel(id string) (Snapshot, error) {
 		m.mu.RUnlock()
 		return Snapshot{}, fmt.Errorf("subagent not found: %s", strings.TrimSpace(id))
 	}
-	snapshot := current.snapshot
+	snapshot := cloneSnapshot(current.snapshot)
 	cancel := current.cancel
 	m.mu.RUnlock()
 	if snapshot.State != StateRunning {
@@ -961,8 +970,13 @@ func (m *Manager) observe(snapshot Snapshot) {
 	observer := m.observer
 	m.mu.RUnlock()
 	if observer != nil {
-		observer(snapshot)
+		observer(cloneSnapshot(snapshot))
 	}
+}
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	snapshot.SourceScope = agentcoord.CloneSourceScope(snapshot.SourceScope)
+	return snapshot
 }
 
 func firstNonEmpty(values ...string) string {

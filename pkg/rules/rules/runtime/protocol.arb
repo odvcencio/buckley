@@ -14,6 +14,13 @@ outcome ProtocolChoice {
     code_mode: string
     continuation: bool
     verification_depth: string
+    max_verification_attempts: number
+    read_only_warning_at: number
+    read_only_action_at: number
+    max_read_only_calls: number
+    reasoning_effort: string
+    reasoning_max_tokens: number
+    max_output_tokens: number
     architect_editor_split: bool
 }
 
@@ -33,6 +40,13 @@ strategy compile returns ProtocolChoice {
         code_mode: "suggest",
         continuation: false,
         verification_depth: "focused",
+        max_verification_attempts: 2,
+        read_only_warning_at: 0,
+        read_only_action_at: 0,
+        max_read_only_calls: 0,
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 2048,
+        max_output_tokens: 6144,
         architect_editor_split: true,
     }
 
@@ -41,12 +55,22 @@ strategy compile returns ProtocolChoice {
     } then WeakTypedStages {
         name: "weak_typed_stages",
         visible_tool_count: 4,
-        max_turns: 10,
+        // Fourteen turns preserves the prior five-call discovery action
+        // boundary, adds a bounded edit-argument repair window, and still
+        // leaves room for one focused verification pass plus honest synthesis.
+        max_turns: 14,
         max_fanout: 1,
         context_source: "canopy_ranked",
         code_mode: "suggest",
         continuation: false,
         verification_depth: "focused",
+        max_verification_attempts: 2,
+        read_only_warning_at: 3,
+        read_only_action_at: 5,
+        max_read_only_calls: 9,
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 2048,
+        max_output_tokens: 6144,
         architect_editor_split: true,
     }
 
@@ -66,6 +90,13 @@ strategy compile returns ProtocolChoice {
         code_mode: "auto_read_only",
         continuation: true,
         verification_depth: "risk_triggered",
+        max_verification_attempts: 3,
+        read_only_warning_at: 8,
+        read_only_action_at: 14,
+        max_read_only_calls: 20,
+        reasoning_effort: "high",
+        reasoning_max_tokens: 8192,
+        max_output_tokens: 16384,
         architect_editor_split: false,
     }
 
@@ -80,6 +111,13 @@ strategy compile returns ProtocolChoice {
         code_mode: "suggest",
         continuation: true,
         verification_depth: "risk_triggered",
+        max_verification_attempts: 3,
+        read_only_warning_at: 8,
+        read_only_action_at: 14,
+        max_read_only_calls: 20,
+        reasoning_effort: "high",
+        reasoning_max_tokens: 8192,
+        max_output_tokens: 16384,
         architect_editor_split: false,
     }
 
@@ -92,6 +130,13 @@ strategy compile returns ProtocolChoice {
         code_mode: "suggest",
         continuation: false,
         verification_depth: "focused",
+        max_verification_attempts: 2,
+        read_only_warning_at: 5,
+        read_only_action_at: 8,
+        max_read_only_calls: 12,
+        reasoning_effort: "medium",
+        reasoning_max_tokens: 4096,
+        max_output_tokens: 8192,
         architect_editor_split: false,
     }
 }

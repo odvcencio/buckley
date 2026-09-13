@@ -35,6 +35,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
@@ -52,6 +53,7 @@ type Server struct {
 	sessions      map[string]*acppb.Session
 	toolApprover  *security.ToolApprover
 	telemetryHub  *telemetry.Hub
+	engine        *rules.Engine
 	liveWorkflows map[string]*orchestrator.WorkflowManager
 	liveMux       sync.RWMutex
 
@@ -76,6 +78,17 @@ type Server struct {
 	// Context handles storage
 	contextHandles   map[string]*ContextHandleData
 	contextHandleMux sync.RWMutex
+}
+
+// Option configures a Server at construction time.
+type Option func(*Server)
+
+// WithRulesEngine supplies the optional Arbiter engine for RLM requests. A nil
+// engine preserves the legacy fail-open behavior.
+func WithRulesEngine(engine *rules.Engine) Option {
+	return func(s *Server) {
+		s.engine = engine
+	}
 }
 
 // SessionContext tracks files and metadata for a session.
@@ -112,7 +125,7 @@ type ContextHandleData struct {
 }
 
 // NewServer creates a new ACP gRPC server
-func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *config.Config, store *storage.Store) (*Server, error) {
+func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *config.Config, store *storage.Store, opts ...Option) (*Server, error) {
 	if coord == nil {
 		return nil, fmt.Errorf("coordinator is required")
 	}
@@ -128,7 +141,7 @@ func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *confi
 	// Default to in-memory task history
 	taskHistory := agent.NewInMemoryTaskHistory()
 
-	return &Server{
+	server := &Server{
 		coordinator:      coord,
 		models:           models,
 		cfg:              cfg,
@@ -146,7 +159,13 @@ func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *confi
 		sessionContexts:  make(map[string]*SessionContext),
 		pendingApprovals: make(map[string]*PendingApproval),
 		contextHandles:   make(map[string]*ContextHandleData),
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
+	return server, nil
 }
 
 // SetMessageBus configures the server to use a specific message bus.
@@ -586,6 +605,7 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 		Bus:          s.messageBus,
 		Telemetry:    s.telemetryHub,
 		SessionID:    sessionID,
+		Engine:       s.engine,
 		GraftClient:  graftClient,
 	})
 	if err != nil {

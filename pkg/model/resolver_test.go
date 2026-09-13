@@ -118,3 +118,41 @@ func TestResolver_NilReceiver(t *testing.T) {
 		t.Errorf("nil receiver Resolve() = %q, want empty string", got)
 	}
 }
+
+func TestResolver_CheapestModelForTier_Light(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ResolverConfig
+		want string
+	}{
+		{
+			name: "configured light model is selected",
+			cfg: ResolverConfig{
+				Planning:  "config-planning-model",
+				Execution: "config-execution-model",
+				Light:     "config-light-model",
+				Review:    "config-review-model",
+			},
+			want: "config-light-model",
+		},
+		{
+			name: "empty light falls back to execution",
+			cfg: ResolverConfig{
+				Planning:  "config-planning-model",
+				Execution: "config-execution-model",
+				Light:     "",
+				Review:    "config-review-model",
+			},
+			want: "config-execution-model",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewResolver(nil, tt.cfg, nil)
+			if got := r.cheapestModelForTier("light"); got != tt.want {
+				t.Fatalf("cheapestModelForTier(light) = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

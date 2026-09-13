@@ -17,8 +17,9 @@ import (
 const ChildContractEnv = "BUCKLEY_SUBAGENT_CONTRACT_V1"
 
 const (
-	childContractVersion  = "buckley.subagent-contract/v1"
-	maxChildContractBytes = 64 * 1024
+	childContractVersion            = "buckley.subagent-contract/v1"
+	childContractSourceScopeVersion = "buckley.subagent-contract/v2"
+	maxChildContractBytes           = 64 * 1024
 )
 
 // ChildContract is the subset of a resolved Request that a Buckley child
@@ -26,30 +27,35 @@ const (
 // preserves the important nil-versus-empty distinction: an empty allowlist
 // means no tools, while an unconstrained task inherits the child profile.
 type ChildContract struct {
-	SchemaVersion    string            `json:"schema_version"`
-	RunID            string            `json:"run_id,omitempty"`
-	ParentRunID      string            `json:"parent_run_id,omitempty"`
-	ParentSessionID  string            `json:"parent_session_id,omitempty"`
-	TaskID           string            `json:"task_id,omitempty"`
-	Model            string            `json:"model,omitempty"`
-	Tier             string            `json:"tier,omitempty"`
-	Effort           string            `json:"effort,omitempty"`
-	SystemPrompt     string            `json:"system_prompt,omitempty"`
-	AllowedTools     []string          `json:"allowed_tools,omitempty"`
-	ToolsConstrained bool              `json:"tools_constrained,omitempty"`
-	StepCap          int               `json:"step_cap,omitempty"`
-	TimeoutSeconds   int               `json:"timeout_seconds,omitempty"`
-	Budget           agentcoord.Budget `json:"budget,omitempty"`
-	ApprovalPosture  string            `json:"approval_posture,omitempty"`
-	OutputSchema     string            `json:"output_schema,omitempty"`
+	SchemaVersion    string                  `json:"schema_version"`
+	RunID            string                  `json:"run_id,omitempty"`
+	ParentRunID      string                  `json:"parent_run_id,omitempty"`
+	ParentSessionID  string                  `json:"parent_session_id,omitempty"`
+	TaskID           string                  `json:"task_id,omitempty"`
+	Model            string                  `json:"model,omitempty"`
+	Tier             string                  `json:"tier,omitempty"`
+	Effort           string                  `json:"effort,omitempty"`
+	SystemPrompt     string                  `json:"system_prompt,omitempty"`
+	AllowedTools     []string                `json:"allowed_tools,omitempty"`
+	SourceScope      *agentcoord.SourceScope `json:"source_scope,omitempty"`
+	ToolsConstrained bool                    `json:"tools_constrained,omitempty"`
+	StepCap          int                     `json:"step_cap,omitempty"`
+	TimeoutSeconds   int                     `json:"timeout_seconds,omitempty"`
+	Budget           agentcoord.Budget       `json:"budget,omitempty"`
+	ApprovalPosture  string                  `json:"approval_posture,omitempty"`
+	OutputSchema     string                  `json:"output_schema,omitempty"`
 }
 
 // ChildContractFromRequest selects the resolved fields that must survive the
 // process boundary. Request.Task is deliberately excluded because it is
 // already passed as the child command's task argument.
 func ChildContractFromRequest(request Request) ChildContract {
+	version := childContractVersion
+	if request.SourceScope != nil {
+		version = childContractSourceScopeVersion
+	}
 	return ChildContract{
-		SchemaVersion:    childContractVersion,
+		SchemaVersion:    version,
 		RunID:            strings.TrimSpace(request.ID),
 		ParentRunID:      strings.TrimSpace(request.ParentRunID),
 		ParentSessionID:  strings.TrimSpace(request.ParentSessionID),
@@ -59,6 +65,7 @@ func ChildContractFromRequest(request Request) ChildContract {
 		Effort:           strings.TrimSpace(request.Effort),
 		SystemPrompt:     strings.TrimSpace(request.SystemPrompt),
 		AllowedTools:     copyStrings(request.AllowedTools),
+		SourceScope:      agentcoord.CloneSourceScope(request.SourceScope),
 		ToolsConstrained: request.AllowedTools != nil,
 		StepCap:          request.StepCap,
 		TimeoutSeconds:   request.TimeoutSeconds,
@@ -72,6 +79,9 @@ func ChildContractFromRequest(request Request) ChildContract {
 func EncodeChildContract(contract ChildContract) (string, error) {
 	if contract.SchemaVersion == "" {
 		contract.SchemaVersion = childContractVersion
+		if contract.SourceScope != nil {
+			contract.SchemaVersion = childContractSourceScopeVersion
+		}
 	}
 	if err := validateChildContract(contract); err != nil {
 		return "", err
@@ -104,10 +114,20 @@ func DecodeChildContract(value string) (contract ChildContract, present bool, er
 	if err := json.Unmarshal(payload, &contract); err != nil {
 		return ChildContract{}, true, fmt.Errorf("unmarshal subagent child contract: %w", err)
 	}
+	if contract.SchemaVersion == childContractVersion {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return ChildContract{}, true, fmt.Errorf("unmarshal subagent child contract: %w", err)
+		}
+		if _, present := fields["source_scope"]; present {
+			return ChildContract{}, true, fmt.Errorf("source_scope requires subagent child contract v2")
+		}
+	}
 	if err := validateChildContract(contract); err != nil {
 		return ChildContract{}, true, err
 	}
 	contract.AllowedTools = copyStrings(contract.AllowedTools)
+	contract.SourceScope = agentcoord.CloneSourceScope(contract.SourceScope)
 	if contract.ToolsConstrained && contract.AllowedTools == nil {
 		contract.AllowedTools = []string{}
 	}
@@ -115,8 +135,20 @@ func DecodeChildContract(value string) (contract ChildContract, present bool, er
 }
 
 func validateChildContract(contract ChildContract) error {
-	if contract.SchemaVersion != childContractVersion {
+	switch contract.SchemaVersion {
+	case childContractVersion:
+		if contract.SourceScope != nil {
+			return fmt.Errorf("source_scope requires subagent child contract v2")
+		}
+	case childContractSourceScopeVersion:
+		if contract.SourceScope == nil {
+			return fmt.Errorf("subagent child contract v2 requires source_scope")
+		}
+	default:
 		return fmt.Errorf("unsupported subagent child contract version %q", contract.SchemaVersion)
+	}
+	if err := agentcoord.ValidateSourceScope(contract.SourceScope); err != nil {
+		return fmt.Errorf("subagent child contract source_scope: %w", err)
 	}
 	if contract.StepCap < 0 {
 		return fmt.Errorf("subagent child contract step_cap must not be negative")

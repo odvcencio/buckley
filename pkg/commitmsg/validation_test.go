@@ -35,3 +35,31 @@ func TestNormalizeBullet(t *testing.T) {
 		t.Fatalf("NormalizeBullet() = %q", got)
 	}
 }
+
+func TestValidateCommitFieldsToolMarkup(t *testing.T) {
+	for _, tc := range []struct {
+		name, bullet string
+		wantErr      bool
+	}{
+		{"observed artifact", "<arg_value>- Run jest with --json", true},
+		{"whitespace", "  <arg_value>Run tests  ", true},
+		{"duplicate bullets", "- * • <arg_value>- Run tests", true},
+		{"marker only", "<arg_value>", true},
+		{"quoted literal", "`<arg_value>` is a literal tag", false},
+		{"inline literal", "Preserve <arg_value> in source examples", false},
+		{"other markup", "<div> remains valid HTML", false},
+		{"escaped literal", "&lt;arg_value&gt; is escaped", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []string{tc.bullet}
+			before := NormalizeBullet(tc.bullet)
+			err := ValidateCommitFields("fix", "", "preserve message text", body, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+			if body[0] != tc.bullet || NormalizeBullet(tc.bullet) != before {
+				t.Fatal("validation rewrote body text")
+			}
+		})
+	}
+}

@@ -80,7 +80,7 @@ func TestTerminalReporter_RenderReport(t *testing.T) {
 		"claude-3-sonnet",
 		"Cost Comparison",
 		"Duration Comparison",
-		"Winner:",
+		"No verified winner:",
 	}
 
 	for _, check := range checks {

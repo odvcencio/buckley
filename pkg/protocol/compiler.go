@@ -89,15 +89,28 @@ type Protocol struct {
 
 // Stage is a bounded unit of work within a protocol.
 type Stage struct {
-	Name                 string `json:"name"`
-	Role                 string `json:"role"`
-	MaxTurns             int    `json:"max_turns"`
-	MaxFanout            int    `json:"max_fanout"`
-	ContextSource        string `json:"context_source"`
-	CodeMode             string `json:"code_mode"`
-	Continuation         bool   `json:"continuation"`
-	VerificationDepth    string `json:"verification_depth"`
-	ArchitectEditorSplit bool   `json:"architect_editor_split"`
+	Name                    string        `json:"name"`
+	Role                    string        `json:"role"`
+	MaxTurns                int           `json:"max_turns"`
+	MaxFanout               int           `json:"max_fanout"`
+	ContextSource           string        `json:"context_source"`
+	CodeMode                string        `json:"code_mode"`
+	Continuation            bool          `json:"continuation"`
+	VerificationDepth       string        `json:"verification_depth"`
+	MaxVerificationAttempts int           `json:"max_verification_attempts,omitempty"`
+	ReadOnlyWarningAt       int           `json:"read_only_warning_at,omitempty"`
+	ReadOnlyActionAt        int           `json:"read_only_action_at,omitempty"`
+	MaxReadOnlyCalls        int           `json:"max_read_only_calls,omitempty"`
+	Request                 RequestPolicy `json:"request"`
+	ArchitectEditorSplit    bool          `json:"architect_editor_split"`
+}
+
+// RequestPolicy is the provider-neutral request envelope selected for a stage.
+// Zero values mean the protocol does not override the host's existing request.
+type RequestPolicy struct {
+	ReasoningEffort    string `json:"reasoning_effort,omitempty"`
+	ReasoningMaxTokens int    `json:"reasoning_max_tokens,omitempty"`
+	MaxOutputTokens    int    `json:"max_output_tokens,omitempty"`
 }
 
 // Receipt makes compilation explainable and replayable. There is no timestamp
@@ -156,28 +169,35 @@ func (c *Compiler) Compile(request TaskRequest, profile BehaviorProfile) (Protoc
 		output.Prompt = "Artifact output is optional for this task. " + output.Prompt
 	}
 	stage := Stage{
-		Name:                 "execute",
-		Role:                 "agent",
-		MaxTurns:             choice.MaxTurns,
-		MaxFanout:            choice.MaxFanout,
-		ContextSource:        choice.ContextSource,
-		CodeMode:             choice.CodeMode,
-		Continuation:         choice.Continuation,
-		VerificationDepth:    choice.VerificationDepth,
-		ArchitectEditorSplit: choice.ArchitectEditorSplit,
+		Name:                    "execute",
+		Role:                    "agent",
+		MaxTurns:                choice.MaxTurns,
+		MaxFanout:               choice.MaxFanout,
+		ContextSource:           choice.ContextSource,
+		CodeMode:                choice.CodeMode,
+		Continuation:            choice.Continuation,
+		VerificationDepth:       choice.VerificationDepth,
+		MaxVerificationAttempts: choice.MaxVerificationAttempts,
+		ReadOnlyWarningAt:       choice.ReadOnlyWarningAt,
+		ReadOnlyActionAt:        choice.ReadOnlyActionAt,
+		MaxReadOnlyCalls:        choice.MaxReadOnlyCalls,
+		Request:                 choice.Request,
+		ArchitectEditorSplit:    choice.ArchitectEditorSplit,
 	}
 	stages := []Stage{stage}
 	if choice.ArchitectEditorSplit {
 		stages = []Stage{
 			{
-				Name:                 "architect",
-				Role:                 "architect",
-				MaxTurns:             maxProtocol(1, choice.MaxTurns/3),
-				MaxFanout:            1,
-				ContextSource:        choice.ContextSource,
-				CodeMode:             "off",
-				VerificationDepth:    "plan",
-				ArchitectEditorSplit: true,
+				Name:                    "architect",
+				Role:                    "architect",
+				MaxTurns:                maxProtocol(1, choice.MaxTurns/3),
+				MaxFanout:               1,
+				ContextSource:           choice.ContextSource,
+				CodeMode:                "off",
+				VerificationDepth:       "plan",
+				MaxVerificationAttempts: choice.MaxVerificationAttempts,
+				Request:                 choice.Request,
+				ArchitectEditorSplit:    true,
 			},
 			stage,
 		}
@@ -214,16 +234,21 @@ func (c *Compiler) Compile(request TaskRequest, profile BehaviorProfile) (Protoc
 }
 
 type protocolChoice struct {
-	Name                 string
-	VisibleToolCount     int
-	ToolOrder            []string
-	MaxTurns             int
-	MaxFanout            int
-	ContextSource        string
-	CodeMode             string
-	Continuation         bool
-	VerificationDepth    string
-	ArchitectEditorSplit bool
+	Name                    string
+	VisibleToolCount        int
+	ToolOrder               []string
+	MaxTurns                int
+	MaxFanout               int
+	ContextSource           string
+	CodeMode                string
+	Continuation            bool
+	VerificationDepth       string
+	MaxVerificationAttempts int
+	ReadOnlyWarningAt       int
+	ReadOnlyActionAt        int
+	MaxReadOnlyCalls        int
+	Request                 RequestPolicy
+	ArchitectEditorSplit    bool
 }
 
 func (c *Compiler) resolveChoice(facts map[string]any, class ModelClass) (protocolChoice, string, error) {
@@ -236,15 +261,24 @@ func (c *Compiler) resolveChoice(facts map[string]any, class ModelClass) (protoc
 	}
 	name := firstNonEmpty(strings.TrimSpace(result.String("name")), "arbiter")
 	choice := protocolChoice{
-		Name:                 name,
-		VisibleToolCount:     result.Int("visible_tool_count"),
-		ToolOrder:            toolOrderForOutcome(name),
-		MaxTurns:             result.Int("max_turns"),
-		MaxFanout:            result.Int("max_fanout"),
-		ContextSource:        firstNonEmpty(strings.TrimSpace(result.String("context_source")), "canopy_ranked"),
-		CodeMode:             firstNonEmpty(strings.TrimSpace(result.String("code_mode")), "suggest"),
-		Continuation:         result.Bool("continuation"),
-		VerificationDepth:    firstNonEmpty(strings.TrimSpace(result.String("verification_depth")), "focused"),
+		Name:                    name,
+		VisibleToolCount:        result.Int("visible_tool_count"),
+		ToolOrder:               toolOrderForOutcome(name),
+		MaxTurns:                result.Int("max_turns"),
+		MaxFanout:               result.Int("max_fanout"),
+		ContextSource:           firstNonEmpty(strings.TrimSpace(result.String("context_source")), "canopy_ranked"),
+		CodeMode:                firstNonEmpty(strings.TrimSpace(result.String("code_mode")), "suggest"),
+		Continuation:            result.Bool("continuation"),
+		VerificationDepth:       firstNonEmpty(strings.TrimSpace(result.String("verification_depth")), "focused"),
+		MaxVerificationAttempts: result.Int("max_verification_attempts"),
+		ReadOnlyWarningAt:       result.Int("read_only_warning_at"),
+		ReadOnlyActionAt:        result.Int("read_only_action_at"),
+		MaxReadOnlyCalls:        result.Int("max_read_only_calls"),
+		Request: RequestPolicy{
+			ReasoningEffort:    strings.TrimSpace(result.String("reasoning_effort")),
+			ReasoningMaxTokens: result.Int("reasoning_max_tokens"),
+			MaxOutputTokens:    result.Int("max_output_tokens"),
+		},
 		ArchitectEditorSplit: result.Bool("architect_editor_split"),
 	}
 	return choice, "arbiter", nil
@@ -255,14 +289,23 @@ func (c *Compiler) resolveChoice(facts map[string]any, class ModelClass) (protoc
 // alternate policy engine.
 func fallbackChoice(_ ModelClass) protocolChoice {
 	return protocolChoice{
-		Name:                 "policy_fallback",
-		VisibleToolCount:     4,
-		ToolOrder:            codingCoreToolOrder,
-		MaxTurns:             10,
-		MaxFanout:            1,
-		ContextSource:        "canopy_ranked",
-		CodeMode:             "suggest",
-		VerificationDepth:    "focused",
+		Name:                    "policy_fallback",
+		VisibleToolCount:        4,
+		ToolOrder:               codingCoreToolOrder,
+		MaxTurns:                14,
+		MaxFanout:               1,
+		ContextSource:           "canopy_ranked",
+		CodeMode:                "suggest",
+		VerificationDepth:       "focused",
+		MaxVerificationAttempts: 1,
+		ReadOnlyWarningAt:       3,
+		ReadOnlyActionAt:        5,
+		MaxReadOnlyCalls:        9,
+		Request: RequestPolicy{
+			ReasoningEffort:    "low",
+			ReasoningMaxTokens: 1024,
+			MaxOutputTokens:    4096,
+		},
 		ArchitectEditorSplit: true,
 	}
 }
@@ -280,6 +323,50 @@ func clampChoice(choice protocolChoice, request TaskRequest, profile BehaviorPro
 	}
 	if choice.MaxTurns < 0 {
 		choice.MaxTurns = 0
+	}
+	if choice.MaxVerificationAttempts < 0 {
+		choice.MaxVerificationAttempts = 0
+	}
+	if choice.ReadOnlyWarningAt < 0 {
+		choice.ReadOnlyWarningAt = 0
+	}
+	if choice.ReadOnlyActionAt < 0 {
+		choice.ReadOnlyActionAt = 0
+	}
+	if choice.MaxReadOnlyCalls < 0 {
+		choice.MaxReadOnlyCalls = 0
+	}
+	if choice.MaxReadOnlyCalls == 0 {
+		choice.ReadOnlyWarningAt = 0
+		choice.ReadOnlyActionAt = 0
+	} else if choice.ReadOnlyWarningAt == 0 || choice.ReadOnlyActionAt == 0 ||
+		choice.ReadOnlyWarningAt >= choice.ReadOnlyActionAt ||
+		choice.ReadOnlyActionAt >= choice.MaxReadOnlyCalls ||
+		(choice.MaxTurns > 0 && choice.MaxReadOnlyCalls >= choice.MaxTurns) {
+		choice.ReadOnlyWarningAt = 0
+		choice.ReadOnlyActionAt = 0
+		choice.MaxReadOnlyCalls = 0
+	}
+	choice.Request.ReasoningEffort = strings.ToLower(strings.TrimSpace(choice.Request.ReasoningEffort))
+	switch choice.Request.ReasoningEffort {
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		choice.Request.ReasoningEffort = ""
+	}
+	if !profile.Capabilities.Reasoning || choice.Request.ReasoningEffort == "" {
+		choice.Request.ReasoningEffort = ""
+		choice.Request.ReasoningMaxTokens = 0
+	} else if len(profile.Capabilities.ReasoningEfforts) > 0 {
+		choice.Request.ReasoningEffort = nearestSupportedReasoningEffort(choice.Request.ReasoningEffort, profile.Capabilities.ReasoningEfforts)
+	}
+	if choice.Request.ReasoningMaxTokens < 0 {
+		choice.Request.ReasoningMaxTokens = 0
+	}
+	if choice.Request.MaxOutputTokens < 0 {
+		choice.Request.MaxOutputTokens = 0
+	}
+	if choice.Request.ReasoningMaxTokens > 0 && choice.Request.MaxOutputTokens > 0 && choice.Request.ReasoningMaxTokens > choice.Request.MaxOutputTokens {
+		choice.Request.ReasoningMaxTokens = choice.Request.MaxOutputTokens
 	}
 	if choice.MaxFanout < 1 {
 		choice.MaxFanout = 1
@@ -299,6 +386,44 @@ func clampChoice(choice protocolChoice, request TaskRequest, profile BehaviorPro
 		}
 	}
 	return choice
+}
+
+func nearestSupportedReasoningEffort(selected string, supported []string) string {
+	selectedRank := protocolReasoningEffortRank(selected)
+	best, bestRank, bestDistance := "", -1, -1
+	for _, effort := range supported {
+		rank := protocolReasoningEffortRank(effort)
+		if rank < 0 {
+			continue
+		}
+		distance := rank - selectedRank
+		if distance < 0 {
+			distance = -distance
+		}
+		if bestDistance < 0 || distance < bestDistance || (distance == bestDistance && rank < bestRank) {
+			best, bestRank, bestDistance = effort, rank, distance
+		}
+	}
+	return best
+}
+
+func protocolReasoningEffortRank(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return 0
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	case "xhigh":
+		return 4
+	case "max":
+		return 5
+	default:
+		return -1
+	}
 }
 
 func normalizeRequest(request TaskRequest) (TaskRequest, error) {
@@ -335,6 +460,7 @@ func protocolFacts(request TaskRequest, profile BehaviorProfile, class ModelClas
 		"model.native_json_schema":            profile.Capabilities.NativeJSONSchema,
 		"model.parallel_tool_calls":           profile.Capabilities.ParallelToolCalls,
 		"model.continuation":                  profile.Capabilities.Continuation,
+		"model.reasoning":                     profile.Capabilities.Reasoning,
 		"model.code_mode":                     profile.Capabilities.CodeMode,
 		"model.tool_reliability":              profile.Metrics.ToolReliability,
 		"model.structured_output_reliability": profile.Metrics.StructuredOutputReliability,

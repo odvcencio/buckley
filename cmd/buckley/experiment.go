@@ -75,7 +75,7 @@ func runExperimentRun(args []string) error {
 	fs.StringVar(&prompt, "prompt", "", "Task prompt")
 
 	var criteriaFlags stringSliceFlag
-	fs.Var(&criteriaFlags, "criteria", "Success criteria (type:target, repeatable)")
+	fs.Var(&criteriaFlags, "criteria", "Success criteria (type:target, repeatable); command/test_pass receive model output on stdin")
 
 	timeout := fs.Duration("timeout", 0, "Timeout per variant (default from config)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "Maximum concurrent variants")
@@ -225,18 +225,38 @@ func runExperimentList(args []string) error {
 func runExperimentShow(args []string) error {
 	fs := flag.NewFlagSet("experiment show", flag.ContinueOnError)
 	format := fs.String("format", "auto", "Output format: auto, terminal, markdown, compact")
-	if err := fs.Parse(args); err != nil {
+	identifier, remaining := extractExperimentName(args)
+	if err := fs.Parse(remaining); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: buckley experiment show <id|name> [--format auto|terminal|markdown|compact]")
+	if identifier == "" {
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: buckley experiment show <id|name> [--format auto|terminal|markdown|compact]")
+		}
+		identifier = fs.Arg(0)
+		if fs.NArg() > 1 {
+			return fmt.Errorf("unexpected trailing argument %s", fs.Arg(1))
+		}
+	} else if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected trailing argument %s", fs.Arg(0))
 	}
-	identifier := strings.TrimSpace(fs.Arg(0))
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return fmt.Errorf("experiment id or name is required")
+	}
+
+	outputFormat := strings.ToLower(strings.TrimSpace(*format))
+	switch outputFormat {
+	case "auto", "terminal", "markdown", "compact":
+	default:
+		return fmt.Errorf("invalid experiment show format: %s", *format)
+	}
 
 	store, err := initExperimentStore()
 	if err != nil {
 		return err
 	}
+	defer store.Close()
 	expStore := experiment.NewStoreFromStorage(store)
 	if expStore == nil {
 		return fmt.Errorf("experiment store unavailable")
@@ -258,8 +278,6 @@ func runExperimentShow(args []string) error {
 
 	comparator := experiment.NewComparator(expStore)
 
-	// Determine output format
-	outputFormat := strings.ToLower(strings.TrimSpace(*format))
 	if outputFormat == "auto" {
 		// Use terminal format if stdout is a terminal, otherwise markdown
 		if isInteractiveTerminal() {

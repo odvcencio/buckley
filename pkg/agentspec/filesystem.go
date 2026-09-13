@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 	"unicode"
-
-	"gopkg.in/yaml.v3"
 )
 
 func LoadFilesystemRuntimeProfile(agentRoot string) (*RuntimeProfile, error) {
@@ -247,7 +245,7 @@ func loadFilesystemSubagentConfig(root string) (filesystemSubagentConfig, error)
 		return filesystemSubagentConfig{}, fmt.Errorf("reading filesystem subagent config %s: %w", path, err)
 	}
 	var config filesystemSubagentConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	if err := decodeStrictYAML(data, &config); err != nil {
 		return filesystemSubagentConfig{}, fmt.Errorf("parsing filesystem subagent config %s: %w", path, err)
 	}
 	config.Persona = strings.TrimSpace(config.Persona)
