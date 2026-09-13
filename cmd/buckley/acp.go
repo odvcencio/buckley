@@ -1289,7 +1289,7 @@ func runACPLoopWithLimits(
 			if errors.As(err, &partial) {
 				return partial.text, acpIncompleteDraftErrorForPartial(partial, err, state, registry)
 			}
-			if state.useTools && isToolUnsupportedError(err) {
+			if state.useTools && model.IsToolUnsupportedError(err) {
 				state.useTools = false
 				continue
 			}
@@ -1710,10 +1710,10 @@ func newACPToolLoopGovernorWithLimits(cfg *config.Config, limits acpLoopLimits) 
 		// An explicit task value narrows the global fuse; absence/zero adds no
 		// task ceiling. Repetition and cycle detectors stay enabled.
 		if limits.MaxModelRequests > 0 {
-			governorConfig.MaxRounds = minPositiveChildLimit(governorConfig.MaxRounds, limits.MaxModelRequests)
+			governorConfig.MaxRounds = minPositiveLimit(governorConfig.MaxRounds, limits.MaxModelRequests)
 		}
 		if limits.MaxToolCalls > 0 {
-			governorConfig.MaxToolCalls = minPositiveChildLimit(governorConfig.MaxToolCalls, limits.MaxToolCalls)
+			governorConfig.MaxToolCalls = minPositiveLimit(governorConfig.MaxToolCalls, limits.MaxToolCalls)
 		}
 	} else {
 		if limits.MaxModelRequests > 0 && (governorConfig.MaxRounds <= 0 || limits.MaxModelRequests < governorConfig.MaxRounds) {
@@ -3222,26 +3222,6 @@ func shouldNudgeForTools(text string) bool {
 		if strings.Contains(lower, phrase) {
 			return true
 		}
-	}
-	return false
-}
-
-func isToolUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
-		return true
-	}
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool calling") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool response") {
-		return true
 	}
 	return false
 }

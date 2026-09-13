@@ -373,7 +373,7 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 	if c.handleToolLoopContextError(err, state) {
 		return nil
 	}
-	if state != nil && state.useTools && isToolUnsupportedError(err) {
+	if state != nil && state.useTools && model.IsToolUnsupportedError(err) {
 		c.app.SetStatus("Retrying without tools")
 		state.useTools = false
 		return nil
@@ -1181,26 +1181,6 @@ func toolDisplayMessage(name string, result *builtin.Result, execErr error) stri
 		return summary
 	}
 	return ""
-}
-
-func isToolUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
-		return true
-	}
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool calling") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool response") {
-		return true
-	}
-	return false
 }
 
 func resolveToolCallName(registry *tool.Registry, name string, allowed []string) (string, bool) {

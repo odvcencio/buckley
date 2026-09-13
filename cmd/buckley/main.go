@@ -914,7 +914,7 @@ func applyOneShotProtocolLimits(limits acpLoopLimits, compiled *protocol.Protoco
 			modelMaxOutputTokens = info.MaxCompletionTokens
 		}
 	}
-	limits.MaxOutputTokens = minPositiveOneShotLimit(limits.MaxOutputTokens, stage.Request.MaxOutputTokens, modelMaxOutputTokens)
+	limits.MaxOutputTokens = minPositiveLimit(limits.MaxOutputTokens, stage.Request.MaxOutputTokens, modelMaxOutputTokens)
 	if stage.MaxReadOnlyCalls > 0 {
 		limits.ReadOnlyWarningAt = stage.ReadOnlyWarningAt
 		limits.ReadOnlyActionAt = stage.ReadOnlyActionAt
@@ -935,7 +935,7 @@ func applyOneShotProtocolLimits(limits acpLoopLimits, compiled *protocol.Protoco
 	return limits
 }
 
-func minPositiveOneShotLimit(values ...int) int {
+func minPositiveLimit(values ...int) int {
 	minimum := 0
 	for _, value := range values {
 		if value > 0 && (minimum == 0 || value < minimum) {

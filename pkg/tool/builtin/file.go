@@ -31,7 +31,7 @@ func (t *ReadFileTool) SetSourceScope(scope *agentcoord.SourceScope) error {
 	return nil
 }
 
-// sourceFileForPath resolves a raw request path against the tool's source
+// sourceFileForPath matches a raw request path against the tool's source
 // scope. A nil scope returns nil (unconstrained); undeclared paths fail.
 func (t *ReadFileTool) sourceFileForPath(raw string) (*agentcoord.SourceFile, error) {
 	if t.sourceScope == nil {
@@ -53,9 +53,6 @@ func (t *ReadFileTool) sourceFileForPath(raw string) (*agentcoord.SourceFile, er
 	}
 	for _, f := range t.sourceScope.Files {
 		if candidate == filepath.Join(base, f.Path) {
-			if _, err := resolvePath(t.workDir, raw); err != nil {
-				return nil, err
-			}
 			declared := f
 			return &declared, nil
 		}

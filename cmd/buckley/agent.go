@@ -1149,10 +1149,10 @@ func runAgentRun(args []string) error {
 
 func applyAgentRunExplicitLimits(limits acpLoopLimits, opts agentRunOptions) acpLoopLimits {
 	if opts.maxToolCalls > 0 {
-		limits.MaxToolCalls = minPositiveChildLimit(limits.MaxToolCalls, opts.maxToolCalls)
+		limits.MaxToolCalls = minPositiveLimit(limits.MaxToolCalls, opts.maxToolCalls)
 	}
 	if opts.maxElapsedSeconds > 0 {
-		limits.MaxElapsedSeconds = minPositiveChildLimit(limits.MaxElapsedSeconds, opts.maxElapsedSeconds)
+		limits.MaxElapsedSeconds = minPositiveLimit(limits.MaxElapsedSeconds, opts.maxElapsedSeconds)
 	}
 	return limits
 }
@@ -1165,7 +1165,7 @@ func acpLoopLimitsFromChildContract(contract subagent.ChildContract) (acpLoopLim
 		StepCap:           contract.StepCap,
 		MaxToolCalls:      contract.Budget.MaxToolCalls,
 		MaxModelRequests:  contract.Budget.MaxModelRequests,
-		MaxElapsedSeconds: minPositiveChildLimit(contract.TimeoutSeconds, contract.Budget.MaxElapsedSecond),
+		MaxElapsedSeconds: minPositiveLimit(contract.TimeoutSeconds, contract.Budget.MaxElapsedSecond),
 		MaxCostUSD:        contract.Budget.MaxCostUSD,
 		RunID:             strings.TrimSpace(contract.RunID),
 		ParentRunID:       strings.TrimSpace(contract.ParentRunID),
@@ -1174,16 +1174,6 @@ func acpLoopLimitsFromChildContract(contract subagent.ChildContract) (acpLoopLim
 		ChildContract:     true,
 		SourceScope:       agentcoord.CloneSourceScope(contract.SourceScope),
 	}, nil
-}
-
-func minPositiveChildLimit(values ...int) int {
-	minimum := 0
-	for _, value := range values {
-		if value > 0 && (minimum == 0 || value < minimum) {
-			minimum = value
-		}
-	}
-	return minimum
 }
 
 // resolveAgentRunLoopLimits resolves the tool-call budget for an agent run.
@@ -1209,7 +1199,7 @@ func resolveAgentRunLoopLimits(profile *agentspec.RuntimeProfile, contract subag
 	if err != nil {
 		return acpLoopLimits{}, err
 	}
-	limits.MaxToolCalls = minPositiveChildLimit(profileCap, contract.Budget.MaxToolCalls)
+	limits.MaxToolCalls = minPositiveLimit(profileCap, contract.Budget.MaxToolCalls)
 	return limits, nil
 }
 
@@ -1398,7 +1388,7 @@ func applyAgentRunChildContract(profile *agentspec.RuntimeProfile, contract suba
 		spec.Metadata["buckley.step_cap"] = strconv.Itoa(contract.StepCap)
 	}
 	if contract.Budget.MaxToolCalls > 0 {
-		spec.Policies.MaxToolCalls = minPositiveChildLimit(spec.Policies.MaxToolCalls, contract.Budget.MaxToolCalls)
+		spec.Policies.MaxToolCalls = minPositiveLimit(spec.Policies.MaxToolCalls, contract.Budget.MaxToolCalls)
 	}
 
 	if outputSchema := strings.TrimSpace(contract.OutputSchema); outputSchema != "" {
@@ -1612,7 +1602,7 @@ func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.Runti
 		snapshot.Skills = append([]string(nil), profile.Spec.Skills...)
 		sort.Strings(snapshot.Skills)
 		snapshot.ApprovalMode = strings.TrimSpace(profile.Spec.Policies.ApprovalMode)
-		snapshot.MaxToolCalls = minPositiveChildLimit(profile.Spec.Policies.MaxToolCalls, opts.maxToolCalls)
+		snapshot.MaxToolCalls = minPositiveLimit(profile.Spec.Policies.MaxToolCalls, opts.maxToolCalls)
 		snapshot.MaxElapsedSeconds = opts.maxElapsedSeconds
 		snapshot.ResolvedTier = strings.TrimSpace(profile.Spec.Metadata["buckley.resolved_tier"])
 		snapshot.ReasoningEffort = strings.TrimSpace(profile.Spec.Metadata["buckley.reasoning_effort"])
