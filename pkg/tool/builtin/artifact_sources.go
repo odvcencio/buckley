@@ -1,11 +1,12 @@
 package builtin
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -153,6 +154,28 @@ func capturedReadPage(data map[string]any) (capturedSource, error) {
 	return capturedSource{Path: path, StartLine: start, EndLine: end, Content: content[begin:offset]}, nil
 }
 
+// orderedSourceIDs requires the caller to hold s.mu.
+func (s *ArtifactSubmission) orderedSourceIDs() []string {
+	ids := make([]string, 0, len(s.sources))
+	for id := range s.sources {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, func(a, b string) int {
+		x, y := s.sources[a], s.sources[b]
+		if c := strings.Compare(x.Path, y.Path); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(x.StartLine, y.StartLine); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(x.EndLine, y.EndLine); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	return ids
+}
+
 // appendCapturedSources runs under the submission lock. Source fields are
 // generated from captured bytes, not from model-authored paths or excerpts.
 func (s *ArtifactSubmission) appendCapturedSources(artifact artifactv1.Artifact, refs []string) (artifactv1.Artifact, error) {
@@ -171,12 +194,7 @@ func (s *ArtifactSubmission) appendCapturedSources(artifact artifactv1.Artifact,
 		if len(s.sources) == 0 {
 			return artifact, fmt.Errorf("no captured sources to select; capture source pages with read_file first")
 		}
-		ids := make([]string, 0, len(s.sources))
-		for id := range s.sources {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		refs = ids
+		refs = s.orderedSourceIDs()
 	}
 	if len(artifact.Blocks) != 0 || len(artifact.EvidenceRefs) != 0 {
 		return artifact, fmt.Errorf("with source_refs, leave artifact blocks and evidence_refs empty; Buckley fills them from captured pages")

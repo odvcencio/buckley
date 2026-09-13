@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,7 +34,6 @@ func TestAllCapturedSourcesMatchesExplicitSelection(t *testing.T) {
 				ids = append(ids, ref)
 				want[ref] = content
 			}
-			sort.Strings(ids)
 			a := artifactv1.New(artifactv1.KindAnalysis, artifactv1.StatusIncomplete, "Partial", "Observed source summary")
 			a.IncompleteReasons = []string{"missing requested context"}
 			selector := []string{"all"}
@@ -63,7 +62,7 @@ func TestAllCapturedSourcesMatchesExplicitSelection(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !ok || !bytes.Equal(body, gold) {
-				t.Fatal("all differs from sorted explicit selection")
+				t.Fatal("all differs from path/line ordered explicit selection")
 			}
 			for _, row := range got.Blocks[0].Table.Rows {
 				if row[4] != want[row[0]] || row[0] == "all" {
@@ -144,5 +143,74 @@ func TestAllCapturedSourcesPreservesOutputLimitAndCanSelectSubset(t *testing.T) 
 	body, _ := json.Marshal(got)
 	if len(body) > artifactv1.MaxProviderBytes || len(got.Blocks[0].Table.Rows) != 1 || got.EvidenceRefs[0].ID != first {
 		t.Fatal("subset selection lost bound or identity")
+	}
+}
+
+func TestAllCapturedSourcesOrdersAllSelectionByPathAndLines(t *testing.T) {
+	full := "one\ntwo\n" + strings.Repeat("pad\n", 7) + "ten\n"
+	specs := []struct {
+		path, full, visible string
+		start, end          int
+	}{
+		{"/source-order/z.go", "z\n", "z", 1, 1},
+		{"/source-order/a.go", full, "ten", 10, 10},
+		{"/source-order/a.go", full, "two", 2, 2},
+		{"/source-order/a.go", full, "one", 1, 1},
+		{"/source-order/a.go", full, "one\ntwo", 1, 2},
+		{"/source-order/a.go", "alternate\n", "alternate", 1, 1},
+	}
+	for _, mode := range []string{"all", "recovery", "explicit-reverse"} {
+		t.Run(mode, func(t *testing.T) {
+			sink := &ArtifactSubmission{}
+			ids := make([]string, len(specs))
+			for i, spec := range specs {
+				result := sourceReadResult(spec.path, spec.full, spec.start, spec.end)
+				result.ShouldAbridge = true
+				result.DisplayData = map[string]any{"path": spec.path, "content": spec.visible, "page": result.Data["page"]}
+				id, err := sink.CaptureReadSource(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids[i] = id
+			}
+			order := []int{3, 5, 4, 2, 1, 0}
+			if ids[3] > ids[5] {
+				order[0], order[1] = order[1], order[0]
+			}
+			a := artifactv1.New(artifactv1.KindAnalysis, artifactv1.StatusIncomplete, "Order", "unverified summary")
+			a.IncompleteReasons = []string{"context incomplete"}
+			var got artifactv1.Artifact
+			if mode == "recovery" {
+				got = sink.RecoveryArtifact()
+				if _, submitted := sink.Artifact(); submitted || len(sink.sources) != len(specs) {
+					t.Fatal("recovery finalized or discarded captures")
+				}
+			} else {
+				refs := []string{"all"}
+				if mode == "explicit-reverse" {
+					refs = nil
+					for i := len(order) - 1; i >= 0; i-- {
+						refs = append(refs, ids[order[i]])
+					}
+					for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
+						order[i], order[j] = order[j], order[i]
+					}
+				}
+				if err := sink.SubmitWithSources(a, refs); err != nil {
+					t.Fatal(err)
+				}
+				got, _ = sink.Artifact()
+			}
+			if got.Status != artifactv1.StatusIncomplete || len(got.Blocks) != 1 || got.Blocks[0].Table == nil || len(got.Blocks[0].Table.Rows) != len(specs) || len(got.EvidenceRefs) != len(specs) {
+				t.Fatalf("unexpected artifact shape: %+v", got)
+			}
+			for i, index := range order {
+				spec := specs[index]
+				want := []string{ids[index], spec.path, strconv.Itoa(spec.start), strconv.Itoa(spec.end), spec.visible + "\n"}
+				if !reflect.DeepEqual(got.Blocks[0].Table.Rows[i], want) || got.EvidenceRefs[i].ID != ids[index] {
+					t.Fatalf("row %d differs from expected order/identity/bytes: got=%#v want=%#v", i, got.Blocks[0].Table.Rows[i], want)
+				}
+			}
+		})
 	}
 }

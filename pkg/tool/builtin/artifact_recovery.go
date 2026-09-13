@@ -2,7 +2,6 @@ package builtin
 
 import (
 	"fmt"
-	"sort"
 
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
@@ -51,11 +50,7 @@ func (s *ArtifactSubmission) RecoveryArtifactWithReserve(reserve int) artifactv1
 		base.IncompleteReasons = append(base.IncompleteReasons, "Previously submitted artifact omitted because it could not fit recovery limits.")
 		return base.Normalized()
 	}
-	ids := make([]string, 0, len(s.sources))
-	for id := range s.sources {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := s.orderedSourceIDs()
 	selected := make([]string, 0, len(ids))
 	artifact := base
 	for _, id := range ids {
