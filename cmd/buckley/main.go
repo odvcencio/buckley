@@ -444,6 +444,14 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	outputSchema = strings.TrimSpace(outputSchema)
+	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	if len(limits.RequiredSourceText) > 0 && outputSchema != artifactv1.SchemaVersion {
+		fmt.Fprintln(os.Stderr, "Error: required source text needs buckley.artifact/v1 output")
+		return 1
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -597,6 +605,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if instruction := oneShotTaskIntentInstruction(limits.TaskIntent); instruction != "" {
 		systemPrompt += "\n\n" + instruction
 	}
+	if instruction := sourceTextRequirementInstruction(limits.RequiredSourceText); instruction != "" {
+		systemPrompt += "\n\n" + instruction
+	}
 	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
 
@@ -610,22 +621,25 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if err != nil {
 		codeModeFailure = err
 		if outputSchema == artifactv1.SchemaVersion {
-			return printOneShotArtifactFailure(artifactSubmission, err)
+			return printOneShotArtifactFailure(artifactSubmission, err, limits.RequiredSourceText...)
 		}
 		return printOneShotFailure(responseText, err)
 	}
 
 	if outputSchema == artifactv1.SchemaVersion {
 		artifact, artifactErr := resolveOneShotArtifact(responseText, artifactContract, artifactSubmission)
+		if artifactErr == nil {
+			artifact, artifactErr = applySourceTextRequirements(artifact, limits.RequiredSourceText)
+		}
 		if artifactErr != nil {
 			codeModeFailure = artifactErr
-			return printOneShotArtifactFailure(artifactSubmission, artifactErr)
+			return printOneShotArtifactFailure(artifactSubmission, artifactErr, limits.RequiredSourceText...)
 		}
 		artifactJSON, renderErr := artifactv1.RenderJSON(artifact)
 		artifactErr = renderErr
 		if artifactErr != nil {
 			codeModeFailure = fmt.Errorf("render artifact output: %w", artifactErr)
-			return printOneShotArtifactFailure(artifactSubmission, codeModeFailure)
+			return printOneShotArtifactFailure(artifactSubmission, codeModeFailure, limits.RequiredSourceText...)
 		}
 		responseText = string(artifactJSON)
 	}
@@ -785,11 +799,20 @@ func printOneShotFailure(responseText string, err error) int {
 	return 1
 }
 
-func printOneShotArtifactFailure(submission *builtin.ArtifactSubmission, err error) int {
+func printOneShotArtifactFailure(submission *builtin.ArtifactSubmission, err error, requiredSourceText ...string) int {
 	var incomplete *agentloop.IncompleteTurnError
 	isIncomplete := errors.As(err, &incomplete)
 
-	artifact := submission.RecoveryArtifact()
+	reserve := 0
+	if len(requiredSourceText) > 0 {
+		reserve = sourceTextCoverageReserve
+	}
+	artifact := submission.RecoveryArtifactWithReserve(reserve)
+	artifact, coverageErr := applySourceTextRequirements(artifact, requiredSourceText)
+	if coverageErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: checking recovery source requirements: %v\n", coverageErr)
+		return 1
+	}
 	status := artifact.Status
 	if artifactJSON, renderErr := artifactv1.RenderJSON(artifact); renderErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: rendering recovery artifact: %v\n", renderErr)

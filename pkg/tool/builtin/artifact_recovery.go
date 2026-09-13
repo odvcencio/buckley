@@ -10,6 +10,14 @@ import (
 // RecoveryArtifact snapshots available evidence without finalizing the sink,
 // rereading files, or treating the failed run as completed.
 func (s *ArtifactSubmission) RecoveryArtifact() artifactv1.Artifact {
+	return s.RecoveryArtifactWithReserve(0)
+}
+
+// RecoveryArtifactWithReserve leaves bounded room for caller-owned output checks.
+// The reserve is clamped to half the artifact budget; captures are never truncated.
+func (s *ArtifactSubmission) RecoveryArtifactWithReserve(reserve int) artifactv1.Artifact {
+	reserve = min(max(reserve, 0), artifactv1.MaxProviderBytes/2)
+	limit := artifactv1.MaxProviderBytes - reserve
 	const reason = "The run ended before a valid final response could be delivered."
 	base := artifactv1.New(artifactv1.KindSubagentResult, artifactv1.StatusIncomplete,
 		"Partial run evidence", "Available evidence from an unfinished run; not proof of task completion.")
@@ -28,7 +36,7 @@ func (s *ArtifactSubmission) RecoveryArtifact() artifactv1.Artifact {
 		artifact.IncompleteReasons = append(artifact.IncompleteReasons, reason)
 		artifact.ArtifactID = ""
 		artifact = artifact.Normalized()
-		if body, err := artifactv1.RenderJSON(artifact); err == nil && len(body) < artifactv1.MaxProviderBytes {
+		if body, err := artifactv1.RenderJSON(artifact); err == nil && len(body) < limit {
 			return artifact
 		}
 		base.Status = artifact.Status
@@ -51,7 +59,7 @@ func (s *ArtifactSubmission) RecoveryArtifact() artifactv1.Artifact {
 		candidate = candidate.Normalized()
 		body, err := artifactv1.RenderJSON(candidate)
 		// Leave room for the bounded omission notice added below.
-		if err != nil || len(body) > artifactv1.MaxProviderBytes-256 {
+		if err != nil || len(body) > limit-256 {
 			continue
 		}
 		selected = trial

@@ -1151,6 +1151,7 @@ func runACPLoop(
 }
 
 type acpLoopLimits struct {
+	RequiredSourceText []string
 	// executionRoute is supplied only by a one-shot output contract that
 	// negotiated from this exact route. ACP otherwise resolves its own route.
 	executionRoute          model.ModelRoute

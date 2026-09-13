@@ -1002,6 +1002,8 @@ func runAgentCheck(args []string) error {
 }
 
 type agentRunOptions struct {
+	requiredSourceText []string
+
 	agentPath         string
 	project           bool
 	specSelect        string
@@ -1019,6 +1021,8 @@ type agentRunOptions struct {
 }
 
 type agentRunPreviewSnapshot struct {
+	RequiredSourceText []string `json:"required_source_text,omitempty"`
+
 	Source            string   `json:"source,omitempty"`
 	Agent             string   `json:"agent,omitempty"`
 	Subagent          string   `json:"subagent"`
@@ -1066,6 +1070,9 @@ func runAgentRun(args []string) error {
 		if err := applyAgentRunChildContract(subProfile, childContract); err != nil {
 			return err
 		}
+	}
+	if len(opts.requiredSourceText) > 0 && strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"]) != artifactv1.SchemaVersion {
+		return fmt.Errorf("--require-source-text requires the buckley.artifact/v1 output schema")
 	}
 	if opts.toolTier != "" {
 		subProfile.Spec.Tools.Tier = opts.toolTier
@@ -1125,6 +1132,7 @@ func runAgentRun(args []string) error {
 	if contractPresent {
 		outputSchema = strings.TrimSpace(childContract.OutputSchema)
 	}
+	limits.RequiredSourceText = append([]string(nil), opts.requiredSourceText...)
 	limits.MaxOutputTokens = opts.maxOutputTokens
 	limits.TaskIntent = opts.taskIntent
 	limits = applyAgentRunExplicitLimits(limits, opts)
@@ -1206,6 +1214,11 @@ func resolveAgentRunLoopLimits(profile *agentspec.RuntimeProfile, contract subag
 func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	fs := flag.NewFlagSet("agent run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	var requiredSourceText []string
+	fs.Func("require-source-text", "require an exact literal in returned captured source (repeatable; not semantic verification)", func(value string) error {
+		requiredSourceText = append(requiredSourceText, value)
+		return validateSourceTextRequirements(requiredSourceText)
+	})
 	projectSpec := fs.Bool("project", false, "use a discovered project agent spec from .buckley/agent.yaml or .buckley/agents")
 	specSelect := fs.String("spec", "", "project agent spec name or path to use with --project")
 	subagent := fs.String("subagent", "", "subagent name from the agent spec")
@@ -1250,18 +1263,19 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 
 	rest := fs.Args()
 	opts := agentRunOptions{
-		project:           *projectSpec || strings.TrimSpace(*specSelect) != "",
-		specSelect:        strings.TrimSpace(*specSelect),
-		subagent:          strings.TrimSpace(*subagent),
-		model:             strings.TrimSpace(*modelID),
-		toolTier:          strings.TrimSpace(*toolTier),
-		maxOutputTokens:   *maxOutputTokens,
-		maxToolCalls:      *maxToolCalls,
-		maxElapsedSeconds: *maxElapsedSeconds,
-		taskIntent:        taskIntent,
-		taskIntentSet:     taskIntentSet,
-		dryRun:            *dryRun,
-		jsonOutput:        *jsonOutput,
+		requiredSourceText: append([]string(nil), requiredSourceText...),
+		project:            *projectSpec || strings.TrimSpace(*specSelect) != "",
+		specSelect:         strings.TrimSpace(*specSelect),
+		subagent:           strings.TrimSpace(*subagent),
+		model:              strings.TrimSpace(*modelID),
+		toolTier:           strings.TrimSpace(*toolTier),
+		maxOutputTokens:    *maxOutputTokens,
+		maxToolCalls:       *maxToolCalls,
+		maxElapsedSeconds:  *maxElapsedSeconds,
+		taskIntent:         taskIntent,
+		taskIntentSet:      taskIntentSet,
+		dryRun:             *dryRun,
+		jsonOutput:         *jsonOutput,
 	}
 	if opts.jsonOutput && !opts.dryRun {
 		return agentRunOptions{}, fmt.Errorf("agent run --json requires --dry-run")
@@ -1560,6 +1574,9 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 	if snapshot.TaskIntent != "" {
 		fmt.Fprintf(&b, "Task intent: %s\n", snapshot.TaskIntent)
 	}
+	for _, text := range snapshot.RequiredSourceText {
+		fmt.Fprintf(&b, "Required source text (literal): %q\n", text)
+	}
 	if snapshot.Instructions {
 		b.WriteString("Instructions: yes\n")
 	}
@@ -1570,15 +1587,16 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.RuntimeProfile) agentRunPreviewSnapshot {
 	taskIntent := agentRunTaskIntent(opts, profile)
 	snapshot := agentRunPreviewSnapshot{
-		Subagent:        strings.TrimSpace(opts.subagent),
-		Project:         opts.project,
-		SpecSelector:    strings.TrimSpace(opts.specSelect),
-		AgentPath:       strings.TrimSpace(opts.agentPath),
-		Model:           previewAgentRunModel(opts, profile),
-		ToolTier:        previewAgentRunToolTier(profile),
-		MaxOutputTokens: opts.maxOutputTokens,
-		TaskIntent:      string(taskIntent),
-		Task:            strings.TrimSpace(opts.task),
+		RequiredSourceText: append([]string(nil), opts.requiredSourceText...),
+		Subagent:           strings.TrimSpace(opts.subagent),
+		Project:            opts.project,
+		SpecSelector:       strings.TrimSpace(opts.specSelect),
+		AgentPath:          strings.TrimSpace(opts.agentPath),
+		Model:              previewAgentRunModel(opts, profile),
+		ToolTier:           previewAgentRunToolTier(profile),
+		MaxOutputTokens:    opts.maxOutputTokens,
+		TaskIntent:         string(taskIntent),
+		Task:               strings.TrimSpace(opts.task),
 	}
 	if profile != nil {
 		snapshot.Source = strings.TrimSpace(profile.SourcePath)
