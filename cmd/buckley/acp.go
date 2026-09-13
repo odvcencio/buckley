@@ -1152,6 +1152,7 @@ func runACPLoop(
 
 type acpLoopLimits struct {
 	ValidateFinalResponse func(string) error
+	SubmittedResponse     func() (string, bool)
 	RequiredSourceText    []string
 	// executionRoute is supplied only by a one-shot output contract that
 	// negotiated from this exact route. ACP otherwise resolves its own route.
@@ -1658,12 +1659,12 @@ func newACPToolLoopGovernor(cfg *config.Config) *agentloop.Governor {
 
 func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 	depth := strings.ToLower(strings.TrimSpace(limits.VerificationDepth))
-	if depth == "legacy" && limits.ValidateFinalResponse == nil {
+	if depth == "legacy" && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
 		return nil
 	}
 	requireVerification := depth != "none" && depth != "off" && depth != "legacy"
 	requireChange := depth != "legacy" && limits.TaskIntent == agentloop.MutationIntent
-	if !requireVerification && !requireChange && limits.ValidateFinalResponse == nil {
+	if !requireVerification && !requireChange && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
 		return nil
 	}
 	attempts := limits.MaxVerificationAttempts
@@ -1676,6 +1677,7 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 		MaxRepairAttempts:             attempts,
 		TaskIntent:                    limits.TaskIntent,
 		ValidateFinalResponse:         limits.ValidateFinalResponse,
+		SubmittedResponse:             limits.SubmittedResponse,
 	}
 	return contract
 }

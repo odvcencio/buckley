@@ -602,6 +602,17 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 			_, err := resolveOneShotArtifact(response, artifactContract, artifactSubmission)
 			return err
 		}
+		limits.SubmittedResponse = func() (string, bool) {
+			if artifactSubmission == nil {
+				return "", false
+			}
+			artifact, ok := artifactSubmission.Artifact()
+			if !ok {
+				return "", false
+			}
+			raw, err := artifactv1.RenderJSON(artifact)
+			return string(raw), err == nil
+		}
 	}
 	if instruction := oneShotProtocolExecutionContract(adaptiveProtocol); instruction != "" {
 		systemPrompt += "\n\n" + instruction

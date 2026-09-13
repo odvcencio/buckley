@@ -217,6 +217,13 @@ type CompletionContract struct {
 	RepairInstruction             string
 	TaskIntent                    TaskIntent
 	ValidateFinalResponse         func(string) error
+
+	// SubmittedResponse optionally supplies a caller-owned result accepted by a
+	// tool. Returning ready=false retains normal model completion. Returning
+	// ready=true means the caller-owned result was accepted by a tool and is
+	// used as the final response, but it still requires the controller's
+	// progress and output gates.
+	SubmittedResponse func() (string, bool)
 }
 
 // Normalize returns the contract with safe execution defaults applied.

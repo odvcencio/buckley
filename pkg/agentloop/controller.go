@@ -939,7 +939,9 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 
 		msg.ToolCalls = BackfillToolCallIDs(msg.ToolCalls)
+		toolCallsClipped := false
 		if remaining := c.cfg.Governor.RemainingToolCalls(); len(msg.ToolCalls) > remaining {
+			toolCallsClipped = true
 			// Preserve a protocol-valid transcript by advertising only calls that
 			// can actually run. The complete provider response remains in durable
 			// evidence, while omitted calls never reach the dispatcher.
@@ -975,6 +977,47 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 		if dispatchErr != nil || observeErr != nil {
 			return result, c.markToolRoundInterrupted(result, errors.Join(dispatchErr, observeErr))
+		}
+		if contractEnabled && contract.SubmittedResponse != nil && !toolCallsClipped {
+			successfulRound := true
+			for _, outcome := range toolRound.outcomes {
+				if !outcome.Success {
+					successfulRound = false
+					break
+				}
+			}
+			if successfulRound && contract.evaluate(result.Progress) == nil {
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+				text, ready := contract.SubmittedResponse()
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+				if ready && strings.TrimSpace(text) != "" && contract.evaluateFinalResponse(result.Progress, text) == nil {
+					if err := ctx.Err(); err != nil {
+						return result, err
+					}
+					if stop := c.consultProgress(ctx, result, resp.Usage, contextWindow, started); stop {
+						result.Termination = Termination{Kind: result.GuardDecision.Kind, Reason: result.GuardDecision.Reason}
+						return c.finalizeStoppedTurn(ctx, result, result.Rounds)
+					}
+					if err := ctx.Err(); err != nil {
+						return result, err
+					}
+					result.Message = model.Message{Role: "assistant", Content: text}
+					result.Content = text
+					result.CompletionStatus = CompletionConclusive
+					if c.cfg.History != nil {
+						c.cfg.History.Append(result.Message)
+					}
+					c.recordDecision(ctx, "submitted_response_completed", "accepted tool result passed the completion contract")
+					return result, nil
+				}
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+			}
 		}
 		if stopDecision.Stop {
 			result.FinishReason = FinishReasonLoopGuard
