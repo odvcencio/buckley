@@ -3,7 +3,9 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
@@ -135,6 +137,20 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 	}
 	artifact, err := artifactv1.DecodeSubmitArtifact(raw)
 	if err != nil {
+		var validation *artifactv1.ValidationError
+		if errors.As(err, &validation) && len(validation.Diagnostics) > 0 {
+			diagnostics := validation.Diagnostics
+			limit := min(len(diagnostics), 8)
+			parts := make([]string, 0, limit)
+			for _, d := range diagnostics[:limit] {
+				parts = append(parts, d.Code+": "+d.Message)
+			}
+			message := "invalid buckley.artifact/v1 submission; correct these fields: " + strings.Join(parts, "; ")
+			if omitted := len(diagnostics) - limit; omitted > 0 {
+				message += fmt.Sprintf(" (+%d more omitted)", omitted)
+			}
+			return &Result{Success: false, Error: message}, nil
+		}
 		return &Result{Success: false, Error: fmt.Sprintf("invalid buckley.artifact/v1 submission: %v", err)}, nil
 	}
 	var refs []string
