@@ -220,6 +220,8 @@ func TestSessionExecEffectAdversarial_ReleaseAndCompleteRejectActiveAndAmbiguous
 func TestSessionExecEffectAdversarial_ResolveRequiresQuiescedExpiredBlockedOrCancelledAndAudits(t *testing.T) {
 	t.Run("headless rejects", func(t *testing.T) {
 		store, _ := openAdversarialEffectStore(t, "effect-resolve-headless")
+		now := time.Now().UnixMilli()
+		store.sessionExecClock = func() int64 { return now }
 		command := claimAdversarialEffectCommand(t, store, "effect-resolve-headless", "effect-resolve-command", "resolve-owner", 50*time.Millisecond)
 		permit := beginAdversarialEffect(t, store, command, "effect-resolve-step")
 		_, err := store.ResolveAmbiguousEffect(context.Background(), sessionexec.EffectResolutionRequest{
