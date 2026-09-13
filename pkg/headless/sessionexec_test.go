@@ -33,15 +33,39 @@ type failOnceCompletionJournal struct {
 
 type staleHeartbeatJournal struct {
 	sessionexec.Journal
-	called chan<- struct{}
+	called    chan<- struct{}
+	ready     <-chan struct{}
+	completed *atomic.Int32
+	released  *atomic.Int32
 }
 
-func (j staleHeartbeatJournal) Heartbeat(_ context.Context, lease sessionexec.LeaseRef, _ time.Duration) (sessionexec.LeaseRef, error) {
+func (j staleHeartbeatJournal) Heartbeat(ctx context.Context, lease sessionexec.LeaseRef, _ time.Duration) (sessionexec.LeaseRef, error) {
+	if j.ready != nil {
+		select {
+		case <-j.ready:
+		case <-ctx.Done():
+			return lease, ctx.Err()
+		}
+	}
 	select {
 	case j.called <- struct{}{}:
 	default:
 	}
 	return lease, sessionexec.ErrLeaseStale
+}
+
+func (j staleHeartbeatJournal) Complete(ctx context.Context, lease sessionexec.LeaseRef, completion sessionexec.Completion, entries []sessionexec.TranscriptEntry) (sessionexec.Receipt, error) {
+	if j.completed != nil {
+		j.completed.Add(1)
+	}
+	return j.Journal.Complete(ctx, lease, completion, entries)
+}
+
+func (j staleHeartbeatJournal) Release(ctx context.Context, lease sessionexec.LeaseRef) (sessionexec.Receipt, error) {
+	if j.released != nil {
+		j.released.Add(1)
+	}
+	return j.Journal.Release(ctx, lease)
 }
 
 type recoveryRequiredStepJournal struct {
@@ -69,6 +93,7 @@ type countingEchoTool struct {
 
 type blockingContextTool struct {
 	entered chan<- struct{}
+	release <-chan struct{}
 }
 
 func (blockingContextTool) Name() string { return "blocking_tool" }
@@ -89,6 +114,9 @@ func (t blockingContextTool) ExecuteWithContext(ctx context.Context, _ map[strin
 	default:
 	}
 	<-ctx.Done()
+	if t.release != nil {
+		<-t.release
+	}
 	return nil, ctx.Err()
 }
 
@@ -635,107 +663,191 @@ func TestDurableRunner_StopReleasesActiveLeaseWithoutTerminalEvent(t *testing.T)
 	}
 }
 
-func TestDurableRunner_StaleHeartbeatDiscardsOutputWithoutTerminalEvent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
+func TestDurableRunner_StaleHeartbeatDiscardsOutputAcrossEffectExpiry(t *testing.T) {
+	cases := []struct {
+		name        string
+		lease       time.Duration
+		wantState   sessionexec.State
+		wantErrCode string
+	}{
+		{name: "live", lease: time.Minute, wantState: sessionexec.StateRunning},
+		{name: "expired", lease: 3 * time.Second, wantState: sessionexec.StateBlocked, wantErrCode: "ambiguous_effect"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{
 			"id":"chatcmpl-stale","model":"gpt-4o",
 			"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_stale_block","type":"function","function":{"name":"blocking_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]
 		}`)
-	}))
-	t.Cleanup(server.Close)
-	store := newTestStore(t)
-	sessionID := "durable-stale-heartbeat"
-	now := time.Now().UTC()
-	sess := &storage.Session{
-		ID: sessionID, Principal: "alice", Model: "gpt-4o",
-		Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
-	}
-	if err := store.CreateSession(sess); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	evidenceStore, ledger := newRegistryDurableStores(t, store)
-	if _, err := ensureForegroundRun(context.Background(), ledger, sessionID, sess.Model); err != nil {
-		t.Fatalf("ensureForegroundRun: %v", err)
-	}
-	cfg := config.DefaultConfig()
-	cfg.Providers.OpenAI.Enabled = true
-	cfg.Providers.OpenAI.APIKey = "test-key"
-	cfg.Providers.OpenAI.BaseURL = server.URL
-	cfg.Models.DefaultProvider = "openai"
-	cfg.Models.Execution = "gpt-4o"
-	mgr, err := model.NewManager(cfg)
-	if err != nil {
-		t.Fatalf("model.NewManager: %v", err)
-	}
-	toolEntered := make(chan struct{}, 1)
-	tools := tool.NewEmptyRegistry()
-	tools.Register(blockingContextTool{entered: toolEntered})
-	heartbeat := make(chan struct{}, 1)
-	journal := staleHeartbeatJournal{Journal: store, called: heartbeat}
-	capture := &runnerLifecycleCapture{}
-	runner, err := NewRunner(RunnerConfig{
-		Session: sess, ModelManager: mgr, Tools: tools, Store: store, Config: cfg, Emitter: capture,
-		CommandJournal: journal, RunLedger: ledger, EvidenceStore: evidenceStore,
-		StepJournal: ledger.(agentloop.DurableStepJournal), LeaseOwner: "durable-stale-owner",
-		DurableTiming: &DurableTiming{
-			LeaseDuration: 3 * time.Second, HeartbeatInterval: 500 * time.Millisecond,
-			ScanInterval: 20 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
-			OperationTimeout: time.Second,
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-	defer runner.Stop()
-	commandID := "durable-stale-command"
-	if _, err := runner.AcceptCommand(context.Background(), command.SessionCommand{
-		SessionID: sessionID, ID: commandID, Type: "input", Content: "lose lease", AcceptedBy: "alice",
-	}); err != nil {
-		t.Fatalf("AcceptCommand: %v", err)
-	}
-	select {
-	case <-toolEntered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocking tool did not start")
-	}
-	select {
-	case <-heartbeat:
-	case <-time.After(5 * time.Second):
-		t.Fatal("heartbeat did not run")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		runner.mu.RLock()
-		active := runner.activeCommandID
-		runner.mu.RUnlock()
-		if active == "" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	receipt, err := store.Get(context.Background(), sessionID, commandID)
-	if err != nil {
-		t.Fatalf("Get stale command: %v", err)
-	}
-	if receipt.State != sessionexec.StateRunning {
-		t.Fatalf("stale command state = %s, want running for expiry takeover", receipt.State)
-	}
-	capture.mu.Lock()
-	events := append([]RunnerEvent(nil), capture.runnerEvents...)
-	capture.mu.Unlock()
-	for _, event := range events {
-		switch event.Type {
-		case EventCommandCompleted, EventCommandFailed, EventCommandInterrupted, EventCommandBlocked:
-			t.Fatalf("stale owner emitted terminal event: %+v", event)
-		}
-	}
-	reloaded := conversation.New(sessionID)
-	if err := reloaded.LoadFromStorage(store); err != nil {
-		t.Fatalf("LoadFromStorage: %v", err)
-	}
-	if len(reloaded.Messages) != 1 || reloaded.Messages[0].Role != "user" {
-		t.Fatalf("stale transcript = %+v, want claimed prefix only", reloaded.Messages)
+			}))
+			t.Cleanup(server.Close)
+			store := newTestStore(t)
+			sessionID := "durable-stale-heartbeat"
+			now := time.Now().UTC()
+			sess := &storage.Session{
+				ID: sessionID, Principal: "alice", Model: "gpt-4o",
+				Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+			}
+			if err := store.CreateSession(sess); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			evidenceStore, ledger := newRegistryDurableStores(t, store)
+			if _, err := ensureForegroundRun(context.Background(), ledger, sessionID, sess.Model); err != nil {
+				t.Fatalf("ensureForegroundRun: %v", err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.Providers.OpenAI.Enabled = true
+			cfg.Providers.OpenAI.APIKey = "test-key"
+			cfg.Providers.OpenAI.BaseURL = server.URL
+			cfg.Models.DefaultProvider = "openai"
+			cfg.Models.Execution = "gpt-4o"
+			mgr, err := model.NewManager(cfg)
+			if err != nil {
+				t.Fatalf("model.NewManager: %v", err)
+			}
+			toolEntered := make(chan struct{}, 1)
+			ready := make(chan struct{})
+			release := make(chan struct{})
+			var readyClosed, releaseClosed bool
+			completed, released := &atomic.Int32{}, &atomic.Int32{}
+			tools := tool.NewEmptyRegistry()
+			tools.Register(blockingContextTool{entered: toolEntered, release: release})
+			heartbeat := make(chan struct{}, 1)
+			journal := staleHeartbeatJournal{Journal: store, called: heartbeat, ready: ready, completed: completed, released: released}
+			capture := &runnerLifecycleCapture{}
+			runner, err := NewRunner(RunnerConfig{
+				Session: sess, ModelManager: mgr, Tools: tools, Store: store, Config: cfg, Emitter: capture,
+				CommandJournal: journal, RunLedger: ledger, EvidenceStore: evidenceStore,
+				StepJournal: ledger.(agentloop.DurableStepJournal), LeaseOwner: "durable-stale-owner",
+				DurableTiming: &DurableTiming{
+					LeaseDuration: tc.lease, HeartbeatInterval: 100 * time.Millisecond,
+					ScanInterval: 20 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
+					OperationTimeout: 5 * time.Second,
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+			defer func() {
+				if !readyClosed {
+					readyClosed = true
+					close(ready)
+				}
+				if !releaseClosed {
+					releaseClosed = true
+					close(release)
+				}
+				runner.Stop()
+			}()
+			commandID := "durable-stale-command"
+			if _, err := runner.AcceptCommand(context.Background(), command.SessionCommand{
+				SessionID: sessionID, ID: commandID, Type: "input", Content: "lose lease", AcceptedBy: "alice",
+			}); err != nil {
+				t.Fatalf("AcceptCommand: %v", err)
+			}
+			select {
+			case <-toolEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("blocking tool did not start")
+			}
+			if !readyClosed {
+				readyClosed = true
+				close(ready)
+			}
+			select {
+			case <-heartbeat:
+			case <-time.After(5 * time.Second):
+				t.Fatal("heartbeat did not run")
+			}
+			if tc.wantErrCode != "" {
+				staleReceipt, err := store.Get(context.Background(), sessionID, commandID)
+				if err != nil {
+					t.Fatalf("Get stale command before expiry: %v", err)
+				}
+				if staleReceipt.StartedAt == nil {
+					t.Fatalf("stale command StartedAt is nil: %+v", staleReceipt)
+				}
+				expiry := time.NewTimer(time.Until(staleReceipt.StartedAt.Add(tc.lease)))
+				select {
+				case <-expiry.C:
+				case <-time.After(5 * time.Second):
+					expiry.Stop()
+					t.Fatal("lease did not reach expiry")
+				}
+				expiry.Stop()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, claimErr := store.ClaimNext(ctx, sessionexec.ClaimRequest{
+					SessionID: sessionID, Lane: sessionexec.LaneWork, Owner: "expiry-observer", LeaseDuration: time.Minute,
+				})
+				cancel()
+				if !errors.Is(claimErr, sessionexec.ErrEffectAmbiguous) && !errors.Is(claimErr, sessionexec.ErrNotFound) {
+					t.Fatalf("ClaimNext after lease expiry = %v, want no reclaim", claimErr)
+				}
+				expiredReceipt, err := store.Get(context.Background(), sessionID, commandID)
+				if err != nil {
+					t.Fatalf("Get expired command: %v", err)
+				}
+				if expiredReceipt.State != sessionexec.StateBlocked || expiredReceipt.ErrorCode != "ambiguous_effect" {
+					t.Fatalf("expired command = %+v, want blocked/ambiguous_effect", expiredReceipt)
+				}
+			}
+			if !releaseClosed {
+				releaseClosed = true
+				close(release)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			quiesced := false
+			for time.Now().Before(deadline) {
+				runner.mu.RLock()
+				active := runner.activeCommandID
+				runner.mu.RUnlock()
+				if active == "" {
+					quiesced = true
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !quiesced {
+				t.Fatal("stale worker did not finish cleanup")
+			}
+			if completed.Load() != 0 || released.Load() != 0 {
+				t.Fatalf("stale worker attempted completion/release: %d/%d", completed.Load(), released.Load())
+			}
+			receipt, err := store.Get(context.Background(), sessionID, commandID)
+			if err != nil {
+				t.Fatalf("Get stale command: %v", err)
+			}
+			if receipt.State != tc.wantState {
+				t.Fatalf("stale command state = %s, want %s", receipt.State, tc.wantState)
+			}
+			if receipt.ErrorCode != tc.wantErrCode {
+				t.Fatalf("stale command error code = %q, want %q", receipt.ErrorCode, tc.wantErrCode)
+			}
+			capture.mu.Lock()
+			events := append([]RunnerEvent(nil), capture.runnerEvents...)
+			capture.mu.Unlock()
+			for _, event := range events {
+				switch event.Type {
+				case EventCommandCompleted, EventCommandFailed, EventCommandInterrupted, EventCommandBlocked:
+					if tc.wantErrCode != "" && event.Type == EventCommandBlocked {
+						if event.SessionID != sessionID || event.Data["commandId"] != commandID || event.Data["error"] != sessionexec.ErrEffectAmbiguous.Error() || receipt.State != sessionexec.StateBlocked || receipt.ErrorCode != "ambiguous_effect" {
+							t.Fatalf("blocked event does not match canonical expiry: %+v", event)
+						}
+						continue
+					}
+					t.Fatalf("stale owner emitted terminal event: %+v", event)
+				}
+			}
+			reloaded := conversation.New(sessionID)
+			if err := reloaded.LoadFromStorage(store); err != nil {
+				t.Fatalf("LoadFromStorage: %v", err)
+			}
+			if len(reloaded.Messages) != 1 || reloaded.Messages[0].Role != "user" {
+				t.Fatalf("stale transcript = %+v, want claimed prefix only", reloaded.Messages)
+			}
+		})
 	}
 }
 
