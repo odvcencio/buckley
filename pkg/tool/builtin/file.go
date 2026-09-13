@@ -90,11 +90,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	contentStr := string(content)
 	lines := fileLines(contentStr)
 	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {
-		if _, ok := params["start_line"]; ok {
-			return &Result{Success: false, Error: "anchor is mutually exclusive with start_line"}, nil
-		}
-		if _, ok := params["end_line"]; ok {
-			return &Result{Success: false, Error: "anchor is mutually exclusive with end_line"}, nil
+		_, hasStart := params["start_line"]
+		_, hasEnd := params["end_line"]
+		if hasStart || hasEnd {
+			return &Result{Success: false, Error: "anchor is mutually exclusive with start_line/end_line; omit anchor for an explicit start_line/end_line range, or omit both line selectors for an anchor read"}, nil
 		}
 		anchor, ok := anchorValue.(string)
 		if !ok {
@@ -126,7 +125,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 			params = maps.Clone(params)
 			params["start_line"] = matches[0]
 		default:
-			return &Result{Success: false, Error: fmt.Sprintf("anchor %q matched %d lines (%v); provide explicit start_line/end_line", anchor, total, matches)}, nil
+			return &Result{Success: false, Error: fmt.Sprintf("anchor %q matched %d lines (%v); omit anchor for start_line/end_line, or use a unique anchor", anchor, total, matches)}, nil
 		}
 	}
 	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))

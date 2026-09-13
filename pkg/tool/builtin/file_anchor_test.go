@@ -167,6 +167,100 @@ func TestReadFileAnchorRejectsInvalidAndAmbiguousSelectors(t *testing.T) {
 	}
 }
 
+func TestReadFileAnchorRecoversAfterSelectorHints(t *testing.T) {
+	content := "first\nneedle\nneedle\nlast\n"
+	for _, tc := range []struct {
+		name   string
+		params map[string]any
+	}{
+		{"bad start", map[string]any{"anchor": "needle", "start_line": 2}},
+		{"bad end", map[string]any{"anchor": "needle", "end_line": 3}},
+		{"both selectors", map[string]any{"anchor": "needle", "start_line": 1, "end_line": 2}},
+		{"null start", map[string]any{"anchor": "needle", "start_line": nil}},
+		{"null end", map[string]any{"anchor": "needle", "end_line": nil}},
+		{"ambiguous anchor", map[string]any{"anchor": "needle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.txt")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			tc.params["path"] = path
+			before, _ := json.Marshal(tc.params)
+			result, err := (&ReadFileTool{}).Execute(tc.params)
+			if err != nil || result.Success {
+				t.Fatalf("expected failure: %+v err=%v", result, err)
+			}
+			hints := []string{"omit anchor", "start_line/end_line"}
+			if tc.name == "ambiguous anchor" {
+				hints = append(hints, "matched 2 lines ([2 3])", "use a unique anchor")
+			} else {
+				hints = append(hints, "omit both line selectors")
+			}
+			for _, hint := range hints {
+				if !strings.Contains(result.Error, hint) {
+					t.Fatalf("hint %q missing: %q", hint, result.Error)
+				}
+			}
+			if len(result.Data) != 0 || len(result.DisplayData) != 0 {
+				t.Fatal("failed selector returned source as successful evidence")
+			}
+			after, _ := json.Marshal(tc.params)
+			if string(before) != string(after) {
+				t.Fatal("failed read mutated params")
+			}
+			if _, err := (&ArtifactSubmission{}).CaptureReadSource(result); err == nil {
+				t.Fatal("failed selector became capture")
+			}
+			if unchanged, err := os.ReadFile(path); err != nil || string(unchanged) != content {
+				t.Fatal("failed read changed source")
+			}
+			for _, retry := range []struct {
+				name       string
+				params     map[string]any
+				start, end int
+				visible    string
+			}{
+				{"explicit range", map[string]any{"path": path, "start_line": 2, "end_line": 3}, 2, 3, "needle\nneedle"},
+				{"unique anchor", map[string]any{"path": path, "anchor": "last"}, 4, 4, "last"},
+			} {
+				t.Run(retry.name, func(t *testing.T) {
+					before, _ := json.Marshal(retry.params)
+					next, err := (&ReadFileTool{}).Execute(retry.params)
+					if err != nil || !next.Success || next.Data["content"] != content {
+						t.Fatalf("recovery failed or raw bytes changed: %+v err=%v", next, err)
+					}
+					after, _ := json.Marshal(retry.params)
+					if string(before) != string(after) {
+						t.Fatal("recovered read mutated caller parameters")
+					}
+					page := next.Data["page"].(map[string]any)
+					if page["start_line"] != retry.start || page["end_line"] != retry.end || page["total_lines"] != 4 || next.DisplayData["content"] != retry.visible {
+						t.Fatalf("bad recovered page: %+v", next.DisplayData)
+					}
+					sink := &ArtifactSubmission{}
+					ref, err := sink.CaptureReadSource(next)
+					if err != nil || !strings.HasPrefix(ref, "src_") || len(ref) != 68 {
+						t.Fatalf("recovered capture: %q %v", ref, err)
+					}
+					a := artifactv1.New(artifactv1.KindSubagentResult, artifactv1.StatusCompleted, "Recovered read", "The requested page was observed.")
+					if err := sink.SubmitWithSources(a, []string{ref}); err != nil {
+						t.Fatal(err)
+					}
+					captured, _ := sink.Artifact()
+					want := []string{ref, path, fmt.Sprint(retry.start), fmt.Sprint(retry.end), retry.visible + "\n"}
+					if !reflect.DeepEqual(captured.Blocks[0].Table.Rows, [][]string{want}) || len(captured.EvidenceRefs) != 1 || captured.EvidenceRefs[0].ID != ref {
+						t.Fatalf("recovered capture bytes/identity differ: %+v", captured)
+					}
+					if unchanged, err := os.ReadFile(path); err != nil || string(unchanged) != content {
+						t.Fatal("recovered read changed source")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestReadFileAnchorDoesNotChangeUnanchoredReads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "source.txt")
 	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0600); err != nil {
