@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/agentspec"
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
@@ -1171,6 +1172,7 @@ func acpLoopLimitsFromChildContract(contract subagent.ChildContract) (acpLoopLim
 		TaskID:            strings.TrimSpace(contract.TaskID),
 		ParentSessionID:   strings.TrimSpace(contract.ParentSessionID),
 		ChildContract:     true,
+		SourceScope:       agentcoord.CloneSourceScope(contract.SourceScope),
 	}, nil
 }
 

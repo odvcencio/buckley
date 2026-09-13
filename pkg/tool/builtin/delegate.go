@@ -3,6 +3,7 @@ package builtin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -545,6 +546,22 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 				Description: "Optional explicit child tool allowlist; an empty array disables tools.",
 				Items:       &PropertySchema{Type: "string"},
 			},
+			"source_scope": {
+				Type:                 "object",
+				Description:          "Optional source-only child contract: literal workspace-relative files, optionally bounded by both start_line and end_line. Empty files denies all source reads. Discovery and execution are unavailable when supplied.",
+				AdditionalProperties: false,
+				Properties: map[string]PropertySchema{
+					"files": {Type: "array", Items: &PropertySchema{
+						Type: "object", AdditionalProperties: false, Required: []string{"path"},
+						Properties: map[string]PropertySchema{
+							"path":       {Type: "string"},
+							"start_line": {Type: "integer"},
+							"end_line":   {Type: "integer"},
+						},
+					}},
+				},
+				Required: []string{"files"},
+			},
 			"step_cap": {
 				Type:        "integer",
 				Description: "Optional maximum model/tool iterations for the child; omitted or zero is unbounded.",
@@ -879,6 +896,20 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 	if err != nil {
 		return &Result{Success: false, Error: "max_cost_usd " + err.Error()}, nil
 	}
+	var sourceScope *agentcoord.SourceScope
+	if value, present := params["source_scope"]; present {
+		if value == nil {
+			return &Result{Success: false, Error: "source_scope must be an object, not null"}, nil
+		}
+		data, err := json.Marshal(value)
+		if err == nil {
+			sourceScope = &agentcoord.SourceScope{}
+			err = json.Unmarshal(data, sourceScope)
+		}
+		if err != nil {
+			return &Result{Success: false, Error: "source_scope: " + err.Error()}, nil
+		}
+	}
 	if err := delegationCheckWithOptions("spawn_subagent", DelegationCheckOptions{
 		SkipSameToolCooldown: userInitiated,
 	}); err != nil {
@@ -901,6 +932,7 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 		Model:           delegateStringParam(params, "model"),
 		Effort:          delegateStringParam(params, "effort"),
 		AllowedTools:    delegateStringSliceParam(params, "allowed_tools"),
+		SourceScope:     sourceScope,
 		StepCap:         parseInt(params["step_cap"], 0),
 		TimeoutSeconds:  timeout,
 		Budget: agentcoord.Budget{

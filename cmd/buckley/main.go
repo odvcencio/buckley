@@ -444,6 +444,12 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	outputSchema = strings.TrimSpace(outputSchema)
+	var scopeErr error
+	limits, scopeErr = prepareOneShotSourceScope(limits, codeMode)
+	if scopeErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", scopeErr)
+		return 1
+	}
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -498,6 +504,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if err := bindOneShotSourceScope(registry, limits.SourceScope); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
 	if candidate, ok := registry.Get("spawn_subagent"); ok {
 		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
 			if limits.ChildContract {
@@ -540,7 +550,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 			registry.SetArtifactSourceCapture(artifactSubmission)
 		}
 	}
-	autoCodeMode := protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
+	autoCodeMode := limits.SourceScope == nil && protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
 	enableCodeMode := codeMode || autoCodeMode
 	var codeRuntime *codeModeRuntime
 	var codeModeFailure error
@@ -587,11 +597,22 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
 	}
-	if toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil); toolFilter != nil {
+	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
+	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
+	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)
 	}
 
-	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), hyphaeProjectKnowledgeContext(cfg, cwd))
+	knowledge := ""
+	if limits.SourceScope == nil {
+		knowledge = hyphaeProjectKnowledgeContext(cfg, cwd)
+	} else {
+		projectContext = nil
+	}
+	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), knowledge)
+	if limits.SourceScope != nil {
+		systemPrompt += "\n\n" + sourceScopeInstruction(limits.SourceScope)
+	}
 	if _, enabled := registry.Get("exec_program"); enabled {
 		systemPrompt += "\n\n" + prompts.CodeModeSystemPrompt
 	}

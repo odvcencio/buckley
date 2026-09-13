@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
@@ -1154,6 +1155,7 @@ type acpLoopLimits struct {
 	ValidateFinalResponse func(string) error
 	SubmittedResponse     func() (string, bool)
 	RequiredSourceText    []string
+	SourceScope           *agentcoord.SourceScope
 	// executionRoute is supplied only by a one-shot output contract that
 	// negotiated from this exact route. ACP otherwise resolves its own route.
 	executionRoute          model.ModelRoute

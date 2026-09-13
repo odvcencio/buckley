@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/agentcoord"
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
+	"m31labs.dev/buckley/pkg/subagent"
 )
 
 type agentSourceLiveSetup struct {
@@ -84,7 +86,19 @@ func prepareAgentSourceLive(t *testing.T, prefix string) agentSourceLiveSetup {
 // questions, not arbitrary prose fidelity. It uses the same explicit routing
 // inputs as TestAgentLive and never chooses credentials or a fallback model.
 func TestAgentSourceSummaryLive(t *testing.T) {
-	setup := prepareAgentSourceLive(t, "source-summary-")
+	testAgentSourceSummaryLive(t, false)
+}
+
+func TestAgentSourceScopeSummaryLive(t *testing.T) {
+	testAgentSourceSummaryLive(t, true)
+}
+
+func testAgentSourceSummaryLive(t *testing.T, scoped bool) {
+	prefix := "source-summary-"
+	if scoped {
+		prefix = "source-scope-summary-"
+	}
+	setup := prepareAgentSourceLive(t, prefix)
 	inputs, recordRoot, template, referencePath := setup.inputs, setup.recordRoot, setup.template, setup.referencePath
 	write := writeAgentSourceLiveRecord
 	reference, err := os.ReadFile(referencePath)
@@ -138,6 +152,9 @@ func TestAgentSourceSummaryLive(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, inputs["BIN"], "--config", inputs["CONFIG"], "agent", "run", "--subagent", "extract", "--model", inputs["MODEL"], "--task-intent", "read_only", "--max-tool-calls", "4", "--max-output-tokens", "1800", "--max-elapsed-seconds", "60", template, prompt)
 			cmd.Dir = dir
+			if scoped {
+				setAgentSourceLiveScope(t, cmd, record, inputs["MODEL"], &agentcoord.SourceScope{Files: []agentcoord.SourceFile{{Path: "source.txt", StartLine: 1, EndLine: tc.end}}})
+			}
 			cmd.WaitDelay = 2 * time.Second
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -175,7 +192,19 @@ func TestAgentSourceSummaryLive(t *testing.T) {
 }
 
 func TestAgentSourceContextLive(t *testing.T) {
-	setup := prepareAgentSourceLive(t, "source-context-")
+	testAgentSourceContextLive(t, false)
+}
+
+func TestAgentSourceScopeContextLive(t *testing.T) {
+	testAgentSourceContextLive(t, true)
+}
+
+func testAgentSourceContextLive(t *testing.T, scoped bool) {
+	prefix := "source-context-"
+	if scoped {
+		prefix = "source-scope-context-"
+	}
+	setup := prepareAgentSourceLive(t, prefix)
 	inputs, recordRoot, template, referencePath := setup.inputs, setup.recordRoot, setup.template, setup.referencePath
 	write := writeAgentSourceLiveRecord
 	reference, err := os.ReadFile(referencePath)
@@ -195,6 +224,9 @@ func TestAgentSourceContextLive(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, inputs["BIN"], "--config", inputs["CONFIG"], "agent", "run", "--subagent", "extract", "--model", inputs["MODEL"], "--task-intent", "read_only", "--max-tool-calls", "8", "--max-output-tokens", "2400", "--max-elapsed-seconds", "90", template, prompt)
 	cmd.Dir = dir
+	if scoped {
+		setAgentSourceLiveScope(t, cmd, recordRoot, inputs["MODEL"], &agentcoord.SourceScope{Files: []agentcoord.SourceFile{{Path: "source.txt"}}})
+	}
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -293,4 +325,19 @@ func TestSourceSummaryReferenceAnswers(t *testing.T) {
 	if result.Status != artifactv1.StatusIncomplete {
 		t.Fatalf("status=%s, want incomplete", result.Status)
 	}
+}
+
+func setAgentSourceLiveScope(t *testing.T, cmd *exec.Cmd, record, modelID string, scope *agentcoord.SourceScope) {
+	t.Helper()
+	contract := subagent.ChildContractFromRequest(subagent.Request{Model: modelID, SourceScope: scope})
+	encoded, err := subagent.EncodeChildContract(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), subagent.ChildContractEnv+"="+encoded)
+	data, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAgentSourceLiveRecord(t, filepath.Join(record, "child-contract.json"), data)
 }

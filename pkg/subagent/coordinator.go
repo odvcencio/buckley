@@ -529,7 +529,9 @@ func (c *Coordinator) applyAdmission(ctx context.Context, spec *agentcoord.Agent
 	if nilPort(policy) {
 		return fmt.Errorf("evaluate subagent admission: policy is unavailable")
 	}
-	decision, err := policy.Admit(ctx, *spec)
+	input := *spec
+	input.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
+	decision, err := policy.Admit(ctx, input)
 	if err != nil {
 		return fmt.Errorf("evaluate subagent admission: %w", err)
 	}
@@ -577,6 +579,7 @@ func (c *Coordinator) registerRun(spec agentcoord.AgentTaskSpec) error {
 		}
 		return nil
 	}
+	spec.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
 	c.runs[spec.RunID] = spec
 	return nil
 }
@@ -602,6 +605,7 @@ func (c *Coordinator) setTaskSpec(spec agentcoord.AgentTaskSpec) {
 		return
 	}
 	c.mu.Lock()
+	spec.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
 	c.runs[spec.RunID] = spec
 	c.mu.Unlock()
 }
@@ -626,6 +630,7 @@ func spawnOptionsFromTask(spec agentcoord.AgentTaskSpec) SpawnOptions {
 		Tier:            persona.Tier(spec.Tier),
 		SystemPrompt:    spec.SystemPrompt,
 		AllowedTools:    copyStrings(spec.AllowedTools),
+		SourceScope:     agentcoord.CloneSourceScope(spec.SourceScope),
 		StepCap:         spec.StepCap,
 		Effort:          spec.Effort,
 		WorkspaceClaims: copyStrings(spec.WorkspaceClaims),
@@ -696,6 +701,10 @@ func normalizeTaskSpec(spec agentcoord.AgentTaskSpec) (agentcoord.AgentTaskSpec,
 		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent limits cannot be negative")
 	}
 	spec.Dependencies = uniqueStrings(spec.Dependencies)
+	if err := agentcoord.ValidateSourceScope(spec.SourceScope); err != nil {
+		return agentcoord.AgentTaskSpec{}, fmt.Errorf("subagent source scope: %w", err)
+	}
+	spec.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
 	spec.AllowedTools = copyStrings(spec.AllowedTools)
 	claims, err := normalizeWorkspaceClaims(spec.WorkspaceClaims)
 	if err != nil {
@@ -2069,6 +2078,7 @@ func (c *Coordinator) taskSpec(runID string) (agentcoord.AgentTaskSpec, bool) {
 	}
 	c.mu.RLock()
 	spec, ok := c.runs[strings.TrimSpace(runID)]
+	spec.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
 	c.mu.RUnlock()
 	return spec, ok
 }
@@ -2245,6 +2255,7 @@ func taskSpecFromSnapshot(snapshot Snapshot) agentcoord.AgentTaskSpec {
 		Tier:            string(snapshot.Tier),
 		Effort:          snapshot.Effort,
 		AllowedTools:    copyStrings(snapshot.AllowedTools),
+		SourceScope:     agentcoord.CloneSourceScope(snapshot.SourceScope),
 		StepCap:         snapshot.StepCap,
 		TimeoutSeconds:  snapshot.TimeoutSeconds,
 		Budget:          snapshot.Budget,

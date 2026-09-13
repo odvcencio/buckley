@@ -11,10 +11,84 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/agentcoord"
 )
 
 // ReadFileTool reads a file from disk
-type ReadFileTool struct{ workDirAware }
+type ReadFileTool struct {
+	workDirAware
+	sourceScope *agentcoord.SourceScope
+}
+
+// SetSourceScope validates and installs a deep copy of the scope. A nil scope
+// restores unconstrained behavior.
+func (t *ReadFileTool) SetSourceScope(scope *agentcoord.SourceScope) error {
+	if err := agentcoord.ValidateSourceScope(scope); err != nil {
+		return err
+	}
+	t.sourceScope = agentcoord.CloneSourceScope(scope)
+	return nil
+}
+
+// sourceFileForPath resolves a raw request path against the tool's source
+// scope. A nil scope returns nil (unconstrained); undeclared paths fail.
+func (t *ReadFileTool) sourceFileForPath(raw string) (*agentcoord.SourceFile, error) {
+	if t.sourceScope == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(t.workDir) == "" {
+		return nil, fmt.Errorf("source scope requires a working directory")
+	}
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return nil, fmt.Errorf("source path must be nonempty without leading or trailing whitespace")
+	}
+	base, err := filepath.Abs(t.workDir)
+	if err != nil {
+		return nil, err
+	}
+	candidate := filepath.Clean(raw)
+	if !filepath.IsAbs(raw) {
+		candidate = filepath.Join(base, raw)
+	}
+	for _, f := range t.sourceScope.Files {
+		if candidate == filepath.Join(base, f.Path) {
+			if _, err := resolvePath(t.workDir, raw); err != nil {
+				return nil, err
+			}
+			declared := f
+			return &declared, nil
+		}
+	}
+	return nil, fmt.Errorf("file %q is not declared in the source scope", raw)
+}
+
+// sourceScopePageParams rejects reads outside the declared range and supplies
+// bounded defaults without mutating the caller's parameters.
+func sourceScopePageParams(params map[string]any, selected *agentcoord.SourceFile) (map[string]any, error) {
+	if selected == nil || (selected.StartLine == 0 && selected.EndLine == 0) {
+		return params, nil
+	}
+	out := maps.Clone(params)
+	for _, selector := range []struct {
+		name     string
+		fallback int
+	}{{"start_line", selected.StartLine}, {"end_line", selected.EndLine}} {
+		line := selector.fallback
+		if value, present := params[selector.name]; present {
+			parsed, err := readFileLineNumber(selector.name, value)
+			if err != nil {
+				return nil, err
+			}
+			line = parsed
+		}
+		if line < selected.StartLine || line > selected.EndLine {
+			return nil, fmt.Errorf("%s %d is outside the declared range [%d, %d] for %q", selector.name, line, selected.StartLine, selected.EndLine, selected.Path)
+		}
+		out[selector.name] = line
+	}
+	return out, nil
+}
 
 func (t *ReadFileTool) Name() string {
 	return "read_file"
@@ -62,6 +136,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	selected, err := t.sourceFileForPath(path)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
 	absPath, err := resolvePath(t.workDir, path)
 	if err != nil {
 		return &Result{
@@ -111,6 +189,9 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		var matches []int
 		total := 0
 		for i, line := range lines {
+			if selected != nil && selected.StartLine > 0 && (i+1 < selected.StartLine || i+1 > selected.EndLine) {
+				continue
+			}
 			if strings.Contains(line, anchor) {
 				total++
 				if len(matches) < 8 {
@@ -127,6 +208,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		default:
 			return &Result{Success: false, Error: fmt.Sprintf("anchor %q matched %d lines (%v); omit anchor for start_line/end_line, or use a unique anchor", anchor, total, matches)}, nil
 		}
+	}
+	params, err = sourceScopePageParams(params, selected)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
 	}
 	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))
 	if err != nil {
@@ -155,6 +240,9 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		pageContent = sb.String()
 	}
 	hasMore := endLine < len(lines)
+	if selected != nil && selected.EndLine > 0 {
+		hasMore = hasMore && endLine < selected.EndLine
+	}
 	page := map[string]any{
 		"start_line":  startLine,
 		"end_line":    endLine,
@@ -164,7 +252,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	if hasMore {
 		page["next_start_line"] = endLine + 1
 	}
-	shouldAbridge := explicitPage || hasMore || numbered
+	shouldAbridge := selected != nil || explicitPage || hasMore || numbered
 
 	result := &Result{
 		Success: true,

@@ -70,6 +70,7 @@ type TaskSpec struct {
 	Effort          string            `json:"effort,omitempty"`
 	SystemPrompt    string            `json:"system_prompt,omitempty"`
 	AllowedTools    []string          `json:"allowed_tools,omitempty"`
+	SourceScope     *SourceScope      `json:"source_scope,omitempty"`
 	StepCap         int               `json:"step_cap,omitempty"`
 	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
 	Budget          Budget            `json:"budget,omitempty"`
