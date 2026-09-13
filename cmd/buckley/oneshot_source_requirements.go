@@ -68,7 +68,8 @@ type capturedPage struct {
 // requirements it returns the artifact unchanged. Otherwise it removes any
 // model-authored required_source_text table, checks every required literal
 // against host-captured source pages only, appends one final coverage table,
-// and downgrades non-terminal statuses when evidence is missing.
+// and preserves failed, blocked, or incomplete statuses; other statuses
+// become incomplete when required evidence is missing.
 func applySourceTextRequirements(a artifactv1.Artifact, required []string) (artifactv1.Artifact, error) {
 	if err := validateSourceTextRequirements(required); err != nil {
 		return artifactv1.Artifact{}, err
@@ -124,7 +125,7 @@ func applySourceTextRequirements(a artifactv1.Artifact, required []string) (arti
 	if missing > 0 {
 		switch out.Status {
 		case artifactv1.StatusFailed, artifactv1.StatusBlocked, artifactv1.StatusIncomplete:
-			// Never upgrade an already-terminal or incomplete result.
+			// Preserve failed, blocked, and incomplete results.
 		default:
 			out.Status = artifactv1.StatusIncomplete
 		}
