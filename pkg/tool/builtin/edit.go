@@ -125,7 +125,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		replaceAll, _ := edit["replace_all"].(bool)
 		count := strings.Count(newContent, oldString)
 		if count == 0 {
-			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string not found in file. Make sure the text matches exactly including whitespace.", i+1)}, nil
+			if i == 0 {
+				return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string not found in file. Reread the relevant range using read_file with line_numbers:false and copy its decoded content exactly, including whitespace; do not guess indentation or copy line-number prefixes.", i+1)}, nil
+			}
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string not found in the staged text after preceding batch edits. The file remains unchanged; reread the original text using read_file with line_numbers:false and account for preceding replacements before retrying.", i+1)}, nil
 		}
 		if !replaceAll && count > 1 {
 			locHint := ""

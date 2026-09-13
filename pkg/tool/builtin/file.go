@@ -46,7 +46,7 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			},
 			"line_numbers": {
 				Type:        "boolean",
-				Description: "Prefix each DisplayData content line with its absolute line number (default: false)",
+				Description: "Display-only line-number prefixes (default false). Model content remains raw; page.start_line/end_line provide the absolute range.",
 			},
 		},
 		Required: []string{"path"},
@@ -189,6 +189,9 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 			"size":    len(content),
 			"page":    page,
 			"preview": preview,
+		}
+		if numbered {
+			result.DisplayData["line_numbers"] = true
 		}
 	}
 
