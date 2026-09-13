@@ -381,6 +381,11 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			requestMessages = finalSynthesisMessages(messages)
 			synthesizing = true
 		}
+		if len(req.Tools) > 0 && a.maxToolCalls > 0 {
+			requestMessages = append([]model.Message(nil), requestMessages...)
+			reminder := fmt.Sprintf("Tool-call slots remaining: %d of %d. Failed attempts consume slots. Reserve calls for required verification and submit_artifact when available. Hand off observed useful results with honest incomplete status if calls cannot finish the task.", a.maxToolCalls-len(result.ToolCalls), a.maxToolCalls)
+			requestMessages[0].Content = fmt.Sprintf("%s\n\n%s", requestMessages[0].Content, reminder)
+		}
 		applyExecutionPolicy(&req, a.readOnly, a.reviewSnapshot)
 		req.Reasoning = subAgentReasoningConfig(providerID, a.reasoning, a.reasoningMaxTokens)
 		req.Messages = conversation.CompactModelMessagesForRequest(requestMessages, req, contextWindow)
@@ -930,13 +935,15 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			toolResults = append(toolResults, SubAgentToolCall{
+			toolCall := SubAgentToolCall{
 				ID:        call.ID,
 				Name:      name,
 				Arguments: call.Function.Arguments,
 				Result:    fmt.Sprintf("invalid arguments: %v", err),
 				Success:   false,
-			})
+			}
+			toolResults = append(toolResults, toolCall)
+			result.ToolCalls = append(result.ToolCalls, toolCall)
 			continue
 		}
 
