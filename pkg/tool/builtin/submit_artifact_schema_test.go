@@ -9,7 +9,7 @@ import (
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
 
-func TestSubmitArtifactSchemaAdvertisesCanonicalContract(t *testing.T) {
+func TestSubmitArtifactSchemaAdvertisesSubmissionContract(t *testing.T) {
 	raw, err := json.Marshal((&SubmitArtifactTool{}).Parameters())
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestSubmitArtifactSchemaAdvertisesCanonicalContract(t *testing.T) {
 			t.Errorf("model schema omits accepted artifact field %q", name)
 		}
 	}
-	wantRaw, err := artifactv1.JSONSchemaBytes()
+	wantRaw, err := json.Marshal(artifactv1.SubmissionJSONSchema())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestSubmitArtifactSchemaAdvertisesCanonicalContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(artifact, want) {
-		t.Error("submit_artifact must advertise the canonical schema, including nested blocks, references, required fields, and constraints")
+		t.Error("submit_artifact must advertise the submission schema, including nested blocks, references, required semantic fields, and constraints")
 	}
 }
 
@@ -67,6 +67,9 @@ func TestSubmitArtifactSchemaResolvesAndValidatesStructuredHandoff(t *testing.T)
 		valid bool
 	}{
 		{name: "incomplete evidence table", valid: true},
+		{name: "host protocol defaults", valid: true, edit: func(a map[string]any) { delete(a, "schema_version"); delete(a, "artifact_id") }},
+		{name: "wrong explicit version", edit: func(a map[string]any) { a["schema_version"] = "buckley.artifact/v999" }},
+		{name: "null explicit id", edit: func(a map[string]any) { a["artifact_id"] = nil }},
 		{name: "unknown artifact field", edit: func(a map[string]any) { a["not_a_field"] = true }},
 		{name: "unknown status", edit: func(a map[string]any) { a["status"] = "looks_good" }},
 		{name: "missing title", edit: func(a map[string]any) { delete(a, "title") }},

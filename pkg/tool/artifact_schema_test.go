@@ -32,7 +32,7 @@ func TestArtifactSchemaSurvivesProviderToolSerialization(t *testing.T) {
 	if err := json.Unmarshal(wire.Function.Parameters.Properties["artifact"], &got); err != nil {
 		t.Fatal(err)
 	}
-	wantRaw, err := artifactv1.JSONSchemaBytes()
+	wantRaw, err := json.Marshal(artifactv1.SubmissionJSONSchema())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +41,6 @@ func TestArtifactSchemaSurvivesProviderToolSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatal("provider request lost canonical artifact schema")
+		t.Fatal("provider request lost submission artifact schema")
 	}
 }

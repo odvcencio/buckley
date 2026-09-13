@@ -99,9 +99,9 @@ func (t *SubmitArtifactTool) Parameters() ParameterSchema {
 				Items: &PropertySchema{Type: "string", Description: "all (alone) or a source_ref from a successful read"},
 			},
 			"artifact": {
-				RawSchema:   artifactv1.JSONSchema(),
+				RawSchema:   artifactv1.SubmissionJSONSchema(),
 				Type:        "object",
-				Description: "A complete buckley.artifact/v1 object",
+				Description: "A complete buckley.artifact/v1 object; schema_version and artifact_id may be omitted because Buckley supplies them, kind, status, title, and summary are required",
 			},
 		},
 		Required:             []string{"artifact"},
