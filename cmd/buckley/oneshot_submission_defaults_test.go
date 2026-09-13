@@ -24,7 +24,12 @@ func TestOneShotSubmissionProtocolDefaultsPreserveEvidenceAndStatus(t *testing.T
 			{name: "missing summary", status: "completed", invalid: true, edit: func(a map[string]any) { delete(a, "summary") }},
 			{name: "explicit wrong version", status: "completed", invalid: true, edit: func(a map[string]any) { a["schema_version"] = "buckley.artifact/v999" }},
 			{name: "explicit empty id", status: "completed", invalid: true, edit: func(a map[string]any) { a["artifact_id"] = "" }},
-			{name: "misplaced sources", status: "completed", invalid: true, edit: func(a map[string]any) { a["source_refs"] = []string{"all"} }},
+			{name: "matching sources completed", status: "completed", edit: func(a map[string]any) { a["source_refs"] = []string{"all"} }},
+			{name: "matching sources incomplete", status: "incomplete", edit: func(a map[string]any) { a["source_refs"] = []string{"all"} }},
+			{name: "matching sources failed", status: "failed", edit: func(a map[string]any) { a["source_refs"] = []string{"all"} }},
+			{name: "matching sources blocked", status: "blocked", edit: func(a map[string]any) { a["source_refs"] = []string{"all"} }},
+			{name: "conflicting sources", status: "completed", invalid: true, edit: func(a map[string]any) { a["source_refs"] = []string{} }},
+			{name: "malformed nested sources", status: "completed", invalid: true, edit: func(a map[string]any) { a["source_refs"] = nil }},
 			{name: "forged evidence", status: "completed", invalid: true, edit: func(a map[string]any) {
 				a["evidence_refs"] = []any{map[string]any{"id": "forged", "kind": "captured_source", "uri": "file:///fake"}}
 			}},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -102,7 +103,7 @@ func (t *SubmitArtifactTool) Parameters() ParameterSchema {
 		Type: "object",
 		Properties: map[string]PropertySchema{
 			"source_refs": {
-				Type: "array", Description: "Use [\"all\"] to include every page already captured in this run without copying IDs, or list source_ref IDs from read_file for a subset. No files are read. Leave artifact blocks and evidence_refs empty. Output limits still apply; summary accuracy and coverage are not verified.",
+				Type: "array", Description: "source_refs belongs beside artifact, not inside it. Use [\"all\"] to include every page already captured in this run without copying IDs, or list source_ref IDs from read_file for a subset; [] means no captures. No files are read. Leave artifact blocks and evidence_refs empty. Output limits still apply; summary accuracy and coverage are not verified.",
 				Items: &PropertySchema{Type: "string", Description: "all (alone) or a source_ref from a successful read"},
 			},
 			"artifact": {
@@ -132,7 +133,11 @@ func (t *SubmitArtifactTool) ExecuteWithContext(_ context.Context, params map[st
 	if artifactMap, ok := artifactParam.(map[string]any); ok {
 		if nested, nestedPresent := artifactMap["source_refs"]; nestedPresent {
 			if refsPresent {
-				return &Result{Success: false, Error: "source_refs supplied in two locations: provide it either beside artifact or inside artifact, not both"}, nil
+				nestedRefs, nestedErr := parseSourceRefs(nested)
+				outerRefs, outerErr := parseSourceRefs(rawRefs)
+				if nestedErr != nil || outerErr != nil || !slices.Equal(nestedRefs, outerRefs) {
+					return &Result{Success: false, Error: "invalid or conflicting source_refs in two locations; keep one valid source_refs beside artifact and remove artifact.source_refs"}, nil
+				}
 			}
 			clone := maps.Clone(artifactMap)
 			delete(clone, "source_refs")

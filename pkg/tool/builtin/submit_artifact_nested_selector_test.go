@@ -12,7 +12,7 @@ import (
 
 func TestSubmitArtifactNestedSourceRefs(t *testing.T) {
 	for _, status := range []artifactv1.ArtifactStatus{artifactv1.StatusCompleted, artifactv1.StatusIncomplete, artifactv1.StatusFailed, artifactv1.StatusBlocked} {
-		for _, selection := range []string{"all", "explicit", "empty"} {
+		for _, selection := range []string{"all", "explicit", "empty", "both-all", "both-explicit", "both-empty"} {
 			t.Run(fmt.Sprintf("%s/%s", status, selection), func(t *testing.T) {
 				sink := &ArtifactSubmission{}
 				ref, err := sink.CaptureReadSource(sourceReadResult("/snapshot.go", "\tvalue\r\n", 1, 1))
@@ -20,10 +20,10 @@ func TestSubmitArtifactNestedSourceRefs(t *testing.T) {
 					t.Fatal(err)
 				}
 				refs := []string{"all"}
-				if selection == "explicit" {
+				switch strings.TrimPrefix(selection, "both-") {
+				case "explicit":
 					refs = []string{ref}
-				}
-				if selection == "empty" {
+				case "empty":
 					refs = []string{}
 				}
 				input := map[string]any{"kind": "analysis", "status": status, "title": "Context", "summary": "Observed context", "source_refs": refs}
@@ -31,6 +31,13 @@ func TestSubmitArtifactNestedSourceRefs(t *testing.T) {
 					input["incomplete_reasons"] = []string{"requested context missing"}
 				}
 				params := map[string]any{"artifact": input}
+				if strings.HasPrefix(selection, "both-") {
+					outer := make([]any, len(refs))
+					for i, r := range refs {
+						outer[i] = r
+					}
+					params["source_refs"] = outer
+				}
 				before, _ := json.Marshal(params)
 				result, err := (&SubmitArtifactTool{Submission: sink}).Execute(params)
 				if err != nil || !result.Success {
@@ -41,13 +48,13 @@ func TestSubmitArtifactNestedSourceRefs(t *testing.T) {
 					t.Fatal("submission mutated caller input")
 				}
 				got, ok := sink.Artifact()
-				if !ok || got.Status != status || got.Summary != "Observed context" {
+				if !ok || got.Kind != artifactv1.KindAnalysis || got.Status != status || got.Title != "Context" || got.Summary != "Observed context" {
 					t.Fatalf("semantic fields changed: %+v", got)
 				}
-				if status == artifactv1.StatusIncomplete && len(got.IncompleteReasons) != 1 {
+				if status == artifactv1.StatusIncomplete && (len(got.IncompleteReasons) != 1 || got.IncompleteReasons[0] != "requested context missing") {
 					t.Fatal("incomplete reason lost")
 				}
-				if selection == "empty" {
+				if selection == "empty" || selection == "both-empty" {
 					if len(got.Blocks) != 0 || len(got.EvidenceRefs) != 0 {
 						t.Fatal("empty selector implicitly retained captures")
 					}
@@ -71,7 +78,7 @@ func TestSubmitArtifactNestedSourceRefs(t *testing.T) {
 }
 
 func TestSubmitArtifactNestedSourceRefsFailClosed(t *testing.T) {
-	for _, name := range []string{"null", "string", "number", "non-string-item", "unknown", "duplicate", "all-combined", "both-equal", "both-empty", "outer-null", "unknown-field", "forged-evidence", "forged-block", "all-without-captures"} {
+	for _, name := range []string{"null", "string", "number", "non-string-item", "unknown", "duplicate", "all-combined", "both-conflicting", "both-empty", "both-null", "both-string", "both-non-string-item", "both-unknown", "both-duplicate", "both-too-many", "both-reordered", "outer-null", "unknown-field", "forged-evidence", "forged-block", "all-without-captures"} {
 		t.Run(name, func(t *testing.T) {
 			sink := &ArtifactSubmission{}
 			ref, err := sink.CaptureReadSource(sourceReadResult("/snapshot.go", "host bytes\n", 1, 1))
@@ -95,10 +102,40 @@ func TestSubmitArtifactNestedSourceRefsFailClosed(t *testing.T) {
 				input["source_refs"] = []string{ref, ref}
 			case "all-combined":
 				input["source_refs"] = []string{"all", ref}
-			case "both-equal":
-				params["source_refs"] = []string{"all"}
+			case "both-conflicting":
+				params["source_refs"] = []string{ref}
 			case "both-empty":
 				params["source_refs"] = []string{}
+			case "both-null":
+				input["source_refs"] = nil
+				params["source_refs"] = nil
+			case "both-string":
+				input["source_refs"] = "all"
+				params["source_refs"] = "all"
+			case "both-non-string-item":
+				input["source_refs"] = []any{1}
+				params["source_refs"] = []any{1}
+			case "both-unknown":
+				bad := "src_" + strings.Repeat("f", 64)
+				input["source_refs"] = []string{bad}
+				params["source_refs"] = []string{bad}
+			case "both-duplicate":
+				input["source_refs"] = []string{ref, ref}
+				params["source_refs"] = []string{ref, ref}
+			case "both-too-many":
+				many := make([]string, 33)
+				for i := range many {
+					many[i] = fmt.Sprintf("src_%064x", i)
+				}
+				input["source_refs"] = many
+				params["source_refs"] = many
+			case "both-reordered":
+				ref2, err := sink.CaptureReadSource(sourceReadResult("/other.go", "other bytes\n", 1, 1))
+				if err != nil {
+					t.Fatal(err)
+				}
+				input["source_refs"] = []string{ref, ref2}
+				params["source_refs"] = []string{ref2, ref}
 			case "outer-null":
 				params["source_refs"] = nil
 			case "unknown-field":
@@ -109,6 +146,9 @@ func TestSubmitArtifactNestedSourceRefsFailClosed(t *testing.T) {
 				input["blocks"] = []any{map[string]any{"kind": "prose", "text": "model-written excerpt"}}
 			case "all-without-captures":
 				sink = &ArtifactSubmission{}
+			}
+			if name == "forged-evidence" || name == "forged-block" {
+				params["source_refs"] = []string{"all"}
 			}
 			before, _ := json.Marshal(params)
 			tool := &SubmitArtifactTool{Submission: sink}
@@ -132,6 +172,10 @@ func TestSubmitArtifactNestedSourceRefsFailClosed(t *testing.T) {
 				corrected, err := tool.Execute(params)
 				if err != nil || !corrected.Success {
 					t.Fatalf("rejected submission lost usable capture: %+v %v", corrected, err)
+				}
+				got, ok := sink.Artifact()
+				if !ok || len(got.Blocks) != 1 || got.Blocks[0].Table == nil || got.Blocks[0].Table.Rows[0][4] != "host bytes\n" || len(got.EvidenceRefs) != 1 || got.EvidenceRefs[0].ID != ref {
+					t.Fatalf("correction lost captured bytes: %+v", got)
 				}
 			}
 		})
