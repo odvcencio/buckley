@@ -128,7 +128,35 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string not found in file. Make sure the text matches exactly including whitespace.", i+1)}, nil
 		}
 		if !replaceAll && count > 1 {
-			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string appears %d times in the file. Either provide a more specific string or use replace_all=true", i+1, count)}, nil
+			locHint := ""
+			if oldString != "" {
+				var locs []int
+				pos, line := 0, 1
+				for len(locs) < 8 {
+					idx := strings.Index(newContent[pos:], oldString)
+					if idx < 0 {
+						break
+					}
+					start := pos + idx
+					end := start + len(oldString)
+					line += strings.Count(newContent[pos:start], "\n")
+					locs = append(locs, line)
+					line += strings.Count(newContent[start:end], "\n")
+					pos = end
+				}
+				locHint = fmt.Sprintf(" (starting lines %v", locs)
+				if count > len(locs) {
+					locHint += fmt.Sprintf("; %d more omitted", count-len(locs))
+				}
+				locHint += ")"
+			}
+			where := "in the file"
+			unchanged := ""
+			if i > 0 {
+				where = "in the staged text after preceding batch edits"
+				unchanged = ". The file remains unchanged."
+			}
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string appears %d times %s%s. Either provide a more specific string or use replace_all=true%s", i+1, count, where, locHint, unchanged)}, nil
 		}
 		if replaceAll {
 			newContent = strings.ReplaceAll(newContent, oldString, newString)
