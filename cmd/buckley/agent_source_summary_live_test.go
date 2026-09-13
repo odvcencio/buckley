@@ -23,10 +23,20 @@ import (
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 )
 
-// This opt-in benchmark checks caller-directed answers to three known source
-// questions, not arbitrary prose fidelity. It uses the same explicit routing
-// inputs as TestAgentLive and never chooses credentials or a fallback model.
-func TestAgentSourceSummaryLive(t *testing.T) {
+type agentSourceLiveSetup struct {
+	inputs                              map[string]string
+	recordRoot, template, referencePath string
+}
+
+func writeAgentSourceLiveRecord(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func prepareAgentSourceLive(t *testing.T, prefix string) agentSourceLiveSetup {
+	t.Helper()
 	if os.Getenv("BUCKLEY_AGENT_LIVE") != "1" {
 		t.Skip("set BUCKLEY_AGENT_LIVE=1 and explicit live-agent inputs")
 	}
@@ -37,15 +47,9 @@ func TestAgentSourceSummaryLive(t *testing.T) {
 			t.Fatalf("missing or invalid BUCKLEY_AGENT_LIVE_%s", name)
 		}
 	}
-	recordRoot, err := os.MkdirTemp(inputs["OUTPUT_DIR"], "source-summary-")
+	recordRoot, err := os.MkdirTemp(inputs["OUTPUT_DIR"], prefix)
 	if err != nil {
 		t.Fatal(err)
-	}
-	write := func(t *testing.T, path string, data []byte) {
-		t.Helper()
-		if err := os.WriteFile(path, data, 0600); err != nil {
-			t.Fatal(err)
-		}
 	}
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
@@ -71,8 +75,18 @@ func TestAgentSourceSummaryLive(t *testing.T) {
 		manifest[name] = hex.EncodeToString(digest.Sum(nil))
 	}
 	rawManifest, _ := json.Marshal(manifest)
-	write(t, filepath.Join(recordRoot, "inputs.json"), rawManifest)
-	t.Logf("source-summary records: %s; requested model: %s", recordRoot, inputs["MODEL"])
+	writeAgentSourceLiveRecord(t, filepath.Join(recordRoot, "inputs.json"), rawManifest)
+	t.Logf("live records: %s; requested model: %s", recordRoot, inputs["MODEL"])
+	return agentSourceLiveSetup{inputs: inputs, recordRoot: recordRoot, template: template, referencePath: referencePath}
+}
+
+// This opt-in benchmark checks caller-directed answers to three known source
+// questions, not arbitrary prose fidelity. It uses the same explicit routing
+// inputs as TestAgentLive and never chooses credentials or a fallback model.
+func TestAgentSourceSummaryLive(t *testing.T) {
+	setup := prepareAgentSourceLive(t, "source-summary-")
+	inputs, recordRoot, template, referencePath := setup.inputs, setup.recordRoot, setup.template, setup.referencePath
+	write := writeAgentSourceLiveRecord
 	reference, err := os.ReadFile(referencePath)
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +172,106 @@ func TestAgentSourceSummaryLive(t *testing.T) {
 			t.Logf("answer=%s status=%s known_answer_verified=true captured_scope_verified=true", artifact.Summary, artifact.Status)
 		})
 	}
+}
+
+func TestAgentSourceContextLive(t *testing.T) {
+	setup := prepareAgentSourceLive(t, "source-context-")
+	inputs, recordRoot, template, referencePath := setup.inputs, setup.recordRoot, setup.template, setup.referencePath
+	write := writeAgentSourceLiveRecord
+	reference, err := os.ReadFile(referencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := string(reference)
+	fixtureEnd := len(strings.Split(strings.TrimSuffix(fixture, "\n"), "\n"))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "source.txt")
+	write(t, path, []byte(fixture))
+	write(t, filepath.Join(recordRoot, "source.txt"), []byte(fixture))
+	prompt := "Read source.txt to summarize the functions applySourceTextRequirements, collectCapturedSourcePages, and matchingLineRange for an orchestration caller. Observe the whole file before summarizing; do not search or read outside source.txt. Set artifact.summary to the three summaries. Use top-level source_refs:[\"all\"] to retain the observed pages. This read and summarize are the entire requested task."
+	caseInputs, _ := json.Marshal(map[string]any{"task": prompt, "start_line": 1, "end_line": fixtureEnd, "manual_review_required": true})
+	write(t, filepath.Join(recordRoot, "task.json"), caseInputs)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, inputs["BIN"], "--config", inputs["CONFIG"], "agent", "run", "--subagent", "extract", "--model", inputs["MODEL"], "--task-intent", "read_only", "--max-tool-calls", "8", "--max-output-tokens", "2400", "--max-elapsed-seconds", "90", template, prompt)
+	cmd.Dir = dir
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	started := time.Now()
+	runErr := cmd.Run()
+	write(t, filepath.Join(recordRoot, "artifact.json"), stdout.Bytes())
+	write(t, filepath.Join(recordRoot, "stderr.txt"), stderr.Bytes())
+	var artifact artifactv1.Artifact
+	if err := json.Unmarshal(stdout.Bytes(), &artifact); err != nil {
+		t.Fatalf("decode live artifact: %v (CLI error: %v)", err, runErr)
+	}
+	if err := artifact.ValidateStrict(); err != nil {
+		t.Fatalf("invalid live artifact: %v", err)
+	}
+	if artifact.Status != artifactv1.StatusCompleted || runErr != nil {
+		t.Fatalf("status=%s, want completed; CLI error=%v", artifact.Status, runErr)
+	}
+	backed := map[string]bool{}
+	for _, ref := range artifact.EvidenceRefs {
+		if ref.Kind != "captured_source" {
+			t.Fatalf("unexpected evidence kind %q", ref.Kind)
+		}
+		backed[ref.ID] = true
+	}
+	observed := map[int]bool{}
+	if len(artifact.Blocks) == 0 {
+		t.Fatal("no captured source retained")
+	}
+	for _, block := range artifact.Blocks {
+		if block.Kind != artifactv1.BlockTable || block.Table == nil || !reflect.DeepEqual(block.Table.Headers, []string{"source_ref", "path", "start_line", "end_line", "content"}) {
+			t.Fatal("unexpected non-capture block")
+		}
+		for _, row := range block.Table.Rows {
+			if len(row) != 5 {
+				t.Fatalf("unexpected capture row: %#v", row)
+			}
+			if !backed[row[0]] {
+				t.Fatalf("unbacked or repeated source ref %q", row[0])
+			}
+			delete(backed, row[0])
+			start, err := strconv.Atoi(row[2])
+			if err != nil {
+				t.Fatalf("bad start line %q", row[2])
+			}
+			end, err := strconv.Atoi(row[3])
+			if err != nil {
+				t.Fatalf("bad end line %q", row[3])
+			}
+			if row[1] != path || start < 1 || end > fixtureEnd || start > end {
+				t.Fatalf("out-of-range capture: %#v", row)
+			}
+			want := strings.Join(strings.SplitAfter(fixture, "\n")[start-1:end], "")
+			if row[4] != want {
+				t.Fatalf("captured bytes changed: %#v", row)
+			}
+			for line := start; line <= end; line++ {
+				if observed[line] {
+					t.Fatalf("duplicate observed line %d", line)
+				}
+				observed[line] = true
+			}
+		}
+	}
+	if len(backed) != 0 {
+		t.Fatal("source refs without capture rows")
+	}
+	if len(observed) != fixtureEnd {
+		t.Fatalf("observed %d of %d fixture lines", len(observed), fixtureEnd)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || string(current) != fixture {
+		t.Fatal("read-only source question modified its fixture")
+	}
+	outcome, _ := json.Marshal(map[string]any{"status": artifact.Status, "summary": artifact.Summary, "duration_ms": time.Since(started).Milliseconds(), "captured_scope_verified": true, "manual_review_required": true})
+	write(t, filepath.Join(recordRoot, "outcome.json"), outcome)
+	t.Logf("summary: %s", artifact.Summary)
+	t.Logf("manual_review_required=true: summary fidelity is not verified by protocol assertions")
 }
 
 func TestSourceSummaryReferenceAnswers(t *testing.T) {
