@@ -48,6 +48,7 @@ const (
 	CompletionFailedPostChangeVerification  CompletionContractReason = "failed_post_change_verification"
 	CompletionStateObservationFailed        CompletionContractReason = "state_observation_failed"
 	CompletionUnknownTaskIntent             CompletionContractReason = "unknown_task_intent"
+	CompletionInvalidFinalResponse          CompletionContractReason = "invalid_final_response"
 )
 
 const (
@@ -215,6 +216,7 @@ type CompletionContract struct {
 	MaxRepairAttempts             int
 	RepairInstruction             string
 	TaskIntent                    TaskIntent
+	ValidateFinalResponse         func(string) error
 }
 
 // Normalize returns the contract with safe execution defaults applied.
@@ -253,9 +255,27 @@ func (c CompletionContract) RepairInstructionFor(err error) string {
 			return defaultCompletionRepairInstruction
 		case CompletionStateObservationFailed:
 			return "Your previous answer was not yet usable because Buckley could not observe workspace state before and after a tool that may affect completion evidence. If the workspace is not a Git checkout or state cannot be observed, report that blocker without claiming the change was verified; otherwise run the cheapest scoped check that restores observable evidence, then answer."
+		case CompletionInvalidFinalResponse:
+			return "Your previous response failed its output contract: " + contractErr.Detail + ". Correct the output or gather missing evidence with offered tools within the remaining budget; do not invent results."
 		}
 	}
 	return defaultCompletionRepairInstruction
+}
+
+func (c CompletionContract) evaluateFinalResponse(snapshot ProgressSnapshot, text string) error {
+	if err := c.evaluate(snapshot); err != nil {
+		return err
+	}
+	if c.ValidateFinalResponse == nil {
+		return nil
+	}
+	if err := c.ValidateFinalResponse(text); err != nil {
+		return &CompletionContractError{
+			Reason: CompletionInvalidFinalResponse,
+			Detail: "required final response is invalid: " + err.Error(),
+		}
+	}
+	return nil
 }
 
 func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {

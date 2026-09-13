@@ -34,6 +34,23 @@ func coverageRows(t *testing.T, a artifactv1.Artifact) [][]string {
 	return table.Rows
 }
 
+func TestSourceTextRequirements_Instruction(t *testing.T) {
+	if got := sourceTextRequirementInstruction(nil); got != "" {
+		t.Fatalf("empty input: got %q", got)
+	}
+	literals := []string{" alpha ", "quote\"literal", "line\nbreak"}
+	got := sourceTextRequirementInstruction(literals)
+	if strings.Contains(got, "report each required literal verbatim") {
+		t.Fatalf("stale verbatim-report directive present: %q", got)
+	}
+	encoded, _ := json.Marshal(literals)
+	for _, want := range []string{string(encoded), `read_file`, `source_refs ["all"]`, "leave blocks and evidence_refs empty", "do not write a required_source_text table", "host-captured pages", "caller findings", "does not verify summary accuracy", "semantic properties"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("instruction missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestSourceTextRequirements_ReportedAgainstReturnedCaptures(t *testing.T) {
 	sink := &builtin.ArtifactSubmission{}
 	ref := coverageSource(t, sink, "/never-reread/a", "ignored\nalpha\nbeta\nend\n", 2, 3)

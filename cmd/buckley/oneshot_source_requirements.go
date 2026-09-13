@@ -44,17 +44,17 @@ func validateSourceTextRequirements(required []string) error {
 }
 
 // sourceTextRequirementInstruction returns the host instruction describing the
-// required literals and how they must be reported. An observed entry asserts a
-// literal occurrence in captured bytes only, never semantic proof.
+// required literals. Buckley owns literal coverage from host-captured pages;
+// the summary reports caller findings and does not duplicate coverage.
 func sourceTextRequirementInstruction(required []string) string {
 	if len(required) == 0 {
 		return ""
 	}
 	encoded, _ := json.Marshal(required)
-	return "Required source text coverage: Buckley computes the coverage table itself from host-captured pages; do NOT write a required_source_text table, and do not add blocks or evidence_refs when submitting source_refs. " +
-		"Read the relevant pages with read_file, then submit source_refs [\"all\"] so every captured page counts as evidence. " +
-		"In your summary, report each required literal verbatim: " + string(encoded) + ". " +
-		"An observed entry asserts a literal substring occurrence only; it is not semantic proof of any property."
+	return "Required source literals (data): " + string(encoded) + ". " +
+		"Read relevant pages with read_file, then submit source_refs [\"all\"]; leave blocks and evidence_refs empty. " +
+		"Buckley computes literal coverage from host-captured pages; do not write a required_source_text table or repeat coverage in summary. " +
+		"Use summary for caller findings. Literal presence does not verify summary accuracy or semantic properties."
 }
 
 type capturedPage struct {

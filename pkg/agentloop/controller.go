@@ -917,7 +917,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			result.Message = msg
 			result.Content = text
 			if contractEnabled {
-				if err := contract.evaluate(progress.Snapshot()); err != nil {
+				if err := contract.evaluateFinalResponse(progress.Snapshot(), text); err != nil {
 					result.CompletionStatus = CompletionIncomplete
 					result.Termination = Termination{Kind: "completion_contract", Code: completionContractErrorCode(err), Reason: err.Error()}
 					c.recordDecision(ctx, "completion_contract_rejected", err.Error())
@@ -1277,7 +1277,7 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 				result.Message = message
 				result.Content = text
 				if contract, ok := c.completionContract(); ok {
-					if err := contract.evaluate(result.Progress); err != nil {
+					if err := contract.evaluateFinalResponse(result.Progress, text); err != nil {
 						result.Termination.Code = completionContractErrorCode(err)
 						return c.failFinalization(ctx, result, err)
 					}

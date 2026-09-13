@@ -598,6 +598,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if outputSchema == artifactv1.SchemaVersion {
 		systemPrompt = artifactv1.ArtifactPrompt(systemPrompt, artifactContract)
 		limits.FinalizationInstruction = artifactv1.SubmissionFallbackPrompt
+		limits.ValidateFinalResponse = func(response string) error {
+			_, err := resolveOneShotArtifact(response, artifactContract, artifactSubmission)
+			return err
+		}
 	}
 	if instruction := oneShotProtocolExecutionContract(adaptiveProtocol); instruction != "" {
 		systemPrompt += "\n\n" + instruction
