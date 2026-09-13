@@ -366,20 +366,17 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	}
 
 	var stdout, stderr bytes.Buffer
-	if cmd != nil {
-		cmd.Dir = commandDir
-	}
-	if cmd != nil {
-		cmd.Env = mergeEnv(cmd.Env, t.env)
-		if framework == "pytest" {
-			cmd.Env = mergeEnv(cmd.Env, map[string]string{
-				"PYTHONDONTWRITEBYTECODE": "1",
-				"PYTHONPYCACHEPREFIX":     filepath.Join(filepath.Dir(reportPath), "pycache"),
-			})
-		}
+	cmd.Dir = commandDir
+	cmd.Env = mergeEnv(cmd.Env, t.env)
+	if framework == "pytest" {
+		cmd.Env = mergeEnv(cmd.Env, map[string]string{
+			"PYTHONDONTWRITEBYTECODE": "1",
+			"PYTHONPYCACHEPREFIX":     filepath.Join(filepath.Dir(reportPath), "pycache"),
+		})
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	configureCommandCancellation(cmd)
 
 	start := time.Now()
 	err := cmd.Run()
@@ -388,7 +385,10 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	exitCode := 0
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run exceeded timeout")
+			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run exceeded timeout: %w", context.DeadlineExceeded)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return stdout.String() + stderr.String(), 1, duration, nil, fmt.Errorf("test run canceled: %w", context.Canceled)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
