@@ -8,6 +8,8 @@ import (
 
 // SetArtifactSourceCapture enables run-local source references on final read
 // results, after all approval, middleware and post-hook processing.
+// Failed tool outcomes are retained separately for bounded recovery diagnostics;
+// they never become source references.
 func (r *Registry) SetArtifactSourceCapture(submission *builtin.ArtifactSubmission) {
 	if r == nil {
 		return

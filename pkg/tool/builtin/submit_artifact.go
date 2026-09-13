@@ -14,11 +14,13 @@ import (
 // object: evidence persistence remains the responsibility of the caller that
 // owns the run lifecycle.
 type ArtifactSubmission struct {
-	mu          sync.RWMutex
-	artifact    artifactv1.Artifact
-	submitted   bool
-	sources     map[string]capturedSource
-	sourceBytes int
+	mu                  sync.RWMutex
+	artifact            artifactv1.Artifact
+	submitted           bool
+	toolFailures        []artifactv1.Diagnostic
+	omittedToolFailures int
+	sources             map[string]capturedSource
+	sourceBytes         int
 }
 
 // Submit records a validated artifact. Repeated submissions fail closed so a
@@ -59,6 +61,8 @@ func (s *ArtifactSubmission) SubmitWithSources(artifact artifactv1.Artifact, ref
 	s.submitted = true
 	s.sources = nil
 	s.sourceBytes = 0
+	s.toolFailures = nil
+	s.omittedToolFailures = 0
 	return nil
 }
 

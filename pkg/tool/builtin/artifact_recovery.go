@@ -28,6 +28,14 @@ func (s *ArtifactSubmission) RecoveryArtifactWithReserve(reserve int) artifactv1
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if !s.submitted && len(s.toolFailures) > 0 {
+		base.Diagnostics = append([]artifactv1.Diagnostic(nil), s.toolFailures...)
+		if s.omittedToolFailures > 0 {
+			base.IncompleteReasons = append(base.IncompleteReasons,
+				fmt.Sprintf("%d earlier tool failure diagnostics omitted because only the most recent %d are retained.",
+					s.omittedToolFailures, maxRetainedToolFailures))
+		}
+	}
 	if s.submitted {
 		artifact := s.artifact.Normalized()
 		if artifact.Status != artifactv1.StatusFailed && artifact.Status != artifactv1.StatusBlocked {
