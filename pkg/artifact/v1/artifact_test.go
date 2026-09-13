@@ -105,6 +105,40 @@ func TestArtifactV1_NormalizedDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestArtifactV1_SubmissionExampleAppliesBeforeToolsDisabledFallback(t *testing.T) {
+	t.Parallel()
+	contract := NegotiatedOutput(ProviderCapabilities{ToolCalls: true})
+	for _, base := range []string{"", "Gather requested source only."} {
+		prompt := ArtifactPrompt(base, contract)
+		start := strings.Index(prompt, `{"artifact":`)
+		fallback := strings.Index(prompt, "If tools are disabled")
+		if start < 0 || fallback < 0 || start >= fallback {
+			t.Fatalf("minimal tool arguments must precede conditional JSON fallback: %s", prompt)
+		}
+		if strings.Count(prompt, `{"artifact":`) != 1 {
+			t.Fatalf("tool and JSON fallback must share one example: %s", prompt)
+		}
+		var envelope struct {
+			Artifact   json.RawMessage `json:"artifact"`
+			SourceRefs []string        `json:"source_refs"`
+		}
+		if err := json.NewDecoder(strings.NewReader(prompt[start:])).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if len(envelope.SourceRefs) != 1 || envelope.SourceRefs[0] != "all" {
+			t.Fatalf("example changed capture selector: %v", envelope.SourceRefs)
+		}
+		raw, err := json.Marshal(map[string]json.RawMessage{"artifact": envelope.Artifact})
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, err := DecodeSubmitArtifact(raw)
+		if err != nil || artifact.Status != StatusIncomplete || len(artifact.IncompleteReasons) == 0 {
+			t.Fatalf("shared example must validate without implying completion: %+v %v", artifact, err)
+		}
+	}
+}
+
 func TestArtifactV1_NegotiatesNativeSchemaThenToolFallback(t *testing.T) {
 	t.Parallel()
 	native := NegotiatedOutput(ProviderCapabilities{NativeJSONSchema: true, ToolCalls: true})
