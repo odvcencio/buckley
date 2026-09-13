@@ -42,7 +42,7 @@ func TestACPCompletionContract_SubmittedResponse(t *testing.T) {
 }
 
 func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
-	for _, name := range []string{"completed", "incomplete", "failed", "title-repair", "reference-repair", "request-cap"} {
+	for _, name := range []string{"completed", "incomplete", "failed", "title-repair", "reference-repair", "status-repair", "request-cap", "status-request-cap"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "key.go")
@@ -51,13 +51,13 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			var calls atomic.Int32
-			var sawCapture, sawRejection atomic.Bool
+			var sawCapture, sawRejection, sawStatusRejection atomic.Bool
 			// Preserve the existing last-request reservation for final synthesis.
 			wantCalls, maxRequests, maxTools := int32(2), 3, 2
-			if name == "title-repair" || name == "reference-repair" {
+			if name == "title-repair" || name == "reference-repair" || name == "status-repair" {
 				wantCalls, maxRequests, maxTools = 3, 4, 3
 			}
-			if name == "request-cap" {
+			if name == "request-cap" || name == "status-request-cap" {
 				wantCalls, maxTools = 3, 6
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +82,9 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 							if strings.Contains(text, "success: false") {
 								sawRejection.Store(true)
 							}
+							if strings.Contains(text, "incompatible with nonempty incomplete_reasons") {
+								sawStatusRejection.Store(true)
+							}
 						}
 					}
 				}
@@ -96,6 +99,9 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 					if name == "incomplete" || name == "failed" {
 						status = name
 					}
+					if name == "status-repair" && n > 2 {
+						status = "incomplete"
+					}
 					artifact := map[string]any{"kind": "subagent_result", "status": status, "title": "Key", "summary": "Model-written summary"}
 					if status == "incomplete" {
 						artifact["incomplete_reasons"] = []string{"additional context missing"}
@@ -106,6 +112,9 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 					}
 					if n == 2 && name == "reference-repair" {
 						refs = []string{"unobserved-source"}
+					}
+					if name == "status-repair" || name == "status-request-cap" {
+						artifact["incomplete_reasons"] = []string{"additional context missing"}
 					}
 					body, err := json.Marshal(map[string]any{"artifact": artifact, "source_refs": refs})
 					if err != nil {
@@ -171,7 +180,10 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 			if calls.Load() != wantCalls || !sawCapture.Load() {
 				t.Fatalf("calls=%d want=%d captured feedback=%v err=%v", calls.Load(), wantCalls, sawCapture.Load(), runErr)
 			}
-			if name == "request-cap" {
+			if (name == "status-repair" || name == "status-request-cap") && !sawStatusRejection.Load() {
+				t.Fatal("contradictory completion skipped normal rejection feedback")
+			}
+			if name == "request-cap" || name == "status-request-cap" {
 				if _, ok := sink.Artifact(); ok || runErr == nil || renders != 0 || len(sink.RecoveryArtifact().EvidenceRefs) != 1 {
 					t.Fatalf("invalid submission escaped request cap or lost evidence: renders=%d err=%v", renders, runErr)
 				}
@@ -188,13 +200,13 @@ func TestOneShotSubmittedResponse_CapturedNativeResult(t *testing.T) {
 				t.Fatalf("missing accepted capture: artifact=%+v err=%v", artifact, err)
 			}
 			status := artifactv1.StatusCompleted
-			if name == "incomplete" {
+			if name == "incomplete" || name == "status-repair" {
 				status = artifactv1.StatusIncomplete
 			}
 			if name == "failed" {
 				status = artifactv1.StatusFailed
 			}
-			if artifact.Status != status || (name == "incomplete" && len(artifact.IncompleteReasons) != 1) {
+			if artifact.Status != status || ((name == "incomplete" || name == "status-repair") && len(artifact.IncompleteReasons) != 1) {
 				t.Fatalf("changed declared result status: %+v", artifact)
 			}
 			row := artifact.Blocks[0].Table.Rows[0]

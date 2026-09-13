@@ -52,6 +52,9 @@ func (s *ArtifactSubmission) SubmitWithSources(artifact artifactv1.Artifact, ref
 	if err != nil {
 		return fmt.Errorf("validate submitted artifact: %w", err)
 	}
+	if artifact.Status == artifactv1.StatusCompleted && len(artifact.IncompleteReasons) > 0 {
+		return fmt.Errorf("artifact status completed is incompatible with nonempty incomplete_reasons; use status incomplete for unfinished work, or remove incomplete_reasons only when the requested work is actually complete")
+	}
 	if len(refs) > 0 {
 		encoded, err := json.Marshal(artifact)
 		if err != nil {
