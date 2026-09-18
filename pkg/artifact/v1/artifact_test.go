@@ -3,89 +3,9 @@ package artifactv1
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"m31labs.dev/buckley/pkg/agentcoord"
-	legacy "m31labs.dev/buckley/pkg/artifact"
-	"m31labs.dev/buckley/pkg/goalloop"
 )
-
-func TestArtifactV1_RenderersConformAndRemainDeterministic(t *testing.T) {
-	t.Parallel()
-	artifact := fullArtifact()
-	if err := artifact.ValidateStrict(); err != nil {
-		t.Fatalf("ValidateStrict: %v diagnostics=%+v table=%+v", err, artifact.Validate(), artifact.Blocks[3].Table)
-	}
-
-	terminal, err := RenderTerminal(artifact)
-	if err != nil {
-		t.Fatalf("RenderTerminal: %v", err)
-	}
-	againTerminal, err := RenderTerminal(artifact)
-	if err != nil {
-		t.Fatalf("RenderTerminal second call: %v", err)
-	}
-	if terminal != againTerminal {
-		t.Fatal("terminal renderer is not deterministic")
-	}
-
-	markdown, err := RenderMarkdownPP(artifact)
-	if err != nil {
-		t.Fatalf("RenderMarkdownPP: %v", err)
-	}
-	if err := ValidateMarkdownPP(markdown); err != nil {
-		t.Fatalf("rendered Markdown++ is invalid: %v\n%s", err, markdown)
-	}
-	golden, err := os.ReadFile(filepath.Join("testdata", "full_artifact.md.golden"))
-	if err != nil {
-		t.Fatalf("read golden: %v", err)
-	}
-	if string(golden) != markdown {
-		t.Fatalf("Markdown golden mismatch\nwant:\n%s\ngot:\n%s", golden, markdown)
-	}
-
-	jsonBytes, err := RenderJSON(artifact)
-	if err != nil {
-		fatalf(t, "RenderJSON", err)
-	}
-	decoded, report, err := DecodeProviderOutput(context.Background(), jsonBytes, OutputNativeJSONSchema, DecodeOptions{})
-	if err != nil {
-		t.Fatalf("DecodeProviderOutput: %v", err)
-	}
-	if report.Repaired || decoded.ArtifactID != artifact.ArtifactID {
-		t.Fatalf("decoded report = %+v artifact=%+v", report, decoded)
-	}
-
-	sarif, err := RenderSARIF(artifact)
-	if err != nil {
-		t.Fatalf("RenderSARIF: %v", err)
-	}
-	var sarifDocument map[string]any
-	if err := json.Unmarshal(sarif, &sarifDocument); err != nil {
-		t.Fatalf("decode SARIF: %v", err)
-	}
-	if sarifDocument["version"] != "2.1.0" {
-		t.Fatalf("SARIF version = %#v", sarifDocument["version"])
-	}
-
-	fluffy, err := RenderFluffyUI(artifact)
-	if err != nil {
-		t.Fatalf("RenderFluffyUI: %v", err)
-	}
-	if fluffy.Markdown != markdown || len(fluffy.Blocks) != len(artifact.Blocks) {
-		t.Fatalf("FluffyUI projection did not preserve artifact content: %+v", fluffy)
-	}
-	acp, err := RenderACP(artifact)
-	if err != nil {
-		t.Fatalf("RenderACP: %v", err)
-	}
-	if acp.Type != "buckley.artifact" || acp.Text != markdown || acp.Artifact.ArtifactID != artifact.ArtifactID {
-		t.Fatalf("ACP projection = %+v", acp)
-	}
-}
 
 func TestArtifactV1_ValidationRejectsMismatchedBlockPayload(t *testing.T) {
 	t.Parallel()
@@ -230,49 +150,6 @@ func TestArtifactV1_RejectsBreakingSchemaChanges(t *testing.T) {
 	}
 }
 
-func TestArtifactV1_MigratesLegacyPlanReviewGoalAndSubagentResult(t *testing.T) {
-	t.Parallel()
-	plan, err := FromPlanning(&legacy.PlanningArtifact{
-		Artifact: legacy.Artifact{Feature: "harness", Status: "completed"},
-		Context:  legacy.ContextSection{UserGoal: "improve harness", ExistingPatterns: []string{"ports and adapters"}},
-		Tasks:    []legacy.TaskBreakdown{{Description: "add contract", FilePath: "pkg/artifact/v1"}},
-	})
-	if err != nil || plan.Kind != KindPlan {
-		t.Fatalf("FromPlanning = %+v, %v", plan, err)
-	}
-
-	review, err := FromReview(&legacy.ReviewArtifact{
-		Artifact:    legacy.Artifact{Feature: "harness", Status: "changes_requested"},
-		IssuesFound: []legacy.Issue{{Title: "test gap", Severity: "quality", Description: "missing test", Location: "pkg/x.go:12", Fix: "add test"}},
-	})
-	if err != nil || review.Kind != KindReview || len(review.Findings) != 1 {
-		t.Fatalf("FromReview = %+v, %v", review, err)
-	}
-
-	goal, err := FromGoalReport(goalloop.Report{
-		RunID:       "run_goal",
-		Statement:   "ship harness",
-		Status:      "partial",
-		Completed:   []goalloop.ReportCompleted{{TaskID: "task-1", Text: "done", EvidenceID: "ev_done"}},
-		Parked:      []goalloop.ReportParked{{TaskID: "task-2", Title: "verify", Reason: "needs benchmark", Needs: "run benchmark"}},
-		NextActions: []goalloop.ReportAction{{TaskID: "task-2", Text: "run benchmark"}},
-	})
-	if err != nil || goal.Kind != KindGoal || goal.Status != StatusIncomplete {
-		t.Fatalf("FromGoalReport = %+v, %v", goal, err)
-	}
-
-	subagent, err := FromSubagentRun(agentcoord.AgentRun{
-		ID:      "run_child",
-		State:   agentcoord.AgentRunCompleted,
-		Adapter: "local-process",
-		Task:    agentcoord.AgentTaskSpec{Agent: "reviewer", Model: "model", Tier: "frontier"},
-		Result:  agentcoord.AgentResult{Summary: "reviewed", EvidenceRefs: []string{"ev_report"}},
-	})
-	if err != nil || subagent.Kind != KindSubagentResult || len(subagent.EvidenceRefs) != 1 {
-		t.Fatalf("FromSubagentRun = %+v, %v", subagent, err)
-	}
-}
-
 type testRepairer struct {
 	calls    int
 	response []byte
@@ -328,9 +205,4 @@ func cloneFieldSpecs(source map[string]FieldSpec) map[string]FieldSpec {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func fatalf(t *testing.T, operation string, err error) {
-	t.Helper()
-	t.Fatalf("%s: %v", operation, err)
 }

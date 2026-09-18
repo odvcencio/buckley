@@ -104,7 +104,11 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		header = action + "(" + scope + "): " + subject
 	}
 	if n := utf8.RuneCountInString(header); n > HeaderLimit {
-		return fmt.Errorf("header exceeds %d characters (%d): shorten the subject by at least %d characters", HeaderLimit, n, n-HeaderLimit)
+		over := n - HeaderLimit
+		if scope == "" {
+			return fmt.Errorf("header exceeds %d characters (%d): shorten the subject by at least %d characters", HeaderLimit, n, over)
+		}
+		return fmt.Errorf("header exceeds %d characters (%d): scope %q is %d characters and the subject is %d characters; use one short scope or none, and shorten the subject so the header drops by at least %d characters", HeaderLimit, n, scope, utf8.RuneCountInString(scope), utf8.RuneCountInString(subject), over)
 	}
 
 	nonEmptyBody := 0

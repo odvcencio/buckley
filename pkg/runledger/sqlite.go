@@ -53,11 +53,7 @@ var ErrRalphDualWriteFailed = errors.New("runledger: ralph dual-write failed")
 // same reasoning applies to agent_runs.session_id, which the spec ties to
 // pkg/storage's sessions table.
 type SQLiteStore struct {
-	db *sql.DB
-	// launchReservationNow is a package-private deterministic test seam. A nil
-	// value always samples SQLite time on the operation's pinned connection.
-	launchReservationNow func(context.Context, launchEnvelopeQueryer) (time.Time, error)
-
+	db         *sql.DB
 	appendGate chan struct{}
 	mu         sync.RWMutex
 	liveSink   LiveSink

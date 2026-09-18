@@ -128,9 +128,8 @@ type Adapter interface {
 
 // Manager manages notification adapters and event routing.
 type Manager struct {
-	adapters   []Adapter
-	publisher  Publisher
-	subscriber Subscriber
+	adapters  []Adapter
+	publisher Publisher
 }
 
 // NewManager creates a notification manager.
