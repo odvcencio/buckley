@@ -324,6 +324,17 @@ GO_TEST_TARGET=all ./scripts/test.sh
 GO_TEST_RACE=1 GO_TEST_TIMEOUT=30m ./scripts/test.sh
 ```
 
+### Unreachable Code Check
+
+CI fails when a function becomes unreachable from `./cmd/buckley` and is not
+listed in `scripts/deadcode-baseline.txt`. Run the check locally, and refresh
+the baseline after you remove dead code:
+
+```bash
+./scripts/check-deadcode.sh
+./scripts/check-deadcode.sh --update
+```
+
 ### Coverage Analysis
 
 ```bash
