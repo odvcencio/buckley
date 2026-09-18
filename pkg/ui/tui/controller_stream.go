@@ -2,15 +2,23 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"m31labs.dev/buckley/pkg/agentloop"
+	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // streamResponse handles the AI response streaming for a specific session.
 func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *SessionState) {
+	c.streamResponseWithIntent(ctx, prompt, sess, agentloop.UnknownIntent)
+}
+
+func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string, sess *SessionState, taskIntent agentloop.TaskIntent) {
 	defer c.finishStreamLifecycle(sess)
 
 	turnBoundary := c.beginTurnUndo(sess)
@@ -25,9 +33,23 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 		c.handleStreamError(ctx, err)
 		return
 	}
-	result, err := c.runToolLoop(ctx, sess, modelID)
+	result, err := c.runToolLoopWithIntent(ctx, sess, modelID, taskIntent)
 	c.app.RemoveThinkingIndicator()
 	c.finishTurnUndo(sess, turnBoundary)
+	var incomplete *agentloop.IncompleteTurnError
+	if errors.As(err, &incomplete) || retainedIncompleteStreamResult(result, err) {
+		c.renderIncompleteStreamResponse(sess, result, err)
+		c.updateStreamUsage(modelID, result.Text, result.Usage)
+		if ctx.Err() == context.Canceled {
+			c.app.SetStatus("Cancelled")
+		} else {
+			c.app.SetStatus("Error")
+		}
+		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
+			return
+		}
+		return
+	}
 	if c.handleStreamError(ctx, err) {
 		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
 			return
@@ -45,6 +67,13 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 	} else {
 		c.app.SetStatus(readyStatusForFinishReason(result.ProviderFinishReason))
 	}
+}
+
+func retainedIncompleteStreamResult(result toolLoopResult, err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.TrimSpace(result.Text) != "" || result.Usage != nil
 }
 
 func (c *Controller) finishStreamLifecycle(sess *SessionState) {
@@ -99,6 +128,48 @@ func (c *Controller) renderStreamResponse(result toolLoopResult) {
 	if notice := modelFinishReasonNotice(result.ProviderFinishReason); notice != "" {
 		c.app.AddMessage(notice, "system")
 	}
+}
+
+func (c *Controller) renderIncompleteStreamResponse(sess *SessionState, result toolLoopResult, err error) {
+	notice := agentloop.PresentIncompleteResult(err)
+	detail := notice.Message
+	text := strings.TrimSpace(result.Text)
+	c.persistAndRenderIncompleteNotice(sess, detail)
+	if text == "" {
+		return
+	}
+	c.persistAndRenderIncompleteDraft(sess, text)
+}
+
+func (c *Controller) persistAndRenderIncompleteNotice(sess *SessionState, content string) {
+	c.app.AddMessage(content, "system")
+	if sess == nil || sess.Conversation == nil {
+		return
+	}
+	sess.Conversation.AddSystemMessage(content)
+	c.saveLatestConversationMessage(sess)
+}
+
+func (c *Controller) persistAndRenderIncompleteDraft(sess *SessionState, draft string) {
+	draft = strings.TrimSpace(draft)
+	if draft == "" {
+		return
+	}
+	content := "Preserved draft (incomplete):\n" + draft
+	c.app.AddMessage(content, "assistant")
+	if sess == nil || sess.Conversation == nil {
+		return
+	}
+	msg := conversation.Message{
+		Role:        "assistant",
+		Content:     content,
+		Timestamp:   time.Now(),
+		Tokens:      conversation.CountTokens(content),
+		IsTruncated: true,
+	}
+	sess.Conversation.Messages = append(sess.Conversation.Messages, msg)
+	sess.Conversation.TokenCount += msg.Tokens
+	c.saveLatestConversationMessage(sess)
 }
 
 func harnessStopReasonNotice(reason string) string {

@@ -39,6 +39,7 @@ type EffectSummary struct {
 type CommandStatus struct {
 	Identity
 	Type             string         `json:"type"`
+	TaskIntent       string         `json:"taskIntent,omitempty"`
 	Lane             Lane           `json:"lane"`
 	State            State          `json:"state"`
 	Attempt          int            `json:"attempt"`

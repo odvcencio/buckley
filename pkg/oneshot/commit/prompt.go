@@ -3,6 +3,9 @@ package commit
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 // BuildPrompt constructs the prompt for commit generation.
@@ -107,10 +110,7 @@ func fileStatusDescription(status string) string {
 	}
 }
 
-// SystemPrompt returns the system prompt for commit generation.
-// Note: This is minimal because the tool schema provides structure.
-func SystemPrompt() string {
-	return `You are a git commit message generator. Analyze the staged changes and generate a clear, informative commit message.
+const commitSystemPrompt = `You are a git commit message generator. Analyze the staged changes and generate a clear, informative commit message.
 
 Use the generate_commit tool to produce your response. The tool expects:
 - action: The verb describing what this commit does (add, fix, update, refactor, etc.)
@@ -133,4 +133,9 @@ Guidelines:
 - Group related changes into single bullets
 - Use imperative mood ("Add feature" not "Added feature")
 - If breaking is true, include a useful breaking_reason instead of repeating the subject`
+
+// SystemPrompt returns the system prompt for commit generation.
+// Note: This is minimal because the tool schema provides structure.
+func SystemPrompt() string {
+	return prompts.CommitToolPrompt(commitSystemPrompt, time.Now())
 }

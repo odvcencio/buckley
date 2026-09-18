@@ -4,7 +4,56 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/prompts"
 )
+
+func isolateCommitPrompt(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
+}
+
+func TestCommitDefinitionSystemPrompt_DefaultPreservesToolContract(t *testing.T) {
+	isolateCommitPrompt(t)
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if got != commitSystemPrompt {
+		t.Fatalf("SystemPrompt() changed the default prompt:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("default prompt does not preserve the generate_commit contract:\n%s", got)
+	}
+}
+
+func TestCommitDefinitionSystemPrompt_AppliesEnvOverride(t *testing.T) {
+	isolateCommitPrompt(t)
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "{{DEFAULT_PROMPT}}\n\nPrefer one precise body bullet.")
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if !strings.Contains(got, "Prefer one precise body bullet.") {
+		t.Fatalf("SystemPrompt() did not apply the environment override:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("environment override lost the generate_commit contract:\n%s", got)
+	}
+}
+
+func TestCommitDefinitionSystemPrompt_AppliesSavedOverride(t *testing.T) {
+	isolateCommitPrompt(t)
+	if err := prompts.SaveOverride("commit", "{{DEFAULT_PROMPT}}\n\nPrefer durable, high-level wording."); err != nil {
+		t.Fatalf("SaveOverride(commit): %v", err)
+	}
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if !strings.Contains(got, "Prefer durable, high-level wording.") {
+		t.Fatalf("SystemPrompt() did not apply the saved override:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("saved override lost the generate_commit contract:\n%s", got)
+	}
+}
 
 func TestCommitDefinitionRejectsMalformedStructuredOutput(t *testing.T) {
 	tests := []struct {

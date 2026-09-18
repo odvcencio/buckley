@@ -1,6 +1,10 @@
 package rlm
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Weight identifies a subagent tier.
 type Weight string
@@ -13,14 +17,24 @@ const (
 	WeightReasoning Weight = "reasoning"
 )
 
+const (
+	scratchpadEvictionPolicyLRU  = "lru"
+	scratchpadEvictionPolicyFIFO = "fifo"
+)
+
 // CoordinatorConfig controls coordinator behavior.
 type CoordinatorConfig struct {
-	Model               string
-	MaxIterations       int
-	MaxTokensBudget     int
-	MaxWallTime         time.Duration
+	Model           string
+	MaxIterations   int
+	MaxTokensBudget int
+	MaxWallTime     time.Duration
+	// ConfidenceThreshold is prompt/context guidance only; it must not turn an
+	// explicit set_answer(ready=false) draft into a completed answer.
 	ConfidenceThreshold float64
-	StreamPartials      bool
+	// StreamPartials controls coordinator progress publication to iteration
+	// hooks and rlm iteration telemetry. It does not enable text-token
+	// streaming.
+	StreamPartials bool
 }
 
 // TierConfig controls model routing for subagents in a weight tier.
@@ -38,7 +52,10 @@ type TierConfig struct {
 type SubAgentRuntimeConfig struct {
 	Model         string
 	MaxConcurrent int
-	Timeout       time.Duration
+	// Timeout is the cooperative per-active-task execution deadline. The timer
+	// starts after concurrency/rate queueing, uses one budget across retries,
+	// defaults to 5m, and remains bounded by any parent context.
+	Timeout time.Duration
 }
 
 // ScratchpadConfig controls scratchpad retention and limits.
@@ -51,7 +68,7 @@ type ScratchpadConfig struct {
 	PersistDecisions  bool
 }
 
-// Config is the top-level configuration for RLM.
+// Config is the top-level configuration for experimental coordinated execution.
 type Config struct {
 	Coordinator CoordinatorConfig
 	SubAgent    SubAgentRuntimeConfig
@@ -59,7 +76,7 @@ type Config struct {
 	Scratchpad  ScratchpadConfig
 }
 
-// DefaultConfig returns a baseline RLM configuration.
+// DefaultConfig returns a baseline coordinator–worker runtime configuration.
 func DefaultConfig() Config {
 	return Config{
 		Coordinator: CoordinatorConfig{
@@ -78,7 +95,7 @@ func DefaultConfig() Config {
 		Scratchpad: ScratchpadConfig{
 			MaxEntriesMemory:  1000,
 			MaxRawBytesMemory: 50 * 1024 * 1024,
-			EvictionPolicy:    "lru",
+			EvictionPolicy:    scratchpadEvictionPolicyLRU,
 			DefaultTTL:        time.Hour,
 			PersistArtifacts:  true,
 			PersistDecisions:  true,
@@ -159,8 +176,50 @@ func (c *Config) Normalize() {
 	if c.Scratchpad.DefaultTTL <= 0 {
 		c.Scratchpad.DefaultTTL = time.Hour
 	}
-	if c.Scratchpad.EvictionPolicy == "" {
-		c.Scratchpad.EvictionPolicy = "lru"
+	c.Scratchpad.EvictionPolicy = normalizeScratchpadEvictionPolicy(c.Scratchpad.EvictionPolicy)
+}
+
+func (c Config) Validate() error {
+	if err := validateScratchpadEvictionPolicy(c.Scratchpad.EvictionPolicy); err != nil {
+		return err
+	}
+	return validateTierConfigs(c.Tiers)
+}
+
+func validateScratchpadEvictionPolicy(policy string) error {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", scratchpadEvictionPolicyLRU, scratchpadEvictionPolicyFIFO:
+		return nil
+	default:
+		return fmt.Errorf("rlm scratchpad eviction_policy must be lru or fifo")
+	}
+}
+
+func validateTierConfigs(tiers map[Weight]TierConfig) error {
+	valid := map[Weight]bool{}
+	for _, weight := range Weights() {
+		valid[weight] = true
+	}
+	for weight, tier := range tiers {
+		if !valid[weight] {
+			return fmt.Errorf("rlm tier %q must be one of: trivial, light, medium, heavy, reasoning", weight)
+		}
+		if tier.MaxCostPerMillion < 0 {
+			return fmt.Errorf("rlm tier %q max_cost_per_million must be >= 0", weight)
+		}
+		if tier.MinContextWindow < 0 {
+			return fmt.Errorf("rlm tier %q min_context_window must be >= 0", weight)
+		}
+	}
+	return nil
+}
+
+func normalizeScratchpadEvictionPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case scratchpadEvictionPolicyFIFO:
+		return scratchpadEvictionPolicyFIFO
+	default:
+		return scratchpadEvictionPolicyLRU
 	}
 }
 

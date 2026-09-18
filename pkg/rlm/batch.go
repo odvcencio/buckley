@@ -18,9 +18,12 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const defaultBatchConcurrency = 4
+
+var errSubAgentTaskTimeout = errors.New("sub-agent task timeout")
 
 // treeSpecies provides agent names for graft coordination.
 var treeSpecies = []string{"birch", "cedar", "maple", "oak", "elm", "pine", "willow", "ash", "beech", "holly"}
@@ -48,14 +51,25 @@ type BatchRequest struct {
 
 // BatchResult captures the outcome of a dispatched task.
 type BatchResult struct {
-	TaskID     string
-	AgentID    string
-	ModelUsed  string
-	Summary    string
-	RawKey     string
-	TokensUsed int
-	Duration   time.Duration
-	Error      string
+	TaskID                string
+	AgentID               string
+	ModelUsed             string
+	Summary               string
+	FinishReason          string
+	TerminationKind       string
+	TerminationReason     string
+	FinalizationAttempted bool
+	FinalizationError     string
+	RawKey                string
+	TokensUsed            int
+	InputTokens           int
+	OutputTokens          int
+	Usage                 transparency.TokenUsage
+	Duration              time.Duration
+	ToolCalls             []SubAgentToolCall
+	ExecutionEvidence     []model.CommandExecutionEvidence
+	ModelExecutions       []model.ExecutionIdentity
+	Error                 string
 }
 
 // BatchDispatcher runs sub-agents with optional concurrency control.
@@ -72,6 +86,7 @@ type BatchDispatcher struct {
 	bus         bus.MessageBus
 	engine      *rules.Engine
 	graftClient *graft.Client
+	taskTimeout time.Duration
 }
 
 // BatchDispatcherConfig configures dispatcher behavior.
@@ -80,6 +95,7 @@ type BatchDispatcherConfig struct {
 	RateLimit     rate.Limit
 	Burst         int
 	Circuit       reliability.CircuitBreakerConfig
+	TaskTimeout   time.Duration
 }
 
 // BatchDispatcherDeps supplies dependencies for dispatcher creation.
@@ -119,6 +135,10 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 	if cfg.RateLimit <= 0 {
 		limiter = nil
 	}
+	taskTimeout := cfg.TaskTimeout
+	if taskTimeout <= 0 {
+		taskTimeout = DefaultConfig().SubAgent.Timeout
+	}
 
 	breaker := reliability.NewCircuitBreaker(cfg.Circuit)
 
@@ -135,6 +155,7 @@ func NewBatchDispatcher(cfg BatchDispatcherConfig, deps BatchDispatcherDeps) (*B
 		bus:         deps.Bus,
 		engine:      deps.Engine,
 		graftClient: deps.GraftClient,
+		taskTimeout: taskTimeout,
 	}, nil
 }
 
@@ -175,7 +196,17 @@ func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) 
 		go func() {
 			defer wg.Done()
 			if d.semaphore != nil {
-				d.semaphore <- struct{}{}
+				select {
+				case d.semaphore <- struct{}{}:
+				case <-ctx.Done():
+					queueErr := contextCancellationError(ctx)
+					res := canceledQueuedBatchResult(task, queueErr)
+					mu.Lock()
+					results[idx] = res
+					combinedErr = errors.Join(combinedErr, queueErr)
+					mu.Unlock()
+					return
+				}
 				defer func() { <-d.semaphore }()
 			}
 			res, err := d.executeTask(ctx, task, idx)
@@ -200,23 +231,6 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 	}
 	if res.TaskID == "" {
 		res.TaskID = ulid.Make().String()
-	}
-
-	// Register subagent with graft coordination.
-	var agentGraft *graft.Client
-	if d.graftClient != nil && d.graftClient.Available() {
-		name := agentName(taskIndex)
-		agentGraft = graft.NewClient(d.graftClient.WorkDir(), name)
-		if err := agentGraft.Coordination.Join(ctx); err != nil {
-			d.publishGraftDebug(ctx, "graft subagent join failed for %s: %v", name, err)
-			agentGraft = nil // disable further coordination for this task
-		} else {
-			defer func() {
-				if err := agentGraft.Coordination.Leave(ctx); err != nil {
-					d.publishGraftDebug(ctx, "graft subagent leave failed for %s: %v", name, err)
-				}
-			}()
-		}
 	}
 
 	weight := task.Weight
@@ -260,6 +274,26 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 			return res, err
 		}
 	}
+	taskCtx, cancelTask := d.taskExecutionContext(ctx)
+	defer cancelTask()
+
+	// Register subagent with graft coordination after queue/rate admission so
+	// the per-task timeout covers task-specific coordination and execution.
+	var agentGraft *graft.Client
+	if d.graftClient != nil && d.graftClient.Available() {
+		name := agentName(taskIndex)
+		agentGraft = graft.NewClient(d.graftClient.WorkDir(), name)
+		if err := agentGraft.Coordination.Join(taskCtx); err != nil {
+			d.publishGraftDebug(taskCtx, "graft subagent join failed for %s: %v", name, err)
+			agentGraft = nil // disable further coordination for this task
+		} else {
+			defer func() {
+				if err := agentGraft.Coordination.Leave(taskCtx); err != nil {
+					d.publishGraftDebug(taskCtx, "graft subagent leave failed for %s: %v", name, err)
+				}
+			}()
+		}
+	}
 
 	agentID := fmt.Sprintf("rlm-%s", res.TaskID)
 	if maxIterations <= 0 {
@@ -297,37 +331,54 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 
 	// Check graft coordination for conflicts before execution.
 	if agentGraft != nil {
-		if clear, err := agentGraft.Coordination.CheckConflicts(ctx); err != nil {
-			d.publishGraftDebug(ctx, "graft conflict check failed: %v", err)
+		if clear, err := agentGraft.Coordination.CheckConflicts(taskCtx); err != nil {
+			d.publishGraftDebug(taskCtx, "graft conflict check failed: %v", err)
 		} else if !clear {
-			d.publishGraftDebug(ctx, "graft conflict detected for task %s", res.TaskID)
+			d.publishGraftDebug(taskCtx, "graft conflict detected for task %s", res.TaskID)
 		}
 	}
 
 	const maxEscalationAttempts = 4
+	var retainedAttemptErr error
 	for attempt := 1; attempt <= maxEscalationAttempts; attempt++ {
+		if err := taskCtx.Err(); err != nil {
+			taskErr := subAgentTaskTerminalError(retainedAttemptErr, taskCtx)
+			res.Error = taskErr.Error()
+			return res, taskErr
+		}
 		run := func() error {
 			start := time.Now()
 			if d.bus != nil {
-				d.publishEvent(ctx, "buckley.rlm.task.started", map[string]any{
+				d.publishEvent(taskCtx, "buckley.rlm.task.started", map[string]any{
 					"task_id":  res.TaskID,
 					"agent_id": agentID,
 					"model":    modelID,
 				})
 			}
-			execResult, execErr := agent.Execute(ctx, task.Prompt)
-			res.Duration = time.Since(start)
+			execResult, execErr := agent.Execute(taskCtx, task.Prompt)
+			res.Duration += time.Since(start)
 			if execResult != nil {
 				res.AgentID = execResult.AgentID
 				res.Summary = execResult.Summary
+				res.FinishReason = execResult.FinishReason
+				res.TerminationKind = execResult.TerminationKind
+				res.TerminationReason = execResult.TerminationReason
+				res.FinalizationAttempted = execResult.FinalizationAttempted
+				res.FinalizationError = execResult.FinalizationError
 				res.RawKey = execResult.RawKey
-				res.TokensUsed = execResult.TokensUsed
+				res.TokensUsed += execResult.TokensUsed
+				res.InputTokens += execResult.InputTokens
+				res.OutputTokens += execResult.OutputTokens
+				res.Usage = transparency.AddTokenUsage(res.Usage, execResult.Usage)
+				res.ToolCalls = append(res.ToolCalls, cloneSubAgentToolCalls(execResult.ToolCalls)...)
+				res.ExecutionEvidence = append(res.ExecutionEvidence, cloneCommandExecutionEvidence(execResult.ExecutionEvidence)...)
+				res.ModelExecutions = append(res.ModelExecutions, cloneSubAgentModelExecutions(execResult.ModelExecutions)...)
 			}
 			if execErr != nil {
 				res.Error = execErr.Error()
 			}
 			if d.bus != nil {
-				d.publishEvent(ctx, "buckley.rlm.task.completed", map[string]any{
+				d.publishEvent(taskCtx, "buckley.rlm.task.completed", map[string]any{
 					"task_id":     res.TaskID,
 					"agent_id":    agentID,
 					"model":       modelID,
@@ -339,9 +390,18 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 		}
 
 		if d.breaker != nil {
-			err = d.breaker.Execute(run)
+			err = d.breaker.ExecuteWithResultFilter(run, func(error) bool {
+				return taskCtx.Err() == nil
+			})
 		} else {
 			err = run()
+		}
+		if err != nil {
+			retainedAttemptErr = errors.Join(retainedAttemptErr, err)
+		}
+		if taskErr := subAgentTaskTerminalError(retainedAttemptErr, taskCtx); taskErr != nil {
+			res.Error = taskErr.Error()
+			return res, taskErr
 		}
 		if err == nil {
 			return res, nil
@@ -364,8 +424,16 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 		action, _ := escalation.Params["action"].(string)
 		switch action {
 		case "retry":
+			if taskErr := subAgentTaskTerminalError(err, taskCtx); taskErr != nil {
+				res.Error = taskErr.Error()
+				return res, taskErr
+			}
 			continue
 		case "escalate":
+			if taskErr := subAgentTaskTerminalError(err, taskCtx); taskErr != nil {
+				res.Error = taskErr.Error()
+				return res, taskErr
+			}
 			if tw, ok := escalation.Params["target_weight"].(string); ok && tw != "" {
 				newWeight := weightFromString(tw)
 				if newWeight != "" {
@@ -408,6 +476,168 @@ func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskInd
 		}
 	}
 	return res, err
+}
+
+func canceledQueuedBatchResult(task SubTask, err error) BatchResult {
+	res := BatchResult{TaskID: task.ID}
+	if res.TaskID == "" {
+		res.TaskID = ulid.Make().String()
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	return res
+}
+
+func (d *BatchDispatcher) taskExecutionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := d.taskTimeout
+	if timeout <= 0 {
+		timeout = DefaultConfig().SubAgent.Timeout
+	}
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	deadline := time.Now().Add(timeout)
+	if parentDeadline, ok := ctx.Deadline(); ok && !parentDeadline.After(deadline) {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadlineCause(ctx, deadline, errSubAgentTaskTimeout)
+}
+
+func subAgentTaskContextError(ctx context.Context) error {
+	if ctx == nil || ctx.Err() == nil {
+		return nil
+	}
+	if errors.Is(context.Cause(ctx), errSubAgentTaskTimeout) {
+		return fmt.Errorf("%w: %w", errSubAgentTaskTimeout, ctx.Err())
+	}
+	return contextCancellationError(ctx)
+}
+
+func subAgentTaskTerminalError(err error, taskCtx context.Context) error {
+	if taskCtx == nil || taskCtx.Err() == nil {
+		return nil
+	}
+	return errors.Join(err, subAgentTaskContextError(taskCtx))
+}
+
+func contextCancellationError(ctx context.Context) error {
+	if ctx == nil || ctx.Err() == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if cause == nil || cause == ctx.Err() {
+		return ctx.Err()
+	}
+	if errors.Is(cause, ctx.Err()) {
+		return cause
+	}
+	return errors.Join(ctx.Err(), cause)
+}
+
+func cloneBatchResult(in BatchResult) BatchResult {
+	out := in
+	out.ToolCalls = cloneSubAgentToolCalls(in.ToolCalls)
+	out.ExecutionEvidence = cloneCommandExecutionEvidence(in.ExecutionEvidence)
+	out.ModelExecutions = cloneSubAgentModelExecutions(in.ModelExecutions)
+	out.Usage = transparency.CloneTokenUsage(in.Usage)
+	return out
+}
+
+func cloneBatchResults(in []BatchResult) []BatchResult {
+	if in == nil {
+		return nil
+	}
+	out := make([]BatchResult, len(in))
+	for i, result := range in {
+		out[i] = cloneBatchResult(result)
+	}
+	return out
+}
+
+func cloneSubAgentToolCalls(in []SubAgentToolCall) []SubAgentToolCall {
+	if in == nil {
+		return nil
+	}
+	out := make([]SubAgentToolCall, len(in))
+	for i, call := range in {
+		out[i] = call
+		out[i].Data = cloneAnyMap(call.Data)
+	}
+	return out
+}
+
+func cloneCommandExecutionEvidence(in []model.CommandExecutionEvidence) []model.CommandExecutionEvidence {
+	if in == nil {
+		return nil
+	}
+	out := make([]model.CommandExecutionEvidence, len(in))
+	for i, evidence := range in {
+		out[i] = evidence
+		if evidence.ExitCode != nil {
+			code := *evidence.ExitCode
+			out[i].ExitCode = &code
+		}
+	}
+	return out
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = cloneAnyValue(value)
+	}
+	return out
+}
+
+func cloneAnySlice(in []any) []any {
+	if in == nil {
+		return nil
+	}
+	out := make([]any, len(in))
+	for i, value := range in {
+		out[i] = cloneAnyValue(value)
+	}
+	return out
+}
+
+func cloneAnyValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(v)
+	case []any:
+		return cloneAnySlice(v)
+	case []string:
+		return append([]string(nil), v...)
+	case map[string]string:
+		out := make(map[string]string, len(v))
+		for key, item := range v {
+			out[key] = item
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(v))
+		for i, item := range v {
+			out[i] = cloneAnyMap(item)
+		}
+		return out
+	case []map[string]string:
+		out := make([]map[string]string, len(v))
+		for i, item := range v {
+			out[i] = cloneAnyValue(item).(map[string]string)
+		}
+		return out
+	case []byte:
+		return append([]byte(nil), v...)
+	default:
+		return value
+	}
 }
 
 // weightFromString maps a string to a Weight constant.
@@ -524,7 +754,7 @@ func (d *BatchDispatcher) applyRolePermissions(toolTier string, allowedTools []s
 	}
 	// Check can_shell flag.
 	if canShell, ok := params["can_shell"].(bool); ok && !canShell {
-		allowedTools = removeFromList(allowedTools, "shell", "bash")
+		allowedTools = removeFromList(allowedTools, "run_shell", "run_code", "shell", "bash")
 	}
 	return allowedTools
 }

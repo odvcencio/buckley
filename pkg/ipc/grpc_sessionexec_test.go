@@ -300,6 +300,7 @@ func TestGRPCSessionObservation_CommandEffectsTruncationContract(t *testing.T) {
 	ctx := grpcObservationContext("alice", storage.TokenScopeViewer)
 	build := func(total int, truncated bool) sessionexec.CommandStatus {
 		status := validCommandStatus("session-alice", "command-truncated", 1)
+		status.TaskIntent = "mutation"
 		status.EffectSummary = sessionexec.EffectSummary{Total: total, Ended: total}
 		projected := total
 		if projected > sessionexec.MaxCommandStatusEffects {
@@ -328,7 +329,7 @@ func TestGRPCSessionObservation_CommandEffectsTruncationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Msg.Command.Effects) != sessionexec.MaxCommandStatusEffects || !response.Msg.Command.EffectsTruncated {
+	if response.Msg.Command.TaskIntent != "mutation" || len(response.Msg.Command.Effects) != sessionexec.MaxCommandStatusEffects || !response.Msg.Command.EffectsTruncated {
 		t.Fatalf("effects=%d truncated=%v", len(response.Msg.Command.Effects), response.Msg.Command.EffectsTruncated)
 	}
 

@@ -41,15 +41,17 @@ type Plan struct {
 }
 
 type Task struct {
-	ID            string     `json:"id"`
-	Title         string     `json:"title"`
-	Description   string     `json:"description"`
-	Type          TaskType   `json:"type"` // implementation, analysis, validation
-	Files         []string   `json:"files"`
-	Dependencies  []string   `json:"dependencies"`
-	EstimatedTime string     `json:"estimated_time"`
-	Verification  []string   `json:"verification"`
-	Status        TaskStatus `json:"status"`
+	ID                 string                  `json:"id"`
+	Title              string                  `json:"title"`
+	Description        string                  `json:"description"`
+	Type               TaskType                `json:"type"` // implementation, analysis, validation
+	Files              []string                `json:"files"`
+	Dependencies       []string                `json:"dependencies"`
+	EstimatedTime      string                  `json:"estimated_time"`
+	Verification       []string                `json:"verification"`
+	VerificationChecks []TaskVerificationCheck `json:"verification_checks,omitempty"`
+	Status             TaskStatus              `json:"status"`
+	ExecutionRecords   []TaskExecutionRecord   `json:"execution_records,omitempty"`
 
 	// RequiredTools lists the tools the task cannot run without. Only this
 	// structured field gates precondition validation. The validator never
@@ -109,7 +111,10 @@ var planSchemaTemplate = map[string]any{
 			"files":          []string{"path/to/file1.go", "path/to/file2.go"},
 			"dependencies":   []string{},
 			"estimated_time": "30m",
-			"verification":   []string{"Run tests", "Manual test X"},
+			"verification":   []string{"Manual test X"},
+			"verification_checks": []map[string]any{
+				{"id": "go-tests", "kind": "test", "language": "go", "path": "./pkg/example", "pattern": "^TestExample$"},
+			},
 		},
 	},
 }
@@ -126,7 +131,8 @@ func defaultPlanningSystemPrompt(useToon bool, personaSection string) string {
 	b.WriteString("- List of files that will be modified or created (empty for analysis/validation tasks)\n")
 	b.WriteString("- Dependencies on other tasks (by task ID)\n")
 	b.WriteString("- Estimated time to complete\n")
-	b.WriteString("- Verification steps (how to test it works)\n\n")
+	b.WriteString("- Machine-verifiable checks in verification_checks when a bounded kind/language/path/pattern applies\n")
+	b.WriteString("- Human-readable legacy verification notes only in verification when no structured check fits\n\n")
 	b.WriteString("Output your plan as JSON following this structure:\n")
 	b.WriteString(schema)
 	b.WriteString("\n\nTask type guidelines:\n")
@@ -395,7 +401,7 @@ func (p *Planner) buildPlanningPrompt(featureName, description string, ctx PlanC
 		b.WriteString(indexHints)
 	}
 
-	b.WriteString("\nBreak this down into specific, actionable tasks with file paths and verification steps.")
+	b.WriteString("\nBreak this down into specific, actionable tasks with file paths and structured verification checks when possible.")
 
 	return b.String()
 }
@@ -504,6 +510,8 @@ func (p *Planner) parsePlan(content, featureName string) (*Plan, error) {
 	// Set default task types for tasks that don't have them
 	for i := range planData.Tasks {
 		task := &planData.Tasks[i]
+		task.Status = TaskPending
+		task.ExecutionRecords = nil
 		if task.Type == "" {
 			// Infer task type based on characteristics
 			if len(task.Files) > 0 {

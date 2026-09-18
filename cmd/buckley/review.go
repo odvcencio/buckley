@@ -1079,16 +1079,9 @@ func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger)
 
 	summary := ledger.Summary()
 	tokens := summary.SessionTokens
-	var tokensLine string
-	if tokens.Reasoning > 0 {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out · %d reasoning = %d total",
-			tokens.Input, tokens.Output, tokens.Reasoning, tokens.Total())
-	} else {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out = %d total",
-			tokens.Input, tokens.Output, tokens.Total())
-	}
+	tokensLine := formatTokenUsageLine(tokens)
 
-	costLine := fmt.Sprintf("Cost: $%.4f · Session: $%.4f", trace.Cost, summary.SessionCost)
+	costLine := formatTraceCostLine(trace, summary)
 
 	termOut.Dim("%s", tokensLine)
 	termOut.Dim("%s", costLine)

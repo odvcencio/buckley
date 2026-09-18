@@ -10,6 +10,7 @@ import (
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/taskstate"
+	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
 // BackendTurnEngine adapts a Ralph execution backend to
@@ -73,6 +74,7 @@ func (e *BackendTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskConte
 	iteration := e.iterations[task.TaskID]
 	e.mu.Unlock()
 
+	beforeFingerprint, beforeErr := workspaceevidence.GitStateFingerprint(ctx, e.sandbox)
 	result, err := e.backend.Execute(ctx, BackendRequest{
 		Prompt:      backendTaskPrompt(task),
 		SandboxPath: e.sandbox,
@@ -99,6 +101,8 @@ func (e *BackendTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskConte
 		}, nil
 	}
 
+	afterFingerprint, afterErr := workspaceevidence.GitStateFingerprint(ctx, e.sandbox)
+
 	evidenceID, err := e.storeExecutionEvidence(ctx, task, iteration, result)
 	if err != nil {
 		return goalloop.TurnOutcome{}, err
@@ -109,8 +113,20 @@ func (e *BackendTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskConte
 		PromptTokens:     result.TokensIn,
 		CompletionTokens: result.TokensOut,
 		SpentUSD:         result.Cost,
-		StateChanged:     len(result.FilesChanged) > 0,
+		StateChanged:     beforeErr == nil && afterErr == nil && beforeFingerprint != afterFingerprint,
 		Summary:          backendSummary(task, result),
+	}
+	if beforeErr != nil || afterErr != nil {
+		observeErr := afterErr
+		if observeErr == nil {
+			observeErr = beforeErr
+		}
+		outcome.CompletionEvidence = taskstate.CompletionEvidenceState{
+			Version:                1,
+			StateObservationFailed: true,
+			StateObservationError:  taskstate.SanitizeCompletionEvidenceError(observeErr.Error()),
+			VerificationStatus:     taskstate.VerificationInconclusive,
+		}
 	}
 	if outcome.SpentUSD == 0 {
 		outcome.SpentUSD = result.CostEstimate
@@ -128,6 +144,41 @@ func (e *BackendTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskConte
 			Required:   true,
 			EvidenceID: evidenceID,
 		}}
+		completionEvidence := task.CompletionEvidence
+		if completionEvidence.Version == 0 {
+			completionEvidence = taskstate.NewCompletionEvidenceState()
+		}
+		if !completionEvidence.StateObservationFailed {
+			if outcome.StateChanged {
+				completionEvidence.StateChangeObserved = true
+			}
+			completionEvidence.VerificationStatus = status
+			if status == taskstate.VerificationPass {
+				completionEvidence.VerificationEvidenceID = evidenceID
+			} else {
+				completionEvidence.VerificationEvidenceID = ""
+			}
+			outcome.CompletionEvidence = completionEvidence
+		}
+	}
+	if outcome.CompletionEvidence.StateObservationFailed {
+		outcome.Blocker = &taskstate.Blocker{
+			Reason: "backend workspace state could not be observed after execution",
+			Needs:  "observable workspace state before accepting completion",
+		}
+		return outcome, nil
+	}
+	if outcome.StateChanged && result.TestsPassed+result.TestsFailed == 0 {
+		outcome.CompletionEvidence = taskstate.CompletionEvidenceState{
+			Version:             1,
+			StateChangeObserved: true,
+			VerificationStatus:  taskstate.VerificationPending,
+		}
+		outcome.Blocker = &taskstate.Blocker{
+			Reason: "backend did not return typed post-change verification",
+			Needs:  "trusted post-change verification evidence",
+		}
+		return outcome, nil
 	}
 
 	// A clean execution claims completion with the stored output as

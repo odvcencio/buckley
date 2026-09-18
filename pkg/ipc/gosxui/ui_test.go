@@ -77,7 +77,8 @@ func TestNewHandlerRendersGoSXDocumentAndAsset(t *testing.T) {
 		Workspaces: []WorkspaceView{{Path: "/tmp/repo", Label: "repo", Sessions: []SessionView{{
 			ID: "run-1", Project: "/tmp/repo", Branch: "main", Status: "active",
 		}}}},
-		Current: &SessionView{ID: "run-1", Project: "/tmp/repo", Branch: "main", Status: "active"},
+		Current:  &SessionView{ID: "run-1", Project: "/tmp/repo", Branch: "main", Status: "active"},
+		Messages: []MessageView{{Role: "system", Content: "Incomplete result: missing successful verification after the latest workspace change. Next: Ask Buckley to run the cheapest relevant verification after the latest change."}},
 	}}
 	handler := NewHandler(backend)
 
@@ -95,6 +96,31 @@ func TestNewHandlerRendersGoSXDocumentAndAsset(t *testing.T) {
 			t.Fatalf("rendered GoSX document missing %q: %s", want, body)
 		}
 	}
+	if !strings.Contains(body, "Incomplete result: missing successful verification") {
+		t.Fatalf("persisted incomplete system notice did not render: %s", body)
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse rendered document: %v", err)
+	}
+	completionFields := doc.Find(`label:contains("Completion") select[name="task_intent"]`)
+	if completionFields.Length() != 2 {
+		t.Fatalf("completion selects = %d, want start and command forms", completionFields.Length())
+	}
+	completionFields.Each(func(i int, selectField *goquery.Selection) {
+		first := selectField.Find("option").First()
+		if value, _ := first.Attr("value"); value != "" || strings.TrimSpace(first.Text()) != "Automatic" {
+			t.Errorf("completion select %d first option value=%q text=%q, want Automatic default", i, value, strings.TrimSpace(first.Text()))
+		}
+		options := map[string]string{}
+		selectField.Find("option").Each(func(_ int, option *goquery.Selection) {
+			value, _ := option.Attr("value")
+			options[value] = strings.TrimSpace(option.Text())
+		})
+		if options["read_only"] != "No change required" || options["mutation"] != "Change required" {
+			t.Errorf("completion select %d options = %+v", i, options)
+		}
+	})
 	if strings.Contains(body, "react") || strings.Contains(body, "index.js") {
 		t.Fatalf("GoSX document still references the retired browser bundle")
 	}
@@ -114,7 +140,7 @@ func TestNewHandlerUsesNativeActions(t *testing.T) {
 	handler := NewHandler(backend)
 
 	start := httptest.NewRecorder()
-	startForm := url.Values{"_csrf": {"csrf-token"}, "project": {"/tmp/repo"}, "agent": {"planner"}, "subagent": {"researcher"}, "model": {"test-model"}, "prompt": {"inspect"}}
+	startForm := url.Values{"_csrf": {"csrf-token"}, "project": {"/tmp/repo"}, "agent": {"planner"}, "subagent": {"researcher"}, "model": {"test-model"}, "prompt": {"inspect"}, "task_intent": {"mutation"}}
 	startReq := httptest.NewRequest(http.MethodPost, "http://localhost/__actions/start-work", strings.NewReader(startForm.Encode()))
 	startReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(start, startReq)
@@ -124,19 +150,19 @@ func TestNewHandlerUsesNativeActions(t *testing.T) {
 	if start.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("successful action cache control = %q", start.Header().Get("Cache-Control"))
 	}
-	if backend.start.Project != "/tmp/repo" || backend.start.Subagent != "researcher" {
+	if backend.start.Project != "/tmp/repo" || backend.start.Subagent != "researcher" || backend.start.TaskIntent != "mutation" {
 		t.Fatalf("start action did not receive native form values: %#v", backend.start)
 	}
 
 	command := httptest.NewRecorder()
-	commandForm := url.Values{"_csrf": {"csrf-token"}, "session_id": {"run-123"}, "type": {"input"}, "content": {"continue"}}
+	commandForm := url.Values{"_csrf": {"csrf-token"}, "session_id": {"run-123"}, "type": {"input"}, "content": {"continue"}, "task_intent": {"read_only"}}
 	commandReq := httptest.NewRequest(http.MethodPost, "http://localhost/__actions/command", strings.NewReader(commandForm.Encode()))
 	commandReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(command, commandReq)
 	if command.Code != http.StatusSeeOther || command.Header().Get("Location") != "/?session=run-123" {
 		t.Fatalf("command action status=%d location=%q", command.Code, command.Header().Get("Location"))
 	}
-	if backend.command.SessionID != "run-123" || backend.command.Content != "continue" {
+	if backend.command.SessionID != "run-123" || backend.command.Content != "continue" || backend.command.TaskIntent != "read_only" {
 		t.Fatalf("command action did not receive native form values: %#v", backend.command)
 	}
 	approval := httptest.NewRecorder()

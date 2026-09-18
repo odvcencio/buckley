@@ -64,6 +64,7 @@ func runExperimentProfile(args []string) error {
 	if len(calibrations) == 0 {
 		return fmt.Errorf("experiment %s has no terminal model runs to profile", exp.ID)
 	}
+	attributionCaveats := experimentCalibrationAttributionCaveats(calibrations)
 
 	profileVersion := strings.TrimSpace(*version)
 	if profileVersion == "" {
@@ -73,22 +74,66 @@ func runExperimentProfile(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(profiles) == 0 {
+		if len(attributionCaveats) > 0 {
+			return fmt.Errorf("experiment %s has no attributable terminal model runs to profile: %s", exp.ID, strings.Join(attributionCaveats, "; "))
+		}
+		return fmt.Errorf("experiment %s has no terminal model runs to profile", exp.ID)
+	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(profiles)
 	}
-	return writeExperimentProfiles(os.Stdout, profiles, *dryRun)
+	return writeExperimentProfiles(os.Stdout, profiles, *dryRun, attributionCaveats)
+}
+
+func runExperimentPromote(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: buckley experiment promote <model-id> <profile-version>")
+	}
+	modelID := strings.TrimSpace(args[0])
+	version := strings.TrimSpace(args[1])
+	if modelID == "" || version == "" {
+		return fmt.Errorf("usage: buckley experiment promote <model-id> <profile-version>")
+	}
+
+	store, err := initExperimentStore()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	profiles := storage.NewBehaviorProfileStore(store)
+	if err := profiles.Promote(context.Background(), modelID, version); err != nil {
+		return err
+	}
+	profile, found, err := profiles.Promoted(context.Background(), modelID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("promoted model behavior profile not found after promotion: %s %s", modelID, version)
+	}
+	return writeExperimentPromotion(os.Stdout, profile)
 }
 
 func calibratedExperimentProfiles(ctx context.Context, profiles *storage.BehaviorProfileStore, calibrations []experiment.ModelCalibration, version string, class modelprofile.Class, persist bool) ([]modelprofile.Profile, error) {
+	if err := validateExperimentProfileProviderKeys(calibrations); err != nil {
+		return nil, err
+	}
 	result := make([]modelprofile.Profile, 0, len(calibrations))
 	for _, calibration := range calibrations {
+		if len(calibration.Observations) == 0 {
+			continue
+		}
 		existing, found, err := profiles.Get(ctx, calibration.ModelID, version)
 		if err != nil {
 			return nil, err
 		}
 		if found {
+			if existing.Provider != "" && calibration.ProviderID != "" && existing.Provider != calibration.ProviderID {
+				return nil, fmt.Errorf("existing profile %s/%s provider %s conflicts with calibration provider %s", calibration.ModelID, version, existing.Provider, calibration.ProviderID)
+			}
 			result = append(result, existing)
 			continue
 		}
@@ -108,6 +153,55 @@ func calibratedExperimentProfiles(ctx context.Context, profiles *storage.Behavio
 		result = append(result, profile)
 	}
 	return result, nil
+}
+
+func validateExperimentProfileProviderKeys(calibrations []experiment.ModelCalibration) error {
+	seen := make(map[string]string)
+	for _, calibration := range calibrations {
+		if len(calibration.Observations) == 0 {
+			continue
+		}
+		modelID := strings.TrimSpace(calibration.ModelID)
+		if modelID == "" {
+			continue
+		}
+		providerID := strings.TrimSpace(calibration.ProviderID)
+		if prior, ok := seen[modelID]; ok && prior != providerID {
+			return fmt.Errorf("model %s has observations from multiple providers (%s, %s); profile storage is keyed by model/version, so attribution is not written", modelID, providerLabel(prior), providerLabel(providerID))
+		}
+		seen[modelID] = providerID
+	}
+	return nil
+}
+
+func providerLabel(providerID string) string {
+	if providerID == "" {
+		return "unknown provider"
+	}
+	return providerID
+}
+
+func experimentCalibrationAttributionCaveats(calibrations []experiment.ModelCalibration) []string {
+	var caveats []string
+	for _, calibration := range calibrations {
+		for _, caveat := range calibration.AttributionCaveats {
+			caveats = append(caveats, fmt.Sprintf("%s: %s", calibration.ModelID, caveat))
+		}
+	}
+	return caveats
+}
+
+func writeExperimentPromotion(out io.Writer, profile modelprofile.Profile) error {
+	if out == nil {
+		return fmt.Errorf("profile promotion output is unavailable")
+	}
+	digest, err := profile.Digest()
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(out, "Promoted model behavior profile:\n  model: %s\n  profile: %s\n  digest: %s\n  class: %s\n",
+		profile.ModelID, profile.Version, digest, profile.ResolvedClass())
+	return err
 }
 
 func splitExperimentProfileArgs(args []string) (string, []string, error) {
@@ -157,7 +251,7 @@ func parseExperimentProfileClass(value string) (modelprofile.Class, error) {
 	}
 }
 
-func writeExperimentProfiles(out io.Writer, profiles []modelprofile.Profile, dryRun bool) error {
+func writeExperimentProfiles(out io.Writer, profiles []modelprofile.Profile, dryRun bool, attributionCaveats ...[]string) error {
 	if out == nil {
 		return fmt.Errorf("profile output is unavailable")
 	}
@@ -166,7 +260,7 @@ func writeExperimentProfiles(out io.Writer, profiles []modelprofile.Profile, dry
 		action = "preview"
 	}
 	writer := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "MODEL\tCLASS\tTASKS\tSUCCESS\tAVG LATENCY\tAVG TOKENS\tCOST/TASK\tCOST/SUCCESS\tPROFILE")
+	fmt.Fprintln(writer, "MODEL\tCLASS\tTASKS\tASSESSED\tSUCCESS\tAVG LATENCY\tAVG TOKENS\tCOST/TASK\tCOST/SUCCESS\tPROFILE")
 	for _, profile := range profiles {
 		success := "-"
 		if profile.Samples.TaskSuccess > 0 {
@@ -187,12 +281,28 @@ func writeExperimentProfiles(out io.Writer, profiles []modelprofile.Profile, dry
 				costPerSuccess = fmt.Sprintf("$%.4f", profile.Metrics.CostUSDPerSuccessfulTask)
 			}
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			profile.ModelID, profile.ResolvedClass(), profile.Samples.TaskSuccess, success, latency, tokens, costPerTask, costPerSuccess, profile.Version)
+		fmt.Fprintf(writer, "%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			profile.ModelID, profile.ResolvedClass(), profile.SampleSize, profile.Samples.TaskSuccess, success, latency, tokens, costPerTask, costPerSuccess, profile.Version)
 	}
 	if err := writer.Flush(); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(out, "\n%d empirical model profile(s) %s.\n", len(profiles), action)
-	return err
+	if _, err := fmt.Fprintf(out, "\n%d empirical model profile(s) %s.\n", len(profiles), action); err != nil {
+		return err
+	}
+	var caveats []string
+	if len(attributionCaveats) > 0 {
+		caveats = attributionCaveats[0]
+	}
+	if len(caveats) > 0 {
+		if _, err := fmt.Fprintln(out, "\nAttribution caveats:"); err != nil {
+			return err
+		}
+		for _, caveat := range caveats {
+			if _, err := fmt.Fprintf(out, "- %s\n", caveat); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

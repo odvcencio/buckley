@@ -130,11 +130,12 @@ func (l *Loop) Start(ctx context.Context, goal Goal) (*Intake, error) {
 
 		cp, err := l.checkpoints.Save(ctx, taskstate.SaveInput{
 			State: taskstate.CheckpointState{
-				Schema:  taskstate.SchemaVersion,
-				TaskID:  taskID,
-				GoalID:  goalTaskID,
-				Status:  taskstate.StatusPending,
-				Summary: spec.Title,
+				Schema:             taskstate.SchemaVersion,
+				TaskID:             taskID,
+				GoalID:             goalTaskID,
+				Status:             taskstate.StatusPending,
+				Summary:            spec.Title,
+				CompletionEvidence: taskstate.NewCompletionEvidenceState(),
 				NextActions: []taskstate.NextAction{
 					{Text: "Start: " + spec.Title, Kind: "explore"},
 				},

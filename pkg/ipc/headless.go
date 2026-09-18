@@ -17,6 +17,7 @@ import (
 	"m31labs.dev/buckley/pkg/headless"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -399,6 +400,10 @@ func respondHeadlessCreateError(w http.ResponseWriter, err error) {
 		respondError(w, status, safeErr)
 		return
 	}
+	if stdliberrors.Is(err, sessionexec.ErrValidation) {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
 	respondError(w, http.StatusInternalServerError, err)
 }
 
@@ -561,9 +566,10 @@ func (s *Server) handleHeadlessCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		CommandID string `json:"commandId,omitempty"`
-		Type      string `json:"type"`
-		Content   string `json:"content"`
+		CommandID  string `json:"commandId,omitempty"`
+		Type       string `json:"type"`
+		Content    string `json:"content"`
+		TaskIntent string `json:"taskIntent,omitempty"`
 	}
 	if status, err := decodeJSONBody(w, r, &payload, maxBodyBytesCommand, false); err != nil {
 		respondError(w, status, err)
@@ -583,6 +589,7 @@ func (s *Server) handleHeadlessCommand(w http.ResponseWriter, r *http.Request) {
 		ID:         payload.CommandID,
 		Type:       payload.Type,
 		Content:    payload.Content,
+		TaskIntent: payload.TaskIntent,
 		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
 	outcome, err := s.dispatchCommandWithReceipt(r.Context(), &cmd, commandDispatchRegistry)

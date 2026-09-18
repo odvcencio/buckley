@@ -166,7 +166,7 @@ func runGoalApprove(args []string) error {
 	}
 	runID := strings.TrimSpace(fs.Arg(0))
 
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return err
 	}
@@ -419,7 +419,7 @@ func runGoalRun(args []string) error {
 		if err != nil {
 			return err
 		}
-		cfg, err = config.Load()
+		cfg, err = loadConfiguredConfig()
 		if err != nil {
 			return err
 		}

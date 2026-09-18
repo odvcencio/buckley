@@ -145,6 +145,19 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 	if cc == nil || cc.manager == nil {
 		return nil, fmt.Errorf("continuation coordinator unavailable")
 	}
+	route, err := cc.manager.ResolveModelRoute(req.Model)
+	if err != nil {
+		return nil, err
+	}
+	return cc.CallForRoute(ctx, req, route)
+}
+
+// CallForRoute executes one continuation-aware turn only if the route remains
+// unchanged at dispatch time.
+func (cc *ContinuationCoordinator) CallForRoute(ctx context.Context, req ChatRequest, route ModelRoute) (*ChatResponse, error) {
+	if cc == nil || cc.manager == nil {
+		return nil, fmt.Errorf("continuation coordinator unavailable")
+	}
 	cc.requestModel = strings.TrimSpace(req.Model)
 	prepared, err := cc.cursor.Prepare(req)
 	if err != nil {
@@ -153,7 +166,7 @@ func (cc *ContinuationCoordinator) Call(ctx context.Context, req ChatRequest) (*
 	}
 	cc.hit = prepared.Continuation != nil
 
-	resp, err := cc.manager.ChatCompletionWithContinuation(ctx, prepared)
+	resp, err := cc.manager.ChatCompletionWithContinuationForRoute(ctx, prepared, route)
 	if err != nil {
 		cc.Reset()
 		if resp != nil && resp.Response != nil {

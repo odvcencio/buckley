@@ -13,7 +13,11 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 )
 
-const defaultScratchpadSummaryLimit = 200
+const (
+	defaultScratchpadSummaryLimit   = 200
+	scratchpadVisibilityMetadataKey = "buckley_visibility"
+	scratchpadDurableOnlyVisibility = "durable_only"
+)
 
 // Scratchpad stores sub-agent outputs with optional persistence.
 type Scratchpad struct {
@@ -83,21 +87,8 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 	s.rawBytes += entrySize(entry)
 	s.enforceLimitsLocked(now)
 	if s.shouldPersist(entry, now) && s.store != nil {
-		metadataJSON := ""
-		if entry.Metadata != nil {
-			if data, err := json.Marshal(entry.Metadata); err == nil {
-				metadataJSON = string(data)
-			}
-		}
-		persistEntry = &storage.ScratchpadEntry{
-			Key:       entry.Key,
-			EntryType: string(entry.Type),
-			Raw:       entry.Raw,
-			Summary:   entry.Summary,
-			Metadata:  metadataJSON,
-			CreatedBy: entry.CreatedBy,
-			CreatedAt: entry.CreatedAt,
-		}
+		stored := storageEntryFromScratchpadEntry(entry)
+		persistEntry = &stored
 	}
 	s.mu.Unlock()
 
@@ -107,6 +98,56 @@ func (s *Scratchpad) Write(ctx context.Context, req WriteRequest) (string, error
 		}
 	}
 
+	return key, nil
+}
+
+// WriteDurableOnly persists a scratchpad entry without adding it to live
+// scratchpad memory. It is for public coordinator answer-state records that
+// should be queryable from durable storage without feeding future coordinator
+// summaries, telemetry, or memory eviction.
+func (s *Scratchpad) WriteDurableOnly(ctx context.Context, req WriteRequest) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("scratchpad is nil")
+	}
+	now := time.Now().UTC()
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		key = ulid.Make().String()
+	}
+	entryType := req.Type
+	if entryType == "" {
+		entryType = EntryTypeAnalysis
+	}
+	createdAt := req.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	summary := strings.TrimSpace(req.Summary)
+	if summary == "" {
+		summary = s.summarize(req.Raw)
+	}
+	metadata := cloneMetadata(req.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[scratchpadVisibilityMetadataKey] = scratchpadDurableOnlyVisibility
+	entry := &Entry{
+		Key:        key,
+		Type:       entryType,
+		Raw:        req.Raw,
+		Summary:    summary,
+		Metadata:   metadata,
+		CreatedBy:  strings.TrimSpace(req.CreatedBy),
+		CreatedAt:  createdAt,
+		LastAccess: now,
+	}
+	if s.isExpired(entry, now) || !s.shouldPersist(entry, now) || s.store == nil {
+		return key, nil
+	}
+	stored := storageEntryFromScratchpadEntry(entry)
+	if _, err := s.store.UpsertScratchpadEntry(ctx, stored); err != nil {
+		return key, err
+	}
 	return key, nil
 }
 
@@ -206,6 +247,9 @@ func (s *Scratchpad) getEntry(ctx context.Context, key string) (*Entry, error) {
 	if err != nil || stored == nil {
 		return nil, err
 	}
+	if storedScratchpadEntryDurableOnly(stored) {
+		return nil, nil
+	}
 	entry = entryFromStorage(stored)
 	entry.LastAccess = now
 	if s.isExpired(entry, now) {
@@ -236,7 +280,7 @@ func (s *Scratchpad) loadFromStore(ctx context.Context, limit int) error {
 	if limit < 0 {
 		limit = 0
 	}
-	entries, err := s.store.ListScratchpadEntries(ctx, limit)
+	entries, err := s.store.ListScratchpadEntriesExcludingMetadataString(ctx, scratchpadVisibilityMetadataKey, scratchpadDurableOnlyVisibility, limit)
 	if err != nil {
 		return err
 	}
@@ -250,6 +294,9 @@ func (s *Scratchpad) loadFromStore(ctx context.Context, limit int) error {
 		if _, ok := s.entries[stored.Key]; ok {
 			continue
 		}
+		if storedScratchpadEntryDurableOnly(&stored) {
+			continue
+		}
 		entry := entryFromStorage(&stored)
 		if s.isExpired(entry, now) {
 			continue
@@ -260,6 +307,39 @@ func (s *Scratchpad) loadFromStore(ctx context.Context, limit int) error {
 	s.enforceLimitsLocked(now)
 	s.mu.Unlock()
 	return nil
+}
+
+func storageEntryFromScratchpadEntry(entry *Entry) storage.ScratchpadEntry {
+	if entry == nil {
+		return storage.ScratchpadEntry{}
+	}
+	metadataJSON := ""
+	if entry.Metadata != nil {
+		if data, err := json.Marshal(entry.Metadata); err == nil {
+			metadataJSON = string(data)
+		}
+	}
+	return storage.ScratchpadEntry{
+		Key:       entry.Key,
+		EntryType: string(entry.Type),
+		Raw:       entry.Raw,
+		Summary:   entry.Summary,
+		Metadata:  metadataJSON,
+		CreatedBy: entry.CreatedBy,
+		CreatedAt: entry.CreatedAt,
+	}
+}
+
+func storedScratchpadEntryDurableOnly(stored *storage.ScratchpadEntry) bool {
+	if stored == nil || strings.TrimSpace(stored.Metadata) == "" {
+		return false
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(stored.Metadata), &metadata); err != nil {
+		return false
+	}
+	visibility, _ := metadata[scratchpadVisibilityMetadataKey].(string)
+	return visibility == scratchpadDurableOnlyVisibility
 }
 
 func entryFromStorage(stored *storage.ScratchpadEntry) *Entry {
@@ -386,8 +466,8 @@ func (s *Scratchpad) evictionTime(entry *Entry, now time.Time) time.Time {
 	if entry == nil {
 		return now
 	}
-	policy := strings.ToLower(strings.TrimSpace(s.config.EvictionPolicy))
-	if policy == "lru" {
+	policy := normalizeScratchpadEvictionPolicy(s.config.EvictionPolicy)
+	if policy == scratchpadEvictionPolicyLRU {
 		if !entry.LastAccess.IsZero() {
 			return entry.LastAccess
 		}

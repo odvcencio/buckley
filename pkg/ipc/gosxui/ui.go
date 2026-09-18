@@ -52,11 +52,12 @@ type MutationGuard interface {
 }
 
 type StartWorkRequest struct {
-	Project  string
-	Agent    string
-	Subagent string
-	Model    string
-	Prompt   string
+	Project    string
+	Agent      string
+	Subagent   string
+	Model      string
+	Prompt     string
+	TaskIntent string
 }
 
 type CommandRequest struct {
@@ -64,6 +65,7 @@ type CommandRequest struct {
 	Type       string
 	Content    string
 	ApprovalID string
+	TaskIntent string
 }
 
 type PageData struct {
@@ -194,11 +196,12 @@ func NewHandler(backend Backend) http.Handler {
 	app.Mount("/assets/mission-control.css", embeddedAsset("styles.css", "text/css; charset=utf-8"))
 	app.Mount(startActionPath, actionHandler(guard, func(ctx context.Context, r *http.Request, _ http.ResponseWriter, values url.Values) (string, error) {
 		id, err := backend.StartWork(ctx, r, StartWorkRequest{
-			Project:  values.Get("project"),
-			Agent:    values.Get("agent"),
-			Subagent: values.Get("subagent"),
-			Model:    values.Get("model"),
-			Prompt:   values.Get("prompt"),
+			Project:    values.Get("project"),
+			Agent:      values.Get("agent"),
+			Subagent:   values.Get("subagent"),
+			Model:      values.Get("model"),
+			Prompt:     values.Get("prompt"),
+			TaskIntent: values.Get("task_intent"),
 		})
 		if err != nil {
 			return "", err
@@ -212,6 +215,7 @@ func NewHandler(backend Backend) http.Handler {
 			Type:       values.Get("type"),
 			Content:    values.Get("content"),
 			ApprovalID: values.Get("approval_id"),
+			TaskIntent: values.Get("task_intent"),
 		}); err != nil {
 			return "", err
 		}
@@ -525,7 +529,7 @@ func renderControls(data PageData) gosx.Node {
 	}
 	return gosx.El("section", cls("panel controls-panel"),
 		gosx.El("div", cls("panel-head"), gosx.El("div", gosx.El("span", cls("eyebrow"), gosx.Text("STEERING")), gosx.El("h2", gosx.Text("Send an instruction"))), gosx.El("span", cls("scope-pill"), gosx.Text(firstNonEmpty(data.Current.Model, "config model")))),
-		server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "command-form")), csrfInput(data.CSRFToken), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", data.Current.ID))), gosx.El("select", gosx.Attrs(gosx.Attr("name", "type")), gosx.El("option", gosx.Attr("value", "input"), gosx.Text("message")), gosx.El("option", gosx.Attr("value", "steer"), gosx.Text("steer / interrupt")), gosx.El("option", gosx.Attr("value", "queue"), gosx.Text("queue")), gosx.El("option", gosx.Attr("value", "slash"), gosx.Text("slash command"))), gosx.El("textarea", gosx.Attrs(gosx.Attr("name", "content"), gosx.Attr("rows", "3"), gosx.Attr("placeholder", "Ask Buckley to continue, inspect, or change direction…"))), gosx.El("button", cls("button button-primary"), gosx.Attr("type", "submit"), gosx.Text("Dispatch"))),
+		server.Form(gosx.Attrs(gosx.Attr("method", http.MethodPost), gosx.Attr("action", commandActionPath), gosx.Attr("class", "command-form")), csrfInput(data.CSRFToken), gosx.El("input", gosx.Attrs(gosx.Attr("type", "hidden"), gosx.Attr("name", "session_id"), gosx.Attr("value", data.Current.ID))), gosx.El("select", gosx.Attrs(gosx.Attr("name", "type")), gosx.El("option", gosx.Attr("value", "input"), gosx.Text("message")), gosx.El("option", gosx.Attr("value", "steer"), gosx.Text("steer / interrupt")), gosx.El("option", gosx.Attr("value", "queue"), gosx.Text("queue")), gosx.El("option", gosx.Attr("value", "slash"), gosx.Text("slash command"))), completionSelect(), gosx.El("textarea", gosx.Attrs(gosx.Attr("name", "content"), gosx.Attr("rows", "3"), gosx.Attr("placeholder", "Ask Buckley to continue, inspect, or change direction…"))), gosx.El("button", cls("button button-primary"), gosx.Attr("type", "submit"), gosx.Text("Dispatch"))),
 	)
 }
 
@@ -594,6 +598,7 @@ func renderStartForm(data PageData) gosx.Node {
 			field("Directory", "project", "text", firstNonEmpty(data.ProjectRoot, "."), "repository path"),
 			el("div", cls("form-grid"), selectField("Agent profile", "agent", options...), field("Subagent", "subagent", "text", "", "optional profile subagent")),
 			selectField("Model override", "model", modelOptions...),
+			completionSelect(),
 			field("Initial task", "prompt", "textarea", "", "optional first instruction"),
 			gosx.El("button", cls("button button-primary"), gosx.Attr("type", "submit"), gosx.Text("Start work")),
 		),
@@ -609,6 +614,14 @@ func field(label, name, kind, value, placeholder string) gosx.Node {
 
 func selectField(label, name string, options ...gosx.Node) gosx.Node {
 	return gosx.El("label", cls("field"), gosx.El("span", gosx.Text(label)), el("select", gosx.Attrs(gosx.Attr("name", name)), options...))
+}
+
+func completionSelect() gosx.Node {
+	return selectField("Completion", "task_intent",
+		gosx.El("option", gosx.Attrs(gosx.Attr("value", "")), gosx.Text("Automatic")),
+		gosx.El("option", gosx.Attrs(gosx.Attr("value", "read_only")), gosx.Text("No change required")),
+		gosx.El("option", gosx.Attrs(gosx.Attr("value", "mutation")), gosx.Text("Change required")),
+	)
 }
 
 func commandButton(csrfToken, sessionID, typ, content, approvalID, label, className string) gosx.Node {

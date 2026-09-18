@@ -752,6 +752,7 @@ func runPRReviewSharded(
 	}
 	spinner.SetMessage(fmt.Sprintf("Running %s %d-shard review with %s reasoning...", reviewDepthLabel(opts.depth), len(shards.Shards), opts.reasoningEffort))
 
+	shardResults := make([]*reviewCommandResult, len(shards.Shards))
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
 		shardOpts := opts.withVerificationTargetBudget(shard.Files)
@@ -789,20 +790,22 @@ func runPRReviewSharded(
 				ExpectedCommit: prCtx.PR.HeadSHA,
 			},
 		})
+		shardResult := reviewResultFromAgent(fwResult, audit)
+		shardResults[index] = shardResult
 		if runErr != nil {
 			return nil, runErr
 		}
-		result, ok := fwResult.Value.(*commands.ReviewAgentResult)
-		if !ok || result.Parsed == nil {
+		if shardResult.parsed == nil {
 			return nil, fmt.Errorf("shard %d produced no parsed review", index+1)
 		}
-		return result.Parsed, nil
+		return shardResult.parsed, nil
 	}
 
 	shardReviews, runErr := commands.RunPRShardsConcurrently(ctx, shards.Shards, concurrency, run)
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		return nil, prCtx.PR, fmt.Errorf("sharded review failed: %w", runErr)
+		reviewErr := fmt.Errorf("sharded review failed: %w", runErr)
+		return incompleteShardedPRReviewResult(audit, shardResults, reviewErr), prCtx.PR, reviewErr
 	}
 
 	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
@@ -810,20 +813,110 @@ func runPRReviewSharded(
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
 		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
-		return &reviewCommandResult{
-			reviewText:    markIncompleteReview(rendered, revalidationErr.Error()),
+		return (&reviewCommandResult{
+			reviewText:    rendered,
 			incomplete:    true,
 			incompleteWhy: revalidationErr.Error(),
 			contextAudit:  audit,
-		}, prCtx.PR, revalidationErr
+			trace:         aggregatePRShardTraces(shardResults),
+		}).withShardedReviewEvidence(shardResults), prCtx.PR, revalidationErr
 	}
 
 	spinner.StopWithSuccess(fmt.Sprintf("%d-shard PR review complete", len(shards.Shards)))
-	return &reviewCommandResult{
+	return (&reviewCommandResult{
 		reviewText:   rendered,
 		parsed:       merged,
 		contextAudit: audit,
-	}, prCtx.PR, nil
+		trace:        aggregatePRShardTraces(shardResults),
+	}).withShardedReviewEvidence(shardResults), prCtx.PR, nil
+}
+
+func incompleteShardedPRReviewResult(audit *transparency.ContextAudit, shardResults []*reviewCommandResult, reviewErr error) *reviewCommandResult {
+	result := &reviewCommandResult{
+		reviewText:    renderIncompleteShardDrafts(shardResults),
+		incomplete:    true,
+		incompleteWhy: reviewErr.Error(),
+		contextAudit:  audit,
+		trace:         aggregatePRShardTraces(shardResults),
+	}
+	return result.withShardedReviewEvidence(shardResults)
+}
+
+func (result *reviewCommandResult) withShardedReviewEvidence(shardResults []*reviewCommandResult) *reviewCommandResult {
+	if result == nil {
+		return nil
+	}
+	for _, shardResult := range shardResults {
+		if shardResult == nil {
+			continue
+		}
+		result.attempts += shardResult.attempts
+		result.primary += shardResult.primary
+		result.criticAttempts += shardResult.criticAttempts
+		result.hostEvidence += shardResult.hostEvidence
+		result.hostPasses += shardResult.hostPasses
+		result.hostNotApplicable += shardResult.hostNotApplicable
+		result.toolEvidence = append(result.toolEvidence, shardResult.toolEvidence...)
+		result.commandEvidence = append(result.commandEvidence, shardResult.commandEvidence...)
+	}
+	if result.incomplete {
+		result.reviewText = appendReviewEvidenceDiagnostics(result.reviewText, result.toolEvidence, result.commandEvidence)
+		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)
+		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
+		result.parsed = nil
+	}
+	return result
+}
+
+func aggregatePRShardTraces(shardResults []*reviewCommandResult) *transparency.Trace {
+	var attempts []transparency.TraceAttempt
+	for i, shardResult := range shardResults {
+		if shardResult == nil {
+			continue
+		}
+		attempts = append(attempts, shardTraceAttempts(i, shardResult.trace)...)
+	}
+	return transparency.AggregateTraceAttempts(attempts)
+}
+
+func shardTraceAttempts(shardIndex int, trace *transparency.Trace) []transparency.TraceAttempt {
+	if trace == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("shard %d", shardIndex+1)
+	if len(trace.Attempts) == 0 {
+		return []transparency.TraceAttempt{{Phase: prefix, Attempt: 1, Trace: trace}}
+	}
+	attempts := make([]transparency.TraceAttempt, 0, len(trace.Attempts))
+	for _, attempt := range trace.Attempts {
+		if attempt.Trace == nil {
+			continue
+		}
+		phase := strings.TrimSpace(attempt.Phase)
+		if phase == "" {
+			phase = "attempt"
+		}
+		attempts = append(attempts, transparency.TraceAttempt{
+			Phase:           prefix + "/" + phase,
+			Attempt:         attempt.Attempt,
+			ValidationError: attempt.ValidationError,
+			Trace:           attempt.Trace,
+		})
+	}
+	return attempts
+}
+
+func renderIncompleteShardDrafts(shardResults []*reviewCommandResult) string {
+	var b strings.Builder
+	b.WriteString("## Incomplete sharded review\n\n")
+	b.WriteString("The sharded PR review did not complete. Completed shard drafts and execution evidence are preserved below for diagnosis only.\n")
+	for i, shardResult := range shardResults {
+		if shardResult == nil || strings.TrimSpace(shardResult.reviewText) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### Shard %d draft\n\n%s\n", i+1, strings.TrimSpace(shardResult.reviewText))
+	}
+	return b.String()
 }
 
 func writePRReviewOutput(outputFile, reviewText string, prInfo *commands.PRInfo) error {

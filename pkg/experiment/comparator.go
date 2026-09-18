@@ -3,9 +3,10 @@ package experiment
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/model"
 )
 
 // Comparator analyzes experiment results and computes rankings.
@@ -25,17 +26,27 @@ type ComparisonReport struct {
 type VariantReport struct {
 	VariantID          string
 	RunID              string
+	SessionID          string
+	Branch             string
 	VariantName        string
 	ModelID            string
+	ProviderID         string
+	InputDigest        string
+	WorkloadDigest     string
+	ProvenanceStatus   string
 	Status             RunStatus
 	Metrics            RunMetrics
+	CostEvidence       CostEvidence
 	CriteriaScore      float64
 	CriteriaPassed     []string
 	CriteriaFailed     []string
 	CriteriaPending    []string
+	EvaluatedCriteria  int
+	AutomatedCriteria  int
 	VerificationStatus string
 	Verified           bool
 	RankEligible       bool
+	ModelExecutions    []model.ExecutionIdentity
 	OutputPreview      string
 	Error              string
 }
@@ -44,9 +55,9 @@ type VariantReport struct {
 type Ranking struct {
 	VariantID string
 	RunID     string
-	Winner    bool
 	Score     float64
 	Rank      int
+	Winner    bool
 }
 
 // NewComparator constructs a comparator for experiment results.
@@ -75,6 +86,28 @@ func (c *Comparator) Compare(exp *Experiment) (*ComparisonReport, error) {
 		return nil, err
 	}
 
+	return CompareRuns(exp, runs, evalsByRun)
+}
+
+// CompareRuns produces the same deterministic comparison report as Comparator
+// from caller-supplied experiment inputs, without doing storage I/O. Run input
+// manifest validation only establishes self-consistency for requested-input
+// provenance; it does not prove actual backend/model revision, repository
+// baseline, harness, tool versions, signature authenticity, or execution. The
+// report preserves unknown outcomes such as no criteria, manual-only criteria,
+// missing automated evaluations, and non-completed runs as unverified evidence
+// rather than verified winners. The caller is responsible for supplying
+// aligned runs and evaluations for the experiment and for not mutating those
+// inputs concurrently during comparison. Evaluations for run IDs not supplied
+// in runs are ignored. CompareRuns does not mutate its inputs.
+func CompareRuns(exp *Experiment, runs []Run, evaluations map[string][]CriterionEvaluation) (*ComparisonReport, error) {
+	if exp == nil {
+		return nil, errors.New("experiment is nil")
+	}
+	if err := validateCompareRunsInputs(exp, runs, evaluations); err != nil {
+		return nil, err
+	}
+
 	variantByID := make(map[string]Variant, len(exp.Variants))
 	for _, variant := range exp.Variants {
 		variantByID[variant.ID] = variant
@@ -83,7 +116,32 @@ func (c *Comparator) Compare(exp *Experiment) (*ComparisonReport, error) {
 	var reports []VariantReport
 	for _, run := range runs {
 		variant := variantByID[run.VariantID]
-		criteria := assessCriteria(exp.Criteria, evalsByRun[run.ID])
+		criteriaDefinitions := exp.Criteria
+		variantNameValue := variantName(&variant)
+		modelID := variant.ModelID
+		providerID := variant.ProviderID
+		inputDigest := ""
+		workloadDigest := ""
+		provenanceStatus := "legacy run: input manifest unavailable; actual backend revision, baseline, harness, and tool versions not captured"
+		if run.InputManifest != nil {
+			criteriaDefinitions = run.InputManifest.criteriaDefinitions()
+			variantNameValue = run.InputManifest.Variant.Name
+			modelID = run.InputManifest.Variant.RequestedModelID
+			providerID = run.InputManifest.Variant.RequestedProviderID
+			inputDigest = run.InputManifest.InputDigest
+			workloadDigest = run.InputManifest.WorkloadDigest
+			provenanceStatus = "requested input manifest captured; actual backend revision, baseline, harness, and tool versions not captured"
+		}
+		if strings.TrimSpace(variantNameValue) == "" {
+			variantNameValue = "unknown"
+		}
+		if strings.TrimSpace(modelID) == "" {
+			modelID = "unknown requested model"
+		}
+		if err := validateComparisonCriteria(run.ID, criteriaDefinitions); err != nil {
+			return nil, err
+		}
+		criteria := assessCriteria(criteriaDefinitions, evaluations[run.ID])
 		verificationStatus := criteria.Status
 		if run.Status != RunCompleted && criteria.Verified {
 			verificationStatus = "unverified: run not completed (criteria passed)"
@@ -95,17 +153,27 @@ func (c *Comparator) Compare(exp *Experiment) (*ComparisonReport, error) {
 		reports = append(reports, VariantReport{
 			VariantID:          run.VariantID,
 			RunID:              run.ID,
-			VariantName:        variantName(&variant),
-			ModelID:            variant.ModelID,
+			SessionID:          run.SessionID,
+			Branch:             run.Branch,
+			VariantName:        variantNameValue,
+			ModelID:            modelID,
+			ProviderID:         providerID,
+			InputDigest:        inputDigest,
+			WorkloadDigest:     workloadDigest,
+			ProvenanceStatus:   provenanceStatus,
 			Status:             run.Status,
-			Metrics:            run.Metrics,
+			Metrics:            cloneRunMetrics(run.Metrics),
+			CostEvidence:       runCostEvidence(run.Metrics),
 			CriteriaScore:      criteria.Score,
 			CriteriaPassed:     criteria.Passed,
 			CriteriaFailed:     criteria.Failed,
 			CriteriaPending:    criteria.Pending,
+			EvaluatedCriteria:  criteria.EvaluatedAutomated,
+			AutomatedCriteria:  criteria.AutomatedTotal,
 			VerificationStatus: verificationStatus,
 			Verified:           run.Status == RunCompleted && criteria.Verified,
 			RankEligible:       run.Status == RunCompleted && criteria.RankEligible,
+			ModelExecutions:    cloneModelExecutions(run.ModelExecutions),
 			OutputPreview:      truncate(run.Output, 500),
 			Error:              errorText,
 		})
@@ -120,6 +188,74 @@ func (c *Comparator) Compare(exp *Experiment) (*ComparisonReport, error) {
 		Rankings:     rankings,
 		Summary:      summary,
 	}, nil
+}
+
+func validateCompareRunsInputs(exp *Experiment, runs []Run, evaluations map[string][]CriterionEvaluation) error {
+	variantIDs := make(map[string]struct{}, len(exp.Variants))
+	for _, variant := range exp.Variants {
+		if strings.TrimSpace(variant.ID) == "" {
+			continue
+		}
+		if _, ok := variantIDs[variant.ID]; ok {
+			return fmt.Errorf("compare experiment contains duplicate variant id %q", variant.ID)
+		}
+		variantIDs[variant.ID] = struct{}{}
+	}
+	seenRunIDs := make(map[string]struct{}, len(runs))
+	for _, run := range runs {
+		if strings.TrimSpace(run.ID) == "" {
+			return errors.New("compare runs require non-empty run ids")
+		}
+		if _, ok := seenRunIDs[run.ID]; ok {
+			return fmt.Errorf("compare runs contain duplicate run id %q", run.ID)
+		}
+		seenRunIDs[run.ID] = struct{}{}
+		if run.ExperimentID != "" && exp.ID != "" && run.ExperimentID != exp.ID {
+			return fmt.Errorf("compare run %s belongs to experiment %s, not %s", run.ID, run.ExperimentID, exp.ID)
+		}
+		if run.ModelExecutions != nil {
+			if err := validateModelExecutions(run.ModelExecutions); err != nil {
+				return fmt.Errorf("compare run %s model executions: %w", run.ID, err)
+			}
+		}
+		if run.InputManifest != nil {
+			if err := run.InputManifest.Validate(); err != nil {
+				return fmt.Errorf("compare run %s input manifest: %w", run.ID, err)
+			}
+			if run.InputManifest.Variant.ID != "" && run.InputManifest.Variant.ID != run.VariantID {
+				return fmt.Errorf("compare run %s input manifest variant id %s does not match run variant id %s", run.ID, run.InputManifest.Variant.ID, run.VariantID)
+			}
+		} else if _, ok := variantIDs[run.VariantID]; !ok {
+			return fmt.Errorf("compare legacy run %s references missing variant id %s", run.ID, run.VariantID)
+		}
+	}
+	for runID, evals := range evaluations {
+		if _, ok := seenRunIDs[runID]; !ok {
+			continue
+		}
+		seenCriterionIDs := make(map[int64]struct{}, len(evals))
+		for _, eval := range evals {
+			if eval.RunID != "" && eval.RunID != runID {
+				return fmt.Errorf("compare evaluation for run %s has mismatched run id %s", runID, eval.RunID)
+			}
+			if _, ok := seenCriterionIDs[eval.CriterionID]; ok {
+				return fmt.Errorf("compare evaluations for run %s contain duplicate criterion evaluation for criterion id %d", runID, eval.CriterionID)
+			}
+			seenCriterionIDs[eval.CriterionID] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateComparisonCriteria(runID string, criteria []SuccessCriterion) error {
+	seen := make(map[int64]string, len(criteria))
+	for _, criterion := range criteria {
+		if existing, ok := seen[criterion.ID]; ok {
+			return fmt.Errorf("compare run %s has duplicate criterion id %d for %q and %q", runID, criterion.ID, existing, criterion.Name)
+		}
+		seen[criterion.ID] = criterion.Name
+	}
+	return nil
 }
 
 type criteriaAssessment struct {
@@ -224,16 +360,17 @@ func rankVariants(reports []VariantReport) []Ranking {
 	}
 
 	ordered := append([]VariantReport(nil), reports...)
-	// Cost comparability is grouped by CriteriaScore so that an entire
-	// equal-score eligible group uses the same rule, avoiding pairwise
-	// nontransitive sorting when some costs are unknown.
+	// Apply the same cost rule to every eligible run in an equal-score group.
 	unpricedScores := make(map[float64]bool)
 	for _, report := range ordered {
 		if !report.RankEligible {
 			continue
 		}
-		cost := report.Metrics.TotalCost
-		if !(cost > 0 && !math.IsInf(cost, 0) && !math.IsNaN(cost)) {
+		cost := report.CostEvidence
+		if cost.Status == "" {
+			cost = runCostEvidence(report.Metrics)
+		}
+		if !cost.Comparable {
 			unpricedScores[report.CriteriaScore] = true
 		}
 	}

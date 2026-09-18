@@ -119,6 +119,7 @@ const sessionExecObservationAggregateSQL = `SELECT
 		OR lane NOT IN ('work','control')
 		OR NOT ((command_type IN ('input','queue','steer','model','slash') AND lane = 'work')
 			OR (command_type IN ('interrupt','approval','pause','resume') AND lane = 'control'))
+		OR task_intent NOT IN ('','unknown','read_only','mutation')
 		OR task_id <> 'foreground'
 		OR generation <> 0
 		OR attempt < 0 OR attempt > ?4
@@ -552,7 +553,7 @@ func scanSessionExecObservationCommand(row rowScanner) (sessionExecObservationCo
 		&stored.command.SessionID, &stored.command.RunID, &stored.command.TaskID,
 		&stored.command.CommandID, &stored.command.TurnID, &stored.command.Generation,
 		&stored.command.Sequence, &stored.command.Lane, &stored.command.Type,
-		&stored.command.Content, &stored.command.InputDigest, &stored.command.AcceptedBy,
+		&stored.command.Content, &stored.command.TaskIntent, &stored.command.InputDigest, &stored.command.AcceptedBy,
 		&stored.target, &stored.state, &stored.attempt, &stored.leaseGeneration,
 		&stored.leaseOwner, &stored.leaseExpires, &stored.acceptedAt, &stored.startedAt,
 		&stored.completionDigest, &stored.completedBy, &stored.completedLeaseGeneration,
@@ -715,6 +716,7 @@ func sessionExecSafeObservedCommand(command *sessionExecObservationCommand, orig
 		status: sessionexec.CommandStatus{
 			Identity:        stored.command.Identity,
 			Type:            stored.command.Type,
+			TaskIntent:      stored.command.TaskIntent,
 			Lane:            stored.command.Lane,
 			State:           stored.state,
 			Attempt:         stored.attempt,

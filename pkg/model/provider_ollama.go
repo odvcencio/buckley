@@ -141,8 +141,9 @@ func (p *OllamaProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 	usage := usageFromOllama(chatResp.PromptEvalCount, chatResp.EvalCount)
 
 	return &ChatResponse{
-		ID:    "",
-		Model: chatResp.Model,
+		ID:                "",
+		Model:             chatResp.Model,
+		ExecutionIdentity: observedExecutionIdentity("", chatResp.Model, nil),
 		Choices: []Choice{
 			{
 				Index:        0,
@@ -243,7 +244,8 @@ func (p *OllamaProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 		}
 
 		stream := StreamChunk{
-			Model: chunkResp.Model,
+			Model:             chunkResp.Model,
+			ExecutionIdentity: observedExecutionIdentity("", chunkResp.Model, nil),
 			Choices: []StreamChoice{
 				{
 					Index:        0,

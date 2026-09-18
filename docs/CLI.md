@@ -114,6 +114,46 @@ buckley execute-task --plan <plan-id> --task <task-id> [OPTIONS]
 buckley execute-task --plan user-auth --task implement-jwt --remote-branch feature/auth
 ```
 
+### experiment
+
+Run and inspect retained model comparison experiments.
+
+```bash
+buckley experiment run <name> -m <model> -p <prompt>
+buckley experiment show <id|name> --format json > experiment.snapshot.json
+buckley experiment compare --snapshot experiment.snapshot.json
+```
+
+`experiment show --format json` exports a versioned snapshot for one stored
+experiment. The snapshot contains the experiment row, full stored run rows,
+input manifests, observed model execution identity rows when available, public
+run output, scalar metrics/status/errors, optional rich token-usage evidence,
+cost-known/unknown markers, and retained criterion evaluation rows.
+It does not embed worktree files or transcripts; `Run.Files` is only the stored
+list of touched paths. Version 1 preserves the existing stored Go row shape for
+nested experiment/run/evaluation fields, including capitalized field names such
+as `ExperimentID` and `InputManifest`.
+
+`experiment compare --snapshot <file>` reads that JSON file, validates the
+bounded 16 MiB payload and checksum, and recomputes the comparison report
+offline from retained rows only. It does not initialize providers, open the
+Buckley database, dispatch tools, or re-run shell criteria. Its JSON output is
+an envelope containing the source snapshot version, source snapshot digest, a
+fixed local provenance disclaimer, and the recomputed comparison report.
+Comparison cost ranking only uses runs with comparable authoritative cost
+evidence. Legacy positive scalar costs remain usable, but legacy zero-cost rows
+or retained usage marked missing, estimated, inconsistent, or otherwise
+unpriceable are shown as unknown/known-subtotal evidence rather than as free
+winners.
+
+Privacy note: the snapshot intentionally preserves full public run output and
+criteria details so future Buckley releases can re-evaluate stored comparison
+logic. Treat it as sensitive if prompts, user code, command output, or error
+text are sensitive. The snapshot checksum proves JSON self-consistency only; it
+is not an execution attestation, the export is not an atomic database snapshot,
+and the exporter version is not the historical harness identity that ran the
+experiment.
+
 ### ralph
 
 Run Ralph autonomous sessions for long-running tasks.
@@ -197,6 +237,18 @@ buckley pr                    # Create PR for current branch
 buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
 ```
+
+Both `commit` and `pr` use the `api` one-shot backend by default (OpenRouter, or
+another configured provider). By default (`oneshot.data_policy: none`, or
+`BUCKLEY_ONESHOT_DATA_POLICY=none`), these requests carry no
+`provider.zdr`/`provider.data_collection` field and are not subject to the
+durable-goal model-data-policy contract — only the OpenRouter account's own
+privacy/guardrail settings apply, the same as any other request. Set
+`oneshot.data_policy: zdr` to force zero data retention (relaxing only for a
+recognized OSS-licensed workspace) or `oneshot.data_policy: deny` to force
+non-ZDR retention with `data_collection: deny`; both opt-ins require the
+workspace to carry recognized OSS license evidence and fail closed otherwise.
+This setting is independent of Buckbot's `openrouter_privacy_fallback`.
 
 ### buckbot
 
@@ -626,6 +678,7 @@ When running in interactive mode, use `/` prefix for commands:
 | `BUCKLEY_MODEL_PR` | Override model for `buckley pr` |
 | `BUCKLEY_PROMPT_COMMIT` | Custom commit prompt template |
 | `BUCKLEY_PROMPT_PR` | Custom PR prompt template |
+| `BUCKLEY_ONESHOT_DATA_POLICY` | `commit`/`pr` OpenRouter privacy mode: `none` (default), `zdr`, or `deny` |
 | `BUCKLEY_PR_BASE` | Override PR base branch |
 | `BUCKLEY_TRUST_LEVEL` | Trust level: conservative, balanced, autonomous |
 | `BUCKLEY_APPROVAL_MODE` | Approval mode: ask, safe, auto, yolo |

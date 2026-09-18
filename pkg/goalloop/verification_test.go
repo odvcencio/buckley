@@ -25,6 +25,12 @@ func TestLoop_CompletionGateRoutesToVerify(t *testing.T) {
 		},
 		{
 			Rounds: 1, Summary: "tests pass",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
 			Completed: true, CompletedEvidenceID: "ev_claim",
 			Checks: []taskstate.VerificationEntry{
 				{Check: "unit tests", Status: taskstate.VerificationPass, Required: true, EvidenceID: "ev_tests"},
@@ -111,6 +117,12 @@ func TestLoop_DebtRoutesVerifyPhase(t *testing.T) {
 		},
 		{
 			Rounds: 1, Summary: "tests green",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_ok",
+			},
 			Checks: []taskstate.VerificationEntry{
 				{Check: "unit tests", Status: taskstate.VerificationPass, Required: true, EvidenceID: "ev_ok"},
 			},
@@ -134,6 +146,124 @@ func TestLoop_DebtRoutesVerifyPhase(t *testing.T) {
 	phases := []string{engine.seen[0].Phase, engine.seen[1].Phase, engine.seen[2].Phase}
 	if phases[0] != PhaseExecute || phases[1] != PhaseVerify || phases[2] != PhaseExecute {
 		t.Fatalf("phases = %v, want execute, verify, execute", phases)
+	}
+}
+
+func TestLoop_StateChangeCreatesCompletionVerificationDebtAcrossTurns(t *testing.T) {
+	t.Parallel()
+	engine := &scriptedEngine{outcomes: []TurnOutcome{
+		{Rounds: 1, StateChanged: true, Summary: "edited the workspace"},
+		{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_claim", Summary: "premature completion"},
+		{
+			Rounds:  1,
+			Summary: "post-change verification passed",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
+		},
+		{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_done", Summary: "done"},
+	}}
+	loop, ledger := newTestLoop(t, Config{Engine: engine})
+	ctx := context.Background()
+
+	intake, err := loop.Start(ctx, Goal{Statement: "edit then finish"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	result, err := loop.RunTask(ctx, intake.RunID, intake.Tasks[0].TaskID, intake.Goal, intake.Tasks[0].Spec)
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if result.Status != taskstate.StatusCompleted || result.Turns != 4 {
+		t.Fatalf("result = %+v, want completion only after carried debt is cleared", result)
+	}
+	if len(engine.seen) < 3 || !engine.seen[1].CompletionEvidence.RequiresVerification() {
+		t.Fatalf("second turn completion evidence = %+v, want carried verification debt", engine.seen[1].CompletionEvidence)
+	}
+	if got := engine.seen[1].CompletionEvidence.VerificationStatus; got != taskstate.VerificationPending {
+		t.Fatalf("carried completion evidence status = %q, want pending", got)
+	}
+
+	events, err := ledger.ListEvents(ctx, runledger.EventQuery{RunID: intake.RunID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var rejections int
+	for _, ev := range events {
+		if ev.Type == runledger.EventControllerDecision &&
+			ev.Payload["decision"] == "verification_gate_rejected_completion" {
+			rejections++
+		}
+	}
+	if rejections != 1 {
+		t.Fatalf("gate rejections = %d, want exactly one premature completion rejection", rejections)
+	}
+}
+
+func TestLoop_StateChangeWithSameTurnCompletionVerificationPassCompletes(t *testing.T) {
+	t.Parallel()
+	engine := &scriptedEngine{outcomes: []TurnOutcome{
+		{
+			Rounds: 1, StateChanged: true, Completed: true, CompletedEvidenceID: "ev_done", Summary: "edited and verified",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
+		},
+	}}
+	loop, _ := newTestLoop(t, Config{Engine: engine})
+	ctx := context.Background()
+
+	intake, err := loop.Start(ctx, Goal{Statement: "edit and verify"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	result, err := loop.RunTask(ctx, intake.RunID, intake.Tasks[0].TaskID, intake.Goal, intake.Tasks[0].Spec)
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if result.Status != taskstate.StatusCompleted || result.Turns != 1 {
+		t.Fatalf("result = %+v, want same-turn typed verification pass to clear mutation debt", result)
+	}
+}
+
+func TestLoop_DriveSnapshotUnknownCompletionEvidenceVersionFailsClosed(t *testing.T) {
+	t.Parallel()
+	engine := &scriptedEngine{outcomes: []TurnOutcome{
+		{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_done", Summary: "done"},
+	}}
+	loop, _ := newTestLoop(t, Config{Engine: engine})
+	ctx := context.Background()
+
+	intake, err := loop.Start(ctx, Goal{Statement: "resume odd durable state"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	step, err := loop.TurnStep(ctx, TurnStepRequest{
+		RunID:      intake.RunID,
+		TaskID:     intake.Tasks[0].TaskID,
+		Goal:       intake.Goal,
+		Spec:       intake.Tasks[0].Spec,
+		Generation: 1,
+		Drive: DriveSnapshot{
+			Summary:            "legacy durable payload",
+			Phase:              PhaseExecute,
+			CompletionEvidence: &taskstate.CompletionEvidenceState{Version: 99},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TurnStep: %v", err)
+	}
+	if step.Kind != StepVerify || step.Status == taskstate.StatusCompleted {
+		t.Fatalf("step = %+v, want unknown completion evidence version to route to verify", step)
+	}
+	if step.Drive.CompletionEvidence == nil || !step.Drive.CompletionEvidence.RequiresVerification() || step.Drive.CompletionEvidence.VerificationStatus != taskstate.VerificationInconclusive {
+		t.Fatalf("drive completion evidence = %+v, want inconclusive debt", step.Drive.CompletionEvidence)
 	}
 }
 
@@ -192,6 +322,12 @@ func TestLoop_QuestionsPersistOnCheckpoints(t *testing.T) {
 	engine := &scriptedEngine{outcomes: []TurnOutcome{
 		{
 			Rounds: 1, StateChanged: true, Summary: "found a fork in the road",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_done",
+			},
 			Questions: []taskstate.Question{{Text: "Keep legacy fixtures?", BlockingTasks: []string{"task-005"}}},
 			Completed: true, CompletedEvidenceID: "ev_done",
 		},

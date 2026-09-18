@@ -209,6 +209,9 @@ message CommandRequest {
 
   // Stable caller-provided identity for session commands.
   string command_id = 6;
+
+  // Optional result contract for this command: unknown, read_only, or mutation.
+  string task_intent = 7;
 }
 
 message CommandResponse {
@@ -341,6 +344,9 @@ message CreateHeadlessRequest {
 
   // Tool restrictions
   ToolPolicy tool_policy = 7;
+
+  // One-shot/headless result contract intent: unknown, read_only, or mutation
+  string task_intent = 8;
 }
 
 message ResourceLimits {
@@ -953,6 +959,7 @@ message SessionCommandStatus {
   SessionEffectSummary effect_summary = 17;
   repeated SessionEffectStatus effects = 18;
   bool effects_truncated = 19;
+  string task_intent = 20;
 }
 
 message SessionRoutineAttemptStatus {

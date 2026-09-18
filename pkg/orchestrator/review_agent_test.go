@@ -1,13 +1,17 @@
 package orchestrator
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/mock/gomock"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
 )
 
@@ -109,6 +113,164 @@ func TestReviewAgentReviewApproved(t *testing.T) {
 	}
 	if _, err := os.Stat(result.ArtifactPath); err != nil {
 		t.Fatalf("expected artifact file: %v", err)
+	}
+}
+
+func TestReviewAgentReview_ResponseErrorReturnsSafeIncompletePublicDraft(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origWD)
+
+	cfg := config.DefaultConfig()
+	cfg.Artifacts.ReviewDir = filepath.Join(tmpDir, "docs", "reviews")
+	plan := &Plan{ID: "plan-123", FeatureName: "Sample Feature"}
+
+	ctrl, mockModel := setupMockModel(t)
+	defer ctrl.Finish()
+
+	publicDraft := `{"summary":"public draft"}`
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message: model.Message{
+			Content:          "<think>PRIVATE_THINK_TAG</think>" + publicDraft,
+			Reasoning:        "PRIVATE_REASONING_FIELD",
+			ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "PRIVATE_REASONING_DETAIL"}},
+		},
+		FinishReason: "length",
+	}}}
+	rawProviderErr := errors.New("RAW_PROVIDER_ERROR_SENTINEL")
+	mockModel.EXPECT().SupportsReasoning(cfg.Models.Review).Return(false)
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, rawProviderErr)
+
+	agent := NewReviewAgent(plan, cfg, mockModel, tool.NewRegistry(), nil)
+	result, err := agent.Review(&Task{ID: "1", Title: "Review me"}, &BuilderResult{Implementation: "done"})
+	if result != nil {
+		t.Fatalf("Review returned result on incomplete response: %+v", result)
+	}
+	var incomplete *IncompleteReviewError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompleteReviewError", err)
+	}
+	if got := incomplete.PublicDraft(); got != publicDraft {
+		t.Fatalf("draft = %q, want %q", got, publicDraft)
+	}
+	if got := incomplete.FinishReason(); got != "length" {
+		t.Fatalf("finish reason = %q, want length", got)
+	}
+	if got := err.Error(); got != "review response incomplete" {
+		t.Fatalf("Error() = %q", got)
+	}
+	formatted := fmt.Sprintf("%v", err)
+	if formatted != "review response incomplete" {
+		t.Fatalf("formatted error = %q", formatted)
+	}
+	for _, sentinel := range []string{"PRIVATE_THINK_TAG", "PRIVATE_REASONING_FIELD", "PRIVATE_REASONING_DETAIL", "RAW_PROVIDER_ERROR_SENTINEL"} {
+		if strings.Contains(incomplete.PublicDraft(), sentinel) || strings.Contains(err.Error(), sentinel) || strings.Contains(formatted, sentinel) {
+			t.Fatalf("incomplete review leaked sentinel %q: draft=%q err=%q formatted=%q", sentinel, incomplete.PublicDraft(), err.Error(), formatted)
+		}
+	}
+}
+
+func TestReviewAgentReview_ResponseErrorWithPrivateOnlyDraftReturnsSafeIncomplete(t *testing.T) {
+	cfg := config.DefaultConfig()
+	plan := &Plan{ID: "plan-123", FeatureName: "Sample Feature"}
+
+	ctrl, mockModel := setupMockModel(t)
+	defer ctrl.Finish()
+
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message: model.Message{
+			Content:          "<think>PRIVATE_THINK_TAG</think>",
+			Reasoning:        "PRIVATE_REASONING_FIELD",
+			ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "PRIVATE_REASONING_DETAIL"}},
+		},
+		FinishReason: "length",
+	}}}
+	rawProviderErr := errors.New("RAW_PROVIDER_ERROR_SENTINEL")
+	mockModel.EXPECT().SupportsReasoning(cfg.Models.Review).Return(false)
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, rawProviderErr)
+
+	agent := NewReviewAgent(plan, cfg, mockModel, tool.NewRegistry(), nil)
+	result, err := agent.Review(&Task{ID: "1", Title: "Review me"}, &BuilderResult{Implementation: "done"})
+	if result != nil {
+		t.Fatalf("Review returned result on incomplete response: %+v", result)
+	}
+	var incomplete *IncompleteReviewError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompleteReviewError", err)
+	}
+	if got := incomplete.PublicDraft(); got != "" {
+		t.Fatalf("draft = %q, want empty", got)
+	}
+	if draft, ok := IncompleteReviewDraft(err); ok || draft != "" {
+		t.Fatalf("IncompleteReviewDraft = %q, %v; want empty, false", draft, ok)
+	}
+	formatted := fmt.Sprintf("%v", err)
+	if formatted != "review response incomplete" {
+		t.Fatalf("formatted error = %q", formatted)
+	}
+	for _, sentinel := range []string{"PRIVATE_THINK_TAG", "PRIVATE_REASONING_FIELD", "PRIVATE_REASONING_DETAIL", "RAW_PROVIDER_ERROR_SENTINEL"} {
+		if strings.Contains(incomplete.PublicDraft(), sentinel) || strings.Contains(err.Error(), sentinel) || strings.Contains(formatted, sentinel) {
+			t.Fatalf("incomplete review leaked sentinel %q: draft=%q err=%q formatted=%q", sentinel, incomplete.PublicDraft(), err.Error(), formatted)
+		}
+	}
+}
+
+func TestReviewAgentReview_TruncatedResponseDoesNotApprove(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origWD)
+
+	cfg := config.DefaultConfig()
+	cfg.Artifacts.ReviewDir = filepath.Join(tmpDir, "docs", "reviews")
+	plan := &Plan{ID: "plan-123", FeatureName: "Sample Feature"}
+
+	ctrl, mockModel := setupMockModel(t)
+	defer ctrl.Finish()
+
+	parseableApproval := `{
+		"summary": "All checks passed",
+		"issues": [],
+		"approval": {
+			"status": "approved",
+			"summary": "Looks good",
+			"ready_for_pr": true,
+			"remaining_work": []
+		}
+	}`
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message:      model.Message{Content: parseableApproval},
+		FinishReason: "length",
+	}}}
+	mockModel.EXPECT().SupportsReasoning(cfg.Models.Review).Return(false)
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, nil)
+
+	agent := NewReviewAgent(plan, cfg, mockModel, tool.NewRegistry(), nil)
+	result, err := agent.Review(&Task{ID: "1", Title: "Review me"}, &BuilderResult{Implementation: "done"})
+	if result != nil {
+		t.Fatalf("Review returned result on length finish: %+v", result)
+	}
+	var incomplete *IncompleteReviewError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompleteReviewError", err)
+	}
+	if incomplete.PublicDraft() != parseableApproval {
+		t.Fatalf("draft = %q, want %q", incomplete.PublicDraft(), parseableApproval)
+	}
+	if incomplete.FinishReason() != "length" {
+		t.Fatalf("finish reason = %q, want length", incomplete.FinishReason())
+	}
+	entries, readErr := os.ReadDir(cfg.Artifacts.ReviewDir)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read review dir: %v", readErr)
+	}
+	if len(entries) > 0 {
+		t.Fatalf("review artifacts were written for incomplete response: %v", entries)
 	}
 }
 

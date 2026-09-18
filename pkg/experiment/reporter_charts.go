@@ -3,7 +3,6 @@ package experiment
 import (
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"sort"
 	"strings"
@@ -133,20 +132,25 @@ func (r *TerminalReporter) renderHeader(exp *Experiment) {
 }
 
 func (r *TerminalReporter) renderResultsTable(report *ComparisonReport) {
+	r.renderProvenanceNote()
+	reportIndex := newVariantReportIndex(report.Variants)
+
 	// Table header
-	fmt.Fprintf(r.out, "%-20s │ %6s │ %9s │ %10s │ %8s │ %s\n",
+	fmt.Fprintf(r.out, "%s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
 		r.style(r.boldStyle, "Model"),
+		r.style(r.boldStyle, "Run"),
 		r.style(r.boldStyle, "Score"),
 		r.style(r.boldStyle, "Cost"),
 		r.style(r.boldStyle, "Duration"),
 		r.style(r.boldStyle, "Tokens"),
+		r.style(r.boldStyle, "Input"),
+		r.style(r.boldStyle, "Execution"),
 		r.style(r.boldStyle, "Evidence"),
 	)
-	fmt.Fprintln(r.out, strings.Repeat("─", 20)+"─┼"+strings.Repeat("─", 8)+"┼"+
-		strings.Repeat("─", 11)+"┼"+strings.Repeat("─", 12)+"┼"+strings.Repeat("─", 10)+"┼"+strings.Repeat("─", 10))
+	fmt.Fprintln(r.out, strings.Repeat("─", 70))
 
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.RunID)
+		v := reportIndex.find(ranking.RunID)
 		if v == nil {
 			continue
 		}
@@ -162,26 +166,20 @@ func (r *TerminalReporter) renderResultsTable(report *ComparisonReport) {
 			indicator = r.style(r.pendingStyle, "○")
 		}
 
-		// Keep model and run identifiers intact for repeated executions.
-		modelName := v.ModelID + " / " + v.RunID
-
 		// Score
-		score := fmt.Sprintf("%.0f%%", ranking.Score*100)
+		score := formatComparisonScore(v)
 
 		// Cost
-		cost := "-"
-		if v.Metrics.TotalCost > 0 {
-			cost = fmt.Sprintf("$%.4f", v.Metrics.TotalCost)
-		}
+		cost := formatCostEvidence(v.CostEvidence, v.Metrics)
 
 		// Duration
 		duration := formatDurationMs(v.Metrics.DurationMs)
 
 		// Tokens
-		tokens := fmt.Sprintf("%d", v.Metrics.PromptTokens+v.Metrics.CompletionTokens)
+		tokens := fmt.Sprintf("%d", formatRunTokens(v.Metrics))
 
-		fmt.Fprintf(r.out, "%s %-18s │ %6s │ %9s │ %10s │ %8s │ %s\n",
-			indicator, modelName, score, cost, duration, tokens, v.VerificationStatus)
+		fmt.Fprintf(r.out, "%s %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
+			indicator, v.ModelID, v.RunID, score, cost, duration, tokens, compactDigest(v.InputDigest), formatExecutionIdentitySummary(v.ModelExecutions), v.VerificationStatus)
 	}
 	fmt.Fprintln(r.out)
 }
@@ -191,24 +189,24 @@ func (r *TerminalReporter) renderCostChart(report *ComparisonReport) {
 
 	// Collect costs and find max
 	type costEntry struct {
-		modelID string
-		cost    float64
+		label string
+		cost  float64
 	}
 	var entries []costEntry
 	var maxCost float64
 
 	for _, v := range report.Variants {
 		cost := v.Metrics.TotalCost
-		if v.Status != RunCompleted || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+		if !v.CostEvidence.Comparable || v.Status != RunCompleted || !finiteNonNegativeFloat(cost) ||
+			(cost == 0 && v.CostEvidence.Status != CostEvidenceKnown) {
 			fmt.Fprintf(r.out, "%s / %s cost unknown or incomplete (not compared)\n", v.ModelID, v.RunID)
 			continue
 		}
-		entries = append(entries, costEntry{modelID: v.ModelID + " / " + v.RunID, cost: cost})
-		if cost > maxCost {
-			maxCost = cost
+		entries = append(entries, costEntry{label: comparisonRunLabel(v), cost: v.Metrics.TotalCost})
+		if v.Metrics.TotalCost > maxCost {
+			maxCost = v.Metrics.TotalCost
 		}
 	}
-
 	if len(entries) == 0 {
 		fmt.Fprintln(r.out, "No comparable cost evidence.")
 		fmt.Fprintln(r.out)
@@ -223,7 +221,7 @@ func (r *TerminalReporter) renderCostChart(report *ComparisonReport) {
 	// Render bars
 	barWidth := r.chartBarWidth()
 	for _, e := range entries {
-		r.renderBar(e.modelID, e.cost, maxCost, barWidth, "$%.4f")
+		r.renderBar(e.label, e.cost, maxCost, barWidth, "$%.4f")
 	}
 	fmt.Fprintln(r.out)
 }
@@ -233,14 +231,14 @@ func (r *TerminalReporter) renderDurationChart(report *ComparisonReport) {
 
 	// Collect durations and find max
 	type durationEntry struct {
-		modelID string
-		ms      int64
+		label string
+		ms    int64
 	}
 	var entries []durationEntry
 	var maxMs int64
 
 	for _, v := range report.Variants {
-		entries = append(entries, durationEntry{modelID: v.ModelID + " / " + v.RunID, ms: v.Metrics.DurationMs})
+		entries = append(entries, durationEntry{label: comparisonRunLabel(v), ms: v.Metrics.DurationMs})
 		if v.Metrics.DurationMs > maxMs {
 			maxMs = v.Metrics.DurationMs
 		}
@@ -254,19 +252,17 @@ func (r *TerminalReporter) renderDurationChart(report *ComparisonReport) {
 	// Render bars
 	barWidth := r.chartBarWidth()
 	for _, e := range entries {
-		label := e.modelID
 		bar := r.buildBar(float64(e.ms), float64(maxMs), barWidth)
 		duration := formatDurationMs(e.ms)
-		fmt.Fprintf(r.out, "%-14s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.durationStyle, duration))
+		fmt.Fprintf(r.out, "%s %s %s\n", e.label, r.style(r.barStyle, bar), r.style(r.durationStyle, duration))
 	}
 	fmt.Fprintln(r.out)
 }
 
-func (r *TerminalReporter) renderBar(modelID string, value, maxValue float64, width int, format string) {
-	label := modelID
+func (r *TerminalReporter) renderBar(label string, value, maxValue float64, width int, format string) {
 	bar := r.buildBar(value, maxValue, width)
 	valueStr := fmt.Sprintf(format, value)
-	fmt.Fprintf(r.out, "%-14s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.costStyle, valueStr))
+	fmt.Fprintf(r.out, "%s %s %s\n", label, r.style(r.barStyle, bar), r.style(r.costStyle, valueStr))
 }
 
 func (r *TerminalReporter) buildBar(value, maxValue float64, width int) string {
@@ -357,9 +353,11 @@ func (r *TerminalReporter) RenderCompact(exp *Experiment) error {
 
 	fmt.Fprintf(r.out, "%s ", r.style(r.boldStyle, exp.Name))
 	fmt.Fprintf(r.out, "%s\n", r.statusStyle(exp.Status, fmt.Sprintf("(%s)", exp.Status)))
+	r.renderProvenanceNote()
 
+	reportIndex := newVariantReportIndex(report.Variants)
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.RunID)
+		v := reportIndex.find(ranking.RunID)
 		if v == nil {
 			continue
 		}
@@ -374,20 +372,50 @@ func (r *TerminalReporter) RenderCompact(exp *Experiment) error {
 			indicator = r.style(r.pendingStyle, "○")
 		}
 
-		cost := ""
-		if v.Metrics.TotalCost > 0 {
-			cost = r.style(r.costStyle, fmt.Sprintf("$%.4f", v.Metrics.TotalCost))
-		}
+		cost := r.style(r.costStyle, formatCostEvidence(v.CostEvidence, v.Metrics))
 
-		fmt.Fprintf(r.out, "  %s %s %.0f%% %s %s %s\n",
+		rank := "-"
+		if ranking.Rank > 0 {
+			rank = fmt.Sprintf("%d", ranking.Rank)
+		}
+		tokens := formatRunTokens(v.Metrics)
+		fmt.Fprintf(r.out, "  %s #%s %s %s %s %s tokens=%d %s input=%s exec=%s %s\n",
 			indicator,
-			v.ModelID+" / "+v.RunID,
-			ranking.Score*100,
+			rank,
+			v.ModelID,
+			v.RunID,
+			formatComparisonScore(v),
 			formatDurationMs(v.Metrics.DurationMs),
+			tokens,
 			cost,
+			compactDigest(v.InputDigest),
+			formatExecutionIdentitySummary(v.ModelExecutions),
 			v.VerificationStatus,
 		)
 	}
 
 	return nil
+}
+
+func comparisonRunLabel(v VariantReport) string {
+	if v.RunID == "" {
+		return v.ModelID
+	}
+	return fmt.Sprintf("%s / %s", v.ModelID, v.RunID)
+}
+
+func (r *TerminalReporter) renderProvenanceNote() {
+	fmt.Fprintln(r.out, r.style(r.dimStyle, "Provenance: requested inputs only; backend, repository baseline, harness, and tool versions are not captured."))
+	fmt.Fprintln(r.out, r.style(r.dimStyle, "Execution identity: observed response identities only; not a complete attempt audit or backend revision proof."))
+}
+
+func compactDigest(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }

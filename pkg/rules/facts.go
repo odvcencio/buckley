@@ -232,9 +232,7 @@ type SessionMemoryFacts struct {
 func (f SessionMemoryFacts) ToMap() map[string]any { return structToMap(f) }
 
 type PromptAssemblyFacts struct {
-	ModelTier        string `arb:"model_tier"`
 	TaskType         string `arb:"task_type"`
-	GitDiffLines     int    `arb:"git_diff_lines"`
 	InstructionChars int    `arb:"instruction_chars"`
 	GTSAvailable     bool   `arb:"gts_available"`
 }

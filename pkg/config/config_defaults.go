@@ -334,7 +334,8 @@ func DefaultConfig() *Config {
 			DurableBackend: DefaultDurableBackend,
 		},
 		Oneshot: OneshotModeConfig{
-			Mode: DefaultOneshotMode,
+			Mode:       DefaultOneshotMode,
+			DataPolicy: DefaultOneshotDataPolicy,
 		},
 	}
 	applyDefaultRuntimeConfig(cfg)
@@ -346,15 +347,15 @@ func applyDefaultRuntimeConfig(cfg *Config) {
 		Coordinator: RLMCoordinatorConfig{
 			Model:               "auto",
 			MaxIterations:       10,
-			MaxTokensBudget:     0, // 0 = unlimited
+			MaxTokensBudget:     0, // 0 = runtime default (currently 100000)
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
-			StreamPartials:      true,
+			StreamPartials:      true, // Publish coordinator progress to iteration hooks and rlm iteration telemetry, not text-token streams.
 		},
 		SubAgent: RLMSubAgentConfig{
 			Model:         "",              // Empty = use execution model
 			MaxConcurrent: 3,               // Parallel sub-agent limit
-			Timeout:       5 * time.Minute, // Per-task timeout
+			Timeout:       5 * time.Minute, // Per-active-task cooperative deadline; queued concurrency/rate wait is excluded.
 		},
 		Scratchpad: RLMScratchpadConfig{
 			MaxEntriesMemory:  1000,

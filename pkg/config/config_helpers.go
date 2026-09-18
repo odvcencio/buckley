@@ -52,6 +52,15 @@ func (c *Config) OneshotMode() string {
 	return normalizeMode(c.Oneshot.Mode, DefaultOneshotMode)
 }
 
+// OneshotDataPolicy returns the normalized one-shot data policy: "none",
+// "zdr", or "deny". See OneshotModeConfig.DataPolicy.
+func (c *Config) OneshotDataPolicy() string {
+	if c == nil {
+		return DefaultOneshotDataPolicy
+	}
+	return normalizeMode(c.Oneshot.DataPolicy, DefaultOneshotDataPolicy)
+}
+
 func normalizeMode(mode, fallback string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {

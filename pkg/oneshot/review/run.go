@@ -80,6 +80,9 @@ type RunResult struct {
 
 // Parse parses the review markdown into structured data.
 func (r *RunResult) Parse() *ParsedReview {
+	if r.Error != nil {
+		return nil
+	}
 	if r.Parsed == nil && r.Review != "" {
 		r.Parsed = ParseReview(r.Review)
 	}
@@ -116,13 +119,15 @@ func (r *Runner) reviewWithAgent(ctx context.Context, systemPrompt, userPrompt s
 	allowedTools := []string{"read_file", "find_files", "search_text"}
 
 	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, userPrompt, allowedTools, oneshot.AgentExecutionOpts{})
+	if agentResult != nil {
+		result.Review = agentResult.Response
+		result.Trace = agentResult.Trace
+	}
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Review = agentResult.Response
-	result.Trace = agentResult.Trace
 	return result, nil
 }
 
@@ -138,6 +143,7 @@ func (r *Runner) reviewWithLegacyInvoker(ctx context.Context, systemPrompt, user
 
 	// Use simple text response without tools
 	response, trace, err := r.invoker.InvokeText(ctx, systemPrompt, userPrompt, audit)
+	result.Review = response
 	result.Trace = trace
 
 	if err != nil {
@@ -145,7 +151,6 @@ func (r *Runner) reviewWithLegacyInvoker(ctx context.Context, systemPrompt, user
 		return result, nil
 	}
 
-	result.Review = response
 	return result, nil
 }
 

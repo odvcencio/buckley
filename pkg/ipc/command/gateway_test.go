@@ -224,9 +224,10 @@ func TestHandlerFunc_ReturnsError(t *testing.T) {
 
 func TestSessionCommand_Fields(t *testing.T) {
 	cmd := SessionCommand{
-		SessionID: "test-session-789",
-		Type:      "execute-task",
-		Content:   "implement feature X",
+		SessionID:  "test-session-789",
+		Type:       "execute-task",
+		Content:    "implement feature X",
+		TaskIntent: "mutation",
 	}
 
 	if cmd.SessionID != "test-session-789" {
@@ -237,6 +238,23 @@ func TestSessionCommand_Fields(t *testing.T) {
 	}
 	if cmd.Content != "implement feature X" {
 		t.Errorf("Content = %s, want 'implement feature X'", cmd.Content)
+	}
+	if cmd.TaskIntent != "mutation" {
+		t.Errorf("TaskIntent = %s, want mutation", cmd.TaskIntent)
+	}
+	encoded, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"taskIntent":"mutation"`) {
+		t.Fatalf("encoded command missing taskIntent: %s", encoded)
+	}
+	var decoded SessionCommand
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if decoded.TaskIntent != cmd.TaskIntent {
+		t.Fatalf("decoded TaskIntent = %q, want %q", decoded.TaskIntent, cmd.TaskIntent)
 	}
 }
 

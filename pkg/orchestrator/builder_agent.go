@@ -67,6 +67,24 @@ const (
 	builderEventFailed         BuilderEventType = "builder.failed"
 )
 
+const builderToollessInstruction = "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation."
+
+type builderRoutePolicy struct {
+	client          builderRoutedModelClient
+	route           model.ModelRoute
+	offerTools      bool
+	catalogToolless bool
+}
+
+type builderRouteReasoningChecker struct {
+	client builderRoutedModelClient
+	route  model.ModelRoute
+}
+
+func (c builderRouteReasoningChecker) SupportsReasoning(string) bool {
+	return c.client.SupportsReasoningForRoute(c.route)
+}
+
 // builderEvent represents a single structured log entry for overseer replay.
 type builderEvent struct {
 	Timestamp time.Time         `json:"timestamp"`
@@ -111,11 +129,11 @@ func (a *BuilderAgent) resolveModel() string {
 	return a.config.Models.Execution
 }
 
-func (a *BuilderAgent) resolveReasoningEffort() string {
+func (a *BuilderAgent) resolveReasoningEffort(modelID string) string {
 	if a == nil {
 		return ""
 	}
-	return model.ResolveReasoningEffort(a.config, a.modelClient, nil, a.resolveModel(), "execution")
+	return model.ResolveReasoningEffort(a.config, a.modelClient, nil, modelID, "execution")
 }
 
 // SetEnricher attaches an optional code-intelligence enricher.
@@ -336,18 +354,51 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 		Content: prompt,
 	})
 
+	requestedModel := a.resolveModel()
+	var routePolicy *builderRoutePolicy
+	if routedClient, ok := a.modelClient.(builderRoutedModelClient); ok {
+		route, err := routedClient.ResolveModelRoute(requestedModel)
+		if err != nil {
+			return "", err
+		}
+		routePolicy = &builderRoutePolicy{
+			client:          routedClient,
+			route:           route,
+			offerTools:      routedClient.OfferToolsForRoute(route),
+			catalogToolless: routedClient.ToolsCatalogConfirmedUnavailableForRoute(route),
+		}
+	}
+
 	req := model.ChatRequest{
-		Model:       a.resolveModel(),
+		Model:       requestedModel,
 		Messages:    messages,
 		ToolChoice:  "auto",
 		Temperature: 0.2,
 	}
-	if effort := a.resolveReasoningEffort(); effort != "" {
+	if routePolicy != nil {
+		req.Model = routePolicy.route.RequestedModel
+		req.Route = routePolicy.route
+		if routePolicy.catalogToolless {
+			req.ToolsCatalogConfirmedUnavailable = true
+			req.Messages = append(req.Messages, model.Message{
+				Role:    "system",
+				Content: builderToollessInstruction,
+			})
+		}
+	}
+	if routePolicy != nil {
+		if effort := model.ResolveReasoningEffort(a.config, builderRouteReasoningChecker{
+			client: routePolicy.client,
+			route:  routePolicy.route,
+		}, nil, routePolicy.route.SelectedModel, "execution"); effort != "" {
+			req.Reasoning = &model.ReasoningConfig{Effort: effort}
+		}
+	} else if effort := a.resolveReasoningEffort(requestedModel); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
 	// Use streaming to handle tool calls
-	return a.generateWithTools(req, task)
+	return a.generateWithToolsWithRoute(req, task, routePolicy)
 }
 
 // generateWithTools drives the builder's model-and-tool turn loop through
@@ -355,6 +406,10 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 // projection (replacing the direct conversation.CompactModelMessagesForRequest
 // call), tool-call ID backfill, and the round/repeat guard.
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
+	return a.generateWithToolsWithRoute(req, task, nil)
+}
+
+func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *Task, routePolicy *builderRoutePolicy) (string, error) {
 	ctx := context.Background()
 	const maxIterations = 10 // Prevent infinite loops
 	messages := req.Messages
@@ -364,7 +419,9 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 	skillState := (*skill.RuntimeState)(nil)
 	var baseInjector func(string)
 	contextWindow := 0
-	if provider, ok := a.modelClient.(model.ContextWindowProvider); ok {
+	if routePolicy != nil {
+		contextWindow, _ = routePolicy.client.GetContextLengthForRoute(routePolicy.route)
+	} else if provider, ok := a.modelClient.(model.ContextWindowProvider); ok {
 		contextWindow, _ = provider.GetContextLength(req.Model)
 	}
 
@@ -392,11 +449,20 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		}
 
 		roundReq := req
-		if a.toolRegistry != nil {
+		if routePolicy != nil && routePolicy.catalogToolless {
+			roundReq.Tools = nil
+			roundReq.ToolChoice = ""
+			roundReq.ToolsCatalogConfirmedUnavailable = true
+		} else if a.toolRegistry != nil {
 			tools := a.toolRegistry.ToOpenAIFunctionsFiltered(allowedTools)
-			if len(tools) > 0 {
-				roundReq.Tools = tools
-				roundReq.ToolChoice = "auto"
+			if routePolicy == nil || routePolicy.offerTools {
+				if len(tools) > 0 {
+					roundReq.Tools = tools
+					roundReq.ToolChoice = "auto"
+				} else {
+					roundReq.Tools = nil
+					roundReq.ToolChoice = "none"
+				}
 			} else {
 				roundReq.Tools = nil
 				roundReq.ToolChoice = "none"
@@ -406,30 +472,38 @@ func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (str
 		return roundReq, nil
 	}
 
-	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, chatReq model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
-		resp, err := a.modelClient.ChatCompletion(ctx, chatReq)
+	callModel := agentloop.ResponseToolOfferModelCallerFunc(func(ctx context.Context, call agentloop.ModelDispatchCall) (*model.ChatResponse, bool, error) {
+		chatReq := call.Request
+		toolsOffered := len(chatReq.Tools) > 0 && chatReq.ToolChoice != "none"
+		dispatch := func(request model.ChatRequest) (*model.ChatResponse, error) {
+			if routePolicy != nil {
+				return routePolicy.client.ChatCompletionForRoute(ctx, request, routePolicy.route)
+			}
+			return a.modelClient.ChatCompletion(ctx, request)
+		}
+		resp, err := dispatch(chatReq)
 		if err == nil {
-			return resp, nil
+			return resp, toolsOffered, nil
 		}
 		// A provider may return billable content alongside a stream or
 		// transport error. Let Controller persist/account that fragment before
 		// deciding whether the turn is incomplete; never discard it here.
 		if resp != nil {
-			return resp, fmt.Errorf("model call failed after partial response: %w", err)
+			return resp, toolsOffered, fmt.Errorf("model call failed after partial response: %w", err)
 		}
-		if a.toolRegistry != nil && model.IsToolUnsupportedError(err) {
+		if toolsOffered && a.toolRegistry != nil && model.IsToolUnsupportedError(err) {
 			// The model rejected the tool schema outright: retry this round
 			// once with tools off instead of failing the turn.
 			retryReq := chatReq
 			retryReq.Tools = nil
 			retryReq.ToolChoice = "none"
-			resp, err = a.modelClient.ChatCompletion(ctx, retryReq)
+			resp, err = dispatch(retryReq)
 			if err != nil {
-				return nil, fmt.Errorf("model call failed: %w", err)
+				return nil, false, fmt.Errorf("model call failed: %w", err)
 			}
-			return resp, nil
+			return resp, false, nil
 		}
-		return nil, fmt.Errorf("model call failed: %w", err)
+		return nil, toolsOffered, fmt.Errorf("model call failed: %w", err)
 	})
 
 	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {

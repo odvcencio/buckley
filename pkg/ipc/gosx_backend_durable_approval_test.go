@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,88 @@ func TestGoSXBackendDispatchDurableApprovalUsesNativeRegistry(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			testGoSXBackendDurableApproval(t, test.typ, test.decision, test.wantStatus)
 		})
+	}
+}
+
+func TestGoSXBackendStartWorkPersistsInitialTaskIntent(t *testing.T) {
+	project := t.TempDir()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "gosx-start-response", "model": "gpt-4o",
+			"choices": []any{map[string]any{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "noted",
+				},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	t.Cleanup(provider.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = provider.URL
+	cfg.Models.DefaultProvider = "openai"
+	cfg.Models.Execution = "gpt-4o"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("model.NewManager: %v", err)
+	}
+	store, err := storage.New(filepath.Join(project, "buckley.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	evidenceStore, err := evidence.NewWithDB(store.DB(), filepath.Join(project, "evidence"))
+	if err != nil {
+		t.Fatalf("evidence.NewWithDB: %v", err)
+	}
+	ledger, err := runledger.NewWithDB(store.DB())
+	if err != nil {
+		t.Fatalf("runledger.NewWithDB: %v", err)
+	}
+	registry := headless.NewRegistry(headless.RegistryConfig{
+		Store:         store,
+		ModelManager:  mgr,
+		Config:        cfg,
+		ProjectRoot:   project,
+		RunLedger:     ledger,
+		EvidenceStore: evidenceStore,
+	})
+	t.Cleanup(registry.Stop)
+	server := NewServer(Config{ProjectRoot: project}, store, nil, command.NewGateway(), nil, cfg, nil, mgr)
+	if err := server.SetDurableStores(ledger, evidenceStore); err != nil {
+		t.Fatalf("SetDurableStores: %v", err)
+	}
+	if err := server.SetHeadlessRegistry(registry); err != nil {
+		t.Fatalf("SetHeadlessRegistry: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/app", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, &requestPrincipal{
+		Name: "alice", Scope: storage.TokenScopeMember,
+	}))
+	sessionID, err := (gosxBackend{server: server}).StartWork(context.Background(), req, gosxui.StartWorkRequest{
+		Project: project, Model: "gpt-4o", Prompt: "change a file", TaskIntent: "mutation",
+	})
+	if err != nil {
+		t.Fatalf("StartWork: %v", err)
+	}
+	inputID, _ := waitForGoSXCommandAcceptance(t, store, sessionID, "input")
+	status, err := store.GetCommandStatus(context.Background(), sessionID, inputID)
+	if err != nil {
+		t.Fatalf("GetCommandStatus: %v", err)
+	}
+	if status.TaskIntent != "mutation" {
+		t.Fatalf("initial command TaskIntent = %q, want mutation", status.TaskIntent)
+	}
+	if _, err := (gosxBackend{server: server}).StartWork(context.Background(), req, gosxui.StartWorkRequest{
+		Project: project, Model: "gpt-4o", Prompt: "hello", TaskIntent: "chat",
+	}); err == nil || !strings.Contains(err.Error(), "task intent") {
+		t.Fatalf("invalid StartWork task intent error = %v", err)
 	}
 }
 
@@ -166,15 +249,23 @@ func testGoSXBackendDurableApproval(t *testing.T, approvalType, decision, wantSt
 	}))
 	backend := gosxBackend{server: server}
 	if err := backend.Dispatch(context.Background(), req, gosxui.CommandRequest{
-		SessionID: info.ID,
-		Type:      "input",
-		Content:   "please write the file",
+		SessionID:  info.ID,
+		Type:       "input",
+		Content:    "please write the file",
+		TaskIntent: "mutation",
 	}); err != nil {
 		t.Fatalf("Dispatch input: %v", err)
 	}
 	inputID, inputActor := waitForGoSXCommandAcceptance(t, store, info.ID, "input")
 	if inputID == "" || inputActor != "alice" {
 		t.Fatalf("input command identity = id:%q actor:%q, want generated id and alice", inputID, inputActor)
+	}
+	inputStatus, err := store.GetCommandStatus(context.Background(), info.ID, inputID)
+	if err != nil {
+		t.Fatalf("GetCommandStatus input: %v", err)
+	}
+	if inputStatus.TaskIntent != "mutation" {
+		t.Fatalf("input command TaskIntent = %q, want mutation", inputStatus.TaskIntent)
 	}
 
 	runner, ok := registry.GetSession(info.ID)

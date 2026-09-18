@@ -186,7 +186,15 @@ func TestRunner_DrivesTaskThroughWireForm(t *testing.T) {
 	t.Parallel()
 	engine := &scriptedEngine{outcomes: []goalloop.TurnOutcome{
 		{Rounds: 2, ToolCalls: 3, StateChanged: true, Summary: "halfway", SpentUSD: 0.25},
-		{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_done", Summary: "done", SpentUSD: 0.10},
+		{
+			Rounds: 1, Completed: true, CompletedEvidenceID: "ev_done", Summary: "done", SpentUSD: 0.10,
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
+		},
 	}}
 	runner, intake := newTestRunner(t, engine)
 	ctx := context.Background()
@@ -247,6 +255,81 @@ func TestRunner_DrivesTaskThroughWireForm(t *testing.T) {
 	}
 	if !next.Done {
 		t.Fatalf("next after completion = %+v, want done", next)
+	}
+}
+
+func TestRunner_RunTurnCarriesMutationDebtAcrossDurableTurns(t *testing.T) {
+	t.Parallel()
+	engine := &scriptedEngine{outcomes: []goalloop.TurnOutcome{
+		{Rounds: 1, ToolCalls: 1, StateChanged: true, Summary: "edited", SpentUSD: 0.25},
+		{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_claim", Summary: "premature", SpentUSD: 0.10},
+		{
+			Rounds: 1, Completed: true, CompletedEvidenceID: "ev_done", Summary: "verified done", SpentUSD: 0.10,
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
+		},
+	}}
+	runner, intake := newTestRunner(t, engine)
+	ctx := context.Background()
+
+	next, err := runner.NextTask(ctx, durability.NextTaskRequest{RunID: intake.RunID})
+	if err != nil {
+		t.Fatalf("NextTask: %v", err)
+	}
+	seed, err := runner.ResumeSeed(ctx, intake.RunID, next.TaskID)
+	if err != nil {
+		t.Fatalf("ResumeSeed: %v", err)
+	}
+
+	first, err := runner.RunTurn(ctx, durability.TurnRequest{
+		RunID:              intake.RunID,
+		TaskID:             next.TaskID,
+		WorkspaceRoot:      intake.Goal.WorkspaceRoot,
+		Generation:         seed.Generation,
+		Drive:              seed.Drive,
+		WorkflowInstanceID: "wf-debt-test",
+	})
+	if err != nil {
+		t.Fatalf("first RunTurn: %v", err)
+	}
+	if first.Kind != string(goalloop.StepVerify) {
+		t.Fatalf("first turn = %+v, want verify after mutation debt", first)
+	}
+
+	second, err := runner.RunTurn(ctx, durability.TurnRequest{
+		RunID:              intake.RunID,
+		TaskID:             next.TaskID,
+		WorkspaceRoot:      intake.Goal.WorkspaceRoot,
+		Generation:         seed.Generation,
+		TurnIndex:          1,
+		Drive:              first.Drive,
+		WorkflowInstanceID: "wf-debt-test",
+	})
+	if err != nil {
+		t.Fatalf("second RunTurn: %v", err)
+	}
+	if second.Kind != string(goalloop.StepVerify) || second.Status == taskstate.StatusCompleted {
+		t.Fatalf("second turn = %+v, want carried debt to reject completion", second)
+	}
+
+	third, err := runner.RunTurn(ctx, durability.TurnRequest{
+		RunID:              intake.RunID,
+		TaskID:             next.TaskID,
+		WorkspaceRoot:      intake.Goal.WorkspaceRoot,
+		Generation:         seed.Generation,
+		TurnIndex:          2,
+		Drive:              second.Drive,
+		WorkflowInstanceID: "wf-debt-test",
+	})
+	if err != nil {
+		t.Fatalf("third RunTurn: %v", err)
+	}
+	if third.Kind != string(goalloop.StepCompleted) || third.Status != taskstate.StatusCompleted {
+		t.Fatalf("third turn = %+v, want verified completion", third)
 	}
 }
 

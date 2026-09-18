@@ -23,6 +23,7 @@ func TestFactContractsIncludesCoreDomains(t *testing.T) {
 	assertFact(t, byDomain["approval"], "risk.level")
 	assertFact(t, byDomain["routing"], "task.phase")
 	assertFact(t, byDomain["routing"], "model.supports_reasoning")
+	assertFact(t, byDomain["reasoning"], "task.name")
 	assertFact(t, byDomain["runtime/protocol"], "model.reasoning")
 	assertFact(t, byDomain["tool_budget"], "agent.max_tool_calls")
 	assertFact(t, byDomain["review_plan"], "diff_bytes")

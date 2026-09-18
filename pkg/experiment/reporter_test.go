@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/parallel"
 )
 
@@ -269,12 +270,18 @@ func TestComparisonMarkdown(t *testing.T) {
 				"# Experiment: comparison-test",
 				"**Description:** Testing comparison",
 				"**Hypothesis:** Model A is faster",
-				"**Task:** test prompt",
+				"**Current experiment task:** test prompt",
+				"Best verified run: variant-1 / run-1 (gpt-4, 100.0% score)",
 				"## Rankings",
-				"| Rank | Run | Variant | Model | Status | Evidence | Score | Cost | Duration |",
+				"| Rank | Run | Variant | Requested model | Execution identity | Status | Evidence | Score | Cost | Duration | Tokens |",
+				"| 1 | run-1 | variant-1 | gpt-4 | unknown (no model response identity evidence) | completed | verified | 100.0% | $0.0100 legacy scalar | 1s | 150 |",
+				"| 2 | run-2 | variant-2 | claude-3 | unknown (no model response identity evidence) | completed | evaluated: criteria failed | 0.0% | $0.0200 legacy scalar | 2s | 225 |",
 				"## Variant Details",
 				"### variant-1 / run-1 (gpt-4)",
 				"### variant-2 / run-2 (claude-3)",
+				"- **Run ID:** run-1",
+				"- **Variant ID:** v1",
+				"- **Evidence:** verified",
 			},
 		},
 	}
@@ -311,6 +318,84 @@ func TestComparisonMarkdown(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestComparisonMarkdown_DisclosesUnverifiedRunsAndIdentity(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:   "exp-unverified",
+		Name: "unverified",
+		Task: Task{Prompt: "compare"},
+		Variants: []Variant{
+			{ID: "v1", Name: "paid", ModelID: "paid-model", ProviderID: "provider-paid"},
+			{ID: "v2", Name: "free", ModelID: "free-model", ProviderID: "provider-free"},
+		},
+		Criteria: []SuccessCriterion{
+			{Name: "automated", Type: CriterionTestPass, Weight: 1},
+			{Name: "manual", Type: CriterionManual, Weight: 1},
+		},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	errText := "tool failed"
+	runs := []*Run{
+		{
+			ID:           "paid-run",
+			ExperimentID: exp.ID,
+			VariantID:    "v1",
+			SessionID:    "session-paid",
+			Branch:       "branch-paid",
+			Status:       RunCompleted,
+			Metrics:      RunMetrics{TotalCost: 0.02, DurationMs: 1500, PromptTokens: 7, CompletionTokens: 8},
+			ModelExecutions: []model.ExecutionIdentity{{
+				RequestedModel: "paid-model",
+				SelectedModel:  "paid-model",
+				ProviderID:     "provider-paid",
+				ResponseModel:  "paid-model-2026-09-05",
+				ResponseID:     "resp-paid-001",
+			}},
+		},
+		{
+			ID:           "free-run",
+			ExperimentID: exp.ID,
+			VariantID:    "v2",
+			Status:       RunFailed,
+			Metrics:      RunMetrics{TotalCost: 0, DurationMs: 500, PromptTokens: 1, CompletionTokens: 2},
+			Error:        &errText,
+		},
+	}
+	for _, run := range runs {
+		if err := store.SaveRun(run); err != nil {
+			t.Fatalf("SaveRun %s: %v", run.ID, err)
+		}
+	}
+	if err := store.ReplaceEvaluations("paid-run", []CriterionEvaluation{{CriterionID: exp.Criteria[0].ID, Passed: true, Score: 1}}); err != nil {
+		t.Fatalf("ReplaceEvaluations: %v", err)
+	}
+
+	got, err := NewReporterWithComparator(NewComparator(store)).ComparisonMarkdown(exp)
+	if err != nil {
+		t.Fatalf("ComparisonMarkdown: %v", err)
+	}
+	for _, want := range []string{
+		"No verified winner",
+		"| Rank | Run | Variant | Requested model | Execution identity | Status | Evidence | Score | Cost | Duration | Tokens |",
+		"| 1 | paid-run | paid | paid-model | 1 observed; selected=paid-model; provider=provider-paid; reported=paid-model-2026-09-05 | completed | manual review pending | 100.0% | $0.0200 legacy scalar | 2s | 15 |",
+		"| - | free-run | free | free-model | unknown (no model response identity evidence) | failed | unverified: missing automated evaluation | not evaluated | unknown (legacy run without retained cost evidence) | 500ms | 3 |",
+		"- **Provider:** provider-paid",
+		"- **Session:** session-paid",
+		"- **Branch:** branch-paid",
+		"- **Execution identity:** 1 observed response(s): 1:requested=paid-model selected=paid-model provider=provider-paid response_model=paid-model-2026-09-05 response_id=resp-paid-001",
+		"- **Execution identity limit:** observed response identities only; not a complete attempt audit or backend revision proof",
+		"- **Pending review:** manual",
+		"- **Error:** tool failed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ComparisonMarkdown missing %q in:\n%s", want, got)
+		}
 	}
 }
 
@@ -397,8 +482,12 @@ func TestFormatDurationMs(t *testing.T) {
 
 func TestFindVariantReport(t *testing.T) {
 	reports := []VariantReport{
-		{VariantID: "v1", VariantName: "first"},
-		{VariantID: "v2", VariantName: "second"},
+		{VariantID: "v1", RunID: "run-1", VariantName: "first"},
+		{VariantID: "v1", RunID: "run-2", VariantName: "second duplicate variant"},
+		{VariantID: "collision-id", RunID: "run-3", VariantName: "variant collision"},
+		{VariantID: "v4", RunID: "collision-id", VariantName: "run collision wins"},
+		{VariantID: "v4", RunID: "run-5", VariantName: "later duplicate variant"},
+		{VariantID: "v6", RunID: "run-5", VariantName: "later duplicate run"},
 	}
 
 	tests := []struct {
@@ -407,9 +496,24 @@ func TestFindVariantReport(t *testing.T) {
 		want string
 	}{
 		{
-			name: "found",
+			name: "found by run id",
+			id:   "run-2",
+			want: "second duplicate variant",
+		},
+		{
+			name: "variant fallback uses first match",
 			id:   "v1",
 			want: "first",
+		},
+		{
+			name: "run id wins over variant id collision",
+			id:   "collision-id",
+			want: "run collision wins",
+		},
+		{
+			name: "run duplicate uses first match",
+			id:   "run-5",
+			want: "later duplicate variant",
 		},
 		{
 			name: "not found",

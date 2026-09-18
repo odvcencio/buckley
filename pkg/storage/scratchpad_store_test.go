@@ -81,6 +81,48 @@ func TestScratchpadEntryList(t *testing.T) {
 	}
 }
 
+func TestScratchpadEntryListExcludingMetadataStringAppliesLimitAfterFilter(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "scratchpad-list-filtered.db"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Minute)
+	entries := []ScratchpadEntry{
+		{Key: "active-old", EntryType: "analysis", Summary: "active", Metadata: `{"buckley_visibility":"active"}`, CreatedAt: base},
+		{Key: "worker-valid", EntryType: "analysis", Summary: "worker", Metadata: `{"model":"m","agent_id":"a"}`, CreatedAt: base.Add(10 * time.Second)},
+		{Key: "malformed-new", EntryType: "analysis", Summary: "malformed", Metadata: `{not-json`, CreatedAt: base.Add(20 * time.Second)},
+		{Key: "durable-newer-1", EntryType: "decision", Summary: "durable", Metadata: `{"buckley_visibility":"durable_only"}`, CreatedAt: base.Add(30 * time.Second)},
+		{Key: "durable-newer-2", EntryType: "artifact", Summary: "durable", Metadata: `{"buckley_visibility":"durable_only"}`, CreatedAt: base.Add(40 * time.Second)},
+	}
+	for _, entry := range entries {
+		if _, err := store.UpsertScratchpadEntry(ctx, entry); err != nil {
+			t.Fatalf("UpsertScratchpadEntry() error = %v", err)
+		}
+	}
+
+	listed, err := store.ListScratchpadEntriesExcludingMetadataString(ctx, "buckley_visibility", "durable_only", 1)
+	if err != nil {
+		t.Fatalf("ListScratchpadEntriesExcludingMetadataString() error = %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(listed))
+	}
+	if listed[0].Key != "malformed-new" {
+		t.Fatalf("expected newest non-excluded entry, got %s", listed[0].Key)
+	}
+
+	listed, err = store.ListScratchpadEntriesExcludingMetadataString(ctx, "buckley_visibility", "durable_only", 10)
+	if err != nil {
+		t.Fatalf("ListScratchpadEntriesExcludingMetadataString() error = %v", err)
+	}
+	if len(listed) != 3 || listed[0].Key != "malformed-new" || listed[1].Key != "worker-valid" || listed[2].Key != "active-old" {
+		t.Fatalf("filtered entries = %+v, want malformed legacy row then valid worker row then active row", listed)
+	}
+}
+
 func TestScratchpadEntryListByType(t *testing.T) {
 	store, err := New(filepath.Join(t.TempDir(), "scratchpad-type.db"))
 	if err != nil {

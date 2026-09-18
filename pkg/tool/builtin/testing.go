@@ -461,7 +461,7 @@ func (t *RunTestsTool) extractFailures(framework, output string) []string {
 }
 
 // GenerateTestTool generates test scaffolding for a function or file
-type GenerateTestTool struct{}
+type GenerateTestTool struct{ workDirAware }
 
 func (t *GenerateTestTool) Name() string {
 	return "generate_test"
@@ -509,6 +509,21 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 	testFile := ""
 	if tf, ok := params["test_file"].(string); ok {
 		testFile = tf
+	}
+
+	if strings.TrimSpace(t.workDir) != "" {
+		abs, err := resolvePath(t.workDir, sourceFile)
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		sourceFile = abs
+		if testFile != "" {
+			abs, err := resolvePath(t.workDir, testFile)
+			if err != nil {
+				return &Result{Success: false, Error: err.Error()}, nil
+			}
+			testFile = abs
+		}
 	}
 
 	// Auto-generate test file path if not specified

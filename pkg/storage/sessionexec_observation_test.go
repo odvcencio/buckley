@@ -8,11 +8,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/sessionexec"
 )
+
+const sessionExecObservationOperationLimit = 5 * time.Second
 
 func newSessionExecObservationStores(t *testing.T, sessionID string) (*Store, *Store) {
 	t.Helper()
@@ -630,7 +633,7 @@ func TestSessionExecObservation_ResolvedEffectRequiresAndProjectsQuiescence(t *t
 	if _, err := store.GetCommandStatus(context.Background(), command.SessionID, command.CommandID); err != nil {
 		t.Fatal(err)
 	}
-	quiesceCtx, cancelQuiesce := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	quiesceCtx, cancelQuiesce := context.WithTimeout(context.Background(), sessionExecObservationOperationLimit)
 	if _, err := store.QuiesceSession(quiesceCtx, command.SessionID, sessionexec.ExecutionModeDetached, "operator_detached"); err != nil && !errors.Is(err, sessionexec.ErrQuiescenceIncomplete) {
 		cancelQuiesce()
 		t.Fatal(err)
@@ -708,7 +711,7 @@ func TestSessionExecObservation_QuiesceOriginRetainsConsistentBlockingFence(t *t
 			t.Fatal(err)
 		}
 	}
-	quiesceCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	quiesceCtx, cancel := context.WithTimeout(context.Background(), sessionExecObservationOperationLimit)
 	result, err := store.QuiesceSession(quiesceCtx, command.SessionID, sessionexec.ExecutionModeDetached, "operator_detached")
 	cancel()
 	if !errors.Is(err, sessionexec.ErrQuiescenceIncomplete) || result.Cancelled != 1 {
@@ -1612,25 +1615,38 @@ func TestSessionExecObservation_SnapshotEnvelopeLoadsStayBoundedAndWriterProgres
 
 	aggregateRead := make(chan struct{})
 	releaseObservation := make(chan struct{})
+	var releaseObservationOnce sync.Once
+	release := func() {
+		releaseObservationOnce.Do(func() {
+			close(releaseObservation)
+		})
+	}
+	defer release()
+	var aggregateReadOnce sync.Once
 	envelopesLoaded := 0
 	trace := &sessionExecObservationTrace{
 		envelopeLoaded: func() { envelopesLoaded++ },
 		aggregateRead: func() {
-			close(aggregateRead)
+			aggregateReadOnce.Do(func() {
+				close(aggregateRead)
+			})
 			<-releaseObservation
 		},
 	}
-	observationCtx := context.WithValue(context.Background(), sessionExecObservationTraceKey{}, trace)
-	type snapshotResult struct {
-		snapshot sessionexec.ExecutionSnapshot
-		err      error
-	}
-	snapshotDone := make(chan snapshotResult, 1)
+	observationCtx, cancelObservation := context.WithTimeout(context.Background(), sessionExecObservationOperationLimit)
+	defer cancelObservation()
+	observationCtx = context.WithValue(observationCtx, sessionExecObservationTraceKey{}, trace)
+	snapshotDone := make(chan sessionExecObservationSnapshotResult, 1)
 	go func() {
 		snapshot, err := store.GetExecutionSnapshot(observationCtx, sessionID, recentLimit)
-		snapshotDone <- snapshotResult{snapshot: snapshot, err: err}
+		snapshotDone <- sessionExecObservationSnapshotResult{snapshot: snapshot, err: err}
 	}()
-	<-aggregateRead
+	if observed, reachedAggregate := waitSessionExecObservationAggregate(t, observationCtx, aggregateRead, snapshotDone); !reachedAggregate {
+		if observed.err != nil {
+			t.Fatalf("snapshot returned before aggregate hook: %v", observed.err)
+		}
+		t.Fatalf("snapshot completed before aggregate hook without exercising writer progress gate: %+v", observed.snapshot.Summary)
+	}
 
 	type writerResult struct {
 		receipt sessionexec.Receipt
@@ -1648,14 +1664,28 @@ func TestSessionExecObservation_SnapshotEnvelopeLoadsStayBoundedAndWriterProgres
 		})
 		writerDone <- writerResult{receipt: receipt, err: err}
 	}()
-	<-writerStarted
-	close(releaseObservation)
+	select {
+	case <-writerStarted:
+	case <-writerCtx.Done():
+		t.Fatalf("writer did not start while snapshot aggregate was held: %v", writerCtx.Err())
+	}
+	release()
 
-	observed := <-snapshotDone
+	var observed sessionExecObservationSnapshotResult
+	select {
+	case observed = <-snapshotDone:
+	case <-observationCtx.Done():
+		t.Fatalf("snapshot did not finish after aggregate release: %v", observationCtx.Err())
+	}
 	if observed.err != nil {
 		t.Fatal(observed.err)
 	}
-	written := <-writerDone
+	var written writerResult
+	select {
+	case written = <-writerDone:
+	case <-writerCtx.Done():
+		t.Fatalf("writer did not finish while snapshot aggregate was held: %v", writerCtx.Err())
+	}
 	if written.err != nil || written.receipt.CommandID != "writer-progress-command" {
 		t.Fatalf("concurrent writer receipt=%+v err=%v", written.receipt, written.err)
 	}
@@ -1692,6 +1722,67 @@ func TestSessionExecObservation_SnapshotEnvelopeLoadsStayBoundedAndWriterProgres
 	}
 	if total != commandRows+1 {
 		t.Fatalf("post-observation command total=%d, want %d", total, commandRows+1)
+	}
+}
+
+func TestSessionExecObservation_SnapshotAggregateWaitSurfacesPreAggregateError(t *testing.T) {
+	const sessionID = "observation-bounded-snapshot-preaggregate-error"
+	store, _ := newSessionExecObservationStores(t, sessionID)
+	acceptObservationCommand(t, store, sessionID, "preaggregate-command", "input", "private")
+	if _, err := store.db.Exec(`UPDATE session_execution_state SET generation = 1 WHERE session_id = ?`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregateRead := make(chan struct{})
+	var aggregateReadOnce sync.Once
+	trace := &sessionExecObservationTrace{
+		aggregateRead: func() {
+			aggregateReadOnce.Do(func() {
+				close(aggregateRead)
+			})
+		},
+	}
+	observationCtx, cancelObservation := context.WithTimeout(context.Background(), sessionExecObservationOperationLimit)
+	defer cancelObservation()
+	observationCtx = context.WithValue(observationCtx, sessionExecObservationTraceKey{}, trace)
+	snapshotDone := make(chan sessionExecObservationSnapshotResult, 1)
+	go func() {
+		snapshot, err := store.GetExecutionSnapshot(observationCtx, sessionID, 1)
+		snapshotDone <- sessionExecObservationSnapshotResult{snapshot: snapshot, err: err}
+	}()
+
+	observed, reachedAggregate := waitSessionExecObservationAggregate(t, observationCtx, aggregateRead, snapshotDone)
+	if reachedAggregate {
+		t.Fatal("snapshot reached aggregate hook despite pre-aggregate corrupt execution state")
+	}
+	if !errors.Is(observed.err, sessionexec.ErrIdempotencyConflict) {
+		t.Fatalf("snapshot error = %v, want %v", observed.err, sessionexec.ErrIdempotencyConflict)
+	}
+	if !reflect.DeepEqual(observed.snapshot, sessionexec.ExecutionSnapshot{}) {
+		t.Fatalf("snapshot = %+v, want empty on pre-aggregate error", observed.snapshot)
+	}
+}
+
+type sessionExecObservationSnapshotResult struct {
+	snapshot sessionexec.ExecutionSnapshot
+	err      error
+}
+
+func waitSessionExecObservationAggregate(
+	t *testing.T,
+	ctx context.Context,
+	aggregateRead <-chan struct{},
+	snapshotDone <-chan sessionExecObservationSnapshotResult,
+) (sessionExecObservationSnapshotResult, bool) {
+	t.Helper()
+	select {
+	case <-aggregateRead:
+		return sessionExecObservationSnapshotResult{}, true
+	case observed := <-snapshotDone:
+		return observed, false
+	case <-ctx.Done():
+		t.Fatalf("snapshot neither reached aggregate hook nor returned: %v", ctx.Err())
+		return sessionExecObservationSnapshotResult{}, false
 	}
 }
 

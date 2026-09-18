@@ -41,6 +41,7 @@ var factContractSpecs = []factContractSpec{
 	{domain: "reasoning", purpose: "reasoning effort selection", fields: fields(
 		field("reasoning.config", "string"),
 		field("task.phase", "string"),
+		field("task.name", "string"),
 		field("model.supports_reasoning", "bool"),
 	)},
 	{domain: "oneshot", purpose: "one-shot command mode selection", facts: OneshotFacts{}},

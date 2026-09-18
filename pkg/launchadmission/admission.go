@@ -135,21 +135,6 @@ type Service struct {
 	store     Store
 }
 
-// NewService accepts only the concrete, package-opaque verification
-// authorities. Arbitrary observers cannot enter the production admission
-// path.
-func NewService(workspace *workspaceguard.GitInspector, price *model.Manager, image *launchimage.Verifier, store Store) (*Service, error) {
-	if workspace == nil || price == nil || image == nil || interfaceNil(store) {
-		return nil, errors.New("launchadmission: admission capability is unavailable")
-	}
-	return newService(
-		workspaceAuthority{verifier: workspace},
-		priceAuthority{verifier: price},
-		imageAuthority{verifier: image},
-		store,
-	)
-}
-
 func newService(workspace workspaceObserver, price priceObserver, image imageObserver, store Store) (*Service, error) {
 	if interfaceNil(workspace) || interfaceNil(price) || interfaceNil(image) || interfaceNil(store) {
 		return nil, errors.New("launchadmission: admission capability is unavailable")
@@ -185,24 +170,6 @@ func (a priceAuthority) ObservePrice(ctx context.Context, request PriceRequest) 
 }
 
 type imageAuthority struct{ verifier *launchimage.Verifier }
-
-func (a imageAuthority) ObserveImage(ctx context.Context, request ImageRequest) (ImageObservation, error) {
-	proof, err := a.verifier.Verify(ctx, request.WorkspaceRoot, request.Profile)
-	if err != nil {
-		return ImageObservation{}, err
-	}
-	value := proof.Snapshot()
-	return ImageObservation{
-		Schema: value.Schema, Contract: value.Contract,
-		Reference: value.Reference, ImageID: value.ImageID,
-		ManifestDigest: value.ManifestDigest, ConfigDigest: value.ConfigDigest,
-		SBOMSHA256: value.SBOMSHA256, ProvenanceSHA256: value.ProvenanceSHA256,
-		OS: value.OS, Architecture: value.Architecture,
-		ContextSHA256: value.ContextSHA256, ModuleLockSHA256: value.ModuleLockSHA256,
-		ToolchainLockSHA256: value.ToolchainLockSHA256,
-		GoVersion:           value.GoVersion, TinyGoVersion: value.TinyGoVersion,
-	}, nil
-}
 
 func (s *Service) Admit(ctx context.Context, request Request) (Record, bool, error) {
 	if s == nil || interfaceNil(s.workspace) || interfaceNil(s.price) || interfaceNil(s.image) || interfaceNil(s.store) {

@@ -136,3 +136,110 @@ func TestValidateRejectsNegativeOpenAICompatibleFirstContentReasoningChunkLimit(
 		t.Fatalf("Validate error = %v, want litellm first content reasoning chunk limit error", err)
 	}
 }
+
+func TestValidateRLMScratchpadEvictionPolicy(t *testing.T) {
+	for _, policy := range []string{"", "lru", " LRU ", "fifo", " FIFO "} {
+		cfg := DefaultConfig()
+		cfg.RLM.Scratchpad.EvictionPolicy = policy
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate rejected valid rlm.scratchpad.eviction_policy %q: %v", policy, err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.RLM.Scratchpad.EvictionPolicy = "lfu"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rlm.scratchpad.eviction_policy") {
+		t.Fatalf("Validate error = %v, want rlm.scratchpad.eviction_policy rejection", err)
+	}
+}
+
+func TestValidateRLMScratchpadEvictionPolicyRunsBeforeBuckbotBudgetValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RLM.Scratchpad.EvictionPolicy = "typo"
+	cfg.Buckbot.PerReviewBudgetUSD = -1
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "rlm.scratchpad.eviction_policy") {
+		t.Fatalf("Validate error = %v, want rlm scratchpad validation before buckbot budget validation", err)
+	}
+}
+
+func TestValidateRLMTiers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RLM.Tiers = map[string]RLMTierConfig{
+		"trivial":   {},
+		"light":     {},
+		"medium":    {},
+		"heavy":     {},
+		"reasoning": {},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected canonical rlm.tiers keys: %v", err)
+	}
+
+	for name, tiers := range map[string]map[string]RLMTierConfig{
+		"case mismatch": {"Light": {}},
+		"typo":          {"ligth": {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.RLM.Tiers = tiers
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rlm.tiers") {
+				t.Fatalf("Validate error = %v, want rlm.tiers rejection", err)
+			}
+		})
+	}
+
+	cfg = DefaultConfig()
+	cfg.RLM.Tiers = map[string]RLMTierConfig{"light": {MaxCostPerMillion: -0.1}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_cost_per_million") {
+		t.Fatalf("Validate error = %v, want max_cost_per_million rejection", err)
+	}
+
+	cfg = DefaultConfig()
+	cfg.RLM.Tiers = map[string]RLMTierConfig{"light": {MinContextWindow: -1}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "min_context_window") {
+		t.Fatalf("Validate error = %v, want min_context_window rejection", err)
+	}
+}
+
+// TestOneshotDataPolicyDefaultsToNone locks the 2026-09-04 owner decision:
+// a fresh config carries the permissive default, and the zero-value
+// OneshotModeConfig (e.g. a config loaded before this field existed)
+// resolves to the same default via OneshotDataPolicy's nil/empty handling.
+func TestOneshotDataPolicyDefaultsToNone(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Oneshot.DataPolicy != "none" {
+		t.Fatalf("DefaultConfig().Oneshot.DataPolicy = %q, want %q", cfg.Oneshot.DataPolicy, "none")
+	}
+	if got := cfg.OneshotDataPolicy(); got != DefaultOneshotDataPolicy {
+		t.Fatalf("OneshotDataPolicy() = %q, want %q", got, DefaultOneshotDataPolicy)
+	}
+
+	var zero Config
+	if got := zero.OneshotDataPolicy(); got != DefaultOneshotDataPolicy {
+		t.Fatalf("zero-value Config.OneshotDataPolicy() = %q, want %q", got, DefaultOneshotDataPolicy)
+	}
+	var nilCfg *Config
+	if got := nilCfg.OneshotDataPolicy(); got != DefaultOneshotDataPolicy {
+		t.Fatalf("nil Config.OneshotDataPolicy() = %q, want %q", got, DefaultOneshotDataPolicy)
+	}
+}
+
+func TestValidateOneshotDataPolicy(t *testing.T) {
+	for _, value := range []string{"", "none", "NONE", "zdr", "ZDR", "deny", "  deny  "} {
+		cfg := DefaultConfig()
+		cfg.Oneshot.DataPolicy = value
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() rejected valid oneshot.data_policy %q: %v", value, err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.Oneshot.DataPolicy = "strict"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "oneshot.data_policy") {
+		t.Fatalf("Validate error = %v, want oneshot.data_policy error", err)
+	}
+}

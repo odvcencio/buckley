@@ -40,6 +40,42 @@ func TestRunTestsToolUnsupportedFramework(t *testing.T) {
 	}
 }
 
+func TestGenerateTestToolUsesConfiguredWorkDir(t *testing.T) {
+	project := t.TempDir()
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "sample.go"), []byte("package sample\n\nfunc Add(a, b int) int { return a + b }\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+	if err := os.Chdir(other); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	tool := &GenerateTestTool{}
+	tool.SetWorkDir(project)
+	result, err := tool.Execute(map[string]any{"source_file": "sample.go"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if _, err := os.Stat(filepath.Join(project, "sample_test.go")); err != nil {
+		t.Fatalf("project test file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "sample_test.go")); !os.IsNotExist(err) {
+		t.Fatalf("test file written in process cwd, stat err=%v", err)
+	}
+}
+
 func TestLocalGoTestPath(t *testing.T) {
 	tests := map[string]string{
 		".":          ".",

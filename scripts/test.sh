@@ -5,9 +5,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if [[ "${GO_TEST_TARGET:-}" == "all" ]]; then
-  mapfile -t packages < <(go list ./...)
+  go_list_args=(./...)
 else
-  mapfile -t packages < <(go list ./pkg/... ./cmd/buckley)
+  go_list_args=(./pkg/... ./cmd/buckley)
+fi
+
+packages_output=""
+if ! packages_output="$(go list "${go_list_args[@]}")"; then
+  echo "go list failed for: ${go_list_args[*]}" >&2
+  exit 1
+fi
+
+packages=()
+if [[ -n "$packages_output" ]]; then
+  mapfile -t packages <<<"$packages_output"
 fi
 
 if [[ "${#packages[@]}" -eq 0 ]]; then

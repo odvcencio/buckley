@@ -433,6 +433,116 @@ func TestPostBuckbotReviewPayloadGraphQLRequiresReviewID(t *testing.T) {
 	}
 }
 
+func TestPostBuckbotReviewPayloadRESTClassifiesOnlyStructuredInlineValidation(t *testing.T) {
+	original := runBuckbotGitHubFn
+	t.Cleanup(func() { runBuckbotGitHubFn = original })
+
+	event := gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "1234567890abcdef",
+	}
+	inline := []map[string]any{{
+		"path": "a.go",
+		"line": 12,
+		"side": "RIGHT",
+		"body": "finding",
+	}}
+
+	tests := []struct {
+		name      string
+		output    string
+		wantTyped bool
+	}{
+		{
+			name: "pull request review comment validation",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}`,
+			wantTyped: true,
+		},
+		{
+			name: "diagnostic before JSON and trailing diagnostic",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}
+gh: Validation Failed (HTTP 422)`,
+			wantTyped: true,
+		},
+		{
+			name: "JSON before diagnostic",
+			output: `{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}
+gh: Validation Failed (HTTP 422)`,
+			wantTyped: true,
+		},
+		{
+			name: "top-level comments field validation remains ambiguous",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"comments","code":"invalid"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "spam 422 remains ambiguous",
+			output: `gh: Validation Failed, or the endpoint has been spammed. (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"body","code":"spam"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "inline then spam remains ambiguous",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"},{"resource":"PullRequestReview","field":"body","code":"spam"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "spam then inline remains ambiguous",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"body","code":"spam"},{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "inline plus top level body remains ambiguous",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"},{"resource":"PullRequestReview","field":"body","code":"invalid"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "inline comment body remains ambiguous",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"body","code":"invalid"}]}`,
+			wantTyped: false,
+		},
+		{
+			name: "multiple inline location failures",
+			output: `gh: Validation Failed (HTTP 422)
+{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"},{"resource":"PullRequestReviewComment","field":"path","code":"invalid"}]}`,
+			wantTyped: true,
+		},
+		{
+			name:      "permission failure is not validation",
+			output:    `gh: Resource not accessible by integration (HTTP 403)`,
+			wantTyped: false,
+		},
+		{
+			name:      "unstructured 422 is not enough",
+			output:    `gh: Validation Failed for line comments (HTTP 422)`,
+			wantTyped: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runBuckbotGitHubFn = func(context.Context, []string, []byte) ([]byte, error) {
+				return []byte(tt.output), errors.New("exit status 1")
+			}
+
+			err := postBuckbotReviewPayloadREST(context.Background(), event, "review", inline)
+			if err == nil {
+				t.Fatal("postBuckbotReviewPayloadREST() error = nil, want error")
+			}
+			if got := isBuckbotInlineValidationError(err); got != tt.wantTyped {
+				t.Fatalf("isBuckbotInlineValidationError() = %v, want %v for %v", got, tt.wantTyped, err)
+			}
+		})
+	}
+}
+
 func TestBuckbotReviewPayloadHelpersRejectIncompleteIdentity(t *testing.T) {
 	original := runBuckbotGitHubFn
 	t.Cleanup(func() { runBuckbotGitHubFn = original })
@@ -473,10 +583,10 @@ func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *tes
 	postBuckbotReviewPayloadFn = func(_ context.Context, _ gitwatcher.PullRequestEvent, body string, comments []map[string]any) error {
 		calls = append(calls, postCall{body: body, comments: comments})
 		if len(calls) == 1 {
-			return errors.New("one line is outside the diff")
+			return &buckbotInlineValidationError{err: errors.New("one line is outside the diff")}
 		}
 		if len(calls) == 4 {
-			return errors.New("second line remains invalid")
+			return &buckbotInlineValidationError{err: errors.New("second line remains invalid")}
 		}
 		return nil
 	}
@@ -505,8 +615,20 @@ func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *tes
 		Number:     42,
 		HeadSHA:    "1234567890abcdef",
 	}, review)
-	if err != nil {
-		t.Fatalf("postBuckbotReview() error = %v", err)
+	var deliveryErr *buckbotReviewDeliveryError
+	if !errors.As(err, &deliveryErr) {
+		t.Fatalf("postBuckbotReview() error = %v, want delivery error", err)
+	}
+	if !deliveryErr.summaryPosted || deliveryErr.inlineTotal != 2 ||
+		deliveryErr.inlineAttempted != 2 || deliveryErr.inlineFailed != 1 ||
+		deliveryErr.ambiguous {
+		t.Fatalf("delivery error = %#v, want one definite inline failure after summary", deliveryErr)
+	}
+	if len(deliveryErr.locations) != 1 || deliveryErr.locations[0] != "second.go:24" {
+		t.Fatalf("locations = %#v, want second.go:24", deliveryErr.locations)
+	}
+	if !strings.Contains(err.Error(), "summary posted") || !strings.Contains(err.Error(), "1 of 2 inline comments failed") {
+		t.Fatalf("delivery error text = %q, want partial summary/inline details", err)
 	}
 	if len(calls) != 4 {
 		t.Fatalf("post calls = %d, want batch, summary, and two individual comments", len(calls))
@@ -519,6 +641,171 @@ func TestPostBuckbotReviewPreservesValidInlineCommentsAfterBatchRejection(t *tes
 	if !strings.Contains(calls[1].body, "Buckbot · Grade C · CHANGES REQUESTED") {
 		t.Fatalf("summary fallback = %q, want formatted review", calls[1].body)
 	}
+}
+
+func TestPostBuckbotReviewDoesNotFallbackWithoutAffirmativeInlineValidation(t *testing.T) {
+	original := postBuckbotReviewPayloadFn
+	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "permission", err: errors.New("post GitHub review: Resource not accessible by integration (HTTP 403)")},
+		{name: "spam 422", err: errors.New("post GitHub review: Validation Failed, or the endpoint has been spammed. (HTTP 422)")},
+		{name: "post state ambiguous", err: errors.New("post GitHub review: connection reset; post-state check: read posted Buckbot reviews: timeout")},
+		{name: "stale head", err: errors.New("check existing GitHub review: read posted Buckbot reviews: head changed from old to new")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			postBuckbotReviewPayloadFn = func(context.Context, gitwatcher.PullRequestEvent, string, []map[string]any) error {
+				calls++
+				return tt.err
+			}
+
+			err := postBuckbotReview(context.Background(), gitwatcher.PullRequestEvent{
+				Repository: "owner/repo",
+				Number:     42,
+				HeadSHA:    "1234567890abcdef",
+			}, buckbotReviewWithTwoFindings())
+			if err == nil || !errors.Is(err, tt.err) {
+				t.Fatalf("error = %v, want original %v", err, tt.err)
+			}
+			if calls != 1 {
+				t.Fatalf("calls = %d, want no fallback fanout", calls)
+			}
+		})
+	}
+}
+
+func TestPostBuckbotReviewStopsFallbackOnCancellation(t *testing.T) {
+	original := postBuckbotReviewPayloadFn
+	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	postBuckbotReviewPayloadFn = func(context.Context, gitwatcher.PullRequestEvent, string, []map[string]any) error {
+		t.Fatal("canceled context must fail before posting")
+		return nil
+	}
+	err := postBuckbotReview(ctx, gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "1234567890abcdef",
+	}, buckbotReviewWithTwoFindings())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
+
+func TestPostBuckbotReviewStopsInlineFanoutWhenCanceledAfterSummaryFallback(t *testing.T) {
+	original := postBuckbotReviewPayloadFn
+	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+	postBuckbotReviewPayloadFn = func(_ context.Context, _ gitwatcher.PullRequestEvent, body string, comments []map[string]any) error {
+		calls++
+		switch calls {
+		case 1:
+			return &buckbotInlineValidationError{err: errors.New("batch inline validation failed")}
+		case 2:
+			if strings.TrimSpace(body) == "" || len(comments) != 0 {
+				t.Fatalf("summary fallback call = body %q comments %d, want summary only", body, len(comments))
+			}
+			cancel()
+			return nil
+		default:
+			t.Fatalf("calls = %d, want cancellation to stop before inline fanout", calls)
+			return nil
+		}
+	}
+
+	err := postBuckbotReview(ctx, gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "1234567890abcdef",
+	}, buckbotReviewWithTwoFindings())
+	var deliveryErr *buckbotReviewDeliveryError
+	if !errors.As(err, &deliveryErr) {
+		t.Fatalf("error = %v, want delivery error", err)
+	}
+	if !errors.Is(err, context.Canceled) || !deliveryErr.summaryPosted ||
+		!deliveryErr.ambiguous || deliveryErr.inlineAttempted != 0 ||
+		deliveryErr.inlineFailed != 0 || deliveryErr.inlineTotal != 2 {
+		t.Fatalf("delivery error = %#v, want summary-only cancellation", deliveryErr)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want batch and summary only", calls)
+	}
+}
+
+func TestPostBuckbotReviewStopsInlineFanoutAfterAmbiguousIndividualFailure(t *testing.T) {
+	original := postBuckbotReviewPayloadFn
+	t.Cleanup(func() { postBuckbotReviewPayloadFn = original })
+
+	ambiguousErr := errors.New("post GitHub review: connection reset; post-state check unavailable")
+	var calls int
+	postBuckbotReviewPayloadFn = func(_ context.Context, _ gitwatcher.PullRequestEvent, body string, comments []map[string]any) error {
+		calls++
+		switch calls {
+		case 1:
+			return &buckbotInlineValidationError{err: errors.New("batch inline validation failed")}
+		case 2:
+			if strings.TrimSpace(body) == "" || len(comments) != 0 {
+				t.Fatalf("summary fallback call = body %q comments %d, want summary only", body, len(comments))
+			}
+			return nil
+		case 3:
+			if len(comments) != 1 {
+				t.Fatalf("first inline fallback comments = %d, want 1", len(comments))
+			}
+			return ambiguousErr
+		default:
+			t.Fatalf("calls = %d, want fanout to stop after ambiguous inline failure", calls)
+			return nil
+		}
+	}
+
+	err := postBuckbotReview(context.Background(), gitwatcher.PullRequestEvent{
+		Repository: "owner/repo",
+		Number:     42,
+		HeadSHA:    "1234567890abcdef",
+	}, buckbotReviewWithTwoFindings())
+	var deliveryErr *buckbotReviewDeliveryError
+	if !errors.As(err, &deliveryErr) {
+		t.Fatalf("error = %v, want delivery error", err)
+	}
+	if !errors.Is(err, ambiguousErr) || !deliveryErr.summaryPosted ||
+		!deliveryErr.ambiguous || deliveryErr.inlineAttempted != 1 ||
+		deliveryErr.inlineFailed != 1 || deliveryErr.inlineTotal != 2 {
+		t.Fatalf("delivery error = %#v, want ambiguous partial after one inline", deliveryErr)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want batch, summary, first inline only", calls)
+	}
+}
+
+func buckbotReviewWithTwoFindings() string {
+	return `## Grade: C
+
+## Findings
+### FINDING-001: [MAJOR] First defect
+- **File**: first.go:12
+- **Evidence**: The first condition fails.
+- **Impact**: Users receive the wrong result.
+- **Fix**: Correct the first condition.
+
+### FINDING-002: [MINOR] Second defect
+- **File**: second.go:24
+- **Evidence**: The second condition fails.
+- **Impact**: Logs contain the wrong value.
+- **Fix**: Correct the second condition.
+
+## Verdict
+- **Approved**: NO
+- **Blockers**: FINDING-001`
 }
 
 func mustJSONQuote(t *testing.T, value string) string {

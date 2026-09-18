@@ -97,7 +97,13 @@ func TestFileStatusDescription(t *testing.T) {
 }
 
 func TestSystemPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
 	prompt := SystemPrompt()
+	if prompt != commitSystemPrompt {
+		t.Fatalf("SystemPrompt() changed the default prompt:\n%s", prompt)
+	}
 
 	// Should contain key instructions
 	if !strings.Contains(prompt, "git commit message generator") {
@@ -117,6 +123,20 @@ func TestSystemPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "imperative mood") {
 		t.Error("expected prompt to mention imperative mood")
+	}
+}
+
+func TestSystemPromptAppliesCommitOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "{{DEFAULT_PROMPT}}\n\nPrefer one precise body bullet.")
+
+	prompt := SystemPrompt()
+	if !strings.Contains(prompt, "Prefer one precise body bullet.") {
+		t.Fatalf("SystemPrompt() did not apply the commit override:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Use the generate_commit tool") {
+		t.Fatalf("commit override lost the generate_commit contract:\n%s", prompt)
 	}
 }
 

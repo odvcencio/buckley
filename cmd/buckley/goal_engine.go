@@ -18,6 +18,7 @@ import (
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
@@ -105,10 +106,83 @@ var codeModeTools = []string{"exec_program", "run_shell", "edit_file", "write_fi
 
 // goalTurnState collects what one turn's tool calls report.
 type goalTurnState struct {
-	completed        bool
-	completedSummary string
-	blocker          *taskstate.Blocker
-	stateChanged     bool
+	completed                bool
+	completedSummary         string
+	blocker                  *taskstate.Blocker
+	completionEvidence       taskstate.CompletionEvidenceState
+	stateChanged             bool
+	stateObservationFailed   bool
+	stateObservationError    string
+	sequence                 int
+	lastStateChangeSequence  int
+	lastVerificationSequence int
+	lastVerificationPassed   bool
+	lastVerificationEvidence string
+}
+
+func newGoalTurnState(task goalloop.TaskContext) *goalTurnState {
+	completionEvidence := task.CompletionEvidence
+	switch completionEvidence.Version {
+	case 0:
+		completionEvidence = taskstate.NewCompletionEvidenceState()
+	case 1:
+	default:
+		completionEvidence = completionEvidence.NormalizeNonTerminal()
+	}
+	return &goalTurnState{completionEvidence: completionEvidence}
+}
+
+func (s *goalTurnState) observeOutcome(outcome agentloop.ToolOutcome) {
+	if s == nil {
+		return
+	}
+	if s.completionEvidence.Version == 0 {
+		s.completionEvidence = taskstate.NewCompletionEvidenceState()
+	}
+	s.sequence++
+	if outcome.StateObserved && outcome.StateChanged {
+		s.stateChanged = true
+		s.lastStateChangeSequence = s.sequence
+		s.completionEvidence.StateChangeObserved = true
+		s.completionEvidence.VerificationStatus = taskstate.VerificationPending
+		s.completionEvidence.VerificationEvidenceID = ""
+	}
+	if outcome.StateObservationFailed {
+		s.stateObservationFailed = true
+		s.stateObservationError = taskstate.SanitizeCompletionEvidenceError(outcome.StateObservationError)
+		s.completionEvidence.StateObservationFailed = true
+		s.completionEvidence.StateObservationError = s.stateObservationError
+		s.completionEvidence.VerificationStatus = taskstate.VerificationInconclusive
+		s.completionEvidence.VerificationEvidenceID = ""
+	}
+	if outcome.VerificationObserved {
+		s.lastVerificationSequence = s.sequence
+		s.lastVerificationPassed = outcome.VerificationPassed
+		s.lastVerificationEvidence = strings.TrimSpace(outcome.EvidenceID)
+		s.refreshCompletionVerificationFromLatestOutcome()
+	}
+}
+
+func (s *goalTurnState) refreshCompletionVerificationFromLatestOutcome() {
+	if s == nil {
+		return
+	}
+	if s.completionEvidence.StateObservationFailed {
+		return
+	}
+	if s.stateChanged && s.lastVerificationSequence <= s.lastStateChangeSequence {
+		s.completionEvidence.StateChangeObserved = true
+		s.completionEvidence.VerificationStatus = taskstate.VerificationPending
+		s.completionEvidence.VerificationEvidenceID = ""
+		return
+	}
+	if s.lastVerificationPassed && s.lastVerificationEvidence != "" {
+		s.completionEvidence.VerificationStatus = taskstate.VerificationPass
+		s.completionEvidence.VerificationEvidenceID = s.lastVerificationEvidence
+		return
+	}
+	s.completionEvidence.VerificationStatus = taskstate.VerificationFail
+	s.completionEvidence.VerificationEvidenceID = ""
 }
 
 // RunTurn implements goalloop.TurnEngine.
@@ -128,7 +202,19 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	if err := e.enforceGoalModelPolicy(ctx, task, providerID); err != nil {
 		return goalloop.TurnOutcome{}, err
 	}
-	state := &goalTurnState{}
+	offerTools := e.mgr.OfferToolsForRoute(route)
+	toolsCatalogConfirmedUnavailable := e.mgr.ToolsCatalogConfirmedUnavailableForRoute(route)
+	if !offerTools && toolsCatalogConfirmedUnavailable {
+		summary := fmt.Sprintf("goal turn blocked before model dispatch: selected route %s does not advertise tool support", route.SelectedModel)
+		return goalloop.TurnOutcome{
+			Summary: summary,
+			Blocker: &taskstate.Blocker{
+				Reason: summary,
+				Needs:  "configure a tool-capable execution model for durable goal execution",
+			},
+		}, nil
+	}
+	state := newGoalTurnState(task)
 	orientationText := strings.Join(append([]string{task.Goal.Statement, task.Spec.Title, task.Spec.Description}, task.Goal.AcceptanceCriteria...), "\n")
 	orientation := workspaceevidence.InspectOrientation(e.workDir, task.Spec.Claims, orientationText).Render()
 	messages := []model.Message{
@@ -200,27 +286,7 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		// Replaying a result must not execute the tool again, but the goal
 		// loop still needs the pure in-memory state that the original
 		// dispatch established (for example, completion or blocking).
-		switch call.Function.Name {
-		case goalCompleteToolName:
-			state.completed = true
-			if params, _ := toolCallParams(call); params != nil {
-				if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
-					state.completedSummary = strings.TrimSpace(summary)
-				}
-			}
-		case goalBlockedToolName:
-			params, _ := toolCallParams(call)
-			reason, _ := params["reason"].(string)
-			if strings.TrimSpace(reason) == "" {
-				reason = "blocked without a stated reason"
-			}
-			needs, _ := params["needs"].(string)
-			state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
-		default:
-			if outcome.StateObserved && outcome.StateChanged {
-				state.stateChanged = true
-			}
-		}
+		replayGoalToolOutcome(call, outcome, state)
 		return nil
 	}
 	history := agentloop.HistorySinkFunc(func(msg model.Message) {
@@ -261,14 +327,19 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 	if err := e.applyGoalConvergencePolicy(ctx, task, result, state); err != nil {
 		return goalloop.TurnOutcome{}, err
 	}
+	completionRejected := ""
+	if state.completed {
+		completionRejected = state.completionBlocker()
+	}
 
 	outcome := goalloop.TurnOutcome{
-		Rounds:           result.Rounds,
-		ToolCalls:        result.ToolCalls,
-		PromptTokens:     result.Usage.PromptTokens,
-		CompletionTokens: result.Usage.CompletionTokens,
-		StateChanged:     state.stateChanged,
-		Blocker:          state.blocker,
+		Rounds:             result.Rounds,
+		ToolCalls:          result.ToolCalls,
+		PromptTokens:       result.Usage.PromptTokens,
+		CompletionTokens:   result.Usage.CompletionTokens,
+		StateChanged:       state.stateChanged,
+		Blocker:            state.blocker,
+		CompletionEvidence: state.completionEvidence,
 	}
 	if cost, err := e.mgr.CalculateCost(modelID, result.Usage); err == nil {
 		outcome.SpentUSD = cost
@@ -285,6 +356,9 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 			return goalloop.TurnOutcome{}, err
 		}
 		outcome.CompletedEvidenceID = evidenceID
+	}
+	if state.completed && completionRejected != "" {
+		summary = "goal completion rejected: " + completionRejected
 	}
 	if summary != "" {
 		outcome.Summary = summary
@@ -350,7 +424,7 @@ func (e *goalTurnEngine) applyGoalModelRequest(contract goalloop.GoalModelReques
 	effort := contract.ReasoningEffort
 	switch effort {
 	case "", "auto":
-		effort = model.ResolveReasoningEffort(e.cfg, e.mgr, e.engine, modelID, "execution")
+		effort = model.ResolveReasoningEffort(e.cfg, goalRouteReasoningChecker{mgr: e.mgr, route: route}, e.engine, modelID, "execution")
 	case "off", "none":
 		effort = ""
 	}
@@ -385,6 +459,31 @@ func (e *goalTurnEngine) applyGoalModelRequest(contract goalloop.GoalModelReques
 	return nil
 }
 
+type goalRouteReasoningChecker struct {
+	mgr   *model.Manager
+	route model.ModelRoute
+}
+
+func (c goalRouteReasoningChecker) SupportsReasoning(string) bool {
+	if c.mgr == nil {
+		return false
+	}
+	return c.mgr.SupportsReasoningForRoute(c.route)
+}
+
+func (c goalRouteReasoningChecker) ResolveReasoningCapability(string) model.CapabilityResolution {
+	if c.mgr == nil {
+		return model.CapabilityResolution{
+			Model:      strings.TrimSpace(c.route.SelectedModel),
+			ProviderID: strings.TrimSpace(c.route.ProviderID),
+			Capability: "reasoning",
+			State:      model.CapabilityUnknown,
+			Source:     "metadata_unavailable",
+		}
+	}
+	return c.mgr.ResolveReasoningCapabilityForRoute(c.route)
+}
+
 func toolCallParams(call model.ToolCall) (map[string]any, error) {
 	params := map[string]any{}
 	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
@@ -398,6 +497,34 @@ func toolCallParams(call model.ToolCall) (map[string]any, error) {
 	return params, nil
 }
 
+func replayGoalToolOutcome(call model.ToolCall, outcome agentloop.ToolOutcome, state *goalTurnState) {
+	if state == nil {
+		return
+	}
+	switch call.Function.Name {
+	case goalCompleteToolName:
+		if !outcome.Success {
+			return
+		}
+		state.completed = true
+		if params, _ := toolCallParams(call); params != nil {
+			if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
+				state.completedSummary = strings.TrimSpace(summary)
+			}
+		}
+	case goalBlockedToolName:
+		params, _ := toolCallParams(call)
+		reason, _ := params["reason"].(string)
+		if strings.TrimSpace(reason) == "" {
+			reason = "blocked without a stated reason"
+		}
+		needs, _ := params["needs"].(string)
+		state.blocker = &taskstate.Blocker{Reason: strings.TrimSpace(reason), Needs: strings.TrimSpace(needs)}
+	default:
+		state.observeOutcome(outcome)
+	}
+}
+
 // dispatchGoalTool executes one tool call: the two goal tools are
 // intercepted here, everything else goes through the governed registry.
 // State change tracks the registry's own impact classification.
@@ -409,6 +536,9 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 
 	switch call.Function.Name {
 	case goalCompleteToolName:
+		if reason := state.completionBlocker(); reason != "" {
+			return agentloop.ToolOutcome{Content: "Error: " + reason, EffectClass: "control"}
+		}
 		state.completed = true
 		if summary, _ := params["summary"].(string); strings.TrimSpace(summary) != "" {
 			state.completedSummary = strings.TrimSpace(summary)
@@ -436,42 +566,105 @@ func (e *goalTurnEngine) dispatchGoalTool(ctx context.Context, task goalloop.Tas
 	}
 
 	effectClass := string(tool.ImpactDestructive)
+	metadata := tool.ToolMetadata{Impact: tool.ImpactDestructive}
 	if registered, ok := e.registry.Get(call.Function.Name); ok {
-		effectClass = string(tool.GetMetadata(registered).Impact)
+		metadata = tool.GetMetadata(registered)
+		effectClass = string(metadata.Impact)
 	}
-	observeState := effectClass != string(tool.ImpactReadOnly) && effectClass != "control"
-	beforeState := ""
-	beforeErr := error(nil)
-	if observeState {
-		beforeState, beforeErr = workspaceevidence.GitStateFingerprint(ctx, e.workDir)
-	}
+	observation := tooloutcome.BeginWithMetadata(ctx, e.workDir, metadata)
 	result, err := e.registry.ExecuteWithContext(ctx, call.Function.Name, params)
-	stateChanged := false
-	if observeState {
-		afterState, afterErr := workspaceevidence.GitStateFingerprint(ctx, e.workDir)
-		stateChanged = beforeErr == nil && afterErr == nil && beforeState != afterState
-		if stateChanged {
-			state.stateChanged = true
-		}
-	}
 	if err != nil {
-		return agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass, StateObserved: observeState, StateChanged: stateChanged}
+		outcome := agentloop.ToolOutcome{Content: "Error: " + err.Error(), EffectClass: effectClass}
+		outcome = observation.Finish(ctx, outcome, metadata, result, err)
+		outcome = e.attachGoalVerificationEvidence(ctx, task, call, outcome)
+		state.observeOutcome(outcome)
+		return outcome
 	}
 	if result == nil {
-		return agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass, StateObserved: observeState, StateChanged: stateChanged}
+		outcome := agentloop.ToolOutcome{Content: "No result", EffectClass: effectClass}
+		outcome = observation.Finish(ctx, outcome, metadata, result, nil)
+		outcome = e.attachGoalVerificationEvidence(ctx, task, call, outcome)
+		state.observeOutcome(outcome)
+		return outcome
 	}
 	content := formatACPToolResult(result, nil)
 	yield := tool.ResultYieldForTool(call.Function.Name, result, nil)
-	return agentloop.ToolOutcome{
+	outcome := agentloop.ToolOutcome{
 		Content:       content,
 		Success:       result.Success,
 		EffectClass:   effectClass,
-		StateObserved: observeState,
-		StateChanged:  stateChanged,
 		YieldObserved: yield.Observed,
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,
 	}
+	outcome = observation.Finish(ctx, outcome, metadata, result, nil)
+	outcome = e.attachGoalVerificationEvidence(ctx, task, call, outcome)
+	state.observeOutcome(outcome)
+	return outcome
+}
+
+func (e *goalTurnEngine) attachGoalVerificationEvidence(ctx context.Context, task goalloop.TaskContext, call model.ToolCall, outcome agentloop.ToolOutcome) agentloop.ToolOutcome {
+	if e == nil || e.evidence == nil || !outcome.VerificationObserved {
+		return outcome
+	}
+	content := strings.TrimSpace(outcome.Content)
+	if content == "" {
+		content = "verification completed with no textual output"
+	}
+	obj, err := e.evidence.Put(ctx, evidence.Object{
+		Kind:       evidence.KindTestOutput,
+		MediaType:  "text/plain",
+		InlineBody: []byte(content),
+		Metadata: map[string]any{
+			evidence.MetaSessionID: e.sessionID,
+			evidence.MetaRunID:     task.RunID,
+			evidence.MetaTaskID:    task.TaskID,
+			"turn_id":              task.TurnID,
+			"tool":                 call.Function.Name,
+			"passed":               outcome.VerificationPassed,
+		},
+	})
+	if err != nil {
+		outcome.Success = false
+		outcome.VerificationPassed = false
+		outcome.Content = "Error: store verification evidence: " + err.Error()
+		return outcome
+	}
+	outcome.EvidenceID = obj.ID
+	return outcome
+}
+
+func (s *goalTurnState) completionBlocker() string {
+	if s == nil {
+		return ""
+	}
+	if s.stateObservationFailed {
+		reason := "workspace state could not be observed after a tool that may affect completion evidence"
+		if s.stateObservationError != "" {
+			reason += ": " + s.stateObservationError
+		}
+		return reason
+	}
+	if s.completionEvidence.StateObservationFailed {
+		reason := "workspace state could not be observed after a tool that may affect completion evidence"
+		if s.completionEvidence.StateObservationError != "" {
+			reason += ": " + s.completionEvidence.StateObservationError
+		}
+		return reason
+	}
+	if !s.stateChanged {
+		if s.completionEvidence.RequiresVerification() {
+			return "missing successful verification after the latest workspace change"
+		}
+		return ""
+	}
+	if s.lastVerificationSequence <= s.lastStateChangeSequence {
+		return "missing successful verification after the latest workspace change"
+	}
+	if !s.lastVerificationPassed {
+		return "latest verification after the final workspace change did not pass"
+	}
+	return ""
 }
 
 // storeCompletionEvidence persists the completion summary as an evidence

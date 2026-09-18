@@ -71,6 +71,51 @@ func TestInputDigest_BindsCanonicalAcceptanceTuple(t *testing.T) {
 	}
 }
 
+func TestInputDigest_TaskIntentCompatibilityAndBinding(t *testing.T) {
+	req := validAcceptRequest()
+	identity := Identity{
+		SessionID: req.SessionID, RunID: RunIDForSession(req.SessionID), TaskID: ForegroundTaskID,
+		CommandID: req.CommandID, TurnID: TurnID(req.CommandID, 0), Generation: 0, Sequence: 1,
+	}
+	legacy, err := InputDigest(req, identity, LaneWork, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyGolden = "37915134fa63a591017d6f14b0674fce09de13ac3542636746b771ad7722d9c1"
+	if legacy != legacyGolden {
+		t.Fatalf("legacy digest = %q, want %q", legacy, legacyGolden)
+	}
+	req.TaskIntent = ""
+	empty, err := InputDigest(req, identity, LaneWork, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty != legacy {
+		t.Fatalf("empty task intent changed legacy digest: %q vs %q", empty, legacy)
+	}
+	req.TaskIntent = "unknown"
+	unknown, err := InputDigest(req, identity, LaneWork, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown == legacy {
+		t.Fatal("explicit unknown task intent did not participate in digest")
+	}
+	req.TaskIntent = "read_only"
+	readOnly, err := InputDigest(req, identity, LaneWork, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.TaskIntent = "mutation"
+	mutation, err := InputDigest(req, identity, LaneWork, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readOnly == mutation {
+		t.Fatal("read_only and mutation task intents collided")
+	}
+}
+
 func TestLaneFor_BoundedVocabulary(t *testing.T) {
 	for _, commandType := range []string{"input", "queue", "steer", "model", "slash"} {
 		lane, err := LaneFor(commandType)
@@ -97,6 +142,10 @@ func TestValidateAcceptRequest_RejectsBoundsUTF8AndControls(t *testing.T) {
 		{SessionID: "session-01", CommandID: "command-01", Type: "input", Content: "x\x00y", AcceptedBy: "operator"},
 		{SessionID: "session-01", CommandID: "command-01", Type: "input", Content: strings.Repeat("x", MaxContentBytes+1), AcceptedBy: "operator"},
 		{SessionID: "session-01", CommandID: "command-01", Type: "input", Content: "x", AcceptedBy: ""},
+		{SessionID: "session-01", CommandID: "command-01", Type: "input", Content: "x", AcceptedBy: "operator", TaskIntent: "question"},
+		{SessionID: "session-01", CommandID: "command-01", Type: "input", Content: "x", AcceptedBy: "operator", TaskIntent: strings.Repeat("x", MaxTaskIntentBytes+1)},
+		{SessionID: "session-01", CommandID: "command-01", Type: "slash", Content: "/help", AcceptedBy: "operator", TaskIntent: "unknown"},
+		{SessionID: "session-01", CommandID: "command-01", Type: "pause", AcceptedBy: "operator", TaskIntent: "read_only"},
 	}
 	for i, req := range tests {
 		if err := ValidateAcceptRequest(req, req.CommandID); !errors.Is(err, ErrValidation) {

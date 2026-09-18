@@ -576,8 +576,7 @@ func (t *PatchFileTool) Parameters() ParameterSchema {
 			},
 			"strip": {
 				Type:        "integer",
-				Description: "Number of leading path components to strip when applying (patch -pN). Defaults to 0.",
-				Default:     0,
+				Description: "Number of leading path components to strip when applying (patch -pN). When omitted, Buckley infers -p1 only for safe git-style a/ and b/ file headers; all other patches use -p0. An explicit value always takes precedence.",
 			},
 		},
 		Required: []string{"patch"},
@@ -608,12 +607,18 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		rawPatch += "\n"
 	}
 
-	strip := 0
+	strip := inferPatchStrip(rawPatch)
 	if v, exists := params["strip"]; exists {
 		var parsedStrip int
 		var err error
 		switch value := v.(type) {
 		case float64:
+			if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) {
+				return &Result{
+					Success: false,
+					Error:   "strip parameter must be an integer",
+				}, nil
+			}
 			parsedStrip = int(value)
 		case int:
 			parsedStrip = value
@@ -644,17 +649,66 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		strip = parsedStrip
 	}
+	if err := validatePatchTargets(t.workDir, rawPatch, strip); err != nil {
+		return &Result{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
 
 	ctx, cancel := t.execContext()
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "patch", fmt.Sprintf("-p%d", strip), "-N", "-s")
-	if strings.TrimSpace(t.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(t.workDir)
+	tempDir, err := os.MkdirTemp("", "buckley-patch-")
+	if err != nil {
+		return &Result{
+			Success: false,
+			Error:   fmt.Sprintf("failed to create patch staging directory: %v", err),
+		}, nil
 	}
-	cmd.Env = mergeEnv(cmd.Env, t.env)
-	cmd.Stdin = strings.NewReader(rawPatch)
-	output, err := cmd.CombinedOutput()
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	runPatch := func(dryRun bool) ([]byte, error) {
+		rejectFile := filepath.Join(tempDir, "rejects")
+		if dryRun {
+			rejectFile = filepath.Join(tempDir, "preflight-rejects")
+		}
+		args := []string{
+			fmt.Sprintf("-p%d", strip),
+			"-N",
+			"-s",
+			"--batch",
+			"--no-backup-if-mismatch",
+			"-r", rejectFile,
+		}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+
+		cmd := exec.CommandContext(ctx, "patch", args...)
+		if strings.TrimSpace(t.workDir) != "" {
+			cmd.Dir = strings.TrimSpace(t.workDir)
+		}
+		cmd.Env = mergeEnv(cmd.Env, t.env)
+		cmd.Stdin = strings.NewReader(rawPatch)
+		return cmd.CombinedOutput()
+	}
+
+	preflightOutput, err := runPatch(true)
+	if ctx.Err() != nil {
+		return &Result{
+			Success: false,
+			Error:   "patch command timed out",
+		}, nil
+	}
+	if err != nil {
+		return &Result{
+			Success: false,
+			Error:   fmt.Sprintf("patch command failed: %v\n%s", err, strings.TrimSpace(string(preflightOutput))),
+		}, nil
+	}
+
+	output, err := runPatch(false)
 	if ctx.Err() != nil {
 		return &Result{
 			Success: false,
@@ -675,6 +729,90 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 			"message": strings.TrimSpace(string(output)),
 		},
 	}, nil
+}
+
+func inferPatchStrip(rawPatch string) int {
+	if !patchHeadersUseSafeGitPrefixes(rawPatch) {
+		return 0
+	}
+	return 1
+}
+
+func patchHeadersUseSafeGitPrefixes(rawPatch string) bool {
+	paths, err := unifiedPatchHeaderPaths(rawPatch)
+	if err != nil {
+		return false
+	}
+	seenPatchPath := false
+	for _, path := range paths {
+		if path == "/dev/null" {
+			continue
+		}
+		seenPatchPath = true
+		if !strings.HasPrefix(path, "a/") && !strings.HasPrefix(path, "b/") {
+			return false
+		}
+		stripped := strings.TrimPrefix(strings.TrimPrefix(path, "a/"), "b/")
+		if !safeRelativePatchPath(stripped) {
+			return false
+		}
+	}
+	return seenPatchPath
+}
+
+func safeRelativePatchPath(path string) bool {
+	if path == "" || path != strings.TrimSpace(path) || strings.ContainsRune(path, '\x00') || strings.ContainsRune(path, '\\') || strings.HasPrefix(path, "/") || looksLikeWindowsAbsolutePath(path) {
+		return false
+	}
+	cleaned := pathpkg.Clean(path)
+	return cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
+}
+
+func looksLikeWindowsAbsolutePath(path string) bool {
+	return len(path) >= 2 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':'
+}
+
+func validatePatchTargets(workDir, rawPatch string, strip int) error {
+	base := strings.TrimSpace(workDir)
+	if base == "" {
+		var err error
+		base, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolve patch workdir: %w", err)
+		}
+	}
+	paths, err := unifiedPatchHeaderPaths(rawPatch)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if path == "/dev/null" {
+			continue
+		}
+		path, ok := patchPathAfterStrip(path, strip)
+		if !ok {
+			return fmt.Errorf("patch contains an unsafe file path")
+		}
+		if _, err := resolvePath(base, filepath.FromSlash(path)); err != nil {
+			return fmt.Errorf("patch target is outside the workdir: %w", err)
+		}
+	}
+	return nil
+}
+
+func patchPathAfterStrip(path string, strip int) (string, bool) {
+	if !safeRelativePatchPath(path) || strip < 0 {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	if strip >= len(parts) {
+		return "", false
+	}
+	stripped := strings.Join(parts[strip:], "/")
+	if !safeRelativePatchPath(stripped) {
+		return "", false
+	}
+	return pathpkg.Clean(stripped), true
 }
 
 // FindFilesTool finds files matching a pattern

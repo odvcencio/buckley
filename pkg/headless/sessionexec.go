@@ -357,7 +357,13 @@ func (r *Runner) executeDurableClaim(command sessionexec.Command) {
 	} else if executeErr != nil {
 		completion.State = sessionexec.StateFailed
 		completion.ErrorCode = "command_failed"
-		if errors.Is(executeErr, errDurabilityNotSupported) {
+		var incomplete *agentloop.IncompleteTurnError
+		if errors.As(executeErr, &incomplete) {
+			notice := agentloop.PresentIncompleteResult(executeErr)
+			completion.State = sessionexec.StateBlocked
+			completion.ErrorCode = notice.Code
+			completion.Error = telemetry.SanitizeText(notice.Message, sessionexec.MaxErrorTextBytes)
+		} else if errors.Is(executeErr, errDurabilityNotSupported) {
 			completion.State = sessionexec.StateBlocked
 			completion.ErrorCode = "durability_not_supported"
 		} else if errors.Is(executeErr, runledger.ErrStepRecoveryRequired) {
@@ -370,7 +376,9 @@ func (r *Runner) executeDurableClaim(command sessionexec.Command) {
 			completion.State = sessionexec.StateBlocked
 			completion.ErrorCode = "transcript_integrity"
 		}
-		completion.Error = telemetry.SanitizeText(executeErr.Error(), sessionexec.MaxErrorTextBytes)
+		if completion.Error == "" {
+			completion.Error = telemetry.SanitizeText(executeErr.Error(), sessionexec.MaxErrorTextBytes)
+		}
 	}
 	ctxComplete, done := context.WithTimeout(context.Background(), r.durableTiming.OperationTimeout)
 	receipt, err := r.commandJournal.Complete(ctxComplete, command.Lease, completion, entries)
@@ -464,6 +472,7 @@ func (r *Runner) emitDurableJournalError(operation string, err error) {
 func commandForDurableEvent(value sessionexec.Command) command.SessionCommand {
 	return command.SessionCommand{
 		SessionID: value.SessionID, ID: value.CommandID, Type: value.Type,
+		TaskIntent: value.TaskIntent,
 	}
 }
 
@@ -660,7 +669,7 @@ func (r *Runner) handleDurableCommand(ctx context.Context, command sessionexec.C
 	switch command.Type {
 	case "input", "queue", "steer":
 		r.setState(StateProcessing)
-		return r.runConversationLoopForCommand(ctx, &command)
+		return r.runConversationLoopForCommand(ctx, &command, "")
 	case "model":
 		return r.setModel(command.Content)
 	case "slash":
@@ -703,7 +712,7 @@ func (r *Runner) processDurableSlashCommand(ctx context.Context, command session
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		r.conv.AddUserMessage(command.Content)
 		r.persistLatestConversationMessage()
-		return r.runConversationLoopForCommand(ctx, &command)
+		return r.runConversationLoopForCommand(ctx, &command, "")
 	}
 	switch name {
 	case "model":

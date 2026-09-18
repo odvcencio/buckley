@@ -285,8 +285,8 @@ func (r *Registry) GetDescriptions() string {
 	}
 
 	result := "# Available Skills\n\n"
-	result += "These are lightweight triggers; full instructions load only after activation. "
-	result += "Use `activate_skill` when relevant; `/skill <name>` is the user shortcut; phase tags auto-activate.\n\n"
+	result += "Lightweight triggers; full instructions load on activation. "
+	result += "Use `activate_skill` when relevant; `/skill <name>` is the shortcut; phase tags auto-activate.\n\n"
 
 	names := make([]string, 0, len(r.skills))
 	for name := range r.skills {
@@ -307,7 +307,7 @@ func (r *Registry) GetDescriptions() string {
 }
 
 func promptSkillDescription(description string) string {
-	const maxRunes = 400
+	const maxRunes = 200
 	compact := strings.Join(strings.Fields(description), " ")
 	runes := []rune(compact)
 	if len(runes) <= maxRunes {

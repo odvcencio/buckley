@@ -98,7 +98,8 @@ var openAIModels = []ModelInfo{
 		Architecture: Architecture{
 			Modality: "text",
 		},
-		SupportedParameters: []string{},
+		SupportedParameters:         []string{},
+		supportedParametersComplete: true,
 	},
 	{
 		ID:            "openai/o3-mini",
@@ -111,7 +112,7 @@ var openAIModels = []ModelInfo{
 		Architecture: Architecture{
 			Modality: "text",
 		},
-		SupportedParameters: []string{},
+		SupportedParameters: []string{"tools", "reasoning_effort"},
 	},
 }
 

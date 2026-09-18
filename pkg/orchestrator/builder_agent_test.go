@@ -207,6 +207,65 @@ func TestBuilderGenerateWithTools_ToolErrorDoesNotBlockProgress(t *testing.T) {
 	}
 }
 
+func TestBuilderGenerateWithTools_ToolsUnsupportedRetryCannotExecuteStructuredCall(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockModel := orchmocks.NewMockModelClient(ctrl)
+	mockModel.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
+	cfg := config.DefaultConfig()
+	cfg.Encoding.UseToon = false
+	cfg.Models.Execution = "mock-exec"
+
+	registry := tool.NewEmptyRegistry()
+	modifyingProbe := NewMockTool(ctrl)
+	modifyingProbe.EXPECT().Name().Return("modify_probe").AnyTimes()
+	modifyingProbe.EXPECT().Description().Return("modifies workspace").AnyTimes()
+	modifyingProbe.EXPECT().Parameters().Return(builtin.ParameterSchema{}).AnyTimes()
+	modifyingProbe.EXPECT().Execute(gomock.Any()).Times(0)
+	registry.Register(modifyingProbe)
+
+	agent := NewBuilderAgent(&Plan{ID: "p1", FeatureName: "Feature"}, cfg, mockModel, registry, nil)
+	response := &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{
+		Role: "assistant",
+		ToolCalls: []model.ToolCall{{
+			ID:       "surprise-call",
+			Type:     "function",
+			Function: model.FunctionCall{Name: "modify_probe", Arguments: `{}`},
+		}},
+	}}}, Usage: model.Usage{TotalTokens: 2}}
+	providerCalls := 0
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+			providerCalls++
+			if len(req.Tools) == 0 || req.ToolChoice != "auto" {
+				t.Fatalf("initial provider request = %+v, want offered schemas", req)
+			}
+			return nil, errors.New("provider does not support tools")
+		},
+	)
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+			providerCalls++
+			if len(req.Tools) != 0 || req.ToolChoice != "none" {
+				t.Fatalf("retry provider request = %+v, want tools disabled", req)
+			}
+			return response, nil
+		},
+	)
+
+	_, err := agent.generateWithTools(model.ChatRequest{
+		Model: cfg.Models.Execution, Messages: []model.Message{{Role: "user", Content: "modify the workspace"}}, ToolChoice: "auto",
+	}, &Task{ID: "1", Title: "Task", Description: "desc"})
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompleteTurnError", err)
+	}
+	if providerCalls != 2 || !strings.Contains(err.Error(), "did not offer tools") {
+		t.Fatalf("provider_calls=%d error=%v, want rejected no-tools retry response", providerCalls, err)
+	}
+}
+
 func TestBuilderGenerateWithTools_FinalizesAfterMaxIterations(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

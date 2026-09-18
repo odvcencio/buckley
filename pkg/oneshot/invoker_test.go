@@ -555,6 +555,221 @@ func (c *requestCapturingClient) ChatCompletion(ctx context.Context, req model.C
 	return c.responses[idx], nil
 }
 
+type requestCapturingStreamClient struct {
+	response *model.ChatResponse
+	requests []model.ChatRequest
+}
+
+func (c *requestCapturingStreamClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	c.requests = append(c.requests, req)
+	if c.response != nil {
+		return c.response, nil
+	}
+	return &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Content: "fallback"}}}}, nil
+}
+
+func (c *requestCapturingStreamClient) ChatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error) {
+	c.requests = append(c.requests, req)
+	chunkChan := make(chan model.StreamChunk, 1)
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(chunkChan)
+		defer close(errChan)
+		resp := c.response
+		if resp == nil {
+			resp = &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Content: "fallback"}}}}
+		}
+		if len(resp.Choices) == 0 {
+			return
+		}
+		msg := resp.Choices[0].Message
+		content := model.ExtractTextContentOrEmpty(msg.Content)
+		chunk := model.StreamChunk{
+			Choices: []model.StreamChoice{{
+				Delta: model.MessageDelta{Content: content, Reasoning: msg.Reasoning},
+			}},
+			Usage: &resp.Usage,
+		}
+		for i, tc := range msg.ToolCalls {
+			chunk.Choices[0].Delta.ToolCalls = append(chunk.Choices[0].Delta.ToolCalls, model.ToolCallDelta{
+				Index: i,
+				ID:    tc.ID,
+				Type:  tc.Type,
+				Function: &model.FunctionCallDelta{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+		}
+		chunkChan <- chunk
+	}()
+	return chunkChan, errChan
+}
+
+func float64Ptr(value float64) *float64 { return &value }
+
+func boolPtr(value bool) *bool { return &value }
+
+func assertProfiledRequest(t *testing.T, req model.ChatRequest, wantToolChoice string) {
+	t.Helper()
+	if req.ToolChoice != wantToolChoice {
+		t.Fatalf("ToolChoice = %q, want %q", req.ToolChoice, wantToolChoice)
+	}
+	if req.MaxTokens != 4096 {
+		t.Fatalf("MaxTokens = %d, want 4096", req.MaxTokens)
+	}
+	if req.Temperature != 0.2 {
+		t.Fatalf("Temperature = %g, want 0.2", req.Temperature)
+	}
+	if req.Reasoning == nil {
+		t.Fatal("Reasoning = nil, want explicit profile")
+	}
+	if req.Reasoning.Effort != "low" || req.Reasoning.MaxTokens != 512 {
+		t.Fatalf("Reasoning = %+v, want effort=low max_tokens=512", req.Reasoning)
+	}
+	if req.Reasoning.Enabled == nil || !*req.Reasoning.Enabled {
+		t.Fatalf("Reasoning.Enabled = %v, want true", req.Reasoning.Enabled)
+	}
+}
+
+func testRequestProfile() RequestProfile {
+	return RequestProfile{
+		Temperature:     float64Ptr(0.2),
+		MaxOutputTokens: 4096,
+		RequireTool:     true,
+		Reasoning: &model.ReasoningConfig{
+			Effort:    "low",
+			MaxTokens: 512,
+			Enabled:   boolPtr(true),
+		},
+	}
+}
+
+func TestRequestProfileAppliesToInvoke(t *testing.T) {
+	client := &requestCapturingClient{responses: []*model.ChatResponse{{
+		Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+			ID:       "call_profile",
+			Type:     "function",
+			Function: model.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}}}}},
+	}}}
+	invoker := NewInvoker(InvokerConfig{
+		Client:         client,
+		Model:          "test-model",
+		RequestProfile: testRequestProfile(),
+	})
+	toolDef := tools.Definition{Name: "test_tool", Parameters: tools.ObjectSchema(map[string]tools.Property{}, "")}
+
+	if _, _, err := invoker.Invoke(context.Background(), "system", "user", toolDef, nil); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	assertProfiledRequest(t, client.requests[0], "required")
+}
+
+func TestRequestProfileAppliesToInvokeStream(t *testing.T) {
+	client := &requestCapturingStreamClient{response: &model.ChatResponse{
+		Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+			ID:       "call_profile",
+			Type:     "function",
+			Function: model.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}}}}},
+	}}
+	invoker := NewInvoker(InvokerConfig{
+		Client:         client,
+		Model:          "test-model",
+		RequestProfile: testRequestProfile(),
+	})
+	toolDef := tools.Definition{Name: "test_tool", Parameters: tools.ObjectSchema(map[string]tools.Property{}, "")}
+
+	if _, _, err := invoker.InvokeStream(context.Background(), "system", "user", toolDef, nil, nil); err != nil {
+		t.Fatalf("InvokeStream: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	assertProfiledRequest(t, client.requests[0], "required")
+	if !client.requests[0].Stream {
+		t.Fatal("stream request did not preserve Stream=true")
+	}
+}
+
+func TestRequestProfileAppliesToInvokeText(t *testing.T) {
+	client := &requestCapturingClient{responses: []*model.ChatResponse{{
+		Choices: []model.Choice{{Message: model.Message{Content: "text"}}},
+	}}}
+	invoker := NewInvoker(InvokerConfig{
+		Client:         client,
+		Model:          "test-model",
+		RequestProfile: testRequestProfile(),
+	})
+
+	if _, _, err := invoker.InvokeText(context.Background(), "system", "user", nil); err != nil {
+		t.Fatalf("InvokeText: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	req := client.requests[0]
+	if req.ToolChoice != "" {
+		t.Fatalf("ToolChoice = %q, want empty without tools", req.ToolChoice)
+	}
+	if req.MaxTokens != 4096 || req.Temperature != 0.2 {
+		t.Fatalf("request profile not applied: %+v", req)
+	}
+	if req.Reasoning == nil || req.Reasoning.Effort != "low" || req.Reasoning.MaxTokens != 512 {
+		t.Fatalf("Reasoning = %+v, want profiled reasoning", req.Reasoning)
+	}
+}
+
+func TestRequestProfileAppliesToInvokeWithTools(t *testing.T) {
+	client := &requestCapturingClient{responses: []*model.ChatResponse{{
+		Choices: []model.Choice{{Message: model.Message{Content: "done"}}},
+	}}}
+	invoker := NewInvoker(InvokerConfig{
+		Client:         client,
+		Model:          "test-model",
+		RequestProfile: testRequestProfile(),
+	})
+	executor := &mockToolExecutor{}
+	toolDefs := []tools.Definition{{Name: "read_file", Parameters: tools.ObjectSchema(map[string]tools.Property{}, "")}}
+
+	if _, _, err := invoker.InvokeWithTools(context.Background(), "system", "user", toolDefs, executor, 1); err != nil {
+		t.Fatalf("InvokeWithTools: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	assertProfiledRequest(t, client.requests[0], "required")
+}
+
+func TestRequestProfileCanExplicitlyDisableReasoning(t *testing.T) {
+	client := &requestCapturingClient{responses: []*model.ChatResponse{{
+		Choices: []model.Choice{{Message: model.Message{Content: "text"}}},
+	}}}
+	invoker := NewInvoker(InvokerConfig{
+		Client:          client,
+		Model:           "test-model",
+		ReasoningEffort: "xhigh",
+		RequestProfile: RequestProfile{
+			Reasoning: &model.ReasoningConfig{Enabled: boolPtr(false)},
+		},
+	})
+
+	if _, _, err := invoker.InvokeText(context.Background(), "system", "user", nil); err != nil {
+		t.Fatalf("InvokeText: %v", err)
+	}
+	req := client.requests[0]
+	if req.Reasoning == nil || req.Reasoning.Enabled == nil || *req.Reasoning.Enabled {
+		t.Fatalf("Reasoning = %+v, want explicit enabled=false", req.Reasoning)
+	}
+	if req.Reasoning.Effort != "" {
+		t.Fatalf("Reasoning.Effort = %q, want disabled profile to override legacy effort", req.Reasoning.Effort)
+	}
+}
+
 // TestInvokeWithTools_SecondRequestCarriesToolCallAndResult is the
 // cross-round transcript invariant carried over from the pkg/headless and
 // pkg/ui/tui agentloop.Controller migrations: after round one dispatches a

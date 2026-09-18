@@ -51,7 +51,7 @@ func TestCostProvenance_APIUsesCatalog(t *testing.T) {
 				t.Fatal(err)
 			}
 			ledger := transparency.NewCostLedger()
-			inv, err := newOneshotToolInvoker(oneshotBackendAPI, "vendor/test", cfg, mgr, ledger)
+			inv, err := newOneshotToolInvoker(oneshotBackendAPI, "commit", "vendor/test", cfg, mgr, ledger)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -80,22 +80,33 @@ func TestResolveReasoningEffort_UsesConfiguredXHigh(t *testing.T) {
 	}
 }
 
-func TestInferModelTier(t *testing.T) {
-	tests := []struct {
-		modelID string
-		want    string
-	}{
-		{modelID: "openai/gpt-5-mini", want: "fast"},
-		{modelID: "anthropic/claude-opus-4", want: "premium"},
-		{modelID: "z-ai/glm-5.2", want: "premium"},
-		{modelID: "moonshotai/kimi-k2.7-code", want: "premium"},
-		{modelID: "qwen/qwen3.7-max", want: "premium"},
-		{modelID: "openai/gpt-4o", want: "standard"},
-	}
+func TestResolveReasoningEffortForTask_CommitAutoUsesLow(t *testing.T) {
+	engine := mustNewTestEngine(t)
+	checker := &stubReasoningChecker{models: map[string]bool{"reasoning-model": true}}
 
-	for _, tt := range tests {
-		if got := InferModelTier(tt.modelID); got != tt.want {
-			t.Fatalf("InferModelTier(%q) = %q, want %q", tt.modelID, got, tt.want)
-		}
+	got := ResolveReasoningEffortForTask(&config.Config{}, checker, engine, "reasoning-model", "execution", "commit")
+	if got != "low" {
+		t.Fatalf("ResolveReasoningEffortForTask() = %q, want low", got)
+	}
+}
+
+func TestResolveReasoningEffortForTask_PRAutoUsesMedium(t *testing.T) {
+	engine := mustNewTestEngine(t)
+	checker := &stubReasoningChecker{models: map[string]bool{"reasoning-model": true}}
+
+	got := ResolveReasoningEffortForTask(&config.Config{}, checker, engine, "reasoning-model", "execution", "pr")
+	if got != "medium" {
+		t.Fatalf("ResolveReasoningEffortForTask() = %q, want medium", got)
+	}
+}
+
+func TestResolveReasoningEffortForTask_RuntimeFallbackMatchesUtilityPolicy(t *testing.T) {
+	checker := &stubReasoningChecker{models: map[string]bool{"reasoning-model": true}}
+
+	if got := ResolveReasoningEffortForTask(&config.Config{}, checker, nil, "reasoning-model", "execution", "commit"); got != "low" {
+		t.Fatalf("fallback commit effort = %q, want low", got)
+	}
+	if got := ResolveReasoningEffortForTask(&config.Config{}, checker, nil, "reasoning-model", "execution", "pr"); got != "medium" {
+		t.Fatalf("fallback pr effort = %q, want medium", got)
 	}
 }

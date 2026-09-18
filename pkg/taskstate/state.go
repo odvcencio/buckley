@@ -20,6 +20,8 @@ import (
 // reads and writes (section 15.1).
 const SchemaVersion = "m31.task-checkpoint.v1"
 
+const maxCompletionEvidenceErrorRunes = 512
+
 // Task status values a checkpoint can carry.
 const (
 	StatusPending    = "pending"
@@ -42,19 +44,20 @@ const (
 // human view. Summary and every other field are agent-facing conclusions,
 // never private chain-of-thought.
 type CheckpointState struct {
-	Schema      string              `json:"schema"`
-	TaskID      string              `json:"task_id"`
-	GoalID      string              `json:"goal_id,omitempty"`
-	Status      string              `json:"status"`
-	Summary     string              `json:"summary,omitempty"`
-	Completed   []CompletedItem     `json:"completed,omitempty"`
-	Checks      []VerificationEntry `json:"verification,omitempty"`
-	NextActions []NextAction        `json:"next_actions,omitempty"`
-	Blocker     *Blocker            `json:"blocker,omitempty"`
-	Questions   []Question          `json:"questions,omitempty"`
-	Spend       Spend               `json:"spend"`
-	Files       []string            `json:"files,omitempty"`
-	UpdatedAt   time.Time           `json:"updated_at"`
+	Schema             string                  `json:"schema"`
+	TaskID             string                  `json:"task_id"`
+	GoalID             string                  `json:"goal_id,omitempty"`
+	Status             string                  `json:"status"`
+	Summary            string                  `json:"summary,omitempty"`
+	Completed          []CompletedItem         `json:"completed,omitempty"`
+	Checks             []VerificationEntry     `json:"verification,omitempty"`
+	CompletionEvidence CompletionEvidenceState `json:"completion_evidence,omitempty"`
+	NextActions        []NextAction            `json:"next_actions,omitempty"`
+	Blocker            *Blocker                `json:"blocker,omitempty"`
+	Questions          []Question              `json:"questions,omitempty"`
+	Spend              Spend                   `json:"spend"`
+	Files              []string                `json:"files,omitempty"`
+	UpdatedAt          time.Time               `json:"updated_at"`
 }
 
 // CompletedItem is one evidence-linked completed claim. Claims require
@@ -75,6 +78,21 @@ type VerificationEntry struct {
 	Status     string `json:"status"`
 	Required   bool   `json:"required,omitempty"`
 	EvidenceID string `json:"evidence_id,omitempty"`
+}
+
+// CompletionEvidenceState is the typed usable-result gate for task
+// completion. It is intentionally separate from user-facing acceptance
+// checks: workspace mutation creates this debt, and only a later trusted
+// verification with durable evidence clears it. Version distinguishes a
+// new clean state from legacy nonterminal checkpoints that predate the
+// contract.
+type CompletionEvidenceState struct {
+	Version                int    `json:"version,omitempty"`
+	StateChangeObserved    bool   `json:"state_change_observed,omitempty"`
+	VerificationStatus     string `json:"verification_status,omitempty"`
+	VerificationEvidenceID string `json:"verification_evidence_id,omitempty"`
+	StateObservationFailed bool   `json:"state_observation_failed,omitempty"`
+	StateObservationError  string `json:"state_observation_error,omitempty"`
 }
 
 // NextAction is one ordered entry of the next-action queue. Kind lets the
@@ -153,7 +171,25 @@ func (s CheckpointState) Validate() error {
 			return fmt.Errorf("taskstate: verification %q: pass requires an evidence id", v.Check)
 		}
 	}
+	if s.CompletionEvidence.Version != 0 && s.CompletionEvidence.Version != 1 {
+		return fmt.Errorf("taskstate: completion evidence: unknown version %d", s.CompletionEvidence.Version)
+	}
+	if s.CompletionEvidence.StateObservationFailed && s.CompletionEvidence.VerificationStatus == VerificationPass {
+		return fmt.Errorf("taskstate: completion evidence: observation failure cannot carry a verification pass")
+	}
+	if s.CompletionEvidence.StateChangeObserved && s.CompletionEvidence.VerificationStatus == "" {
+		return fmt.Errorf("taskstate: completion evidence: observed state change requires verification status")
+	}
+	if s.CompletionEvidence.VerificationStatus != "" && !validVerificationStatuses[s.CompletionEvidence.VerificationStatus] {
+		return fmt.Errorf("taskstate: completion evidence: unknown verification status %q", s.CompletionEvidence.VerificationStatus)
+	}
+	if s.CompletionEvidence.VerificationStatus == VerificationPass && strings.TrimSpace(s.CompletionEvidence.VerificationEvidenceID) == "" {
+		return fmt.Errorf("taskstate: completion evidence: pass requires an evidence id")
+	}
 	if s.Status == StatusCompleted {
+		if s.CompletionEvidence.RequiresVerification() {
+			return fmt.Errorf("taskstate: task cannot complete: completion evidence requires verification")
+		}
 		for _, v := range s.Checks {
 			if v.Required && v.Status != VerificationPass {
 				return fmt.Errorf("taskstate: task cannot complete: required verification %q is %s", v.Check, v.Status)
@@ -180,6 +216,9 @@ func (s CheckpointState) Validate() error {
 // the schema-level building block.
 func (s CheckpointState) VerificationDebt() int {
 	debt := 0
+	if s.CompletionEvidence.RequiresVerification() {
+		debt++
+	}
 	for _, v := range s.Checks {
 		if v.Status != VerificationPass {
 			debt++
@@ -193,8 +232,58 @@ func (s CheckpointState) VerificationDebt() int {
 	return debt
 }
 
+func NewCompletionEvidenceState() CompletionEvidenceState {
+	return CompletionEvidenceState{Version: 1}
+}
+
+func (s CompletionEvidenceState) NormalizeNonTerminal() CompletionEvidenceState {
+	if s.Version != 1 {
+		return CompletionEvidenceState{Version: 1, VerificationStatus: VerificationInconclusive}
+	}
+	return s.Sanitize()
+}
+
+func (s CompletionEvidenceState) Sanitize() CompletionEvidenceState {
+	s.StateObservationError = SanitizeCompletionEvidenceError(s.StateObservationError)
+	return s
+}
+
+func SanitizeCompletionEvidenceError(raw string) string {
+	return boundedSingleLine(raw, maxCompletionEvidenceErrorRunes)
+}
+
+func (s CompletionEvidenceState) RequiresVerification() bool {
+	if s.StateObservationFailed {
+		return true
+	}
+	switch s.VerificationStatus {
+	case VerificationPending, VerificationFail, VerificationInconclusive:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s CompletionEvidenceState) EvidencedPass() bool {
+	return s.VerificationStatus == VerificationPass && strings.TrimSpace(s.VerificationEvidenceID) != ""
+}
+
+func boundedSingleLine(raw string, maxRunes int) string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 || maxRunes <= 0 {
+		return ""
+	}
+	line := strings.Join(fields, " ")
+	runes := []rune(line)
+	if len(runes) <= maxRunes {
+		return line
+	}
+	return string(runes[:maxRunes]) + "…"
+}
+
 // Marshal serializes the state as canonical JSON after validating it.
 func (s CheckpointState) Marshal() (string, error) {
+	s.CompletionEvidence = s.CompletionEvidence.Sanitize()
 	if err := s.Validate(); err != nil {
 		return "", err
 	}

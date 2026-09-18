@@ -300,6 +300,12 @@ type TaskContext struct {
 	// Resume carries the compiled checkpoint context when the task has
 	// one; nil on a fresh task.
 	Resume *taskstate.ResumeContext
+	// Checks is the current typed drive/checkpoint verification state for
+	// this task. It lets engines reject stale completion controls before
+	// the loop's final checkpoint gate, including debt carried from a
+	// previous turn in the same drive.
+	Checks             []taskstate.VerificationEntry
+	CompletionEvidence taskstate.CompletionEvidenceState
 }
 
 // TurnOutcome reports what one turn accomplished, in conclusions the
@@ -324,6 +330,10 @@ type TurnOutcome struct {
 	// must carry the evidence object ID of the check's output (machine
 	// checks attach command output as evidence, design 5.4).
 	Checks []taskstate.VerificationEntry
+	// CompletionEvidence reports the ordered usable-result contract facts
+	// for this turn: observed mutation, state-observation failure, and
+	// trusted verification with durable evidence.
+	CompletionEvidence taskstate.CompletionEvidenceState
 	// Questions are deferred user questions (design 5.5): the loop
 	// never blocks on them — they land on the checkpoint for the
 	// morning report, and only tasks a question names as blocking park.

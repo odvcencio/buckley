@@ -30,11 +30,14 @@ var configValidators = []func(*Config) error{
 	validateBatch,
 	validateIPC,
 	validateWorktrees,
+	validateRLMScratchpad,
+	validateRLMTiers,
 	func(c *Config) error { return c.MCP.Validate() },
 	func(c *Config) error { return c.Hooks.Validate() },
 	validateMemoryLimits,
 	validateAgentCostLimits,
 	validateBuckbotPrivacyFallback,
+	validateOneshotDataPolicy,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -70,7 +73,7 @@ func validateExecutionModes(c *Config) error {
 		return fmt.Errorf("invalid execution mode: %s (valid: classic, rlm)", c.Execution.Mode)
 	}
 	if mode := strings.ToLower(strings.TrimSpace(c.Oneshot.Mode)); mode != "" && mode != ExecutionModeClassic {
-		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; RLM is only an execution mode)", c.Oneshot.Mode)
+		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; coordinated execution (legacy mode key: rlm) is only an execution mode)", c.Oneshot.Mode)
 	}
 	validBackends := map[string]bool{
 		DurableBackendLocal: true,
@@ -193,6 +196,38 @@ func validateToolsPoolMode(c *Config) error {
 	}
 	if !validPoolModes[strings.ToLower(mode)] {
 		return fmt.Errorf("invalid tools.default_pool_mode: %s (valid: full, standard, read_only, simple)", c.Tools.DefaultPoolMode)
+	}
+	return nil
+}
+
+func validateRLMScratchpad(c *Config) error {
+	policy := strings.ToLower(strings.TrimSpace(c.RLM.Scratchpad.EvictionPolicy))
+	switch policy {
+	case "", "lru", "fifo":
+		return nil
+	default:
+		return fmt.Errorf("rlm.scratchpad.eviction_policy must be lru or fifo")
+	}
+}
+
+func validateRLMTiers(c *Config) error {
+	valid := map[string]bool{
+		"trivial":   true,
+		"light":     true,
+		"medium":    true,
+		"heavy":     true,
+		"reasoning": true,
+	}
+	for name, tier := range c.RLM.Tiers {
+		if !valid[name] {
+			return fmt.Errorf("rlm.tiers.%s must be one of: trivial, light, medium, heavy, reasoning", name)
+		}
+		if tier.MaxCostPerMillion < 0 {
+			return fmt.Errorf("rlm.tiers.%s.max_cost_per_million must be >= 0", name)
+		}
+		if tier.MinContextWindow < 0 {
+			return fmt.Errorf("rlm.tiers.%s.min_context_window must be >= 0", name)
+		}
 	}
 	return nil
 }
@@ -321,6 +356,16 @@ func validateBuckbotPrivacyFallback(c *Config) error {
 		return nil
 	default:
 		return fmt.Errorf("buckbot.openrouter_privacy_fallback has unsupported value %q", c.Buckbot.OpenRouterPrivacyFallback)
+	}
+}
+
+func validateOneshotDataPolicy(c *Config) error {
+	value := strings.ToLower(strings.TrimSpace(c.Oneshot.DataPolicy))
+	switch value {
+	case "", "none", "zdr", "deny":
+		return nil
+	default:
+		return fmt.Errorf("oneshot.data_policy has unsupported value %q (valid: none, zdr, deny)", c.Oneshot.DataPolicy)
 	}
 }
 

@@ -149,7 +149,7 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 	}
 
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, "pr", modelID, cfg, mgr, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err

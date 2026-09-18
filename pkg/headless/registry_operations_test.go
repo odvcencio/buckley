@@ -2,12 +2,14 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -464,6 +466,38 @@ func TestRegistryEnsureSession(t *testing.T) {
 			t.Error("expected error for non-existent session")
 		}
 	})
+}
+
+func TestRegistryAcceptCommandValidatesBeforeEnsureSession(t *testing.T) {
+	store := newTestStore(t)
+	mgr := newTestModelManager(t)
+	sessionID := "validate-before-ensure"
+	now := time.Now().UTC()
+	if err := store.CreateSession(&storage.Session{
+		ID: sessionID, Principal: "alice", ProjectPath: t.TempDir(),
+		Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	registry := NewRegistry(RegistryConfig{
+		Store:        store,
+		ModelManager: mgr,
+		Config:       config.DefaultConfig(),
+	})
+	t.Cleanup(registry.Stop)
+
+	_, err := registry.AcceptCommand(context.Background(), command.SessionCommand{
+		SessionID:  sessionID,
+		Type:       "slash",
+		Content:    "/help",
+		TaskIntent: "mutation",
+	})
+	if !errors.Is(err, sessionexec.ErrValidation) {
+		t.Fatalf("AcceptCommand error = %v, want validation", err)
+	}
+	if got := registry.Count(); got != 0 {
+		t.Fatalf("registry activated %d runner(s), want none", got)
+	}
 }
 
 func TestRegistryCleanupIdleSessions(t *testing.T) {

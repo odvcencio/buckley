@@ -9,8 +9,10 @@ import (
 
 // ConflictDetector tracks read/write access for resources (typically files).
 type ConflictDetector struct {
-	mu    sync.Mutex
-	locks map[string]*resourceLock
+	mu             sync.Mutex
+	locks          map[string]*resourceLock
+	exclusiveTask  string
+	exclusiveCount int
 }
 
 type resourceLock struct {
@@ -36,6 +38,9 @@ func (c *ConflictDetector) AcquireRead(taskID, path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.exclusiveTask != "" && c.exclusiveTask != taskID {
+		return &LockConflictError{Path: path, Holder: c.exclusiveTask, Mode: "exclusive"}
+	}
 	lock := c.lockFor(path)
 	if lock.writer != "" && lock.writer != taskID {
 		return &LockConflictError{Path: path, Holder: lock.writer, Mode: "write"}
@@ -54,6 +59,9 @@ func (c *ConflictDetector) AcquireWrite(taskID, path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.exclusiveTask != "" && c.exclusiveTask != taskID {
+		return &LockConflictError{Path: path, Holder: c.exclusiveTask, Mode: "exclusive"}
+	}
 	lock := c.lockFor(path)
 	if lock.writer != "" && lock.writer != taskID {
 		return &LockConflictError{Path: path, Holder: lock.writer, Mode: "write"}
@@ -67,6 +75,43 @@ func (c *ConflictDetector) AcquireWrite(taskID, path string) error {
 
 	lock.writer = taskID
 	lock.writerCount++
+	return nil
+}
+
+// AcquireExclusive acquires an opaque effect lock for a task. It is used for
+// tools such as shell/code execution whose affected paths cannot be known
+// without pretending to parse an arbitrary command language.
+func (c *ConflictDetector) AcquireExclusive(taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return fmt.Errorf("invalid exclusive lock: taskID required")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.exclusiveTask != "" {
+		if c.exclusiveTask == taskID {
+			c.exclusiveCount++
+			return nil
+		}
+		return &LockConflictError{Path: "*", Holder: c.exclusiveTask, Mode: "exclusive"}
+	}
+	for path, lock := range c.locks {
+		if lock == nil {
+			continue
+		}
+		if lock.writer != "" && lock.writer != taskID {
+			return &LockConflictError{Path: path, Holder: lock.writer, Mode: "write"}
+		}
+		for reader := range lock.readers {
+			if reader != taskID {
+				return &LockConflictError{Path: path, Holder: reader, Mode: "read"}
+			}
+		}
+	}
+	c.exclusiveTask = taskID
+	c.exclusiveCount = 1
 	return nil
 }
 
@@ -117,6 +162,27 @@ func (c *ConflictDetector) ReleaseWrite(taskID, path string) {
 	c.cleanupLock(path, lock)
 }
 
+// ReleaseExclusive releases an opaque effect lock for a task.
+func (c *ConflictDetector) ReleaseExclusive(taskID string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.exclusiveTask != taskID {
+		return
+	}
+	if c.exclusiveCount > 1 {
+		c.exclusiveCount--
+		return
+	}
+	c.exclusiveTask = ""
+	c.exclusiveCount = 0
+}
+
 // ReleaseAll clears any locks held by a task.
 func (c *ConflictDetector) ReleaseAll(taskID string) {
 	taskID = strings.TrimSpace(taskID)
@@ -134,6 +200,10 @@ func (c *ConflictDetector) ReleaseAll(taskID string) {
 			lock.writerCount = 0
 		}
 		c.cleanupLock(path, lock)
+	}
+	if c.exclusiveTask == taskID {
+		c.exclusiveTask = ""
+		c.exclusiveCount = 0
 	}
 }
 

@@ -49,6 +49,30 @@ func ValidateExecutionMode(value ExecutionMode, allowHeadless bool) error {
 	}
 }
 
+func ValidateTaskIntent(value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "unknown", "read_only", "mutation":
+		return nil
+	default:
+		return validationError("task intent must be unknown, read_only, or mutation")
+	}
+}
+
+func ValidateCommandTaskIntent(commandType, value string) error {
+	if err := ValidateTaskIntent(value); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(commandType)) {
+	case "input", "queue", "steer":
+		return nil
+	default:
+		return validationError("task intent is only supported for input, queue, or steer commands")
+	}
+}
+
 // ValidateAcceptRequest validates the caller-provided request after an
 // optional command identifier has been resolved by the adapter.
 func ValidateAcceptRequest(req AcceptRequest, commandID string) error {
@@ -71,6 +95,12 @@ func ValidateAcceptRequest(req AcceptRequest, commandID string) error {
 		return err
 	}
 	if err := validateBody("command content", req.Content, MaxContentBytes); err != nil {
+		return err
+	}
+	if err := validateBody("task intent", req.TaskIntent, MaxTaskIntentBytes); err != nil {
+		return err
+	}
+	if err := ValidateCommandTaskIntent(req.Type, req.TaskIntent); err != nil {
 		return err
 	}
 	switch strings.ToLower(req.Type) {

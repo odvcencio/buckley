@@ -14,6 +14,7 @@ const (
 	MaxRunIDBytes                        = 128
 	MaxTurnIDBytes                       = 192
 	MaxCommandTypeBytes                  = 32
+	MaxTaskIntentBytes                   = 32
 	MaxPrincipalBytes                    = 128
 	MaxLeaseOwnerBytes                   = 128
 	MaxContentBytes                      = 1 << 20
@@ -60,6 +61,7 @@ var (
 	ErrEffectPermitLimit    = errors.New("sessionexec: effect permit limit reached")
 	ErrEffectAmbiguous      = errors.New("sessionexec: effect outcome ambiguous")
 	ErrQuiescenceIncomplete = errors.New("sessionexec: quiescence incomplete")
+	ErrLeaseClockSkew       = errors.New("sessionexec: lease clock skew")
 )
 
 type ExecutionMode string
@@ -168,6 +170,7 @@ type AcceptRequest struct {
 	CommandID  string `json:"commandId,omitempty"`
 	Type       string `json:"type"`
 	Content    string `json:"content,omitempty"`
+	TaskIntent string `json:"taskIntent,omitempty"`
 	AcceptedBy string `json:"acceptedBy"`
 }
 
@@ -190,6 +193,7 @@ type Command struct {
 	Lane                  Lane       `json:"lane"`
 	Type                  string     `json:"type"`
 	Content               string     `json:"content"`
+	TaskIntent            string     `json:"taskIntent,omitempty"`
 	InputDigest           string     `json:"inputDigest"`
 	AcceptedBy            string     `json:"acceptedBy"`
 	TargetCommandID       string     `json:"targetCommandId,omitempty"`

@@ -36,6 +36,7 @@ import (
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/types"
 )
 
@@ -68,29 +69,7 @@ const (
 	EventWarning            = "warning"
 )
 
-// defaultHeadlessSystemPrompt provides core agent instructions for headless sessions.
-// This ensures models understand how to use tools and continue working on tasks.
-const defaultHeadlessSystemPrompt = `You are an AI development assistant with access to various tools.
-
-CRITICAL BEHAVIOR:
-- You MUST use tools to complete tasks, not just describe what you would do
-- Continue calling tools until the task is fully complete
-- Do not stop after one tool call if more work is needed
-- After each tool result, evaluate if more actions are required
-
-TOOL USAGE:
-- Use search_text to find files and code locations
-- Use read_file to examine file contents
-- Use edit_file to make changes
-- Use run_shell for commands, builds, and tests
-- Chain multiple tool calls as needed
-
-ANTI-PATTERNS TO AVOID:
-- Do NOT respond with just text when tools are needed
-- Do NOT stop after acknowledging a task without executing it
-- Do NOT describe what you would do without actually doing it
-
-Always take action with tools. If you're uncertain, use tools to investigate.`
+const defaultHeadlessSystemPrompt = prompts.DefaultToolUseSystemPrompt
 
 // RunnerEvent represents an event emitted during conversation processing.
 type RunnerEvent struct {
@@ -549,6 +528,9 @@ func (r *Runner) AcceptCommand(ctx context.Context, cmd command.SessionCommand) 
 		return r.acceptDurableCommand(ctx, cmd, true, false, true)
 	}
 	cmd.EnsureID()
+	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
+		return sessionexec.Receipt{}, err
+	}
 	err := r.handleLegacySessionCommand(cmd)
 	if err != nil {
 		return sessionexec.Receipt{}, err
@@ -561,6 +543,9 @@ func (r *Runner) AcceptCommand(ctx context.Context, cmd command.SessionCommand) 
 
 func (r *Runner) handleLegacySessionCommand(cmd command.SessionCommand) error {
 	cmd.EnsureID()
+	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	if r.lifecycleManaged && !r.activated {
 		r.mu.Unlock()
@@ -629,13 +614,14 @@ func (r *Runner) acceptDurableCommand(ctx context.Context, cmd command.SessionCo
 	defer cancel()
 	receipt, err := r.commandJournal.Accept(acceptCtx, sessionexec.AcceptRequest{
 		SessionID: r.sessionID, CommandID: cmd.ID, Type: cmd.Type,
-		Content: cmd.Content, AcceptedBy: principal,
+		Content: cmd.Content, TaskIntent: cmd.TaskIntent, AcceptedBy: principal,
 	})
 	if err != nil {
 		return sessionexec.Receipt{}, err
 	}
 	cmd.ID = receipt.CommandID
 	cmd.Type = strings.ToLower(strings.TrimSpace(cmd.Type))
+	cmd.TaskIntent = strings.ToLower(strings.TrimSpace(cmd.TaskIntent))
 	if announce && !receipt.Duplicate {
 		r.emitCommandEvent(EventCommandQueued, cmd, nil)
 	}
@@ -786,7 +772,7 @@ func (r *Runner) emitCommandEvent(eventType string, cmd command.SessionCommand, 
 func (r *Runner) handleSessionCommand(cmd command.SessionCommand) error {
 	switch cmd.Type {
 	case "input", "steer", "queue":
-		return r.processUserInput(cmd.Content)
+		return r.processUserInputWithIntent(cmd.Content, cmd.TaskIntent)
 	case "model":
 		return r.setModel(cmd.Content)
 	case "slash":
@@ -901,6 +887,10 @@ func (r *Runner) IsIdle() bool {
 }
 
 func (r *Runner) processUserInput(content string) error {
+	return r.processUserInputWithIntent(content, "")
+}
+
+func (r *Runner) processUserInputWithIntent(content string, taskIntent string) error {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return fmt.Errorf("empty input")
@@ -923,7 +913,7 @@ func (r *Runner) processUserInput(content string) error {
 	}
 
 	// Run the conversation loop
-	return r.runConversationLoop()
+	return r.runConversationLoopWithIntent(taskIntent)
 }
 
 // runConversationLoop drives one turn -- one or more model rounds until the
@@ -934,6 +924,10 @@ func (r *Runner) processUserInput(content string) error {
 // tested); the engine only owns the round loop, projection, ID backfill,
 // usage accumulation, and the loop guard around them.
 func (r *Runner) runConversationLoop() error {
+	return r.runConversationLoopWithIntent("")
+}
+
+func (r *Runner) runConversationLoopWithIntent(taskIntent string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
 	r.cancelFunc = cancel
@@ -944,15 +938,15 @@ func (r *Runner) runConversationLoop() error {
 		r.cancelFunc = nil
 		r.mu.Unlock()
 	}()
-	return r.runConversationLoopForCommand(ctx, nil)
+	return r.runConversationLoopForCommand(ctx, nil, taskIntent)
 }
 
-func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *sessionexec.Command) error {
+func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *sessionexec.Command, taskIntent string) error {
 	if r.State() == StateStopped || (command == nil && r.State() == StatePaused) {
 		return nil
 	}
 
-	controller, err := r.newTurnControllerForCommand(command)
+	controller, err := r.newTurnControllerForCommand(command, taskIntent)
 	if err != nil {
 		r.emitError("failed to build turn controller", err)
 		return err
@@ -965,14 +959,22 @@ func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *ses
 		r.mu.Unlock()
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return err
+		draft := ""
+		if result != nil {
+			draft = result.Content
 		}
-		r.emitError("model call failed", err)
+		if notice, ok := r.persistIncompleteTurnNotice(err, draft); ok {
+			r.emitIncompleteTurnEvent(notice)
+		} else if errors.Is(err, context.Canceled) {
+			return err
+		} else {
+			r.emitError("model call failed", err)
+		}
 		return err
 	}
 	if err := result.RequireConclusive(); err != nil {
-		r.emitError("agent turn incomplete", err)
+		notice, _ := r.persistIncompleteTurnNotice(err, result.Content)
+		r.emitIncompleteTurnEvent(notice)
 		return err
 	}
 
@@ -1030,28 +1032,107 @@ func (r *Runner) persistFinalAssistantMessage(content, reasoning string, reasoni
 	}
 }
 
+func (r *Runner) persistIncompleteTurnNotice(err error, draft string) (agentloop.IncompleteResultNotice, bool) {
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		return agentloop.IncompleteResultNotice{}, false
+	}
+	notice := agentloop.PresentIncompleteResult(err)
+	if strings.TrimSpace(notice.Message) != "" {
+		_ = r.persistSystemMessage(notice.Message)
+	}
+	if strings.TrimSpace(draft) != "" {
+		_ = r.persistIncompleteDraft(draft)
+	}
+	return notice, true
+}
+
+func (r *Runner) persistIncompleteDraft(draft string) error {
+	draft = strings.TrimSpace(draft)
+	if draft == "" || r.conv == nil || r.store == nil {
+		return nil
+	}
+	content := "Preserved draft (incomplete):\n" + draft
+	msg := conversation.Message{
+		Role:        "assistant",
+		Content:     content,
+		Timestamp:   time.Now(),
+		Tokens:      conversation.CountTokens(content),
+		IsTruncated: true,
+	}
+	r.conv.Messages = append(r.conv.Messages, msg)
+	r.conv.TokenCount += msg.Tokens
+	if buffered, err := r.bufferDurableConversationMessage(msg); buffered {
+		if err != nil {
+			r.emitError("failed to buffer incomplete draft", err)
+		}
+		return err
+	}
+	if err := r.conv.SaveMessage(r.store, msg); err != nil {
+		r.emitError("failed to save incomplete draft", err)
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) emitIncompleteTurnEvent(notice agentloop.IncompleteResultNotice) {
+	if strings.TrimSpace(notice.Message) == "" {
+		notice = agentloop.PresentIncompleteResult(&agentloop.IncompleteTurnError{})
+	}
+	r.emit(RunnerEvent{
+		Type:      EventWarning,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data: map[string]any{
+			"message":    notice.Message,
+			"code":       notice.Code,
+			"reason":     notice.Reason,
+			"nextAction": notice.NextAction,
+		},
+	})
+}
+
 // newTurnController wires the shared turn engine for one conversation turn.
 // A fresh Governor is created per turn (per user message), matching how the
 // pre-engine loop had no cross-turn round budget either.
 func (r *Runner) newTurnController() (*agentloop.Controller, error) {
-	return r.newTurnControllerForCommand(nil)
+	return r.newTurnControllerForCommand(nil, "")
 }
 
-func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command) (*agentloop.Controller, error) {
+func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command, taskIntent string) (*agentloop.Controller, error) {
+	if command != nil {
+		if err := sessionexec.ValidateCommandTaskIntent(command.Type, command.TaskIntent); err != nil {
+			return nil, err
+		}
+	} else if err := sessionexec.ValidateTaskIntent(taskIntent); err != nil {
+		return nil, err
+	}
 	dispatchTools := agentloop.ToolDispatcher(agentloop.ToolDispatcherFunc(r.dispatchToolCalls))
 	callModel := agentloop.ModelCaller(agentloop.ModelCallerFunc(r.callModel))
+	offeredToolsThisRound := false
 	if command != nil {
 		dispatchTools = agentloop.ContextualToolDispatcherFunc(func(ctx context.Context, calls []agentloop.ToolDispatchCall) ([]agentloop.ToolOutcome, error) {
+			if !offeredToolsThisRound {
+				return rejectUnexpectedHeadlessToolCalls(calls), nil
+			}
 			return r.dispatchToolCallsForCommand(ctx, command, calls)
 		})
 		callModel = agentloop.ContextualModelCallerFunc(func(ctx context.Context, call agentloop.ModelDispatchCall) (*model.ChatResponse, error) {
 			return r.callModelForCommand(ctx, command, call)
 		})
+	} else {
+		dispatchTools = agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+			if !offeredToolsThisRound {
+				return rejectUnexpectedHeadlessToolCalls(modelToolDispatchCalls(calls)), nil
+			}
+			return r.dispatchToolCalls(ctx, calls)
+		})
 	}
 	cfg := agentloop.ControllerConfig{
-		Governor:          agentloop.New(agentloop.DefaultConfig()),
-		FinalizeOnStop:    true,
-		LifecycleObserver: telemetry.NewAgentLoopObserver(r.telemetry),
+		Governor:           agentloop.New(agentloop.DefaultConfig()),
+		FinalizeOnStop:     true,
+		CompletionContract: r.completionContractForCommand(command, taskIntent),
+		LifecycleObserver:  telemetry.NewAgentLoopObserver(r.telemetry),
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
 			if command != nil {
 				if err := r.currentDurableBufferError(); err != nil {
@@ -1062,7 +1143,13 @@ func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command) (*age
 			if err != nil {
 				return model.ChatRequest{}, err
 			}
-			return r.buildRawChatRequest(modelID), nil
+			route, err := r.modelManager.ResolveModelRoute(modelID)
+			if err != nil {
+				return model.ChatRequest{}, err
+			}
+			req := r.buildRawChatRequestForRoute(route)
+			offeredToolsThisRound = len(req.Tools) > 0
+			return req, nil
 		},
 		CallModel:     callModel,
 		DispatchTools: dispatchTools,
@@ -1080,6 +1167,9 @@ func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command) (*age
 			case msg.Role == "tool":
 				text, _ := model.ExtractTextContent(msg.Content)
 				r.conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, text)
+				r.persistLatestConversationMessage()
+			case msg.Role == "user":
+				r.conv.AddUserMessage(model.ExtractTextContentOrEmpty(msg.Content))
 				r.persistLatestConversationMessage()
 			}
 		}),
@@ -1112,6 +1202,57 @@ func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command) (*age
 	return agentloop.NewController(cfg)
 }
 
+func modelToolDispatchCalls(calls []model.ToolCall) []agentloop.ToolDispatchCall {
+	out := make([]agentloop.ToolDispatchCall, len(calls))
+	for index, call := range calls {
+		out[index] = agentloop.ToolDispatchCall{
+			Call:               call,
+			ProviderToolCallID: call.ID,
+		}
+	}
+	return out
+}
+
+func rejectUnexpectedHeadlessToolCalls(calls []agentloop.ToolDispatchCall) []agentloop.ToolOutcome {
+	outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+	for _, dispatchCall := range calls {
+		name := strings.TrimSpace(dispatchCall.Call.Function.Name)
+		outcomes = append(outcomes, agentloop.ToolOutcome{
+			Content:     unexpectedToolCallMessage(name),
+			Success:     false,
+			EffectClass: "control",
+		})
+	}
+	return outcomes
+}
+
+func unexpectedToolCallMessage(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	return "Tool execution rejected: Buckley did not offer tool schemas for this model request, so no local tool was run for " + name + "."
+}
+
+func (r *Runner) completionContractForCommand(command *sessionexec.Command, taskIntent string) *agentloop.CompletionContract {
+	intent := agentloop.UnknownIntent
+	if command != nil {
+		parsed, err := agentloop.ParseTaskIntent(command.TaskIntent)
+		if err != nil {
+			parsed = agentloop.UnknownIntent
+		}
+		intent = parsed
+	} else if parsed, err := agentloop.ParseTaskIntent(taskIntent); err == nil {
+		intent = parsed
+	}
+	return &agentloop.CompletionContract{
+		RequirePostChangeVerification: true,
+		RequireObservableChange:       intent == agentloop.MutationIntent,
+		MaxRepairAttempts:             1,
+		TaskIntent:                    intent,
+	}
+}
+
 // continuationEligible reports whether this turn should attempt provider
 // continuation (decision 0001): the opt-in flag is on, and the resolved
 // provider implements ContinuationClient for modelID.
@@ -1120,6 +1261,13 @@ func (r *Runner) continuationEligible(modelID string) bool {
 		return false
 	}
 	return r.modelManager.SupportsContinuation(modelID)
+}
+
+func (r *Runner) continuationEligibleForRoute(route model.ModelRoute) bool {
+	if r == nil || r.config == nil || !r.config.Models.ProviderContinuation || r.modelManager == nil {
+		return false
+	}
+	return r.modelManager.SupportsContinuationForRoute(route)
 }
 
 // continuationCoordinator lazily creates and caches this session's
@@ -1146,23 +1294,29 @@ func (r *Runner) continuationCoordinator() *model.ContinuationCoordinator {
 // directly-tested method and the Controller-driven turn loop never diverge.
 func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 	modelID := r.resolveExecutionModel()
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if r.modelManager != nil {
+		if resolved, err := r.modelManager.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
 
-	useContinuation := r.continuationEligible(modelID)
+	useContinuation := r.continuationEligibleForRoute(route)
 	var coordinator *model.ContinuationCoordinator
 	if useContinuation {
 		coordinator = r.continuationCoordinator()
 		useContinuation = coordinator != nil
 	}
 
-	req := r.buildRawChatRequest(modelID)
+	req := r.buildRawChatRequestForRoute(route)
 
 	contextWindow := 0
 	if r.modelManager != nil {
-		contextWindow, _ = r.modelManager.GetContextLength(modelID)
+		contextWindow, _ = r.modelManager.GetContextLengthForRoute(route)
 	}
 	providerID := ""
 	if useContinuation {
-		providerID = r.modelManager.ProviderIDForModel(modelID)
+		providerID = route.ProviderID
 	}
 	req = agentloop.ProjectForContinuation(req, contextWindow, coordinator, providerID, useContinuation)
 	return req, useContinuation
@@ -1177,25 +1331,61 @@ func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 // active because it is pin-unaware and could strip reasoning from the
 // region the window represents.
 func (r *Runner) buildRawChatRequest(modelID string) model.ChatRequest {
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if r.modelManager != nil {
+		if resolved, err := r.modelManager.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
+	return r.buildRawChatRequestForRoute(route)
+}
+
+func (r *Runner) buildRawChatRequestForRoute(route model.ModelRoute) model.ChatRequest {
+	modelID := route.RequestedModel
 	req := model.ChatRequest{
 		Model:     modelID,
 		SessionID: r.sessionID,
+		Route:     route,
 	}
 	req.Messages = r.conv.ToModelMessages()
-	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
+	if r.modelManager != nil && r.modelManager.ToolsCatalogConfirmedUnavailableForRoute(route) {
+		req.ToolsCatalogConfirmedUnavailable = true
+	}
+	if r.tools != nil && r.modelManager != nil && r.modelManager.OfferToolsForRoute(route) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
 		if len(req.Tools) > 0 {
 			req.ToolChoice = "auto"
 		}
+	} else if r.tools != nil && len(r.tools.List()) > 0 {
+		req.Messages = append(req.Messages, model.Message{
+			Role:    "system",
+			Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
+		})
 	}
-	if effort := model.ResolveReasoningEffort(r.config, r.modelManager, r.rulesEngine, modelID, "execution"); effort != "" {
+	if effort := model.ResolveReasoningEffort(r.config, routeReasoningChecker{manager: r.modelManager, route: route}, r.rulesEngine, route.SelectedModel, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
-	if r.modelManager != nil && r.modelManager.SupportsParameter(modelID, "include_reasoning") {
+	if r.modelManager != nil && r.modelManager.SupportsParameterForRoute(route, "include_reasoning") {
 		include := true
 		req.IncludeReasoning = &include
 	}
 	return req
+}
+
+type routeReasoningChecker struct {
+	manager *model.Manager
+	route   model.ModelRoute
+}
+
+func (c routeReasoningChecker) SupportsReasoning(string) bool {
+	return c.manager != nil && c.manager.SupportsReasoningForRoute(c.route)
+}
+
+func (c routeReasoningChecker) ResolveReasoningCapability(string) model.CapabilityResolution {
+	if c.manager == nil {
+		return model.CapabilityResolution{Model: c.route.SelectedModel, ProviderID: c.route.ProviderID, Capability: "reasoning", State: model.CapabilityUnknown, Source: "checker_unavailable"}
+	}
+	return c.manager.ResolveReasoningCapabilityForRoute(c.route)
 }
 
 // callModel executes one model turn. When useContinuation is set, it calls
@@ -1221,8 +1411,12 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 	continuationStatus := ""
 	var resp *model.ChatResponse
 	var err error
+	route := req.Route
+	if strings.TrimSpace(route.RequestedModel) == "" && r.modelManager != nil {
+		route, _ = r.modelManager.ResolveModelRoute(req.Model)
+	}
 	if useContinuation && r.continuation != nil {
-		resp, err = r.continuation.Call(ctx, req)
+		resp, err = r.continuation.CallForRoute(ctx, req, route)
 		if err != nil {
 			if resp != nil {
 				// The provider may have emitted billable material before the
@@ -1232,7 +1426,7 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 				return resp, err
 			}
 			r.continuation.Reset()
-			resp, err = r.modelManager.ChatCompletion(ctx, req)
+			resp, err = r.modelManager.ChatCompletionForRoute(ctx, req, route)
 			continuationStatus = "reset"
 		} else if r.continuation.Hit() {
 			continuationStatus = "hit"
@@ -1240,7 +1434,7 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 			continuationStatus = "reset"
 		}
 	} else {
-		resp, err = r.modelManager.ChatCompletion(ctx, req)
+		resp, err = r.modelManager.ChatCompletionForRoute(ctx, req, route)
 	}
 
 	if r.telemetry != nil {
@@ -1378,8 +1572,49 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 
 		// Parse arguments
 		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			args = map[string]any{"raw": tc.Function.Arguments}
+		if strings.TrimSpace(tc.Function.Arguments) == "" {
+			args = map[string]any{}
+		} else if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			message := "Tool execution failed: invalid JSON arguments: " + err.Error()
+			decision = "rejected"
+			r.emit(RunnerEvent{
+				Type:      EventToolCallComplete,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data: map[string]any{
+					"toolCallId": providerToolCallID,
+					"approvalId": approvalID,
+					"toolName":   tc.Function.Name,
+					"success":    false,
+					"error":      message,
+				},
+			})
+			if r.store != nil {
+				decidedBy := "system"
+				riskScore := 0
+				if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
+					if approvalDecision != "" {
+						decidedBy = approvalDecision
+					}
+					riskScore = score
+				}
+				if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
+					SessionID:  r.sessionID,
+					ApprovalID: approvalID,
+					ToolName:   tc.Function.Name,
+					ToolInput:  tc.Function.Arguments,
+					RiskScore:  riskScore,
+					Decision:   decision,
+					DecidedBy:  decidedBy,
+					ExecutedAt: time.Now(),
+					DurationMs: 0,
+					ToolOutput: message,
+				}); logErr != nil {
+					r.emitError("failed to log tool execution", logErr)
+				}
+			}
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false, EffectClass: "control"})
+			continue
 		}
 		if args != nil && providerToolCallID != "" {
 			args[tool.ToolCallIDParam] = providerToolCallID
@@ -1477,6 +1712,14 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 		if err := r.requireDurableExecutionEnabled(ctx); err != nil {
 			return outcomes, err
 		}
+		metadata := tool.DefaultMetadata()
+		if r.tools != nil {
+			if registered, ok := r.tools.Get(tc.Function.Name); ok {
+				metadata = tool.GetMetadata(registered)
+			}
+		}
+		effectClass := string(metadata.Impact)
+		observation := tooloutcome.BeginWithMetadata(ctx, r.toolOutcomeWorkDir(), metadata)
 		var permit sessionexec.EffectPermit
 		if command != nil {
 			if dispatchCall.RunID != command.RunID || dispatchCall.TaskID != command.TaskID ||
@@ -1535,7 +1778,11 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 			if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 				r.emitError("failed to log tool execution", logErr)
 			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: errorResult, Success: false})
+			outcomes = append(outcomes, observation.Finish(ctx, agentloop.ToolOutcome{
+				Content:     errorResult,
+				Success:     false,
+				EffectClass: effectClass,
+			}, metadata, result, err))
 			continue
 		}
 
@@ -1561,16 +1808,27 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 			r.emitError("failed to log tool execution", logErr)
 		}
 		yield := tool.ResultYieldForTool(tc.Function.Name, result, nil)
-		outcomes = append(outcomes, agentloop.ToolOutcome{
+		outcomes = append(outcomes, observation.Finish(ctx, agentloop.ToolOutcome{
 			Content:       resultContent,
 			Success:       result.Success,
+			EffectClass:   effectClass,
 			YieldObserved: yield.Observed,
 			YieldCount:    yield.Count,
 			YieldUnit:     yield.Unit,
-		})
+		}, metadata, result, nil))
 	}
 
 	return outcomes, nil
+}
+
+func (r *Runner) toolOutcomeWorkDir() string {
+	if r == nil || r.session == nil {
+		return ""
+	}
+	if project := strings.TrimSpace(r.session.ProjectPath); project != "" {
+		return project
+	}
+	return strings.TrimSpace(r.session.GitRepo)
 }
 
 func (r *Runner) approvalAuditFields(approvalID string) (string, int) {
@@ -2834,7 +3092,6 @@ func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCt
 		WorkDir:          workDir,
 		RootDir:          rootDir,
 		TaskType:         "coding",
-		ModelTier:        model.InferModelTier(""),
 		GTSAvailable:     binaryAvailable("gts"),
 	})
 }

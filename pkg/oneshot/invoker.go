@@ -9,6 +9,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/tools"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -23,17 +24,54 @@ type StreamingModelClient interface {
 	model.StreamingClient
 }
 
+// routedInvokerClient is an optional extension for callers that have already
+// made one authoritative routing decision. It deliberately stays private so
+// the long-standing ModelClient and ToolInvoker contracts remain compatible
+// with ordinary completion clients and test doubles.
+type routedInvokerClient interface {
+	model.CompletionClient
+	OfferToolsForRoute(model.ModelRoute) bool
+	ToolsCatalogConfirmedUnavailableForRoute(model.ModelRoute) bool
+	GetContextLengthForRoute(model.ModelRoute) (int, error)
+	ChatCompletionForRoute(context.Context, model.ChatRequest, model.ModelRoute) (*model.ChatResponse, error)
+}
+
+type routedStreamingInvokerClient interface {
+	routedInvokerClient
+	ChatCompletionStreamForRoute(context.Context, model.ChatRequest, model.ModelRoute) (<-chan model.StreamChunk, <-chan error)
+}
+
 // StreamCallback is called for each streaming chunk.
 // reasoningChunk contains thinking/reasoning tokens as they stream.
 // contentChunk contains the main response content.
 type StreamCallback func(reasoningChunk, contentChunk string)
+
+// RequestProfile decorates one-shot model requests with task/model-specific
+// transport controls. It is intentionally small: durable routing policy can
+// choose a profile, while the invoker only applies concrete request fields.
+type RequestProfile struct {
+	// Temperature is applied when set and the request did not set one.
+	Temperature *float64
+	// MaxOutputTokens is applied to the provider's completion/output field.
+	MaxOutputTokens int
+	// RequireTool upgrades tool_choice to "required" for structured commands.
+	RequireTool bool
+	// DisableReasoningForForcedTools resolves a known provider incompatibility.
+	// Requests without forced tool selection keep their reasoning settings.
+	DisableReasoningForForcedTools bool
+	// Reasoning is an explicit model reasoning envelope selected by policy.
+	// When set, it takes precedence over the legacy ReasoningEffort fields.
+	Reasoning *model.ReasoningConfig
+}
 
 // DefaultInvoker implements Invoker using the model client.
 type DefaultInvoker struct {
 	client         ModelClient
 	model          string
 	provider       string
+	route          model.ModelRoute
 	reasoning      string
+	requestProfile RequestProfile
 	ledger         *transparency.CostLedger
 	pricing        transparency.ModelPricing
 	pricingUnknown bool
@@ -50,14 +88,22 @@ type InvokerConfig struct {
 	// Provider name (for tracing)
 	Provider string
 
+	// Route is an already-resolved API route. Its zero value preserves generic
+	// ModelClient behavior for existing callers and test doubles.
+	Route model.ModelRoute
+
 	// ReasoningEffort requests extended reasoning when the selected model supports it.
 	ReasoningEffort string
+
+	// RequestProfile applies task/model-specific transport controls.
+	RequestProfile RequestProfile
 
 	// Pricing for cost calculation
 	Pricing transparency.ModelPricing
 
-	// PricingUnknown marks pricing as guessed; guessed prices must never
-	// become recorded costs.
+	// PricingUnknown marks invocations whose token pricing is not authoritative.
+	// When true, traces and ledger entries carry a zero known subtotal plus
+	// CostUnknown, even if Pricing contains nonzero legacy fallback values.
 	PricingUnknown bool
 
 	// Ledger for tracking costs (optional)
@@ -69,40 +115,251 @@ func NewInvoker(cfg InvokerConfig) *DefaultInvoker {
 	if cfg.Provider == "" {
 		cfg.Provider = "openrouter"
 	}
-	if cfg.PricingUnknown {
-		cfg.Pricing = transparency.ModelPricing{}
-	}
+	profile := normalizeRequestProfile(cfg.RequestProfile)
 	return &DefaultInvoker{
 		client:         cfg.Client,
 		model:          cfg.Model,
 		provider:       cfg.Provider,
+		route:          cfg.Route,
 		reasoning:      normalizeInvokerReasoningEffort(cfg.ReasoningEffort),
+		requestProfile: profile,
 		pricing:        cfg.Pricing,
 		pricingUnknown: cfg.PricingUnknown,
 		ledger:         cfg.Ledger,
 	}
 }
 
-// recordTrace records a completed trace in the cost ledger when present.
-func (inv *DefaultInvoker) recordTrace(trace *transparency.Trace) {
-	if inv.ledger == nil {
-		return
+func (inv *DefaultInvoker) hasRoute() bool {
+	return inv != nil && inv.route != (model.ModelRoute{})
+}
+
+func (inv *DefaultInvoker) routeClient() (routedInvokerClient, error) {
+	if !inv.hasRoute() {
+		return nil, nil
 	}
-	inv.ledger.Record(transparency.CostEntry{
-		Model:        trace.Model,
-		Tokens:       trace.Tokens,
-		Cost:         trace.Cost,
-		CostUnknown:  trace.CostUnknown,
-		Latency:      trace.Duration,
-		InvocationID: trace.ID,
-	})
+	client, ok := inv.client.(routedInvokerClient)
+	if !ok {
+		return nil, fmt.Errorf("oneshot route contract unavailable: configured route requires a route-capable model client")
+	}
+	return client, nil
+}
+
+func (inv *DefaultInvoker) applyRoute(req model.ChatRequest) (model.ChatRequest, error) {
+	if !inv.hasRoute() {
+		return req, nil
+	}
+	if _, err := inv.routeClient(); err != nil {
+		return req, err
+	}
+	req.Model = inv.route.RequestedModel
+	req.Route = inv.route
+	return req, nil
+}
+
+func (inv *DefaultInvoker) preflightToolRoute() error {
+	if !inv.hasRoute() {
+		return nil
+	}
+	client, err := inv.routeClient()
+	if err != nil {
+		return err
+	}
+	if client.ToolsCatalogConfirmedUnavailableForRoute(inv.route) {
+		return fmt.Errorf("selected model route does not advertise tool calling; choose a tool-capable model")
+	}
+	return nil
+}
+
+func (inv *DefaultInvoker) chatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+	if !inv.hasRoute() {
+		return inv.client.ChatCompletion(ctx, req)
+	}
+	client, err := inv.routeClient()
+	if err != nil {
+		return nil, err
+	}
+	req, err = inv.applyRoute(req)
+	if err != nil {
+		return nil, err
+	}
+	return client.ChatCompletionForRoute(ctx, req, inv.route)
+}
+
+func (inv *DefaultInvoker) chatCompletionStream(ctx context.Context, req model.ChatRequest) (<-chan model.StreamChunk, <-chan error, error) {
+	if !inv.hasRoute() {
+		client, ok := inv.client.(StreamingModelClient)
+		if !ok {
+			return nil, nil, nil
+		}
+		chunks, errs := client.ChatCompletionStream(ctx, req)
+		return chunks, errs, nil
+	}
+	client, err := inv.routeClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	streamClient, ok := client.(routedStreamingInvokerClient)
+	if !ok {
+		return nil, nil, nil
+	}
+	req, err = inv.applyRoute(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	chunks, errs := streamClient.ChatCompletionStreamForRoute(ctx, req, inv.route)
+	return chunks, errs, nil
+}
+
+func (inv *DefaultInvoker) routeFailureTrace(builder *transparency.TraceBuilder, err error) *transparency.Trace {
+	builder.WithError(err)
+	return inv.buildTrace(builder)
+}
+
+func (inv *DefaultInvoker) completeTrace(builder *transparency.TraceBuilder, tokens transparency.TokenUsage, traceID string, observed bool) *transparency.Trace {
+	return inv.completeTraceWithCostUnknown(builder, tokens, traceID, observed, false)
+}
+
+func (inv *DefaultInvoker) completeTraceWithCostUnknown(builder *transparency.TraceBuilder, tokens transparency.TokenUsage, traceID string, observed bool, forceUnknown bool) *transparency.Trace {
+	cost, unknown := inv.invocationCost(tokens)
+	if observed && !hasProviderUsageEvidence(tokens) && hasNonzeroPricing(inv.pricing) {
+		cost, unknown = 0, true
+	}
+	if forceUnknown {
+		cost, unknown = 0, true
+	}
+	trace := builder.Complete(tokens, cost)
+	trace.CostUnknown = unknown
+	if observed && inv.ledger != nil {
+		inv.ledger.Record(transparency.CostEntry{
+			Model:        inv.model,
+			Tokens:       tokens,
+			Cost:         trace.Cost,
+			CostUnknown:  trace.CostUnknown,
+			Latency:      trace.Duration,
+			InvocationID: traceID,
+		})
+	}
+	return trace
+}
+
+func (inv *DefaultInvoker) buildTrace(builder *transparency.TraceBuilder) *transparency.Trace {
+	trace := builder.Build()
+	if inv.pricingUnknown {
+		trace.CostUnknown = true
+	}
+	return trace
+}
+
+func (inv *DefaultInvoker) invocationCost(tokens transparency.TokenUsage) (float64, bool) {
+	if inv.pricingUnknown || tokenUsageCostUnknown(tokens, inv.pricing) {
+		return 0, true
+	}
+	return inv.pricing.Calculate(tokens), false
+}
+
+func (inv *DefaultInvoker) observedUsageCostUnknown(tokens transparency.TokenUsage) bool {
+	_, unknown := inv.invocationCost(tokens)
+	if unknown {
+		return true
+	}
+	return !hasProviderUsageEvidence(tokens) && hasNonzeroPricing(inv.pricing)
 }
 
 func (inv *DefaultInvoker) requestReasoning() *model.ReasoningConfig {
-	if inv == nil || inv.reasoning == "" {
+	if inv == nil {
 		return nil
 	}
-	return &model.ReasoningConfig{Effort: inv.reasoning}
+	if inv.requestProfile.Reasoning != nil {
+		cfg := cloneReasoningConfig(inv.requestProfile.Reasoning)
+		cfg.Effort = normalizeInvokerReasoningEffort(cfg.Effort)
+		if cfg.Effort == "" && cfg.MaxTokens <= 0 && cfg.Enabled == nil && cfg.Exclude == nil {
+			return nil
+		}
+		return cfg
+	}
+	effort := inv.reasoning
+	if effort == "" {
+		return nil
+	}
+	return &model.ReasoningConfig{Effort: effort}
+}
+
+func normalizeRequestProfile(profile RequestProfile) RequestProfile {
+	if profile.Temperature != nil {
+		if *profile.Temperature < 0 {
+			profile.Temperature = nil
+		} else {
+			value := *profile.Temperature
+			profile.Temperature = &value
+		}
+	}
+	if profile.MaxOutputTokens < 0 {
+		profile.MaxOutputTokens = 0
+	}
+	if profile.Reasoning != nil {
+		profile.Reasoning = cloneReasoningConfig(profile.Reasoning)
+		profile.Reasoning.Effort = normalizeInvokerReasoningEffort(profile.Reasoning.Effort)
+		if profile.Reasoning.MaxTokens < 0 {
+			profile.Reasoning.MaxTokens = 0
+		}
+	}
+	return profile
+}
+
+func (inv *DefaultInvoker) applyRequestProfile(req model.ChatRequest) model.ChatRequest {
+	if inv == nil {
+		return req
+	}
+	profile := inv.requestProfile
+	if profile.RequireTool && len(req.Tools) > 0 {
+		req.ToolChoice = "required"
+	}
+	if profile.DisableReasoningForForcedTools && len(req.Tools) > 0 && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+		enabled := false
+		req.Reasoning = &model.ReasoningConfig{Enabled: &enabled}
+	}
+	if profile.Temperature != nil && req.Temperature == 0 {
+		req.Temperature = *profile.Temperature
+	}
+	if profile.MaxOutputTokens > 0 && req.MaxTokens == 0 && req.MaxCompletionTokens == 0 {
+		switch strings.ToLower(strings.TrimSpace(inv.provider)) {
+		case "openai":
+			req.MaxCompletionTokens = profile.MaxOutputTokens
+		default:
+			req.MaxTokens = profile.MaxOutputTokens
+		}
+	}
+	return req
+}
+
+func cloneReasoningConfig(cfg *model.ReasoningConfig) *model.ReasoningConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	if cfg.Enabled != nil {
+		value := *cfg.Enabled
+		out.Enabled = &value
+	}
+	if cfg.Exclude != nil {
+		value := *cfg.Exclude
+		out.Exclude = &value
+	}
+	return &out
+}
+
+func requestOutputTokens(req model.ChatRequest) int {
+	if req.MaxTokens > 0 {
+		return req.MaxTokens
+	}
+	return req.MaxCompletionTokens
+}
+
+func requestReasoningMaxTokens(req model.ChatRequest) int {
+	if req.Reasoning == nil {
+		return 0
+	}
+	return req.Reasoning.MaxTokens
 }
 
 func normalizeInvokerReasoningEffort(effort string) string {
@@ -114,14 +371,143 @@ func normalizeInvokerReasoningEffort(effort string) string {
 	}
 }
 
+func completionTruncatedError(reason string) error {
+	return fmt.Errorf("model response truncated with finish_reason=%q", reason)
+}
+
+func tokenUsageFromModelUsage(usage model.Usage) transparency.TokenUsage {
+	return modelusage.FromUsage(usage)
+}
+
+func tokenUsageFromStreamUsage(usage *model.Usage) transparency.TokenUsage {
+	if usage == nil {
+		return transparency.TokenUsage{}
+	}
+	tokens := tokenUsageFromModelUsage(*usage)
+	tokens.UsageEvidencePresent = true
+	return tokens
+}
+
+func responseTraceForFinishReason(reason string) *transparency.ResponseTrace {
+	return &transparency.ResponseTrace{FinishReason: reason}
+}
+
+func modelExecutionTrace(identity *model.ExecutionIdentity) []transparency.ExecutionIdentityTrace {
+	if identity == nil {
+		return nil
+	}
+	return agentModelExecutionsForTrace([]model.ExecutionIdentity{*identity})
+}
+
+func toolCallsForTrace(calls []model.ToolCall) []tools.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]tools.ToolCall, 0, len(calls))
+	for _, tc := range calls {
+		out = append(out, tools.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: json.RawMessage(tc.Function.Arguments),
+		})
+	}
+	return out
+}
+
+func applyMessageEvidence(builder *transparency.TraceBuilder, msg model.Message, tokens *transparency.TokenUsage) (string, []tools.ToolCall) {
+	if msg.Reasoning != "" {
+		builder.WithReasoning(msg.Reasoning)
+		if tokens != nil && !hasProviderUsageEvidence(*tokens) {
+			tokens.Reasoning = estimateTokens(msg.Reasoning)
+			tokens.Estimated = true
+		}
+	}
+	content := model.ExtractTextContentOrEmpty(msg.Content)
+	if content != "" {
+		builder.WithContent(content)
+	}
+	calls := toolCallsForTrace(msg.ToolCalls)
+	if len(calls) > 0 {
+		builder.WithToolCalls(calls)
+	}
+	return content, calls
+}
+
+func hasProviderUsageEvidence(tokens transparency.TokenUsage) bool {
+	return modelusage.HasEvidence(tokens)
+}
+
+func hasNonzeroPricing(pricing transparency.ModelPricing) bool {
+	return pricing.InputPerMillion != 0 ||
+		pricing.OutputPerMillion != 0 ||
+		pricing.ReasoningPerMillion != 0 ||
+		pricing.CachedInputPerMillion != 0
+}
+
+func tokenUsageCostUnknown(tokens transparency.TokenUsage, pricing transparency.ModelPricing) bool {
+	return transparency.CostUnknownForUsage(tokens, pricing)
+}
+
+func processStreamChunk(acc *model.StreamAccumulator, callback StreamCallback, chunk model.StreamChunk) string {
+	finishReason := ""
+	if callback != nil && len(chunk.Choices) > 0 {
+		delta := chunk.Choices[0].Delta
+		if delta.Reasoning != "" || delta.Content != "" {
+			// Filter tool call tokens from streamed content.
+			filteredContent := model.FilterToolCallTokens(delta.Content)
+			callback(delta.Reasoning, filteredContent)
+		}
+	}
+	if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
+		finishReason = *chunk.Choices[0].FinishReason
+	}
+	acc.Add(chunk)
+	return finishReason
+}
+
+func drainReadyStreamChunks(acc *model.StreamAccumulator, callback StreamCallback, chunkChan <-chan model.StreamChunk, finishReason *string, observed *bool) <-chan model.StreamChunk {
+	if chunkChan == nil {
+		return nil
+	}
+	ready := len(chunkChan)
+	for i := 0; i < ready; i++ {
+		chunk, ok := <-chunkChan
+		if !ok {
+			return nil
+		}
+		if observed != nil {
+			*observed = true
+		}
+		if reason := processStreamChunk(acc, callback, chunk); reason != "" && finishReason != nil {
+			*finishReason = reason
+		}
+	}
+	return chunkChan
+}
+
+func (inv *DefaultInvoker) completePartialStreamResult(builder *transparency.TraceBuilder, acc *model.StreamAccumulator, finishReason string, traceID string, err error, observed bool) (*Result, *transparency.Trace, error) {
+	msg := acc.FinalizeWithTokenParsing()
+	tokens := tokenUsageFromStreamUsage(acc.Usage())
+	content, _ := applyMessageEvidence(builder, msg, &tokens)
+	if finishReason != "" {
+		builder.WithResponse(responseTraceForFinishReason(finishReason))
+	}
+	builder.WithError(err)
+	builder.WithModelExecutions(modelExecutionTrace(acc.ExecutionIdentity()))
+	trace := inv.completeTrace(builder, tokens, traceID, observed)
+	if content != "" || msg.Reasoning != "" || len(msg.ToolCalls) > 0 || acc.Usage() != nil {
+		return &Result{TextContent: content, Trace: trace}, trace, fmt.Errorf("model request failed after partial response: %w", err)
+	}
+	return nil, trace, fmt.Errorf("model request failed: %w", err)
+}
+
 // Invoke executes a one-shot command with the given tool.
 func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit) (*Result, *transparency.Trace, error) {
 	// Generate trace ID
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
-		WithCostUnknown(inv.pricingUnknown)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
 	builder.WithContext(audit)
 
 	// Build request
@@ -137,6 +523,9 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 		SessionID:  traceID,
 		Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
+	req = inv.applyRequestProfile(req)
+	var routeErr error
+	req, routeErr = inv.applyRoute(req)
 
 	// Capture request for tracing
 	builder.WithRequest(&transparency.RequestTrace{
@@ -144,86 +533,76 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 			{Role: "system", Content: truncateForTrace(systemPrompt, 500), ContentLength: len(systemPrompt)},
 			{Role: "user", Content: truncateForTrace(userPrompt, 500), ContentLength: len(userPrompt)},
 		},
-		Tools:       []string{tool.Name},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Tools:              []string{tool.Name},
+		Temperature:        req.Temperature,
+		MaxTokens:          requestOutputTokens(req),
+		ReasoningMaxTokens: requestReasoningMaxTokens(req),
 	})
+	if routeErr != nil {
+		return nil, inv.routeFailureTrace(builder, routeErr), routeErr
+	}
+	if err := inv.preflightToolRoute(); err != nil {
+		return nil, inv.routeFailureTrace(builder, err), err
+	}
 
 	// Make request
-	resp, err := inv.client.ChatCompletion(ctx, req)
+	resp, err := inv.chatCompletion(ctx, req)
 	if err != nil {
 		if resp != nil {
-			tokens := transparency.TokenUsage{Input: resp.Usage.PromptTokens, Output: resp.Usage.CompletionTokens}
+			tokens := modelusage.FromResponse(resp)
 			result := &Result{}
 			if len(resp.Choices) > 0 {
 				choice := resp.Choices[0]
-				if choice.Message.Reasoning != "" {
-					builder.WithReasoning(choice.Message.Reasoning)
-					tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
-				}
-				if len(choice.Message.ToolCalls) > 0 {
-					calls := make([]tools.ToolCall, 0, len(choice.Message.ToolCalls))
-					for _, tc := range choice.Message.ToolCalls {
-						calls = append(calls, tools.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: json.RawMessage(tc.Function.Arguments)})
-					}
-					result.ToolCall = &calls[0]
-					builder.WithToolCalls(calls)
-				} else if content := model.ExtractTextContentOrEmpty(choice.Message.Content); content != "" {
+				builder.WithResponse(responseTraceForFinishReason(choice.FinishReason))
+				content, _ := applyMessageEvidence(builder, choice.Message, &tokens)
+				if content != "" {
 					result.TextContent = content
-					builder.WithContent(content)
 				}
 			}
 			builder.WithError(err)
-			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
-			inv.recordTrace(trace)
+			builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+			trace := inv.completeTrace(builder, tokens, traceID, true)
+			result.Trace = trace
 			return result, trace, fmt.Errorf("model request failed after partial response: %w", err)
 		}
 		builder.WithError(err)
-		trace := builder.Build()
+		trace := inv.buildTrace(builder)
 		return nil, trace, fmt.Errorf("model request failed: %w", err)
 	}
 
 	// Calculate tokens and cost
-	tokens := transparency.TokenUsage{
-		Input:  resp.Usage.PromptTokens,
-		Output: resp.Usage.CompletionTokens,
-	}
-	cost := inv.pricing.Calculate(tokens)
+	tokens := modelusage.FromResponse(resp)
 
 	// Extract response content
 	result := &Result{}
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
+		builder.WithResponse(responseTraceForFinishReason(choice.FinishReason))
 
-		// Extract reasoning if present
-		if choice.Message.Reasoning != "" {
-			builder.WithReasoning(choice.Message.Reasoning)
-			tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
+		content, calls := applyMessageEvidence(builder, choice.Message, &tokens)
+		if model.IsTruncatedFinishReason(choice.FinishReason) {
+			result.TextContent = content
+			builder.WithError(completionTruncatedError(choice.FinishReason))
+			builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+			trace := inv.completeTrace(builder, tokens, traceID, true)
+			result.Trace = trace
+			return result, trace, completionTruncatedError(choice.FinishReason)
 		}
 
-		// Check for tool calls
-		if len(choice.Message.ToolCalls) > 0 {
-			tc := choice.Message.ToolCalls[0]
-			toolCall := &tools.ToolCall{
-				ID:        tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: json.RawMessage(tc.Function.Arguments),
-			}
-			result.ToolCall = toolCall
-			builder.WithToolCalls([]tools.ToolCall{*toolCall})
-		} else {
-			// Extract text content if no tool calls
-			if content, ok := choice.Message.Content.(string); ok {
-				result.TextContent = content
-				builder.WithContent(content)
-			}
+		if len(calls) > 0 {
+			toolCall := calls[0]
+			result.ToolCall = &toolCall
+		} else if content != "" {
+			result.TextContent = content
 		}
 	}
 
 	// Complete trace
-	trace := builder.Complete(tokens, cost)
+	builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+	trace := inv.completeTrace(builder, tokens, traceID, true)
+	result.Trace = trace
 
-	inv.recordTrace(trace)
+	// Record in ledger if available
 
 	return result, trace, nil
 }
@@ -232,19 +611,11 @@ func (inv *DefaultInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt 
 // The callback is called for each chunk of reasoning/content as it streams.
 // This allows showing thinking progress for models like kimi-k2-thinking.
 func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit, callback StreamCallback) (*Result, *transparency.Trace, error) {
-	// Check if client supports streaming
-	streamClient, ok := inv.client.(StreamingModelClient)
-	if !ok {
-		// Fall back to non-streaming
-		return inv.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
-	}
-
 	// Generate trace ID
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
-		WithCostUnknown(inv.pricingUnknown)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
 	builder.WithContext(audit)
 
 	// Build request
@@ -261,6 +632,9 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 		SessionID:  traceID,
 		Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
+	req = inv.applyRequestProfile(req)
+	var routeErr error
+	req, routeErr = inv.applyRoute(req)
 
 	// Capture request for tracing
 	builder.WithRequest(&transparency.RequestTrace{
@@ -268,37 +642,47 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 			{Role: "system", Content: truncateForTrace(systemPrompt, 500), ContentLength: len(systemPrompt)},
 			{Role: "user", Content: truncateForTrace(userPrompt, 500), ContentLength: len(userPrompt)},
 		},
-		Tools:       []string{tool.Name},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Tools:              []string{tool.Name},
+		Temperature:        req.Temperature,
+		MaxTokens:          requestOutputTokens(req),
+		ReasoningMaxTokens: requestReasoningMaxTokens(req),
 	})
+	if routeErr != nil {
+		return nil, inv.routeFailureTrace(builder, routeErr), routeErr
+	}
+	if err := inv.preflightToolRoute(); err != nil {
+		return nil, inv.routeFailureTrace(builder, err), err
+	}
 
 	// Make streaming request
-	chunkChan, errChan := streamClient.ChatCompletionStream(ctx, req)
+	chunkChan, errChan, streamErr := inv.chatCompletionStream(ctx, req)
+	if streamErr != nil {
+		return nil, inv.routeFailureTrace(builder, streamErr), streamErr
+	}
+	if chunkChan == nil && errChan == nil {
+		// Preserve the historical non-streaming fallback, which remains route
+		// bound when a route-aware non-streaming client was supplied.
+		return inv.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
+	}
 
 	// Accumulate response
 	acc := model.NewStreamAccumulator()
+	finishReason := ""
+	observedStreamFrame := false
 
 	// Process chunks
-	for {
+	for chunkChan != nil || errChan != nil {
 		select {
 		case chunk, ok := <-chunkChan:
 			if !ok {
-				// Channel closed, done receiving chunks
-				goto done
+				chunkChan = nil
+				continue
 			}
 
-			// Stream reasoning/content to callback
-			if callback != nil && len(chunk.Choices) > 0 {
-				delta := chunk.Choices[0].Delta
-				if delta.Reasoning != "" || delta.Content != "" {
-					// Filter tool call tokens from streamed content
-					filteredContent := model.FilterToolCallTokens(delta.Content)
-					callback(delta.Reasoning, filteredContent)
-				}
+			observedStreamFrame = true
+			if reason := processStreamChunk(acc, callback, chunk); reason != "" {
+				finishReason = reason
 			}
-
-			acc.Add(chunk)
 
 		case err, ok := <-errChan:
 			if !ok {
@@ -306,81 +690,51 @@ func (inv *DefaultInvoker) InvokeStream(ctx context.Context, systemPrompt, userP
 				continue
 			}
 			if err != nil {
-				msg := acc.FinalizeWithTokenParsing()
-				usage := acc.Usage()
-				if msg.Reasoning != "" {
-					builder.WithReasoning(msg.Reasoning)
-				}
-				partialContent := model.ExtractTextContentOrEmpty(msg.Content)
-				if partialContent != "" {
-					builder.WithContent(partialContent)
-				}
-				if len(msg.ToolCalls) > 0 {
-					partialCalls := make([]tools.ToolCall, 0, len(msg.ToolCalls))
-					for _, tc := range msg.ToolCalls {
-						partialCalls = append(partialCalls, tools.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: json.RawMessage(tc.Function.Arguments)})
-					}
-					builder.WithToolCalls(partialCalls)
-				}
-				var tokens transparency.TokenUsage
-				if usage != nil {
-					tokens.Input = usage.PromptTokens
-					tokens.Output = usage.CompletionTokens
-				}
-				cost := inv.pricing.Calculate(tokens)
-				builder.WithError(err)
-				trace := builder.Complete(tokens, cost)
-				if partialContent != "" || msg.Reasoning != "" || len(msg.ToolCalls) > 0 || usage != nil {
-					inv.recordTrace(trace)
-					return &Result{TextContent: partialContent}, trace, fmt.Errorf("model request failed after partial response: %w", err)
-				}
-				return nil, trace, fmt.Errorf("model request failed: %w", err)
+				chunkChan = drainReadyStreamChunks(acc, callback, chunkChan, &finishReason, &observedStreamFrame)
+				return inv.completePartialStreamResult(builder, acc, finishReason, traceID, err, observedStreamFrame)
 			}
+		case <-ctx.Done():
+			chunkChan = drainReadyStreamChunks(acc, callback, chunkChan, &finishReason, &observedStreamFrame)
+			return inv.completePartialStreamResult(builder, acc, finishReason, traceID, ctx.Err(), observedStreamFrame)
 		}
 	}
-done:
 
 	// Get final message with parsed tool calls
 	msg := acc.FinalizeWithTokenParsing()
 
 	// Get usage from accumulator
-	usage := acc.Usage()
-	var tokens transparency.TokenUsage
-	if usage != nil {
-		tokens = transparency.TokenUsage{
-			Input:  usage.PromptTokens,
-			Output: usage.CompletionTokens,
-		}
-	}
+	tokens := tokenUsageFromStreamUsage(acc.Usage())
 
 	// Extract reasoning for trace
-	if msg.Reasoning != "" {
-		builder.WithReasoning(msg.Reasoning)
-		tokens.Reasoning = estimateTokens(msg.Reasoning)
+	content, calls := applyMessageEvidence(builder, msg, &tokens)
+	if finishReason != "" {
+		builder.WithResponse(responseTraceForFinishReason(finishReason))
 	}
-
-	cost := inv.pricing.Calculate(tokens)
 
 	// Build result
 	result := &Result{}
-	if len(msg.ToolCalls) > 0 {
-		tc := msg.ToolCalls[0]
-		toolCall := &tools.ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: json.RawMessage(tc.Function.Arguments),
-		}
-		result.ToolCall = toolCall
-		builder.WithToolCalls([]tools.ToolCall{*toolCall})
-	} else if content, ok := msg.Content.(string); ok && content != "" {
+
+	if model.IsTruncatedFinishReason(finishReason) {
 		result.TextContent = content
-		builder.WithContent(content)
+		truncatedErr := completionTruncatedError(finishReason)
+		builder.WithError(truncatedErr)
+		builder.WithModelExecutions(modelExecutionTrace(acc.ExecutionIdentity()))
+		trace := inv.completeTrace(builder, tokens, traceID, observedStreamFrame)
+		result.Trace = trace
+		return result, trace, truncatedErr
+	}
+
+	if len(calls) > 0 {
+		toolCall := calls[0]
+		result.ToolCall = &toolCall
+	} else if content != "" {
+		result.TextContent = content
 	}
 
 	// Complete trace
-	trace := builder.Complete(tokens, cost)
-
-	inv.recordTrace(trace)
+	builder.WithModelExecutions(modelExecutionTrace(acc.ExecutionIdentity()))
+	trace := inv.completeTrace(builder, tokens, traceID, observedStreamFrame)
+	result.Trace = trace
 
 	return result, trace, nil
 }
@@ -391,8 +745,7 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
-		WithCostUnknown(inv.pricingUnknown)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
 	builder.WithContext(audit)
 
 	// Build request (no tools)
@@ -406,6 +759,9 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 		SessionID: traceID,
 		Trace:     map[string]string{"trace_id": traceID, "trace_name": "oneshot"},
 	}
+	req = inv.applyRequestProfile(req)
+	var routeErr error
+	req, routeErr = inv.applyRoute(req)
 
 	// Capture request for tracing
 	builder.WithRequest(&transparency.RequestTrace{
@@ -413,86 +769,122 @@ func (inv *DefaultInvoker) InvokeText(ctx context.Context, systemPrompt, userPro
 			{Role: "system", Content: truncateForTrace(systemPrompt, 500), ContentLength: len(systemPrompt)},
 			{Role: "user", Content: truncateForTrace(userPrompt, 500), ContentLength: len(userPrompt)},
 		},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Temperature:        req.Temperature,
+		MaxTokens:          requestOutputTokens(req),
+		ReasoningMaxTokens: requestReasoningMaxTokens(req),
 	})
+	if routeErr != nil {
+		return "", inv.routeFailureTrace(builder, routeErr), routeErr
+	}
 
 	// Make request
-	resp, err := inv.client.ChatCompletion(ctx, req)
+	resp, err := inv.chatCompletion(ctx, req)
 	if err != nil {
 		if resp != nil {
-			tokens := transparency.TokenUsage{Input: resp.Usage.PromptTokens, Output: resp.Usage.CompletionTokens}
+			tokens := modelusage.FromResponse(resp)
 			content := ""
 			if len(resp.Choices) > 0 {
 				choice := resp.Choices[0]
-				if choice.Message.Reasoning != "" {
-					builder.WithReasoning(choice.Message.Reasoning)
-					tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
-				}
-				content = model.ExtractTextContentOrEmpty(choice.Message.Content)
-				if content != "" {
-					builder.WithContent(content)
-				}
+				builder.WithResponse(responseTraceForFinishReason(choice.FinishReason))
+				content, _ = applyMessageEvidence(builder, choice.Message, &tokens)
 			}
 			builder.WithError(err)
-			trace := builder.Complete(tokens, inv.pricing.Calculate(tokens))
-			inv.recordTrace(trace)
+			builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+			trace := inv.completeTrace(builder, tokens, traceID, true)
 			return content, trace, fmt.Errorf("model request failed after partial response: %w", err)
 		}
 		builder.WithError(err)
-		trace := builder.Build()
+		trace := inv.buildTrace(builder)
 		return "", trace, fmt.Errorf("model request failed: %w", err)
 	}
 
 	// Calculate tokens and cost
-	tokens := transparency.TokenUsage{
-		Input:  resp.Usage.PromptTokens,
-		Output: resp.Usage.CompletionTokens,
-	}
-	cost := inv.pricing.Calculate(tokens)
+	tokens := modelusage.FromResponse(resp)
 
 	// Extract response content
 	var content string
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
+		builder.WithResponse(responseTraceForFinishReason(choice.FinishReason))
 
-		// Extract reasoning if present
-		if choice.Message.Reasoning != "" {
-			builder.WithReasoning(choice.Message.Reasoning)
-			tokens.Reasoning = estimateTokens(choice.Message.Reasoning)
-		}
-
-		// Extract text content
-		if c, ok := choice.Message.Content.(string); ok {
-			content = c
-			builder.WithContent(content)
+		content, _ = applyMessageEvidence(builder, choice.Message, &tokens)
+		if model.IsTruncatedFinishReason(choice.FinishReason) {
+			truncatedErr := completionTruncatedError(choice.FinishReason)
+			builder.WithError(truncatedErr)
+			builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+			trace := inv.completeTrace(builder, tokens, traceID, true)
+			return content, trace, truncatedErr
 		}
 	}
 
 	// Complete trace
-	trace := builder.Complete(tokens, cost)
+	builder.WithModelExecutions(modelExecutionTrace(resp.ExecutionIdentity))
+	trace := inv.completeTrace(builder, tokens, traceID, true)
 
-	inv.recordTrace(trace)
+	// Record in ledger if available
 
 	return content, trace, nil
 }
 
 // InvokeWithRetry invokes with a single retry on tool call failure.
 func (inv *DefaultInvoker) InvokeWithRetry(ctx context.Context, systemPrompt, userPrompt string, tool tools.Definition, audit *transparency.ContextAudit) (*Result, *transparency.Trace, error) {
+	var attempts []transparency.TraceAttempt
 	result, trace, err := inv.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
 	if err != nil {
-		return nil, trace, err
+		trace = traceWithErrorIfBlank(trace, err)
+	}
+	if trace != nil {
+		attempts = append(attempts, transparency.TraceAttempt{Phase: "invoke", Attempt: 1, Trace: trace})
+	}
+	if err != nil {
+		if aggregate := transparency.AggregateTraceAttempts(attempts); aggregate != nil && len(attempts) > 1 {
+			trace = aggregate
+		}
+		if result != nil {
+			result.Trace = trace
+		}
+		return result, trace, err
 	}
 
 	// If we got a tool call, we're done
-	if result.HasToolCall() {
+	if result != nil && result.HasToolCall() {
 		return result, trace, nil
+	}
+	if len(attempts) > 0 {
+		attempts[len(attempts)-1].ValidationError = "model did not call the " + tool.Name + " tool"
 	}
 
 	// If no tool call, try once more with a stronger hint
 	retryPrompt := userPrompt + "\n\nIMPORTANT: You MUST use the " + tool.Name + " tool to respond. Do not output text directly."
 
-	return inv.Invoke(ctx, systemPrompt, retryPrompt, tool, audit)
+	result, retryTrace, err := inv.Invoke(ctx, systemPrompt, retryPrompt, tool, audit)
+	if err != nil {
+		retryTrace = traceWithErrorIfBlank(retryTrace, err)
+	}
+	if retryTrace != nil {
+		attempts = append(attempts, transparency.TraceAttempt{Phase: "invoke", Attempt: 2, Trace: retryTrace})
+	}
+	if aggregate := transparency.AggregateTraceAttempts(attempts); aggregate != nil && len(attempts) > 1 {
+		trace = aggregate
+	} else if retryTrace != nil {
+		trace = retryTrace
+	}
+	if err != nil {
+		trace = traceWithErrorIfBlank(trace, err)
+	}
+	if result != nil {
+		result.Trace = trace
+	}
+	return result, trace, err
+}
+
+func traceWithErrorIfBlank(trace *transparency.Trace, err error) *transparency.Trace {
+	if trace == nil || err == nil || strings.TrimSpace(trace.Error) != "" {
+		return trace
+	}
+	copied := *trace
+	copied.Error = err.Error()
+	return &copied
 }
 
 // truncateForTrace truncates a string for trace display.
@@ -569,8 +961,15 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 	traceID := fmt.Sprintf("inv-%d", time.Now().UnixNano())
 
 	// Start building trace
-	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider).
-		WithCostUnknown(inv.pricingUnknown)
+	builder := transparency.NewTraceBuilder(traceID, inv.model, inv.provider)
+	if _, err := inv.routeClient(); err != nil {
+		return "", inv.routeFailureTrace(builder, err), err
+	}
+	if len(toolDefs) > 0 {
+		if err := inv.preflightToolRoute(); err != nil {
+			return "", inv.routeFailureTrace(builder, err), err
+		}
+	}
 
 	// Convert tool definitions to OpenAI format
 	var toolSpecs []map[string]any
@@ -590,18 +989,33 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		{Role: "user", Content: userPrompt},
 	}
 
+	traceReq := inv.applyRequestProfile(model.ChatRequest{
+		Model:      inv.model,
+		Tools:      toolSpecs,
+		ToolChoice: "auto",
+		Reasoning:  inv.requestReasoning(),
+	})
+	traceReq, err := inv.applyRoute(traceReq)
+	if err != nil {
+		return "", inv.routeFailureTrace(builder, err), err
+	}
+
 	// Capture request for tracing
 	builder.WithRequest(&transparency.RequestTrace{
 		Messages: []transparency.MessageTrace{
 			{Role: "system", Content: truncateForTrace(systemPrompt, 500), ContentLength: len(systemPrompt)},
 			{Role: "user", Content: truncateForTrace(userPrompt, 500), ContentLength: len(userPrompt)},
 		},
-		Tools:       toolNames,
-		Temperature: 0,
+		Tools:              toolNames,
+		Temperature:        traceReq.Temperature,
+		MaxTokens:          requestOutputTokens(traceReq),
+		ReasoningMaxTokens: requestReasoningMaxTokens(traceReq),
 	})
 
 	var totalTokens transparency.TokenUsage
 	var allToolCalls []tools.ToolCall
+	var observedResponse bool
+	var observedCostUnknown bool
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		req := model.ChatRequest{
@@ -613,22 +1027,26 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			Trace:      map[string]string{"trace_id": traceID, "trace_name": "oneshot-tools"},
 		}
 		req.Messages = messages
-		return req, nil
+		req = inv.applyRequestProfile(req)
+		return inv.applyRoute(req)
 	}
 
-	var observedResponse bool
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
-		resp, err := inv.client.ChatCompletion(ctx, req)
+		resp, err := inv.chatCompletion(ctx, req)
 		if resp != nil {
 			observedResponse = true
-			totalTokens.Input += resp.Usage.PromptTokens
-			totalTokens.Output += resp.Usage.CompletionTokens
+			responseTokens := modelusage.FromResponse(resp)
 			if len(resp.Choices) > 0 {
 				if reasoning := resp.Choices[0].Message.Reasoning; reasoning != "" {
 					builder.WithReasoning(reasoning)
-					totalTokens.Reasoning += estimateTokens(reasoning)
+					if !hasProviderUsageEvidence(responseTokens) {
+						responseTokens.Reasoning += estimateTokens(reasoning)
+						responseTokens.Estimated = true
+					}
 				}
 			}
+			observedCostUnknown = observedCostUnknown || inv.observedUsageCostUnknown(responseTokens)
+			totalTokens = transparency.AddTokenUsage(totalTokens, responseTokens)
 		}
 		if err != nil {
 			return resp, err
@@ -679,6 +1097,17 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		DispatchTools:  dispatchTools,
 		History:        history,
 		ContextWindow: func(modelID string) int {
+			if inv.hasRoute() {
+				client, err := inv.routeClient()
+				if err != nil {
+					return 0
+				}
+				window, err := client.GetContextLengthForRoute(inv.route)
+				if err != nil {
+					return 0
+				}
+				return window
+			}
 			provider, ok := inv.client.(model.ContextWindowProvider)
 			if !ok {
 				return 0
@@ -688,7 +1117,7 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 		},
 	})
 	if err != nil {
-		return "", builder.Build(), err
+		return "", inv.buildTrace(builder), err
 	}
 
 	result, runErr := ctrl.Run(ctx)
@@ -708,11 +1137,13 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 				StopReason:   result.Termination.Reason,
 			})
 		}
-		cost := inv.pricing.Calculate(totalTokens)
-		trace := builder.Complete(totalTokens, cost)
-		if observedResponse {
-			inv.recordTrace(trace)
+		if result != nil {
+			builder.WithModelExecutions(agentModelExecutionsForTrace(result.ModelExecutions))
 		}
+		if !observedResponse {
+			return content, inv.buildTrace(builder), fmt.Errorf("model request failed: %w", runErr)
+		}
+		trace := inv.completeTraceWithCostUnknown(builder, totalTokens, traceID, true, observedCostUnknown)
 		return content, trace, fmt.Errorf("model request failed: %w", runErr)
 	}
 	if completionErr := result.RequireConclusive(); completionErr != nil {
@@ -727,22 +1158,23 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 				StopReason:   result.Termination.Reason,
 			})
 		}
-		cost := inv.pricing.Calculate(totalTokens)
-		trace := builder.Complete(totalTokens, cost)
-		if observedResponse {
-			inv.recordTrace(trace)
-		}
+		builder.WithModelExecutions(agentModelExecutionsForTrace(result.ModelExecutions))
+		trace := inv.completeTraceWithCostUnknown(builder, totalTokens, traceID, observedResponse, observedCostUnknown)
 		return result.Content, trace, completionErr
 	}
 
 	content, extractErr := model.ExtractTextContent(result.Message.Content)
 	if extractErr != nil {
+		builder.WithToolCalls(allToolCalls)
 		builder.WithError(extractErr)
-		cost := inv.pricing.Calculate(totalTokens)
-		trace := builder.Complete(totalTokens, cost)
-		if observedResponse {
-			inv.recordTrace(trace)
+		if result.Termination.Kind != "" {
+			builder.WithResponse(&transparency.ResponseTrace{
+				FinishReason: result.FinishReason,
+				StopReason:   result.Termination.Reason,
+			})
 		}
+		builder.WithModelExecutions(agentModelExecutionsForTrace(result.ModelExecutions))
+		trace := inv.completeTraceWithCostUnknown(builder, totalTokens, traceID, observedResponse, observedCostUnknown)
 		return "", trace, fmt.Errorf("extract final response: %w", extractErr)
 	}
 	builder.WithToolCalls(allToolCalls)
@@ -753,11 +1185,9 @@ func (inv *DefaultInvoker) InvokeWithTools(ctx context.Context, systemPrompt, us
 			StopReason:   result.Termination.Reason,
 		})
 	}
+	builder.WithModelExecutions(agentModelExecutionsForTrace(result.ModelExecutions))
 
-	cost := inv.pricing.Calculate(totalTokens)
-	trace := builder.Complete(totalTokens, cost)
-
-	inv.recordTrace(trace)
+	trace := inv.completeTraceWithCostUnknown(builder, totalTokens, traceID, observedResponse, observedCostUnknown)
 
 	return content, trace, nil
 }

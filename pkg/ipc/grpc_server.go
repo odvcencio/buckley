@@ -27,6 +27,7 @@ import (
 	"m31labs.dev/buckley/pkg/ipc/command"
 	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
@@ -825,6 +826,7 @@ func (s *GRPCService) SendCommand(
 		ID:         msg.CommandId,
 		Type:       cmdType,
 		Content:    msg.Content,
+		TaskIntent: msg.TaskIntent,
 		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
 	outcome, err := s.server.dispatchCommandWithReceipt(ctx, &cmd, commandDispatchRegistryThenGateway)
@@ -1040,6 +1042,9 @@ func (s *GRPCService) CreateHeadlessSession(
 	if p := principalFromContext(ctx); p != nil {
 		principal = strings.TrimSpace(p.Name)
 	}
+	if err := sessionexec.ValidateCommandTaskIntent("input", req.Msg.TaskIntent); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid command"))
+	}
 
 	project := strings.TrimSpace(req.Msg.Project)
 	if project != "" && headless.IsGitURL(project) {
@@ -1056,12 +1061,13 @@ func (s *GRPCService) CreateHeadlessSession(
 	}
 
 	createReq := headless.CreateSessionRequest{
-		Principal: principal,
-		Project:   project,
-		Branch:    req.Msg.Branch,
-		Env:       req.Msg.Env,
-		Prompt:    req.Msg.InitialPrompt,
-		Model:     req.Msg.Model,
+		Principal:  principal,
+		Project:    project,
+		Branch:     req.Msg.Branch,
+		Env:        req.Msg.Env,
+		Prompt:     req.Msg.InitialPrompt,
+		Model:      req.Msg.Model,
+		TaskIntent: req.Msg.TaskIntent,
 	}
 	if req.Msg.Limits != nil {
 		createReq.Limits = &headless.ResourceLimits{

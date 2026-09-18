@@ -21,6 +21,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -29,6 +30,8 @@ type fakeHeadlessRegistry struct {
 
 	createReq      headless.CreateSessionRequest
 	createdSession *headless.SessionInfo
+	createCalls    int
+	createErr      error
 
 	sessions map[string]*headless.SessionInfo
 
@@ -101,6 +104,10 @@ func newFakeHeadlessRegistry() *fakeHeadlessRegistry {
 func (f *fakeHeadlessRegistry) CreateSession(req headless.CreateSessionRequest) (*headless.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.createCalls++
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	f.createReq = req
 	if f.createdSession == nil {
 		now := time.Now().UTC()
@@ -212,6 +219,7 @@ func newHeadlessTestServer(t *testing.T) (*Server, *storage.Store, string) {
 		nil,
 		nil,
 	)
+	t.Cleanup(server.waitForViewPatches)
 	return server, store, tmpDir
 }
 
@@ -668,6 +676,28 @@ func TestCreateHeadlessSessionAcceptsGitURLProjects(t *testing.T) {
 	defer registry.mu.Unlock()
 	if registry.createReq.Project != "https://example.com/acme/repo.git" {
 		t.Fatalf("create project=%q want %q", registry.createReq.Project, "https://example.com/acme/repo.git")
+	}
+}
+
+func TestCreateHeadlessSessionValidationErrorReturnsBadRequest(t *testing.T) {
+	server, _, _ := newHeadlessTestServer(t)
+	registry := newFakeHeadlessRegistry()
+	registry.createErr = fmt.Errorf("%w: bad task intent", sessionexec.ErrValidation)
+	server.SetHeadlessRegistry(registry)
+
+	r := chi.NewRouter()
+	server.setupHeadlessRoutes(r)
+
+	body := strings.NewReader(`{"project":"","model":"test-model","taskIntent":"chat"}`)
+	req := httptest.NewRequest(http.MethodPost, "/headless/sessions", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withScope(req, storage.TokenScopeMember)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want %d body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
 	}
 }
 

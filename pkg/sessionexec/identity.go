@@ -58,8 +58,7 @@ func inputEnvelopeDigest(req AcceptRequest, commandID string, lane Lane, targetC
 			return "", err
 		}
 	}
-	return hashParts(
-		"acceptance",
+	parts := []string{
 		req.SessionID,
 		commandID,
 		strings.ToLower(req.Type),
@@ -67,7 +66,11 @@ func inputEnvelopeDigest(req AcceptRequest, commandID string, lane Lane, targetC
 		req.AcceptedBy,
 		string(lane),
 		targetCommandID,
-	), nil
+	}
+	if intent := strings.ToLower(strings.TrimSpace(req.TaskIntent)); intent != "" {
+		parts = append(parts, "task_intent", intent)
+	}
+	return hashParts("acceptance", parts...), nil
 }
 
 // InputDigest binds the immutable acceptance envelope and execution identity.

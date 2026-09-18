@@ -22,6 +22,7 @@ import (
 	"m31labs.dev/buckley/pkg/ipc/gosxui"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
@@ -195,17 +196,22 @@ func (b gosxBackend) StartWork(_ context.Context, r *http.Request, req gosxui.St
 	if registry == nil {
 		return "", fmt.Errorf("headless sessions not enabled")
 	}
+	taskIntent := strings.ToLower(strings.TrimSpace(req.TaskIntent))
+	if err := sessionexec.ValidateCommandTaskIntent("input", taskIntent); err != nil {
+		return "", err
+	}
 	project, err := s.resolveAgentProjectPath(req.Project)
 	if err != nil {
 		return "", err
 	}
 	create := headless.CreateSessionRequest{
-		Principal: principal.Name,
-		Project:   project,
-		Agent:     strings.TrimSpace(req.Agent),
-		Subagent:  strings.TrimSpace(req.Subagent),
-		Model:     strings.TrimSpace(req.Model),
-		Prompt:    strings.TrimSpace(req.Prompt),
+		Principal:  principal.Name,
+		Project:    project,
+		Agent:      strings.TrimSpace(req.Agent),
+		Subagent:   strings.TrimSpace(req.Subagent),
+		Model:      strings.TrimSpace(req.Model),
+		Prompt:     strings.TrimSpace(req.Prompt),
+		TaskIntent: taskIntent,
 	}
 	if create.Agent != "" || create.Subagent != "" {
 		profile, profileModel, profilePolicy, profileErr := s.resolveHeadlessAgentSelection(project, create.Agent, create.Subagent)
@@ -280,11 +286,15 @@ func (b gosxBackend) Dispatch(ctx context.Context, r *http.Request, req gosxui.C
 	if command.RequiresContent(typ) && content == "" {
 		return fmt.Errorf("content required")
 	}
+	taskIntent := strings.ToLower(strings.TrimSpace(req.TaskIntent))
+	if err := sessionexec.ValidateCommandTaskIntent(typ, taskIntent); err != nil {
+		return err
+	}
 	if s.commandLimiter != nil && !s.commandLimiter.Allow(sessionID) {
 		return fmt.Errorf("rate limit exceeded")
 	}
 	cmd := command.SessionCommand{
-		SessionID: sessionID, Type: typ, Content: content,
+		SessionID: sessionID, Type: typ, Content: content, TaskIntent: taskIntent,
 		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
 	if _, err := s.dispatchCommandWithReceipt(ctx, &cmd, commandDispatchGateway); err != nil {

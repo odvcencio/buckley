@@ -1,8 +1,28 @@
+outcome OneshotReasoningCompatibility {
+    disable_reasoning_for_forced_tools: bool
+}
+
+strategy oneshot_reasoning_compatibility returns OneshotReasoningCompatibility {
+    when {
+        provider.id == "openrouter"
+        and model.id == "qwen/qwen3.8-flash"
+    } then QwenFlashForcedTools {
+        disable_reasoning_for_forced_tools: true,
+    }
+
+    else KeepReasoning {
+        disable_reasoning_for_forced_tools: false,
+    }
+}
+
 outcome OneshotConfig {
     action: string
     max_retries: number
     context_budget: number
     use_rlm: bool
+    max_output_tokens: number
+    temperature: number
+    require_tool: bool
 }
 
 strategy oneshot_policy returns OneshotConfig {
@@ -13,6 +33,9 @@ strategy oneshot_policy returns OneshotConfig {
         max_retries: 3,
         context_budget: 8000,
         use_rlm: false,
+        max_output_tokens: 4096,
+        temperature: 0.2,
+        require_tool: true,
     }
 
     when {
@@ -22,6 +45,9 @@ strategy oneshot_policy returns OneshotConfig {
         max_retries: 3,
         context_budget: 16000,
         use_rlm: false,
+        max_output_tokens: 8192,
+        temperature: 0.2,
+        require_tool: true,
     }
 
     when {
@@ -31,6 +57,9 @@ strategy oneshot_policy returns OneshotConfig {
 		max_retries: 2,
         context_budget: 32000,
         use_rlm: true,
+        max_output_tokens: 0,
+        temperature: 0,
+        require_tool: false,
     }
 
 	when {
@@ -40,6 +69,9 @@ strategy oneshot_policy returns OneshotConfig {
 		max_retries: 2,
 		context_budget: 32000,
 		use_rlm: true,
+        max_output_tokens: 0,
+        temperature: 0,
+        require_tool: false,
 	}
 
     else DefaultConfig {
@@ -47,5 +79,8 @@ strategy oneshot_policy returns OneshotConfig {
         max_retries: 2,
         context_budget: 8000,
         use_rlm: false,
+        max_output_tokens: 0,
+        temperature: 0,
+        require_tool: false,
     }
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/tools"
 	"m31labs.dev/buckley/pkg/transparency"
@@ -200,18 +201,43 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	userPrompt := baseUserPrompt
 	var lastTrace *transparency.Trace
 	var lastErr error
+	var traceAttempts []transparency.TraceAttempt
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, trace, invokeErr := f.invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
+		if invokeErr != nil {
+			trace = traceWithErrorIfBlank(trace, invokeErr)
+		}
 		lastTrace = trace
+		traceIndex := -1
+		if trace != nil {
+			traceAttempts = append(traceAttempts, transparency.TraceAttempt{
+				Phase:   "definition",
+				Attempt: attempt + 1,
+				Trace:   trace,
+			})
+			traceIndex = len(traceAttempts) - 1
+		}
 
 		if invokeErr != nil {
-			return nil, fmt.Errorf("invoke failed: %w", invokeErr)
+			err := fmt.Errorf("invoke failed: %w", invokeErr)
+			retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
+			return &RunResult{
+				Trace:            retainedTrace,
+				ContextAudit:     audit,
+				Attempts:         attempt + 1,
+				PrimaryAttempts:  attempt + 1,
+				Incomplete:       true,
+				IncompleteReason: err.Error(),
+			}, err
 		}
 
 		// Check if model called the tool
 		if result == nil || result.ToolCall == nil {
 			lastErr = fmt.Errorf("model did not call the %s tool", tool.Name)
+			if traceIndex >= 0 {
+				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
+			}
 			userPrompt = baseUserPrompt + "\n\nIMPORTANT: You MUST call the " + tool.Name + " tool. Do not reply with plain text."
 			continue
 		}
@@ -219,6 +245,9 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		// 5. Validate
 		if err := def.Validate(result.ToolCall.Arguments); err != nil {
 			lastErr = fmt.Errorf("validation: %w", err)
+			if traceIndex >= 0 {
+				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
+			}
 			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) + ". Fix and call " + tool.Name + " again."
 			continue
 		}
@@ -227,14 +256,26 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		value, err := def.Unmarshal(result.ToolCall.Arguments)
 		if err != nil {
 			lastErr = fmt.Errorf("unmarshal: %w", err)
+			if traceIndex >= 0 {
+				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
+			}
 			userPrompt = baseUserPrompt + "\n\nThe tool call arguments must be valid JSON matching the schema for " + tool.Name + "."
 			continue
 		}
 
+		resultTrace := trace
+		if len(traceAttempts) > 1 {
+			resultTrace = transparency.AggregateTraceAttempts(traceAttempts)
+		}
+		if resultTrace == nil {
+			resultTrace = aggregateDefinitionTrace(traceAttempts, lastTrace)
+		}
 		return &RunResult{
-			Value:        value,
-			Trace:        trace,
-			ContextAudit: audit,
+			Value:           value,
+			Trace:           resultTrace,
+			ContextAudit:    audit,
+			Attempts:        attempt + 1,
+			PrimaryAttempts: attempt + 1,
 		}, nil
 	}
 
@@ -243,15 +284,41 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	// guess whether the model skipped the tool call, tripped validation,
 	// or emitted malformed JSON.
 	if lastErr != nil {
+		err := fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", maxRetries, def.Name(), lastErr)
+		retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
 		return &RunResult{
-			Trace:        lastTrace,
-			ContextAudit: audit,
-		}, fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", maxRetries, def.Name(), lastErr)
+			Trace:            retainedTrace,
+			ContextAudit:     audit,
+			Attempts:         maxRetries,
+			PrimaryAttempts:  maxRetries,
+			Incomplete:       true,
+			IncompleteReason: err.Error(),
+		}, err
 	}
+	err = fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
+	retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
 	return &RunResult{
-		Trace:        lastTrace,
-		ContextAudit: audit,
-	}, fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
+		Trace:            retainedTrace,
+		ContextAudit:     audit,
+		Attempts:         maxRetries,
+		PrimaryAttempts:  maxRetries,
+		Incomplete:       true,
+		IncompleteReason: err.Error(),
+	}, err
+}
+
+func aggregateDefinitionTrace(attempts []transparency.TraceAttempt, fallback *transparency.Trace) *transparency.Trace {
+	if len(attempts) == 0 {
+		return fallback
+	}
+	if len(attempts) == 1 {
+		return attempts[0].Trace
+	}
+	aggregate := transparency.AggregateTraceAttempts(attempts)
+	if aggregate == nil {
+		return fallback
+	}
+	return aggregate
 }
 
 // AgentRunOpts configures a tool agent framework execution.
@@ -437,6 +504,7 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	result.CommandEvidence = append([]model.CommandExecutionEvidence(nil), primary.commandEvidence...)
 	traceAttempts := append([]transparency.TraceAttempt(nil), primary.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
+	markAggregateCostUnknown(result.Trace, primary.costUnknown)
 	if primary.err != nil {
 		result.Value = primary.value
 		result.Incomplete = true
@@ -471,6 +539,11 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 		criticExecutionOpts.SynthesisLead = opts.CriticSynthesisLead
 	}
 	if opts.MaxCostUSD > 0 {
+		if primary.costUnknown {
+			result.Incomplete = true
+			result.IncompleteReason = "review cost budget cannot be enforced before approval critic because primary cost is unknown"
+			return result, fmt.Errorf("%s for %q", result.IncompleteReason, def.Name())
+		}
 		criticExecutionOpts.MaxCostUSD = opts.MaxCostUSD - primary.cost
 		if criticExecutionOpts.MaxCostUSD <= 0 {
 			result.Incomplete = true
@@ -505,6 +578,7 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 	result.CommandEvidence = append(result.CommandEvidence, critic.commandEvidence...)
 	traceAttempts = append(traceAttempts, critic.traces...)
 	result.Trace = transparency.AggregateTraceAttempts(traceAttempts)
+	markAggregateCostUnknown(result.Trace, primary.costUnknown || critic.costUnknown)
 	if critic.err != nil {
 		if hasAgentValue(critic.value) {
 			result.Value = critic.value
@@ -559,6 +633,7 @@ type agentPhaseResult struct {
 	commandEvidence []model.CommandExecutionEvidence
 	attempts        int
 	cost            float64
+	costUnknown     bool
 	err             error
 }
 
@@ -604,9 +679,13 @@ func (f *Framework) runValidatedAgentPhase(
 	cleanRepairUsed := false
 
 	for attempt := 0; attempt < attemptLimit; attempt++ {
+		if executionOpts.MaxCostUSD > 0 && result.costUnknown {
+			result.err = fmt.Errorf("agent %s cannot determine remaining cost budget for %q after %d attempts: prior agent attempt cost is unknown", phase, def.Name(), result.attempts)
+			return result
+		}
 		attemptOpts, err := agentPhaseAttemptOptions(executionOpts, retryMode, attempt, result.cost)
 		if err != nil {
-			result.err = fmt.Errorf("agent %s cost budget exhausted for %q after %d attempts", phase, def.Name(), result.attempts)
+			result.err = fmt.Errorf("agent %s cost budget exhausted for %q after %d attempts: %w", phase, def.Name(), result.attempts, err)
 			return result
 		}
 		result.attempts++
@@ -614,6 +693,9 @@ func (f *Framework) runValidatedAgentPhase(
 		validationExecution := evidence.accumulate(&result, agentResult)
 		traceIndex := recordAgentPhaseTrace(&result, agentResult, phase, attempt+1)
 		if runErr != nil {
+			if traceIndex >= 0 {
+				result.traces[traceIndex].Trace = traceWithErrorIfBlank(result.traces[traceIndex].Trace, runErr)
+			}
 			if agentResult != nil && strings.TrimSpace(agentResult.Response) != "" {
 				// Preserve parseable partial work for callers that explicitly
 				// handle incomplete results. Keep an earlier rejected response
@@ -717,16 +799,66 @@ func (e *agentPhaseEvidence) accumulate(result *agentPhaseResult, current *Agent
 }
 
 func recordAgentPhaseTrace(result *agentPhaseResult, current *AgentResult, phase string, attempt int) int {
-	if current == nil || current.Trace == nil {
+	if current == nil {
+		result.costUnknown = true
 		return -1
 	}
-	result.cost += current.Trace.Cost
+	trace := current.Trace
+	if trace == nil {
+		trace = minimalAgentResultTrace(current, phase, attempt)
+	}
+	if trace == nil {
+		result.costUnknown = true
+		return -1
+	}
+	result.cost += trace.Cost
+	if trace.CostUnknown {
+		result.costUnknown = true
+	}
 	result.traces = append(result.traces, transparency.TraceAttempt{
 		Phase:   phase,
 		Attempt: attempt,
-		Trace:   current.Trace,
+		Trace:   trace,
 	})
 	return len(result.traces) - 1
+}
+
+func minimalAgentResultTrace(current *AgentResult, phase string, attempt int) *transparency.Trace {
+	if current == nil {
+		return nil
+	}
+	executions := agentModelExecutionsForTrace(current.ModelExecutions)
+	tokens := transparency.CloneTokenUsage(current.Usage)
+	if !modelusage.HasEvidence(tokens) {
+		tokens = legacyFrameworkAgentTokenUsage(current.TokensUsed, current.InputTokens, current.OutputTokens)
+	}
+	hasTokenUsage := tokens.Total() != 0
+	hasResponse := current.Response != ""
+	hasFinish := strings.TrimSpace(current.FinishReason) != ""
+	hasDuration := current.Duration > 0
+	hasProvider := strings.TrimSpace(current.ProviderID) != ""
+	if !hasTokenUsage && !hasResponse && !hasFinish && !hasDuration && !hasProvider && len(executions) == 0 {
+		return nil
+	}
+	traceID := fmt.Sprintf("agent:%s:%d", strings.ReplaceAll(strings.TrimSpace(phase), " ", "-"), attempt)
+	builder := transparency.NewTraceBuilder(traceID, "", strings.TrimSpace(current.ProviderID))
+	if hasResponse {
+		builder.WithContent(current.Response)
+	}
+	if hasFinish {
+		builder.WithResponse(&transparency.ResponseTrace{FinishReason: strings.TrimSpace(current.FinishReason)})
+	}
+	builder.WithModelExecutions(executions)
+	trace := builder.Complete(tokens, 0)
+	trace.CostUnknown = true
+	trace.Duration = current.Duration
+	return trace
+}
+
+func markAggregateCostUnknown(trace *transparency.Trace, unknown bool) {
+	if trace != nil && unknown {
+		trace.CostUnknown = true
+	}
 }
 
 func validateAgentPhaseAttempt(def AgentDefinition, current, execution *AgentResult) agentAttemptValidation {

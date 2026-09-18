@@ -38,13 +38,19 @@ func writeRecognizedMITLicense(t *testing.T, root string) {
 	}
 }
 
+// The tests below pass dataPolicy "zdr" explicitly: they lock the governed
+// gate's behavior for callers who opt back into it. See
+// TestOneshotClientForProvider_DefaultDataPolicySkipsGovernance and
+// TestOneshotClientForProvider_DenyDataPolicyForcesNonZDR below for the
+// default ("none") and "deny" modes.
+
 func TestGovernedOneshotClient_RecognizedOSSDispatchesNonZDRDeny(t *testing.T) {
 	root := t.TempDir()
 	writeRecognizedMITLicense(t, root)
 	setOneshotTestWorkspace(t, root)
 
 	fake := &capturingOneshotClient{}
-	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter")
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -97,7 +103,7 @@ func TestGovernedOneshotClient_LicenseMutationFailsClosedBeforeDispatch(t *testi
 	setOneshotTestWorkspace(t, root)
 
 	fake := &capturingOneshotClient{}
-	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter")
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -123,7 +129,7 @@ func TestGovernedOneshotClient_UnlicensedRequiresStrictZDR(t *testing.T) {
 	setOneshotTestWorkspace(t, root)
 
 	fake := &capturingOneshotClient{}
-	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter")
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -162,7 +168,7 @@ func TestGovernedOneshotClient_ExactModelNoFallback(t *testing.T) {
 	setOneshotTestWorkspace(t, root)
 
 	fake := &capturingOneshotClient{}
-	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter")
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -190,7 +196,7 @@ func TestGovernedOneshotClient_ExactModelNoFallback(t *testing.T) {
 
 func TestOneshotClientForProvider_NonOpenRouterUnchanged(t *testing.T) {
 	fake := &capturingOneshotClient{}
-	client, err := oneshotClientForProvider(fake, "claude-x/some", "anthropic")
+	client, err := oneshotClientForProvider(fake, "claude-x/some", "anthropic", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -205,7 +211,7 @@ func TestOneshotClientForProvider_NonOpenRouterUnchanged(t *testing.T) {
 	if len(fake.requests) != 1 || len(fake.requests[0].Provider) != 1 || fake.requests[0].Provider["allow_fallbacks"] != true {
 		t.Fatalf("non-OpenRouter request was modified: %#v", fake.requests)
 	}
-	if _, err := oneshotClientForProvider(nil, "m/x", "openrouter"); err == nil {
+	if _, err := oneshotClientForProvider(nil, "m/x", "openrouter", "zdr"); err == nil {
 		t.Fatal("expected nil OpenRouter client to fail at construction")
 	}
 }
@@ -218,7 +224,7 @@ func TestGovernedOneshotClient_InvalidPolicyBlocksDispatch(t *testing.T) {
 	fake := &capturingOneshotClient{}
 	// A non-canonical model ID cannot carry an OpenRouter privacy policy;
 	// the contract must fail closed on every dispatch.
-	client, err := oneshotClientForProvider(fake, "not-canonical", "openrouter")
+	client, err := oneshotClientForProvider(fake, "not-canonical", "openrouter", "zdr")
 	if err != nil {
 		t.Fatalf("oneshotClientForProvider: %v", err)
 	}
@@ -229,5 +235,112 @@ func TestGovernedOneshotClient_InvalidPolicyBlocksDispatch(t *testing.T) {
 	}
 	if len(fake.requests) != 0 {
 		t.Fatalf("invalid policy dispatched %d requests, want 0", len(fake.requests))
+	}
+}
+
+// TestOneshotClientForProvider_DefaultDataPolicySkipsGovernance locks the
+// 2026-09-04 owner decision: with the default ("none") data policy, an
+// OpenRouter one-shot request is never wrapped in governedOpenRouterClient,
+// so no provider.zdr/data_collection field is attached and the goal-engine
+// model-data-policy contract is never bound or enforced. It uses the same
+// "not-canonical" model ID that TestGovernedOneshotClient_InvalidPolicyBlocksDispatch
+// proves fails contract validation under "zdr", to demonstrate the contract
+// check itself is skipped, not merely passing.
+func TestOneshotClientForProvider_DefaultDataPolicySkipsGovernance(t *testing.T) {
+	root := t.TempDir()
+	setOneshotTestWorkspace(t, root)
+
+	for _, dataPolicy := range []string{"", "none", "NONE", "  "} {
+		fake := &capturingOneshotClient{}
+		client, err := oneshotClientForProvider(fake, "not-canonical", "openrouter", dataPolicy)
+		if err != nil {
+			t.Fatalf("oneshotClientForProvider(%q): %v", dataPolicy, err)
+		}
+		if _, ok := client.(*governedOpenRouterClient); ok {
+			t.Fatalf("dataPolicy %q wrapped the client in governedOpenRouterClient, want passthrough", dataPolicy)
+		}
+		provider := map[string]any{"allow_fallbacks": true}
+		req := model.ChatRequest{Model: "not-canonical", Provider: provider}
+		if _, err := client.ChatCompletion(context.Background(), req); err != nil {
+			t.Fatalf("dataPolicy %q: ChatCompletion: %v", dataPolicy, err)
+		}
+		if len(fake.requests) != 1 {
+			t.Fatalf("dataPolicy %q: dispatched requests = %d, want 1", dataPolicy, len(fake.requests))
+		}
+		got := fake.requests[0].Provider
+		if _, has := got["zdr"]; has {
+			t.Fatalf("dataPolicy %q: request carries provider.zdr, want none: %#v", dataPolicy, got)
+		}
+		if _, has := got["data_collection"]; has {
+			t.Fatalf("dataPolicy %q: request carries provider.data_collection, want none: %#v", dataPolicy, got)
+		}
+		if len(got) != 1 || got["allow_fallbacks"] != true {
+			t.Fatalf("dataPolicy %q: request provider was modified: %#v", dataPolicy, got)
+		}
+	}
+}
+
+// TestOneshotClientForProvider_DenyDataPolicyForcesNonZDR locks the "deny"
+// opt-in: its contract requests non-ZDR retention with
+// provider.data_collection=deny as the baseline (unlike "zdr", which only
+// reaches non-ZDR by relaxing from a strict-ZDR default). The shared
+// runtime/model_data_policy Arbiter strategy still requires recognized,
+// digest-matched OSS license evidence for any non-ZDR dispatch regardless of
+// which opt-in produced the contract (see NonZDRLicenseMissing and
+// NonZDROSSAllow in model_data_policy.arb) — "deny" does not bypass that
+// evidence gate, only the default "none" mode skips contract enforcement
+// entirely.
+func TestOneshotClientForProvider_DenyDataPolicyForcesNonZDR(t *testing.T) {
+	root := t.TempDir()
+	writeRecognizedMITLicense(t, root)
+	setOneshotTestWorkspace(t, root)
+
+	fake := &capturingOneshotClient{}
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "deny")
+	if err != nil {
+		t.Fatalf("oneshotClientForProvider: %v", err)
+	}
+	governed, ok := client.(*governedOpenRouterClient)
+	if !ok {
+		t.Fatalf("client type = %T, want *governedOpenRouterClient", client)
+	}
+	if governed.contract.EffectiveRetentionMode() != goalloop.GoalRetentionNonZDR {
+		t.Fatalf("retention mode = %q, want non_zdr", governed.contract.EffectiveRetentionMode())
+	}
+
+	if _, err := client.ChatCompletion(context.Background(), model.ChatRequest{Model: "stealth/ox-alpha"}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("dispatched requests = %d, want 1", len(fake.requests))
+	}
+	provider := fake.requests[0].Provider
+	if provider["data_collection"] != "deny" {
+		t.Fatalf("data_collection = %#v, want deny", provider["data_collection"])
+	}
+	if _, has := provider["zdr"]; has {
+		t.Fatal("deny dispatch must not set zdr")
+	}
+}
+
+// TestOneshotClientForProvider_DenyDataPolicyBlocksWithoutLicenseEvidence
+// confirms "deny" fails closed exactly like "zdr" does for an unlicensed
+// workspace: it never dispatches, and reports the missing evidence.
+func TestOneshotClientForProvider_DenyDataPolicyBlocksWithoutLicenseEvidence(t *testing.T) {
+	root := t.TempDir()
+	setOneshotTestWorkspace(t, root) // no LICENSE file written
+
+	fake := &capturingOneshotClient{}
+	client, err := oneshotClientForProvider(fake, "stealth/ox-alpha", "openrouter", "deny")
+	if err != nil {
+		t.Fatalf("oneshotClientForProvider: %v", err)
+	}
+	if _, err := client.ChatCompletion(context.Background(), model.ChatRequest{Model: "stealth/ox-alpha"}); err == nil {
+		t.Fatal("expected missing license evidence to block deny dispatch")
+	} else if !strings.Contains(err.Error(), "license_missing") {
+		t.Fatalf("error = %v, want license_missing block", err)
+	}
+	if len(fake.requests) != 0 {
+		t.Fatalf("blocked deny dispatched %d requests, want 0", len(fake.requests))
 	}
 }

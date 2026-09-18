@@ -405,6 +405,7 @@ func grpcCommandStatus(status sessionexec.CommandStatus) *ipcpb.SessionCommandSt
 		Generation:       int64(status.Generation),
 		Sequence:         status.Sequence,
 		Type:             status.Type,
+		TaskIntent:       status.TaskIntent,
 		Lane:             string(status.Lane),
 		State:            string(status.State),
 		Attempt:          int64(status.Attempt),

@@ -88,13 +88,15 @@ func (r *Runner) reviewPRWithAgent(ctx context.Context, prCtx *PRContext, system
 	result := &RunResult{ContextAudit: audit, PRInfo: prCtx.PR}
 
 	agentResult, err := r.agentRunner.Run(ctx, systemPrompt, userPrompt, legacyPRReviewAllowedTools(), oneshot.AgentExecutionOpts{})
+	if agentResult != nil {
+		result.Review = agentResult.Response
+		result.Trace = agentResult.Trace
+	}
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 
-	result.Review = agentResult.Response
-	result.Trace = agentResult.Trace
 	return result, nil
 }
 
@@ -123,6 +125,7 @@ func (r *Runner) reviewPRWithLegacyTools(ctx context.Context, prCtx *PRContext, 
 		prTools,
 		10, // max iterations
 	)
+	result.Review = response
 	result.Trace = trace
 	result.PRInfo = prCtx.PR
 
@@ -131,7 +134,6 @@ func (r *Runner) reviewPRWithLegacyTools(ctx context.Context, prCtx *PRContext, 
 		return result, nil
 	}
 
-	result.Review = response
 	return result, nil
 }
 

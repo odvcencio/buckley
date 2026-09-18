@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	pb "m31labs.dev/buckley/pkg/acp/proto"
 )
 
@@ -123,6 +125,81 @@ func TestBridge_HandleTextQuery_CoordinatorError(t *testing.T) {
 	_, err = bridge.HandleTextQuery(ctx, "test query")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "coordinator error")
+}
+
+func TestBridge_HandleTextQuery_PreservesTypedPartialResultOnError(t *testing.T) {
+	config := &BridgeConfig{
+		CoordinatorAddr: "localhost:50051",
+		AgentID:         "test-agent",
+	}
+	bridge, err := NewBridge(config)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	_, err = bridge.Initialize(ctx, InitializeParams{})
+	require.NoError(t, err)
+	require.NoError(t, bridge.Initialized(ctx))
+
+	const private = "private reasoning sentinel"
+	partialErr := partialresult.StatusError(codes.Internal, "ACP response incomplete", &pb.PartialResult{
+		ReasonCode: "provider_error",
+		SafeError:  "raw provider secret " + private,
+		PartialResponse: &pb.Message{
+			Role:    "assistant",
+			Content: "public partial draft",
+		},
+		TaskResults: []*pb.PartialTaskResult{{
+			TaskId:       "task-1",
+			Status:       "incomplete",
+			Summary:      "public task summary",
+			Error:        "safe task error",
+			FinishReason: "length",
+			Usage: &pb.PartialUsage{
+				InputTokens:               5,
+				OutputTokens:              3,
+				ReportedTotalTokens:       8,
+				UsageEvidencePresent:      true,
+				UsageEvidenceMissing:      true,
+				ReportedReasoningTokens:   ptrInt64(1),
+				ReportedCachedInputTokens: ptrInt64(2),
+				Estimated:                 true,
+			},
+			ToolCallCount: 1,
+			CommandCount:  2,
+		}},
+		ModelIdentities: []*pb.PartialModelIdentity{{
+			RequestedModel: "alias",
+			SelectedModel:  "provider/model",
+			ProviderId:     "openai",
+			ResponseModel:  "gpt-4o",
+			ResponseId:     "chatcmpl-partial",
+		}},
+	})
+	mockClient := &mockAgentCommunicationClient{
+		sendMessageFunc: func(ctx context.Context, req *pb.SendMessageRequest, opts ...grpc.CallOption) (*pb.SendMessageResponse, error) {
+			return nil, partialErr
+		},
+	}
+	bridge.grpcClient = mockClient
+
+	response, err := bridge.HandleTextQuery(ctx, "test query")
+	if response != "" {
+		t.Fatalf("response = %q, want no accepted text", response)
+	}
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	got := incomplete.Result
+	if got.GetPartialResponse().GetContent() != "public partial draft" {
+		t.Fatalf("partial draft = %q", got.GetPartialResponse().GetContent())
+	}
+	if got.GetSafeError() != "ACP response incomplete" || strings.Contains(got.String(), private) {
+		t.Fatalf("partial result unsafe: %+v", got)
+	}
+	if len(got.GetTaskResults()) != 1 || len(got.GetModelIdentities()) != 1 {
+		t.Fatalf("partial evidence rows = tasks %d identities %d", len(got.GetTaskResults()), len(got.GetModelIdentities()))
+	}
 }
 
 func TestBridge_HandleTextQuery_EmptyResponse(t *testing.T) {
@@ -418,3 +495,58 @@ func TestHandleMessage_TextQuery_HandlerError(t *testing.T) {
 	assert.Equal(t, InternalError, response.Error.Code)
 	assert.Contains(t, response.Error.Message, "coordinator error")
 }
+
+func TestHandleMessage_TextQuery_PartialErrorData(t *testing.T) {
+	config := &BridgeConfig{
+		CoordinatorAddr: "localhost:50051",
+		AgentID:         "test-agent",
+	}
+	bridge, err := NewBridge(config)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	_, err = bridge.Initialize(ctx, InitializeParams{})
+	require.NoError(t, err)
+	require.NoError(t, bridge.Initialized(ctx))
+
+	bridge.grpcClient = &mockAgentCommunicationClient{
+		sendMessageFunc: func(ctx context.Context, req *pb.SendMessageRequest, opts ...grpc.CallOption) (*pb.SendMessageResponse, error) {
+			return nil, partialresult.StatusError(codes.Internal, "ACP response incomplete", &pb.PartialResult{
+				ReasonCode: "token_budget",
+				PartialResponse: &pb.Message{
+					Role:    "assistant",
+					Content: "public draft",
+				},
+				TaskResults: []*pb.PartialTaskResult{{TaskId: "task-1", Status: "incomplete"}},
+			})
+		},
+	}
+
+	paramsJSON, err := json.Marshal(TextQueryParams{Query: "test query"})
+	require.NoError(t, err)
+	id := json.RawMessage(`1`)
+	response := bridge.HandleMessage(ctx, &JSONRPCMessage{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Method:  "buckley/textQuery",
+		Params:  paramsJSON,
+	})
+	require.NotNil(t, response)
+	if response.Result != nil {
+		t.Fatalf("JSON-RPC result = %s, want nil on incomplete error", response.Result)
+	}
+	require.NotNil(t, response.Error)
+	if response.Error.Message != "ACP response incomplete" {
+		t.Fatalf("error message = %q", response.Error.Message)
+	}
+	var data map[string]any
+	require.NoError(t, json.Unmarshal(response.Error.Data, &data))
+	if data["schema_version"] != partialresult.SchemaVersion || data["incomplete"] != true || data["partial_response"] != "public draft" {
+		t.Fatalf("error data = %+v", data)
+	}
+	if data["task_results"] != float64(1) {
+		t.Fatalf("task_results = %#v, want 1", data["task_results"])
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }

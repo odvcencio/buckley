@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS session_commands (
     lane TEXT NOT NULL CHECK(lane IN ('work','control')),
     command_type TEXT NOT NULL,
     content TEXT NOT NULL,
+    task_intent TEXT NOT NULL DEFAULT '' CHECK(task_intent IN ('','unknown','read_only','mutation')),
     input_digest TEXT NOT NULL CHECK(length(input_digest) = 64),
     accepted_by TEXT NOT NULL,
     target_command_id TEXT,
@@ -52,6 +54,7 @@ CREATE TABLE IF NOT EXISTS session_commands (
     CHECK(length(CAST(turn_id AS BLOB)) BETWEEN 1 AND 192),
     CHECK(length(CAST(command_type AS BLOB)) BETWEEN 1 AND 32),
     CHECK(length(CAST(content AS BLOB)) <= 1048576),
+    CHECK(length(CAST(task_intent AS BLOB)) <= 32),
     CHECK(length(CAST(accepted_by AS BLOB)) BETWEEN 1 AND 128),
     CHECK(target_command_id IS NULL OR length(CAST(target_command_id AS BLOB)) BETWEEN 1 AND 128),
     CHECK(lease_owner IS NULL OR length(CAST(lease_owner AS BLOB)) BETWEEN 1 AND 128),
@@ -152,6 +155,37 @@ func ensureSessionExecSchema(db MigrationDB) error {
 	if _, err := db.Exec(sessionExecSchemaSQL); err != nil {
 		return fmt.Errorf("create session command journal: %w", err)
 	}
+	if err := ensureSessionCommandTaskIntentSchema(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureSessionCommandTaskIntentSchema(db MigrationDB) error {
+	rows, err := db.Query(`PRAGMA table_info(session_commands)`)
+	if err != nil {
+		return fmt.Errorf("inspect session_commands columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan session_commands column: %w", err)
+		}
+		if name == "task_intent" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE session_commands ADD COLUMN task_intent TEXT NOT NULL DEFAULT '' CHECK(task_intent IN ('','unknown','read_only','mutation'))`); err != nil {
+		return fmt.Errorf("add session_commands.task_intent: %w", err)
+	}
 	return nil
 }
 
@@ -201,21 +235,65 @@ func (s *Store) withSessionExecWrite(ctx context.Context, fn func(*sessionExecCo
 		if err != nil {
 			return fmt.Errorf("acquire session command connection: %w", err)
 		}
+		restoreBusyTimeout := false
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				_ = conn.Close()
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				return context.DeadlineExceeded
+			}
+			busyWait := sqliteWALBusyTimeout
+			if remaining < busyWait {
+				busyWait = remaining
+			}
+			busyMillis := busyWait.Milliseconds()
+			if busyMillis < 1 {
+				busyMillis = 1
+			}
+			if _, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busyMillis)); err != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				_ = conn.Close()
+				return fmt.Errorf("configure session command busy timeout: %w", err)
+			}
+			restoreBusyTimeout = true
+		}
+		began := false
+		discard := false
 		if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err == nil {
+			began = true
 			bound := &sessionExecConn{ctx: ctx, conn: conn, clock: s.sessionExecClock}
 			err = fn(bound)
 			if err == nil {
 				_, err = conn.ExecContext(ctx, `COMMIT`)
 			}
-			if err != nil {
-				_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+		if err != nil && began {
+			if _, rollbackErr := conn.ExecContext(context.Background(), `ROLLBACK`); rollbackErr != nil {
+				discard = true
 			}
+		}
+		if err != nil && !began && !IsSQLiteBusyError(err) {
+			discard = true
+		}
+		if restoreBusyTimeout {
+			if _, restoreErr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteWALBusyTimeout.Milliseconds())); restoreErr != nil {
+				discard = true
+			}
+		}
+		if discard {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 		_ = conn.Close()
 		if err == nil {
 			return nil
 		}
 		lastErr = err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if !IsSQLiteBusyError(err) {
 			return err
 		}
@@ -242,6 +320,37 @@ func sessionExecNowMillis(db *sessionExecConn) (int64, error) {
 		return 0, fmt.Errorf("read database time: %w", err)
 	}
 	return now, nil
+}
+
+func sessionExecEffectTransitionMillis(now int64, predecessors ...time.Time) int64 {
+	for _, predecessor := range predecessors {
+		if !predecessor.IsZero() && predecessor.UnixMilli() > now {
+			now = predecessor.UnixMilli()
+		}
+	}
+	return now
+}
+
+func sessionExecCommandTransitionMillis(now int64, acceptedAt int64, startedAt sql.NullInt64) int64 {
+	if acceptedAt > now {
+		now = acceptedAt
+	}
+	if startedAt.Valid && startedAt.Int64 > now {
+		now = startedAt.Int64
+	}
+	return now
+}
+
+func sessionExecCommandLeaseMetadataMillis(now int64, acceptedAt int64, startedAt, heartbeatAt sql.NullInt64, expiresAt int64) (int64, int64, error) {
+	started := sessionExecCommandTransitionMillis(now, acceptedAt, startedAt)
+	heartbeat := started
+	if heartbeatAt.Valid && heartbeatAt.Int64 > heartbeat {
+		heartbeat = heartbeatAt.Int64
+	}
+	if heartbeat >= expiresAt {
+		return 0, 0, fmt.Errorf("%w: lease metadata clock floor reaches expiry", sessionexec.ErrLeaseClockSkew)
+	}
+	return started, heartbeat, nil
 }
 
 func sessionExecTime(ms int64) time.Time {
@@ -412,12 +521,12 @@ func (s *Store) Accept(ctx context.Context, request sessionexec.AcceptRequest) (
 		}
 		_, err = db.exec(`INSERT INTO session_commands (
 			session_id, command_id, run_id, task_id, turn_id, generation, sequence,
-			lane, command_type, content, input_digest, accepted_by, target_command_id,
+			lane, command_type, content, task_intent, input_digest, accepted_by, target_command_id,
 			state, accepted_at_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			identity.SessionID, identity.CommandID, identity.RunID, identity.TaskID,
 			identity.TurnID, identity.Generation, identity.Sequence, lane, request.Type,
-			request.Content, digest, request.AcceptedBy, nullIfEmpty(target),
+			request.Content, strings.ToLower(strings.TrimSpace(request.TaskIntent)), digest, request.AcceptedBy, nullIfEmpty(target),
 			sessionexec.StateAccepted, now)
 		if err != nil {
 			return fmt.Errorf("insert session command: %w", err)
@@ -681,7 +790,8 @@ func (s *Store) QuiesceSession(ctx context.Context, sessionID string, mode sessi
 		}
 
 		cancelled, err := db.exec(`UPDATE session_commands SET
-			state = ?, completed_at_ms = ?, error_code = ?, error_text = NULL,
+			state = ?, completed_at_ms = MAX(?, accepted_at_ms, COALESCE(started_at_ms, accepted_at_ms)),
+			error_code = ?, error_text = NULL,
 			outcome_json = '{}', completion_digest = NULL, completed_by = NULL,
 			completion_lease_generation = NULL, lease_owner = NULL,
 			lease_expires_at_ms = NULL, heartbeat_at_ms = NULL
@@ -801,7 +911,7 @@ func (s *Store) CancellationRequested(ctx context.Context, sessionID, targetComm
 
 const sessionExecStoredCommandColumns = `
 session_id, run_id, task_id, command_id, turn_id, generation, sequence,
-lane, command_type, content, input_digest, accepted_by, target_command_id,
+lane, command_type, content, task_intent, input_digest, accepted_by, target_command_id,
 state, attempt, lease_generation, lease_owner, lease_expires_at_ms,
 accepted_at_ms, started_at_ms, completion_digest, completed_by,
 completion_lease_generation`
@@ -827,7 +937,7 @@ func scanSessionExecStoredCommand(row rowScanner) (sessionExecStoredCommand, err
 		&stored.command.SessionID, &stored.command.RunID, &stored.command.TaskID,
 		&stored.command.CommandID, &stored.command.TurnID, &stored.command.Generation,
 		&stored.command.Sequence, &stored.command.Lane, &stored.command.Type,
-		&stored.command.Content, &stored.command.InputDigest, &stored.command.AcceptedBy,
+		&stored.command.Content, &stored.command.TaskIntent, &stored.command.InputDigest, &stored.command.AcceptedBy,
 		&stored.target, &stored.state, &stored.attempt, &stored.leaseGeneration,
 		&stored.leaseOwner, &stored.leaseExpires, &stored.acceptedAt, &stored.startedAt,
 		&stored.completionDigest, &stored.completedBy, &stored.completedLeaseGeneration,
@@ -855,7 +965,7 @@ func sessionExecValidateStoredAcceptance(stored sessionExecStoredCommand) error 
 	command := stored.command
 	request := sessionexec.AcceptRequest{
 		SessionID: command.SessionID, CommandID: command.CommandID, Type: command.Type,
-		Content: command.Content, AcceptedBy: command.AcceptedBy,
+		Content: command.Content, TaskIntent: command.TaskIntent, AcceptedBy: command.AcceptedBy,
 	}
 	if err := sessionexec.ValidateAcceptRequest(request, command.CommandID); err != nil {
 		return sessionExecStoredConflict("acceptance envelope")
@@ -1047,14 +1157,25 @@ func (s *Store) ClaimNext(ctx context.Context, request sessionexec.ClaimRequest)
 		if stored.attempt == sessionexec.MaxCommandAttempts || stored.leaseGeneration == int64(sessionexec.MaxCommandAttempts) {
 			return fmt.Errorf("%w: command attempt limit reached", sessionexec.ErrValidation)
 		}
+		var priorHeartbeatAt sql.NullInt64
+		if err := db.queryRow(`SELECT heartbeat_at_ms FROM session_commands
+			WHERE session_id = ? AND command_id = ?`, stored.command.SessionID, stored.command.CommandID).Scan(&priorHeartbeatAt); err != nil {
+			return fmt.Errorf("read claim lease metadata: %w", err)
+		}
 		expires := now + request.LeaseDuration.Milliseconds()
+		startedAt, heartbeatAt, err := sessionExecCommandLeaseMetadataMillis(
+			now, stored.acceptedAt, stored.startedAt, priorHeartbeatAt, expires,
+		)
+		if err != nil {
+			return err
+		}
 		result, err := db.exec(`UPDATE session_commands SET
 			state = ?, attempt = attempt + 1, lease_generation = lease_generation + 1,
 			lease_owner = ?, lease_expires_at_ms = ?, heartbeat_at_ms = ?,
 			started_at_ms = COALESCE(started_at_ms, ?)
 			WHERE session_id = ? AND command_id = ? AND generation = ? AND state = ?
 				AND attempt = ? AND lease_generation = ?`,
-			sessionexec.StateRunning, request.Owner, expires, now, now,
+			sessionexec.StateRunning, request.Owner, expires, heartbeatAt, startedAt,
 			stored.command.SessionID, stored.command.CommandID, stored.command.Generation, sessionexec.StateAccepted,
 			stored.attempt, stored.leaseGeneration)
 		if err != nil {
@@ -1076,7 +1197,7 @@ func (s *Store) ClaimNext(ctx context.Context, request sessionexec.ClaimRequest)
 		if stored.startedAt.Valid {
 			command.StartedAt = sessionExecTimePtr(stored.startedAt)
 		} else {
-			startedNow := sessionExecTime(now)
+			startedNow := sessionExecTime(startedAt)
 			command.StartedAt = &startedNow
 		}
 		command.Lease = sessionexec.LeaseRef{
@@ -1141,21 +1262,28 @@ func (s *Store) Heartbeat(ctx context.Context, ref sessionexec.LeaseRef, duratio
 		if err := sessionExecCheckLease(db, ref, now, true); err != nil {
 			return err
 		}
+		var acceptedAt int64
+		var startedAt, priorHeartbeatAt sql.NullInt64
 		var currentExpiry int64
-		if err := db.queryRow(`SELECT lease_expires_at_ms FROM session_commands
-			WHERE session_id = ? AND command_id = ?`, ref.SessionID, ref.CommandID).Scan(&currentExpiry); err != nil {
-			return fmt.Errorf("read heartbeat lease expiry: %w", err)
+		if err := db.queryRow(`SELECT accepted_at_ms, started_at_ms, heartbeat_at_ms, lease_expires_at_ms
+			FROM session_commands WHERE session_id = ? AND command_id = ?`,
+			ref.SessionID, ref.CommandID).Scan(&acceptedAt, &startedAt, &priorHeartbeatAt, &currentExpiry); err != nil {
+			return fmt.Errorf("read heartbeat lease metadata: %w", err)
 		}
-		active, err := sessionExecValidateHeartbeatEffects(db, ref, currentExpiry)
+		expires := now + duration.Milliseconds()
+		active, err := sessionExecValidateHeartbeatEffects(db, ref, currentExpiry, expires)
 		if err != nil {
 			return err
 		}
-		expires := now + duration.Milliseconds()
+		_, heartbeatAt, err := sessionExecCommandLeaseMetadataMillis(now, acceptedAt, startedAt, priorHeartbeatAt, expires)
+		if err != nil {
+			return err
+		}
 		result, err := db.exec(`UPDATE session_commands
 			SET heartbeat_at_ms = ?, lease_expires_at_ms = ?
 			WHERE session_id = ? AND command_id = ? AND generation = ? AND state = ?
 				AND lease_owner = ? AND lease_generation = ? AND lease_expires_at_ms > ?`,
-			now, expires, ref.SessionID, ref.CommandID, ref.Generation,
+			heartbeatAt, expires, ref.SessionID, ref.CommandID, ref.Generation,
 			sessionexec.StateRunning, ref.Owner, ref.LeaseGeneration, now)
 		if err != nil {
 			return fmt.Errorf("heartbeat session command: %w", err)
@@ -1241,10 +1369,11 @@ func (s *Store) BeginEffect(ctx context.Context, request sessionexec.EffectReque
 				}
 			}
 			if existing.State == sessionexec.EffectStateActive {
+				ambiguousMillis := sessionExecEffectTransitionMillis(now, existing.CreatedAt)
 				changed, err := db.exec(`UPDATE session_effect_permits SET
-					state = ?, ambiguous_at_ms = ?
-					WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ? AND state = ?`,
-					sessionexec.EffectStateAmbiguous, now, request.Lease.SessionID,
+						state = ?, ambiguous_at_ms = ?
+						WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ? AND state = ?`,
+					sessionexec.EffectStateAmbiguous, ambiguousMillis, request.Lease.SessionID,
 					request.Lease.CommandID, request.Lease.Generation, request.EffectID,
 					sessionexec.EffectStateActive)
 				if err != nil {
@@ -1255,7 +1384,7 @@ func (s *Store) BeginEffect(ctx context.Context, request sessionexec.EffectReque
 					return sessionexec.ErrEffectPermitConflict
 				}
 				existing.State = sessionexec.EffectStateAmbiguous
-				ambiguousAt := sessionExecTime(now)
+				ambiguousAt := sessionExecTime(ambiguousMillis)
 				existing.AmbiguousAt = &ambiguousAt
 			}
 			blockingPermit := existing
@@ -1369,10 +1498,14 @@ func (s *Store) EndEffect(ctx context.Context, permit sessionexec.EffectPermit) 
 		default:
 			return sessionexec.ErrEffectPermitConflict
 		}
+		endedMillis := sessionExecEffectTransitionMillis(now, stored.CreatedAt)
+		if stored.AmbiguousAt != nil {
+			endedMillis = sessionExecEffectTransitionMillis(endedMillis, *stored.AmbiguousAt)
+		}
 		result, err := db.exec(`UPDATE session_effect_permits SET state = ?, ended_at_ms = ?
-			WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?
-				AND kind = ? AND lease_owner = ? AND lease_generation = ? AND state IN (?, ?)`,
-			sessionexec.EffectStateEnded, now,
+				WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?
+					AND kind = ? AND lease_owner = ? AND lease_generation = ? AND state IN (?, ?)`,
+			sessionexec.EffectStateEnded, endedMillis,
 			permit.Lease.SessionID, permit.Lease.CommandID, permit.Lease.Generation,
 			permit.EffectID, permit.Kind, permit.Lease.Owner, permit.Lease.LeaseGeneration,
 			sessionexec.EffectStateActive, sessionexec.EffectStateAmbiguous)
@@ -1613,13 +1746,14 @@ func sessionExecFailCommandForAmbiguousEffect(db *sessionExecConn, permit sessio
 	if stored.state != sessionexec.StateRunning && stored.state != sessionexec.StateAccepted {
 		return sessionexec.ErrEffectPermitConflict
 	}
+	completedAt := sessionExecCommandTransitionMillis(now, stored.acceptedAt, stored.startedAt)
 	result, err := db.exec(`UPDATE session_commands SET
 		state = ?, completed_at_ms = ?, error_code = ?, error_text = NULL,
 		outcome_json = '{}', completion_digest = NULL, completed_by = NULL,
 		completion_lease_generation = NULL, lease_owner = NULL,
 		lease_expires_at_ms = NULL, heartbeat_at_ms = NULL
 		WHERE session_id = ? AND command_id = ? AND generation = ? AND state IN (?, ?)`,
-		sessionexec.StateBlocked, now, "ambiguous_effect", permit.Lease.SessionID,
+		sessionexec.StateBlocked, completedAt, "ambiguous_effect", permit.Lease.SessionID,
 		permit.Lease.CommandID, permit.Lease.Generation,
 		sessionexec.StateAccepted, sessionexec.StateRunning)
 	if err != nil {
@@ -1685,7 +1819,7 @@ func sessionExecRequireNoSessionAmbiguousEffects(db *sessionExecConn, sessionID 
 	return nil
 }
 
-func sessionExecValidateHeartbeatEffects(db *sessionExecConn, ref sessionexec.LeaseRef, leaseExpiry int64) (int, error) {
+func sessionExecValidateHeartbeatEffects(db *sessionExecConn, ref sessionexec.LeaseRef, leaseExpiry int64, proposedExpiry int64) (int, error) {
 	permits, err := sessionExecCommandEffectPermits(db, ref)
 	if err != nil {
 		return 0, err
@@ -1698,6 +1832,9 @@ func sessionExecValidateHeartbeatEffects(db *sessionExecConn, ref sessionexec.Le
 				Lease: ref, EffectID: permit.EffectID, Kind: permit.Kind,
 			}) || permit.ExpiresAt.UnixMilli() != leaseExpiry {
 				return 0, sessionexec.ErrEffectPermitConflict
+			}
+			if proposedExpiry < permit.CreatedAt.UnixMilli() {
+				return 0, fmt.Errorf("%w: effect permit renewal expiry precedes creation", sessionexec.ErrLeaseClockSkew)
 			}
 			active++
 		case sessionexec.EffectStateAmbiguous:
@@ -2248,6 +2385,7 @@ func (s *Store) Complete(ctx context.Context, ref sessionexec.LeaseRef, completi
 		if err != nil {
 			return err
 		}
+		completedAt := sessionExecCommandTransitionMillis(now, stored.acceptedAt, stored.startedAt)
 		result, err := db.exec(`UPDATE session_commands SET
 			state = ?, completed_at_ms = ?, error_code = ?, error_text = ?,
 			outcome_json = ?, completion_digest = ?, completed_by = ?,
@@ -2255,7 +2393,7 @@ func (s *Store) Complete(ctx context.Context, ref sessionexec.LeaseRef, completi
 			lease_expires_at_ms = NULL, heartbeat_at_ms = NULL
 			WHERE session_id = ? AND command_id = ? AND generation = ? AND state = ?
 				AND lease_owner = ? AND lease_generation = ? AND lease_expires_at_ms > ?`,
-			completion.State, now, nullIfEmpty(completion.ErrorCode), nullIfEmpty(completion.Error),
+			completion.State, completedAt, nullIfEmpty(completion.ErrorCode), nullIfEmpty(completion.Error),
 			outcome, digest, ref.Owner, ref.LeaseGeneration,
 			ref.SessionID, ref.CommandID, ref.Generation, sessionexec.StateRunning,
 			ref.Owner, ref.LeaseGeneration, now)
@@ -2301,20 +2439,25 @@ func (s *Store) CancelPending(ctx context.Context, sessionID, reasonCode string)
 		if err != nil {
 			return err
 		}
-		rows, err := db.query(`SELECT command_id FROM session_commands
+		rows, err := db.query(`SELECT command_id, accepted_at_ms, started_at_ms FROM session_commands
 			WHERE session_id = ? AND state = ? ORDER BY sequence ASC, command_id ASC LIMIT ?`,
 			sessionID, sessionexec.StateAccepted, sessionexec.MaxCancelBatch)
 		if err != nil {
 			return fmt.Errorf("select pending commands for cancellation: %w", err)
 		}
-		commandIDs := make([]string, 0, sessionexec.MaxCancelBatch)
+		type pendingCancellation struct {
+			commandID  string
+			acceptedAt int64
+			startedAt  sql.NullInt64
+		}
+		commands := make([]pendingCancellation, 0, sessionexec.MaxCancelBatch)
 		for rows.Next() {
-			var commandID string
-			if err := rows.Scan(&commandID); err != nil {
+			var command pendingCancellation
+			if err := rows.Scan(&command.commandID, &command.acceptedAt, &command.startedAt); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan pending command for cancellation: %w", err)
 			}
-			commandIDs = append(commandIDs, commandID)
+			commands = append(commands, command)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -2332,14 +2475,21 @@ func (s *Store) CancelPending(ctx context.Context, sessionID, reasonCode string)
 		if err != nil {
 			return err
 		}
-		for _, commandID := range commandIDs {
+		for _, command := range commands {
+			completedAt := now
+			if command.acceptedAt > completedAt {
+				completedAt = command.acceptedAt
+			}
+			if command.startedAt.Valid && command.startedAt.Int64 > completedAt {
+				completedAt = command.startedAt.Int64
+			}
 			result, err := db.exec(`UPDATE session_commands SET
 				state = ?, completed_at_ms = ?, error_code = ?, error_text = NULL,
 				outcome_json = ?, completion_digest = ?, completed_by = NULL,
 				completion_lease_generation = NULL
 				WHERE session_id = ? AND command_id = ? AND state = ?`,
-				sessionexec.StateCancelled, now, reasonCode, outcome, digest,
-				sessionID, commandID, sessionexec.StateAccepted)
+				sessionexec.StateCancelled, completedAt, reasonCode, outcome, digest,
+				sessionID, command.commandID, sessionexec.StateAccepted)
 			if err != nil {
 				return fmt.Errorf("cancel pending session command: %w", err)
 			}

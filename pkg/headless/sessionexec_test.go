@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,17 @@ import (
 type failOnceCompletionJournal struct {
 	sessionexec.Journal
 	failed atomic.Bool
+}
+
+type expireOnceBeforeCompleteJournal struct {
+	sessionexec.Journal
+	store       *storage.Store
+	failFirst   bool
+	calls       atomic.Int32
+	expired     atomic.Bool
+	mu          sync.Mutex
+	expiredRows int64
+	completeErr error
 }
 
 type staleHeartbeatJournal struct {
@@ -85,6 +97,46 @@ func (j *failOnceCompletionJournal) Complete(ctx context.Context, lease sessione
 		return sessionexec.Receipt{}, fmt.Errorf("injected completion outage")
 	}
 	return j.Journal.Complete(ctx, lease, completion, entries)
+}
+
+func (j *expireOnceBeforeCompleteJournal) Complete(ctx context.Context, lease sessionexec.LeaseRef, completion sessionexec.Completion, entries []sessionexec.TranscriptEntry) (sessionexec.Receipt, error) {
+	if call := j.calls.Add(1); j.failFirst && call == 1 {
+		return sessionexec.Receipt{}, fmt.Errorf("injected completion outage")
+	}
+	if j.expired.CompareAndSwap(false, true) {
+		result, err := j.store.DB().ExecContext(ctx, `UPDATE session_commands
+			SET lease_expires_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000 +
+				CAST(substr(strftime('%f','now'), 4, 3) AS INTEGER) - 1
+			WHERE session_id = ? AND command_id = ? AND generation = ? AND state = ?
+				AND lease_owner = ? AND lease_generation = ?`,
+			lease.SessionID, lease.CommandID, lease.Generation, sessionexec.StateRunning,
+			lease.Owner, lease.LeaseGeneration)
+		if err != nil {
+			return sessionexec.Receipt{}, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return sessionexec.Receipt{}, err
+		}
+		j.mu.Lock()
+		j.expiredRows = rows
+		j.mu.Unlock()
+	}
+	receipt, err := j.Journal.Complete(ctx, lease, completion, entries)
+	if j.expired.Load() {
+		j.mu.Lock()
+		if j.completeErr == nil && receipt.State == "" {
+			j.completeErr = err
+		}
+		j.mu.Unlock()
+	}
+	return receipt, err
+}
+
+func (j *expireOnceBeforeCompleteJournal) injectedResult() (int64, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.expiredRows, j.completeErr
 }
 
 type countingEchoTool struct {
@@ -210,7 +262,7 @@ func TestDurableRunner_ReplaysCompletedStepsAndCommitsTranscriptOnce(t *testing.
 		DurableTiming: &DurableTiming{
 			LeaseDuration: 5 * time.Second, HeartbeatInterval: 50 * time.Millisecond,
 			ScanInterval: 10 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
-			OperationTimeout: time.Second,
+			OperationTimeout: 3 * time.Second,
 		},
 	})
 	if err != nil {
@@ -231,6 +283,9 @@ func TestDurableRunner_ReplaysCompletedStepsAndCommitsTranscriptOnce(t *testing.
 		t.Fatalf("receipt identity = %+v", receipt.Identity)
 	}
 	terminal := waitForCommandState(t, journal, sessionID, commandID, sessionexec.StateSucceeded)
+	t.Logf("durable replay terminal receipt: %+v; provider=%d tool=%d continuation=%d; transcript=%s",
+		terminal, requests.Load(), toolCalls.Load(), continuationRequests.Load(),
+		durableTranscriptRoleSummary(t, store, sessionID))
 	if terminal.Attempt != 2 {
 		t.Fatalf("terminal attempt = %d, want 2 after injected completion failure", terminal.Attempt)
 	}
@@ -261,6 +316,134 @@ func TestDurableRunner_ReplaysCompletedStepsAndCommitsTranscriptOnce(t *testing.
 	}
 	if users != 1 || assistants != 2 || toolMessages != 1 {
 		t.Fatalf("durable transcript roles = user:%d assistant:%d tool:%d, want 1/2/1", users, assistants, toolMessages)
+	}
+}
+
+func TestDurableRunner_ReclaimsExpiredTerminalCommitWithoutProviderOrToolReplay(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		failFirst   bool
+		wantAttempt int
+	}{
+		{name: "expiry only", wantAttempt: 2},
+		{name: "outage then expiry", failFirst: true, wantAttempt: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runDurableTerminalCommitFaultScenario(t, tt.failFirst, tt.wantAttempt)
+		})
+	}
+}
+
+func runDurableTerminalCommitFaultScenario(t *testing.T, failFirst bool, wantAttempt int) {
+	t.Helper()
+	var requests atomic.Int32
+	var continuationRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasSuffix(req.URL.Path, "/responses") {
+			continuationRequests.Add(1)
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		call := requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch call {
+		case 1:
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-expiry-1","model":"gpt-5.4",
+				"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_expiry_echo","type":"function","function":{"name":"echo_tool","arguments":"{\"text\":\"once\"}"}}]},"finish_reason":"tool_calls"}],
+				"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+			}`)
+		case 2:
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-expiry-2","model":"gpt-5.4",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"expiry durable done"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+			}`)
+		default:
+			http.Error(w, "unexpected provider replay", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	store := newTestStore(t)
+	sessionID := fmt.Sprintf("durable-terminal-expiry-session-%t", failFirst)
+	now := time.Now().UTC()
+	sess := &storage.Session{
+		ID: sessionID, Principal: "alice", Model: "gpt-5.4",
+		Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+	}
+	if err := store.CreateSession(sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	evidenceStore, ledger := newRegistryDurableStores(t, store)
+	if _, err := ensureForegroundRun(context.Background(), ledger, sessionID, sess.Model); err != nil {
+		t.Fatalf("ensureForegroundRun: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	cfg.Models.Execution = "gpt-5.4"
+	cfg.Models.ProviderContinuation = true
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("model.NewManager: %v", err)
+	}
+	var toolCalls atomic.Int32
+	tools := tool.NewEmptyRegistry()
+	tools.Register(countingEchoTool{calls: &toolCalls})
+	journal := &expireOnceBeforeCompleteJournal{Journal: store, store: store, failFirst: failFirst}
+	stepJournal, ok := ledger.(agentloop.DurableStepJournal)
+	if !ok {
+		t.Fatalf("ledger %T does not implement DurableStepJournal", ledger)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Session: sess, ModelManager: mgr, Tools: tools, Store: store, Config: cfg,
+		CommandJournal: journal, RunLedger: ledger, EvidenceStore: evidenceStore,
+		StepJournal: stepJournal, LeaseOwner: "durable-terminal-expiry-owner",
+		DurableTiming: &DurableTiming{
+			LeaseDuration: 5 * time.Second, HeartbeatInterval: time.Hour,
+			ScanInterval: 10 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
+			OperationTimeout: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	t.Cleanup(runner.Stop)
+
+	commandID := fmt.Sprintf("durable-terminal-expiry-command-%t", failFirst)
+	if _, err := runner.AcceptCommand(context.Background(), command.SessionCommand{
+		SessionID: sessionID, ID: commandID, Type: "input",
+		Content: "please echo exactly once", AcceptedBy: "alice",
+	}); err != nil {
+		t.Fatalf("AcceptCommand: %v", err)
+	}
+	terminal := waitForCommandState(t, journal, sessionID, commandID, sessionexec.StateSucceeded)
+	t.Logf("terminal-expiry replay receipt: %+v; provider=%d tool=%d continuation=%d; transcript=%s",
+		terminal, requests.Load(), toolCalls.Load(), continuationRequests.Load(),
+		durableTranscriptRoleSummary(t, store, sessionID))
+	if terminal.Attempt != wantAttempt {
+		t.Fatalf("terminal attempt = %d, want %d after terminal commit faults", terminal.Attempt, wantAttempt)
+	}
+	if rows, err := journal.injectedResult(); rows != 1 || !errors.Is(err, sessionexec.ErrLeaseExpired) {
+		t.Fatalf("injected completion = rows:%d err:%v, want exactly one current lease expired", rows, err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("provider calls = %d, want durable model results reused without replay", got)
+	}
+	if got := toolCalls.Load(); got != 1 {
+		t.Fatalf("tool calls = %d, want durable tool result reused without replay", got)
+	}
+	if got := continuationRequests.Load(); got != 0 {
+		t.Fatalf("provider continuation requests = %d, want zero", got)
+	}
+	reloaded := conversation.New(sessionID)
+	if err := reloaded.LoadFromStorage(store); err != nil {
+		t.Fatalf("LoadFromStorage: %v", err)
+	}
+	if got := durableCountRoles(reloaded.Messages); got != "user:1 assistant:2 tool:1" {
+		t.Fatalf("durable transcript roles = %s, want user:1 assistant:2 tool:1", got)
 	}
 }
 
@@ -1214,6 +1397,30 @@ func waitForCommandState(t *testing.T, journal sessionexec.Journal, sessionID, c
 	receipt, err := journal.Get(context.Background(), sessionID, commandID)
 	t.Fatalf("command did not reach %s: receipt=%+v err=%v", want, receipt, err)
 	return sessionexec.Receipt{}
+}
+
+func durableTranscriptRoleSummary(t *testing.T, store *storage.Store, sessionID string) string {
+	t.Helper()
+	reloaded := conversation.New(sessionID)
+	if err := reloaded.LoadFromStorage(store); err != nil {
+		return "load_error:" + err.Error()
+	}
+	return durableCountRoles(reloaded.Messages)
+}
+
+func durableCountRoles(messages []conversation.Message) string {
+	var users, assistants, tools int
+	for _, message := range messages {
+		switch message.Role {
+		case "user":
+			users++
+		case "assistant":
+			assistants++
+		case "tool":
+			tools++
+		}
+	}
+	return fmt.Sprintf("user:%d assistant:%d tool:%d", users, assistants, tools)
 }
 
 func errorsIsSessionExecNotFound(err error) bool {

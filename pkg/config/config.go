@@ -41,22 +41,30 @@ const (
 
 // Default configuration values exported for documentation and validation
 const (
-	DefaultPlanningModel    = defaultOpenRouterModel
-	DefaultExecutionModel   = defaultOpenRouterModel
-	DefaultReviewModel      = defaultOpenRouterModel
-	DefaultProvider         = "openrouter"
-	DefaultExecutionMode    = ExecutionModeClassic // RLM is experimental
-	DefaultOneshotMode      = ExecutionModeClassic
-	DefaultTrustLevel       = "balanced"
-	DefaultApprovalMode     = "safe"
-	DefaultSessionBudget    = 10.00
-	DefaultDailyBudget      = 20.00
-	DefaultMonthlyBudget    = 200.00
-	DefaultIPCBind          = "127.0.0.1:4488"
-	DefaultCompactThreshold = 0.75
-	DefaultMaxSelfHeal      = 3
-	DefaultMaxReviewCycles  = 3
-	DefaultCodexModel       = defaultCodexModel
+	DefaultPlanningModel  = defaultOpenRouterModel
+	DefaultExecutionModel = defaultOpenRouterModel
+	DefaultReviewModel    = defaultOpenRouterModel
+	DefaultProvider       = "openrouter"
+	DefaultExecutionMode  = ExecutionModeClassic // coordinated execution is experimental
+	DefaultOneshotMode    = ExecutionModeClassic
+	// DefaultOneshotDataPolicy leaves one-shot commit/PR requests to
+	// OpenRouter's normal routing: no forced provider.zdr or
+	// provider.data_collection field, and no goal-engine model-data-policy
+	// contract enforced. Buckbot's independent openrouter_privacy_fallback
+	// opt-in (see Buckbot.OpenRouterPrivacyFallback) is unaffected. Set
+	// "zdr" or "deny" to opt back into the stricter, contract-enforced
+	// behavior this used to apply unconditionally.
+	DefaultOneshotDataPolicy = "none"
+	DefaultTrustLevel        = "balanced"
+	DefaultApprovalMode      = "safe"
+	DefaultSessionBudget     = 10.00
+	DefaultDailyBudget       = 20.00
+	DefaultMonthlyBudget     = 200.00
+	DefaultIPCBind           = "127.0.0.1:4488"
+	DefaultCompactThreshold  = 0.75
+	DefaultMaxSelfHeal       = 3
+	DefaultMaxReviewCycles   = 3
+	DefaultCodexModel        = defaultCodexModel
 )
 
 type providerModelDefaults struct {
@@ -423,7 +431,9 @@ type OrchestratorConfig struct {
 
 const (
 	ExecutionModeClassic = "classic"
-	ExecutionModeRLM     = "rlm"
+	// ExecutionModeRLM is the legacy mode key that selects coordinated
+	// execution. Keep the literal stable for existing configuration.
+	ExecutionModeRLM = "rlm"
 )
 
 // Durable backend names for goal execution (spec.durable-execution-dapr).
@@ -449,13 +459,25 @@ type ExecutionModeConfig struct {
 // OneshotModeConfig controls the strategy for one-shot commands.
 type OneshotModeConfig struct {
 	Mode string `yaml:"mode" env:"BUCKLEY_ONESHOT_MODE"`
+
+	// DataPolicy controls whether the one-shot OpenRouter backend (commit,
+	// PR) attaches provider privacy fields and enforces the goal-engine
+	// model-data-policy contract. Valid values: "none" (default — no
+	// provider.zdr/data_collection field, no contract check), "zdr" (force
+	// zero data retention, relaxing only for a recognized OSS-licensed
+	// workspace, matching the durable goal engine's own rule), or "deny"
+	// (force non-ZDR retention with provider.data_collection=deny). See
+	// DefaultOneshotDataPolicy.
+	DataPolicy string `yaml:"data_policy" env:"BUCKLEY_ONESHOT_DATA_POLICY"`
 }
 
-// RLMConfig controls the Recursive Language Model runtime.
+// RLMConfig controls Buckley's coordinator–worker runtime. The historical
+// "rlm" configuration key remains for compatibility.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig `yaml:"coordinator"`
-	SubAgent    RLMSubAgentConfig    `yaml:"sub_agent"`
-	Scratchpad  RLMScratchpadConfig  `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig     `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig        `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig      `yaml:"scratchpad"`
+	Tiers       map[string]RLMTierConfig `yaml:"tiers"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -465,14 +487,19 @@ type RLMCoordinatorConfig struct {
 	MaxTokensBudget     int           `yaml:"max_tokens_budget"`
 	MaxWallTime         time.Duration `yaml:"max_wall_time"`
 	ConfidenceThreshold float64       `yaml:"confidence_threshold"`
-	StreamPartials      bool          `yaml:"stream_partials"`
+	// StreamPartials controls coordinator progress publication to iteration
+	// hooks and rlm iteration telemetry. It does not enable text-token
+	// streaming. The historical rlm configuration namespace is retained for
+	// compatibility.
+	StreamPartials bool `yaml:"stream_partials"`
 }
 
-// RLMSubAgentConfig controls sub-agent behavior.
+// RLMSubAgentConfig controls sub-agent behavior for the coordinator–worker
+// runtime.
 type RLMSubAgentConfig struct {
 	Model         string        `yaml:"model"`          // Model for all sub-agents (default: execution model)
 	MaxConcurrent int           `yaml:"max_concurrent"` // Parallel execution limit
-	Timeout       time.Duration `yaml:"timeout"`        // Per-task timeout
+	Timeout       time.Duration `yaml:"timeout"`        // Per-active-task cooperative deadline; queued concurrency/rate wait is excluded and parent contexts still win.
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -483,6 +510,18 @@ type RLMScratchpadConfig struct {
 	DefaultTTL        time.Duration `yaml:"default_ttl"`
 	PersistArtifacts  bool          `yaml:"persist_artifacts"`
 	PersistDecisions  bool          `yaml:"persist_decisions"`
+}
+
+// RLMTierConfig mirrors the public, compatibility-safe subset of runtime
+// tier-routing controls under the historical rlm namespace.
+type RLMTierConfig struct {
+	Model             string   `yaml:"model"`
+	Provider          string   `yaml:"provider"`
+	Models            []string `yaml:"models"`
+	MaxCostPerMillion float64  `yaml:"max_cost_per_million"`
+	MinContextWindow  int      `yaml:"min_context_window"`
+	Prefer            []string `yaml:"prefer"`
+	Requires          []string `yaml:"requires"`
 }
 
 // IsZero reports whether the RLM config is entirely unset.
@@ -501,7 +540,8 @@ func (c RLMConfig) IsZero() bool {
 		c.Scratchpad.EvictionPolicy == "" &&
 		c.Scratchpad.DefaultTTL == 0 &&
 		!c.Scratchpad.PersistArtifacts &&
-		!c.Scratchpad.PersistDecisions
+		!c.Scratchpad.PersistDecisions &&
+		len(c.Tiers) == 0
 }
 
 // PlanningConfig controls intelligent planning behavior

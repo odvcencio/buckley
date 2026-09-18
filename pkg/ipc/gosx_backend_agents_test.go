@@ -47,12 +47,22 @@ func TestGoSXBackendDispatchPropagatesAuthenticatedActor(t *testing.T) {
 		Name: "alice", Scope: storage.TokenScopeMember,
 	}))
 	if err := (gosxBackend{server: server}).Dispatch(context.Background(), req, gosxui.CommandRequest{
-		SessionID: "session-actor", Type: "input", Content: "hello",
+		SessionID: "session-actor", Type: "input", Content: "hello", TaskIntent: "mutation",
 	}); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if captured.ID == "" || captured.AcceptedBy != "alice" || captured.SessionID != "session-actor" || captured.Content != "hello" {
+	if captured.ID == "" || captured.AcceptedBy != "alice" || captured.SessionID != "session-actor" || captured.Content != "hello" || captured.TaskIntent != "mutation" {
 		t.Fatalf("captured command = %+v", captured)
+	}
+	if err := (gosxBackend{server: server}).Dispatch(context.Background(), req, gosxui.CommandRequest{
+		SessionID: "session-actor", Type: "input", Content: "hello", TaskIntent: "chat",
+	}); err == nil || !strings.Contains(err.Error(), "task intent") {
+		t.Fatalf("invalid task intent error = %v", err)
+	}
+	if err := (gosxBackend{server: server}).Dispatch(context.Background(), req, gosxui.CommandRequest{
+		SessionID: "session-actor", Type: "slash", Content: "/help", TaskIntent: "unknown",
+	}); err == nil || !strings.Contains(err.Error(), "only supported") {
+		t.Fatalf("unsupported command task intent error = %v", err)
 	}
 }
 

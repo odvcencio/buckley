@@ -37,6 +37,7 @@ type CreateSessionRequest struct {
 	Agent            string            `json:"agent,omitempty"`
 	Subagent         string            `json:"subagent,omitempty"`
 	Prompt           string            `json:"prompt,omitempty"`
+	TaskIntent       string            `json:"taskIntent,omitempty"`
 	InitialCommandID string            `json:"-"`
 	IdleTimeout      string            `json:"idleTimeout,omitempty"`
 	Limits           *ResourceLimits   `json:"limits,omitempty"`
@@ -539,6 +540,9 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	if r.modelManager == nil {
 		return nil, fmt.Errorf("model manager not configured")
 	}
+	if err := sessionexec.ValidateCommandTaskIntent("input", req.TaskIntent); err != nil {
+		return nil, err
+	}
 	journal, stepJournal, err := r.resolveRunnerDurability(ledger, evidenceStore)
 	if err != nil {
 		return nil, err
@@ -675,7 +679,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	if journal != nil && strings.TrimSpace(req.Prompt) != "" {
 		initial := command.SessionCommand{
 			SessionID: sessionID, ID: strings.TrimSpace(req.InitialCommandID), Type: "input",
-			Content: req.Prompt, AcceptedBy: strings.TrimSpace(req.Principal),
+			Content: req.Prompt, TaskIntent: req.TaskIntent, AcceptedBy: strings.TrimSpace(req.Principal),
 		}
 		initial.EnsureID()
 		receipt, err := runner.acceptDurableCommand(context.Background(), initial, false, true, false)
@@ -738,7 +742,7 @@ func (r *Registry) CreateSession(req CreateSessionRequest) (*SessionInfo, error)
 	// Legacy sessions retain their historical asynchronous initial prompt.
 	if journal == nil && req.Prompt != "" {
 		initial := command.SessionCommand{
-			SessionID: sessionID, Type: "input", Content: req.Prompt,
+			SessionID: sessionID, Type: "input", Content: req.Prompt, TaskIntent: req.TaskIntent,
 			AcceptedBy: strings.TrimSpace(req.Principal),
 		}
 		initial.EnsureID()
@@ -1172,6 +1176,9 @@ func (r *Registry) AcceptCommand(ctx context.Context, cmd command.SessionCommand
 	}
 	if strings.TrimSpace(cmd.SessionID) == "" {
 		return sessionexec.Receipt{}, fmt.Errorf("session ID required")
+	}
+	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
+		return sessionexec.Receipt{}, err
 	}
 	runner, ok := r.GetSession(cmd.SessionID)
 	if !ok || runner == nil {

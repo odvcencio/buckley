@@ -125,7 +125,7 @@ func parseOneShotStats(lines []string) map[string]any {
 }
 
 // CodexTool invokes the codex CLI with one-shot mode for specialized tasks
-type CodexTool struct{}
+type CodexTool struct{ workDirAware }
 
 func (t *CodexTool) Name() string {
 	return "invoke_codex"
@@ -188,6 +188,9 @@ func (t *CodexTool) ExecuteWithContext(ctx context.Context, params map[string]an
 	}
 
 	command := exec.CommandContext(ctx, "codex", "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	GetDelegationGuard().ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer
@@ -237,7 +240,7 @@ func (t *CodexTool) ExecuteWithContext(ctx context.Context, params map[string]an
 }
 
 // ClaudeTool invokes the Claude CLI with one-shot mode for specialized tasks
-type ClaudeTool struct{}
+type ClaudeTool struct{ workDirAware }
 
 func (t *ClaudeTool) Name() string {
 	return "invoke_claude"
@@ -300,6 +303,9 @@ func (t *ClaudeTool) ExecuteWithContext(ctx context.Context, params map[string]a
 	}
 
 	command := exec.CommandContext(ctx, "claude", "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	GetDelegationGuard().ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer
@@ -349,7 +355,7 @@ func (t *ClaudeTool) ExecuteWithContext(ctx context.Context, params map[string]a
 }
 
 // BuckleyTool invokes Buckley itself in one-shot mode for focused tasks
-type BuckleyTool struct{}
+type BuckleyTool struct{ workDirAware }
 
 func (t *BuckleyTool) Name() string {
 	return "invoke_buckley"
@@ -432,6 +438,9 @@ func (t *BuckleyTool) ExecuteWithContext(ctx context.Context, params map[string]
 	}
 
 	command := exec.CommandContext(ctx, buckleyPath, "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	guard.ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer

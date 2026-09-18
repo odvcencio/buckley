@@ -10,7 +10,9 @@ import (
 	"m31labs.dev/fluffyui/backend"
 )
 
-const codeHighlightTimeoutMicros = 10_000
+// Keep highlighting bounded for interactive rendering while allowing small
+// grammar queries to finish on loaded hosts and under race instrumentation.
+const codeHighlightTimeoutMicros = 50_000
 
 type codeSyntaxStyles struct {
 	Default   backend.Style

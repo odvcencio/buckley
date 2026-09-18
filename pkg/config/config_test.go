@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -69,6 +70,45 @@ func TestSplitReasoningSuffixSupportsQwenReviewModel(t *testing.T) {
 	modelID, effort := config.SplitReasoningSuffix("qwen/qwen3.7-plus-medium")
 	if modelID != "qwen/qwen3.7-plus" || effort != "medium" {
 		t.Fatalf("SplitReasoningSuffix() = %q, %q", modelID, effort)
+	}
+}
+
+func TestLoadRLMConfiguredTiers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+rlm:
+  tiers:
+    light:
+      model: public/light
+      provider: openrouter
+      models:
+        - public/light
+        - public/fallback
+      max_cost_per_million: 1.5
+      min_context_window: 12000
+      prefer:
+        - cost
+        - quality
+      requires:
+        - extended_thinking
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("LoadFromPath returned error: %v", err)
+	}
+	tier := cfg.RLM.Tiers["light"]
+	if tier.Model != "public/light" || tier.Provider != "openrouter" || tier.MaxCostPerMillion != 1.5 || tier.MinContextWindow != 12000 {
+		t.Fatalf("loaded light tier scalars = %+v", tier)
+	}
+	if !reflect.DeepEqual(tier.Models, []string{"public/light", "public/fallback"}) ||
+		!reflect.DeepEqual(tier.Prefer, []string{"cost", "quality"}) ||
+		!reflect.DeepEqual(tier.Requires, []string{"extended_thinking"}) {
+		t.Fatalf("loaded light tier slices = %+v", tier)
 	}
 }
 
@@ -159,6 +199,18 @@ func TestInvalidExecutionModeFailsValidation(t *testing.T) {
 	cfg.Oneshot.Mode = config.ExecutionModeRLM
 	if err := cfg.Validate(); err == nil {
 		t.Fatalf("expected validation to reject RLM as a oneshot mode")
+	}
+}
+
+func TestLegacyRLMExecutionModeRemainsAccepted(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Execution.Mode = config.ExecutionModeRLM
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected legacy rlm execution mode: %v", err)
+	}
+	if got := cfg.ExecutionMode(); got != config.ExecutionModeRLM {
+		t.Fatalf("ExecutionMode() = %q, want legacy rlm literal", got)
 	}
 }
 

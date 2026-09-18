@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/goalloop"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rules"
@@ -24,15 +23,7 @@ var goalStartWorkspaceFn = os.Getwd
 var goalRunWorkspaceFn = os.Getwd
 
 func resolveGoalStartProvider(modelID string) (string, error) {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if configPath != "" {
-		cfg, err = config.LoadFromPath(configPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return "", fmt.Errorf("load goal model policy config: %w", err)
 	}

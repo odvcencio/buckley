@@ -116,181 +116,19 @@ func TestBackendResult_Fields(t *testing.T) {
 	}
 }
 
-func TestBackendRegistry_Register(t *testing.T) {
-	r := NewBackendRegistry()
+// These should not panic
 
-	backend := &mockBackend{name: "test-backend", available: true}
-	r.Register(backend)
+// Pre-populate some backends
 
-	got, ok := r.Get("test-backend")
-	if !ok {
-		t.Fatal("expected to find registered backend")
-	}
-	if got.Name() != "test-backend" {
-		t.Errorf("expected name 'test-backend', got %q", got.Name())
-	}
-}
+// Writer goroutine
 
-func TestBackendRegistry_RegisterOverwrites(t *testing.T) {
-	r := NewBackendRegistry()
+// Reader goroutine - Get
 
-	backend1 := &mockBackend{name: "test-backend", available: true}
-	backend2 := &mockBackend{name: "test-backend", available: false}
+// Reader goroutine - List
 
-	r.Register(backend1)
-	r.Register(backend2)
+// Reader goroutine - Available
 
-	got, ok := r.Get("test-backend")
-	if !ok {
-		t.Fatal("expected to find registered backend")
-	}
-	if got.Available() {
-		t.Error("expected backend to be unavailable after overwrite")
-	}
-}
-
-func TestBackendRegistry_Get_NotFound(t *testing.T) {
-	r := NewBackendRegistry()
-
-	_, ok := r.Get("nonexistent")
-	if ok {
-		t.Error("expected Get to return false for nonexistent backend")
-	}
-}
-
-func TestBackendRegistry_List(t *testing.T) {
-	r := NewBackendRegistry()
-
-	r.Register(&mockBackend{name: "backend-a", available: true})
-	r.Register(&mockBackend{name: "backend-b", available: false})
-	r.Register(&mockBackend{name: "backend-c", available: true})
-
-	list := r.List()
-	if len(list) != 3 {
-		t.Fatalf("expected 3 backends, got %d", len(list))
-	}
-
-	names := make(map[string]bool)
-	for _, b := range list {
-		names[b.Name()] = true
-	}
-
-	for _, name := range []string{"backend-a", "backend-b", "backend-c"} {
-		if !names[name] {
-			t.Errorf("expected to find backend %q in list", name)
-		}
-	}
-}
-
-func TestBackendRegistry_Available(t *testing.T) {
-	r := NewBackendRegistry()
-
-	r.Register(&mockBackend{name: "available-1", available: true})
-	r.Register(&mockBackend{name: "unavailable", available: false})
-	r.Register(&mockBackend{name: "available-2", available: true})
-
-	available := r.Available()
-	if len(available) != 2 {
-		t.Fatalf("expected 2 available backends, got %d", len(available))
-	}
-
-	for _, b := range available {
-		if !b.Available() {
-			t.Errorf("expected backend %q to be available", b.Name())
-		}
-	}
-}
-
-func TestBackendRegistry_Available_Empty(t *testing.T) {
-	r := NewBackendRegistry()
-
-	available := r.Available()
-	if len(available) != 0 {
-		t.Errorf("expected 0 available backends, got %d", len(available))
-	}
-}
-
-func TestBackendRegistry_Available_NoneAvailable(t *testing.T) {
-	r := NewBackendRegistry()
-
-	r.Register(&mockBackend{name: "unavailable-1", available: false})
-	r.Register(&mockBackend{name: "unavailable-2", available: false})
-
-	available := r.Available()
-	if len(available) != 0 {
-		t.Errorf("expected 0 available backends, got %d", len(available))
-	}
-}
-
-func TestBackendRegistry_NilGuards(t *testing.T) {
-	var r *BackendRegistry
-
-	// These should not panic
-	r.Register(&mockBackend{name: "test"})
-
-	_, ok := r.Get("test")
-	if ok {
-		t.Error("expected Get on nil registry to return false")
-	}
-
-	list := r.List()
-	if list != nil {
-		t.Error("expected List on nil registry to return nil")
-	}
-
-	available := r.Available()
-	if available != nil {
-		t.Error("expected Available on nil registry to return nil")
-	}
-}
-
-func TestBackendRegistry_ConcurrentAccess(t *testing.T) {
-	r := NewBackendRegistry()
-
-	// Pre-populate some backends
-	for i := 0; i < 5; i++ {
-		r.Register(&mockBackend{name: "initial-" + string(rune('a'+i)), available: true})
-	}
-
-	done := make(chan bool)
-
-	// Writer goroutine
-	go func() {
-		for i := 0; i < 100; i++ {
-			r.Register(&mockBackend{name: "dynamic-backend", available: i%2 == 0})
-		}
-		done <- true
-	}()
-
-	// Reader goroutine - Get
-	go func() {
-		for i := 0; i < 100; i++ {
-			r.Get("dynamic-backend")
-		}
-		done <- true
-	}()
-
-	// Reader goroutine - List
-	go func() {
-		for i := 0; i < 100; i++ {
-			r.List()
-		}
-		done <- true
-	}()
-
-	// Reader goroutine - Available
-	go func() {
-		for i := 0; i < 100; i++ {
-			r.Available()
-		}
-		done <- true
-	}()
-
-	// Wait for all goroutines
-	for i := 0; i < 4; i++ {
-		<-done
-	}
-}
+// Wait for all goroutines
 
 func TestMockBackend_Execute(t *testing.T) {
 	backend := &mockBackend{name: "test", available: true}

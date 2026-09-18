@@ -32,21 +32,30 @@ type driveState struct {
 	summary     string
 	nextActions []taskstate.NextAction
 	checks      []taskstate.VerificationEntry
-	questions   []taskstate.Question
-	phase       string
+	// completionEvidence is the typed cross-turn completion contract:
+	// mutations open it, trusted evidenced verification closes it, and
+	// observation failures stay as durable debt.
+	completionEvidence taskstate.CompletionEvidenceState
+	questions          []taskstate.Question
+	phase              string
 	// prematureCompletions counts completion claims the verification
 	// gate rejected; the second one parks the task instead of looping.
 	prematureCompletions int
 }
 
 func newDriveState(spec TaskSpec, resume *taskstate.ResumeContext) *driveState {
-	d := &driveState{summary: spec.Title, phase: PhaseExecute}
+	d := &driveState{summary: spec.Title, phase: PhaseExecute, completionEvidence: taskstate.NewCompletionEvidenceState()}
 	if resume != nil {
 		if resume.State.Summary != "" {
 			d.summary = resume.State.Summary
 		}
 		d.nextActions = resume.State.NextActions
 		d.checks = resume.State.Checks
+		if resume.State.Status == taskstate.StatusCompleted {
+			d.completionEvidence = resume.State.CompletionEvidence
+		} else {
+			d.completionEvidence = resume.State.CompletionEvidence.NormalizeNonTerminal()
+		}
 		d.questions = resume.State.Questions
 	}
 	return d
@@ -63,6 +72,7 @@ func (d *driveState) absorb(outcome TurnOutcome) {
 	for _, check := range outcome.Checks {
 		d.mergeCheck(check)
 	}
+	d.absorbCompletionEvidence(outcome)
 	d.questions = append(d.questions, outcome.Questions...)
 }
 
@@ -77,9 +87,31 @@ func (d *driveState) mergeCheck(check taskstate.VerificationEntry) {
 	d.checks = append(d.checks, check)
 }
 
+func (d *driveState) absorbCompletionEvidence(outcome TurnOutcome) {
+	turn := outcome.CompletionEvidence
+	if turn.Version != 0 {
+		d.completionEvidence = turn
+		if !outcome.StateChanged || turn.EvidencedPass() || turn.RequiresVerification() {
+			return
+		}
+	}
+	if !outcome.StateChanged {
+		return
+	}
+	if d.completionEvidence.Version == 0 {
+		d.completionEvidence = taskstate.NewCompletionEvidenceState()
+	}
+	d.completionEvidence.StateChangeObserved = true
+	d.completionEvidence.VerificationStatus = taskstate.VerificationPending
+	d.completionEvidence.VerificationEvidenceID = ""
+}
+
 // debt is the drive's current verification debt: unresolved checks.
 func (d *driveState) debt() int {
 	debt := 0
+	if d.completionEvidence.RequiresVerification() {
+		debt++
+	}
 	for _, check := range d.checks {
 		if check.Status != taskstate.VerificationPass {
 			debt++
@@ -284,14 +316,15 @@ func (l *Loop) checkpointTask(ctx context.Context, runID, taskID, status string,
 // full debt and question load for the morning report.
 func (l *Loop) driveCheckpoint(taskID, status string, drive *driveState, blocker *taskstate.Blocker) taskstate.CheckpointState {
 	return taskstate.CheckpointState{
-		Schema:      taskstate.SchemaVersion,
-		TaskID:      taskID,
-		Status:      status,
-		Summary:     drive.summary,
-		NextActions: drive.nextActions,
-		Checks:      drive.checks,
-		Questions:   drive.questions,
-		Blocker:     blocker,
+		Schema:             taskstate.SchemaVersion,
+		TaskID:             taskID,
+		Status:             status,
+		Summary:            drive.summary,
+		NextActions:        drive.nextActions,
+		Checks:             drive.checks,
+		CompletionEvidence: drive.completionEvidence,
+		Questions:          drive.questions,
+		Blocker:            blocker,
 	}
 }
 

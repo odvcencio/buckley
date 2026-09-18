@@ -189,6 +189,121 @@ Guardrails for ZDR, data-collection, provider, and model allowlists. A model
 with no ZDR-compatible endpoint cannot run while the account enforces ZDR;
 choose a compatible model or change that account policy deliberately.
 
+### oneshot
+
+```yaml
+oneshot:
+  mode: classic
+  data_policy: none # none (default), zdr, or deny
+```
+
+`data_policy` controls whether `buckley commit` and `buckley pr` (the one-shot
+`api` backend) attach OpenRouter privacy fields or enforce the durable-goal
+model-data-policy contract. The default, `none`, is a plain pass-through: no
+`provider.zdr`/`provider.data_collection` field, no contract check — the same
+behavior described above for "requests outside a Buckbot runtime". Before
+2026-09-04 this backend unconditionally forced `provider.zdr: true` (falling
+back to non-ZDR `data_collection: deny` only for a recognized-OSS-licensed
+workspace), which routinely broke ordinary commits with OpenRouter's
+policy-filtered 404 or an `invalid_policy_contract` validation failure when
+the bound contract didn't hold. Set `data_policy: zdr` or `data_policy: deny`
+to opt back into that stricter, contract-enforced behavior; both require the
+workspace to carry recognized OSS license evidence and fail closed otherwise.
+This setting is independent of `buckbot.openrouter_privacy_fallback` above.
+
+### Coordinated execution (legacy mode key: `rlm`)
+
+`execution.mode: rlm` selects Buckley's experimental coordinator–worker
+execution path. The `rlm` mode and configuration namespace are retained for
+compatibility with earlier builds; the operator-facing name is coordinated
+execution.
+
+```yaml
+execution:
+  mode: rlm # classic | rlm (legacy mode key for coordinated execution)
+
+rlm:
+  coordinator:
+    model: ""                 # empty keeps the runtime default/router choice
+    max_iterations: 10
+    max_tokens_budget: 0      # runtime default currently 100000
+    max_wall_time: 10m
+    confidence_threshold: 0.95 # guidance only, not verification
+    stream_partials: true      # publish coordinator progress; not text-token streaming
+  sub_agent:
+    model: ""          # empty keeps routed/default worker model selection
+    max_concurrent: 3
+    timeout: 5m
+  scratchpad:
+    max_entries_memory: 1000
+    max_raw_bytes_memory: 52428800
+    eviction_policy: lru  # valid: lru or fifo
+    default_ttl: 1h
+    persist_artifacts: true
+    persist_decisions: true
+  tiers:
+    light:
+      models: ["qwen/qwen3.7-max", "qwen/qwen3.6-flash"]
+      max_cost_per_million: 3.0
+      min_context_window: 16000
+      prefer: ["cost", "quality"]
+      requires: []
+```
+
+Coordinated execution has two deliberately distinct topologies. ACP requests
+selected through the legacy `rlm` mode key use the full coordinator–worker
+runtime: the coordinator prompt uses context, delegates bounded missing work,
+reads scratchpad summaries, and synthesizes the final answer. Those requests
+use the coordinator, worker, and scratchpad settings (subject to the
+compatibility notes below). The dispatcher owns admission, routing, worker
+concurrency, and cooperative deadlines.
+
+CLI plan execution selected by `execution.mode: rlm` uses the runner's
+host-bound worker-batch path. It calls `Runtime.ExecuteTasks` for routed worker
+dispatch, then the host records task state and runs verification. Its worker,
+routing, tier, timeout, and policy settings are active, but it does not run the
+coordinator iteration/synthesis loop, read coordinator scratchpad summaries, or
+persist a coordinator `set_answer` result. This distinction is intentional; it
+does not change the retained `rlm` compatibility namespace.
+
+Important trust boundaries:
+
+- `coordinator.confidence_threshold` is prompt/context guidance. Model
+  confidence is not verification, and incomplete evidence is not accepted as a
+  completed task.
+- `coordinator.stream_partials` controls coordinator progress publication to
+  registered iteration hooks and `rlm.iteration` telemetry. `false` suppresses
+  those progress publications; it does not enable or disable text-token
+  streaming, terminal results, incomplete diagnostics, budget warnings, or
+  termination telemetry.
+- `sub_agent.timeout` starts after admission/concurrency/rate queueing, uses
+  one cooperative active-worker deadline across retries, and remains bounded by
+  the parent context. It is not hard preemption of a blocked process.
+- Scratchpad persistence stores coordinator answer-state decisions and public
+  artifact references as durable-only decision/artifact rows; they are not
+  reintroduced into live coordinator summaries. Ordinary worker analysis, raw
+  scratchpad keys, prompts, and transient tool context are not promised as
+  durable raw evidence.
+- `scratchpad.eviction_policy` accepts `lru` and `fifo` only, with
+  case/whitespace normalized by runtime config. Unknown values are rejected at
+  config validation time rather than silently behaving like FIFO.
+- `tiers` is an optional public mirror of the runtime weight-tier router
+  controls. Omit it to keep the built-in runtime defaults; provide only the
+  named tiers and fields you want to override. Canonical tier names are
+  `trivial`, `light`, `medium`, `heavy`, and `reasoning`; unknown or
+  case-mismatched names are rejected. Zero scalar tier values mean "preserve
+  the runtime default" rather than "clear this constraint"; empty lists such as
+  `prefer: []` or `requires: []` explicitly clear list fields. A
+  `rlm.tiers.<weight>.model` value pins the candidate model for that tier, but
+  the pinned candidate must still satisfy the tier's cost, provider, context,
+  and capability constraints. Tier constraints guide model selection and
+  capability filtering, but they are not provider attestations or verification
+  of a worker's answer. When
+  `max_cost_per_million` is positive, models with unknown, invalid, or
+  unauthoritative pricing are excluded rather than treated as free; with no
+  positive cap they may still be selected if no better known-priced candidate
+  is available.
+
 Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project
 deliberately needs a cap. A caller can set `--budget <USD>` for one capped

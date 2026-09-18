@@ -1,20 +1,27 @@
 package experiment
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // ErrStoreUnavailable indicates the experiment store is not configured.
 var ErrStoreUnavailable = errors.New("experiment store unavailable")
+
+// ErrRunManifestConflict indicates an attempt to rewrite immutable run provenance.
+var ErrRunManifestConflict = errors.New("run input manifest conflict")
 
 // Store manages experiment persistence.
 type Store struct {
@@ -64,11 +71,7 @@ func (s *Store) CreateExperiment(exp *Experiment) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+	defer tx.Rollback()
 
 	_, err = tx.Exec(`
 		INSERT INTO experiments (
@@ -430,6 +433,9 @@ func (s *Store) SaveRun(run *Run) error {
 	if run.Status == "" {
 		run.Status = RunPending
 	}
+	if run.ModelExecutions != nil && !isTerminalRunStatus(run.Status) {
+		return fmt.Errorf("model executions can only be captured for terminal runs: %w", ErrRunManifestConflict)
+	}
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now()
 	}
@@ -438,18 +444,33 @@ func (s *Store) SaveRun(run *Run) error {
 	if err != nil {
 		return fmt.Errorf("marshal files: %w", err)
 	}
+	inputManifest, err := marshalRunInputManifest(run.InputManifest)
+	if err != nil {
+		return err
+	}
+	modelExecutions, err := marshalModelExecutions(run.ModelExecutions)
+	if err != nil {
+		return err
+	}
+	usageJSON, err := marshalRunUsage(run.Metrics.Usage)
+	if err != nil {
+		return fmt.Errorf("marshal run usage evidence: %w", err)
+	}
+	costUnknown := 0
+	if run.Metrics.CostUnknown {
+		costUnknown = 1
+	}
 
-	_, err = s.db.Exec(`
+	result, err := s.db.Exec(`
 		INSERT INTO experiment_runs (
 			id, experiment_id, variant_id, session_id, branch, status,
 			output, files_changed, error,
 			duration_ms, prompt_tokens, completion_tokens, total_cost,
+			usage_json, cost_unknown,
 			tool_calls, tool_successes, tool_failures, files_modified, lines_changed,
-			started_at, completed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			started_at, completed_at, input_manifest_json, model_executions_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			experiment_id = excluded.experiment_id,
-			variant_id = excluded.variant_id,
 			session_id = excluded.session_id,
 			branch = excluded.branch,
 			status = excluded.status,
@@ -460,13 +481,44 @@ func (s *Store) SaveRun(run *Run) error {
 			prompt_tokens = excluded.prompt_tokens,
 			completion_tokens = excluded.completion_tokens,
 			total_cost = excluded.total_cost,
+			usage_json = excluded.usage_json,
+			cost_unknown = excluded.cost_unknown,
 			tool_calls = excluded.tool_calls,
 			tool_successes = excluded.tool_successes,
 			tool_failures = excluded.tool_failures,
 			files_modified = excluded.files_modified,
 			lines_changed = excluded.lines_changed,
 			started_at = excluded.started_at,
-			completed_at = excluded.completed_at
+			completed_at = excluded.completed_at,
+			model_executions_json = CASE
+				WHEN experiment_runs.model_executions_json IS NULL
+				  AND excluded.model_executions_json IS NOT NULL
+				  AND experiment_runs.status IN ('pending', 'running')
+				  AND excluded.status IN ('completed', 'failed', 'cancelled')
+				THEN excluded.model_executions_json
+				ELSE experiment_runs.model_executions_json
+			END
+		WHERE experiment_runs.experiment_id = excluded.experiment_id
+		  AND experiment_runs.variant_id = excluded.variant_id
+		  AND (
+			excluded.input_manifest_json IS NULL
+			OR (
+				experiment_runs.input_manifest_json IS NOT NULL
+				AND experiment_runs.input_manifest_json = excluded.input_manifest_json
+			)
+		  )
+		  AND (
+			excluded.model_executions_json IS NULL
+			OR (
+				experiment_runs.model_executions_json IS NOT NULL
+				AND experiment_runs.model_executions_json = excluded.model_executions_json
+			)
+			OR (
+				experiment_runs.model_executions_json IS NULL
+				AND experiment_runs.status IN ('pending', 'running')
+				AND excluded.status IN ('completed', 'failed', 'cancelled')
+			)
+		  )
 	`,
 		run.ID,
 		run.ExperimentID,
@@ -481,6 +533,8 @@ func (s *Store) SaveRun(run *Run) error {
 		nullIfZeroInt(run.Metrics.PromptTokens),
 		nullIfZeroInt(run.Metrics.CompletionTokens),
 		nullIfZeroFloat(run.Metrics.TotalCost),
+		nullIfEmpty(usageJSON),
+		costUnknown,
 		nullIfZeroInt(run.Metrics.ToolCalls),
 		nullIfZeroInt(run.Metrics.ToolSuccesses),
 		nullIfZeroInt(run.Metrics.ToolFailures),
@@ -488,8 +542,20 @@ func (s *Store) SaveRun(run *Run) error {
 		nullIfZeroInt(run.Metrics.LinesChanged),
 		run.StartedAt,
 		nullTime(run.CompletedAt),
+		nullIfEmpty(inputManifest),
+		nullIfEmpty(modelExecutions),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("check run manifest conflict: %w", rowsErr)
+	}
+	if rows == 0 {
+		return ErrRunManifestConflict
+	}
+	return nil
 }
 
 // ListRuns returns runs for an experiment.
@@ -504,8 +570,9 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 	rows, err := s.db.Query(`
 		SELECT id, variant_id, session_id, branch, status, output, files_changed, error,
 		       duration_ms, prompt_tokens, completion_tokens, total_cost,
+		       usage_json, cost_unknown,
 		       tool_calls, tool_successes, tool_failures, files_modified, lines_changed,
-		       started_at, completed_at
+		       started_at, completed_at, input_manifest_json, model_executions_json
 		FROM experiment_runs
 		WHERE experiment_id = ?
 		ORDER BY started_at
@@ -527,12 +594,16 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 		var promptTokens sql.NullInt64
 		var completionTokens sql.NullInt64
 		var totalCost sql.NullFloat64
+		var usageJSON sql.NullString
+		var costUnknown sql.NullInt64
 		var toolCalls sql.NullInt64
 		var toolSuccesses sql.NullInt64
 		var toolFailures sql.NullInt64
 		var filesModified sql.NullInt64
 		var linesChanged sql.NullInt64
 		var completed sql.NullTime
+		var inputManifest sql.NullString
+		var modelExecutions sql.NullString
 
 		if err := rows.Scan(
 			&run.ID,
@@ -547,6 +618,8 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 			&promptTokens,
 			&completionTokens,
 			&totalCost,
+			&usageJSON,
+			&costUnknown,
 			&toolCalls,
 			&toolSuccesses,
 			&toolFailures,
@@ -554,6 +627,8 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 			&linesChanged,
 			&run.StartedAt,
 			&completed,
+			&inputManifest,
+			&modelExecutions,
 		); err != nil {
 			return nil, err
 		}
@@ -569,6 +644,14 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 		run.Metrics.PromptTokens = int(promptTokens.Int64)
 		run.Metrics.CompletionTokens = int(completionTokens.Int64)
 		run.Metrics.TotalCost = totalCost.Float64
+		if usageJSON.Valid {
+			usage, err := unmarshalRunUsage(usageJSON.String)
+			if err != nil {
+				return nil, fmt.Errorf("decode run usage evidence for %s: %w", run.ID, err)
+			}
+			run.Metrics.Usage = usage
+		}
+		run.Metrics.CostUnknown = costUnknown.Valid && costUnknown.Int64 != 0
 		run.Metrics.ToolCalls = int(toolCalls.Int64)
 		run.Metrics.ToolSuccesses = int(toolSuccesses.Int64)
 		run.Metrics.ToolFailures = int(toolFailures.Int64)
@@ -579,6 +662,18 @@ func (s *Store) ListRuns(experimentID string) ([]Run, error) {
 		}
 		if err := unmarshalJSON(filesChanged.String, &run.Files); err != nil {
 			return nil, fmt.Errorf("decode files: %w", err)
+		}
+		manifest, err := unmarshalRunInputManifest(inputManifest.String)
+		if err != nil {
+			return nil, fmt.Errorf("decode run input manifest for %s: %w", run.ID, err)
+		}
+		run.InputManifest = manifest
+		if modelExecutions.Valid {
+			identities, err := unmarshalModelExecutions(modelExecutions.String)
+			if err != nil {
+				return nil, fmt.Errorf("decode run model executions for %s: %w", run.ID, err)
+			}
+			run.ModelExecutions = identities
 		}
 		runs = append(runs, run)
 	}
@@ -597,8 +692,9 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 	row := s.db.QueryRow(`
 		SELECT experiment_id, variant_id, session_id, branch, status, output, files_changed, error,
 		       duration_ms, prompt_tokens, completion_tokens, total_cost,
+		       usage_json, cost_unknown,
 		       tool_calls, tool_successes, tool_failures, files_modified, lines_changed,
-		       started_at, completed_at
+		       started_at, completed_at, input_manifest_json, model_executions_json
 		FROM experiment_runs WHERE id = ?
 	`, runID)
 
@@ -612,12 +708,16 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 	var promptTokens sql.NullInt64
 	var completionTokens sql.NullInt64
 	var totalCost sql.NullFloat64
+	var usageJSON sql.NullString
+	var costUnknown sql.NullInt64
 	var toolCalls sql.NullInt64
 	var toolSuccesses sql.NullInt64
 	var toolFailures sql.NullInt64
 	var filesModified sql.NullInt64
 	var linesChanged sql.NullInt64
 	var completed sql.NullTime
+	var inputManifest sql.NullString
+	var modelExecutions sql.NullString
 
 	if err := row.Scan(
 		&run.ExperimentID,
@@ -632,6 +732,8 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 		&promptTokens,
 		&completionTokens,
 		&totalCost,
+		&usageJSON,
+		&costUnknown,
 		&toolCalls,
 		&toolSuccesses,
 		&toolFailures,
@@ -639,6 +741,8 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 		&linesChanged,
 		&run.StartedAt,
 		&completed,
+		&inputManifest,
+		&modelExecutions,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -658,6 +762,14 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 	run.Metrics.PromptTokens = int(promptTokens.Int64)
 	run.Metrics.CompletionTokens = int(completionTokens.Int64)
 	run.Metrics.TotalCost = totalCost.Float64
+	if usageJSON.Valid {
+		usage, err := unmarshalRunUsage(usageJSON.String)
+		if err != nil {
+			return nil, fmt.Errorf("decode run usage evidence for %s: %w", run.ID, err)
+		}
+		run.Metrics.Usage = usage
+	}
+	run.Metrics.CostUnknown = costUnknown.Valid && costUnknown.Int64 != 0
 	run.Metrics.ToolCalls = int(toolCalls.Int64)
 	run.Metrics.ToolSuccesses = int(toolSuccesses.Int64)
 	run.Metrics.ToolFailures = int(toolFailures.Int64)
@@ -668,6 +780,18 @@ func (s *Store) GetRun(runID string) (*Run, error) {
 	}
 	if err := unmarshalJSON(filesChanged.String, &run.Files); err != nil {
 		return nil, fmt.Errorf("decode files: %w", err)
+	}
+	manifest, err := unmarshalRunInputManifest(inputManifest.String)
+	if err != nil {
+		return nil, fmt.Errorf("decode run input manifest for %s: %w", run.ID, err)
+	}
+	run.InputManifest = manifest
+	if modelExecutions.Valid {
+		identities, err := unmarshalModelExecutions(modelExecutions.String)
+		if err != nil {
+			return nil, fmt.Errorf("decode run model executions for %s: %w", run.ID, err)
+		}
+		run.ModelExecutions = identities
 	}
 
 	return &run, nil
@@ -892,6 +1016,108 @@ func unmarshalJSON(raw string, target any) error {
 		return nil
 	}
 	return json.Unmarshal([]byte(raw), target)
+}
+
+func marshalRunInputManifest(manifest *RunInputManifest) (string, error) {
+	if manifest == nil {
+		return "", nil
+	}
+	if err := manifest.Validate(); err != nil {
+		return "", err
+	}
+	return marshalJSON(manifest)
+}
+
+func unmarshalRunInputManifest(raw string) (*RunInputManifest, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var manifest RunInputManifest
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		return nil, err
+	}
+	if err := manifest.Validate(); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func marshalRunUsage(usage *transparency.TokenUsage) (string, error) {
+	if usage == nil {
+		return "", nil
+	}
+	value := transparency.CloneTokenUsage(*usage)
+	return marshalJSON(value)
+}
+
+func unmarshalRunUsage(raw string) (*transparency.TokenUsage, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var usage transparency.TokenUsage
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&usage); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return nil, errors.New("run usage evidence JSON has trailing data")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	usage = transparency.CloneTokenUsage(usage)
+	return &usage, nil
+}
+
+func marshalModelExecutions(identities []model.ExecutionIdentity) (string, error) {
+	if identities == nil {
+		return "", nil
+	}
+	if err := validateModelExecutions(identities); err != nil {
+		return "", err
+	}
+	return marshalJSON(identities)
+}
+
+func unmarshalModelExecutions(raw string) ([]model.ExecutionIdentity, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("model executions JSON must be an array")
+	}
+	var identities []model.ExecutionIdentity
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&identities); err != nil {
+		return nil, err
+	}
+	if decoder.More() {
+		return nil, errors.New("model executions JSON has trailing data")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return nil, errors.New("model executions JSON has trailing data")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if identities == nil {
+		return nil, errors.New("model executions JSON must be an array")
+	}
+	if err := validateModelExecutions(identities); err != nil {
+		return nil, err
+	}
+	return identities, nil
+}
+
+func isTerminalRunStatus(status RunStatus) bool {
+	switch status {
+	case RunCompleted, RunFailed, RunCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func nullIfEmpty(value string) any {

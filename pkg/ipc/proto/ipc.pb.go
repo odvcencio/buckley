@@ -199,7 +199,9 @@ type CommandRequest struct {
 	// Target agent for host agent commands
 	AgentId string `protobuf:"bytes,5,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	// Stable caller-provided identity for session commands.
-	CommandId     string `protobuf:"bytes,6,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	CommandId string `protobuf:"bytes,6,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	// Optional result contract for this command: unknown, read_only, or mutation.
+	TaskIntent    string `protobuf:"bytes,7,opt,name=task_intent,json=taskIntent,proto3" json:"task_intent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -272,6 +274,13 @@ func (x *CommandRequest) GetAgentId() string {
 func (x *CommandRequest) GetCommandId() string {
 	if x != nil {
 		return x.CommandId
+	}
+	return ""
+}
+
+func (x *CommandRequest) GetTaskIntent() string {
+	if x != nil {
+		return x.TaskIntent
 	}
 	return ""
 }
@@ -1205,7 +1214,9 @@ type CreateHeadlessRequest struct {
 	// Resource limits
 	Limits *ResourceLimits `protobuf:"bytes,6,opt,name=limits,proto3" json:"limits,omitempty"`
 	// Tool restrictions
-	ToolPolicy    *ToolPolicy `protobuf:"bytes,7,opt,name=tool_policy,json=toolPolicy,proto3" json:"tool_policy,omitempty"`
+	ToolPolicy *ToolPolicy `protobuf:"bytes,7,opt,name=tool_policy,json=toolPolicy,proto3" json:"tool_policy,omitempty"`
+	// One-shot/headless result contract intent: unknown, read_only, or mutation
+	TaskIntent    string `protobuf:"bytes,8,opt,name=task_intent,json=taskIntent,proto3" json:"task_intent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1287,6 +1298,13 @@ func (x *CreateHeadlessRequest) GetToolPolicy() *ToolPolicy {
 		return x.ToolPolicy
 	}
 	return nil
+}
+
+func (x *CreateHeadlessRequest) GetTaskIntent() string {
+	if x != nil {
+		return x.TaskIntent
+	}
+	return ""
 }
 
 type ResourceLimits struct {
@@ -6000,6 +6018,7 @@ type SessionCommandStatus struct {
 	EffectSummary    *SessionEffectSummary  `protobuf:"bytes,17,opt,name=effect_summary,json=effectSummary,proto3" json:"effect_summary,omitempty"`
 	Effects          []*SessionEffectStatus `protobuf:"bytes,18,rep,name=effects,proto3" json:"effects,omitempty"`
 	EffectsTruncated bool                   `protobuf:"varint,19,opt,name=effects_truncated,json=effectsTruncated,proto3" json:"effects_truncated,omitempty"`
+	TaskIntent       string                 `protobuf:"bytes,20,opt,name=task_intent,json=taskIntent,proto3" json:"task_intent,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -6165,6 +6184,13 @@ func (x *SessionCommandStatus) GetEffectsTruncated() bool {
 		return x.EffectsTruncated
 	}
 	return false
+}
+
+func (x *SessionCommandStatus) GetTaskIntent() string {
+	if x != nil {
+		return x.TaskIntent
+	}
+	return ""
 }
 
 type SessionRoutineAttemptStatus struct {
@@ -6782,7 +6808,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\apayload\x18\x03 \x01(\v2\x17.google.protobuf.StructR\apayload\x128\n" +
 	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x19\n" +
 	"\bevent_id\x18\x05 \x01(\tR\aeventId\x12\x19\n" +
-	"\bagent_id\x18\x06 \x01(\tR\aagentId\"\xbc\x01\n" +
+	"\bagent_id\x18\x06 \x01(\tR\aagentId\"\xdd\x01\n" +
 	"\x0eCommandRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -6791,7 +6817,9 @@ const file_ipc_proto_rawDesc = "" +
 	"\rsession_token\x18\x04 \x01(\tR\fsessionToken\x12\x19\n" +
 	"\bagent_id\x18\x05 \x01(\tR\aagentId\x12\x1d\n" +
 	"\n" +
-	"command_id\x18\x06 \x01(\tR\tcommandId\"\x9c\x01\n" +
+	"command_id\x18\x06 \x01(\tR\tcommandId\x12\x1f\n" +
+	"\vtask_intent\x18\a \x01(\tR\n" +
+	"taskIntent\"\x9c\x01\n" +
 	"\x0fCommandResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1d\n" +
@@ -6875,7 +6903,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\x14SessionTokenResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\tR\x05token\"\xf5\x02\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\"\x96\x03\n" +
 	"\x15CreateHeadlessRequest\x12\x18\n" +
 	"\aproject\x18\x01 \x01(\tR\aproject\x12%\n" +
 	"\x0einitial_prompt\x18\x02 \x01(\tR\rinitialPrompt\x12\x14\n" +
@@ -6884,7 +6912,9 @@ const file_ipc_proto_rawDesc = "" +
 	"\x03env\x18\x05 \x03(\v2..buckley.ipc.v1.CreateHeadlessRequest.EnvEntryR\x03env\x126\n" +
 	"\x06limits\x18\x06 \x01(\v2\x1e.buckley.ipc.v1.ResourceLimitsR\x06limits\x12;\n" +
 	"\vtool_policy\x18\a \x01(\v2\x1a.buckley.ipc.v1.ToolPolicyR\n" +
-	"toolPolicy\x1a6\n" +
+	"toolPolicy\x12\x1f\n" +
+	"\vtask_intent\x18\b \x01(\tR\n" +
+	"taskIntent\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"}\n" +
@@ -7324,7 +7354,7 @@ const file_ipc_proto_rawDesc = "" +
 	"\bended_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12;\n" +
 	"\vresolved_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"resolvedAt\"\xea\x05\n" +
+	"resolvedAt\"\x8b\x06\n" +
 	"\x14SessionCommandStatus\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
@@ -7353,7 +7383,9 @@ const file_ipc_proto_rawDesc = "" +
 	"error_code\x18\x10 \x01(\tR\terrorCode\x12K\n" +
 	"\x0eeffect_summary\x18\x11 \x01(\v2$.buckley.ipc.v1.SessionEffectSummaryR\reffectSummary\x12=\n" +
 	"\aeffects\x18\x12 \x03(\v2#.buckley.ipc.v1.SessionEffectStatusR\aeffects\x12+\n" +
-	"\x11effects_truncated\x18\x13 \x01(\bR\x10effectsTruncated\"\xca\x02\n" +
+	"\x11effects_truncated\x18\x13 \x01(\bR\x10effectsTruncated\x12\x1f\n" +
+	"\vtask_intent\x18\x14 \x01(\tR\n" +
+	"taskIntent\"\xca\x02\n" +
 	"\x1bSessionRoutineAttemptStatus\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\x03R\x06number\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12;\n" +

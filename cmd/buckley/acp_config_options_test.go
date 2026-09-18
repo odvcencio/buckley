@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 )
 
@@ -120,5 +121,59 @@ func TestApplyACPSetModelConfigOption_RejectsEmptyValue(t *testing.T) {
 	}
 	if session.Mode != "normal" {
 		t.Fatalf("session.Mode = %q, want unchanged (normal) after a rejected update", session.Mode)
+	}
+}
+
+func TestACPTaskIntentConfigOption_NextRequestLabelsAndReset(t *testing.T) {
+	t.Parallel()
+
+	option := buildACPTaskIntentConfigOption(agentloop.MutationIntent)
+	if option.ID != acpTaskIntentConfigID || option.Name != "Next request" || option.CurrentValue != string(agentloop.MutationIntent) {
+		t.Fatalf("option = %+v", option)
+	}
+	if len(option.Options) != 3 {
+		t.Fatalf("options = %+v, want 3 entries", option.Options)
+	}
+	wantNames := []string{"Automatic", "No change required", "Change required"}
+	for index, want := range wantNames {
+		if option.Options[index].Name != want {
+			t.Fatalf("option %d name = %q, want %q", index, option.Options[index].Name, want)
+		}
+	}
+	session := &acp.AgentSession{}
+	if err := applyACPSetTaskIntentConfigOption(session, acp.ConfigOptionValue{ValueID: string(agentloop.MutationIntent)}); err != nil {
+		t.Fatalf("applyACPSetTaskIntentConfigOption: %v", err)
+	}
+	if got := session.Environment[acpTaskIntentEnvKey]; got != string(agentloop.MutationIntent) {
+		t.Fatalf("stored task intent = %q, want mutation", got)
+	}
+	consumed, err := consumeACPNextTaskIntent(session)
+	if err != nil {
+		t.Fatalf("consumeACPNextTaskIntent: %v", err)
+	}
+	if consumed != agentloop.MutationIntent {
+		t.Fatalf("consumed = %q, want mutation", consumed)
+	}
+	if _, ok := session.Environment[acpTaskIntentEnvKey]; ok {
+		t.Fatalf("task intent was not reset after consumption: %+v", session.Environment)
+	}
+	if got := buildACPTaskIntentConfigOption(acpSessionTaskIntent(session)).CurrentValue; got != string(agentloop.UnknownIntent) {
+		t.Fatalf("current after reset = %q, want unknown", got)
+	}
+}
+
+func TestACPTaskIntentConfigOption_RejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+
+	session := &acp.AgentSession{}
+	if err := applyACPSetTaskIntentConfigOption(session, acp.ConfigOptionValue{}); err == nil {
+		t.Fatal("expected empty task intent config value to fail")
+	}
+	if err := applyACPSetTaskIntentConfigOption(session, acp.ConfigOptionValue{ValueID: "chat"}); err == nil {
+		t.Fatal("expected invalid task intent config value to fail")
+	}
+	session.Environment = map[string]string{acpTaskIntentEnvKey: "chat"}
+	if _, err := consumeACPNextTaskIntent(session); err == nil {
+		t.Fatal("expected corrupted task intent environment to fail strictly")
 	}
 }

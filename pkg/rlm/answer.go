@@ -2,13 +2,14 @@ package rlm
 
 // Answer represents the coordinator's evolving response state.
 type Answer struct {
-	Content    string
-	Ready      bool
-	Confidence float64
-	Artifacts  []string
-	NextSteps  []string
-	Iteration  int
-	TokensUsed int
+	Content     string
+	Ready       bool
+	Confidence  float64
+	Artifacts   []string
+	NextSteps   []string
+	Iteration   int
+	TokensUsed  int
+	TaskResults []BatchResult
 }
 
 // NewAnswer initializes an empty answer for an iteration.
@@ -28,6 +29,13 @@ func (a *Answer) Normalize() {
 	if a.TokensUsed < 0 {
 		a.TokensUsed = 0
 	}
+}
+
+func (a *Answer) appendTaskResults(results []BatchResult) {
+	if a == nil || len(results) == 0 {
+		return
+	}
+	a.TaskResults = append(a.TaskResults, cloneBatchResults(results)...)
 }
 
 func clampConfidence(v float64) float64 {

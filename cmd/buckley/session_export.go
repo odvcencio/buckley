@@ -14,12 +14,12 @@ import (
 )
 
 // SessionExportSchemaVersion identifies the exportable session transcript
-// document's JSON shape. There is no session-to-run mapping in the run
-// ledger yet (pkg/runledger has no production caller as of this command's
-// introduction), so this exports the conversation transcript straight from
-// pkg/storage instead of runledger.ExportRun. When that mapping lands, a
-// ledger-backed export should take priority for sessions that have a run.
-const SessionExportSchemaVersion = "buckley.session.export.v1"
+// document's JSON shape. There is no session-to-run mapping yet, so this exports
+// the conversation transcript straight from pkg/storage instead of runledger.
+// v2 makes that limitation explicit in machine-readable evidence fields.
+const SessionExportSchemaVersion = "buckley.session.export.v2"
+
+const SessionExportEvidenceSchemaVersion = "buckley.session.export.evidence.v1"
 
 // SessionExportDocument is the redacted, exportable document for one
 // session's stored transcript.
@@ -34,17 +34,35 @@ type SessionExportDocument struct {
 // SessionExportSummary is the redacted session metadata included in an
 // export.
 type SessionExportSummary struct {
-	ID           string    `json:"id"`
-	ProjectPath  string    `json:"project_path,omitempty"`
-	GitRepo      string    `json:"git_repo,omitempty"`
-	GitBranch    string    `json:"git_branch,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastActive   time.Time `json:"last_active"`
-	MessageCount int       `json:"message_count"`
-	TotalTokens  int       `json:"total_tokens"`
-	TotalCost    float64   `json:"total_cost"`
-	Status       string    `json:"status"`
+	ID           string                `json:"id"`
+	ProjectPath  string                `json:"project_path,omitempty"`
+	GitRepo      string                `json:"git_repo,omitempty"`
+	GitBranch    string                `json:"git_branch,omitempty"`
+	Model        string                `json:"model,omitempty"`
+	CreatedAt    time.Time             `json:"created_at"`
+	LastActive   time.Time             `json:"last_active"`
+	MessageCount int                   `json:"message_count"`
+	TotalTokens  int                   `json:"total_tokens"`
+	TotalCost    float64               `json:"total_cost"`
+	Status       string                `json:"status"`
+	Evidence     SessionExportEvidence `json:"evidence"`
+}
+
+// SessionExportEvidence labels what the transcript summary can prove. The
+// storage transcript has only legacy scalar totals; it does not retain rich
+// usage, cost evidence, or per-response execution identity.
+type SessionExportEvidence struct {
+	Schema          string                    `json:"schema"`
+	Usage           SessionExportEvidenceItem `json:"usage"`
+	Cost            SessionExportEvidenceItem `json:"cost"`
+	ModelExecutions SessionExportEvidenceItem `json:"model_executions"`
+}
+
+type SessionExportEvidenceItem struct {
+	Status        string `json:"status"`
+	Source        string `json:"source"`
+	Authoritative bool   `json:"authoritative"`
+	Label         string `json:"label"`
 }
 
 // SessionExportMessage is one redacted message row included in an export.
@@ -174,6 +192,7 @@ func buildSessionExportDocument(session *storage.Session, messages []storage.Mes
 			TotalTokens:  session.TotalTokens,
 			TotalCost:    session.TotalCost,
 			Status:       session.Status,
+			Evidence:     legacyStorageTranscriptEvidence(),
 		},
 	}
 
@@ -190,6 +209,30 @@ func buildSessionExportDocument(session *storage.Session, messages []storage.Mes
 		})
 	}
 	return doc
+}
+
+func legacyStorageTranscriptEvidence() SessionExportEvidence {
+	return SessionExportEvidence{
+		Schema: SessionExportEvidenceSchemaVersion,
+		Usage: SessionExportEvidenceItem{
+			Status:        "legacy_scalar",
+			Source:        "storage_transcript.total_tokens",
+			Authoritative: false,
+			Label:         "legacy scalar token total; no rich usage evidence",
+		},
+		Cost: SessionExportEvidenceItem{
+			Status:        "legacy_unknown",
+			Source:        "storage_transcript.total_cost",
+			Authoritative: false,
+			Label:         "unknown (legacy session transcript cost; not authoritative free)",
+		},
+		ModelExecutions: SessionExportEvidenceItem{
+			Status:        "unavailable",
+			Source:        "storage_transcript",
+			Authoritative: false,
+			Label:         "unavailable (storage transcript export has no model execution provenance)",
+		},
+	}
 }
 
 func redactString(s string) string {
@@ -217,7 +260,10 @@ func renderSessionExportMarkdown(doc SessionExportDocument) string {
 	}
 	fmt.Fprintf(&b, "- Created: %s\n", doc.Session.CreatedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Last active: %s\n", doc.Session.LastActive.Format(time.RFC3339))
-	fmt.Fprintf(&b, "- Messages: %d\n\n", len(doc.Messages))
+	fmt.Fprintf(&b, "- Messages: %d\n", len(doc.Messages))
+	fmt.Fprintf(&b, "- Tokens: %d — %s\n", doc.Session.TotalTokens, doc.Session.Evidence.Usage.Label)
+	fmt.Fprintf(&b, "- Cost: $%.4f — %s\n", doc.Session.TotalCost, doc.Session.Evidence.Cost.Label)
+	fmt.Fprintf(&b, "- Model execution evidence: %s\n\n", doc.Session.Evidence.ModelExecutions.Label)
 
 	for _, msg := range doc.Messages {
 		role := "Message"

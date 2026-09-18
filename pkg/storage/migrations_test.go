@@ -242,3 +242,92 @@ func TestMigrationsCreateModelBehaviorProfilePromotionsAfterCandidates(t *testin
 		t.Fatalf("promotions table count = %d, want 1", tableCount)
 	}
 }
+
+func TestMigrationAddsExperimentRunInputManifestToPopulatedLegacyRuns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-experiment-runs.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySchema := `
+CREATE TABLE schema_migrations (
+	version INTEGER PRIMARY KEY,
+	name TEXT NOT NULL,
+	applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE experiments (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	task_prompt TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE experiment_variants (
+	id TEXT PRIMARY KEY,
+	experiment_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	model_id TEXT NOT NULL
+);
+CREATE TABLE experiment_runs (
+	id TEXT PRIMARY KEY,
+	experiment_id TEXT NOT NULL,
+	variant_id TEXT NOT NULL,
+	branch TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	output TEXT,
+	started_at TIMESTAMP
+);
+INSERT INTO experiments(id, name, task_prompt, status) VALUES ('exp-legacy', 'legacy', 'prompt', 'completed');
+INSERT INTO experiment_variants(id, experiment_id, name, model_id) VALUES ('var-legacy', 'exp-legacy', 'variant', 'model');
+INSERT INTO experiment_runs(id, experiment_id, variant_id, branch, status, output) VALUES ('run-legacy', 'exp-legacy', 'var-legacy', 'branch', 'completed', 'legacy output');
+`
+	if _, err := db.Exec(legacySchema); err != nil {
+		_ = db.Close()
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	for _, migration := range migrations[:26] {
+		if _, err := db.Exec(`INSERT INTO schema_migrations(version, name) VALUES (?, ?)`, migration.Version, migration.Name); err != nil {
+			_ = db.Close()
+			t.Fatalf("record legacy migration %d: %v", migration.Version, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New legacy db: %v", err)
+	}
+	defer store.Close()
+	var output string
+	var manifest sql.NullString
+	var executions sql.NullString
+	var usage sql.NullString
+	var costUnknown int
+	if err := store.db.QueryRow(`SELECT output, input_manifest_json, model_executions_json, usage_json, cost_unknown FROM experiment_runs WHERE id = 'run-legacy'`).Scan(&output, &manifest, &executions, &usage, &costUnknown); err != nil {
+		t.Fatalf("query migrated run: %v", err)
+	}
+	if output != "legacy output" {
+		t.Fatalf("output = %q, want legacy output", output)
+	}
+	if manifest.Valid {
+		t.Fatalf("legacy run input_manifest_json = %q, want NULL", manifest.String)
+	}
+	if executions.Valid {
+		t.Fatalf("legacy run model_executions_json = %q, want NULL", executions.String)
+	}
+	if usage.Valid {
+		t.Fatalf("legacy run usage_json = %q, want NULL", usage.String)
+	}
+	if costUnknown != 0 {
+		t.Fatalf("legacy run cost_unknown = %d, want 0", costUnknown)
+	}
+	version, err := store.GetSchemaVersion()
+	if err != nil {
+		t.Fatalf("GetSchemaVersion: %v", err)
+	}
+	if version != len(migrations) {
+		t.Fatalf("schema version = %d, want %d", version, len(migrations))
+	}
+}

@@ -19,6 +19,11 @@ var (
 	_ sessionexec.EffectResolver = (*Store)(nil)
 )
 
+const (
+	adversarialEffectExpiryLease    = 2 * time.Second
+	adversarialEffectOperationLimit = 5 * time.Second
+)
+
 func openAdversarialEffectStore(t *testing.T, sessionID string) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "sessionexec-effects.db")
@@ -56,12 +61,37 @@ func beginAdversarialEffect(t *testing.T, store *Store, command sessionexec.Comm
 	return permit
 }
 
-func waitAdversarialEffectExpiry(t *testing.T, permit sessionexec.EffectPermit) {
+func sessionExecTestDBNowMillis(t *testing.T, store *Store) int64 {
 	t.Helper()
-	delay := time.Until(permit.ExpiresAt) + 30*time.Millisecond
-	if delay > 0 {
-		time.Sleep(delay)
+	var now int64
+	if err := store.db.QueryRow(`SELECT ` + sessionExecNowMillisSQL).Scan(&now); err != nil {
+		t.Fatalf("read session exec database time: %v", err)
 	}
+	return now
+}
+
+func waitSessionExecDBClockAtLeast(t *testing.T, store *Store, deadlineMillis int64, reason string) {
+	t.Helper()
+	start := time.Now()
+	timeout := 5 * time.Second
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	lastNow := sessionExecTestDBNowMillis(t, store)
+	for {
+		if lastNow >= deadlineMillis {
+			return
+		}
+		if time.Since(start) > timeout {
+			t.Fatalf("database clock did not reach %s deadline: now=%d deadline=%d elapsed=%s", reason, lastNow, deadlineMillis, time.Since(start))
+		}
+		<-ticker.C
+		lastNow = sessionExecTestDBNowMillis(t, store)
+	}
+}
+
+func waitAdversarialEffectExpiry(t *testing.T, store *Store, permit sessionexec.EffectPermit) {
+	t.Helper()
+	waitSessionExecDBClockAtLeast(t, store, permit.ExpiresAt.UnixMilli(), "effect permit expiry")
 }
 
 func adversarialEffectState(t *testing.T, store *Store, permit sessionexec.EffectPermit) string {
@@ -99,9 +129,11 @@ func assertEffectBlocked(t *testing.T, err error) {
 
 func TestSessionExecEffectAdversarial_ExpiryTombstoneSurvivesReopenAndRecoveryRefusesRequeue(t *testing.T) {
 	store, path := openAdversarialEffectStore(t, "effect-tombstone")
-	command := claimAdversarialEffectCommand(t, store, "effect-tombstone", "effect-tombstone-command", "tombstone-owner", 50*time.Millisecond)
+	// Leave enough lease headroom for race-instrumented, heavily loaded test
+	// hosts to reach BeginEffect before this test deliberately waits for expiry.
+	command := claimAdversarialEffectCommand(t, store, "effect-tombstone", "effect-tombstone-command", "tombstone-owner", adversarialEffectExpiryLease)
 	permit := beginAdversarialEffect(t, store, command, "effect-tombstone-step")
-	waitAdversarialEffectExpiry(t, permit)
+	waitAdversarialEffectExpiry(t, store, permit)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +179,10 @@ func TestSessionExecEffectAdversarial_ExpiryTombstoneSurvivesReopenAndRecoveryRe
 
 func TestSessionExecEffectAdversarial_QuiesceRemainsIncompleteUntilExactEnd(t *testing.T) {
 	store, _ := openAdversarialEffectStore(t, "effect-quiesce-expiry")
-	command := claimAdversarialEffectCommand(t, store, "effect-quiesce-expiry", "effect-quiesce-command", "quiesce-owner", 50*time.Millisecond)
+	command := claimAdversarialEffectCommand(t, store, "effect-quiesce-expiry", "effect-quiesce-command", "quiesce-owner", adversarialEffectExpiryLease)
 	permit := beginAdversarialEffect(t, store, command, "effect-quiesce-step")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), adversarialEffectOperationLimit)
 	quiesced, quiesceErr := store.QuiesceSession(ctx, command.SessionID, sessionexec.ExecutionModeDetached, "effect_expired")
 	cancel()
 	if quiesced.State.Mode != sessionexec.ExecutionModeDetached {
@@ -186,14 +218,20 @@ func TestSessionExecEffectAdversarial_ReleaseAndCompleteRejectActiveAndAmbiguous
 			permit := beginAdversarialEffect(t, store, command, "effect-block-step")
 			if state == sessionexec.EffectStateAmbiguous {
 				if _, err := store.db.Exec(`UPDATE session_effect_permits
-					SET state = ?, ambiguous_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000
+					SET state = ?, ambiguous_at_ms = `+sessionExecNowMillisSQL+`
 					WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?`,
 					state, command.SessionID, command.CommandID, command.Generation, permit.EffectID); err != nil {
 					t.Fatal(err)
 				}
 			}
 			_, releaseErr := store.Release(context.Background(), command.Lease)
-			assertEffectBlocked(t, releaseErr)
+			if state == sessionexec.EffectStateAmbiguous {
+				if !errors.Is(releaseErr, sessionexec.ErrEffectAmbiguous) || errors.Is(releaseErr, sessionexec.ErrEffectPermitConflict) {
+					t.Fatalf("ambiguous Release error = %v, want ambiguity without permit conflict", releaseErr)
+				}
+			} else {
+				assertEffectBlocked(t, releaseErr)
+			}
 			receipt, err := store.Get(context.Background(), command.SessionID, command.CommandID)
 			if err != nil {
 				t.Fatal(err)
@@ -202,7 +240,13 @@ func TestSessionExecEffectAdversarial_ReleaseAndCompleteRejectActiveAndAmbiguous
 				t.Fatalf("state after rejected Release = %q, want running", receipt.State)
 			}
 			_, completeErr := store.Complete(context.Background(), command.Lease, sessionexec.Completion{State: sessionexec.StateSucceeded}, nil)
-			assertEffectBlocked(t, completeErr)
+			if state == sessionexec.EffectStateAmbiguous {
+				if !errors.Is(completeErr, sessionexec.ErrEffectAmbiguous) || errors.Is(completeErr, sessionexec.ErrEffectPermitConflict) {
+					t.Fatalf("ambiguous Complete error = %v, want ambiguity without permit conflict", completeErr)
+				}
+			} else {
+				assertEffectBlocked(t, completeErr)
+			}
 			receipt, err = store.Get(context.Background(), command.SessionID, command.CommandID)
 			if err != nil {
 				t.Fatal(err)
@@ -217,12 +261,58 @@ func TestSessionExecEffectAdversarial_ReleaseAndCompleteRejectActiveAndAmbiguous
 	}
 }
 
+func TestSessionExecEffectAdversarial_AmbiguousTimestampOrdering(t *testing.T) {
+	t.Run("valid ambiguity blocks without conflict", func(t *testing.T) {
+		store, _ := openAdversarialEffectStore(t, "effect-valid-ambiguous-time")
+		command := claimAdversarialEffectCommand(t, store, "effect-valid-ambiguous-time", "effect-valid-time-command", "time-owner", time.Minute)
+		permit := beginAdversarialEffect(t, store, command, "effect-valid-time-step")
+		var createdAt int64
+		if err := store.db.QueryRow(`SELECT created_at_ms FROM session_effect_permits
+			WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?`,
+			command.SessionID, command.CommandID, command.Generation, permit.EffectID).Scan(&createdAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE session_effect_permits
+			SET state = ?, ambiguous_at_ms = ?
+			WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?`,
+			sessionexec.EffectStateAmbiguous, createdAt,
+			command.SessionID, command.CommandID, command.Generation, permit.EffectID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Release(context.Background(), command.Lease); !errors.Is(err, sessionexec.ErrEffectAmbiguous) || errors.Is(err, sessionexec.ErrEffectPermitConflict) {
+			t.Fatalf("valid ambiguous Release error = %v, want ambiguity without permit conflict", err)
+		}
+	})
+
+	t.Run("corrupt ambiguity ordering conflicts", func(t *testing.T) {
+		store, _ := openAdversarialEffectStore(t, "effect-corrupt-ambiguous-time")
+		command := claimAdversarialEffectCommand(t, store, "effect-corrupt-ambiguous-time", "effect-corrupt-time-command", "time-owner", time.Minute)
+		permit := beginAdversarialEffect(t, store, command, "effect-corrupt-time-step")
+		var createdAt int64
+		if err := store.db.QueryRow(`SELECT created_at_ms FROM session_effect_permits
+			WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?`,
+			command.SessionID, command.CommandID, command.Generation, permit.EffectID).Scan(&createdAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE session_effect_permits
+			SET state = ?, ambiguous_at_ms = ?
+			WHERE session_id = ? AND command_id = ? AND generation = ? AND effect_id = ?`,
+			sessionexec.EffectStateAmbiguous, createdAt-1,
+			command.SessionID, command.CommandID, command.Generation, permit.EffectID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Release(context.Background(), command.Lease); !errors.Is(err, sessionexec.ErrEffectPermitConflict) {
+			t.Fatalf("corrupt ambiguous Release error = %v, want permit conflict", err)
+		}
+	})
+}
+
 func TestSessionExecEffectAdversarial_ResolveRequiresQuiescedExpiredBlockedOrCancelledAndAudits(t *testing.T) {
 	t.Run("headless rejects", func(t *testing.T) {
 		store, _ := openAdversarialEffectStore(t, "effect-resolve-headless")
 		now := time.Now().UnixMilli()
 		store.sessionExecClock = func() int64 { return now }
-		command := claimAdversarialEffectCommand(t, store, "effect-resolve-headless", "effect-resolve-command", "resolve-owner", 50*time.Millisecond)
+		command := claimAdversarialEffectCommand(t, store, "effect-resolve-headless", "effect-resolve-command", "resolve-owner", adversarialEffectExpiryLease)
 		permit := beginAdversarialEffect(t, store, command, "effect-resolve-step")
 		_, err := store.ResolveAmbiguousEffect(context.Background(), sessionexec.EffectResolutionRequest{
 			SessionID: command.SessionID, CommandID: command.CommandID, Generation: command.Generation,
@@ -239,19 +329,19 @@ func TestSessionExecEffectAdversarial_ResolveRequiresQuiescedExpiredBlockedOrCan
 	for _, commandState := range []string{"cancelled", "blocked"} {
 		t.Run(commandState, func(t *testing.T) {
 			store, path := openAdversarialEffectStore(t, "effect-resolve-"+commandState)
-			command := claimAdversarialEffectCommand(t, store, "effect-resolve-"+commandState, "effect-resolve-command", "resolve-owner", 50*time.Millisecond)
+			command := claimAdversarialEffectCommand(t, store, "effect-resolve-"+commandState, "effect-resolve-command", "resolve-owner", adversarialEffectExpiryLease)
 			permit := beginAdversarialEffect(t, store, command, "effect-resolve-step")
-			waitAdversarialEffectExpiry(t, permit)
+			waitAdversarialEffectExpiry(t, store, permit)
 			if commandState == "blocked" {
 				if _, err := store.db.Exec(`UPDATE session_commands SET
-					state = ?, completed_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000,
+					state = ?, completed_at_ms = `+sessionExecNowMillisSQL+`,
 					lease_owner = NULL, lease_expires_at_ms = NULL, heartbeat_at_ms = NULL
 					WHERE session_id = ? AND command_id = ?`,
 					sessionexec.StateBlocked, command.SessionID, command.CommandID); err != nil {
 					t.Fatal(err)
 				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), adversarialEffectOperationLimit)
 			_, quiesceErr := store.QuiesceSession(ctx, command.SessionID, sessionexec.ExecutionModeDetached, "resolve_effect")
 			cancel()
 			if quiesceErr != nil && !errors.Is(quiesceErr, sessionexec.ErrQuiescenceIncomplete) && !errors.Is(quiesceErr, sessionexec.ErrEffectAmbiguous) {
@@ -321,7 +411,7 @@ func TestSessionExecEffectAdversarial_ResolveRequiresQuiescedExpiredBlockedOrCan
 		store, _ := openAdversarialEffectStore(t, "effect-resolve-live")
 		command := claimAdversarialEffectCommand(t, store, "effect-resolve-live", "effect-resolve-command", "resolve-owner", time.Minute)
 		permit := beginAdversarialEffect(t, store, command, "effect-resolve-step")
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), adversarialEffectOperationLimit)
 		_, quiesceErr := store.QuiesceSession(ctx, command.SessionID, sessionexec.ExecutionModeDetached, "live_effect")
 		cancel()
 		if quiesceErr == nil || !errors.Is(quiesceErr, sessionexec.ErrQuiescenceIncomplete) {
@@ -393,7 +483,7 @@ func TestSessionExecEffectAdversarial_ShorterExpiryTamperNeverDrains(t *testing.
 		command.SessionID, command.CommandID, command.Generation, permit.EffectID); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), adversarialEffectOperationLimit)
 	_, err := store.QuiesceSession(ctx, command.SessionID, sessionexec.ExecutionModeDetached, "tampered_expiry")
 	cancel()
 	if err == nil || (!errors.Is(err, sessionexec.ErrQuiescenceIncomplete) &&
@@ -418,16 +508,23 @@ func TestSessionExecEffectAdversarial_ActiveAndTotalCaps(t *testing.T) {
 		command := claimAdversarialEffectCommand(t, store, "effect-active-cap", "effect-active-command", "cap-owner", 10*time.Minute)
 		permits := make([]sessionexec.EffectPermit, 0, sessionexec.MaxActiveEffectPermits)
 		for index := 0; index < sessionexec.MaxActiveEffectPermits; index++ {
-			permits = append(permits, beginAdversarialEffect(t, store, command, fmt.Sprintf("effect-active-%03d", index)))
+			effectID := fmt.Sprintf("effect-active-%03d", index)
+			permit, err := store.BeginEffect(context.Background(), sessionexec.EffectRequest{
+				Lease: command.Lease, EffectID: effectID, Kind: sessionexec.EffectKindTool,
+			})
+			if err != nil {
+				t.Fatalf("begin active permit %d (%s): %v", index, effectID, err)
+			}
+			permits = append(permits, permit)
 		}
 		if _, err := store.BeginEffect(context.Background(), sessionexec.EffectRequest{
 			Lease: command.Lease, EffectID: "effect-active-overflow", Kind: sessionexec.EffectKindTool,
 		}); !errors.Is(err, sessionexec.ErrEffectPermitLimit) {
 			t.Fatalf("active cap error = %v, want limit", err)
 		}
-		for _, permit := range permits {
+		for index, permit := range permits {
 			if err := store.EndEffect(context.Background(), permit); err != nil {
-				t.Fatal(err)
+				t.Fatalf("end active permit %d (%s): %v", index, permit.EffectID, err)
 			}
 		}
 	})
@@ -436,9 +533,15 @@ func TestSessionExecEffectAdversarial_ActiveAndTotalCaps(t *testing.T) {
 		store, _ := openAdversarialEffectStore(t, "effect-total-cap")
 		command := claimAdversarialEffectCommand(t, store, "effect-total-cap", "effect-total-command", "cap-owner", 10*time.Minute)
 		for index := 0; index < sessionexec.MaxEffectPermitsPerSession; index++ {
-			permit := beginAdversarialEffect(t, store, command, fmt.Sprintf("effect-total-%03d", index))
+			effectID := fmt.Sprintf("effect-total-%03d", index)
+			permit, err := store.BeginEffect(context.Background(), sessionexec.EffectRequest{
+				Lease: command.Lease, EffectID: effectID, Kind: sessionexec.EffectKindTool,
+			})
+			if err != nil {
+				t.Fatalf("begin total permit %d (%s): %v", index, effectID, err)
+			}
 			if err := store.EndEffect(context.Background(), permit); err != nil {
-				t.Fatalf("end total permit %d: %v", index, err)
+				t.Fatalf("end total permit %d (%s): %v", index, permit.EffectID, err)
 			}
 		}
 		if _, err := store.BeginEffect(context.Background(), sessionexec.EffectRequest{

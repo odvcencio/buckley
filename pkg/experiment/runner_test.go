@@ -3,12 +3,19 @@ package experiment
 import (
 	"context"
 	"errors"
+	"io"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/parallel"
+	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/transparency"
 	"m31labs.dev/buckley/pkg/worktree"
 )
 
@@ -30,6 +37,38 @@ func (m *mockWorktreeManager) Remove(branch string, force bool) error {
 		return m.removeFn(branch, force)
 	}
 	return nil
+}
+
+type successfulExperimentExecutor struct{}
+
+func (successfulExperimentExecutor) Execute(ctx context.Context, task *parallel.AgentTask, wtPath string) (*parallel.AgentResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return &parallel.AgentResult{
+		Success: true,
+		Output:  "variant completed",
+		Files:   []string{"result.txt"},
+		Metrics: map[string]int{
+			"prompt_tokens":     7,
+			"completion_tokens": 3,
+			"tool_calls":        1,
+		},
+		TotalCost: 0.0123,
+	}, nil
+}
+
+type countingExperimentExecutor struct {
+	count *int
+}
+
+func (e countingExperimentExecutor) Execute(ctx context.Context, task *parallel.AgentTask, wtPath string) (*parallel.AgentResult, error) {
+	if e.count != nil {
+		(*e.count)++
+	}
+	return (&successfulExperimentExecutor{}).Execute(ctx, task, wtPath)
 }
 
 func TestNewRunner(t *testing.T) {
@@ -184,6 +223,329 @@ func TestRunExperiment_Validation(t *testing.T) {
 	}
 }
 
+func TestRunExperiment_CleanupWarningPreservesCompletedResult(t *testing.T) {
+	cleanupErr := errors.New("failed to remove worktree; retained path /tmp/buckley-retained: dirty output preserved")
+	runner, events := newCleanupWarningTestRunner(t, func(branch string, force bool) error {
+		if force {
+			t.Fatalf("cleanup used force=true for branch %s", branch)
+		}
+		return cleanupErr
+	})
+	exp := cleanupWarningTestExperiment()
+
+	results, err := runner.RunExperiment(context.Background(), exp)
+	if err != nil {
+		t.Fatalf("RunExperiment() unexpected error = %v", err)
+	}
+	if exp.Status != ExperimentCompleted {
+		t.Fatalf("experiment status = %q, want %q", exp.Status, ExperimentCompleted)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	result := results[0]
+	if result == nil || !result.Success {
+		t.Fatalf("result = %#v, want successful result", result)
+	}
+	if result.Output != "variant completed" {
+		t.Fatalf("result output = %q, want executor output", result.Output)
+	}
+	if result.Metrics["prompt_tokens"] != 7 || result.Metrics["completion_tokens"] != 3 {
+		t.Fatalf("metrics = %#v, want token metrics preserved", result.Metrics)
+	}
+	if result.TotalCost != 0.0123 {
+		t.Fatalf("total cost = %v, want 0.0123", result.TotalCost)
+	}
+
+	warnings := cleanupWarningEvents(drainTelemetry(events))
+	if len(warnings) != 1 {
+		t.Fatalf("cleanup warnings = %d, want 1", len(warnings))
+	}
+	data := warnings[0].Data
+	if data["experiment_id"] != exp.ID {
+		t.Fatalf("warning experiment_id = %v, want %q", data["experiment_id"], exp.ID)
+	}
+	warning, ok := data["warning"].(string)
+	if !ok {
+		t.Fatalf("warning payload = %#v, want string", data["warning"])
+	}
+	if !strings.Contains(warning, "retained path /tmp/buckley-retained") {
+		t.Fatalf("warning = %q, want retained path", warning)
+	}
+}
+
+func TestRunExperiment_CleanCleanupDoesNotPublishWarning(t *testing.T) {
+	runner, events := newCleanupWarningTestRunner(t, func(branch string, force bool) error {
+		if force {
+			t.Fatalf("cleanup used force=true for branch %s", branch)
+		}
+		return nil
+	})
+	exp := cleanupWarningTestExperiment()
+
+	results, err := runner.RunExperiment(context.Background(), exp)
+	if err != nil {
+		t.Fatalf("RunExperiment() unexpected error = %v", err)
+	}
+	if exp.Status != ExperimentCompleted {
+		t.Fatalf("experiment status = %q, want %q", exp.Status, ExperimentCompleted)
+	}
+	if len(results) != 1 || results[0] == nil || !results[0].Success {
+		t.Fatalf("results = %#v, want one successful result", results)
+	}
+	if warnings := cleanupWarningEvents(drainTelemetry(events)); len(warnings) != 0 {
+		t.Fatalf("cleanup warnings = %d, want 0: %#v", len(warnings), warnings)
+	}
+}
+
+func TestRunExperimentPersistsExecutionIdentityThroughReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"resp-runner-identity",
+			"model":"gpt-4o-release",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"runner identity output"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}
+		}`)
+	}))
+	defer server.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	db := setupTestDB(t)
+	store := NewStore(db)
+	runner, err := NewRunner(RunnerConfig{MaxConcurrent: 1, DefaultTimeout: time.Minute}, Dependencies{
+		Config:       cfg,
+		ModelManager: mgr,
+		Worktree: &mockWorktreeManager{createFn: func(branch string) (*worktree.Worktree, error) {
+			return &worktree.Worktree{Branch: branch, Path: t.TempDir()}, nil
+		}},
+		Store: store,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	exp := &Experiment{
+		ID:   "exp-runner-identity",
+		Name: "identity",
+		Task: Task{Prompt: "finish"},
+		Variants: []Variant{{
+			ID:   "variant-a",
+			Name: "candidate",
+			// Keep dollar admission enabled; this fixture needs a priced model to execute.
+			ModelID:    "gpt-4o",
+			ProviderID: "openai",
+		}},
+		Criteria: []SuccessCriterion{{Name: "contains output", Type: CriterionContains, Target: "runner identity output", Weight: 1}},
+	}
+	results, err := runner.RunExperiment(context.Background(), exp)
+	if err != nil {
+		t.Fatalf("RunExperiment: %v", err)
+	}
+	if len(results) != 1 || len(results[0].ModelExecutions) != 1 {
+		t.Fatalf("results = %+v, want one execution identity", results)
+	}
+	if got := results[0].ModelExecutions[0]; got.RequestedModel != "gpt-4o" || got.SelectedModel != "gpt-4o" || got.ProviderID != "openai" || got.ResponseModel != "gpt-4o-release" || got.ResponseID != "resp-runner-identity" {
+		t.Fatalf("result identity = %+v", got)
+	}
+	runs, err := store.ListRuns(exp.ID)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 1 || len(runs[0].ModelExecutions) != 1 {
+		t.Fatalf("stored runs = %+v, want persisted identity", runs)
+	}
+	if err := store.ReplaceEvaluations(runs[0].ID, []CriterionEvaluation{{CriterionID: exp.Criteria[0].ID, Passed: true, Score: 1}}); err != nil {
+		t.Fatalf("ReplaceEvaluations: %v", err)
+	}
+	report, err := NewComparator(store).Compare(exp)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(report.Variants) != 1 || len(report.Variants[0].ModelExecutions) != 1 {
+		t.Fatalf("report variants = %+v, want identity in report DTO", report.Variants)
+	}
+	if got := formatExecutionIdentityDetail(report.Variants[0].ModelExecutions); !strings.Contains(got, "response_id=resp-runner-identity") || !strings.Contains(got, "response_model=gpt-4o-release") {
+		t.Fatalf("execution summary = %q, want exact response identity", got)
+	}
+}
+
+func TestRunExperimentPreflightsAllVariantsBeforePersistenceOrExecution(t *testing.T) {
+	tests := []struct {
+		name string
+		exp  func() *Experiment
+	}{
+		{
+			name: "unsupported json in second variant",
+			exp: func() *Experiment {
+				return &Experiment{
+					ID:   "exp-invalid-second-json",
+					Name: "invalid",
+					Task: Task{Prompt: "prompt"},
+					Variants: []Variant{
+						{ID: "variant-ok", Name: "ok", ModelID: "model-a"},
+						{ID: "variant-bad", Name: "bad", ModelID: "model-b", CustomConfig: map[string]any{"bad": func() {}}},
+					},
+				}
+			},
+		},
+		{
+			name: "nan temperature in second variant",
+			exp: func() *Experiment {
+				nan := math.NaN()
+				return &Experiment{
+					ID:   "exp-invalid-second-nan",
+					Name: "invalid",
+					Task: Task{Prompt: "prompt"},
+					Variants: []Variant{
+						{ID: "variant-ok", Name: "ok", ModelID: "model-a"},
+						{ID: "variant-bad", Name: "bad", ModelID: "model-b", Temperature: &nan},
+					},
+				}
+			},
+		},
+		{
+			name: "infinite criterion weight",
+			exp: func() *Experiment {
+				return &Experiment{
+					ID:       "exp-invalid-criteria-inf",
+					Name:     "invalid",
+					Task:     Task{Prompt: "prompt"},
+					Variants: []Variant{{ID: "variant-ok", Name: "ok", ModelID: "model-a"}, {ID: "variant-ok-2", Name: "ok2", ModelID: "model-b"}},
+					Criteria: []SuccessCriterion{{Name: "bad", Type: CriterionTestPass, Target: "go test", Weight: math.Inf(1)}},
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storeDB := setupTestDB(t)
+			store := NewStore(storeDB)
+			exp := tt.exp()
+			creates := 0
+			executes := 0
+			wt := &mockWorktreeManager{createFn: func(branch string) (*worktree.Worktree, error) {
+				creates++
+				return &worktree.Worktree{Branch: branch, Path: "/tmp/worktree/" + branch}, nil
+			}}
+			hub := telemetry.NewHub()
+			events, unsubscribe := hub.Subscribe()
+			t.Cleanup(unsubscribe)
+			t.Cleanup(hub.Close)
+			runner := &Runner{
+				cfg:       RunnerConfig{MaxConcurrent: 1, DefaultTimeout: time.Second},
+				telemetry: hub,
+				parallel: parallel.NewOrchestrator(wt, countingExperimentExecutor{count: &executes}, parallel.Config{
+					MaxAgents:       1,
+					TaskQueueSize:   10,
+					ResultQueueSize: 10,
+				}),
+				store: store,
+			}
+
+			_, err := runner.RunExperiment(context.Background(), exp)
+			if err == nil {
+				t.Fatalf("RunExperiment error = nil, want preflight error")
+			}
+			if exp.Status == ExperimentRunning {
+				t.Fatalf("experiment status = %q, want not running after preflight failure", exp.Status)
+			}
+			if creates != 0 || executes != 0 {
+				t.Fatalf("work launched despite preflight failure: worktrees=%d executes=%d", creates, executes)
+			}
+			stored, loadErr := store.GetExperiment(exp.ID)
+			if loadErr != nil {
+				t.Fatalf("GetExperiment: %v", loadErr)
+			}
+			if stored != nil {
+				t.Fatalf("experiment row persisted despite preflight failure: %#v", stored)
+			}
+			runs, listErr := store.ListRuns(exp.ID)
+			if listErr != nil {
+				t.Fatalf("ListRuns: %v", listErr)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("running rows persisted despite preflight failure: %#v", runs)
+			}
+			if gotEvents := drainTelemetry(events); len(gotEvents) != 0 {
+				t.Fatalf("published events despite preflight failure: %#v", gotEvents)
+			}
+		})
+	}
+}
+
+func newCleanupWarningTestRunner(t *testing.T, removeFn func(branch string, force bool) error) (*Runner, <-chan telemetry.Event) {
+	t.Helper()
+	hub := telemetry.NewHub()
+	events, unsubscribe := hub.Subscribe()
+	t.Cleanup(unsubscribe)
+	t.Cleanup(hub.Close)
+
+	wt := &mockWorktreeManager{removeFn: removeFn}
+	orchestrator := parallel.NewOrchestrator(wt, successfulExperimentExecutor{}, parallel.Config{
+		MaxAgents:       1,
+		TaskQueueSize:   10,
+		ResultQueueSize: 10,
+	})
+	return &Runner{
+		cfg: RunnerConfig{
+			MaxConcurrent:  1,
+			DefaultTimeout: time.Second,
+			CleanupOnDone:  true,
+		},
+		telemetry: hub,
+		parallel:  orchestrator,
+	}, events
+}
+
+func cleanupWarningTestExperiment() *Experiment {
+	return &Experiment{
+		ID:   "exp-cleanup",
+		Name: "Cleanup warning",
+		Task: Task{Prompt: "produce output"},
+		Variants: []Variant{
+			{
+				ID:      "variant-one",
+				Name:    "one",
+				ModelID: "model/a",
+			},
+		},
+	}
+}
+
+func drainTelemetry(events <-chan telemetry.Event) []telemetry.Event {
+	var drained []telemetry.Event
+	for {
+		select {
+		case event := <-events:
+			drained = append(drained, event)
+		default:
+			return drained
+		}
+	}
+}
+
+func cleanupWarningEvents(events []telemetry.Event) []telemetry.Event {
+	var warnings []telemetry.Event
+	for _, event := range events {
+		if event.Type != telemetry.EventDebug {
+			continue
+		}
+		if event.Data["kind"] == "experiment.cleanup_warning" {
+			warnings = append(warnings, event)
+		}
+	}
+	return warnings
+}
+
 func TestJoinTools(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -276,6 +638,78 @@ func TestCopyContext(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCloneExperimentDeepSnapshotsMutableInputs(t *testing.T) {
+	systemPrompt := "original system"
+	temp := 0.3
+	maxTokens := 100
+	exp := &Experiment{
+		ID: "exp-snapshot",
+		Task: Task{
+			Prompt:  "original prompt",
+			Context: map[string]string{"mode": "original"},
+			Files:   []string{"a.go"},
+			Scope:   []string{"pkg/a/..."},
+		},
+		Variants: []Variant{{
+			ID:           "variant-1",
+			Name:         "variant",
+			ModelID:      "model-a",
+			SystemPrompt: &systemPrompt,
+			Temperature:  &temp,
+			MaxTokens:    &maxTokens,
+			ToolsAllowed: []string{"read"},
+			CustomConfig: map[string]any{"nested": map[string]any{"value": "original"}},
+			Files:        []string{"variant-a.go"},
+			Scope:        []string{"pkg/variant/..."},
+		}},
+		Criteria: []SuccessCriterion{{Name: "tests", Type: CriterionTestPass, Target: "go test", Weight: 1}},
+	}
+	snapshot, err := cloneExperiment(exp)
+	if err != nil {
+		t.Fatalf("cloneExperiment: %v", err)
+	}
+	exp.Task.Context["mode"] = "changed"
+	exp.Task.Files[0] = "changed.go"
+	exp.Variants[0].ToolsAllowed[0] = "write"
+	exp.Variants[0].CustomConfig["nested"].(map[string]any)["value"] = "changed"
+	systemPrompt = "changed system"
+	temp = 0.9
+	maxTokens = 200
+	exp.Criteria[0].Name = "changed"
+
+	if snapshot.Task.Context["mode"] != "original" || snapshot.Task.Files[0] != "a.go" {
+		t.Fatalf("task snapshot aliased caller mutation: %#v", snapshot.Task)
+	}
+	if *snapshot.Variants[0].SystemPrompt != "original system" || *snapshot.Variants[0].Temperature != 0.3 || *snapshot.Variants[0].MaxTokens != 100 {
+		t.Fatalf("variant pointer snapshot aliased caller mutation: %#v", snapshot.Variants[0])
+	}
+	if snapshot.Variants[0].ToolsAllowed[0] != "read" {
+		t.Fatalf("tools snapshot aliased caller mutation: %#v", snapshot.Variants[0].ToolsAllowed)
+	}
+	nested := snapshot.Variants[0].CustomConfig["nested"].(map[string]any)
+	if nested["value"] != "original" {
+		t.Fatalf("custom config snapshot aliased caller mutation: %#v", snapshot.Variants[0].CustomConfig)
+	}
+	if snapshot.Criteria[0].Name != "tests" {
+		t.Fatalf("criteria snapshot aliased caller mutation: %#v", snapshot.Criteria)
+	}
+}
+
+func TestCloneExperimentRejectsUnsupportedCustomConfig(t *testing.T) {
+	exp := &Experiment{
+		Task: Task{Prompt: "prompt"},
+		Variants: []Variant{{
+			ID:           "variant-1",
+			Name:         "variant",
+			ModelID:      "model-a",
+			CustomConfig: map[string]any{"bad": func() {}},
+		}},
+	}
+	if _, err := cloneExperiment(exp); err == nil {
+		t.Fatalf("cloneExperiment unsupported custom config error = nil, want error")
 	}
 }
 
@@ -579,6 +1013,7 @@ func TestPersistResult(t *testing.T) {
 
 	// Test successful result
 	t.Run("successful result", func(t *testing.T) {
+		reasoning := 12
 		result := &parallel.AgentResult{
 			TaskID:   "var-1",
 			Success:  true,
@@ -591,7 +1026,15 @@ func TestPersistResult(t *testing.T) {
 				"completion_tokens": 200,
 				"tool_calls":        5,
 			},
-			TotalCost: 0.05,
+			TotalCost:   0.05,
+			CostUnknown: true,
+			Usage: &transparency.TokenUsage{
+				Input:                100,
+				Output:               200,
+				ReportedTotal:        300,
+				ReportedReasoning:    &reasoning,
+				UsageEvidencePresent: true,
+			},
 		}
 
 		err := runner.persistResult(context.Background(), exp, result, runIDs, startTimes)
@@ -603,6 +1046,15 @@ func TestPersistResult(t *testing.T) {
 		runID := runIDs["var-1"]
 		if runID == "" {
 			t.Error("persistResult() did not generate run ID")
+		}
+		result.Usage.Input = 999
+		*result.Usage.ReportedReasoning = 99
+		run, err := store.GetRun(runID)
+		if err != nil {
+			t.Fatalf("GetRun: %v", err)
+		}
+		if run.Metrics.Usage == nil || run.Metrics.Usage.Input != 100 || run.Metrics.Usage.ReportedReasoning == nil || *run.Metrics.Usage.ReportedReasoning != 12 || !run.Metrics.CostUnknown {
+			t.Fatalf("stored usage = %+v costUnknown=%v, want cloned usage evidence", run.Metrics.Usage, run.Metrics.CostUnknown)
 		}
 	})
 

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -149,6 +151,230 @@ func (p *acpProbeTool) callCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
+}
+
+func TestRunACPLoop_CompletionContractBuffersRejectedTerminalAndPersistsRepair(t *testing.T) {
+	root := t.TempDir()
+	runACPGit(t, root, "init", "-q")
+	runACPGit(t, root, "config", "user.name", "Buckley Test")
+	runACPGit(t, root, "config", "user.email", "buckley@example.invalid")
+	trackedPath := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(trackedPath, []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	runACPGit(t, root, "add", "tracked.txt")
+	runACPGit(t, root, "commit", "-qm", "base")
+
+	var mu sync.Mutex
+	var requestBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		round := len(requestBodies)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		switch round {
+		case 1:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"premature final"},"finish_reason":"stop"}],`+
+				`"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105}}`+
+				"\n\n")
+		case 2:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-2","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}],`+
+				`"usage":{"prompt_tokens":140,"completion_tokens":10,"total_tokens":150}}`+
+				"\n\n")
+		default:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-3","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"accepted final"},"finish_reason":"stop"}],`+
+				`"usage":{"prompt_tokens":200,"completion_tokens":5,"total_tokens":205}}`+
+				"\n\n")
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("rules.NewDefaultEngine: %v", err)
+	}
+
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&acpStateTestTool{
+		name:     "write_file",
+		metadata: tool.ToolMetadata{Category: tool.CategoryFilesystem, Impact: tool.ImpactModifying},
+		execute: func() error {
+			return os.WriteFile(trackedPath, []byte("after\n"), 0o644)
+		},
+	})
+	conv := conversation.New("session-contract-buffer")
+	conv.AddUserMessage("make the explicit change")
+	collector := &collectingStream{}
+
+	text, err := runACPLoopWithLimits(
+		context.Background(), cfg, mgr, conv, registry, nil, engine,
+		"gpt-4o", root, "session-contract-buffer", nil,
+		func(string, ...interface{}) {}, collector.fn,
+		acpLoopLimits{
+			TaskIntent:              agentloop.MutationIntent,
+			VerificationDepth:       "none",
+			MaxVerificationAttempts: 1,
+			MaxModelRequests:        4,
+		},
+	)
+	if err != nil {
+		t.Fatalf("runACPLoopWithLimits: %v", err)
+	}
+	if text != "accepted final" {
+		t.Fatalf("text = %q, want accepted final", text)
+	}
+
+	mu.Lock()
+	bodies := append([]string(nil), requestBodies...)
+	mu.Unlock()
+	if len(bodies) != 3 {
+		t.Fatalf("model requests = %d, want rejected terminal, repair tool call, accepted terminal", len(bodies))
+	}
+	if !strings.Contains(bodies[1], "requires an observable workspace change and none was recorded") {
+		t.Fatalf("second request omitted mutation repair instruction: %s", bodies[1])
+	}
+	if strings.Contains(strings.Join(collector.messageChunks(), ""), "premature final") {
+		t.Fatalf("rejected terminal candidate was streamed: %#v", collector.messageChunks())
+	}
+	if got := strings.Join(collector.messageChunks(), ""); got != "accepted final" {
+		t.Fatalf("streamed message chunks = %q, want accepted final only", got)
+	}
+}
+
+func TestRunACPLoop_CompletionContractPersistsVerificationRepair(t *testing.T) {
+	root := t.TempDir()
+	runACPGit(t, root, "init", "-q")
+	runACPGit(t, root, "config", "user.name", "Buckley Test")
+	runACPGit(t, root, "config", "user.email", "buckley@example.invalid")
+	trackedPath := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(trackedPath, []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	runACPGit(t, root, "add", "tracked.txt")
+	runACPGit(t, root, "commit", "-qm", "base")
+
+	var mu sync.Mutex
+	var requestBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		round := len(requestBodies)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		switch round {
+		case 1:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}],`+
+				`"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}`+
+				"\n\n")
+		case 2:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-2","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"unverified final"},"finish_reason":"stop"}],`+
+				`"usage":{"prompt_tokens":150,"completion_tokens":5,"total_tokens":155}}`+
+				"\n\n")
+		case 3:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-3","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-tests","type":"function","function":{"name":"run_tests","arguments":"{}"}}]},"finish_reason":"tool_calls"}],`+
+				`"usage":{"prompt_tokens":190,"completion_tokens":10,"total_tokens":200}}`+
+				"\n\n")
+		default:
+			_, _ = io.WriteString(w, "data: "+
+				`{"id":"chatcmpl-4","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"verified final"},"finish_reason":"stop"}],`+
+				`"usage":{"prompt_tokens":220,"completion_tokens":5,"total_tokens":225}}`+
+				"\n\n")
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("rules.NewDefaultEngine: %v", err)
+	}
+
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&acpStateTestTool{
+		name:     "write_file",
+		metadata: tool.ToolMetadata{Category: tool.CategoryFilesystem, Impact: tool.ImpactModifying},
+		execute: func() error {
+			return os.WriteFile(trackedPath, []byte("after\n"), 0o644)
+		},
+	})
+	registry.Register(&acpStateTestTool{
+		name:     "run_tests",
+		metadata: tool.ToolMetadata{Category: tool.CategoryTesting, Impact: tool.ImpactReadOnly, Verification: true},
+	})
+	conv := conversation.New("session-verification-repair")
+	conv.AddUserMessage("make a change and verify it")
+	collector := &collectingStream{}
+
+	text, err := runACPLoopWithLimits(
+		context.Background(), cfg, mgr, conv, registry, nil, engine,
+		"gpt-4o", root, "session-verification-repair", nil,
+		func(string, ...interface{}) {}, collector.fn,
+		acpLoopLimits{
+			VerificationDepth:       "focused",
+			MaxVerificationAttempts: 1,
+			MaxModelRequests:        5,
+		},
+	)
+	if err != nil {
+		t.Fatalf("runACPLoopWithLimits: %v", err)
+	}
+	if text != "verified final" {
+		t.Fatalf("text = %q, want verified final", text)
+	}
+
+	mu.Lock()
+	bodies := append([]string(nil), requestBodies...)
+	mu.Unlock()
+	if len(bodies) != 4 {
+		t.Fatalf("model requests = %d, want edit, rejected final, verification repair, accepted final", len(bodies))
+	}
+	if !strings.Contains(bodies[2], "workspace changed after the last successful verification") {
+		t.Fatalf("third request omitted verification repair instruction: %s", bodies[2])
+	}
+	if strings.Contains(strings.Join(collector.messageChunks(), ""), "unverified final") {
+		t.Fatalf("rejected terminal candidate was streamed: %#v", collector.messageChunks())
+	}
+	if got := strings.Join(collector.messageChunks(), ""); got != "verified final" {
+		t.Fatalf("streamed message chunks = %q, want verified final only", got)
+	}
 }
 
 // TestRunACPLoop_ControllerCrossRoundInvariants is the ACP loop's
@@ -474,6 +700,71 @@ func TestRunACPLoop_NoToolsRepeatedInvocationMarkupIsIncomplete(t *testing.T) {
 	}
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("provider requests = %d, want one repair attempt then incomplete", got)
+	}
+}
+
+func TestRunACPLoop_MalformedToolControlMarkupWithToolsIsIncompleteAndDoesNotExecute(t *testing.T) {
+	t.Parallel()
+
+	const malformedMarkup = `<tool_call>stub_probe|input=not-json</think><tool_call>stub_probe|input=still-text</arg_value>`
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		payload, _ := json.Marshal(map[string]any{
+			"id":    "chatcmpl-malformed-tool-control",
+			"model": "gpt-4o",
+			"choices": []any{map[string]any{
+				"index":         0,
+				"delta":         map[string]any{"content": malformedMarkup},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50},
+		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", payload)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	engine, err := rules.NewDefaultEngine()
+	if err != nil {
+		t.Fatalf("rules.NewDefaultEngine: %v", err)
+	}
+	conv := conversation.New("session-malformed-tool-control")
+	conv.AddUserMessage("use the probe if needed")
+	probe := &acpProbeTool{}
+	registry := tool.NewRegistry()
+	registry.Register(probe)
+
+	text, err := runACPLoopWithLimits(
+		context.Background(), cfg, mgr, conv, registry, nil, engine,
+		"gpt-4o", "", "session-malformed-tool-control", nil,
+		func(string, ...interface{}) {}, nil, acpLoopLimits{MaxModelRequests: 2},
+	)
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) || !strings.Contains(err.Error(), "invocation markup as text") {
+		t.Fatalf("runACPLoopWithLimits = %q, %v, want explicit incomplete malformed markup result", text, err)
+	}
+	if text != malformedMarkup {
+		t.Fatalf("preserved terminal evidence = %q, want exact malformed markup", text)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("provider requests = %d, want one repair attempt then incomplete", got)
+	}
+	if got := probe.callCount(); got != 0 {
+		t.Fatalf("malformed text markup executed tool %d time(s), want 0", got)
+	}
+	lastPrompt := conv.Messages[len(conv.Messages)-1]
+	if lastPrompt.Role != "user" || !strings.Contains(model.ExtractTextContentOrEmpty(lastPrompt.Content), "structured tool-call channel") {
+		t.Fatalf("repair nudge = %+v, want structured-channel guidance", lastPrompt)
 	}
 }
 

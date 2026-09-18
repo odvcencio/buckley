@@ -16,9 +16,7 @@ const (
 
 // PromptContext provides facts for arbiter-governed prompt assembly.
 type PromptContext struct {
-	ModelTier        string
 	TaskType         string
-	GitDiffLines     int
 	InstructionChars int
 	GTSAvailable     bool
 }
@@ -58,9 +56,7 @@ func (b *PromptBuilder) AddSection(name, content string, dynamic bool) {
 func (b *PromptBuilder) Build(ctx PromptContext) []string {
 	if b.evaluator != nil {
 		result, err := b.evaluator.EvalStrategy("session/prompt_assembly", "assembly_policy", map[string]any{
-			"model_tier":        ctx.ModelTier,
 			"task_type":         ctx.TaskType,
-			"git_diff_lines":    ctx.GitDiffLines,
 			"instruction_chars": ctx.InstructionChars,
 			"gts_available":     ctx.GTSAvailable,
 		})

@@ -79,8 +79,18 @@ func TestRunSessionExportCommand_JSONRedactsSecrets(t *testing.T) {
 	if doc.SchemaVersion != SessionExportSchemaVersion {
 		t.Fatalf("SchemaVersion = %q, want %q", doc.SchemaVersion, SessionExportSchemaVersion)
 	}
+	if doc.SchemaVersion != "buckley.session.export.v2" {
+		t.Fatalf("SchemaVersion = %q, want explicit v2 provenance contract", doc.SchemaVersion)
+	}
 	if doc.Source != "storage_transcript" {
 		t.Fatalf("Source = %q, want storage_transcript", doc.Source)
+	}
+	assertSessionExportEvidence(t, doc.Session.Evidence)
+	if doc.Session.TotalCost != 0 {
+		t.Fatalf("TotalCost = %v, seed fixture should exercise zero legacy scalar", doc.Session.TotalCost)
+	}
+	if doc.Session.Evidence.Cost.Authoritative {
+		t.Fatal("legacy zero cost scalar must not be exported as authoritative")
 	}
 	if doc.Session.ID != "session-export-1" {
 		t.Fatalf("Session.ID = %q, want session-export-1", doc.Session.ID)
@@ -116,6 +126,43 @@ func TestRunSessionExportCommand_Markdown(t *testing.T) {
 	}
 	if !strings.Contains(content, "## User") {
 		t.Fatalf("markdown export missing user section: %s", content)
+	}
+	if !strings.Contains(content, "- Tokens: 0 — legacy scalar token total; no rich usage evidence") {
+		t.Fatalf("markdown export missing token evidence label: %s", content)
+	}
+	if !strings.Contains(content, "- Cost: $0.0000 — unknown (legacy session transcript cost; not authoritative free)") {
+		t.Fatalf("markdown export missing zero-cost non-free evidence label: %s", content)
+	}
+	if !strings.Contains(content, "- Model execution evidence: unavailable (storage transcript export has no model execution provenance)") {
+		t.Fatalf("markdown export missing model execution provenance label: %s", content)
+	}
+	if strings.Contains(strings.ToLower(content), "known free") {
+		t.Fatalf("markdown export incorrectly implies zero cost is known free: %s", content)
+	}
+}
+
+func assertSessionExportEvidence(t *testing.T, evidence SessionExportEvidence) {
+	t.Helper()
+	if evidence.Schema != SessionExportEvidenceSchemaVersion {
+		t.Fatalf("Evidence.Schema = %q, want %q", evidence.Schema, SessionExportEvidenceSchemaVersion)
+	}
+	if evidence.Usage.Status != "legacy_scalar" || evidence.Usage.Source != "storage_transcript.total_tokens" || evidence.Usage.Authoritative {
+		t.Fatalf("Usage evidence = %+v, want non-authoritative storage transcript legacy scalar", evidence.Usage)
+	}
+	if !strings.Contains(evidence.Usage.Label, "no rich usage evidence") {
+		t.Fatalf("Usage label = %q, want rich-usage limitation", evidence.Usage.Label)
+	}
+	if evidence.Cost.Status != "legacy_unknown" || evidence.Cost.Source != "storage_transcript.total_cost" || evidence.Cost.Authoritative {
+		t.Fatalf("Cost evidence = %+v, want non-authoritative legacy unknown", evidence.Cost)
+	}
+	if !strings.Contains(evidence.Cost.Label, "not authoritative free") {
+		t.Fatalf("Cost label = %q, want zero-scalar non-free limitation", evidence.Cost.Label)
+	}
+	if evidence.ModelExecutions.Status != "unavailable" || evidence.ModelExecutions.Authoritative {
+		t.Fatalf("Model execution evidence = %+v, want unavailable and non-authoritative", evidence.ModelExecutions)
+	}
+	if !strings.Contains(evidence.ModelExecutions.Label, "no model execution provenance") {
+		t.Fatalf("Model execution label = %q, want provenance limitation", evidence.ModelExecutions.Label)
 	}
 }
 

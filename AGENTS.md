@@ -87,7 +87,7 @@ Key decisions to know before changing architecture:
 | 0006 | Tiered approval modes | Ask/Safe/Auto/Yolo levels for agent autonomy |
 | 0007 | TOON encoding | Compact tool outputs to reduce token costs |
 | 0008 | Event-driven telemetry | Pub/sub hub for workflow observability |
-| 0009 | RLM runtime | Iterative refinement with tiered model routing |
+| 0009 | Coordinator–worker coordinated execution | Legacy RLM compatibility namespace retained |
 | 0010 | Custom TUI runtime | Retained-mode rendering, dirty tracking, testable |
 | 0013 | Code execution surface | One `exec_program` tool over brokered, sandboxed capabilities |
 | 0014 | Durable execution deployment | PostgreSQL state store, `goal worker` process split, single retry owner, run-lifetime evidence pins |

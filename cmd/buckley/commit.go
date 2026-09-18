@@ -262,7 +262,13 @@ func prepareCommitIndex(opts commitCommandOptions) error {
 }
 
 func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, func(), error) {
+	preflightFallbackModel, preflightFallback := selectAvailableDefaultCommitModelBeforeInit(opts)
+	restoreProviderLock := func() {}
+	if preflightFallback {
+		restoreProviderLock = beginAgentProviderLock("openrouter/" + preflightFallbackModel)
+	}
 	cfg, mgr, store, err := initOneshotDependencies(opts.backend)
+	restoreProviderLock()
 	cleanup := func() {
 		if store != nil {
 			store.Close()
@@ -278,9 +284,19 @@ func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, 
 		cleanup()
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
 	}
+	fellBack := preflightFallback
+	if fellBack {
+		modelID = preflightFallbackModel
+	} else if selected, unavailable := selectAvailableDefaultCommitModel(opts, cfg, mgr, modelID); unavailable {
+		modelID = selected
+		fellBack = true
+	}
+	if fellBack && !quietMode {
+		termOut.Warn("Local commit model unavailable; using %s", modelID)
+	}
 
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvoker(opts.backend, modelID, cfg, mgr, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, "commit", modelID, cfg, mgr, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -523,14 +539,7 @@ func printCost(trace *transparency.Trace, ledger *transparency.CostLedger) {
 	termOut.Newline()
 
 	tokens := trace.Tokens
-	var tokensLine string
-	if tokens.Reasoning > 0 {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out · %d reasoning = %d total",
-			tokens.Input, tokens.Output, tokens.Reasoning, tokens.Total())
-	} else {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out = %d total",
-			tokens.Input, tokens.Output, tokens.Total())
-	}
+	tokensLine := formatTokenUsageLine(tokens)
 
 	summary := ledger.Summary()
 	costLine := formatTraceCostLine(trace, summary)

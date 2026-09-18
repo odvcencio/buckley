@@ -133,6 +133,7 @@ func (m *Manager) prepareCheckpoint(ctx context.Context, in SaveInput) (runledge
 	if in.State.UpdatedAt.IsZero() {
 		in.State.UpdatedAt = time.Now().UTC()
 	}
+	in.State.CompletionEvidence = in.State.CompletionEvidence.Sanitize()
 	stateJSON, err := in.State.Marshal()
 	if err != nil {
 		return runledger.TaskCheckpoint{}, err
@@ -201,6 +202,9 @@ func (m *Manager) Resume(ctx context.Context, taskID string) (ResumeContext, err
 	if err != nil {
 		return ResumeContext{}, fmt.Errorf("taskstate: checkpoint %s: %w", cp.CheckpointID, err)
 	}
+	if state.Status != StatusCompleted {
+		state.CompletionEvidence = state.CompletionEvidence.NormalizeNonTerminal()
+	}
 	return ResumeContext{
 		Checkpoint: cp,
 		State:      state,
@@ -217,6 +221,9 @@ func resumePrompt(s CheckpointState, cp runledger.TaskCheckpoint) string {
 	fmt.Fprintf(&b, "Status: %s.", s.Status)
 	if debt := s.VerificationDebt(); debt > 0 {
 		fmt.Fprintf(&b, " Verification debt: %d unresolved check(s).", debt)
+	}
+	if s.CompletionEvidence.RequiresVerification() {
+		fmt.Fprintf(&b, " Completion evidence: %s.", completionEvidenceStatusLine(s.CompletionEvidence))
 	}
 	b.WriteString("\n")
 	if strings.TrimSpace(s.Summary) != "" {

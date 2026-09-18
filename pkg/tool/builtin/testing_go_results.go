@@ -107,3 +107,13 @@ func parseGoTestOutput(raw string) goTestReport {
 	}
 	return report
 }
+
+func truncateString(value string, max int) string {
+	if max <= 0 {
+		return value
+	}
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "..."
+}

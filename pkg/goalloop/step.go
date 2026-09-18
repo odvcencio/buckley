@@ -47,12 +47,13 @@ type RetryWakeResult struct {
 // questions — so a durable workflow can carry it as explicit state
 // without violating the payload rules in spec.durable-execution-dapr.
 type DriveSnapshot struct {
-	Summary              string                        `json:"summary,omitempty"`
-	NextActions          []taskstate.NextAction        `json:"next_actions,omitempty"`
-	Checks               []taskstate.VerificationEntry `json:"checks,omitempty"`
-	Questions            []taskstate.Question          `json:"questions,omitempty"`
-	Phase                string                        `json:"phase,omitempty"`
-	PrematureCompletions int                           `json:"premature_completions,omitempty"`
+	Summary              string                             `json:"summary,omitempty"`
+	NextActions          []taskstate.NextAction             `json:"next_actions,omitempty"`
+	Checks               []taskstate.VerificationEntry      `json:"checks,omitempty"`
+	CompletionEvidence   *taskstate.CompletionEvidenceState `json:"completion_evidence,omitempty"`
+	Questions            []taskstate.Question               `json:"questions,omitempty"`
+	Phase                string                             `json:"phase,omitempty"`
+	PrematureCompletions int                                `json:"premature_completions,omitempty"`
 }
 
 func snapshotOf(d *driveState) DriveSnapshot {
@@ -60,6 +61,7 @@ func snapshotOf(d *driveState) DriveSnapshot {
 		Summary:              d.summary,
 		NextActions:          d.nextActions,
 		Checks:               d.checks,
+		CompletionEvidence:   completionEvidencePtr(d.completionEvidence),
 		Questions:            d.questions,
 		Phase:                d.phase,
 		PrematureCompletions: d.prematureCompletions,
@@ -75,10 +77,31 @@ func (s DriveSnapshot) driveState() *driveState {
 		summary:              s.Summary,
 		nextActions:          s.NextActions,
 		checks:               s.Checks,
+		completionEvidence:   driveSnapshotCompletionEvidence(s),
 		questions:            s.Questions,
 		phase:                phase,
 		prematureCompletions: s.PrematureCompletions,
 	}
+}
+
+func completionEvidencePtr(state taskstate.CompletionEvidenceState) *taskstate.CompletionEvidenceState {
+	state = state.Sanitize()
+	if state.Version == 0 &&
+		!state.StateChangeObserved &&
+		state.VerificationStatus == "" &&
+		state.VerificationEvidenceID == "" &&
+		!state.StateObservationFailed &&
+		state.StateObservationError == "" {
+		return nil
+	}
+	return &state
+}
+
+func driveSnapshotCompletionEvidence(s DriveSnapshot) taskstate.CompletionEvidenceState {
+	if s.CompletionEvidence == nil {
+		return taskstate.CompletionEvidenceState{}.NormalizeNonTerminal()
+	}
+	return s.CompletionEvidence.NormalizeNonTerminal()
 }
 
 // TaskSeed is the durable starting state for driving a task: the
@@ -169,14 +192,21 @@ func (l *Loop) turnStep(ctx context.Context, req TurnStepRequest, legacyAudit bo
 		return TurnStepResponse{}, errNoEngine
 	}
 
-	task := TaskContext{RunID: req.RunID, TaskID: req.TaskID, Goal: req.Goal, Spec: req.Spec}
+	drive := req.Drive.driveState()
+	task := TaskContext{
+		RunID:              req.RunID,
+		TaskID:             req.TaskID,
+		Goal:               req.Goal,
+		Spec:               req.Spec,
+		Checks:             append([]taskstate.VerificationEntry(nil), drive.checks...),
+		CompletionEvidence: drive.completionEvidence,
+	}
 	if resumed, err := l.checkpoints.Resume(ctx, req.TaskID); err == nil {
 		task.Resume = &resumed
 	} else if !errors.Is(err, taskstate.ErrNoCheckpoint) {
 		return TurnStepResponse{}, fmt.Errorf("goalloop: resume %s: %w", req.TaskID, err)
 	}
 
-	drive := req.Drive.driveState()
 	task.Phase = drive.phase
 	task.TurnID = fmt.Sprintf("%s/cp-%03d/turn-%03d", req.TaskID, req.Generation, req.TurnIndex)
 

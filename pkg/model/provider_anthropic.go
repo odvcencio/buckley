@@ -153,8 +153,9 @@ func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req ChatRe
 		}
 
 		chunkChan <- StreamChunk{
-			ID:    resp.ID,
-			Model: resp.Model,
+			ID:                resp.ID,
+			Model:             resp.Model,
+			ExecutionIdentity: cloneExecutionIdentity(resp.ExecutionIdentity),
 			Choices: []StreamChoice{
 				{
 					Index:        0,
@@ -341,6 +342,7 @@ func (a anthropicResponse) toChatResponse() (*ChatResponse, error) {
 			CompletionTokens: a.Usage.OutputTokens,
 			TotalTokens:      a.Usage.InputTokens + a.Usage.OutputTokens,
 		},
+		ExecutionIdentity: observedExecutionIdentity(a.ID, a.Model, nil),
 	}, nil
 }
 

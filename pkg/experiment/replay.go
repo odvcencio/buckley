@@ -19,7 +19,16 @@ type ReplayConfig struct {
 	NewSystemPrompt    *string
 	NewTemperature     *float64
 	DeterministicTools bool
+	AllowLiveTools     bool
 }
+
+// ErrDeterministicReplayUnsupported is returned before runtime setup because
+// Buckley does not yet have a deterministic tool replay engine.
+var ErrDeterministicReplayUnsupported = errors.New("deterministic experiment replay is not supported")
+
+// ErrLiveReplayRequiresOptIn is returned when a replay would rerun live tools
+// and model execution without an explicit opt-in.
+var ErrLiveReplayRequiresOptIn = errors.New("experiment replay requires --live-tools")
 
 // Replayer replays a stored session with new configuration.
 type Replayer struct {
@@ -40,9 +49,6 @@ func NewReplayer(store *storage.Store, runner *Runner) (*Replayer, error) {
 
 // Replay re-executes a session with updated model configuration.
 func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
-	if r == nil || r.store == nil || r.runner == nil {
-		return nil, errors.New("replayer unavailable")
-	}
 	sourceID := strings.TrimSpace(cfg.SourceSessionID)
 	if sourceID == "" {
 		return nil, errors.New("source session id is required")
@@ -50,6 +56,15 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 	modelID := strings.TrimSpace(cfg.NewModelID)
 	if modelID == "" {
 		return nil, errors.New("new model id is required")
+	}
+	if cfg.DeterministicTools {
+		return nil, ErrDeterministicReplayUnsupported
+	}
+	if !cfg.AllowLiveTools {
+		return nil, ErrLiveReplayRequiresOptIn
+	}
+	if r == nil || r.store == nil || r.runner == nil {
+		return nil, errors.New("replayer unavailable")
 	}
 
 	session, err := r.store.GetSession(sourceID)
@@ -68,7 +83,13 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 	var prompt string
 	for _, msg := range messages {
 		if msg.Role == "user" {
-			prompt = strings.TrimSpace(msg.Content)
+			if msg.IsTruncated {
+				return nil, errors.New("first user prompt is truncated and cannot be replayed")
+			}
+			if strings.TrimSpace(msg.Content) == "" {
+				return nil, errors.New("first user prompt is blank and cannot be replayed")
+			}
+			prompt = msg.Content
 			break
 		}
 	}
@@ -78,9 +99,12 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 
 	exp := &Experiment{
 		ID:   ulid.Make().String(),
-		Name: fmt.Sprintf("Replay %s with %s", sourceID[:8], modelID),
+		Name: fmt.Sprintf("Live replay %s with %s", shortReplaySourceID(sourceID), modelID),
 		Task: Task{
 			Prompt: prompt,
+			Context: map[string]string{
+				"source_session_id": sourceID,
+			},
 		},
 		Variants: []Variant{{
 			ID:           ulid.Make().String(),
@@ -90,14 +114,6 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 			SystemPrompt: cfg.NewSystemPrompt,
 			Temperature:  cfg.NewTemperature,
 		}},
-	}
-
-	if cfg.DeterministicTools {
-		if exp.Task.Context == nil {
-			exp.Task.Context = make(map[string]string)
-		}
-		exp.Task.Context["replay_mode"] = "deterministic"
-		exp.Task.Context["source_session_id"] = sourceID
 	}
 
 	results, err := r.runner.RunExperiment(ctx, exp)
@@ -121,4 +137,13 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 	}
 
 	return &runs[0], nil
+}
+
+func shortReplaySourceID(sourceID string) string {
+	sourceID = strings.TrimSpace(sourceID)
+	runes := []rune(sourceID)
+	if len(runes) <= 8 {
+		return sourceID
+	}
+	return string(runes[:8])
 }

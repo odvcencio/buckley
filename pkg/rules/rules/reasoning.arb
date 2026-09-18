@@ -44,6 +44,24 @@ strategy reasoning_mode returns ReasoningConfig {
     }
 
     when {
+        reasoning.config == "auto"
+        and task.name == "commit"
+        and model.supports_reasoning
+    } then CommitReasoning {
+        action: "set",
+        effort: "low",
+    }
+
+    when {
+        reasoning.config == "auto"
+        and task.name == "pr"
+        and model.supports_reasoning
+    } then PRReasoning {
+        action: "set",
+        effort: "medium",
+    }
+
+    when {
         task.phase == "planning"
         and model.supports_reasoning
     } then PlanningReasoning {

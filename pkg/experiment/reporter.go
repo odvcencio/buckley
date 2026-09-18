@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/parallel"
 )
 
@@ -95,40 +96,55 @@ func (r *Reporter) ComparisonMarkdown(exp *Experiment) (string, error) {
 	if strings.TrimSpace(exp.Hypothesis) != "" {
 		fmt.Fprintf(&b, "**Hypothesis:** %s\n\n", exp.Hypothesis)
 	}
-	fmt.Fprintf(&b, "**Task:** %s\n\n", exp.Task.Prompt)
+	fmt.Fprintf(&b, "**Current experiment task:** %s\n\n", exp.Task.Prompt)
 	if report.Summary != "" {
 		fmt.Fprintf(&b, "%s\n\n", report.Summary)
 	}
 
 	b.WriteString("## Rankings\n\n")
-	b.WriteString("| Rank | Run | Variant | Model | Status | Evidence | Score | Cost | Duration |\n")
-	b.WriteString("|------|-----|---------|-------|--------|----------|-------|------|----------|\n")
+	b.WriteString("| Rank | Run | Variant | Requested model | Execution identity | Status | Evidence | Score | Cost | Duration | Tokens |\n")
+	b.WriteString("|------|-----|---------|-----------------|--------------------|--------|----------|-------|------|----------|--------|\n")
+	reportIndex := newVariantReportIndex(report.Variants)
 	for _, ranking := range report.Rankings {
-		v := findVariantReport(report.Variants, ranking.RunID)
+		v := reportIndex.find(ranking.RunID)
 		if v == nil {
 			continue
 		}
-		cost := "-"
-		if v.Metrics.TotalCost > 0 {
-			cost = fmt.Sprintf("$%.4f", v.Metrics.TotalCost)
+		rank := "-"
+		if ranking.Rank > 0 {
+			rank = fmt.Sprintf("%d", ranking.Rank)
 		}
+		cost := formatCostEvidence(v.CostEvidence, v.Metrics)
 		duration := formatDurationMs(v.Metrics.DurationMs)
-		rank := fmt.Sprintf("%d", ranking.Rank)
-		if ranking.Rank == 0 {
-			rank = "-"
-		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %.1f%% | %s | %s |\n",
-			rank, v.RunID, v.VariantName, v.ModelID, v.Status, v.VerificationStatus, ranking.Score*100, cost, duration)
+		tokens := formatRunTokens(v.Metrics)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %d |\n",
+			rank, markdownCell(v.RunID), markdownCell(v.VariantName), markdownCell(v.ModelID), markdownCell(formatExecutionIdentitySummary(v.ModelExecutions)), v.Status, markdownCell(v.VerificationStatus), formatComparisonScore(v), markdownCell(cost), duration, tokens)
 	}
 
 	b.WriteString("\n## Variant Details\n\n")
 	for _, v := range report.Variants {
 		fmt.Fprintf(&b, "### %s / %s (%s)\n\n", v.VariantName, v.RunID, v.ModelID)
+		fmt.Fprintf(&b, "- **Run ID:** %s\n", v.RunID)
+		fmt.Fprintf(&b, "- **Variant ID:** %s\n", v.VariantID)
+		if v.ProviderID != "" {
+			fmt.Fprintf(&b, "- **Provider:** %s\n", v.ProviderID)
+		}
+		if v.SessionID != "" {
+			fmt.Fprintf(&b, "- **Session:** %s\n", v.SessionID)
+		}
+		if v.Branch != "" {
+			fmt.Fprintf(&b, "- **Branch:** %s\n", v.Branch)
+		}
 		fmt.Fprintf(&b, "- **Status:** %s\n", v.Status)
 		fmt.Fprintf(&b, "- **Evidence:** %s\n", v.VerificationStatus)
-		fmt.Fprintf(&b, "- **Score:** %.1f%%\n", v.CriteriaScore*100)
-		fmt.Fprintf(&b, "- **Tokens:** %d prompt + %d completion\n",
-			v.Metrics.PromptTokens, v.Metrics.CompletionTokens)
+		fmt.Fprintf(&b, "- **Score:** %s\n", formatComparisonScore(&v))
+		fmt.Fprintf(&b, "- **Input digest:** %s\n", formatDigestOrUnknown(v.InputDigest))
+		fmt.Fprintf(&b, "- **Workload digest:** %s\n", formatDigestOrUnknown(v.WorkloadDigest))
+		fmt.Fprintf(&b, "- **Provenance:** %s\n", v.ProvenanceStatus)
+		fmt.Fprintf(&b, "- **Execution identity:** %s\n", formatExecutionIdentityDetail(v.ModelExecutions))
+		fmt.Fprintf(&b, "- **Execution identity limit:** observed response identities only; not a complete attempt audit or backend revision proof\n")
+		fmt.Fprintf(&b, "- **Tokens:** %s\n", formatRunTokensDetail(v.Metrics))
+		fmt.Fprintf(&b, "- **Cost:** %s\n", formatCostEvidence(v.CostEvidence, v.Metrics))
 		fmt.Fprintf(&b, "- **Tool calls:** %d (%d success, %d failed)\n",
 			v.Metrics.ToolCalls, v.Metrics.ToolSuccesses, v.Metrics.ToolFailures)
 		fmt.Fprintf(&b, "- **Files modified:** %d (%d lines)\n",
@@ -174,6 +190,147 @@ func formatDurationMs(ms int64) string {
 	return formatDuration(time.Duration(ms) * time.Millisecond)
 }
 
+func formatComparisonScore(v *VariantReport) string {
+	if v == nil || !v.RankEligible {
+		return "not evaluated"
+	}
+	return fmt.Sprintf("%.1f%%", v.CriteriaScore*100)
+}
+
+func formatCostEvidence(evidence CostEvidence, metrics RunMetrics) string {
+	if strings.TrimSpace(evidence.Label) != "" {
+		return evidence.Label
+	}
+	return runCostEvidence(metrics).Label
+}
+
+func formatRunTokens(metrics RunMetrics) int {
+	if metrics.Usage != nil {
+		return metrics.Usage.Total()
+	}
+	return metrics.PromptTokens + metrics.CompletionTokens
+}
+
+func formatRunTokensDetail(metrics RunMetrics) string {
+	if metrics.Usage == nil {
+		return fmt.Sprintf("%d prompt + %d completion (legacy scalar)", metrics.PromptTokens, metrics.CompletionTokens)
+	}
+	parts := []string{fmt.Sprintf("%d input", metrics.Usage.Input), fmt.Sprintf("%d output", metrics.Usage.Output)}
+	if metrics.Usage.Unclassified != 0 {
+		parts = append(parts, fmt.Sprintf("%d unclassified", metrics.Usage.Unclassified))
+	}
+	if metrics.Usage.Estimated {
+		parts = append(parts, "estimated")
+	}
+	if metrics.Usage.UsageEvidenceMissing {
+		parts = append(parts, "missing usage evidence observed")
+	}
+	if metrics.Usage.ReportedUsageInconsistent {
+		parts = append(parts, "reported usage inconsistent")
+	}
+	return strings.Join(parts, "; ")
+}
+
+func formatDigestOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown (legacy run or unavailable input manifest)"
+	}
+	return value
+}
+
+func formatExecutionIdentitySummary(identities []model.ExecutionIdentity) string {
+	if len(identities) == 0 {
+		return "unknown (no model response identity evidence)"
+	}
+	unknown := 0
+	conflicted := false
+	selectedModels := make(map[string]struct{})
+	providers := make(map[string]struct{})
+	responseModels := make(map[string]struct{})
+	for _, identity := range identities {
+		if identity == (model.ExecutionIdentity{}) {
+			unknown++
+			continue
+		}
+		if identity.Conflicted {
+			conflicted = true
+		}
+		if identity.SelectedModel != "" {
+			selectedModels[identity.SelectedModel] = struct{}{}
+		}
+		if identity.ProviderID != "" {
+			providers[identity.ProviderID] = struct{}{}
+		}
+		if identity.ResponseModel != "" {
+			responseModels[identity.ResponseModel] = struct{}{}
+		}
+	}
+	parts := []string{fmt.Sprintf("%d observed", len(identities))}
+	if unknown > 0 {
+		parts = append(parts, fmt.Sprintf("%d unknown", unknown))
+	}
+	if conflicted {
+		parts = append(parts, "conflicted")
+	}
+	parts = appendIdentitySetSummary(parts, "selected", selectedModels)
+	parts = appendIdentitySetSummary(parts, "provider", providers)
+	parts = appendIdentitySetSummary(parts, "reported", responseModels)
+	return strings.Join(parts, "; ")
+}
+
+func appendIdentitySetSummary(parts []string, label string, values map[string]struct{}) []string {
+	switch len(values) {
+	case 0:
+		return parts
+	case 1:
+		for value := range values {
+			return append(parts, label+"="+value)
+		}
+	}
+	return append(parts, fmt.Sprintf("mixed %s (%d)", label, len(values)))
+}
+
+func formatExecutionIdentityDetail(identities []model.ExecutionIdentity) string {
+	if len(identities) == 0 {
+		return "unknown (no model response identity evidence)"
+	}
+	parts := make([]string, 0, len(identities))
+	for i, identity := range identities {
+		fields := make([]string, 0, 6)
+		if identity.RequestedModel != "" {
+			fields = append(fields, "requested="+identity.RequestedModel)
+		}
+		if identity.SelectedModel != "" {
+			fields = append(fields, "selected="+identity.SelectedModel)
+		}
+		if identity.ProviderID != "" {
+			fields = append(fields, "provider="+identity.ProviderID)
+		}
+		if identity.ResponseModel != "" {
+			fields = append(fields, "response_model="+identity.ResponseModel)
+		}
+		if identity.ResponseID != "" {
+			fields = append(fields, "response_id="+identity.ResponseID)
+		}
+		if identity.Conflicted {
+			fields = append(fields, "conflicted=true")
+		}
+		if len(fields) == 0 {
+			fields = append(fields, "unknown")
+		}
+		parts = append(parts, fmt.Sprintf("%d:%s", i+1, strings.Join(fields, " ")))
+	}
+	return fmt.Sprintf("%d observed response(s): %s", len(identities), strings.Join(parts, "; "))
+}
+
+func markdownCell(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	return value
+}
+
 func findVariantReport(reports []VariantReport, id string) *VariantReport {
 	for i := range reports {
 		if reports[i].RunID == id {
@@ -186,4 +343,32 @@ func findVariantReport(reports []VariantReport, id string) *VariantReport {
 		}
 	}
 	return nil
+}
+
+type variantReportIndex struct {
+	byRunID     map[string]*VariantReport
+	byVariantID map[string]*VariantReport
+}
+
+func newVariantReportIndex(reports []VariantReport) variantReportIndex {
+	index := variantReportIndex{
+		byRunID:     make(map[string]*VariantReport, len(reports)),
+		byVariantID: make(map[string]*VariantReport, len(reports)),
+	}
+	for i := range reports {
+		if _, exists := index.byRunID[reports[i].RunID]; !exists {
+			index.byRunID[reports[i].RunID] = &reports[i]
+		}
+		if _, exists := index.byVariantID[reports[i].VariantID]; !exists {
+			index.byVariantID[reports[i].VariantID] = &reports[i]
+		}
+	}
+	return index
+}
+
+func (i variantReportIndex) find(id string) *VariantReport {
+	if report := i.byRunID[id]; report != nil {
+		return report
+	}
+	return i.byVariantID[id]
 }

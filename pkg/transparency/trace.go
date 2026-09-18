@@ -22,6 +22,11 @@ type Trace struct {
 	// Provider (e.g., "openrouter", "anthropic")
 	Provider string `json:"provider"`
 
+	// ModelExecutions records provider-neutral identity evidence for every
+	// model response that contributed to this trace. Empty identity fields
+	// mean the provider did not supply them; Buckley does not infer them here.
+	ModelExecutions []ExecutionIdentityTrace `json:"model_executions,omitempty"`
+
 	// Duration of the request
 	Duration time.Duration `json:"duration"`
 
@@ -34,7 +39,8 @@ type Trace struct {
 	// Cost in USD
 	Cost float64 `json:"cost"`
 
-	// CostUnknown means Cost is only the known subtotal, not a complete price.
+	// CostUnknown reports that Cost is only the known subtotal because at least
+	// one contributing invocation had usage without authoritative pricing.
 	CostUnknown bool `json:"cost_unknown,omitempty"`
 
 	// Request contains the raw request (for --trace mode)
@@ -68,6 +74,17 @@ type TraceAttempt struct {
 	Attempt         int    `json:"attempt"`
 	ValidationError string `json:"validation_error,omitempty"`
 	Trace           *Trace `json:"trace"`
+}
+
+// ExecutionIdentityTrace is the trace-local, model-package-free projection of
+// one model execution identity.
+type ExecutionIdentityTrace struct {
+	RequestedModel string `json:"requested_model,omitempty"`
+	SelectedModel  string `json:"selected_model,omitempty"`
+	ProviderID     string `json:"provider_id,omitempty"`
+	ResponseModel  string `json:"response_model,omitempty"`
+	ResponseID     string `json:"response_id,omitempty"`
+	Conflicted     bool   `json:"conflicted,omitempty"`
 }
 
 // RequestTrace captures request details for debugging.
@@ -178,7 +195,7 @@ func (tb *TraceBuilder) WithRequest(req *RequestTrace) *TraceBuilder {
 // Complete finalizes the trace with response data.
 func (tb *TraceBuilder) Complete(tokens TokenUsage, cost float64) *Trace {
 	tb.trace.Duration = time.Since(tb.start)
-	tb.trace.Tokens = tokens
+	tb.trace.Tokens = CloneTokenUsage(tokens)
 	tb.trace.Cost = cost
 	return &tb.trace
 }
@@ -213,6 +230,12 @@ func (tb *TraceBuilder) WithResponse(response *ResponseTrace) *TraceBuilder {
 	return tb
 }
 
+// WithModelExecutions attaches model execution identity evidence to the trace.
+func (tb *TraceBuilder) WithModelExecutions(executions []ExecutionIdentityTrace) *TraceBuilder {
+	tb.trace.ModelExecutions = cloneExecutionIdentityTraces(executions)
+	return tb
+}
+
 // WithError marks the trace as failed.
 func (tb *TraceBuilder) WithError(err error) *TraceBuilder {
 	if err != nil {
@@ -239,6 +262,8 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 		}
 		child := *attempt.Trace
 		child.Attempts = nil
+		child.ModelExecutions = cloneExecutionIdentityTraces(attempt.Trace.ModelExecutions)
+		child.Tokens = CloneTokenUsage(attempt.Trace.Tokens)
 		valid = append(valid, TraceAttempt{
 			Phase:           attempt.Phase,
 			Attempt:         attempt.Attempt,
@@ -257,17 +282,24 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 	aggregate.Duration = 0
 	aggregate.Tokens = TokenUsage{}
 	aggregate.Cost = 0
-	aggregate.CostUnknown = false
 	aggregate.Attempts = valid
+	aggregate.ModelExecutions = nil
 	for _, attempt := range valid {
 		trace := attempt.Trace
 		aggregate.Duration += trace.Duration
-		aggregate.Tokens.Input += trace.Tokens.Input
-		aggregate.Tokens.Output += trace.Tokens.Output
-		aggregate.Tokens.Reasoning += trace.Tokens.Reasoning
-		aggregate.Tokens.CachedInput += trace.Tokens.CachedInput
+		aggregate.Tokens = AddTokenUsage(aggregate.Tokens, trace.Tokens)
 		aggregate.Cost += trace.Cost
 		aggregate.CostUnknown = aggregate.CostUnknown || trace.CostUnknown
+		aggregate.ModelExecutions = append(aggregate.ModelExecutions, trace.ModelExecutions...)
 	}
 	return &aggregate
+}
+
+func cloneExecutionIdentityTraces(input []ExecutionIdentityTrace) []ExecutionIdentityTrace {
+	if input == nil {
+		return nil
+	}
+	out := make([]ExecutionIdentityTrace, len(input))
+	copy(out, input)
+	return out
 }

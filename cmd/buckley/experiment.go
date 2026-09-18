@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -41,9 +42,16 @@ type experimentDiffOptions struct {
 	maxOutputLen int
 }
 
+type experimentSnapshotCompareOutput struct {
+	SnapshotVersion string                       `json:"snapshot_version"`
+	SnapshotDigest  experiment.SnapshotDigest    `json:"snapshot_digest"`
+	Provenance      string                       `json:"provenance"`
+	Report          *experiment.ComparisonReport `json:"report"`
+}
+
 func runExperimentCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: buckley experiment <run|list|show|diff|replay|profile>")
+		return fmt.Errorf("usage: buckley experiment <run|list|show|compare|diff|replay|profile|promote>")
 	}
 	switch args[0] {
 	case "run":
@@ -52,12 +60,16 @@ func runExperimentCommand(args []string) error {
 		return runExperimentList(args[1:])
 	case "show":
 		return runExperimentShow(args[1:])
+	case "compare":
+		return runExperimentCompare(args[1:])
 	case "diff":
 		return runExperimentDiff(args[1:])
 	case "replay":
 		return runExperimentReplay(args[1:])
 	case "profile":
 		return runExperimentProfile(args[1:])
+	case "promote":
+		return runExperimentPromote(args[1:])
 	default:
 		return fmt.Errorf("unknown experiment command: %s", args[0])
 	}
@@ -224,30 +236,29 @@ func runExperimentList(args []string) error {
 
 func runExperimentShow(args []string) error {
 	fs := flag.NewFlagSet("experiment show", flag.ContinueOnError)
-	format := fs.String("format", "auto", "Output format: auto, terminal, markdown, compact")
+	format := fs.String("format", "auto", "Output format: auto, terminal, markdown, compact, json")
 	identifier, remaining := extractExperimentName(args)
 	if err := fs.Parse(remaining); err != nil {
 		return err
 	}
 	if identifier == "" {
 		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: buckley experiment show <id|name> [--format auto|terminal|markdown|compact]")
+			return fmt.Errorf("usage: buckley experiment show <id|name> [--format auto|terminal|markdown|compact|json]")
 		}
 		identifier = fs.Arg(0)
 		if fs.NArg() > 1 {
-			return fmt.Errorf("unexpected trailing argument %s", fs.Arg(1))
+			return fmt.Errorf("unexpected trailing argument: %s", fs.Arg(1))
 		}
 	} else if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected trailing argument %s", fs.Arg(0))
+		return fmt.Errorf("unexpected trailing argument: %s", fs.Arg(0))
 	}
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return fmt.Errorf("experiment id or name is required")
 	}
-
 	outputFormat := strings.ToLower(strings.TrimSpace(*format))
 	switch outputFormat {
-	case "auto", "terminal", "markdown", "compact":
+	case "auto", "terminal", "markdown", "compact", "json":
 	default:
 		return fmt.Errorf("invalid experiment show format: %s", *format)
 	}
@@ -278,6 +289,7 @@ func runExperimentShow(args []string) error {
 
 	comparator := experiment.NewComparator(expStore)
 
+	// Determine output format
 	if outputFormat == "auto" {
 		// Use terminal format if stdout is a terminal, otherwise markdown
 		if isInteractiveTerminal() {
@@ -308,9 +320,55 @@ func runExperimentShow(args []string) error {
 		}
 		fmt.Println(report)
 		return nil
+	case "json":
+		runs, err := expStore.ListRuns(exp.ID)
+		if err != nil {
+			return err
+		}
+		evals, err := expStore.ListEvaluationsByExperiment(exp.ID)
+		if err != nil {
+			return err
+		}
+		snapshot, err := experiment.NewSnapshot(exp, runs, evals)
+		if err != nil {
+			return err
+		}
+		return experiment.EncodeSnapshot(os.Stdout, snapshot)
 	default:
-		return fmt.Errorf("unknown format: %s (use: auto, terminal, markdown, compact)", outputFormat)
+		return fmt.Errorf("unknown format: %s (use: auto, terminal, markdown, compact, json)", outputFormat)
 	}
+}
+
+func runExperimentCompare(args []string) error {
+	fs := flag.NewFlagSet("experiment compare", flag.ContinueOnError)
+	snapshotPath := fs.String("snapshot", "", "Experiment snapshot JSON file to compare offline")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*snapshotPath) == "" || fs.NArg() != 0 {
+		return fmt.Errorf("usage: buckley experiment compare --snapshot <file>")
+	}
+	file, err := os.Open(*snapshotPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	snapshot, err := experiment.DecodeSnapshot(file)
+	if err != nil {
+		return err
+	}
+	report, err := snapshot.Compare()
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(experimentSnapshotCompareOutput{
+		SnapshotVersion: snapshot.Version,
+		SnapshotDigest:  snapshot.Digest,
+		Provenance:      experiment.ExperimentSnapshotProvenance,
+		Report:          report,
+	})
 }
 
 func runExperimentDiff(args []string) error {
@@ -432,9 +490,12 @@ func writeExperimentDiff(out io.Writer, exp *experiment.Experiment, runs []exper
 		status := string(run.Status)
 		files := fmt.Sprintf("%d", len(run.Files))
 		tokens := fmt.Sprintf("%d", run.Metrics.PromptTokens+run.Metrics.CompletionTokens)
+		if run.Metrics.Usage != nil {
+			tokens = fmt.Sprintf("%d", run.Metrics.Usage.Total())
+		}
 		cost := "-"
-		if run.Metrics.TotalCost > 0 {
-			cost = fmt.Sprintf("$%.4f", run.Metrics.TotalCost)
+		if evidence := experiment.CostEvidenceForMetrics(run.Metrics); evidence.Label != "" {
+			cost = evidence.Label
 		}
 		duration := fmt.Sprintf("%dms", run.Metrics.DurationMs)
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", name, status, files, tokens, cost, duration)
@@ -516,19 +577,35 @@ func runExperimentReplay(args []string) error {
 	fs.StringVar(&systemPrompt, "system-prompt", "", "System prompt override")
 	var temperatureRaw string
 	fs.StringVar(&temperatureRaw, "temperature", "", "Temperature override")
-	deterministic := fs.Bool("deterministic-tools", false, "Replay tool calls deterministically (best-effort)")
-	if err := fs.Parse(args); err != nil {
+	deterministic := fs.Bool("deterministic-tools", false, "Replay tool calls deterministically (currently unsupported)")
+	liveTools := fs.Bool("live-tools", false, "Opt in to live replay: rerun the first stored user prompt on the current baseline")
+	sourceSessionID, remaining := extractExperimentName(args)
+	if err := fs.Parse(remaining); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: buckley experiment replay <session-id> -m <model>")
+	if sourceSessionID == "" {
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: buckley experiment replay <session-id> -m <model> --live-tools")
+		}
+		sourceSessionID = fs.Arg(0)
+		if fs.NArg() > 1 {
+			return fmt.Errorf("unexpected trailing argument: %s", fs.Arg(1))
+		}
+	} else if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected trailing argument: %s", fs.Arg(0))
 	}
-	sourceSessionID := strings.TrimSpace(fs.Arg(0))
+	sourceSessionID = strings.TrimSpace(sourceSessionID)
 	if sourceSessionID == "" {
 		return fmt.Errorf("source session id is required")
 	}
 	if strings.TrimSpace(modelID) == "" {
 		return fmt.Errorf("model id is required")
+	}
+	if *deterministic {
+		return fmt.Errorf("%w: deterministic tool replay is not implemented; no session was replayed", experiment.ErrDeterministicReplayUnsupported)
+	}
+	if !*liveTools {
+		return fmt.Errorf("%w: replay is a live rerun of the first stored user prompt on the current baseline; pass --live-tools to run it", experiment.ErrLiveReplayRequiresOptIn)
 	}
 
 	cfg, mgr, store, err := initDependenciesFn()
@@ -604,6 +681,7 @@ func runExperimentReplay(args []string) error {
 		NewSystemPrompt:    systemOverride,
 		NewTemperature:     tempOverride,
 		DeterministicTools: *deterministic,
+		AllowLiveTools:     *liveTools,
 	})
 	return err
 }

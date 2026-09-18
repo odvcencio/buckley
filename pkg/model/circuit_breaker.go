@@ -1,6 +1,8 @@
 package model
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -91,6 +93,7 @@ func (cb *CircuitBreaker) Reset() {
 	cb.state = CircuitClosed
 	cb.failureCount = 0
 	cb.lastFailureTime = time.Time{}
+	cb.halfOpenProbe.Store(false)
 
 	if oldState != CircuitClosed {
 		slog.Warn("circuit breaker manually reset", "old_state", oldState.String(), "new_state", "closed")
@@ -102,6 +105,8 @@ func (cb *CircuitBreaker) Reset() {
 func (cb *CircuitBreaker) Call(fn func() error) error {
 	cb.mu.Lock()
 
+	ownsHalfOpenProbe := false
+
 	// Check if we should transition from open to half-open
 	if cb.state == CircuitOpen {
 		if time.Since(cb.lastFailureTime) >= cb.config.ResetTimeout {
@@ -110,6 +115,7 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 				cb.mu.Unlock()
 				return fmt.Errorf("circuit breaker is open (half-open probe in progress)")
 			}
+			ownsHalfOpenProbe = true
 			cb.state = CircuitHalfOpen
 			cb.failureCount = 0
 			slog.Warn("circuit breaker state transition", "old_state", "open", "new_state", "half-open", "reset_timeout", cb.config.ResetTimeout)
@@ -117,6 +123,11 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 			cb.mu.Unlock()
 			return fmt.Errorf("circuit breaker is open (last failure: %v ago)", time.Since(cb.lastFailureTime))
 		}
+	} else if cb.state == CircuitHalfOpen {
+		// A probe is already in flight: reject every non-owner caller
+		// that observes half-open state. They never run fn.
+		cb.mu.Unlock()
+		return fmt.Errorf("circuit breaker is open (half-open probe in progress)")
 	}
 
 	cb.mu.Unlock()
@@ -127,13 +138,48 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	if err != nil {
-		cb.recordFailure()
+	// Caller-initiated cancellation is neutral: it says nothing about
+	// service health. DeadlineExceeded is NOT exempt and still counts
+	// as a failure.
+	// Only the owner may act on half-open state.
+	if errors.Is(err, context.Canceled) {
+		if cb.state == CircuitHalfOpen && ownsHalfOpenProbe {
+			// Restore open state and release the probe latch so a new
+			// probe can be attempted immediately. The existing
+			// lastFailureTime is already expired, so it is preserved
+			// as-is to allow immediate reprobe.
+			cb.state = CircuitOpen
+			cb.halfOpenProbe.Store(false)
+			slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "open", "reason", "probe canceled")
+		}
 		return err
 	}
 
-	cb.recordSuccess()
-	return nil
+	if cb.state == CircuitHalfOpen {
+		if !ownsHalfOpenProbe {
+			// A call admitted while closed finished after another caller became
+			// the half-open probe. Its stale outcome cannot decide that probe.
+			return err
+		}
+		if err != nil {
+			cb.recordFailure()
+		} else {
+			cb.recordSuccess()
+		}
+		return err
+	}
+
+	if ownsHalfOpenProbe {
+		// Manual Reset or another explicit state change won while this probe
+		// was in flight. Do not project the stale probe outcome onto it.
+		return err
+	}
+	if err != nil {
+		cb.recordFailure()
+	} else {
+		cb.recordSuccess()
+	}
+	return err
 }
 
 // recordFailure records a failure and transitions state if needed

@@ -3,6 +3,8 @@ package ralph
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ type fakeGoalBackend struct {
 	available bool
 	result    *BackendResult
 	err       error
+	execute   func(BackendRequest)
 	requests  []BackendRequest
 }
 
@@ -25,6 +28,9 @@ func (f *fakeGoalBackend) Name() string    { return f.name }
 func (f *fakeGoalBackend) Available() bool { return f.available }
 func (f *fakeGoalBackend) Execute(_ context.Context, req BackendRequest) (*BackendResult, error) {
 	f.requests = append(f.requests, req)
+	if f.execute != nil {
+		f.execute(req)
+	}
 	return f.result, f.err
 }
 
@@ -36,11 +42,27 @@ func newBackendEngineUnderTest(t *testing.T, backend Backend) (*BackendTurnEngin
 		t.Fatalf("evidence.New: %v", err)
 	}
 	t.Cleanup(func() { _ = ev.Close() })
+	runRalphGoalGit(t, dir, "init", "-q")
+	runRalphGoalGit(t, dir, "config", "user.name", "Buckley Test")
+	runRalphGoalGit(t, dir, "config", "user.email", "buckley@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, ".gitkeep"), []byte{}, 0o644); err != nil {
+		t.Fatalf("write .gitkeep: %v", err)
+	}
+	runRalphGoalGit(t, dir, "add", ".gitkeep")
+	runRalphGoalGit(t, dir, "commit", "-qm", "base")
 	engine, err := NewBackendTurnEngine(backend, ev, dir)
 	if err != nil {
 		t.Fatalf("NewBackendTurnEngine: %v", err)
 	}
 	return engine, ev
+}
+
+func runRalphGoalGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
 }
 
 func goalTask() goalloop.TaskContext {
@@ -73,7 +95,7 @@ func TestBackendTurnEngine_CleanRunClaimsCompletion(t *testing.T) {
 	if !outcome.Completed || outcome.CompletedEvidenceID == "" {
 		t.Fatalf("outcome = %+v, want completion with evidence", outcome)
 	}
-	if !outcome.StateChanged || outcome.SpentUSD != 0.42 || outcome.PromptTokens != 900 {
+	if outcome.StateChanged || outcome.SpentUSD != 0.42 || outcome.PromptTokens != 900 {
 		t.Fatalf("outcome mapping = %+v", outcome)
 	}
 	if len(outcome.Checks) != 1 || outcome.Checks[0].Status != taskstate.VerificationPass || !outcome.Checks[0].Required {
@@ -116,6 +138,33 @@ func TestBackendTurnEngine_FailingTestsBlockCompletion(t *testing.T) {
 	}
 	if len(outcome.Checks) != 1 || outcome.Checks[0].Status != taskstate.VerificationFail {
 		t.Fatalf("checks = %+v, want one required fail", outcome.Checks)
+	}
+}
+
+func TestBackendTurnEngine_MutationWithoutTypedTestsBlocksImmediately(t *testing.T) {
+	t.Parallel()
+	backend := &fakeGoalBackend{
+		name:      "codex",
+		available: true,
+		result:    &BackendResult{Backend: "codex", Output: "edited files"},
+		execute: func(req BackendRequest) {
+			_ = os.WriteFile(filepath.Join(req.SandboxPath, "changed.txt"), []byte("changed\n"), 0o644)
+		},
+	}
+	engine, _ := newBackendEngineUnderTest(t, backend)
+
+	outcome, err := engine.RunTurn(context.Background(), goalTask())
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if outcome.Completed || !outcome.StateChanged {
+		t.Fatalf("outcome = %+v, want observed mutation without completion", outcome)
+	}
+	if outcome.Blocker == nil || !strings.Contains(outcome.Blocker.Reason, "typed post-change verification") {
+		t.Fatalf("blocker = %+v, want missing-verification blocker", outcome.Blocker)
+	}
+	if !outcome.CompletionEvidence.RequiresVerification() || outcome.CompletionEvidence.VerificationStatus != taskstate.VerificationPending {
+		t.Fatalf("completion evidence = %+v, want pending verification debt", outcome.CompletionEvidence)
 	}
 }
 

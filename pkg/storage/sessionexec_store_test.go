@@ -32,6 +32,40 @@ func newSessionExecStore(t *testing.T, sessionIDs ...string) *Store {
 	return store
 }
 
+func TestWithSessionExecWrite_CancelledTransactionLeavesReusableConnection(t *testing.T) {
+	store := newSessionExecStore(t)
+	store.db.SetMaxOpenConns(1)
+	store.db.SetMaxIdleConns(1)
+
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		err := store.withSessionExecWrite(ctx, func(*sessionExecConn) error {
+			cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d: error = %v, want context.Canceled", i, err)
+		}
+	}
+
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer probeCancel()
+	if err := store.withSessionExecWrite(probeCtx, func(db *sessionExecConn) error {
+		var value int
+		if err := db.queryRow(`SELECT 1`).Scan(&value); err != nil {
+			return err
+		}
+		if value != 1 {
+			return fmt.Errorf("unexpected probe value %d", value)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("fresh write after cancellations: %v", err)
+	}
+}
+
 func acceptInput(t *testing.T, store *Store, sessionID, commandID, content string) sessionexec.Receipt {
 	t.Helper()
 	receipt, err := store.Accept(context.Background(), sessionexec.AcceptRequest{
@@ -97,6 +131,71 @@ func TestSessionExecMigration_FreshUpgradeAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestSessionExecMigration_TaskIntentBackfillsPopulatedLegacyCommands(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-task-intent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE session_commands (
+		session_id TEXT NOT NULL,
+		command_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		task_id TEXT NOT NULL CHECK(task_id = 'foreground'),
+		turn_id TEXT NOT NULL,
+		generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+		sequence INTEGER NOT NULL CHECK(sequence > 0 AND sequence <= 1000000000000),
+		lane TEXT NOT NULL CHECK(lane IN ('work','control')),
+		command_type TEXT NOT NULL,
+		content TEXT NOT NULL,
+		input_digest TEXT NOT NULL CHECK(length(input_digest) = 64),
+		accepted_by TEXT NOT NULL,
+		target_command_id TEXT,
+		state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','failed','blocked','interrupted','cancelled')),
+		attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0 AND attempt <= 1000000),
+		lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0 AND lease_generation <= 1000000),
+		lease_owner TEXT,
+		lease_expires_at_ms INTEGER,
+		accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+		started_at_ms INTEGER,
+		heartbeat_at_ms INTEGER,
+		completed_at_ms INTEGER,
+		error_code TEXT,
+		error_text TEXT,
+		outcome_json TEXT,
+		completion_digest TEXT,
+		completed_by TEXT,
+		completion_lease_generation INTEGER,
+		PRIMARY KEY(session_id, command_id),
+		UNIQUE(session_id, sequence),
+		UNIQUE(run_id, turn_id)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_commands (
+		session_id, command_id, run_id, task_id, turn_id, generation, sequence,
+		lane, command_type, content, input_digest, accepted_by, state, accepted_at_ms
+	) VALUES (?, ?, ?, 'foreground', ?, 0, 1, 'work', 'input', 'legacy body', ?, 'operator', 'accepted', 1)`,
+		"session-legacy", "command-legacy", sessionexec.RunIDForSession("session-legacy"),
+		sessionexec.TurnID("command-legacy", 0), strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSessionCommandTaskIntentSchema(db); err != nil {
+		t.Fatalf("ensureSessionCommandTaskIntentSchema: %v", err)
+	}
+	var taskIntent string
+	if err := db.QueryRow(`SELECT task_intent FROM session_commands WHERE session_id = ? AND command_id = ?`,
+		"session-legacy", "command-legacy").Scan(&taskIntent); err != nil {
+		t.Fatal(err)
+	}
+	if taskIntent != "" {
+		t.Fatalf("legacy task_intent = %q, want empty compatibility default", taskIntent)
+	}
+	if err := ensureSessionCommandTaskIntentSchema(db); err != nil {
+		t.Fatalf("idempotent ensureSessionCommandTaskIntentSchema: %v", err)
+	}
+}
+
 func TestSessionExecAccept_DuplicateConflictPrincipalBindingAndNoTranscript(t *testing.T) {
 	store := newSessionExecStore(t, "session-accept")
 	request := sessionexec.AcceptRequest{
@@ -127,6 +226,55 @@ func TestSessionExecAccept_DuplicateConflictPrincipalBindingAndNoTranscript(t *t
 	}
 	if delta := time.Since(first.AcceptedAt); delta < -time.Second || delta > 5*time.Second {
 		t.Fatalf("accepted time was not DB-current: %v", first.AcceptedAt)
+	}
+}
+
+func TestSessionExecAccept_TaskIntentRoundTripAndIdempotency(t *testing.T) {
+	store := newSessionExecStore(t, "session-intent")
+	request := sessionexec.AcceptRequest{
+		SessionID:  "session-intent",
+		CommandID:  "command-intent",
+		Type:       "input",
+		Content:    "change a file",
+		AcceptedBy: "operator@example.test",
+		TaskIntent: "Mutation",
+	}
+	first, err := store.Accept(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Duplicate {
+		t.Fatalf("first receipt unexpectedly duplicate: %#v", first)
+	}
+	request.TaskIntent = " mutation "
+	duplicate, err := store.Accept(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicate.Duplicate || duplicate.Sequence != first.Sequence {
+		t.Fatalf("duplicate receipt = %#v, want same accepted command", duplicate)
+	}
+	request.TaskIntent = "read_only"
+	if _, err := store.Accept(context.Background(), request); !errors.Is(err, sessionexec.ErrIdempotencyConflict) {
+		t.Fatalf("task intent drift error = %v, want idempotency conflict", err)
+	}
+	command := claimLane(t, store, "session-intent", sessionexec.LaneWork, "worker-intent")
+	if command.TaskIntent != "mutation" {
+		t.Fatalf("claimed TaskIntent = %q, want mutation", command.TaskIntent)
+	}
+	status, err := store.GetCommandStatus(context.Background(), "session-intent", "command-intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.TaskIntent != "mutation" {
+		t.Fatalf("status TaskIntent = %q, want mutation", status.TaskIntent)
+	}
+	page, err := store.ListCommandStatuses(context.Background(), sessionexec.CommandStatusQuery{SessionID: "session-intent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Commands) != 1 || page.Commands[0].TaskIntent != "mutation" {
+		t.Fatalf("listed commands = %#v, want mutation task intent", page.Commands)
 	}
 }
 
@@ -601,7 +749,7 @@ func TestSessionExecEffectPermit_QuiesceTimeoutLeavesGateClosedForExpiryRetry(t 
 	acceptInput(t, store, "session-effect-timeout", "effect-timeout-command", "run effect")
 	command, err := store.ClaimNext(context.Background(), sessionexec.ClaimRequest{
 		SessionID: "session-effect-timeout", Lane: sessionexec.LaneWork,
-		Owner: "effect-timeout-owner", LeaseDuration: 120 * time.Millisecond,
+		Owner: "effect-timeout-owner", LeaseDuration: 500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -622,7 +770,7 @@ func TestSessionExecEffectPermit_QuiesceTimeoutLeavesGateClosedForExpiryRetry(t 
 	if err != nil || state.Mode != sessionexec.ExecutionModeDetached {
 		t.Fatalf("closed gate = %+v, %v", state, err)
 	}
-	time.Sleep(130 * time.Millisecond)
+	waitSessionExecDBClockAtLeast(t, store, permit.ExpiresAt.UnixMilli(), "effect permit expiry")
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	retry, err := store.QuiesceSession(retryCtx, command.SessionID, sessionexec.ExecutionModeDetached, "timeout_test")
 	retryCancel()

@@ -651,6 +651,13 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 				Content:  "raw rejected response",
 				Duration: 2 * time.Second,
 				Tokens:   transparency.TokenUsage{Input: 120, Output: 30},
+				ModelExecutions: []transparency.ExecutionIdentityTrace{{
+					RequestedModel: "review-alias",
+					SelectedModel:  "review-provider/model",
+					ProviderID:     "review-provider",
+					ResponseModel:  "actual-review-model",
+					ResponseID:     "raw-response-id-not-for-public-comments",
+				}},
 				Request:  &transparency.RequestTrace{MaxTokens: 32768, ReasoningMaxTokens: 4096},
 				Response: &transparency.ResponseTrace{FinishReason: "stop"},
 			},
@@ -683,6 +690,12 @@ func TestReviewResultFromAgentPreservesIncompleteState(t *testing.T) {
 	}
 	if strings.Contains(got.reviewText, "`host-evidence-2` `run_verification`: PASS") {
 		t.Fatal("incomplete salvage rendered typed NO_TEST_GATE as PASS")
+	}
+	if got.trace == nil || len(got.trace.Attempts) != 1 || len(got.trace.Attempts[0].Trace.ModelExecutions) != 1 {
+		t.Fatalf("trace identities = %#v, want preserved model execution identity", got.trace)
+	}
+	if strings.Contains(got.reviewText, "raw-response-id-not-for-public-comments") || strings.Contains(got.reviewText, "actual-review-model") {
+		t.Fatalf("review text exposed raw execution identity: %s", got.reviewText)
 	}
 }
 
