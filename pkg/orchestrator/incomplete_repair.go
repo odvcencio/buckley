@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"errors"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/model"
@@ -48,15 +47,6 @@ func (e *IncompleteRepairError) FinishReason() string {
 		return ""
 	}
 	return e.finishReason
-}
-
-func IncompleteRepairDraft(err error) (string, bool) {
-	var incomplete *IncompleteRepairError
-	if !errors.As(err, &incomplete) {
-		return "", false
-	}
-	draft := incomplete.PublicDraft()
-	return draft, strings.TrimSpace(draft) != ""
 }
 
 func firstRepairFinishReason(resp *model.ChatResponse) string {

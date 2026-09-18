@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"fmt"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -103,14 +102,4 @@ func (p TaskPhase) Title() string {
 		return p.Name
 	}
 	return strings.Title(p.Stage)
-}
-
-func normalizeStage(stage string) (string, error) {
-	n := strings.ToLower(strings.TrimSpace(stage))
-	switch n {
-	case "builder", "verify", "review":
-		return n, nil
-	default:
-		return "", fmt.Errorf("unknown stage: %s", stage)
-	}
 }

@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -58,15 +57,6 @@ func (e *IncompleteUtilityResponseError) FinishReason() string {
 		return ""
 	}
 	return e.finishReason
-}
-
-func IncompleteUtilityDraft(err error) (string, bool) {
-	var incomplete *IncompleteUtilityResponseError
-	if !errors.As(err, &incomplete) {
-		return "", false
-	}
-	draft := incomplete.PublicDraft()
-	return draft, strings.TrimSpace(draft) != ""
 }
 
 func firstUtilityFinishReason(resp *model.ChatResponse) string {

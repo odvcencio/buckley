@@ -204,9 +204,6 @@ func TestReviewAgentReview_ResponseErrorWithPrivateOnlyDraftReturnsSafeIncomplet
 	if got := incomplete.PublicDraft(); got != "" {
 		t.Fatalf("draft = %q, want empty", got)
 	}
-	if draft, ok := IncompleteReviewDraft(err); ok || draft != "" {
-		t.Fatalf("IncompleteReviewDraft = %q, %v; want empty, false", draft, ok)
-	}
 	formatted := fmt.Sprintf("%v", err)
 	if formatted != "review response incomplete" {
 		t.Fatalf("formatted error = %q", formatted)

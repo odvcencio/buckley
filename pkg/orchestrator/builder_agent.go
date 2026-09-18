@@ -401,14 +401,6 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	return a.generateWithToolsWithRoute(req, task, routePolicy)
 }
 
-// generateWithTools drives the builder's model-and-tool turn loop through
-// the shared turn engine (pkg/agentloop.Controller), which now owns request
-// projection (replacing the direct conversation.CompactModelMessagesForRequest
-// call), tool-call ID backfill, and the round/repeat guard.
-func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
-	return a.generateWithToolsWithRoute(req, task, nil)
-}
-
 func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *Task, routePolicy *builderRoutePolicy) (string, error) {
 	ctx := context.Background()
 	const maxIterations = 10 // Prevent infinite loops
