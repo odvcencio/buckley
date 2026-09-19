@@ -937,6 +937,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 				}
 			}
 			result.CompletionStatus = CompletionConclusive
+			result.Termination = Termination{}
 			if c.cfg.History != nil {
 				c.cfg.History.Append(msg)
 			}
@@ -1013,6 +1014,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 					result.Message = model.Message{Role: "assistant", Content: text}
 					result.Content = text
 					result.CompletionStatus = CompletionConclusive
+					result.Termination = Termination{}
 					if c.cfg.History != nil {
 						c.cfg.History.Append(result.Message)
 					}
