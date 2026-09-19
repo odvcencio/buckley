@@ -24,12 +24,16 @@ func Timeout(defaultTimeout time.Duration, perTool map[string]time.Duration) Mid
 				return next(ctx)
 			}
 
-			base := ctx.Context
+			parent := ctx.Context
+			base := parent
 			if base == nil {
 				base = context.Background()
 			}
 			timeoutCtx, cancel := context.WithTimeout(base, timeout)
-			defer cancel()
+			defer func() {
+				ctx.Context = parent
+				cancel()
+			}()
 
 			ctx.Context = timeoutCtx
 			return next(ctx)

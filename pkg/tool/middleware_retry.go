@@ -3,12 +3,12 @@ package tool
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand"
 	"strings"
 	"time"
 
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // RetryConfig configures retry behavior.
@@ -21,35 +21,13 @@ type RetryConfig struct {
 	RetryableFunc func(error) bool
 }
 
-// mutatingTools lists tool names whose side effects must not be retried.
-var mutatingTools = map[string]bool{
-	"write_file":       true,
-	"edit_file":        true,
-	"apply_patch":      true,
-	"insert_text":      true,
-	"delete_lines":     true,
-	"search_replace":   true,
-	"patch_file":       true,
-	"rename_symbol":    true,
-	"extract_function": true,
-	"run_shell":        true,
-	"delete_file":      true,
-}
-
-func isMutatingTool(name string) bool {
-	return mutatingTools[strings.TrimSpace(name)]
-}
-
-// Retry retries tool execution with exponential backoff.
+// Retry retries tools in the read-only permission tier with exponential backoff.
+// Execution without a registered Tool is attempted only once.
 func Retry(cfg RetryConfig) Middleware {
 	return func(next Executor) Executor {
 		return func(ctx *ExecutionContext) (*builtin.Result, error) {
-			if ctx != nil && isMutatingTool(ctx.ToolName) {
-				return next(ctx)
-			}
-
 			attempts := cfg.MaxAttempts
-			if attempts <= 0 {
+			if attempts <= 0 || ctx == nil || ctx.Tool == nil || RequiredTierForTool(ctx.Tool) != types.TierReadOnly {
 				attempts = 1
 			}
 			retryable := cfg.RetryableFunc
@@ -58,8 +36,7 @@ func Retry(cfg RetryConfig) Middleware {
 			}
 
 			delay := cfg.InitialDelay
-			var lastErr error
-			for attempt := 1; attempt <= attempts; attempt++ {
+			for attempt := 1; ; attempt++ {
 				loopCtx := ctxContext(ctx)
 				if err := loopCtx.Err(); err != nil {
 					return nil, err
@@ -68,12 +45,7 @@ func Retry(cfg RetryConfig) Middleware {
 					ctx.Attempt = attempt
 				}
 				result, err := next(ctx)
-				if err == nil {
-					return result, nil
-				}
-
-				lastErr = err
-				if !retryable(err) || attempt == attempts {
+				if err == nil || attempt >= attempts || !retryable(err) {
 					return result, err
 				}
 
@@ -84,15 +56,6 @@ func Retry(cfg RetryConfig) Middleware {
 
 				delay = minDuration(time.Duration(float64(delay)*cfg.Multiplier), cfg.MaxDelay)
 			}
-
-			if lastErr == nil {
-				lastErr = fmt.Errorf("unknown error")
-			}
-			name := ""
-			if ctx != nil {
-				name = ctx.ToolName
-			}
-			return nil, fmt.Errorf("tool %s failed after %d attempts: %w", name, attempts, lastErr)
 		}
 	}
 }
