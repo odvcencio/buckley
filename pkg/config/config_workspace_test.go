@@ -5,6 +5,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,7 +84,7 @@ func TestLoadLaunchOperatorConfig_IgnoresWorkspacePolicyOverrides(t *testing.T) 
 	t.Chdir(workspace)
 	t.Setenv("HOME", workspace)
 
-	loaded, err := loadLaunchOperatorConfigForUser(workspace, launchTestOperator(home))
+	loaded, err := loadLaunchOperatorConfigForUser(workspace, launchTestOperator(t, home))
 	if err != nil {
 		t.Fatalf("LoadLaunchOperatorConfig: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestLoadLaunchOperatorConfig_RejectsWorkspaceOverlap(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(home, ".buckley"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	operator := launchTestOperator(home)
+	operator := launchTestOperator(t, home)
 	if _, err := loadLaunchOperatorConfigForUser(home, operator); err == nil {
 		t.Fatal("workspace equal to operator home was accepted")
 	}
@@ -163,7 +164,7 @@ func TestLoadLaunchOperatorConfig_RequiresOwnedNoFollowArtifactDirectory(t *test
 			home := t.TempDir()
 			workspace, artifact := test.setup(t)
 			writeOperator(t, home, artifact)
-			if _, err := loadLaunchOperatorConfigForUser(workspace, launchTestOperator(home)); err == nil {
+			if _, err := loadLaunchOperatorConfigForUser(workspace, launchTestOperator(t, home)); err == nil {
 				t.Fatal("unsafe artifact directory was accepted")
 			}
 		})
@@ -180,9 +181,13 @@ func TestValidateLaunchArtifactDirectory_AcceptsOwnedPrivateDirectory(t *testing
 	if err := os.Chmod(artifact, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	validated, err := validateLaunchArtifactDirectory(artifact, workspace, operatorDir, 1000)
+	uid := uint64(os.Geteuid())
+	validated, err := validateLaunchArtifactDirectory(artifact, workspace, operatorDir, uid)
 	if err != nil || validated != artifact {
 		t.Fatalf("validated=%q err=%v", validated, err)
+	}
+	if _, err := validateLaunchArtifactDirectory(artifact, workspace, operatorDir, uid+1); err == nil {
+		t.Fatal("artifact directory with a different owner was accepted")
 	}
 }
 
@@ -201,8 +206,12 @@ func TestLoadLaunchOperatorConfig_RejectsRootOrMalformedOperatorIdentity(t *test
 	}
 }
 
-func launchTestOperator(home string) *user.User {
-	return &user.User{Uid: "1000", Gid: "1000", HomeDir: home, Username: "operator"}
+func launchTestOperator(t *testing.T, home string) *user.User {
+	t.Helper()
+	if os.Geteuid() == 0 || os.Getegid() == 0 {
+		t.Skip("launch operator fixtures require a non-root account")
+	}
+	return &user.User{Uid: strconv.Itoa(os.Geteuid()), Gid: strconv.Itoa(os.Getegid()), HomeDir: home, Username: "operator"}
 }
 
 func TestReadLaunchOperatorConfig_RejectsUnsafeOrChangingSource(t *testing.T) {
