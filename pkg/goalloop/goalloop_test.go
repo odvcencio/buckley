@@ -145,7 +145,15 @@ func TestLoop_RunTaskCompletesWithEvidence(t *testing.T) {
 	t.Parallel()
 	engine := &scriptedEngine{outcomes: []TurnOutcome{
 		{Rounds: 3, ToolCalls: 5, StateChanged: true, Summary: "ported two files"},
-		{Rounds: 2, ToolCalls: 2, Completed: true, CompletedEvidenceID: "ev_done", Summary: "all files ported"},
+		{
+			Rounds: 2, ToolCalls: 2, Completed: true, CompletedEvidenceID: "ev_done", Summary: "all files ported",
+			CompletionEvidence: taskstate.CompletionEvidenceState{
+				Version:                1,
+				StateChangeObserved:    true,
+				VerificationStatus:     taskstate.VerificationPass,
+				VerificationEvidenceID: "ev_tests",
+			},
+		},
 	}}
 	loop, ledger := newTestLoop(t, Config{Engine: engine})
 	ctx := context.Background()

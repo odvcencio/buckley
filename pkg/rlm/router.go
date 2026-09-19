@@ -2,6 +2,7 @@ package rlm
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -45,6 +46,9 @@ func NewModelRouterFromManager(mgr *model.Manager, cfg Config) (*ModelRouter, er
 	if mgr == nil {
 		return nil, fmt.Errorf("model manager required")
 	}
+	if err := validateRouterConfig(cfg); err != nil {
+		return nil, err
+	}
 	return NewModelRouterWithCatalog(mgr.GetCatalog(), cfg, RouterOptions{
 		ProviderResolver:  mgr,
 		CapabilityChecker: mgr,
@@ -55,6 +59,9 @@ func NewModelRouterFromManager(mgr *model.Manager, cfg Config) (*ModelRouter, er
 func NewModelRouterWithCatalog(catalog *model.ModelCatalog, cfg Config, opts RouterOptions) (*ModelRouter, error) {
 	if catalog == nil || len(catalog.Data) == 0 {
 		return nil, fmt.Errorf("model catalog is empty")
+	}
+	if err := validateRouterConfig(cfg); err != nil {
+		return nil, err
 	}
 	cfg.Normalize()
 
@@ -92,6 +99,13 @@ func NewModelRouterWithCatalog(catalog *model.ModelCatalog, cfg Config, opts Rou
 	return router, nil
 }
 
+func validateRouterConfig(cfg Config) error {
+	if err := validateTierConfigs(cfg.Tiers); err != nil {
+		return fmt.Errorf("router config: %w", err)
+	}
+	return nil
+}
+
 // SetPin overrides the model choice for a given weight tier.
 func (r *ModelRouter) SetPin(weight Weight, modelID string) {
 	if r == nil {
@@ -122,13 +136,18 @@ func (r *ModelRouter) Select(weight Weight) (string, error) {
 	}
 
 	if pin := strings.TrimSpace(r.pins[weight]); pin != "" {
-		if r.modelAvailable(pin) {
-			return pin, nil
+		info, ok := r.catalog[pin]
+		if !ok {
+			return "", fmt.Errorf("pinned model not found: %s", pin)
 		}
-		return "", fmt.Errorf("pinned model not found: %s", pin)
+		if r.matchesTier(info, tier) {
+			return info.ID, nil
+		}
+		return "", fmt.Errorf("pinned model does not satisfy tier %s constraints: %s", weight, pin)
 	}
 
 	if len(tier.Models) > 0 {
+		candidates := make([]model.ModelInfo, 0, len(tier.Models))
 		for _, candidate := range tier.Models {
 			candidate = strings.TrimSpace(candidate)
 			if candidate == "" {
@@ -139,8 +158,15 @@ func (r *ModelRouter) Select(weight Weight) (string, error) {
 				continue
 			}
 			if r.matchesTier(info, tier) {
-				return info.ID, nil
+				candidates = append(candidates, info)
 			}
+		}
+		if len(candidates) > 0 {
+			if len(normalizePrefs(tier.Prefer)) == 0 {
+				return candidates[0].ID, nil
+			}
+			candidates = r.rankCandidates(candidates, tier.Prefer)
+			return candidates[0].ID, nil
 		}
 	}
 
@@ -175,8 +201,8 @@ func (r *ModelRouter) matchesTier(info model.ModelInfo, tier TierConfig) bool {
 		return false
 	}
 	if tier.MaxCostPerMillion > 0 {
-		cost := maxCostPerMillion(info)
-		if cost > 0 && cost > tier.MaxCostPerMillion {
+		cost, ok := authoritativeMaxCostPerMillion(info)
+		if !ok || cost > tier.MaxCostPerMillion {
 			return false
 		}
 	}
@@ -228,9 +254,12 @@ func (r *ModelRouter) rankCandidates(candidates []model.ModelInfo, prefer []stri
 		for _, pref := range prefs {
 			switch pref {
 			case "cost":
-				leftCost := maxCostPerMillion(left)
-				rightCost := maxCostPerMillion(right)
-				if leftCost != rightCost {
+				leftCost, leftKnown := authoritativeMaxCostPerMillion(left)
+				rightCost, rightKnown := authoritativeMaxCostPerMillion(right)
+				if leftKnown != rightKnown {
+					return leftKnown
+				}
+				if leftKnown && leftCost != rightCost {
 					return leftCost < rightCost
 				}
 			case "quality":
@@ -263,11 +292,18 @@ func normalizePrefs(prefer []string) []string {
 	return out
 }
 
-func maxCostPerMillion(info model.ModelInfo) float64 {
+func authoritativeMaxCostPerMillion(info model.ModelInfo) (float64, bool) {
+	if !info.PricingKnown || !finiteNonnegative(info.Pricing.Prompt) || !finiteNonnegative(info.Pricing.Completion) {
+		return 0, false
+	}
 	prompt := info.Pricing.Prompt
 	completion := info.Pricing.Completion
 	if prompt > completion {
-		return prompt
+		return prompt, true
 	}
-	return completion
+	return completion, true
+}
+
+func finiteNonnegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }

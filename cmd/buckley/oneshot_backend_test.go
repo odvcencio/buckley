@@ -1,14 +1,22 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
-	"m31labs.dev/buckley/pkg/transparency"
 )
+
+type oneshotProfileReasoningChecker map[string]bool
+
+func (c oneshotProfileReasoningChecker) SupportsReasoning(modelID string) bool {
+	return c[modelID]
+}
 
 func TestResolveOneshotBackendPrecedence(t *testing.T) {
 	t.Setenv(envOneshotBackend, "claude")
@@ -60,34 +68,6 @@ func TestResolveCommitModelIDUsesUtilityOnlyForAPI(t *testing.T) {
 	}
 }
 
-func TestNewOneshotToolInvoker_CLIBackendsConstruct(t *testing.T) {
-	tests := []struct {
-		backend string
-		modelID string
-	}{
-		{backend: oneshot.CLIBackendCodex, modelID: "gpt-test"},
-		{backend: oneshot.CLIBackendClaude, modelID: "claude-test"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.backend, func(t *testing.T) {
-			invoker, err := newOneshotToolInvoker(
-				tt.backend,
-				tt.modelID,
-				config.DefaultConfig(),
-				nil,
-				transparency.ModelPricing{},
-				nil,
-			)
-			if err != nil {
-				t.Fatalf("newOneshotToolInvoker: %v", err)
-			}
-			if invoker == nil {
-				t.Fatal("CLI backend returned a nil invoker")
-			}
-		})
-	}
-}
-
 func TestCLICommandForBackendUsesEnvOverride(t *testing.T) {
 	t.Setenv(envCodexCommand, "/opt/bin/codex")
 	t.Setenv(envClaudeCommand, "/opt/bin/claude")
@@ -97,6 +77,165 @@ func TestCLICommandForBackendUsesEnvOverride(t *testing.T) {
 	}
 	if got := cliCommandForBackend(oneshot.CLIBackendClaude); got != "/opt/bin/claude" {
 		t.Fatalf("claude command = %q", got)
+	}
+}
+
+func TestResolveOneshotRequestProfileCommit(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "auto"
+
+	profile := resolveOneshotRequestProfile("commit", cfg, oneshotProfileReasoningChecker{"reasoning-model": true}, "reasoning-model")
+	assertOneshotProfile(t, profile, 4096, true, 0.2, &model.ReasoningConfig{Effort: "low"})
+}
+
+func TestResolveOneshotRequestProfilePR(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "auto"
+
+	profile := resolveOneshotRequestProfile("pr", cfg, oneshotProfileReasoningChecker{"reasoning-model": true}, "reasoning-model")
+	assertOneshotProfile(t, profile, 8192, true, 0.2, &model.ReasoningConfig{Effort: "medium"})
+}
+
+func TestResolveOneshotRequestProfileDisablesReasoningWhenConfiguredOff(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "off"
+
+	profile := resolveOneshotRequestProfile("commit", cfg, oneshotProfileReasoningChecker{"reasoning-model": true}, "reasoning-model")
+	if profile.Reasoning == nil || profile.Reasoning.Enabled == nil || *profile.Reasoning.Enabled {
+		t.Fatalf("Reasoning = %+v, want explicit enabled=false", profile.Reasoning)
+	}
+	if profile.Reasoning.Effort != "" {
+		t.Fatalf("Reasoning.Effort = %q, want empty when disabled", profile.Reasoning.Effort)
+	}
+}
+
+func TestResolveOneshotRequestProfileOmitsReasoningWhenUnsupported(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.Reasoning = "auto"
+
+	profile := resolveOneshotRequestProfile("commit", cfg, oneshotProfileReasoningChecker{}, "reasoning-model")
+	if profile.Reasoning != nil {
+		t.Fatalf("Reasoning = %+v, want nil for unsupported model", profile.Reasoning)
+	}
+	if profile.MaxOutputTokens != 4096 || !profile.RequireTool {
+		t.Fatalf("commit transport profile was not preserved without reasoning: %+v", profile)
+	}
+}
+
+func TestNewOneshotToolInvokerWarnsOnceForUnknownReasoningMetadata(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.DefaultProvider = "openai_compatible"
+	cfg.Models.Reasoning = "auto"
+	cfg.Providers.OpenAICompatible.Enabled = true
+	cfg.Providers.OpenAICompatible.BaseURL = "https://example.invalid/v1"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	stderr := captureOneshotStderr(t, func() {
+		invoker, err := newOneshotToolInvoker(oneshotBackendAPI, "commit", "future\nmodel", cfg, mgr, nil)
+		if err != nil {
+			t.Fatalf("newOneshotToolInvoker: %v", err)
+		}
+		if invoker == nil {
+			t.Fatal("newOneshotToolInvoker returned nil invoker")
+		}
+	})
+	if !strings.Contains(stderr, "buckley: reasoning disabled") || !strings.Contains(stderr, "capability metadata is unavailable") {
+		t.Fatalf("stderr = %q, want unknown metadata diagnostic", stderr)
+	}
+	if strings.Contains(stderr, "\nmodel") {
+		t.Fatalf("stderr contains unsanitized model label: %q", stderr)
+	}
+	if strings.Count(stderr, "reasoning disabled") != 1 {
+		t.Fatalf("stderr = %q, want one diagnostic", stderr)
+	}
+}
+
+func TestNewOneshotToolInvokerDoesNotWarnWhenReasoningExplicitlyOff(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Models.DefaultProvider = "openai_compatible"
+	cfg.Models.Reasoning = "off"
+	cfg.Providers.OpenAICompatible.Enabled = true
+	cfg.Providers.OpenAICompatible.BaseURL = "https://example.invalid/v1"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	stderr := captureOneshotStderr(t, func() {
+		invoker, err := newOneshotToolInvoker(oneshotBackendAPI, "commit", "future-model", cfg, mgr, nil)
+		if err != nil {
+			t.Fatalf("newOneshotToolInvoker: %v", err)
+		}
+		if invoker == nil {
+			t.Fatal("newOneshotToolInvoker returned nil invoker")
+		}
+	})
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want no diagnostic", stderr)
+	}
+}
+
+func captureOneshotStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		os.Stderr = old
+		_ = w.Close()
+		_ = r.Close()
+		restored = true
+	}
+	defer restore()
+	t.Cleanup(restore)
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr pipe writer: %v", err)
+	}
+	os.Stderr = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stderr pipe reader: %v", err)
+	}
+	restored = true
+	return string(out)
+}
+
+func assertOneshotProfile(t *testing.T, profile oneshot.RequestProfile, wantMaxOutput int, wantRequireTool bool, wantTemperature float64, wantReasoning *model.ReasoningConfig) {
+	t.Helper()
+	if profile.MaxOutputTokens != wantMaxOutput {
+		t.Fatalf("MaxOutputTokens = %d, want %d", profile.MaxOutputTokens, wantMaxOutput)
+	}
+	if profile.RequireTool != wantRequireTool {
+		t.Fatalf("RequireTool = %v, want %v", profile.RequireTool, wantRequireTool)
+	}
+	if profile.Temperature == nil || *profile.Temperature != wantTemperature {
+		t.Fatalf("Temperature = %v, want %g", profile.Temperature, wantTemperature)
+	}
+	if wantReasoning == nil {
+		if profile.Reasoning != nil {
+			t.Fatalf("Reasoning = %+v, want nil", profile.Reasoning)
+		}
+		return
+	}
+	if profile.Reasoning == nil {
+		t.Fatalf("Reasoning = nil, want %+v", wantReasoning)
+	}
+	if profile.Reasoning.Effort != wantReasoning.Effort || profile.Reasoning.MaxTokens != wantReasoning.MaxTokens {
+		t.Fatalf("Reasoning = %+v, want %+v", profile.Reasoning, wantReasoning)
 	}
 }
 

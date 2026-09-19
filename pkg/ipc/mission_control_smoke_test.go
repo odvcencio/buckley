@@ -29,6 +29,79 @@ import (
 	"m31labs.dev/buckley/pkg/storage"
 )
 
+func TestMissionControlGoSXNotFoundMiddlewareSmoke(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "mission-control-gosx.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := NewServer(Config{
+		BindAddress: "127.0.0.1:0", EnableBrowser: true, RequireToken: true, AuthToken: "unit-token",
+	}, store, nil, command.NewGateway(), nil, &config.Config{}, nil, nil)
+
+	router := chi.NewRouter()
+	router.Use(server.corsMiddleware)
+	router.Use(server.securityHeadersMiddleware)
+	router.Use(server.sessionMiddleware)
+	router.Use(server.basicAuthMiddleware)
+	router.Route("/api", func(r chi.Router) {
+		r.Use(server.authMiddleware)
+		r.Get("/probe", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, principalFromContext(r.Context()).Name)
+		})
+	})
+	router.With(server.authContextMiddleware).Get("/connect-probe", func(w http.ResponseWriter, r *http.Request) {
+		principal := principalFromContext(r.Context())
+		if principal == nil {
+			http.Error(w, "missing principal", http.StatusUnauthorized)
+			return
+		}
+		_, _ = io.WriteString(w, principal.Name)
+	})
+	server.mountBrowserUI(router)
+
+	for _, target := range []string{"/api/probe", "/connect-probe"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://localhost"+target, nil)
+		req.Header.Set("Authorization", "Bearer unit-token")
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "builtin" {
+			t.Fatalf("registered route %s status/body=%d/%q", target, rec.Code, rec.Body.String())
+		}
+		if countNamedCookies(rec.Result(), sessionCookieName) != 0 {
+			t.Fatalf("registered route %s unexpectedly bootstrapped browser cookie", target)
+		}
+	}
+
+	bootstrap := httptest.NewRecorder()
+	bootstrapReq := httptest.NewRequest(http.MethodGet, "http://localhost/?token=unit-token&session=selected&page=7", nil)
+	router.ServeHTTP(bootstrap, bootstrapReq)
+	if bootstrap.Code != http.StatusSeeOther || bootstrap.Header().Get("Location") != "/?page=7&session=selected" {
+		t.Fatalf("NotFound bootstrap status/location=%d/%q", bootstrap.Code, bootstrap.Header().Get("Location"))
+	}
+	if countNamedCookies(bootstrap.Result(), sessionCookieName) != 1 {
+		t.Fatalf("NotFound bootstrap Set-Cookie values=%v", bootstrap.Header().Values("Set-Cookie"))
+	}
+
+	follow := httptest.NewRecorder()
+	followReq := httptest.NewRequest(http.MethodGet, "http://localhost"+bootstrap.Header().Get("Location"), nil)
+	followReq.AddCookie(onlyBrowserSessionCookie(t, bootstrap.Result()))
+	router.ServeHTTP(follow, followReq)
+	if follow.Code != http.StatusOK || !strings.Contains(follow.Body.String(), "Mission Control") {
+		t.Fatalf("NotFound follow status=%d", follow.Code)
+	}
+	if got := follow.Header().Values("Content-Security-Policy"); len(got) != 1 {
+		t.Fatalf("CSP values=%q, want exactly one", got)
+	}
+	if got := follow.Header().Values("X-Frame-Options"); len(got) != 1 || got[0] != "DENY" {
+		t.Fatalf("frame header values=%q", got)
+	}
+	if countNamedCookies(follow.Result(), sessionCookieName) != 0 {
+		t.Fatal("authenticated follow-up rotated browser cookie")
+	}
+	assertGoSXNavigationCSP(t, follow)
+}
+
 func TestMissionControlSmokeFlow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY smoke test is not supported on Windows")

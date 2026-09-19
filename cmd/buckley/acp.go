@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
@@ -36,31 +37,11 @@ import (
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/types"
 )
 
-const defaultACPSystemPrompt = `You are Buckley, an AI development assistant with access to tools.
-
-CRITICAL BEHAVIOR:
-- Use tools to complete tasks, not just describe what you would do.
-- Continue calling tools until the task is fully complete.
-- Do not stop after one tool call if more work is needed.
-- After each tool result, evaluate if more actions are required.
-
-TOOL USAGE:
-- Use search_text to find files and code locations.
-- Use read_file to examine file contents.
-- Use edit_file to make changes.
-- Use run_shell for commands, builds, and tests.
-- Use create_skill to generate new SKILL.md files when the user requests a new skill.
-- Chain multiple tool calls as needed.
-
-ANTI-PATTERNS TO AVOID:
-- Do not respond with just text when tools are needed.
-- Do not stop after acknowledging a task without executing it.
-- Do not describe what you would do without actually doing it.
-
-Always take action with tools. If you are uncertain, use tools to investigate.`
+const defaultACPSystemPrompt = prompts.DefaultToolUseSystemPrompt + "\n\nUse create_skill when the user explicitly asks to create a new skill."
 
 const (
 	acpModePrefix  = "model:"
@@ -155,13 +136,20 @@ func runACPCommand(args []string) error {
 		// about which model is active. Permission modes stay as modes;
 		// this only adds a second surface for the model selector.
 		OnSessionConfigOptions: func(ctx context.Context, session *acp.AgentSession) ([]acp.SessionConfigOption, error) {
-			return buildACPModelConfigOptions(cfg, mgr, session), nil
+			return buildACPSessionConfigOptions(cfg, mgr, session), nil
 		},
 		OnSetConfigOption: func(ctx context.Context, session *acp.AgentSession, configID string, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
-			if configID != acpModelConfigID {
+			switch configID {
+			case acpModelConfigID:
+				return applyACPSetModelConfigOption(cfg, mgr, session, value)
+			case acpTaskIntentConfigID:
+				if err := applyACPSetTaskIntentConfigOption(session, value); err != nil {
+					return nil, err
+				}
+				return buildACPSessionConfigOptions(cfg, mgr, session), nil
+			default:
 				return nil, fmt.Errorf("unknown config option %q", configID)
 			}
-			return applyACPSetModelConfigOption(cfg, mgr, session, value)
 		},
 		// OnSessionCommands (S6) loads the skill registry fresh from disk
 		// rather than reusing the per-prompt session state (getACPSessionState
@@ -288,20 +276,38 @@ func makePromptHandler(
 			skillsBefore = len(state.skills.List())
 		}
 
-		// S1: runACPLoop streams the final message as agent_message_chunk
-		// notifications while the model generates it (see streamACPTurn), so
-		// the returned text is not re-sent here -- doing so would duplicate
-		// every turn's content on the wire.
+		// S1: runACPLoop streams accepted messages as agent_message_chunk
+		// notifications while the model generates them (see streamACPTurn).
+		// On incomplete turns, however, retained public text can return after
+		// buffered delivery was discarded; stream that text only when the
+		// loop's delivery metadata says this candidate was not attempted.
+		taskIntent, intentErr := consumeACPNextTaskIntent(session)
+		if intentErr != nil {
+			return nil, intentErr
+		}
+		if taskIntent != agentloop.UnknownIntent && stream != nil {
+			stream(acp.NewConfigOptionUpdate(buildACPSessionConfigOptions(cfg, mgr, session)))
+		}
 		turnID := state.nextLifecycleTurnID()
-		_, err := runACPLoopWithLimits(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream, acpLoopLimits{
+		text, err := runACPLoopWithLimits(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream, acpLoopLimits{
 			LifecycleObserver:  lifecycleObserver,
 			LifecycleSessionID: state.lifecycleSessionID,
 			TurnID:             turnID,
+			TaskIntent:         taskIntent,
 		})
 		if err != nil {
 			projected := newACPProjectedError(err)
 			logACPProjectedPromptError(logf, projected)
-			stream(acp.NewAgentMessageChunk("\n\nError: " + projected.Error()))
+			if stream != nil && shouldStreamACPIncompleteDraft(text, err) {
+				stream(acp.NewAgentMessageChunk("\n\nIncomplete draft (not accepted):\n\n" + text))
+			}
+			if stream != nil {
+				if notice := agentloop.PresentIncompleteResult(err); notice.Code != "incomplete_turn" || notice.Reason != "the turn stopped before a conclusive answer was produced" {
+					stream(acp.NewAgentMessageChunk("\n\n" + notice.Message))
+				} else {
+					stream(acp.NewAgentMessageChunk("\n\nError: " + projected.Error()))
+				}
+			}
 			return nil, projected
 		}
 
@@ -326,6 +332,17 @@ func makePromptHandler(
 	}
 
 	return handler, cleanup
+}
+
+func shouldStreamACPIncompleteDraft(text string, err error) bool {
+	if strings.TrimSpace(text) == "" || err == nil {
+		return false
+	}
+	var draft *acpIncompleteDraftError
+	if !errors.As(err, &draft) || draft == nil {
+		return false
+	}
+	return !draft.deliveryAttempted
 }
 
 type acpSessionState struct {
@@ -469,6 +486,9 @@ func getACPSessionState(
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
 ) *acpSessionState {
+	if mu == nil || sessions == nil {
+		return nil
+	}
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -919,6 +939,83 @@ func resolveACPModelOverride(cfg *config.Config, mgr *model.Manager, modeID stri
 // picker (S8) -- the ID a client sends back as configId on
 // session/set_config_option.
 const acpModelConfigID = "model"
+const acpTaskIntentConfigID = "task_intent"
+const acpTaskIntentEnvKey = "buckley.task_intent"
+
+func buildACPSessionConfigOptions(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) []acp.SessionConfigOption {
+	options := buildACPModelConfigOptions(cfg, mgr, session)
+	options = append(options, buildACPTaskIntentConfigOption(acpSessionTaskIntent(session)))
+	return options
+}
+
+func acpSessionTaskIntent(session *acp.AgentSession) agentloop.TaskIntent {
+	intent, err := acpSessionTaskIntentStrict(session)
+	if err != nil {
+		return agentloop.UnknownIntent
+	}
+	return intent
+}
+
+func acpSessionTaskIntentStrict(session *acp.AgentSession) (agentloop.TaskIntent, error) {
+	if session == nil || session.Environment == nil {
+		return agentloop.UnknownIntent, nil
+	}
+	intent, err := agentloop.ParseTaskIntent(session.Environment[acpTaskIntentEnvKey])
+	if err != nil {
+		return "", err
+	}
+	return intent, nil
+}
+
+func consumeACPNextTaskIntent(session *acp.AgentSession) (agentloop.TaskIntent, error) {
+	intent, err := acpSessionTaskIntentStrict(session)
+	if err != nil {
+		return "", err
+	}
+	if session != nil && session.Environment != nil {
+		delete(session.Environment, acpTaskIntentEnvKey)
+	}
+	return intent, nil
+}
+
+func buildACPTaskIntentConfigOption(current agentloop.TaskIntent) acp.SessionConfigOption {
+	if current == "" {
+		current = agentloop.UnknownIntent
+	}
+	values := []acp.SessionConfigSelectOption{
+		{Value: string(agentloop.UnknownIntent), Name: "Automatic", Description: "Use the default completion rules for open-ended chat."},
+		{Value: string(agentloop.ReadOnlyIntent), Name: "No change required", Description: "A useful answer can complete the next request without requiring an edit."},
+		{Value: string(agentloop.MutationIntent), Name: "Change required", Description: "The next request is complete only after an observable change and verification."},
+	}
+	return acp.SessionConfigOption{
+		ID:           acpTaskIntentConfigID,
+		Name:         "Next request",
+		Description:  "Result contract for the next prompt only.",
+		Category:     acp.SessionConfigCategoryMode,
+		Type:         acp.SessionConfigKindSelect,
+		CurrentValue: string(current),
+		Options:      values,
+	}
+}
+
+func applyACPSetTaskIntentConfigOption(session *acp.AgentSession, value acp.ConfigOptionValue) error {
+	raw := strings.TrimSpace(value.ValueID)
+	if raw == "" {
+		return fmt.Errorf("task intent config option requires a value id: unknown, read_only, or mutation")
+	}
+	intent, err := agentloop.ParseTaskIntent(raw)
+	if err != nil {
+		return err
+	}
+	if session == nil {
+		return nil
+	}
+	if session.Environment == nil {
+		session.Environment = make(map[string]string)
+	}
+	session.Environment[acpTaskIntentEnvKey] = string(intent)
+	return nil
+}
 
 // buildACPModelConfigOptions builds the "model" SessionConfigOption (S8):
 // a select-style config option listing every curated model, alongside the
@@ -994,13 +1091,24 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 // whether any round has executed tools yet (the finalize-nudge gate), and
 // the last phase update sent (sendACPPhaseUpdate dedupes on it).
 type acpLoopState struct {
-	useTools         bool
-	toolTurnEnabled  bool
-	allowedTools     []string
-	toolsExecuted    bool
-	lastPhase        string
-	codeModeRecovery *tool.CodeModeRecoveryState
-	childMailbox     *subagent.FileMailboxReader
+	useTools        bool
+	toolTurnEnabled bool
+	allowedTools    []string
+	// route is resolved once after execution-model selection. Every request
+	// built during this prompt carries it so streaming dispatch can reject a
+	// hook/routing change before an upstream provider sees the request.
+	route model.ModelRoute
+	// toolsCatalogConfirmedUnavailable distinguishes an intentional catalog
+	// decision from the reactive provider tool-unsupported fallback below.
+	toolsCatalogConfirmedUnavailable bool
+	// requestHadToolSchemas records the exact just-completed request. A model
+	// can emit a structured call even when schemas were omitted; that output is
+	// retained as a failed control outcome, never executed locally.
+	requestHadToolSchemas bool
+	toolsExecuted         bool
+	lastPhase             string
+	codeModeRecovery      *tool.CodeModeRecoveryState
+	childMailbox          *subagent.FileMailboxReader
 	// contextWindow is resolved once per prompt turn (the model does not
 	// change mid-turn) and paired with each round's model.Usage to report
 	// usage_update as "tokens used out of this context window" (N1).
@@ -1009,8 +1117,10 @@ type acpLoopState struct {
 	// accepts a tool-bearing assistant message or the ACP loop accepts a final
 	// no-tool candidate. A rejected/nudged response is never presented to the
 	// ACP client as accepted assistant output.
-	pendingModelUpdates []acp.SessionUpdate
-	pendingModelUsage   *model.Usage
+	pendingModelUpdates           []acp.SessionUpdate
+	pendingModelUsage             *model.Usage
+	currentDraftDeliveryAttempted bool
+	currentObservedToolDelta      bool
 }
 
 // runACPLoop drives one ACP prompt turn through the shared turn engine
@@ -1042,19 +1152,35 @@ func runACPLoop(
 }
 
 type acpLoopLimits struct {
-	StepCap            int
-	MaxToolCalls       int
-	MaxModelRequests   int
-	MaxElapsedSeconds  int
-	MaxCostUSD         float64
-	LifecycleObserver  agentloop.LifecycleObserver
-	LifecycleSessionID string
-	TurnID             string
-	RunID              string
-	ParentRunID        string
-	TaskID             string
-	ParentSessionID    string
-	ChildContract      bool
+	ValidateFinalResponse func(string) error
+	SubmittedResponse     func() (string, bool)
+	RequiredSourceText    []string
+	SourceScope           *agentcoord.SourceScope
+	// executionRoute is supplied only by a one-shot output contract that
+	// negotiated from this exact route. ACP otherwise resolves its own route.
+	executionRoute          model.ModelRoute
+	FinalizationInstruction string
+	StepCap                 int
+	MaxOutputTokens         int
+	ProtocolReasoning       *model.ReasoningConfig
+	MaxToolCalls            int
+	MaxModelRequests        int
+	ReadOnlyWarningAt       int
+	ReadOnlyActionAt        int
+	MaxReadOnlyCalls        int
+	VerificationDepth       string
+	MaxVerificationAttempts int
+	MaxElapsedSeconds       int
+	MaxCostUSD              float64
+	LifecycleObserver       agentloop.LifecycleObserver
+	LifecycleSessionID      string
+	TurnID                  string
+	RunID                   string
+	ParentRunID             string
+	TaskID                  string
+	ParentSessionID         string
+	ChildContract           bool
+	TaskIntent              agentloop.TaskIntent
 }
 
 // runACPLoopWithStepCap is the internal one-shot variant that applies a
@@ -1099,6 +1225,21 @@ func runACPLoopWithLimits(
 	if modelErr != nil {
 		return "", modelErr
 	}
+	route := limits.executionRoute
+	if route != (model.ModelRoute{}) {
+		if strings.TrimSpace(route.RequestedModel) == "" || strings.TrimSpace(route.SelectedModel) == "" || strings.TrimSpace(route.ProviderID) == "" {
+			return "", fmt.Errorf("retained execution route requires requested model, selected model, and provider")
+		}
+		if route.RequestedModel != modelID {
+			return "", fmt.Errorf("retained execution route requested model %q does not match resolved execution model %q", route.RequestedModel, modelID)
+		}
+	} else {
+		var routeErr error
+		route, routeErr = mgr.ResolveModelRoute(modelID)
+		if routeErr != nil {
+			return "", routeErr
+		}
+	}
 	childMailbox, mailboxPresent, err := subagent.OpenChildMailboxFromEnv()
 	if err != nil {
 		return "", err
@@ -1107,12 +1248,14 @@ func runACPLoopWithLimits(
 		defer childMailbox.Close()
 	}
 	state := &acpLoopState{
-		useTools:         acpModelCanUseTools(registry, mgr, modelID),
-		codeModeRecovery: &tool.CodeModeRecoveryState{},
-		childMailbox:     childMailbox,
+		useTools:                         acpModelCanUseTools(registry, mgr, route),
+		route:                            route,
+		toolsCatalogConfirmedUnavailable: mgr.ToolsCatalogConfirmedUnavailableForRoute(route),
+		codeModeRecovery:                 &tool.CodeModeRecoveryState{},
+		childMailbox:                     childMailbox,
 	}
 	if mgr != nil {
-		state.contextWindow, _ = mgr.GetContextLength(modelID)
+		state.contextWindow, _ = mgr.GetContextLengthForRoute(route)
 	}
 
 	ctrl, err := newACPLoopController(cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state, limits)
@@ -1126,7 +1269,7 @@ func runACPLoopWithLimits(
 	}()
 
 	nudgeCount := 0
-	unavailableToolMarkupNudgeCount := 0
+	toolMarkupRecoveryCount := 0
 	finalizeNudgeCount := 0
 	// The nudge and tools-unsupported paths re-run the same Controller:
 	// its per-turn state lives in state and the Governor, so a re-run
@@ -1140,13 +1283,13 @@ func runACPLoopWithLimits(
 		if err != nil {
 			var incomplete *agentloop.IncompleteTurnError
 			if errors.As(err, &incomplete) && result != nil {
-				return result.Content, err
+				return result.Content, acpIncompleteDraftErrorForResult(result.Content, err, result, state, registry)
 			}
 			var partial *partialStreamTurnError
 			if errors.As(err, &partial) {
-				return partial.text, err
+				return partial.text, acpIncompleteDraftErrorForPartial(partial, err, state, registry)
 			}
-			if state.useTools && isToolUnsupportedError(err) {
+			if state.useTools && model.IsToolUnsupportedError(err) {
 				state.useTools = false
 				continue
 			}
@@ -1154,7 +1297,7 @@ func runACPLoopWithLimits(
 		}
 
 		if completionErr := result.RequireConclusive(); completionErr != nil {
-			return result.Content, completionErr
+			return result.Content, acpIncompleteDraftErrorForResult(result.Content, completionErr, result, state, registry)
 		}
 		harnessFinal := result.FinishReason == agentloop.FinishReasonLoopGuard || result.FinishReason == agentloop.FinishReasonStepCap
 		switch result.FinishReason {
@@ -1187,18 +1330,29 @@ func runACPLoopWithLimits(
 			}
 			return "", fmt.Errorf("model returned an empty final response after tool execution")
 		}
-		if toolName, attempted := soleKnownACPToolInvocationMarkup(text, registry); attempted && (harnessFinal || !state.toolTurnEnabled) {
-			if !harnessFinal && unavailableToolMarkupNudgeCount == 0 {
-				unavailableToolMarkupNudgeCount++
-				conv.AddUserMessage(fmt.Sprintf(
-					"Tools are unavailable for this turn. Your prior response attempted to call %s as markup instead of answering. Answer directly in ordinary prose using only the available context; do not emit tool-call markup.",
-					toolName,
-				))
+		if toolName, attempted := acpToolInvocationMarkup(text, registry); attempted {
+			if !harnessFinal && toolMarkupRecoveryCount == 0 {
+				toolMarkupRecoveryCount++
+				if state.toolTurnEnabled {
+					conv.AddUserMessage(fmt.Sprintf(
+						"Your prior response emitted %s tool-control markup as text. If a tool is needed, use the structured tool-call channel; otherwise answer directly in ordinary prose. Do not emit textual tool-call markup.",
+						toolName,
+					))
+				} else {
+					conv.AddUserMessage(fmt.Sprintf(
+						"Tools are unavailable for this turn. Your prior response attempted to call %s as markup instead of answering. Answer directly in ordinary prose using only the available context; do not emit tool-call markup.",
+						toolName,
+					))
+				}
 				continue
+			}
+			reason := fmt.Sprintf("model returned %s invocation markup as text", toolName)
+			if !state.toolTurnEnabled {
+				reason = fmt.Sprintf("model returned %s invocation markup while no tools were available", toolName)
 			}
 			return text, &agentloop.IncompleteTurnError{
 				FinishReason: result.FinishReason,
-				Reason:       fmt.Sprintf("model returned %s invocation markup while no tools were available", toolName),
+				Reason:       reason,
 			}
 		}
 		if !harnessFinal && shouldNudgeACPToolUse(state.useTools, state.toolTurnEnabled, nudgeCount, text) {
@@ -1216,6 +1370,53 @@ func runACPLoopWithLimits(
 	}
 }
 
+type acpIncompleteDraftError struct {
+	cause             error
+	deliveryAttempted bool
+}
+
+func (e *acpIncompleteDraftError) Error() string {
+	if e == nil || e.cause == nil {
+		return "incomplete draft"
+	}
+	return e.cause.Error()
+}
+
+func (e *acpIncompleteDraftError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func acpIncompleteDraftErrorForPartial(partial *partialStreamTurnError, err error, state *acpLoopState, registry *tool.Registry) error {
+	if err == nil || partial == nil || strings.TrimSpace(partial.text) == "" {
+		return err
+	}
+	if len(partial.turn.Message.ToolCalls) > 0 || partial.turn.ObservedToolDelta {
+		return err
+	}
+	if _, attempted := acpToolInvocationMarkup(partial.text, registry); attempted {
+		return err
+	}
+	deliveryAttempted := state != nil && state.currentDraftDeliveryAttempted
+	return &acpIncompleteDraftError{cause: err, deliveryAttempted: deliveryAttempted}
+}
+
+func acpIncompleteDraftErrorForResult(text string, err error, result *agentloop.Result, state *acpLoopState, registry *tool.Registry) error {
+	if err == nil || result == nil || strings.TrimSpace(text) == "" {
+		return err
+	}
+	if len(result.Message.ToolCalls) > 0 || (state != nil && state.currentObservedToolDelta) {
+		return err
+	}
+	if _, attempted := acpToolInvocationMarkup(text, registry); attempted {
+		return err
+	}
+	deliveryAttempted := state != nil && state.currentDraftDeliveryAttempted
+	return &acpIncompleteDraftError{cause: err, deliveryAttempted: deliveryAttempted}
+}
+
 // partialStreamTurnError preserves the accumulated stream when an SSE
 // connection ends after the provider has started its response. The complete
 // fragment is retained for evidence/accounting, while Controller still
@@ -1224,9 +1425,46 @@ type partialStreamTurnError struct {
 	cause error
 	text  string
 	turn  acpStreamTurn
+	// attempts is populated when a safe no-tools retry was exhausted. The
+	// first attempt is retained as evidence even though neither attempt's
+	// partial deltas are released to the ACP client.
+	attempts []acpStreamAttemptEvidence
 }
 
-func (e *partialStreamTurnError) Error() string { return e.cause.Error() }
+type acpStreamAttemptEvidence struct {
+	turn acpStreamTurn
+	err  error
+}
+
+func (e *partialStreamTurnError) Error() string {
+	if e == nil {
+		return "agent stream is incomplete"
+	}
+	if len(e.attempts) < 2 {
+		if e.cause == nil {
+			return "agent stream is incomplete"
+		}
+		return e.cause.Error()
+	}
+	details := make([]string, 0, len(e.attempts))
+	for i, attempt := range e.attempts {
+		detail := fmt.Sprintf("attempt %d", i+1)
+		if attempt.err != nil {
+			detail += ": " + attempt.err.Error()
+		}
+		if text := model.ExtractTextContentOrEmpty(attempt.turn.Message.Content); text != "" {
+			detail += fmt.Sprintf(" (content_bytes=%d)", len(text))
+		}
+		if finish := strings.TrimSpace(attempt.turn.FinishReason); finish != "" {
+			detail += ", finish=" + finish
+		}
+		if len(attempt.turn.Message.ToolCalls) > 0 {
+			detail += fmt.Sprintf(", tool_calls=%d", len(attempt.turn.Message.ToolCalls))
+		}
+		details = append(details, detail)
+	}
+	return "stream retry failed: " + strings.Join(details, "; ")
+}
 
 func (e *partialStreamTurnError) Unwrap() error { return e.cause }
 
@@ -1268,39 +1506,68 @@ func newACPLoopController(
 	limits acpLoopLimits,
 ) (*agentloop.Controller, error) {
 	evaluator := newACPEvaluator(engine)
+	governor := newACPToolLoopGovernorWithLimits(cfg, limits)
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		if _, err := drainChildMailbox(conv, state.childMailbox); err != nil {
 			return model.ChatRequest{}, err
 		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools)
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, governor.ActionRequired(), limits.TaskIntent)
 		state.useTools = toolTurn.UseTools
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
-		return buildACPChatRequest(cfg, mgr, engine, conv, modelID, toolTurn), nil
+		req := buildACPChatRequestForRoute(cfg, mgr, engine, conv, modelID, state.route, toolTurn, limits)
+		if state.toolsCatalogConfirmedUnavailable {
+			req.ToolsCatalogConfirmedUnavailable = true
+			req.Messages = append(req.Messages, model.Message{
+				Role:    "system",
+				Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
+			})
+		}
+		return req, nil
 	}
 
+	completionContract := acpCompletionContract(limits)
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		// Controller may turn a tool-bearing round into a final synthesis
+		// request. Record this post-controller shape, not the earlier build
+		// shape, so surprise calls are evaluated against the request actually
+		// delivered to the provider.
+		state.requestHadToolSchemas = len(req.Tools) > 0
 		state.pendingModelUpdates = nil
 		state.pendingModelUsage = nil
-		turn, err := streamACPTurnWithDelivery(ctx, mgr, req, stream, limits.MaxCostUSD > 0)
-		// N1: the round's usage is available right after the round
-		// completes -- report it immediately rather than waiting for the
-		// whole prompt turn to finish, so a multi-round tool turn shows
-		// live context-window growth.
-		if limits.MaxCostUSD > 0 {
+		state.currentDraftDeliveryAttempted = false
+		state.currentObservedToolDelta = false
+		deferModelDelivery := limits.MaxCostUSD > 0 || completionContract != nil
+		modelStream := stream
+		if !deferModelDelivery && stream != nil {
+			modelStream = func(update acp.SessionUpdate) error {
+				if update.SessionUpdate == acp.SessionUpdateAgentMessageChunk {
+					if block, ok := update.Content.(acp.ContentBlock); ok && strings.TrimSpace(block.Text) != "" {
+						state.currentDraftDeliveryAttempted = true
+					}
+				}
+				return stream(update)
+			}
+		}
+		turn, err := streamACPTurnWithDelivery(ctx, mgr, req, modelStream, deferModelDelivery)
+		state.currentObservedToolDelta = turn.ObservedToolDelta
+		resp := buildACPStreamChatResponse(req, turn)
+		usageForUpdate := turn.Usage
+		if usageForUpdate == nil && resp.Usage.Estimated {
+			estimated := resp.Usage
+			usageForUpdate = &estimated
+		}
+		// N1: report provider usage, or Buckley's marked local estimate when
+		// the provider omitted it, immediately after the round rather than
+		// waiting for the whole prompt turn to finish. Multi-round tool turns
+		// therefore still show live context-window growth.
+		if deferModelDelivery {
 			state.pendingModelUpdates = turn.Updates
-			state.pendingModelUsage = turn.Usage
+			state.pendingModelUsage = usageForUpdate
 		} else {
-			sendACPUsageUpdate(stream, turn.Usage, state.contextWindow)
-		}
-		resp := &model.ChatResponse{
-			Model:   req.Model,
-			Choices: []model.Choice{{Message: turn.Message, FinishReason: turn.FinishReason}},
-		}
-		if turn.Usage != nil {
-			resp.Usage = *turn.Usage
+			sendACPUsageUpdate(stream, usageForUpdate, state.contextWindow)
 		}
 		if err != nil {
 			// A provider can charge for a stream that ends after emitting
@@ -1316,6 +1583,13 @@ func newACPLoopController(
 	})
 
 	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		if !state.requestHadToolSchemas {
+			outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+			for i, tc := range calls {
+				outcomes = append(outcomes, rejectACPUnexpectedToolCall(stream, tc, i+1, len(calls), state, workDir))
+			}
+			return outcomes, nil
+		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Executing %d tool call(s)…", len(calls)))
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
 		for i, tc := range calls {
@@ -1324,7 +1598,7 @@ func newACPLoopController(
 			}
 			outcomes = append(outcomes, dispatchACPToolCall(ctx, registry, evaluator, stream, tc, i+1, len(calls), state, workDir, sessionID, agent, logf))
 		}
-		state.toolsExecuted = true
+		state.toolsExecuted = len(calls) > 0
 		return outcomes, nil
 	})
 
@@ -1335,6 +1609,8 @@ func newACPLoopController(
 			conv.AddToolCallMessageWithReasoning(msg.ToolCalls, msg.Reasoning, msg.ReasoningDetails)
 		case msg.Role == "tool":
 			conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
+		case msg.Role == "user":
+			conv.AddUserMessage(model.ExtractTextContentOrEmpty(msg.Content))
 		}
 	})
 
@@ -1343,26 +1619,26 @@ func newACPLoopController(
 		lifecycleSessionID = strings.TrimSpace(sessionID)
 	}
 	controllerConfig := agentloop.ControllerConfig{
-		Governor:         newACPToolLoopGovernorWithLimits(cfg, limits),
-		StepCap:          limits.StepCap,
-		FinalizeOnStop:   true,
-		MaxCostUSD:       limits.MaxCostUSD,
-		MaxModelRequests: limits.MaxModelRequests,
+		Governor:                governor,
+		StepCap:                 limits.StepCap,
+		FinalizeOnStop:          true,
+		FinalizationInstruction: limits.FinalizationInstruction,
+		MaxCostUSD:              limits.MaxCostUSD,
+		MaxModelRequests:        limits.MaxModelRequests,
 		// Progress carries only operator-wide emergency fuses. Child task
 		// ceilings are enforced by the governor/context/cost fields, so a zero
 		// child budget never synthesizes a second hidden cap here.
-		Progress:      newACPProgressController(cfg),
-		BuildRequest:  buildRequest,
-		CallModel:     callModel,
-		DispatchTools: dispatch,
-		History:       history,
-		ContextWindow: func(mid string) int {
-			if mgr == nil {
-				return 0
-			}
-			window, _ := mgr.GetContextLength(mid)
-			return window
-		},
+		Progress:           newACPProgressController(cfg),
+		CompletionContract: completionContract,
+		BuildRequest:       buildRequest,
+		CallModel:          callModel,
+		DispatchTools:      dispatch,
+		History:            history,
+		// The route and its context window were resolved before Controller
+		// construction. Reusing that value keeps ordinary and finalization
+		// projections pinned to the same provider/model evidence without a
+		// second alias lookup or routing-hook invocation.
+		ContextWindow:         func(string) int { return state.contextWindow },
 		RunID:                 strings.TrimSpace(limits.RunID),
 		SessionID:             lifecycleSessionID,
 		TaskID:                strings.TrimSpace(limits.TaskID),
@@ -1383,6 +1659,31 @@ func newACPToolLoopGovernor(cfg *config.Config) *agentloop.Governor {
 	return newACPToolLoopGovernorWithLimits(cfg, acpLoopLimits{})
 }
 
+func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
+	depth := strings.ToLower(strings.TrimSpace(limits.VerificationDepth))
+	if depth == "legacy" && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
+		return nil
+	}
+	requireVerification := depth != "none" && depth != "off" && depth != "legacy"
+	requireChange := depth != "legacy" && limits.TaskIntent == agentloop.MutationIntent
+	if !requireVerification && !requireChange && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
+		return nil
+	}
+	attempts := limits.MaxVerificationAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	contract := &agentloop.CompletionContract{
+		RequirePostChangeVerification: requireVerification,
+		RequireObservableChange:       requireChange,
+		MaxRepairAttempts:             attempts,
+		TaskIntent:                    limits.TaskIntent,
+		ValidateFinalResponse:         limits.ValidateFinalResponse,
+		SubmittedResponse:             limits.SubmittedResponse,
+	}
+	return contract
+}
+
 func newACPToolLoopGovernorWithLimits(cfg *config.Config, limits acpLoopLimits) *agentloop.Governor {
 	governorConfig := agentloop.DefaultConfig()
 	if limits.ChildContract {
@@ -1400,14 +1701,19 @@ func newACPToolLoopGovernorWithLimits(cfg *config.Config, limits acpLoopLimits) 
 			governorConfig.MaxToolCalls = limit
 		}
 	}
+	if limits.MaxReadOnlyCalls > 0 {
+		governorConfig.ReadOnlyWarningAt = limits.ReadOnlyWarningAt
+		governorConfig.ReadOnlyActionAt = limits.ReadOnlyActionAt
+		governorConfig.MaxReadOnlyCalls = limits.MaxReadOnlyCalls
+	}
 	if limits.ChildContract {
 		// An explicit task value narrows the global fuse; absence/zero adds no
 		// task ceiling. Repetition and cycle detectors stay enabled.
 		if limits.MaxModelRequests > 0 {
-			governorConfig.MaxRounds = minPositiveChildLimit(governorConfig.MaxRounds, limits.MaxModelRequests)
+			governorConfig.MaxRounds = minPositiveLimit(governorConfig.MaxRounds, limits.MaxModelRequests)
 		}
 		if limits.MaxToolCalls > 0 {
-			governorConfig.MaxToolCalls = minPositiveChildLimit(governorConfig.MaxToolCalls, limits.MaxToolCalls)
+			governorConfig.MaxToolCalls = minPositiveLimit(governorConfig.MaxToolCalls, limits.MaxToolCalls)
 		}
 	} else {
 		if limits.MaxModelRequests > 0 && (governorConfig.MaxRounds <= 0 || limits.MaxModelRequests < governorConfig.MaxRounds) {
@@ -1455,10 +1761,13 @@ func streamACPTurn(ctx context.Context, mgr *model.Manager, req model.ChatReques
 }
 
 type acpStreamTurn struct {
-	Message      model.Message
-	Usage        *model.Usage
-	FinishReason string
-	Updates      []acp.SessionUpdate
+	Message           model.Message
+	Usage             *model.Usage
+	FinishReason      string
+	ExecutionIdentity *model.ExecutionIdentity
+	Updates           []acp.SessionUpdate
+	Attempts          []acpStreamAttemptEvidence
+	ObservedToolDelta bool
 }
 
 func acpStreamTurnHasMaterial(turn acpStreamTurn) bool {
@@ -1468,7 +1777,7 @@ func acpStreamTurnHasMaterial(turn acpStreamTurn) bool {
 	if strings.TrimSpace(model.ExtractTextContentOrEmpty(turn.Message.Content)) != "" || strings.TrimSpace(turn.Message.Reasoning) != "" {
 		return true
 	}
-	return len(turn.Message.ToolCalls) > 0 || len(turn.Message.ReasoningDetails) > 0
+	return len(turn.Message.ToolCalls) > 0 || len(turn.Message.ReasoningDetails) > 0 || turn.ObservedToolDelta
 }
 
 func usageValue(usage *model.Usage) model.Usage {
@@ -1478,18 +1787,264 @@ func usageValue(usage *model.Usage) model.Usage {
 	return *usage
 }
 
+func cloneModelExecutionIdentity(identity *model.ExecutionIdentity) *model.ExecutionIdentity {
+	if identity == nil {
+		return nil
+	}
+	cloned := *identity
+	return &cloned
+}
+
+func aggregateACPStreamAttemptUsage(attempts []acpStreamAttemptEvidence) *model.Usage {
+	var aggregate *model.Usage
+	for _, attempt := range attempts {
+		if attempt.turn.Usage == nil {
+			continue
+		}
+		combined := model.AddUsage(usageValue(aggregate), *attempt.turn.Usage)
+		aggregate = &combined
+	}
+	return aggregate
+}
+
+func acpModelAttemptEvidence(attempts []acpStreamAttemptEvidence) []model.ModelAttemptEvidence {
+	if len(attempts) == 0 {
+		return nil
+	}
+	evidence := make([]model.ModelAttemptEvidence, 0, len(attempts))
+	for _, attempt := range attempts {
+		item := model.ModelAttemptEvidence{
+			UsagePresent:      attempt.turn.Usage != nil,
+			FinishReason:      strings.TrimSpace(attempt.turn.FinishReason),
+			Incomplete:        attempt.err != nil,
+			ExecutionIdentity: cloneModelExecutionIdentity(attempt.turn.ExecutionIdentity),
+		}
+		if attempt.turn.Usage != nil {
+			item.Usage = model.AddUsage(model.Usage{}, *attempt.turn.Usage)
+		}
+		evidence = append(evidence, item)
+	}
+	return evidence
+}
+
+func buildACPStreamChatResponse(req model.ChatRequest, turn acpStreamTurn) *model.ChatResponse {
+	response := &model.ChatResponse{
+		Model:             req.Model,
+		Choices:           []model.Choice{{Message: turn.Message, FinishReason: turn.FinishReason}},
+		AttemptEvidence:   acpModelAttemptEvidence(turn.Attempts),
+		ExecutionIdentity: cloneModelExecutionIdentity(turn.ExecutionIdentity),
+	}
+	if turn.Usage != nil {
+		response.Usage = model.AddUsage(model.Usage{}, *turn.Usage)
+		response.UsagePresent = true
+	} else {
+		response.Usage = model.EstimateChatUsage(req, turn.Message)
+	}
+	return response
+}
+
 // streamACPTurnWithDelivery optionally defers assistant deltas so a caller can
 // release them only after the shared Controller accepts the response. Provider
 // finish_reason is retained alongside the accumulated message for conclusive
-// completion validation.
+// completion validation. A no-tools request is buffered through its terminal
+// decision because an inconclusive first attempt is allowed one safe replay;
+// releasing its deltas early would duplicate them if the replay succeeds.
 func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
 	req.Stream = true
-	chunks, errs := mgr.ChatCompletionStream(ctx, req)
+	retryAllowed := acpStreamRetryAllowed(req)
+	bufferDelivery := deferDelivery || retryAllowed
 
+	first, firstErr := streamACPTurnAttempt(ctx, mgr, req, stream, bufferDelivery)
+	if firstErr == nil {
+		if bufferDelivery && !deferDelivery {
+			flushACPStreamUpdates(stream, first.Updates)
+		}
+		return first, nil
+	}
+
+	if !retryAllowed || !acpStreamRetryCandidate(ctx, first, firstErr) {
+		if bufferDelivery && !deferDelivery {
+			flushACPStreamUpdates(stream, first.Updates)
+		}
+		return first, firstErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if bufferDelivery && !deferDelivery {
+			flushACPStreamUpdates(stream, first.Updates)
+		}
+		return first, errors.Join(ctxErr, firstErr)
+	}
+
+	// Keep the second attempt buffered too. If it fails, no fragment from
+	// either inference is presented as an accepted assistant answer.
+	second, secondErr := streamACPTurnAttempt(ctx, mgr, req, stream, true)
+	if secondErr == nil {
+		second.Attempts = []acpStreamAttemptEvidence{
+			{turn: first, err: firstErr},
+			{turn: second},
+		}
+		second.Usage = aggregateACPStreamAttemptUsage(second.Attempts)
+		if !deferDelivery {
+			flushACPStreamUpdates(stream, second.Updates)
+		}
+		return second, nil
+	}
+
+	second.Attempts = []acpStreamAttemptEvidence{
+		{turn: first, err: firstErr},
+		{turn: second, err: secondErr},
+	}
+	second.Usage = aggregateACPStreamAttemptUsage(second.Attempts)
+	return second, &partialStreamTurnError{
+		cause:    errors.Join(firstErr, secondErr),
+		text:     model.ExtractTextContentOrEmpty(second.Message.Content),
+		turn:     second,
+		attempts: second.Attempts,
+	}
+}
+
+func streamACPTurnAttempt(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
+	// A provider can leave its HTTP body or trailer goroutine open after the
+	// semantic finish. Canceling this child context prevents that provider-side
+	// work from outliving the attempt while keeping the caller's turn context
+	// intact for a possible safe retry.
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	route := req.Route
+	// streamACPTurn remains a reusable test/helper boundary. Production ACP
+	// always supplies the prompt-bound route above; direct helper callers that
+	// predate route pinning resolve one immediately before their lone dispatch.
+	if strings.TrimSpace(route.RequestedModel) == "" {
+		resolved, err := mgr.ResolveModelRoute(req.Model)
+		if err != nil {
+			return acpStreamTurn{}, err
+		}
+		route = resolved
+		req.Route = route
+	}
+	chunks, errs := mgr.ChatCompletionStreamForRoute(streamCtx, req, route)
+	return drainACPStreamTurn(streamCtx, req, chunks, errs, stream, deferDelivery)
+}
+
+func acpStreamRetryAllowed(req model.ChatRequest) bool {
+	if len(req.Tools) > 0 {
+		return false
+	}
+	if choice := strings.ToLower(strings.TrimSpace(req.ToolChoice)); choice != "" && choice != "none" {
+		return false
+	}
+	// A no-tools request can still be carrying an earlier tool transaction in
+	// its transcript. Treat that as side-effect-adjacent and do not replay it.
+	for _, message := range req.Messages {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "tool") || len(message.ToolCalls) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error) bool {
+	if err == nil || ctx.Err() != nil || strings.TrimSpace(turn.FinishReason) != "" {
+		return false
+	}
+	if len(turn.Message.ToolCalls) > 0 || turn.ObservedToolDelta || isContextCancellationError(err) {
+		return false
+	}
+	safe := acpEveryErrorLeaf(err, func(leaf error) bool {
+		return leaf == io.ErrUnexpectedEOF || isUsageTrackingUnavailableError(leaf)
+	})
+	return safe && ctx.Err() == nil
+}
+
+const (
+	acpErrorTreeMaxDepth = 64
+	acpErrorTreeMaxNodes = 1024
+)
+
+// acpEveryErrorLeaf fails closed unless every leaf in a bounded unwrap tree
+// satisfies predicate. Depth and node bounds also terminate cyclic custom
+// errors without comparing potentially non-comparable dynamic error values.
+func acpEveryErrorLeaf(root error, predicate func(error) bool) bool {
+	if root == nil || predicate == nil {
+		return false
+	}
+	nodes := 0
+	leaves := 0
+	var walk func(error, int) bool
+	walk = func(current error, depth int) bool {
+		if current == nil || depth > acpErrorTreeMaxDepth {
+			return false
+		}
+		nodes++
+		if nodes > acpErrorTreeMaxNodes {
+			return false
+		}
+		switch wrapped := current.(type) {
+		case interface{ Unwrap() []error }:
+			children := wrapped.Unwrap()
+			if len(children) == 0 {
+				leaves++
+				return predicate(current)
+			}
+			for _, child := range children {
+				if !walk(child, depth+1) {
+					return false
+				}
+			}
+			return true
+		case interface{ Unwrap() error }:
+			if child := wrapped.Unwrap(); child != nil {
+				return walk(child, depth+1)
+			}
+			leaves++
+			return predicate(current)
+		default:
+			leaves++
+			return predicate(current)
+		}
+	}
+	return walk(root, 0) && leaves > 0
+}
+
+func isContextCancellationError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+const acpUsageTrackingUnavailableCode = "usage_tracking_unavailable"
+
+func isUsageTrackingUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *model.APIError
+	if errors.As(err, &apiErr) {
+		code := strings.ToLower(strings.TrimSpace(apiErr.Code))
+		if code != "" {
+			return code == acpUsageTrackingUnavailableCode
+		}
+		// An unstructured compatible provider may omit Code. Keep a narrow
+		// compatibility fallback, but never let message text override a
+		// different structured code.
+		text := strings.ToLower(strings.TrimSpace(apiErr.Message))
+		return strings.Contains(text, "usage tracking") && strings.Contains(text, "unavailable")
+	}
+	return false
+}
+
+const (
+	acpPostFinishDrainLimit      = 64
+	acpRequiredUsageTrailerGrace = 250 * time.Millisecond
+)
+
+func drainACPStreamTurn(ctx context.Context, req model.ChatRequest, chunks <-chan model.StreamChunk, errs <-chan error, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
 	acc := model.NewStreamAccumulator()
 	receivedChoice := false
 	finishReason := ""
+	var terminalErr error
+	terminalErrorCount := 0
+	terminalErrorAfterFinish := false
 	var updates []acp.SessionUpdate
+	observedToolDelta := false
 	deltaStream := stream
 	if deferDelivery {
 		deltaStream = func(update acp.SessionUpdate) error {
@@ -1497,26 +2052,185 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 			return nil
 		}
 	}
+	turnSnapshot := func() acpStreamTurn {
+		message := acc.Message()
+		if message.Role == "" && receivedChoice {
+			message.Role = "assistant"
+		}
+		return acpStreamTurn{
+			Message:           message,
+			Usage:             acc.Usage(),
+			FinishReason:      finishReason,
+			ExecutionIdentity: acc.ExecutionIdentity(),
+			Updates:           updates,
+			ObservedToolDelta: observedToolDelta,
+		}
+	}
+	recordTerminalError := func(err error) {
+		if err == nil {
+			return
+		}
+		terminalErrorCount++
+		if terminalErr == nil {
+			terminalErr = err
+			terminalErrorAfterFinish = strings.TrimSpace(finishReason) != ""
+			return
+		}
+		terminalErr = errors.Join(terminalErr, err)
+		terminalErrorAfterFinish = false
+	}
+	finishTurn := func() (acpStreamTurn, error) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			turn := turnSnapshot()
+			if acpStreamTurnHasMaterial(turn) {
+				cause := ctxErr
+				if terminalErr != nil {
+					cause = errors.Join(ctxErr, terminalErr)
+				}
+				return turn, newPartialStreamTurnError(turn, cause)
+			}
+			return acpStreamTurn{}, ctxErr
+		}
+		turn := turnSnapshot()
+		if terminalErr == nil {
+			return turn, nil
+		}
+		if acpAcceptsUsageTrailerError(req, turn, terminalErr, terminalErrorAfterFinish, terminalErrorCount) {
+			return turn, nil
+		}
+		if !acpStreamTurnHasMaterial(turn) {
+			return acpStreamTurn{}, terminalErr
+		}
+		return turn, newPartialStreamTurnError(turn, terminalErr)
+	}
+	consumeChunk := func(chunk model.StreamChunk) {
+		if chunk.Error != nil {
+			recordTerminalError(newACPStreamAPIError(chunk.Error))
+		}
+		acc.Add(chunk)
+		for _, choice := range chunk.Choices {
+			receivedChoice = true
+			if len(choice.Delta.ToolCalls) > 0 {
+				observedToolDelta = true
+			}
+			if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+				finishReason = strings.TrimSpace(*choice.FinishReason)
+			}
+			forwardACPStreamDelta(deltaStream, choice.Delta)
+		}
+	}
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
-			turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
-			if acpStreamTurnHasMaterial(turn) {
-				return turn, &partialStreamTurnError{cause: ctx.Err(), text: model.ExtractTextContentOrEmpty(turn.Message.Content), turn: turn}
-			}
-			return acpStreamTurn{}, ctx.Err()
+			return finishTurn()
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
 			}
-			acc.Add(chunk)
-			for _, choice := range chunk.Choices {
-				receivedChoice = true
-				if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
-					finishReason = strings.TrimSpace(*choice.FinishReason)
+			consumeChunk(chunk)
+			if strings.TrimSpace(finishReason) != "" {
+				// Once the provider has declared a semantic finish, ordinary streams
+				// consume only values already available. A request that explicitly
+				// requires authoritative usage gets a short grace period because the
+				// producer can enqueue the stop chunk just before its usage-only
+				// trailer. The grace is local, bounded, and disabled as soon as usage
+				// arrives, so an optional or absent trailer never stalls normal turns.
+				var requiredUsageTimer *time.Timer
+				var requiredUsageC <-chan time.Time
+				if req.StreamOptions != nil && req.StreamOptions.IncludeUsage && acc.Usage() == nil {
+					requiredUsageTimer = time.NewTimer(acpRequiredUsageTrailerGrace)
+					requiredUsageC = requiredUsageTimer.C
+					defer requiredUsageTimer.Stop()
 				}
-				forwardACPStreamDelta(deltaStream, choice.Delta)
+				drainedChunks := 0
+				for chunks != nil || errs != nil {
+					select {
+					case <-ctx.Done():
+						return finishTurn()
+					default:
+					}
+
+					// A terminal error that is already ready must win over the
+					// bounded chunk drain. Otherwise a final buffered chunk can
+					// consume the limit and incorrectly turn a provider failure
+					// into a successful completion.
+					if errs != nil {
+						select {
+						case err, ok := <-errs:
+							if !ok {
+								errs = nil
+							} else {
+								recordTerminalError(err)
+							}
+							continue
+						default:
+						}
+					}
+
+					if requiredUsageC != nil && acc.Usage() != nil {
+						requiredUsageTimer.Stop()
+						requiredUsageC = nil
+					}
+					if drainedChunks >= acpPostFinishDrainLimit {
+						return finishTurn()
+					}
+					if requiredUsageC != nil {
+						select {
+						case <-ctx.Done():
+							return finishTurn()
+						case <-requiredUsageC:
+							requiredUsageC = nil
+							// Preserve ready-error priority at the grace boundary too.
+							if errs != nil {
+								select {
+								case err, ok := <-errs:
+									if !ok {
+										errs = nil
+									} else {
+										recordTerminalError(err)
+									}
+								default:
+								}
+							}
+							return finishTurn()
+						case err, ok := <-errs:
+							if !ok {
+								errs = nil
+								continue
+							}
+							recordTerminalError(err)
+						case chunk, ok := <-chunks:
+							if !ok {
+								chunks = nil
+								continue
+							}
+							consumeChunk(chunk)
+							drainedChunks++
+						}
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return finishTurn()
+					case err, ok := <-errs:
+						if !ok {
+							errs = nil
+							continue
+						}
+						recordTerminalError(err)
+					case chunk, ok := <-chunks:
+						if !ok {
+							chunks = nil
+							continue
+						}
+						consumeChunk(chunk)
+						drainedChunks++
+					default:
+						return finishTurn()
+					}
+				}
+				return finishTurn()
 			}
 		case err, ok := <-errs:
 			if !ok {
@@ -1524,35 +2238,68 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 				continue
 			}
 			if err != nil {
-				turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
-				partialText := model.ExtractTextContentOrEmpty(turn.Message.Content)
-				if acpStreamTurnHasMaterial(turn) {
-					return turn, &partialStreamTurnError{cause: err, text: partialText, turn: turn}
-				}
-				return acpStreamTurn{}, err
+				recordTerminalError(err)
+				errs = nil
+				continue
 			}
 		}
 	}
 
+	if terminalErr != nil {
+		return finishTurn()
+	}
+
 	if !receivedChoice {
-		turn := acpStreamTurn{Message: acc.Message(), Usage: acc.Usage(), FinishReason: finishReason, Updates: updates}
+		turn := turnSnapshot()
+		if ctx.Err() != nil {
+			return finishTurn()
+		}
 		noChoices := model.NoResponseChoicesError(req, &model.ChatResponse{Model: req.Model, Usage: usageValue(turn.Usage)})
 		if acpStreamTurnHasMaterial(turn) {
-			return turn, &partialStreamTurnError{cause: noChoices, text: model.ExtractTextContentOrEmpty(turn.Message.Content), turn: turn}
+			return turn, newPartialStreamTurnError(turn, noChoices)
 		}
 		return acpStreamTurn{}, noChoices
 	}
 
-	msg := acc.Message()
-	if msg.Role == "" {
-		msg.Role = "assistant"
+	return finishTurn()
+}
+
+func newPartialStreamTurnError(turn acpStreamTurn, cause error) *partialStreamTurnError {
+	return &partialStreamTurnError{
+		cause: cause,
+		text:  model.ExtractTextContentOrEmpty(turn.Message.Content),
+		turn:  turn,
 	}
-	return acpStreamTurn{
-		Message:      msg,
-		Usage:        acc.Usage(),
-		FinishReason: finishReason,
-		Updates:      updates,
-	}, nil
+}
+
+func acpFinishReasonIsStop(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), "stop")
+}
+
+func acpAcceptsUsageTrailerError(req model.ChatRequest, turn acpStreamTurn, err error, observedAfterFinish bool, terminalErrorCount int) bool {
+	return observedAfterFinish &&
+		terminalErrorCount == 1 &&
+		acpFinishReasonIsStop(turn.FinishReason) &&
+		strings.TrimSpace(model.ExtractTextContentOrEmpty(turn.Message.Content)) != "" &&
+		len(turn.Message.ToolCalls) == 0 &&
+		acpStreamRetryAllowed(req) &&
+		acpEveryErrorLeaf(err, isUsageTrackingUnavailableError)
+}
+
+func newACPStreamAPIError(detail *model.ErrorDetail) error {
+	if detail == nil {
+		return nil
+	}
+	message := strings.TrimSpace(detail.Message)
+	if message == "" {
+		message = "provider returned a streaming error"
+	}
+	return &model.APIError{
+		StatusCode: 200,
+		Message:    message,
+		Type:       detail.Type,
+		Code:       detail.Code,
+	}
 }
 
 func flushACPStreamUpdates(stream acp.StreamFunc, updates []acp.SessionUpdate) {
@@ -1574,6 +2321,9 @@ func flushPendingACPModelDelivery(stream acp.StreamFunc, state *acpLoopState) {
 	// repeated acceptance path therefore cannot emit the same model delta twice.
 	state.pendingModelUpdates = nil
 	state.pendingModelUsage = nil
+	if stream != nil && acpSessionUpdatesContainMessageText(updates) {
+		state.currentDraftDeliveryAttempted = true
+	}
 	flushACPStreamUpdates(stream, updates)
 	sendACPUsageUpdate(stream, usage, state.contextWindow)
 }
@@ -1584,6 +2334,18 @@ func discardPendingACPModelDelivery(state *acpLoopState) {
 	}
 	state.pendingModelUpdates = nil
 	state.pendingModelUsage = nil
+}
+
+func acpSessionUpdatesContainMessageText(updates []acp.SessionUpdate) bool {
+	for _, update := range updates {
+		if update.SessionUpdate != acp.SessionUpdateAgentMessageChunk {
+			continue
+		}
+		if block, ok := update.Content.(acp.ContentBlock); ok && strings.TrimSpace(block.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // forwardACPStreamDelta streams one chunk's delta immediately: content as an
@@ -1615,13 +2377,12 @@ func forwardACPStreamDelta(stream acp.StreamFunc, delta model.MessageDelta) {
 	}
 }
 
-// sendACPUsageUpdate emits a usage_update session update (N1) for one
-// model round-trip: used is that round's total token count (from
-// model.Usage, available once the round's streaming completes), size is
-// the model's context window. It is a no-op when usage or the context
-// window is unavailable rather than sending a misleading zero/zero
-// update. Buckley does not track a per-request USD cost here, so the
-// optional cost field is left unset.
+// sendACPUsageUpdate emits a usage_update session update (N1) for one model
+// round-trip. Used is the provider-reported total when available, otherwise
+// Buckley's marked local estimate; size is the model's context window. It is a
+// no-op when usage or the context window is unavailable rather than sending a
+// misleading zero/zero update. Buckley does not track a per-request USD cost
+// here, so the optional cost field is left unset.
 func sendACPUsageUpdate(stream acp.StreamFunc, usage *model.Usage, contextWindow int) {
 	if stream == nil || usage == nil || contextWindow <= 0 {
 		return
@@ -1649,21 +2410,24 @@ func acpReasoningChecker(mgr *model.Manager) model.ReasoningChecker {
 	return mgr
 }
 
-func newACPEvaluator(engine *rules.Engine) *rules.EngineAdapter {
+func newACPEvaluator(engine *rules.Engine) types.RuleEvaluator {
 	if engine == nil {
 		return nil
 	}
 	return rules.NewEngineAdapter(engine)
 }
 
-func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, modelID string) bool {
-	return registry != nil && (mgr == nil || mgr.SupportsTools(modelID))
+func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, route model.ModelRoute) bool {
+	return registry != nil && (mgr == nil || mgr.OfferToolsForRoute(route))
 }
 
-func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator *rules.EngineAdapter, useTools bool) acpToolTurn {
+func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, actionRequired bool, intent agentloop.TaskIntent) acpToolTurn {
 	turn := acpToolTurn{UseTools: useTools}
 	if skillState != nil {
 		turn.AllowedTools = skillState.ToolFilter()
+	}
+	if actionRequired && intent != agentloop.ReadOnlyIntent && registry != nil {
+		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools)
 	}
 	if !useTools || registry == nil {
 		turn.UseTools = false
@@ -1678,9 +2442,51 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 	return turn
 }
 
-func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn) model.ChatRequest {
+// acpActionToolNames keeps state-changing tools plus the bounded control and
+// verification surfaces needed to finish honestly after discovery is parked.
+// It deliberately excludes general read/search and destructive escape hatches.
+func acpActionToolNames(registry *tool.Registry, allowed []string) []string {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	names := make([]string, 0)
+	for _, registered := range registry.List() {
+		name := registered.Name()
+		if len(allowedSet) > 0 {
+			if _, ok := allowedSet[name]; !ok {
+				continue
+			}
+		}
+		metadata := tool.GetMetadata(registered)
+		verificationOrControl := metadata.Impact == tool.ImpactReadOnly && (metadata.Verification || isACPActionSupportTool(name))
+		if metadata.Impact == tool.ImpactModifying || verificationOrControl {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func isACPActionSupportTool(name string) bool {
+	switch name {
+	case "exec_program", "git_diff", "git_status", "submit_artifact":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, turn acpToolTurn, limits acpLoopLimits) model.ChatRequest {
+	return buildACPChatRequestForRoute(cfg, mgr, engine, conv, modelID, model.ModelRoute{}, turn, limits)
+}
+
+// buildACPChatRequestForRoute builds the production ACP request from an
+// already-governed execution route. The empty-route path preserves the legacy
+// direct/helper behavior for callers that do not have a prompt-bound route.
+func buildACPChatRequestForRoute(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, conv *conversation.Conversation, modelID string, route model.ModelRoute, turn acpToolTurn, limits acpLoopLimits) model.ChatRequest {
 	req := model.ChatRequest{
-		Model: modelID,
+		Model:     modelID,
+		MaxTokens: limits.MaxOutputTokens,
 		// ToModelMessages returns the full portable transcript. Compaction
 		// runs once below via CompactModelMessagesForRequest -- an earlier
 		// ToEfficientModelMessages pass here would be a redundant compaction
@@ -1688,28 +2494,122 @@ func buildACPChatRequest(cfg *config.Config, mgr *model.Manager, engine *rules.E
 		Messages:  conv.ToModelMessages(),
 		SessionID: conv.SessionID,
 	}
+	hasRoute := strings.TrimSpace(route.SelectedModel) != "" && strings.TrimSpace(route.ProviderID) != ""
+	if hasRoute {
+		req.Route = route
+	}
 	if turn.UseTools {
 		req.Tools = turn.Tools
 		req.ToolChoice = "auto"
-		if mgr != nil && mgr.SupportsParameter(modelID, "parallel_tool_calls") {
+		parallelToolCalls := false
+		if mgr != nil {
+			if hasRoute {
+				parallelToolCalls = mgr.SupportsParameterForRoute(route, "parallel_tool_calls")
+			} else {
+				parallelToolCalls = mgr.SupportsParameter(modelID, "parallel_tool_calls")
+			}
+		}
+		if parallelToolCalls {
 			sequential := false
 			req.ParallelToolCalls = &sequential
 		}
 	}
-	if effort := model.ResolveReasoningEffort(cfg, acpReasoningChecker(mgr), engine, modelID, "execution"); effort != "" {
-		req.Reasoning = &model.ReasoningConfig{Effort: effort}
-	}
 	contextWindow := 0
 	if mgr != nil {
-		contextWindow, _ = mgr.GetContextLength(modelID)
+		if hasRoute {
+			contextWindow, _ = mgr.GetContextLengthForRoute(route)
+		} else {
+			contextWindow, _ = mgr.GetContextLength(modelID)
+		}
+	}
+	if hasRoute {
+		req.Reasoning = resolveACPRequestReasoningForRoute(cfg, mgr, engine, route, limits.ProtocolReasoning)
+	} else {
+		req.Reasoning = resolveACPRequestReasoning(cfg, mgr, engine, modelID, limits.ProtocolReasoning)
 	}
 	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req
 }
 
+func resolveACPRequestReasoning(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, modelID string, protocolReasoning *model.ReasoningConfig) *model.ReasoningConfig {
+	checker := acpReasoningChecker(mgr)
+	if checker == nil || !checker.SupportsReasoning(modelID) {
+		return nil
+	}
+
+	configured := ""
+	if cfg != nil {
+		configured = strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
+	}
+	switch configured {
+	case "off", "none":
+		enabled := false
+		return &model.ReasoningConfig{Enabled: &enabled}
+	case "minimal", "low", "medium", "high", "xhigh":
+		return &model.ReasoningConfig{Effort: configured}
+	}
+
+	if protocolReasoning != nil {
+		return model.NormalizeReasoningConfig(protocolReasoning)
+	}
+	if effort := model.ResolveReasoningEffort(cfg, checker, engine, modelID, "execution"); effort != "" {
+		return &model.ReasoningConfig{Effort: effort}
+	}
+	return nil
+}
+
+// resolveACPRequestReasoningForRoute keeps reasoning capability evidence on
+// the same route that governed tool eligibility and provider dispatch.
+func resolveACPRequestReasoningForRoute(cfg *config.Config, mgr *model.Manager, engine *rules.Engine, route model.ModelRoute, protocolReasoning *model.ReasoningConfig) *model.ReasoningConfig {
+	if mgr == nil || !mgr.SupportsReasoningForRoute(route) {
+		return nil
+	}
+	configured := ""
+	if cfg != nil {
+		configured = strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
+	}
+	switch configured {
+	case "off", "none":
+		enabled := false
+		return &model.ReasoningConfig{Enabled: &enabled}
+	case "minimal", "low", "medium", "high", "xhigh":
+		return &model.ReasoningConfig{Effort: configured}
+	}
+	if protocolReasoning != nil {
+		return model.NormalizeReasoningConfig(protocolReasoning)
+	}
+	if effort := model.ResolveReasoningEffort(cfg, acpRouteReasoningChecker{mgr: mgr, route: route}, engine, route.SelectedModel, "execution"); effort != "" {
+		return &model.ReasoningConfig{Effort: effort}
+	}
+	return nil
+}
+
+type acpRouteReasoningChecker struct {
+	mgr   *model.Manager
+	route model.ModelRoute
+}
+
+func (c acpRouteReasoningChecker) SupportsReasoning(string) bool {
+	return c.mgr != nil && c.mgr.SupportsReasoningForRoute(c.route)
+}
+
+func (c acpRouteReasoningChecker) ResolveReasoningCapability(string) model.CapabilityResolution {
+	if c.mgr == nil {
+		return model.CapabilityResolution{Model: c.route.SelectedModel, ProviderID: c.route.ProviderID, Capability: "reasoning", State: model.CapabilityUnknown, Source: "checker_unavailable"}
+	}
+	return c.mgr.ResolveReasoningCapabilityForRoute(c.route)
+}
+
 func shouldNudgeACPToolUse(useTools, toolsEnabled bool, nudgeCount int, text string) bool {
 	return useTools && toolsEnabled && nudgeCount < acpMaxToolNudges &&
 		(strings.TrimSpace(text) == "" || shouldNudgeForTools(text))
+}
+
+func acpToolInvocationMarkup(text string, registry *tool.Registry) (string, bool) {
+	if toolName, attempted := soleKnownACPToolInvocationMarkup(text, registry); attempted {
+		return toolName, true
+	}
+	return malformedACPToolControlMarkup(text, registry)
 }
 
 // soleKnownACPToolInvocationMarkup recognizes a provider's attempted tool call
@@ -1805,6 +2705,40 @@ func soleKnownACPToolInvocationMarkup(text string, registry *tool.Registry) (str
 	return "", false
 }
 
+func malformedACPToolControlMarkup(text string, registry *tool.Registry) (string, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.HasPrefix(text, "```") || !strings.HasPrefix(text, "<tool_call>") {
+		return "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(text, "<tool_call>"))
+	toolName := readACPToolControlMarkupName(rest)
+	if toolName == "" {
+		return "tool_call", true
+	}
+	if registry != nil {
+		if _, ok := registry.Get(toolName); ok {
+			return toolName, true
+		}
+	}
+	return "tool_call", true
+}
+
+func readACPToolControlMarkupName(text string) string {
+	const maxToolControlNameLen = 80
+	for idx, r := range text {
+		if idx >= maxToolControlNameLen {
+			return text[:idx]
+		}
+		if !(r == '_' || r == '-' || r == '.' || r == ':' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			if idx == 0 {
+				return ""
+			}
+			return text[:idx]
+		}
+	}
+	return text
+}
+
 // dispatchACPToolCall runs one tool call for the Controller's dispatcher:
 // phase update, tool_call start notification, the skill allowlist, the
 // client permission flow (M3), execution, and the tool_call_update result
@@ -1821,9 +2755,10 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		sendACPToolCallUpdate(stream, tc, rawParams, acp.ToolCallStatusFailed, toolText, map[string]any{
 			"error": err.Error(),
 		}, nil, workDir)
-		return agentloop.ToolOutcome{Content: toolText, Error: err.Error()}
+		return agentloop.ToolOutcome{Content: toolText, Error: err.Error(), EffectClass: "control"}
 	}
 
+	effectClass := string(acpToolRiskImpact(registry, tc.Function.Name))
 	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), index, total))
 	sendACPToolCallStart(stream, tc, params, workDir)
 
@@ -1832,7 +2767,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
 			"error": toolText,
 		}, nil, workDir)
-		return agentloop.ToolOutcome{Content: toolText, Error: toolText}
+		return agentloop.ToolOutcome{Content: toolText, Error: toolText, EffectClass: effectClass}
 	}
 
 	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
@@ -1842,9 +2777,16 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 			"error":  toolText,
 			"denied": true,
 		}, result, workDir)
-		return agentloop.ToolOutcome{Content: toolText, Error: toolText}
+		return agentloop.ToolOutcome{Content: toolText, Error: toolText, EffectClass: effectClass}
 	}
 
+	metadata := tool.DefaultMetadata()
+	if registry != nil {
+		if registered, ok := registry.Get(tc.Function.Name); ok {
+			metadata = tool.GetMetadata(registered)
+		}
+	}
+	observation := tooloutcome.BeginWithMetadata(ctx, workDir, metadata)
 	result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
 	toolText := formatACPToolResult(result, execErr)
 	toolText = tool.AppendCodeModeRecoveryGuidance(toolText, evaluator, registry, state.allowedTools, tc.Function.Name, result, execErr, state.codeModeRecovery)
@@ -1862,15 +2804,37 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 	} else if result != nil {
 		errorText = result.Error
 	}
-	return agentloop.ToolOutcome{
+	return observation.Finish(ctx, agentloop.ToolOutcome{
 		Content:       toolText,
 		Success:       execErr == nil && result != nil && result.Success,
+		EffectClass:   effectClass,
 		Error:         errorText,
 		Stderr:        toolResultString(result, "stderr"),
 		YieldObserved: yield.Observed,
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,
+	}, metadata, result, execErr)
+}
+
+// rejectACPUnexpectedToolCall records a model's structured call as a visible
+// failed ACP control outcome when the exact request contained no schemas. It
+// intentionally does not inspect the registry, request approval, begin an
+// observation, signal an executor, or update toolsExecuted: the model must
+// recover with a direct answer using the resulting tool message.
+func rejectACPUnexpectedToolCall(stream acp.StreamFunc, tc model.ToolCall, index, total int, state *acpLoopState, workDir string) agentloop.ToolOutcome {
+	params := map[string]any{}
+	if parsed, err := parseACPToolParams(tc.Function.Arguments); err == nil {
+		params = parsed
+	} else if strings.TrimSpace(tc.Function.Arguments) != "" {
+		params["raw"] = tc.Function.Arguments
 	}
+	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Rejecting unexpected tool call %d/%d…", index, total))
+	sendACPToolCallStart(stream, tc, params, workDir)
+	toolText := fmt.Sprintf("Error: tool %s was not offered for this request and was not executed. Answer directly using only the available conversation context.", tc.Function.Name)
+	sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{
+		"error": "tool call rejected because this request did not include tool schemas",
+	}, nil, workDir)
+	return agentloop.ToolOutcome{Content: toolText, EffectClass: "control"}
 }
 
 // acpPermissionRequestTimeout bounds how long Buckley waits for a live
@@ -1895,11 +2859,11 @@ var acpPermissionOptions = []acp.PermissionOption{
 // elsewhere for approval gating, not a new ACP-specific notion.
 func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
 	if registry == nil {
-		return tool.ImpactReadOnly
+		return tool.ImpactDestructive
 	}
 	t, ok := registry.Get(name)
 	if !ok {
-		return tool.ImpactReadOnly
+		return tool.ImpactDestructive
 	}
 	return tool.GetMetadata(t).Impact
 }
@@ -2266,26 +3230,6 @@ func shouldNudgeForTools(text string) bool {
 		if strings.Contains(lower, phrase) {
 			return true
 		}
-	}
-	return false
-}
-
-func isToolUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
-		return true
-	}
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool calling") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool response") {
-		return true
 	}
 	return false
 }

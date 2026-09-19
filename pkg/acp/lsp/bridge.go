@@ -11,7 +11,10 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	pb "m31labs.dev/buckley/pkg/acp/proto"
 	buckleyversion "m31labs.dev/buckley/pkg/version"
 )
@@ -36,6 +39,68 @@ type Bridge struct {
 
 // InlineCompletionCallback receives streamed inline completion text.
 type InlineCompletionCallback func(text string, done bool) error
+
+type safeStreamError string
+
+func (e safeStreamError) Error() string { return string(e) }
+
+const (
+	errStreamQueryUnavailable      safeStreamError = "stream query unavailable"
+	errStreamQueryIncomplete       safeStreamError = "stream query incomplete"
+	errInlineCompletionUnavailable safeStreamError = "inline completion unavailable"
+	errInlineCompletionIncomplete  safeStreamError = "inline completion incomplete"
+)
+
+type safeBridgeError string
+
+func (e safeBridgeError) Error() string { return string(e) }
+
+type safeBridgeStatusError struct {
+	code    codes.Code
+	message string
+}
+
+func (e safeBridgeStatusError) Error() string { return e.message }
+
+func (e safeBridgeStatusError) GRPCStatus() *status.Status {
+	code := e.code
+	if code == codes.OK {
+		code = codes.Internal
+	}
+	return status.New(code, e.message)
+}
+
+func bridgePartialError(err error, safeMessage string) (*partialresult.IncompleteError, bool) {
+	result, ok := partialresult.Extract(err)
+	if !ok {
+		return nil, false
+	}
+	return &partialresult.IncompleteError{
+		Result: result,
+		Cause:  bridgeSafeStatusCause(err, safeMessage),
+	}, true
+}
+
+func bridgeSafeStatusCause(err error, safeMessage string) error {
+	code := status.Code(err)
+	if code == codes.OK {
+		code = codes.Internal
+	}
+	return safeBridgeStatusError{code: code, message: safeMessage}
+}
+
+func bridgeSafeRPCError(err error, safeMessage string) error {
+	if err == nil {
+		return safeBridgeError(safeMessage)
+	}
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return err
+	}
+	if status.Code(err) != codes.Unknown {
+		return bridgeSafeStatusCause(err, safeMessage)
+	}
+	return safeBridgeError(safeMessage)
+}
 
 // ApplyTextEdits applies LSP text edits to the provided content and returns the updated text.
 func ApplyTextEdits(content string, edits []*pb.TextEdit) (string, error) {
@@ -331,11 +396,14 @@ func (b *Bridge) HandleTextQuery(ctx context.Context, query string) (string, err
 
 	response, err := client.SendMessage(ctx, request)
 	if err != nil {
-		return "", fmt.Errorf("coordinator error: %w", err)
+		if incomplete, ok := bridgePartialError(err, "ACP response incomplete"); ok {
+			return "", incomplete
+		}
+		return "", bridgeSafeRPCError(err, "coordinator error")
 	}
 
-	if response.Response == nil {
-		return "", fmt.Errorf("empty response from coordinator")
+	if response == nil || response.Response == nil {
+		return "", safeBridgeError("empty response from coordinator")
 	}
 
 	return response.Response.Content, nil
@@ -392,7 +460,10 @@ func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback S
 
 	stream, err := client.StreamTask(streamCtx, request)
 	if err != nil {
-		return "", fmt.Errorf("failed to start stream: %w", err)
+		if incomplete, ok := bridgePartialError(err, string(errStreamQueryUnavailable)); ok {
+			return streamID, incomplete
+		}
+		return streamID, errStreamQueryUnavailable
 	}
 
 	// Process stream events
@@ -404,7 +475,10 @@ func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback S
 			break
 		}
 		if err != nil {
-			return streamID, fmt.Errorf("stream error: %w", err)
+			if incomplete, ok := bridgePartialError(err, string(errStreamQueryIncomplete)); ok {
+				return streamID, incomplete
+			}
+			return streamID, errStreamQueryIncomplete
 		}
 
 		// Send chunk to callback (use Message field from TaskEvent)
@@ -458,7 +532,10 @@ func (b *Bridge) StreamInlineCompletions(ctx context.Context, req *pb.InlineComp
 
 	stream, err := client.StreamInlineCompletions(ctx, req)
 	if err != nil {
-		return streamID, fmt.Errorf("start inline completions: %w", err)
+		if incomplete, ok := bridgePartialError(err, string(errInlineCompletionUnavailable)); ok {
+			return streamID, incomplete
+		}
+		return streamID, errInlineCompletionUnavailable
 	}
 
 	for {
@@ -467,7 +544,10 @@ func (b *Bridge) StreamInlineCompletions(ctx context.Context, req *pb.InlineComp
 			break
 		}
 		if err != nil {
-			return streamID, fmt.Errorf("inline stream error: %w", err)
+			if incomplete, ok := bridgePartialError(err, string(errInlineCompletionIncomplete)); ok {
+				return streamID, incomplete
+			}
+			return streamID, errInlineCompletionIncomplete
 		}
 		if cb != nil {
 			if err := cb(ev.Text, ev.GetIsFinal()); err != nil {
@@ -499,7 +579,14 @@ func (b *Bridge) ProposeEdits(ctx context.Context, req *pb.ProposeEditsRequest) 
 		return nil, fmt.Errorf("not connected to coordinator")
 	}
 
-	return client.ProposeEdits(ctx, req)
+	response, err := client.ProposeEdits(ctx, req)
+	if err != nil {
+		return nil, bridgeSafeRPCError(err, "propose edits failed")
+	}
+	if response == nil {
+		return nil, safeBridgeError("propose edits unavailable")
+	}
+	return response, nil
 }
 
 // ApplyEdits forwards apply edits to ACP.
@@ -520,7 +607,14 @@ func (b *Bridge) ApplyEdits(ctx context.Context, req *pb.ApplyEditsRequest) (*pb
 		return nil, fmt.Errorf("not connected to coordinator")
 	}
 
-	return client.ApplyEdits(ctx, req)
+	response, err := client.ApplyEdits(ctx, req)
+	if err != nil {
+		return nil, bridgeSafeRPCError(err, "apply edits failed")
+	}
+	if response == nil {
+		return nil, safeBridgeError("apply edits unavailable")
+	}
+	return response, nil
 }
 
 // UpdateEditorState retrieves editor state snapshot (plan/TODO/approvals).
@@ -541,5 +635,12 @@ func (b *Bridge) UpdateEditorState(ctx context.Context, req *pb.UpdateEditorStat
 		return nil, fmt.Errorf("not connected to coordinator")
 	}
 
-	return client.UpdateEditorState(ctx, req)
+	response, err := client.UpdateEditorState(ctx, req)
+	if err != nil {
+		return nil, bridgeSafeRPCError(err, "update editor state failed")
+	}
+	if response == nil {
+		return nil, safeBridgeError("update editor state unavailable")
+	}
+	return response, nil
 }

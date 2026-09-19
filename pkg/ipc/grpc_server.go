@@ -27,6 +27,7 @@ import (
 	"m31labs.dev/buckley/pkg/ipc/command"
 	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
@@ -115,19 +116,12 @@ func requireGRPCScope(ctx context.Context, required string) error {
 	return nil
 }
 
-func (s *GRPCService) dispatchSessionCommand(cmd command.SessionCommand) error {
+func (s *GRPCService) dispatchSessionCommand(ctx context.Context, cmd command.SessionCommand) error {
 	if s.server == nil {
 		return fmt.Errorf("server unavailable")
 	}
-	if s.server.headlessRegistry != nil {
-		if err := s.server.headlessRegistry.DispatchCommand(cmd); err == nil {
-			return nil
-		}
-	}
-	if s.server.commandGW != nil {
-		return s.server.commandGW.Dispatch(cmd)
-	}
-	return fmt.Errorf("no command handler available")
+	_, err := s.server.dispatchCommandWithReceipt(ctx, &cmd, commandDispatchRegistryThenGateway)
+	return err
 }
 
 // NewGRPCService creates a new gRPC service wrapping the IPC server.
@@ -828,44 +822,37 @@ func (s *GRPCService) SendCommand(
 	}
 
 	cmd := command.SessionCommand{
-		SessionID: sessionID,
-		Type:      cmdType,
-		Content:   msg.Content,
+		SessionID:  sessionID,
+		ID:         msg.CommandId,
+		Type:       cmdType,
+		Content:    msg.Content,
+		TaskIntent: msg.TaskIntent,
+		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
-	cmd.EnsureID()
-
-	// Try headless registry first
-	if s.server.headlessRegistry != nil {
-		if err := s.server.headlessRegistry.DispatchCommand(cmd); err == nil {
-			return connect.NewResponse(&ipcpb.CommandResponse{
-				Status:    "accepted",
-				Message:   "Command dispatched to headless session",
-				CommandId: cmd.ID,
-			}), nil
+	outcome, err := s.server.dispatchCommandWithReceipt(ctx, &cmd, commandDispatchRegistryThenGateway)
+	if err != nil {
+		if isAuthoritativeCommandError(err) {
+			return nil, commandAcceptanceConnectError(err)
 		}
-	}
-
-	// Try command gateway
-	if s.server.commandGW != nil {
-		if err := s.server.commandGW.Dispatch(cmd); err != nil {
-			return connect.NewResponse(&ipcpb.CommandResponse{
-				Status:    "rejected",
-				Message:   err.Error(),
-				CommandId: cmd.ID,
-			}), nil
+		message := err.Error()
+		if s.server.commandGW == nil {
+			message = "No command handler available"
 		}
 		return connect.NewResponse(&ipcpb.CommandResponse{
-			Status:    "accepted",
-			Message:   "Command dispatched",
-			CommandId: cmd.ID,
+			Status: "rejected", Message: message, CommandId: cmd.ID,
 		}), nil
 	}
-
-	return connect.NewResponse(&ipcpb.CommandResponse{
-		Status:    "rejected",
-		Message:   "No command handler available",
-		CommandId: cmd.ID,
-	}), nil
+	message := "Command dispatched"
+	if outcome.UsedRegistry {
+		message = "Command dispatched to headless session"
+	}
+	response := &ipcpb.CommandResponse{
+		Status: "accepted", Message: message, CommandId: cmd.ID,
+	}
+	if outcome.Durable {
+		response.Receipt = commandReceiptForProto(outcome.Receipt)
+	}
+	return connect.NewResponse(response), nil
 }
 
 func (s *GRPCService) ListSessions(
@@ -1046,13 +1033,17 @@ func (s *GRPCService) CreateHeadlessSession(
 	if err := requireGRPCScope(ctx, storage.TokenScopeMember); err != nil {
 		return nil, err
 	}
-	if s.server.headlessRegistry == nil {
+	registry := s.server.getHeadlessRegistry()
+	if registry == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("headless sessions not enabled"))
 	}
 
 	principal := ""
 	if p := principalFromContext(ctx); p != nil {
 		principal = strings.TrimSpace(p.Name)
+	}
+	if err := sessionexec.ValidateCommandTaskIntent("input", req.Msg.TaskIntent); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid command"))
 	}
 
 	project := strings.TrimSpace(req.Msg.Project)
@@ -1070,12 +1061,13 @@ func (s *GRPCService) CreateHeadlessSession(
 	}
 
 	createReq := headless.CreateSessionRequest{
-		Principal: principal,
-		Project:   project,
-		Branch:    req.Msg.Branch,
-		Env:       req.Msg.Env,
-		Prompt:    req.Msg.InitialPrompt,
-		Model:     req.Msg.Model,
+		Principal:  principal,
+		Project:    project,
+		Branch:     req.Msg.Branch,
+		Env:        req.Msg.Env,
+		Prompt:     req.Msg.InitialPrompt,
+		Model:      req.Msg.Model,
+		TaskIntent: req.Msg.TaskIntent,
 	}
 	if req.Msg.Limits != nil {
 		createReq.Limits = &headless.ResourceLimits{
@@ -1095,18 +1087,28 @@ func (s *GRPCService) CreateHeadlessSession(
 		}
 	}
 
-	info, err := s.server.headlessRegistry.CreateSession(createReq)
+	info, err := registry.CreateSession(createReq)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, commandAcceptanceConnectError(err)
 	}
 
-	return connect.NewResponse(&ipcpb.HeadlessSession{
+	response := &ipcpb.HeadlessSession{
 		Id:        info.ID,
 		Status:    headlessStatusFromRunnerState(info.State),
 		Project:   info.Project,
 		Branch:    info.Branch,
 		CreatedAt: timestamppb.New(info.CreatedAt),
-	}), nil
+	}
+	if info.InitialReceipt != nil {
+		durable, receiptErr := validateAcceptedCommandReceipt(*info.InitialReceipt, info.ID, info.InitialReceipt.CommandID)
+		if receiptErr != nil {
+			return nil, commandAcceptanceConnectError(receiptErr)
+		}
+		if durable {
+			response.InitialReceipt = commandReceiptForProto(*info.InitialReceipt)
+		}
+	}
+	return connect.NewResponse(response), nil
 }
 
 func (s *GRPCService) DeleteHeadlessSession(
@@ -1116,7 +1118,8 @@ func (s *GRPCService) DeleteHeadlessSession(
 	if err := requireGRPCScope(ctx, storage.TokenScopeMember); err != nil {
 		return nil, err
 	}
-	if s.server.headlessRegistry == nil {
+	registry := s.server.getHeadlessRegistry()
+	if registry == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("headless sessions not enabled"))
 	}
 	if s.server.store == nil {
@@ -1146,12 +1149,12 @@ func (s *GRPCService) DeleteHeadlessSession(
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("invalid session token"))
 	}
 
-	if reg, ok := s.server.headlessRegistry.(interface {
+	if reg, ok := registry.(interface {
 		RemoveSessionWithCleanup(sessionID string, cleanupWorkspace bool) error
 	}); ok {
 		err = reg.RemoveSessionWithCleanup(sessionID, req.Msg.CleanupWorkspace)
 	} else {
-		err = s.server.headlessRegistry.RemoveSession(sessionID)
+		err = registry.RemoveSession(sessionID)
 	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, err)
@@ -1167,7 +1170,8 @@ func (s *GRPCService) ListHeadlessSessions(
 	if err := requireGRPCScope(ctx, storage.TokenScopeViewer); err != nil {
 		return nil, err
 	}
-	if s.server.headlessRegistry == nil {
+	registry := s.server.getHeadlessRegistry()
+	if registry == nil {
 		return connect.NewResponse(&ipcpb.HeadlessSessionList{}), nil
 	}
 
@@ -1176,7 +1180,7 @@ func (s *GRPCService) ListHeadlessSessions(
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unauthorized"))
 	}
 
-	sessions := s.server.headlessRegistry.ListSessions()
+	sessions := registry.ListSessions()
 	var list []*ipcpb.HeadlessSession
 	for _, sess := range sessions {
 		if s.server.store != nil {
@@ -1281,21 +1285,12 @@ func (s *GRPCService) WorkflowAction(
 
 	dispatch := func(content string) error {
 		cmd := command.SessionCommand{
-			SessionID: sessionID,
-			Type:      "slash",
-			Content:   content,
+			SessionID:  sessionID,
+			Type:       "slash",
+			Content:    content,
+			AcceptedBy: strings.TrimSpace(principal.Name),
 		}
-
-		if s.server.headlessRegistry != nil {
-			if err := s.server.headlessRegistry.DispatchCommand(cmd); err == nil {
-				return nil
-			}
-		}
-
-		if s.server.commandGW != nil {
-			return s.server.commandGW.Dispatch(cmd)
-		}
-		return fmt.Errorf("no command handler available")
+		return s.dispatchSessionCommand(ctx, cmd)
 	}
 
 	if action == "execute" {
@@ -1303,6 +1298,9 @@ func (s *GRPCService) WorkflowAction(
 		taskID := strings.TrimSpace(msg.TaskId)
 		if planID != "" {
 			if err := dispatch(fmt.Sprintf("/resume %s", planID)); err != nil {
+				if isAuthoritativeCommandError(err) {
+					return nil, commandAcceptanceConnectError(err)
+				}
 				return connect.NewResponse(&ipcpb.WorkflowActionResponse{
 					Status:  "rejected",
 					Message: err.Error(),
@@ -1317,6 +1315,9 @@ func (s *GRPCService) WorkflowAction(
 			execCmd = fmt.Sprintf("/execute %s", taskID)
 		}
 		if err := dispatch(execCmd); err != nil {
+			if isAuthoritativeCommandError(err) {
+				return nil, commandAcceptanceConnectError(err)
+			}
 			return connect.NewResponse(&ipcpb.WorkflowActionResponse{
 				Status:  "rejected",
 				Message: err.Error(),
@@ -1350,6 +1351,9 @@ func (s *GRPCService) WorkflowAction(
 		}), nil
 	}
 	if err := dispatch(cmd); err != nil {
+		if isAuthoritativeCommandError(err) {
+			return nil, commandAcceptanceConnectError(err)
+		}
 		return connect.NewResponse(&ipcpb.WorkflowActionResponse{
 			Status:  "rejected",
 			Message: err.Error(),
@@ -1950,28 +1954,32 @@ func (s *GRPCService) ApproveToolCall(
 		}), nil
 	}
 
-	if approval.Status == "pending" && !approval.ExpiresAt.IsZero() && time.Now().After(approval.ExpiresAt) {
-		approval.Status = "expired"
-		approval.DecidedBy = ""
-		approval.DecidedAt = time.Now()
-		approval.DecisionReason = "timeout"
-		if err := s.server.store.UpdatePendingApproval(approval); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+	if approval.Status == "pending" {
+		var expireErr error
+		approval, _, expireErr = s.server.store.ExpirePendingApproval(approval.ID, approval.SessionID)
+		if expireErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, expireErr)
 		}
-		return connect.NewResponse(&ipcpb.ApproveToolCallResponse{
-			Success: false,
-			Message: "Approval expired",
-		}), nil
+		if approval.Status == "expired" {
+			return connect.NewResponse(&ipcpb.ApproveToolCallResponse{
+				Success: false,
+				Message: "Approval expired",
+			}), nil
+		}
 	}
 	if approval.Status != "pending" {
 		if approval.Status == "approved" {
 			payload, _ := json.Marshal(headless.ApprovalResponse{ID: approval.ID, Approved: true})
 			cmd := command.SessionCommand{
-				SessionID: approval.SessionID,
-				Type:      "approval",
-				Content:   string(payload),
+				SessionID:  approval.SessionID,
+				Type:       "approval",
+				Content:    string(payload),
+				AcceptedBy: strings.TrimSpace(principal.Name),
 			}
-			if err := s.dispatchSessionCommand(cmd); err != nil {
+			if err := s.dispatchSessionCommand(ctx, cmd); err != nil {
+				if isAuthoritativeCommandError(err) {
+					return nil, commandAcceptanceConnectError(err)
+				}
 				return connect.NewResponse(&ipcpb.ApproveToolCallResponse{
 					Success: true,
 					Message: fmt.Sprintf("Tool call already approved, but failed to notify session: %v", err),
@@ -1988,17 +1996,11 @@ func (s *GRPCService) ApproveToolCall(
 		}), nil
 	}
 
-	// Get principal for audit
-	decidedBy := "unknown"
-	if principal := principalFromContext(ctx); principal != nil {
-		decidedBy = principal.Name
-	}
-
-	approval.Status = "approved"
-	approval.DecidedBy = decidedBy
-	approval.DecidedAt = time.Now()
-
-	if err := s.server.store.UpdatePendingApproval(approval); err != nil {
+	decidedBy := strings.TrimSpace(principal.Name)
+	approval, _, err = s.server.store.DecidePendingApproval(
+		approval.ID, approval.SessionID, "approved", decidedBy, "", time.Now().UTC(),
+	)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
@@ -2016,11 +2018,15 @@ func (s *GRPCService) ApproveToolCall(
 
 	payload, _ := json.Marshal(headless.ApprovalResponse{ID: approval.ID, Approved: true})
 	cmd := command.SessionCommand{
-		SessionID: approval.SessionID,
-		Type:      "approval",
-		Content:   string(payload),
+		SessionID:  approval.SessionID,
+		Type:       "approval",
+		Content:    string(payload),
+		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
-	if err := s.dispatchSessionCommand(cmd); err != nil {
+	if err := s.dispatchSessionCommand(ctx, cmd); err != nil {
+		if isAuthoritativeCommandError(err) {
+			return nil, commandAcceptanceConnectError(err)
+		}
 		return connect.NewResponse(&ipcpb.ApproveToolCallResponse{
 			Success: true,
 			Message: fmt.Sprintf("Tool call approved, but failed to notify session: %v", err),
@@ -2071,18 +2077,18 @@ func (s *GRPCService) RejectToolCall(
 		}), nil
 	}
 
-	if approval.Status == "pending" && !approval.ExpiresAt.IsZero() && time.Now().After(approval.ExpiresAt) {
-		approval.Status = "expired"
-		approval.DecidedBy = ""
-		approval.DecidedAt = time.Now()
-		approval.DecisionReason = "timeout"
-		if err := s.server.store.UpdatePendingApproval(approval); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+	if approval.Status == "pending" {
+		var expireErr error
+		approval, _, expireErr = s.server.store.ExpirePendingApproval(approval.ID, approval.SessionID)
+		if expireErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, expireErr)
 		}
-		return connect.NewResponse(&ipcpb.RejectToolCallResponse{
-			Success: false,
-			Message: "Approval expired",
-		}), nil
+		if approval.Status == "expired" {
+			return connect.NewResponse(&ipcpb.RejectToolCallResponse{
+				Success: false,
+				Message: "Approval expired",
+			}), nil
+		}
 	}
 	if approval.Status != "pending" {
 		if approval.Status == "rejected" {
@@ -2096,11 +2102,15 @@ func (s *GRPCService) RejectToolCall(
 				Reason:   reason,
 			})
 			cmd := command.SessionCommand{
-				SessionID: approval.SessionID,
-				Type:      "approval",
-				Content:   string(payload),
+				SessionID:  approval.SessionID,
+				Type:       "approval",
+				Content:    string(payload),
+				AcceptedBy: strings.TrimSpace(principal.Name),
 			}
-			if err := s.dispatchSessionCommand(cmd); err != nil {
+			if err := s.dispatchSessionCommand(ctx, cmd); err != nil {
+				if isAuthoritativeCommandError(err) {
+					return nil, commandAcceptanceConnectError(err)
+				}
 				return connect.NewResponse(&ipcpb.RejectToolCallResponse{
 					Success: true,
 					Message: fmt.Sprintf("Tool call already rejected, but failed to notify session: %v", err),
@@ -2117,22 +2127,14 @@ func (s *GRPCService) RejectToolCall(
 		}), nil
 	}
 
-	// Get principal for audit
-	decidedBy := "unknown"
-	if principal := principalFromContext(ctx); principal != nil {
-		decidedBy = principal.Name
-	}
-
-	approval.Status = "rejected"
-	approval.DecidedBy = decidedBy
-	approval.DecidedAt = time.Now()
-	approval.DecisionReason = strings.TrimSpace(req.Msg.Reason)
-
-	if err := s.server.store.UpdatePendingApproval(approval); err != nil {
+	decidedBy := strings.TrimSpace(principal.Name)
+	reason := strings.TrimSpace(req.Msg.Reason)
+	approval, _, err = s.server.store.DecidePendingApproval(
+		approval.ID, approval.SessionID, "rejected", decidedBy, reason, time.Now().UTC(),
+	)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-
-	reason := strings.TrimSpace(req.Msg.Reason)
 
 	// Broadcast rejection event
 	s.server.hub.Broadcast(Event{
@@ -2153,11 +2155,15 @@ func (s *GRPCService) RejectToolCall(
 		Reason:   reason,
 	})
 	cmd := command.SessionCommand{
-		SessionID: approval.SessionID,
-		Type:      "approval",
-		Content:   string(payload),
+		SessionID:  approval.SessionID,
+		Type:       "approval",
+		Content:    string(payload),
+		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
-	if err := s.dispatchSessionCommand(cmd); err != nil {
+	if err := s.dispatchSessionCommand(ctx, cmd); err != nil {
+		if isAuthoritativeCommandError(err) {
+			return nil, commandAcceptanceConnectError(err)
+		}
 		return connect.NewResponse(&ipcpb.RejectToolCallResponse{
 			Success: true,
 			Message: fmt.Sprintf("Tool call rejected, but failed to notify session: %v", err),

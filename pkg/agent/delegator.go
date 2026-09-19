@@ -2,38 +2,60 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	pkgcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
+
+const maxDelegationOutputBytes = 4096
+
+var errDelegationIncomplete = errors.New("delegate task incomplete")
+
+type delegationChatCompletion func(context.Context, model.ChatRequest) (*model.ChatResponse, error)
 
 // Delegator manages sub-agent execution
 type Delegator struct {
-	modelMgr *model.Manager
-	registry *tool.Registry
-	specs    map[string]*pkgcontext.SubAgentSpec
+	modelMgr       *model.Manager
+	registry       *tool.Registry
+	specs          map[string]*pkgcontext.SubAgentSpec
+	chatCompletion delegationChatCompletion
 }
 
 // NewDelegator creates a new delegator instance
 func NewDelegator(mgr *model.Manager, registry *tool.Registry, specs map[string]*pkgcontext.SubAgentSpec) *Delegator {
-	return &Delegator{
+	delegator := &Delegator{
 		modelMgr: mgr,
 		registry: registry,
 		specs:    specs,
 	}
+	if mgr != nil {
+		delegator.chatCompletion = mgr.ChatCompletion
+	}
+	return delegator
 }
 
 // DelegationResult holds the result of a sub-agent execution
 type DelegationResult struct {
-	Output       string
-	Success      bool
-	Cost         float64
-	TokensUsed   int
-	ModelUsed    string
-	ErrorMessage string
+	Output          string
+	Success         bool
+	Incomplete      bool
+	Cost            float64
+	CostUnknown     bool
+	TokensUsed      int
+	InputTokens     int
+	OutputTokens    int
+	ModelUsed       string
+	FinishReason    string
+	Usage           *transparency.TokenUsage
+	ModelExecutions []model.ExecutionIdentity
+	ErrorMessage    string
 }
 
 // Delegate executes a task using a sub-agent
@@ -43,7 +65,7 @@ func (d *Delegator) Delegate(ctx context.Context, agentName string, task string)
 		return nil, fmt.Errorf("sub-agent not found: %s", agentName)
 	}
 
-	if d.modelMgr == nil {
+	if d.modelMgr == nil || d.chatCompletion == nil {
 		return nil, fmt.Errorf("model manager unavailable for delegation")
 	}
 
@@ -78,34 +100,126 @@ func (d *Delegator) Delegate(ctx context.Context, agentName string, task string)
 		ToolChoice:  "auto",
 	}
 
-	chatResp, err := d.modelMgr.ChatCompletion(ctx, req)
+	chatResp, err := d.chatCompletion(ctx, req)
+	result := d.delegationResultFromResponse(modelID, chatResp)
+
 	if err != nil {
-		return nil, fmt.Errorf("delegate call failed: %w", err)
+		if result == nil {
+			return &DelegationResult{
+				ModelUsed:    modelID,
+				Success:      false,
+				Incomplete:   true,
+				ErrorMessage: errDelegationIncomplete.Error(),
+			}, errDelegationIncomplete
+		}
+		result.Success = false
+		result.Incomplete = true
+		result.ErrorMessage = errDelegationIncomplete.Error()
+		return result, errDelegationIncomplete
 	}
 
+	if result == nil {
+		return &DelegationResult{
+			ModelUsed:    modelID,
+			Success:      false,
+			Incomplete:   true,
+			ErrorMessage: errDelegationIncomplete.Error(),
+		}, errDelegationIncomplete
+	}
+	if result.Output == "" || !isConclusiveDelegateFinish(result.FinishReason) {
+		result.Success = false
+		result.Incomplete = true
+		result.ErrorMessage = errDelegationIncomplete.Error()
+		return result, errDelegationIncomplete
+	}
+
+	result.Success = true
+	return result, nil
+}
+
+func (d *Delegator) delegationResultFromResponse(modelID string, chatResp *model.ChatResponse) *DelegationResult {
+	if chatResp == nil {
+		return nil
+	}
+	result := &DelegationResult{
+		ModelUsed:    modelID,
+		TokensUsed:   chatResp.Usage.TotalTokens,
+		InputTokens:  chatResp.Usage.PromptTokens,
+		OutputTokens: chatResp.Usage.CompletionTokens,
+		FinishReason: firstFinishReason(chatResp),
+	}
+	if usage := modelusage.FromResponse(chatResp); modelusage.HasEvidence(usage) {
+		cloned := transparency.CloneTokenUsage(usage)
+		result.Usage = &cloned
+		if cost, ok := d.authoritativeDelegationCost(modelID, chatResp, cloned); ok {
+			result.Cost = cost
+		} else {
+			result.CostUnknown = true
+		}
+	}
+	if chatResp.ExecutionIdentity != nil {
+		result.ModelExecutions = append(result.ModelExecutions, *chatResp.ExecutionIdentity)
+	}
 	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("model returned empty response")
+		return result
 	}
-
 	content, err := model.ExtractTextContent(chatResp.Choices[0].Message.Content)
 	if err != nil {
-		return nil, fmt.Errorf("delegate response parse failed: %w", err)
+		return result
 	}
+	_, public := model.ExtractThinkingContent(content)
+	result.Output = truncateUTF8(strings.TrimSpace(public), maxDelegationOutputBytes)
+	return result
+}
 
-	// Execute with the model
-	result := &DelegationResult{
-		ModelUsed: modelID,
-		Success:   true,
-		Output:    content,
-		TokensUsed: func() int {
-			if chatResp != nil {
-				return chatResp.Usage.TotalTokens
-			}
-			return 0
-		}(),
+func (d *Delegator) authoritativeDelegationCost(modelID string, resp *model.ChatResponse, usage transparency.TokenUsage) (float64, bool) {
+	if d == nil || d.modelMgr == nil || resp == nil || !modelusage.HasEvidence(usage) {
+		return 0, false
 	}
+	info, err := d.modelMgr.GetModelInfo(modelID)
+	if err != nil {
+		return 0, false
+	}
+	pricing := transparency.ModelPricing{
+		InputPerMillion:  info.Pricing.Prompt,
+		OutputPerMillion: info.Pricing.Completion,
+	}
+	if transparency.CostUnknownForUsage(usage, pricing) {
+		return 0, false
+	}
+	if resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0 {
+		if resp.UsagePresent && info.PricingKnown && info.Pricing.Prompt == 0 && info.Pricing.Completion == 0 {
+			return 0, true
+		}
+		return 0, false
+	}
+	cost, err := d.modelMgr.CalculateBoundedCost(modelID, resp.Usage)
+	if err != nil {
+		return 0, false
+	}
+	return cost, true
+}
 
-	return result, nil
+func firstFinishReason(resp *model.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(resp.Choices[0].FinishReason)
+}
+
+func isConclusiveDelegateFinish(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), "stop")
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 // filterTools creates a filtered registry with only allowed tools

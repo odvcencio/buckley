@@ -305,64 +305,18 @@ func TestGenerateDiff_NewFile(t *testing.T) {
 	}
 }
 
-func TestContainsAt(t *testing.T) {
-	tests := []struct {
-		name   string
-		lines  []string
-		target string
-		want   bool
-	}{
-		{
-			name:   "empty lines",
-			lines:  nil,
-			target: "foo",
-			want:   false,
-		},
-		{
-			name:   "target found",
-			lines:  []string{"foo", "bar", "baz"},
-			target: "bar",
-			want:   true,
-		},
-		{
-			name:   "target not found",
-			lines:  []string{"foo", "bar", "baz"},
-			target: "qux",
-			want:   false,
-		},
-		{
-			name:   "exact match required",
-			lines:  []string{"foobar"},
-			target: "foo",
-			want:   false,
-		},
-		{
-			name:   "empty target",
-			lines:  []string{"foo", "", "bar"},
-			target: "",
-			want:   true,
-		},
-		{
-			name:   "first element",
-			lines:  []string{"first", "second"},
-			target: "first",
-			want:   true,
-		},
-		{
-			name:   "last element",
-			lines:  []string{"first", "last"},
-			target: "last",
-			want:   true,
-		},
-	}
+func TestGenerateUnifiedDiff_CrossedLinesMakesProgress(t *testing.T) {
+	diff := generateUnifiedDiff(
+		"crossed.txt",
+		[]string{"same", "old", "new", "tail"},
+		[]string{"same", "new", "old", "tail"},
+	)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := containsAt(tc.lines, tc.target)
-			if got != tc.want {
-				t.Errorf("containsAt(%v, %q) = %v, want %v", tc.lines, tc.target, got, tc.want)
-			}
-		})
+	if !strings.Contains(diff, "--- crossed.txt") || !strings.Contains(diff, "+++ crossed.txt") {
+		t.Fatalf("generateUnifiedDiff() missing headers:\n%s", diff)
+	}
+	if !strings.Contains(diff, "-new") || !strings.Contains(diff, "+new") {
+		t.Fatalf("generateUnifiedDiff() did not describe crossed lines:\n%s", diff)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 type ProgramTool struct {
 	runner    *execmode.Runner
 	evidence  evidence.Store
+	ledger    runledger.Store
 	runID     string
 	sessionID string
 }
@@ -69,6 +70,7 @@ func NewProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.St
 	return &ProgramTool{
 		runner:    runner,
 		evidence:  ev,
+		ledger:    ledger,
 		runID:     runID,
 		sessionID: sessionID,
 	}, nil
@@ -162,6 +164,21 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		return nil, fmt.Errorf("exec_program: store program evidence: %w", err)
 	}
 
+	startedEvent, err := t.ledger.Append(ctx, runledger.Event{
+		Type:        "exec_program.started",
+		SessionID:   t.sessionID,
+		RunID:       t.runID,
+		EvidenceIDs: []string{program.ID},
+		Payload: map[string]any{
+			"language":         language,
+			"program_evidence": program.ID,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exec_program: append started event: %w", err)
+	}
+	executionID := startedEvent.ID
+
 	started := time.Now()
 	var result execmode.Result
 	if language == "fw" {
@@ -173,44 +190,64 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 	output, evidenceErr := t.evidence.Put(ctx, evidence.Object{
 		Kind:       evidence.KindToolResult,
 		MediaType:  "text/plain",
-		InlineBody: []byte(fmt.Sprintf("exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s", result.ExitCode, result.Stdout, result.Stderr)),
+		InlineBody: []byte(fmt.Sprintf("exit=%d\nstdout_truncated=%t\nstderr_truncated=%t\n--- stdout ---\n%s\n--- stderr ---\n%s", result.ExitCode, result.StdoutTruncated, result.StderrTruncated, result.Stdout, result.Stderr)),
 		Metadata: map[string]any{
 			evidence.MetaRunID:     t.runID,
 			evidence.MetaSessionID: t.sessionID,
 			"surface":              "exec_program",
 			"program_evidence":     program.ID,
+			"stdout_truncated":     result.StdoutTruncated,
+			"stderr_truncated":     result.StderrTruncated,
 		},
 	})
 	if evidenceErr != nil {
 		return nil, fmt.Errorf("exec_program: store output evidence: %w", evidenceErr)
 	}
-	if err != nil {
-		return &builtin.Result{
-			Success: false,
-			Error:   err.Error(),
-			Data: map[string]any{
-				"stderr":          result.Stderr,
-				"stdout":          result.Stdout,
-				"output_evidence": output.ID,
-			},
-		}, nil
-	}
 	data := map[string]any{
+		"execution_id":     executionID,
 		"stdout":           result.Stdout,
+		"stderr":           result.Stderr,
 		"exit_code":        result.ExitCode,
 		"duration_ms":      time.Since(started).Milliseconds(),
 		"program_evidence": program.ID,
 		"output_evidence":  output.ID,
+		"stdout_truncated": result.StdoutTruncated,
+		"stderr_truncated": result.StderrTruncated,
 	}
-	if result.Stderr != "" {
-		data["stderr"] = result.Stderr
+	truncated := result.StdoutTruncated || result.StderrTruncated
+	truncatedMsg := "output truncated: captured stdout/stderr exceeded the capture limit; print a smaller filtered summary of the output instead of the full text"
+	var message string
+	switch {
+	case err != nil:
+		message = err.Error()
+	case result.ExitCode != 0:
+		message = fmt.Sprintf("program exited %d", result.ExitCode)
 	}
-	if result.ExitCode != 0 {
-		return &builtin.Result{
-			Success: false,
-			Error:   fmt.Sprintf("program exited %d", result.ExitCode),
-			Data:    data,
-		}, nil
+	if truncated {
+		if message != "" {
+			message += "; "
+		}
+		message += truncatedMsg
 	}
-	return &builtin.Result{Success: true, Data: data}, nil
+	if _, err := t.ledger.Append(ctx, runledger.Event{
+		Type:        "exec_program.finished",
+		SessionID:   t.sessionID,
+		RunID:       t.runID,
+		EvidenceIDs: []string{program.ID, output.ID},
+		Payload: map[string]any{
+			"execution_id":     executionID,
+			"program_evidence": program.ID,
+			"output_evidence":  output.ID,
+			"language":         language,
+			"exit_code":        result.ExitCode,
+			"success":          message == "",
+			"error":            message,
+			"duration_ms":      data["duration_ms"],
+			"stdout_truncated": result.StdoutTruncated,
+			"stderr_truncated": result.StderrTruncated,
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("exec_program: append finished event: %w", err)
+	}
+	return &builtin.Result{Success: message == "", Error: message, Data: data}, nil
 }

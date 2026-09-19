@@ -204,7 +204,7 @@ func newProgressTestController(t *testing.T, progress *ProgressController, store
 	ctrl, err := NewController(ControllerConfig{
 		Progress: progress,
 		BuildRequest: func(ctx context.Context, r int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			round++
@@ -395,13 +395,41 @@ func TestProgressTracker_ProjectsZeroYieldWithoutCallingItFailure(t *testing.T) 
 	}
 }
 
+func TestProgressTracker_TracksPostChangeVerificationSequence(t *testing.T) {
+	t.Parallel()
+
+	tracker := progressTracker{}
+	tracker.Observe("run_tests", ToolOutcome{Content: "pass", Success: true, VerificationObserved: true, VerificationPassed: true})
+	tracker.Observe("edit_file", ToolOutcome{Content: "changed", Success: true, StateObserved: true, StateChanged: true})
+
+	got := tracker.Snapshot()
+	if got.LastVerificationSequence >= got.LastStateChangeSequence {
+		t.Fatalf("pre-edit verification appears post-change: %+v", got)
+	}
+	if err := (CompletionContract{RequirePostChangeVerification: true}).Normalize().evaluate(got); err == nil {
+		t.Fatalf("pre-edit verification satisfied contract: %+v", got)
+	}
+
+	tracker.Observe("run_tests", ToolOutcome{Content: "fail", Success: false, VerificationObserved: true, VerificationPassed: false})
+	got = tracker.Snapshot()
+	if err := (CompletionContract{RequirePostChangeVerification: true}).Normalize().evaluate(got); err == nil || !strings.Contains(err.Error(), "did not pass") {
+		t.Fatalf("failed verification contract error = %v snapshot=%+v", err, got)
+	}
+
+	tracker.Observe("run_tests", ToolOutcome{Content: "pass", Success: true, VerificationObserved: true, VerificationPassed: true})
+	got = tracker.Snapshot()
+	if err := (CompletionContract{RequirePostChangeVerification: true}).Normalize().evaluate(got); err != nil {
+		t.Fatalf("post-change pass rejected: %v snapshot=%+v", err, got)
+	}
+}
+
 func TestController_ExposesProgressProjectionOnNormalCompletion(t *testing.T) {
 	t.Parallel()
 
 	modelCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++

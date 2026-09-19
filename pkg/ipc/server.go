@@ -29,6 +29,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
 	"m31labs.dev/buckley/pkg/ipc/push"
@@ -38,6 +39,7 @@ import (
 	"m31labs.dev/buckley/pkg/paths"
 	"m31labs.dev/buckley/pkg/personality"
 	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/scaffold"
 	"m31labs.dev/buckley/pkg/session"
 	"m31labs.dev/buckley/pkg/storage"
@@ -54,8 +56,9 @@ var allowedSettingKeySet = map[string]struct{}{
 type ctxKey string
 
 const (
-	principalContextKey ctxKey = "buckley-ipc-principal"
-	sessionCookieName          = "buckley_session"
+	principalContextKey         ctxKey = "buckley-ipc-principal"
+	issuedAuthSessionContextKey ctxKey = "buckley-ipc-issued-auth-session"
+	sessionCookieName                  = "buckley_session"
 )
 
 const (
@@ -110,31 +113,40 @@ type Config struct {
 
 // Server hosts a JSON/HTTP + WebSocket API for external UIs.
 type Server struct {
-	cfg              Config
-	appConfig        *config.Config
-	store            *storage.Store
-	missionStore     *mission.Store
-	models           *model.Manager
-	hub              *Hub
-	pushService      *push.Service
-	eventConnLimiter *connLimiter
-	ptyConnLimiter   *connLimiter
-	httpServer       *http.Server
-	logger           *log.Logger
-	telemetry        *telemetry.Hub
-	commandGW        *command.Gateway
-	commandLimiter   *rateLimiter
-	cliTicketLimiter *rateLimiter
-	planStore        orchestrator.PlanStore
-	projectRoot      string
-	workflow         *orchestrator.WorkflowManager
-	viewAssembler    *viewmodel.Assembler
-	viewPatchMu      sync.Mutex
-	viewPatchWG      sync.WaitGroup
-	viewPatchClosing bool
-	runtimeTracker   *viewmodel.RuntimeStateTracker
-	headlessRegistry HeadlessRegistry
-	grpcService      *GRPCService
+	cfg                 Config
+	appConfig           *config.Config
+	store               *storage.Store
+	missionStore        *mission.Store
+	models              *model.Manager
+	hub                 *Hub
+	pushService         *push.Service
+	eventConnLimiter    *connLimiter
+	ptyConnLimiter      *connLimiter
+	httpServer          *http.Server
+	logger              *log.Logger
+	telemetry           *telemetry.Hub
+	commandGW           *command.Gateway
+	commandLimiter      *rateLimiter
+	cliTicketLimiter    *rateLimiter
+	planStore           orchestrator.PlanStore
+	projectRoot         string
+	workflow            *orchestrator.WorkflowManager
+	viewAssembler       *viewmodel.Assembler
+	viewPatchMu         sync.Mutex
+	viewPatchWG         sync.WaitGroup
+	viewPatchClosing    bool
+	runtimeTracker      *viewmodel.RuntimeStateTracker
+	observationMu       sync.RWMutex
+	executionMonitor    sessionExecutionMonitorReader
+	routineMonitor      routineMonitorReader
+	headlessMu          sync.RWMutex
+	headlessVersion     uint64
+	headlessConfiguring bool
+	headlessRegistry    HeadlessRegistry
+	durableLedger       runledger.Store
+	durableEvidence     evidence.Store
+	hudTaskMarkerKey    [32]byte
+	grpcService         *GRPCService
 }
 
 // NewServer constructs a server bound to the provided store.
@@ -179,6 +191,7 @@ func NewServer(cfg Config, store *storage.Store, telemetryHub *telemetry.Hub, co
 		workflow:         workflow,
 		runtimeTracker:   runtimeTracker,
 		viewAssembler:    viewmodel.NewAssembler(store, planStore, workflow).WithRuntimeTracker(runtimeTracker),
+		hudTaskMarkerKey: newHUDTaskMarkerKey(),
 	}
 	s.hub.SetRecorder(func(event Event) error {
 		if !shouldPersistEvent(event.Type) {
@@ -199,6 +212,14 @@ func NewServer(cfg Config, store *storage.Store, telemetryHub *telemetry.Hub, co
 
 	store.AddObserver(storage.ObserverFunc(s.onStorageEvent))
 	return s
+}
+
+func newHUDTaskMarkerKey() [32]byte {
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return [32]byte{}
+	}
+	return key
 }
 
 func shouldPersistEvent(eventType string) bool {
@@ -250,6 +271,7 @@ func (s *Server) Start(ctx context.Context) error {
 	api.Get("/sessions/{sessionID}/messages", s.handleSessionMessages)
 	api.Get("/sessions/{sessionID}/todos", s.handleSessionTodos)
 	api.Get("/sessions/{sessionID}/skills", s.handleSessionSkills)
+	s.setupSessionExecRoutes(api)
 	api.Post("/sessions/{sessionID}/tokens", s.handleSessionToken)
 	api.Get("/files", s.handleListFiles)
 	api.Get("/metrics/cost", s.handleCostMetrics)
@@ -316,6 +338,14 @@ func (s *Server) Start(ctx context.Context) error {
 	grpcHandler = http.MaxBytesHandler(grpcHandler, maxConnectRequestBytes)
 	router.With(s.authContextMiddleware).Mount(grpcPath, grpcHandler)
 	s.logger.Printf("gRPC/Connect service mounted at %s", grpcPath)
+	observationPath, observationHandler := ipcpbconnect.NewBuckleyObservationHandler(
+		s.grpcService,
+		connect.WithCompressMinBytes(1024),
+		connect.WithReadMaxBytes(maxConnectReadBytes),
+	)
+	observationHandler = http.MaxBytesHandler(observationHandler, maxConnectRequestBytes)
+	router.With(s.authContextMiddleware).Mount(observationPath, observationHandler)
+	s.logger.Printf("gRPC/Connect observation service mounted at %s", observationPath)
 
 	// Serve UI: only when enabled, prefer external StaticDir if configured.
 	if s.cfg.EnableBrowser {
@@ -1087,6 +1117,7 @@ func (s *Server) handleRevokeAPIToken(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.refreshAuthSessionGauge()
 	_ = s.store.RecordAuditLog(principal.Name, principal.Scope, "api_token.revoke", map[string]any{"id": tokenID})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1292,7 +1323,7 @@ func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
-	if s.commandGW == nil {
+	if !commandTargetAvailable(s) {
 		respondError(w, http.StatusServiceUnavailable, fmt.Errorf("commands not enabled"))
 		return
 	}
@@ -1314,6 +1345,7 @@ func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.SessionID = sessionID
+	payload.AcceptedBy = strings.TrimSpace(principal.Name)
 
 	session, err := s.store.GetSession(sessionID)
 	if err != nil {
@@ -1340,19 +1372,29 @@ func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, fmt.Errorf("content required"))
 		return
 	}
-	payload.EnsureID()
-	if err := s.commandGW.Dispatch(payload); err != nil {
+	outcome, err := s.dispatchCommandWithReceipt(r.Context(), &payload, commandDispatchGateway)
+	if err != nil {
+		if isAuthoritativeCommandError(err) {
+			status, safeErr := commandAcceptanceHTTPError(err)
+			respondError(w, status, safeErr)
+			return
+		}
 		respondError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	respondJSONStatus(w, http.StatusAccepted, map[string]string{
-		"status":    "accepted",
-		"commandId": payload.ID,
-	})
+	response := struct {
+		Status    string              `json:"status"`
+		CommandID string              `json:"commandId"`
+		Receipt   *commandReceiptJSON `json:"receipt,omitempty"`
+	}{Status: "accepted", CommandID: payload.ID}
+	if outcome.Durable {
+		response.Receipt = commandReceiptForJSON(outcome.Receipt)
+	}
+	respondJSONStatus(w, http.StatusAccepted, response)
 }
 
 func (s *Server) handleWorkflowAction(w http.ResponseWriter, r *http.Request) {
-	if s.commandGW == nil {
+	if !commandTargetAvailable(s) {
 		respondError(w, http.StatusServiceUnavailable, fmt.Errorf("commands not enabled"))
 		return
 	}
@@ -1402,12 +1444,18 @@ func (s *Server) handleWorkflowAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := command.SessionCommand{
-		SessionID: sessionID,
-		Type:      "slash",
-		Content:   content,
+		SessionID:  sessionID,
+		Type:       "slash",
+		Content:    content,
+		AcceptedBy: strings.TrimSpace(principal.Name),
 	}
-	cmd.EnsureID()
-	if err := s.commandGW.Dispatch(cmd); err != nil {
+	_, err = s.dispatchCommandWithReceipt(r.Context(), &cmd, commandDispatchGateway)
+	if err != nil {
+		if isAuthoritativeCommandError(err) {
+			status, safeErr := commandAcceptanceHTTPError(err)
+			respondError(w, status, safeErr)
+			return
+		}
 		respondError(w, http.StatusServiceUnavailable, err)
 		return
 	}
@@ -1785,13 +1833,19 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	principal := principalFromContext(r.Context())
 	if principal == nil {
 		respondError(w, http.StatusUnauthorized, stdliberrors.New("unauthorized"))
 		return
 	}
-	if cookie, err := r.Cookie(sessionCookieName); err == nil {
-		s.revokeAuthSession(strings.TrimSpace(cookie.Value))
+	if err := s.revokeLogoutSessions(r); err != nil {
+		status := http.StatusInternalServerError
+		if stdliberrors.Is(err, errBrowserSessionCookieInvalid) {
+			status = http.StatusBadRequest
+		}
+		respondError(w, status, stdliberrors.New("logout failed"))
+		return
 	}
 	s.clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -2683,11 +2737,55 @@ func (s *Server) principalFromSessionCookie(r *http.Request) (*requestPrincipal,
 }
 
 func (s *Server) revokeAuthSession(token string) {
-	if strings.TrimSpace(token) == "" || s.store == nil {
-		return
+	_ = s.revokeAuthSessionExact(token)
+}
+
+func (s *Server) revokeAuthSessionExact(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("session token required")
 	}
-	_ = s.store.DeleteAuthSession(strings.TrimSpace(token))
+	if s == nil || s.store == nil {
+		return fmt.Errorf("storage unavailable")
+	}
+	if err := s.store.DeleteAuthSession(token); err != nil {
+		return fmt.Errorf("delete auth session: %w", err)
+	}
 	s.refreshAuthSessionGauge()
+	return nil
+}
+
+func (s *Server) revokeLogoutSessions(r *http.Request) error {
+	requestSession, requestPresent, err := exactRequestBrowserSessionValue(r)
+	if err != nil {
+		return err
+	}
+	sessions := make([]string, 0, 2)
+	if requestPresent {
+		sessions = append(sessions, requestSession)
+	}
+	if issuedSession, ok := issuedAuthSessionFromContext(r.Context()); ok && issuedSession != requestSession {
+		sessions = append(sessions, issuedSession)
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
+	if s == nil || s.store == nil {
+		return fmt.Errorf("storage unavailable")
+	}
+	if err := s.store.DeleteAuthSessions(sessions); err != nil {
+		return fmt.Errorf("delete logout sessions: %w", err)
+	}
+	s.refreshAuthSessionGauge()
+	return nil
+}
+
+func issuedAuthSessionFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	token, ok := ctx.Value(issuedAuthSessionContextKey).(string)
+	return token, ok && validBrowserSessionValue(token)
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {

@@ -1,9 +1,12 @@
 package experiment
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +119,14 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) ([]*paralle
 		timeout = r.cfg.DefaultTimeout
 	}
 
+	preflightExp, err := cloneExperiment(exp)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot experiment input: %w", err)
+	}
+	if _, err := prepareExperimentRuns(preflightExp, timeout, false); err != nil {
+		return nil, err
+	}
+
 	runIDs := make(map[string]string)
 	startTimes := make(map[string]time.Time)
 
@@ -125,97 +136,58 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) ([]*paralle
 			return nil, err
 		}
 		if stored == nil {
-			if err := r.store.CreateExperiment(exp); err != nil {
+			if err := r.store.CreateExperiment(preflightExp); err != nil {
 				return nil, err
 			}
+			syncCreatedExperimentFields(exp, preflightExp)
 		}
+	}
+	runExp, err := cloneExperiment(preflightExp)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot experiment input: %w", err)
+	}
+	prepared, err := prepareExperimentRuns(runExp, timeout, r.store != nil)
+	if err != nil {
+		return nil, err
+	}
+	if r.store != nil {
 		if err := r.store.UpdateExperimentStatus(exp.ID, ExperimentRunning, nil); err != nil {
 			return nil, err
 		}
 	}
 	exp.Status = ExperimentRunning
+	runExp.Status = ExperimentRunning
 
-	r.publishExperimentStart(exp)
-	r.notifyExperimentStart(ctx, exp)
+	r.publishExperimentStart(runExp)
+	r.notifyExperimentStart(ctx, runExp)
+
+	for i := range prepared {
+		preparedRun := prepared[i]
+		if r.store != nil {
+			runIDs[preparedRun.variant.ID] = preparedRun.run.ID
+			startTimes[preparedRun.variant.ID] = preparedRun.run.StartedAt
+			if err := r.store.SaveRun(&preparedRun.run); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	r.parallel.Start()
 	defer r.parallel.Stop()
 
-	for i := range exp.Variants {
-		variant := &exp.Variants[i]
-		contextValues := copyContext(exp.Task.Context)
-		task := &parallel.AgentTask{
-			ID:          variant.ID,
-			Name:        variant.Name,
-			Description: exp.Task.Prompt,
-			Branch:      fmt.Sprintf("experiment/%s/%s", exp.ID, variant.ID),
-			Prompt:      exp.Task.Prompt,
-			Context:     contextValues,
-		}
-		contextValues["model_id"] = variant.ModelID
-		contextValues["provider"] = variant.ProviderID
-		contextValues["timeout"] = strconv.FormatInt(timeout.Milliseconds(), 10)
-		contextValues["experiment"] = exp.ID
-		if exp.Task.WorkingDir != "" {
-			contextValues["working_dir"] = exp.Task.WorkingDir
-		}
-		if variant.SystemPrompt != nil {
-			contextValues["system_prompt"] = strings.TrimSpace(*variant.SystemPrompt)
-		}
-		if variant.Temperature != nil {
-			contextValues["temperature"] = fmt.Sprintf("%g", *variant.Temperature)
-		}
-		if variant.MaxTokens != nil {
-			contextValues["max_tokens"] = strconv.Itoa(*variant.MaxTokens)
-		}
-		if len(variant.ToolsAllowed) > 0 {
-			task.Context["tools_allowed"] = joinTools(variant.ToolsAllowed)
-		}
+	for i := range prepared {
+		preparedRun := prepared[i]
 
-		// Set file scope for conflict detection (variant overrides task)
-		files := variant.Files
-		if len(files) == 0 {
-			files = exp.Task.Files
-		}
-		if len(files) > 0 {
-			contextValues["files"] = strings.Join(files, ",")
-		}
-		scope := variant.Scope
-		if len(scope) == 0 {
-			scope = exp.Task.Scope
-		}
-		if len(scope) > 0 {
-			contextValues["scope"] = strings.Join(scope, ",")
-		}
-
-		if r.store != nil {
-			runID := ulid.Make().String()
-			runIDs[variant.ID] = runID
-			startTime := time.Now()
-			startTimes[variant.ID] = startTime
-			run := Run{
-				ID:           runID,
-				ExperimentID: exp.ID,
-				VariantID:    variant.ID,
-				Branch:       task.Branch,
-				Status:       RunRunning,
-				StartedAt:    startTime,
-			}
-			if err := r.store.SaveRun(&run); err != nil {
-				return nil, err
-			}
-		}
-
-		r.publishVariantEvent(telemetry.EventExperimentVariantStarted, exp, variant, nil)
-		r.notifyVariantStart(ctx, exp, variant)
-		if err := r.parallel.Submit(task); err != nil {
+		r.publishVariantEvent(telemetry.EventExperimentVariantStarted, runExp, &preparedRun.variant, nil)
+		r.notifyVariantStart(ctx, runExp, &preparedRun.variant)
+		if err := r.parallel.Submit(preparedRun.task); err != nil {
 			return nil, err
 		}
 	}
 
-	results := make([]*parallel.AgentResult, 0, len(exp.Variants))
+	results := make([]*parallel.AgentResult, 0, len(runExp.Variants))
 	hadFailure := false
-	for len(results) < len(exp.Variants) {
+	for len(results) < len(runExp.Variants) {
 		select {
 		case <-ctx.Done():
 			if r.store != nil {
@@ -231,19 +203,21 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) ([]*paralle
 			}
 			if result != nil {
 				if r.store != nil {
-					if err := r.persistResult(ctx, exp, result, runIDs, startTimes); err != nil {
+					if err := r.persistResult(ctx, runExp, result, runIDs, startTimes); err != nil {
 						return results, err
 					}
 				}
-				r.publishVariantResult(exp, result)
-				r.notifyVariantResult(ctx, exp, result)
+				r.publishVariantResult(runExp, result)
+				r.notifyVariantResult(ctx, runExp, result)
 			}
 			results = append(results, result)
 		}
 	}
 
 	if r.cfg.CleanupOnDone {
-		_ = r.parallel.Cleanup()
+		if err := r.parallel.Cleanup(); err != nil {
+			r.reportCleanupWarning(ctx, runExp, err)
+		}
 	}
 
 	finalStatus := ExperimentCompleted
@@ -252,12 +226,13 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) ([]*paralle
 	}
 	exp.Status = finalStatus
 	if r.store != nil {
-		if err := r.store.UpdateExperimentStatus(exp.ID, finalStatus, nil); err != nil {
+		if err := r.store.UpdateExperimentStatus(runExp.ID, finalStatus, nil); err != nil {
 			return results, err
 		}
 	}
-	r.publishExperimentEnd(exp)
-	r.notifyExperimentEnd(ctx, exp, results)
+	runExp.Status = finalStatus
+	r.publishExperimentEnd(runExp)
+	r.notifyExperimentEnd(ctx, runExp, results)
 
 	return results, nil
 }
@@ -282,6 +257,170 @@ func copyContext(input map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func syncCreatedExperimentFields(dst, src *Experiment) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.ID = src.ID
+	dst.CreatedAt = src.CreatedAt
+	for i := range dst.Variants {
+		if i < len(src.Variants) {
+			dst.Variants[i].ID = src.Variants[i].ID
+		}
+	}
+	for i := range dst.Criteria {
+		if i < len(src.Criteria) {
+			dst.Criteria[i].ID = src.Criteria[i].ID
+		}
+	}
+}
+
+type preparedExperimentRun struct {
+	variant Variant
+	task    *parallel.AgentTask
+	run     Run
+}
+
+func prepareExperimentRuns(exp *Experiment, timeout time.Duration, includeRuns bool) ([]preparedExperimentRun, error) {
+	if exp == nil {
+		return nil, fmt.Errorf("experiment is nil")
+	}
+	prepared := make([]preparedExperimentRun, 0, len(exp.Variants))
+	for i := range exp.Variants {
+		variant := exp.Variants[i]
+		task := buildExperimentAgentTask(exp, variant, timeout)
+		manifest, err := buildRunInputManifest(exp, variant, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("build run input manifest for variant %s: %w", variantName(&variant), err)
+		}
+		item := preparedExperimentRun{
+			variant: variant,
+			task:    task,
+		}
+		if includeRuns {
+			startTime := time.Now()
+			item.run = Run{
+				ID:            ulid.Make().String(),
+				ExperimentID:  exp.ID,
+				VariantID:     variant.ID,
+				Branch:        task.Branch,
+				Status:        RunRunning,
+				StartedAt:     startTime,
+				InputManifest: manifest,
+			}
+		}
+		prepared = append(prepared, item)
+	}
+	return prepared, nil
+}
+
+func buildExperimentAgentTask(exp *Experiment, variant Variant, timeout time.Duration) *parallel.AgentTask {
+	contextValues := copyContext(exp.Task.Context)
+	task := &parallel.AgentTask{
+		ID:          variant.ID,
+		Name:        variant.Name,
+		Description: exp.Task.Prompt,
+		Branch:      fmt.Sprintf("experiment/%s/%s", exp.ID, variant.ID),
+		Prompt:      exp.Task.Prompt,
+		Context:     contextValues,
+	}
+	contextValues["model_id"] = variant.ModelID
+	contextValues["provider"] = variant.ProviderID
+	contextValues["timeout"] = strconv.FormatInt(timeout.Milliseconds(), 10)
+	contextValues["experiment"] = exp.ID
+	if exp.Task.WorkingDir != "" {
+		contextValues["working_dir"] = exp.Task.WorkingDir
+	}
+	if variant.SystemPrompt != nil {
+		contextValues["system_prompt"] = strings.TrimSpace(*variant.SystemPrompt)
+	}
+	if variant.Temperature != nil {
+		contextValues["temperature"] = fmt.Sprintf("%g", *variant.Temperature)
+	}
+	if variant.MaxTokens != nil {
+		contextValues["max_tokens"] = strconv.Itoa(*variant.MaxTokens)
+	}
+	if len(variant.ToolsAllowed) > 0 {
+		task.Context["tools_allowed"] = joinTools(variant.ToolsAllowed)
+	}
+
+	files := variant.Files
+	if len(files) == 0 {
+		files = exp.Task.Files
+	}
+	if len(files) > 0 {
+		contextValues["files"] = strings.Join(files, ",")
+	}
+	scope := variant.Scope
+	if len(scope) == 0 {
+		scope = exp.Task.Scope
+	}
+	if len(scope) > 0 {
+		contextValues["scope"] = strings.Join(scope, ",")
+	}
+	return task
+}
+
+func cloneExperiment(exp *Experiment) (*Experiment, error) {
+	if exp == nil {
+		return nil, nil
+	}
+	out := *exp
+	out.Task.Context = copyContext(exp.Task.Context)
+	out.Task.Files = append([]string(nil), exp.Task.Files...)
+	out.Task.Scope = append([]string(nil), exp.Task.Scope...)
+	out.Variants = make([]Variant, len(exp.Variants))
+	for i, variant := range exp.Variants {
+		cloned, err := cloneVariant(variant)
+		if err != nil {
+			return nil, err
+		}
+		out.Variants[i] = cloned
+	}
+	out.Criteria = append([]SuccessCriterion(nil), exp.Criteria...)
+	if exp.CompletedAt != nil {
+		completed := *exp.CompletedAt
+		out.CompletedAt = &completed
+	}
+	return &out, nil
+}
+
+func cloneVariant(variant Variant) (Variant, error) {
+	out := variant
+	if variant.SystemPrompt != nil {
+		value := *variant.SystemPrompt
+		out.SystemPrompt = &value
+	}
+	out.Temperature = copyFloatPtr(variant.Temperature)
+	out.MaxTokens = copyIntPtr(variant.MaxTokens)
+	out.ToolsAllowed = append([]string(nil), variant.ToolsAllowed...)
+	out.Files = append([]string(nil), variant.Files...)
+	out.Scope = append([]string(nil), variant.Scope...)
+	customConfig, err := cloneAnyMap(variant.CustomConfig)
+	if err != nil {
+		return Variant{}, err
+	}
+	out.CustomConfig = customConfig
+	return out, nil
+}
+
+func cloneAnyMap(input map[string]any) (map[string]any, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *Runner) persistResult(ctx context.Context, exp *Experiment, result *parallel.AgentResult, runIDs map[string]string, startTimes map[string]time.Time) error {
@@ -312,6 +451,8 @@ func (r *Runner) persistResult(ctx context.Context, exp *Experiment, result *par
 		PromptTokens:     metricValue(result.Metrics, "prompt_tokens"),
 		CompletionTokens: metricValue(result.Metrics, "completion_tokens"),
 		TotalCost:        result.TotalCost,
+		Usage:            cloneTokenUsagePtr(result.Usage),
+		CostUnknown:      result.CostUnknown,
 		ToolCalls:        metricValue(result.Metrics, "tool_calls"),
 		ToolSuccesses:    metricValue(result.Metrics, "tool_successes"),
 		ToolFailures:     metricValue(result.Metrics, "tool_failures"),
@@ -320,17 +461,18 @@ func (r *Runner) persistResult(ctx context.Context, exp *Experiment, result *par
 	}
 
 	run := Run{
-		ID:           runID,
-		ExperimentID: exp.ID,
-		VariantID:    result.TaskID,
-		Branch:       result.Branch,
-		Status:       status,
-		Output:       result.Output,
-		Files:        result.Files,
-		Metrics:      metrics,
-		Error:        errText,
-		StartedAt:    startedAt,
-		CompletedAt:  &completedAt,
+		ID:              runID,
+		ExperimentID:    exp.ID,
+		VariantID:       result.TaskID,
+		Branch:          result.Branch,
+		Status:          status,
+		Output:          result.Output,
+		Files:           result.Files,
+		Metrics:         metrics,
+		Error:           errText,
+		StartedAt:       startedAt,
+		CompletedAt:     &completedAt,
+		ModelExecutions: cloneModelExecutions(result.ModelExecutions),
 	}
 
 	if err := r.store.SaveRun(&run); err != nil {
@@ -448,6 +590,32 @@ func (r *Runner) publishExperimentEnd(exp *Experiment) {
 	})
 }
 
+func (r *Runner) reportCleanupWarning(ctx context.Context, exp *Experiment, err error) {
+	if r == nil || exp == nil || err == nil {
+		return
+	}
+	warning := strings.TrimSpace(err.Error())
+	if warning == "" {
+		return
+	}
+
+	slog.Warn("experiment cleanup incomplete", "experiment_id", exp.ID, "warning", warning)
+	if r.telemetry != nil {
+		r.telemetry.Publish(telemetry.Event{
+			Type: telemetry.EventDebug,
+			Data: map[string]any{
+				"kind":          "experiment.cleanup_warning",
+				"experiment_id": exp.ID,
+				"warning":       warning,
+			},
+		})
+	}
+	if r.notify != nil {
+		message := "Experiment cleanup needs attention; inspect the reported worktree paths before manual cleanup. " + warning
+		_ = r.notify.NotifyProgress(ctx, exp.ID, exp.Name, message)
+	}
+}
+
 func findVariant(exp *Experiment, id string) *Variant {
 	if exp == nil {
 		return nil
@@ -530,131 +698,4 @@ func (r *Runner) notifyExperimentEnd(ctx context.Context, exp *Experiment, resul
 	}
 }
 
-// CoordinatedRunner wraps Runner with conflict-aware scheduling.
-type CoordinatedRunner struct {
-	*Runner
-	coordinator *parallel.Coordinator
-	repoPath    string
-}
-
-// NewCoordinatedRunner creates a runner with conflict-aware coordination.
-func NewCoordinatedRunner(cfg RunnerConfig, deps Dependencies, repoPath string) (*CoordinatedRunner, error) {
-	runner, err := NewRunner(cfg, deps)
-	if err != nil {
-		return nil, err
-	}
-
-	executor := &experimentExecutor{
-		config:         deps.Config,
-		modelManager:   deps.ModelManager,
-		projectContext: deps.ProjectContext,
-		telemetry:      deps.Telemetry,
-	}
-
-	coordCfg := parallel.DefaultCoordinatorConfig(repoPath)
-	coordCfg.MaxAgents = cfg.MaxConcurrent
-	coordinator := parallel.NewCoordinator(deps.Worktree, executor, coordCfg)
-
-	return &CoordinatedRunner{
-		Runner:      runner,
-		coordinator: coordinator,
-		repoPath:    repoPath,
-	}, nil
-}
-
-// PreviewExecution returns a preview of how tasks would be scheduled.
-func (r *CoordinatedRunner) PreviewExecution(exp *Experiment) *parallel.ExecutionPreview {
-	tasks := r.buildTasks(exp)
-	return r.coordinator.PreviewExecution(tasks)
-}
-
-// RunCoordinated executes the experiment with conflict-aware scheduling.
-// Tasks with overlapping file scopes are automatically serialized into waves.
-func (r *CoordinatedRunner) RunCoordinated(ctx context.Context, exp *Experiment, targetBranch string) (*parallel.ExecutionReport, error) {
-	if exp == nil {
-		return nil, errors.New("experiment is nil")
-	}
-	if len(exp.Variants) == 0 {
-		return nil, errors.New("experiment has no variants")
-	}
-
-	tasks := r.buildTasks(exp)
-	return r.coordinator.ExecuteParallel(ctx, tasks, targetBranch)
-}
-
-// buildTasks converts experiment variants to parallel agent tasks.
-func (r *CoordinatedRunner) buildTasks(exp *Experiment) []*parallel.AgentTask {
-	tasks := make([]*parallel.AgentTask, 0, len(exp.Variants))
-	timeout := exp.Task.Timeout
-	if timeout <= 0 {
-		timeout = r.cfg.DefaultTimeout
-	}
-
-	for i := range exp.Variants {
-		variant := &exp.Variants[i]
-		contextValues := copyContext(exp.Task.Context)
-		task := &parallel.AgentTask{
-			ID:          variant.ID,
-			Name:        variant.Name,
-			Description: exp.Task.Prompt,
-			Branch:      fmt.Sprintf("experiment/%s/%s", exp.ID, variant.ID),
-			Prompt:      exp.Task.Prompt,
-			Context:     contextValues,
-		}
-		contextValues["model_id"] = variant.ModelID
-		contextValues["provider"] = variant.ProviderID
-		contextValues["timeout"] = strconv.FormatInt(timeout.Milliseconds(), 10)
-		contextValues["experiment"] = exp.ID
-
-		if exp.Task.WorkingDir != "" {
-			contextValues["working_dir"] = exp.Task.WorkingDir
-		}
-		if variant.SystemPrompt != nil {
-			contextValues["system_prompt"] = strings.TrimSpace(*variant.SystemPrompt)
-		}
-		if variant.Temperature != nil {
-			contextValues["temperature"] = fmt.Sprintf("%g", *variant.Temperature)
-		}
-		if variant.MaxTokens != nil {
-			contextValues["max_tokens"] = strconv.Itoa(*variant.MaxTokens)
-		}
-		if len(variant.ToolsAllowed) > 0 {
-			contextValues["tools_allowed"] = joinTools(variant.ToolsAllowed)
-		}
-
-		// Set file scope for conflict detection (variant overrides task)
-		files := variant.Files
-		if len(files) == 0 {
-			files = exp.Task.Files
-		}
-		if len(files) > 0 {
-			contextValues["files"] = strings.Join(files, ",")
-		}
-		scope := variant.Scope
-		if len(scope) == 0 {
-			scope = exp.Task.Scope
-		}
-		if len(scope) > 0 {
-			contextValues["scope"] = strings.Join(scope, ",")
-		}
-
-		tasks = append(tasks, task)
-	}
-
-	return tasks
-}
-
-// SetConflictHandler sets a callback for conflict events.
-func (r *CoordinatedRunner) SetConflictHandler(fn func(parallel.ConflictEvent)) {
-	r.coordinator.SetConflictHandler(fn)
-}
-
-// SetPartitionHandler sets a callback for partition events.
-func (r *CoordinatedRunner) SetPartitionHandler(fn func(parallel.PartitionEvent)) {
-	r.coordinator.SetPartitionHandler(fn)
-}
-
-// SetMergeHandler sets a callback for merge events.
-func (r *CoordinatedRunner) SetMergeHandler(fn func(parallel.MergeEvent)) {
-	r.coordinator.SetMergeHandler(fn)
-}
+// Set file scope for conflict detection (variant overrides task)

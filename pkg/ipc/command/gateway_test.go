@@ -1,7 +1,9 @@
 package command
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/mock/gomock"
@@ -222,9 +224,10 @@ func TestHandlerFunc_ReturnsError(t *testing.T) {
 
 func TestSessionCommand_Fields(t *testing.T) {
 	cmd := SessionCommand{
-		SessionID: "test-session-789",
-		Type:      "execute-task",
-		Content:   "implement feature X",
+		SessionID:  "test-session-789",
+		Type:       "execute-task",
+		Content:    "implement feature X",
+		TaskIntent: "mutation",
 	}
 
 	if cmd.SessionID != "test-session-789" {
@@ -235,6 +238,23 @@ func TestSessionCommand_Fields(t *testing.T) {
 	}
 	if cmd.Content != "implement feature X" {
 		t.Errorf("Content = %s, want 'implement feature X'", cmd.Content)
+	}
+	if cmd.TaskIntent != "mutation" {
+		t.Errorf("TaskIntent = %s, want mutation", cmd.TaskIntent)
+	}
+	encoded, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"taskIntent":"mutation"`) {
+		t.Fatalf("encoded command missing taskIntent: %s", encoded)
+	}
+	var decoded SessionCommand
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if decoded.TaskIntent != cmd.TaskIntent {
+		t.Fatalf("decoded TaskIntent = %q, want %q", decoded.TaskIntent, cmd.TaskIntent)
 	}
 }
 
@@ -247,6 +267,20 @@ func TestSessionCommandEnsureID_Stable(t *testing.T) {
 	}
 	if second != first {
 		t.Fatalf("EnsureID changed ID: first=%q second=%q", first, second)
+	}
+}
+
+func TestSessionCommandAcceptedByIsPrivate(t *testing.T) {
+	cmd := SessionCommand{
+		SessionID: "session-private-actor", ID: "command-private-actor",
+		Type: "input", Content: "hello", AcceptedBy: "production-secret-principal",
+	}
+	encoded, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), cmd.AcceptedBy) || strings.Contains(string(encoded), "AcceptedBy") || strings.Contains(string(encoded), "acceptedBy") {
+		t.Fatalf("private actor leaked into command JSON: %s", encoded)
 	}
 }
 

@@ -7,6 +7,20 @@ import (
 	"unicode/utf8"
 )
 
+func TestTerminalReporter_ExplicitKnownFreeCostChart(t *testing.T) {
+	var out bytes.Buffer
+	r := NewTerminalReporterWithOutput(&out, nil)
+	r.SetNoColor(true)
+	r.renderCostChart(&ComparisonReport{Variants: []VariantReport{{
+		ModelID: "local/model", RunID: "free-run", Status: RunCompleted,
+		Metrics:      RunMetrics{TotalCost: 0},
+		CostEvidence: CostEvidence{Status: CostEvidenceKnown, Comparable: true},
+	}}})
+	if !strings.Contains(out.String(), "$0.0000") || strings.Contains(out.String(), "unknown") || strings.Contains(out.String(), "No comparable") {
+		t.Fatalf("explicit free evidence lost: %s", out.String())
+	}
+}
+
 func TestTerminalReporter_RenderReport(t *testing.T) {
 	// Create test data
 	db := setupTestDB(t)
@@ -80,7 +94,7 @@ func TestTerminalReporter_RenderReport(t *testing.T) {
 		"claude-3-sonnet",
 		"Cost Comparison",
 		"Duration Comparison",
-		"Winner:",
+		"No verified winner:",
 	}
 
 	for _, check := range checks {
@@ -137,6 +151,9 @@ func TestTerminalReporter_RenderCompact(t *testing.T) {
 	}
 	if !strings.Contains(output, "model-a") {
 		t.Error("output missing model name")
+	}
+	if !strings.Contains(output, "#-") || !strings.Contains(output, "not evaluated") {
+		t.Errorf("output missing unranked evidence state:\n%s", output)
 	}
 }
 
@@ -282,6 +299,12 @@ func TestTerminalReporter_FailedVariants(t *testing.T) {
 	if !strings.Contains(output, "✗") {
 		t.Error("output missing failure indicator")
 	}
+	if !strings.Contains(output, "failed-model") {
+		t.Error("output missing failed model row")
+	}
+	if !strings.Contains(output, "unknown (legacy run without retained cost evidence)") {
+		t.Error("output missing legacy unknown-cost failed run observation")
+	}
 }
 
 func TestTerminalReporter_ZeroCostVariants(t *testing.T) {
@@ -326,4 +349,97 @@ func TestTerminalReporter_ZeroCostVariants(t *testing.T) {
 	if !strings.Contains(output, "ollama/llama3") {
 		t.Error("output missing model name")
 	}
+}
+
+func TestTerminalReporter_RenderedOutputsPreserveCollidingRunAndModelIdentity(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	comparator := NewComparator(store)
+
+	runA := "01K4ABCDEF1200000000000001"
+	runB := "01K4ABCDEF1200000000000002"
+	modelA := "provider/model-release-2026-09-04-alpha"
+	modelB := "provider/model-release-2026-09-04-beta"
+
+	exp := &Experiment{
+		ID:     "exp-colliding-identity",
+		Name:   "identity-test",
+		Status: ExperimentCompleted,
+		Task:   Task{Prompt: "compare"},
+		Variants: []Variant{
+			{ID: "variant-a", Name: "sameVariant", ModelID: modelA},
+			{ID: "variant-b", Name: "sameVariant", ModelID: modelB},
+		},
+		Criteria: []SuccessCriterion{{Name: "tests pass", Type: CriterionTestPass, Weight: 1}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	runs := []*Run{
+		{ID: runA, ExperimentID: exp.ID, VariantID: "variant-a", Status: RunCompleted, Metrics: RunMetrics{DurationMs: 1100, TotalCost: 0.1111, PromptTokens: 10, CompletionTokens: 11}},
+		{ID: runB, ExperimentID: exp.ID, VariantID: "variant-b", Status: RunCompleted, Metrics: RunMetrics{DurationMs: 2200, TotalCost: 0.2222, PromptTokens: 20, CompletionTokens: 22}},
+	}
+	for _, run := range runs {
+		if err := store.SaveRun(run); err != nil {
+			t.Fatalf("SaveRun %s: %v", run.ID, err)
+		}
+		if err := store.ReplaceEvaluations(run.ID, []CriterionEvaluation{{CriterionID: exp.Criteria[0].ID, Passed: true, Score: 1}}); err != nil {
+			t.Fatalf("ReplaceEvaluations %s: %v", run.ID, err)
+		}
+	}
+
+	var full bytes.Buffer
+	fullReporter := NewTerminalReporterWithOutput(&full, comparator)
+	fullReporter.SetNoColor(true)
+	if err := fullReporter.RenderReport(exp); err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	fullOutput := full.String()
+	for _, want := range []string{runA, runB, modelA, modelB} {
+		if !strings.Contains(fullOutput, want) {
+			t.Fatalf("full output missing exact identity %q in:\n%s", want, fullOutput)
+		}
+	}
+	for _, want := range [][]string{
+		{modelA + " / " + runA, "$0.1111"},
+		{modelB + " / " + runB, "$0.2222"},
+		{modelA + " / " + runA, "1s"},
+		{modelB + " / " + runB, "2s"},
+	} {
+		if !lineContainsAll(fullOutput, want...) {
+			t.Fatalf("full output does not associate %v in one line:\n%s", want, fullOutput)
+		}
+	}
+	if strings.Contains(fullOutput, "01K4ABCDEF1…") || strings.Contains(fullOutput, "provider/model-rele…") {
+		t.Fatalf("full output contains visually colliding truncation:\n%s", fullOutput)
+	}
+
+	var compact bytes.Buffer
+	compactReporter := NewTerminalReporterWithOutput(&compact, comparator)
+	compactReporter.SetNoColor(true)
+	if err := compactReporter.RenderCompact(exp); err != nil {
+		t.Fatalf("RenderCompact: %v", err)
+	}
+	compactOutput := compact.String()
+	for _, want := range []string{runA, runB, modelA, modelB, "tokens=21", "tokens=42"} {
+		if !strings.Contains(compactOutput, want) {
+			t.Fatalf("compact output missing %q in:\n%s", want, compactOutput)
+		}
+	}
+}
+
+func lineContainsAll(output string, parts ...string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(line, part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }

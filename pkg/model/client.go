@@ -19,6 +19,14 @@ import (
 
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
+	// defaultTimeout is the read deadline for the underlying http.Client
+	// (Client, and every other provider adapter's own client -- see
+	// provider_openai.go, provider_anthropic.go, provider_google.go,
+	// provider_ollama.go, provider_openai_compatible.go). It must stay at or above 300s:
+	// the stealth/ox-alpha empty-response incident observed a healthy-but-queued
+	// response take 249s. The goal path additionally calls SetTimeout(0) to
+	// disable this deadline entirely (see cmd/buckley/goal_engine.go), so a
+	// durable goal run is never bound by it at all.
 	defaultTimeout = 5 * time.Minute
 
 	// Rate limiting: OpenRouter allows ~200 requests/minute for most tiers
@@ -164,6 +172,13 @@ func (c *Client) SetRetryConfig(config RetryConfig) {
 	c.retryConfig = config
 }
 
+func (c *Client) CatalogSourceURL() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimRight(c.baseURL, "/") + "/models"
+}
+
 // isRetryableError checks if an error is retryable based on status code.
 func isRetryableError(err error) bool {
 	if err == nil {
@@ -187,7 +202,10 @@ func (c *Client) retryLimit(err error) int {
 }
 
 func (c *Client) canRetryModelRequest(attempt int, err error, mode RequestRetryMode) bool {
-	return mode == RequestRetryDefault && isRetryableError(err) && attempt < c.retryLimit(err)
+	if mode != RequestRetryDefault {
+		return false
+	}
+	return isRetryableError(err) && attempt < c.retryLimit(err)
 }
 
 func retryExhaustedError(attempt int, err error) error {
@@ -369,10 +387,11 @@ func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion performs a non-streaming chat completion with automatic retries
 func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
+	req.Stream = false
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return nil, err
 	}
-	req.Stream = false
 
 	var result *ChatResponse
 
@@ -453,6 +472,8 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			if len(chatResp.Choices) == 0 {
 				return NoResponseChoicesError(req, &chatResp)
 			}
+			chatResp.AttemptEvidence = nil
+			chatResp.ExecutionIdentity = observedExecutionIdentity(chatResp.ID, chatResp.Model, nil)
 
 			result = &chatResp
 			return nil
@@ -495,15 +516,17 @@ func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
 
 // ChatCompletionStream performs a streaming chat completion with automatic retries
 func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	if err := validateOpenRouterRetryMode(req.RetryMode); err != nil {
-		return streamErrorChannels(err)
-	}
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(errChan)
 		defer close(chunkChan)
+		if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
+			errChan <- err
+			return
+		}
 
 		// Check if circuit breaker allows the request
 		circuitErr := c.circuitBreaker.Call(func() error {
@@ -521,6 +544,10 @@ func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 // executeStreamRequest performs the actual streaming request
 func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	req.Stream = true
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
+		return err
+	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -665,9 +692,15 @@ func (c *Client) parseError(resp *http.Response) error {
 		}
 	}
 
-	// Use parsed error message if available, fallback to status
+	// Use parsed error message if available, fallback to status. OpenRouter's
+	// non-standard shared-pool 429 body carries no "error" envelope at all
+	// (just {"limit_source":"upstream_provider_shared_pool"}), so an empty
+	// message with a populated LimitSource still gets a message that names
+	// the actual condition instead of a bare status line.
 	message := errResp.Error.Message
-	if message == "" {
+	if message == "" && errResp.LimitSource != "" {
+		message = fmt.Sprintf("upstream provider rate limit (limit_source: %s)", errResp.LimitSource)
+	} else if message == "" {
 		message = resp.Status
 	}
 	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
@@ -685,15 +718,16 @@ func (c *Client) parseError(resp *http.Response) error {
 	}
 
 	return &APIError{
-		StatusCode: resp.StatusCode,
-		Message:    message,
-		Type:       errResp.Error.Type,
-		Code:       errResp.Error.Code,
-		Provider:   provider,
-		Details:    details,
-		RequestID:  requestID,
-		Retryable:  retryable,
-		RetryAfter: retryAfter,
+		StatusCode:  resp.StatusCode,
+		Message:     message,
+		Type:        errResp.Error.Type,
+		Code:        errResp.Error.Code,
+		Provider:    provider,
+		Details:     details,
+		RequestID:   requestID,
+		Retryable:   retryable,
+		RetryAfter:  retryAfter,
+		LimitSource: errResp.LimitSource,
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/ipc/command"
 	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/pkg/model"
@@ -29,10 +30,13 @@ import (
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/push"
 	"m31labs.dev/buckley/pkg/rules"
+	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/types"
 )
 
@@ -60,33 +64,12 @@ const (
 	EventCommandCompleted   = "command.completed"
 	EventCommandFailed      = "command.failed"
 	EventCommandInterrupted = "command.interrupted"
+	EventCommandBlocked     = "command.blocked"
 	EventError              = "error"
 	EventWarning            = "warning"
 )
 
-// defaultHeadlessSystemPrompt provides core agent instructions for headless sessions.
-// This ensures models understand how to use tools and continue working on tasks.
-const defaultHeadlessSystemPrompt = `You are an AI development assistant with access to various tools.
-
-CRITICAL BEHAVIOR:
-- You MUST use tools to complete tasks, not just describe what you would do
-- Continue calling tools until the task is fully complete
-- Do not stop after one tool call if more work is needed
-- After each tool result, evaluate if more actions are required
-
-TOOL USAGE:
-- Use search_text to find files and code locations
-- Use read_file to examine file contents
-- Use edit_file to make changes
-- Use run_shell for commands, builds, and tests
-- Chain multiple tool calls as needed
-
-ANTI-PATTERNS TO AVOID:
-- Do NOT respond with just text when tools are needed
-- Do NOT stop after acknowledging a task without executing it
-- Do NOT describe what you would do without actually doing it
-
-Always take action with tools. If you're uncertain, use tools to investigate.`
+const defaultHeadlessSystemPrompt = prompts.DefaultToolUseSystemPrompt
 
 // RunnerEvent represents an event emitted during conversation processing.
 type RunnerEvent struct {
@@ -115,6 +98,7 @@ type Runner struct {
 	emitter       EventEmitter
 	telemetry     *telemetry.Hub
 	modelOverride string
+	systemPrompt  string
 	projectCtx    *projectcontext.ProjectContext
 	rulesEngine   *rules.Engine
 	evaluator     types.RuleEvaluator
@@ -141,7 +125,23 @@ type Runner struct {
 
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.
-	continuation *model.ContinuationCoordinator
+	continuation       *model.ContinuationCoordinator
+	commandJournal     sessionexec.Journal
+	runLedger          runledger.Store
+	evidenceStore      evidence.Store
+	stepJournal        agentloop.DurableStepJournal
+	leaseOwner         string
+	durable            bool
+	durableWorkWake    chan struct{}
+	durableControlWake chan struct{}
+	durableTiming      DurableTiming
+	transcriptLoader   DurableTranscriptLoader
+	durableWG          sync.WaitGroup
+	durableBuffer      []sessionexec.TranscriptEntry
+	durableBufferNext  int
+	durableBufferErr   error
+	durableBuffering   bool
+	durableEffects     int
 
 	// usage accumulates model.Usage across every round of every turn this
 	// session has run, closing the gap where each round's usage was
@@ -161,19 +161,24 @@ type Runner struct {
 	pendingApproval *PendingApproval
 	approvalChan    chan ApprovalResponse
 
-	commandQueue   chan command.SessionCommand
-	commandStop    chan struct{}
-	commandStopped chan struct{}
-	stopOnce       sync.Once
+	commandQueue     chan command.SessionCommand
+	commandStop      chan struct{}
+	commandStopped   chan struct{}
+	stopOnce         sync.Once
+	activationOnce   sync.Once
+	activationErr    error
+	activated        bool
+	lifecycleManaged bool
 }
 
 // PendingApproval represents a tool call awaiting user approval.
 type PendingApproval struct {
-	ID        string         `json:"id"`
-	ToolName  string         `json:"toolName"`
-	ToolArgs  map[string]any `json:"toolArgs"`
-	CreatedAt time.Time      `json:"createdAt"`
-	ExpiresAt time.Time      `json:"expiresAt"`
+	ID                 string         `json:"id"`
+	ProviderToolCallID string         `json:"providerToolCallId,omitempty"`
+	ToolName           string         `json:"toolName"`
+	ToolArgs           map[string]any `json:"toolArgs"`
+	CreatedAt          time.Time      `json:"createdAt"`
+	ExpiresAt          time.Time      `json:"expiresAt"`
 }
 
 // ApprovalResponse carries the user's decision on a pending approval.
@@ -182,6 +187,8 @@ type ApprovalResponse struct {
 	Approved bool   `json:"approved"`
 	Reason   string `json:"reason,omitempty"`
 }
+
+type DurableTranscriptLoader func(*conversation.Conversation, *storage.Store) error
 
 // RunnerConfig configures a new headless runner.
 type RunnerConfig struct {
@@ -200,10 +207,33 @@ type RunnerConfig struct {
 	MaxRuntime    time.Duration
 	SystemPrompt  string // If empty, uses default system prompt for tool-using agents
 	AgentProfile  string // Optional rendered buckley.agent/v1 prompt section
+
+	CommandJournal   sessionexec.Journal
+	RunLedger        runledger.Store
+	EvidenceStore    evidence.Store
+	StepJournal      agentloop.DurableStepJournal
+	LeaseOwner       string
+	DurableTiming    *DurableTiming
+	TranscriptLoader DurableTranscriptLoader
 }
 
 // NewRunner creates a new headless session runner.
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
+	runner, err := newInertRunner(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := runner.activate(); err != nil {
+		runner.disposeBeforeStart()
+		return nil, err
+	}
+	return runner, nil
+}
+
+// newInertRunner constructs a runner without starting its command loop or
+// max-runtime timer. Registry publication uses this path so durable session
+// persistence can finish before any runner-side work becomes observable.
+func newInertRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.Session == nil {
 		return nil, fmt.Errorf("session required")
 	}
@@ -212,6 +242,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	if cfg.Store == nil {
 		return nil, fmt.Errorf("store required")
+	}
+	durable, leaseOwner, err := normalizeRunnerDurability(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	idleTimeout := cfg.IdleTimeout
@@ -270,9 +304,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}, cfg.ModelManager)
 	riskDetector := orchestrator.NewRiskDetector(orchestrator.WithRiskRulesEngine(rulesEngine))
 
+	systemPrompt := buildHeadlessSystemPrompt(cfg.SystemPrompt, cfg.AgentProfile, projectCtx, cfg.Session, evaluator, headlessHyphaeProjectKnowledgeContext(sessionCfg, cfg.Session))
 	// Inject system prompt if this is a fresh conversation (no messages yet)
 	if len(conv.Messages) == 0 {
-		conv.AddSystemMessage(buildHeadlessSystemPrompt(cfg.SystemPrompt, cfg.AgentProfile, projectCtx, cfg.Session, evaluator, headlessHyphaeProjectKnowledgeContext(sessionCfg, cfg.Session)))
+		conv.AddSystemMessage(systemPrompt)
 	}
 
 	// Initialize policy engine if not provided
@@ -298,6 +333,16 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		}
 	}
 
+	initialState := StateIdle
+	if cfg.Session.Status == storage.SessionStatusPaused {
+		initialState = StatePaused
+	}
+	transcriptLoader := cfg.TranscriptLoader
+	if transcriptLoader == nil {
+		transcriptLoader = func(conv *conversation.Conversation, store *storage.Store) error {
+			return conv.LoadFromStorage(store)
+		}
+	}
 	r := &Runner{
 		sessionID:             cfg.Session.ID,
 		session:               cfg.Session,
@@ -309,6 +354,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		emitter:               cfg.Emitter,
 		telemetry:             cfg.Telemetry,
 		modelOverride:         cfg.ModelOverride,
+		systemPrompt:          systemPrompt,
 		projectCtx:            projectCtx,
 		rulesEngine:           rulesEngine,
 		evaluator:             evaluator,
@@ -322,7 +368,15 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		requiredApprovalTools: requiredApprovalTools,
 		maxToolExecTime:       maxToolExecTime,
 		maxRuntime:            cfg.MaxRuntime,
-		state:                 StateIdle,
+		commandJournal:        cfg.CommandJournal,
+		runLedger:             cfg.RunLedger,
+		evidenceStore:         cfg.EvidenceStore,
+		stepJournal:           cfg.StepJournal,
+		leaseOwner:            leaseOwner,
+		durable:               durable,
+		durableTiming:         normalizeDurableTiming(cfg.DurableTiming),
+		transcriptLoader:      transcriptLoader,
+		state:                 initialState,
 		lastActive:            time.Now(),
 		idleTimeout:           idleTimeout,
 		approvalChan:          make(chan ApprovalResponse, 1),
@@ -330,12 +384,83 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		commandStop:           make(chan struct{}),
 		commandStopped:        make(chan struct{}),
 		interruptedCommands:   make(map[string]struct{}),
+		lifecycleManaged:      true,
 	}
-
-	go r.commandLoop()
-	r.startMaxRuntimeTimer(cfg.MaxRuntime)
-
+	if durable {
+		r.durableWorkWake = make(chan struct{}, 1)
+		r.durableControlWake = make(chan struct{}, 1)
+	}
 	return r, nil
+}
+
+func normalizeRunnerDurability(cfg RunnerConfig) (bool, string, error) {
+	values := []struct {
+		name  string
+		value any
+	}{
+		{"command journal", cfg.CommandJournal},
+		{"run ledger", cfg.RunLedger},
+		{"evidence store", cfg.EvidenceStore},
+		{"step journal", cfg.StepJournal},
+	}
+	configured := 0
+	for _, value := range values {
+		if isRegistryTypedNil(value.value) {
+			return false, "", fmt.Errorf("headless %s is typed nil", value.name)
+		}
+		if value.value != nil {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return false, "", nil
+	}
+	if configured != len(values) {
+		return false, "", fmt.Errorf("headless durable foreground execution requires command journal, run ledger, evidence store, and fenced step journal")
+	}
+	owner := strings.TrimSpace(cfg.LeaseOwner)
+	if owner == "" {
+		owner = "headless-" + sessionexec.NewCommandID()
+	}
+	if err := sessionexec.ValidateClaimRequest(sessionexec.ClaimRequest{
+		SessionID: cfg.Session.ID, Lane: sessionexec.LaneWork, Owner: owner, LeaseDuration: 30 * time.Second,
+	}); err != nil {
+		return false, "", fmt.Errorf("headless durable lease owner: %w", err)
+	}
+	return true, owner, nil
+}
+
+func (r *Runner) activate() error {
+	if r == nil {
+		return fmt.Errorf("runner unavailable")
+	}
+	r.activationOnce.Do(func() {
+		r.mu.Lock()
+		if r.state == StateStopped {
+			r.activationErr = fmt.Errorf("runner stopped before activation")
+			r.mu.Unlock()
+			return
+		}
+		r.activated = true
+		r.lastActive = time.Now()
+		maxRuntime := r.maxRuntime
+		r.mu.Unlock()
+
+		if r.durable {
+			r.startDurablePumps()
+		} else {
+			go r.commandLoop()
+		}
+		r.startMaxRuntimeTimer(maxRuntime)
+	})
+	return r.activationErr
+}
+
+func (r *Runner) disposeBeforeStart() {
+	if r == nil {
+		return
+	}
+	r.Stop()
 }
 
 // SessionID returns the session identifier.
@@ -388,8 +513,44 @@ func (r *Runner) GetPendingApproval() *PendingApproval {
 
 // HandleSessionCommand implements the command.Handler interface.
 func (r *Runner) HandleSessionCommand(cmd command.SessionCommand) error {
+	_, err := r.AcceptCommand(context.Background(), cmd)
+	return err
+}
+
+// AcceptCommand accepts one command and returns its durable receipt when the
+// runner has foreground durability enabled. Legacy runners retain their
+// in-memory queue behavior and return a synthetic accepted receipt.
+func (r *Runner) AcceptCommand(ctx context.Context, cmd command.SessionCommand) (sessionexec.Receipt, error) {
+	if r == nil {
+		return sessionexec.Receipt{}, fmt.Errorf("headless runner unavailable")
+	}
+	if r != nil && r.durable {
+		return r.acceptDurableCommand(ctx, cmd, true, false, true)
+	}
 	cmd.EnsureID()
+	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
+		return sessionexec.Receipt{}, err
+	}
+	err := r.handleLegacySessionCommand(cmd)
+	if err != nil {
+		return sessionexec.Receipt{}, err
+	}
+	return sessionexec.Receipt{
+		Identity: sessionexec.Identity{SessionID: r.sessionID, CommandID: cmd.ID},
+		State:    sessionexec.StateAccepted,
+	}, nil
+}
+
+func (r *Runner) handleLegacySessionCommand(cmd command.SessionCommand) error {
+	cmd.EnsureID()
+	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
+		return err
+	}
 	r.mu.Lock()
+	if r.lifecycleManaged && !r.activated {
+		r.mu.Unlock()
+		return fmt.Errorf("session not active")
+	}
 	r.lastActive = time.Now()
 	stopped := r.state == StateStopped
 	r.mu.Unlock()
@@ -415,6 +576,62 @@ func (r *Runner) HandleSessionCommand(cmd command.SessionCommand) error {
 	default:
 		return fmt.Errorf("command queue full")
 	}
+}
+
+func (r *Runner) acceptDurableCommand(ctx context.Context, cmd command.SessionCommand, wake, allowInactive, announce bool) (sessionexec.Receipt, error) {
+	if r == nil || r.commandJournal == nil {
+		return sessionexec.Receipt{}, fmt.Errorf("headless durable command journal unavailable")
+	}
+	cmd.EnsureID()
+	if strings.TrimSpace(cmd.SessionID) == "" {
+		cmd.SessionID = r.sessionID
+	}
+	if cmd.SessionID != r.sessionID {
+		return sessionexec.Receipt{}, fmt.Errorf("command session mismatch")
+	}
+	r.mu.Lock()
+	if r.state == StateStopped {
+		r.mu.Unlock()
+		return sessionexec.Receipt{}, fmt.Errorf("session stopped")
+	}
+	if !allowInactive && r.lifecycleManaged && !r.activated {
+		r.mu.Unlock()
+		return sessionexec.Receipt{}, fmt.Errorf("session not active")
+	}
+	r.lastActive = time.Now()
+	principal := strings.TrimSpace(cmd.AcceptedBy)
+	if principal == "" && r.session != nil {
+		principal = strings.TrimSpace(r.session.Principal)
+	}
+	r.mu.Unlock()
+	if principal == "" {
+		return sessionexec.Receipt{}, fmt.Errorf("authenticated command principal required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	acceptCtx, cancel := context.WithTimeout(ctx, r.durableTiming.OperationTimeout)
+	defer cancel()
+	receipt, err := r.commandJournal.Accept(acceptCtx, sessionexec.AcceptRequest{
+		SessionID: r.sessionID, CommandID: cmd.ID, Type: cmd.Type,
+		Content: cmd.Content, TaskIntent: cmd.TaskIntent, AcceptedBy: principal,
+	})
+	if err != nil {
+		return sessionexec.Receipt{}, err
+	}
+	cmd.ID = receipt.CommandID
+	cmd.Type = strings.ToLower(strings.TrimSpace(cmd.Type))
+	cmd.TaskIntent = strings.ToLower(strings.TrimSpace(cmd.TaskIntent))
+	if announce && !receipt.Duplicate {
+		r.emitCommandEvent(EventCommandQueued, cmd, nil)
+	}
+	if receipt.TargetCommandID != "" && (cmd.Type == "steer" || cmd.Type == "interrupt") {
+		r.interruptTarget(receipt.TargetCommandID)
+	}
+	if wake {
+		r.wakeDurableLane(receipt.Lane)
+	}
+	return receipt, nil
 }
 
 func (r *Runner) commandLoop() {
@@ -488,6 +705,49 @@ func (r *Runner) interruptActiveCommand() string {
 	return target
 }
 
+func (r *Runner) interruptTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	r.mu.Lock()
+	if r.activeCommandID != target {
+		r.mu.Unlock()
+		return false
+	}
+	if r.interruptedCommands == nil {
+		r.interruptedCommands = make(map[string]struct{})
+	}
+	r.interruptedCommands[target] = struct{}{}
+	cancel := r.cancelFunc
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
+}
+
+func (r *Runner) wakeDurableLane(lane sessionexec.Lane) {
+	if r == nil || !r.durable {
+		return
+	}
+	var wake chan struct{}
+	if lane == sessionexec.LaneControl {
+		wake = r.durableControlWake
+	} else {
+		wake = r.durableWorkWake
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Runner) wakeDurableLanes() {
+	r.wakeDurableLane(sessionexec.LaneWork)
+	r.wakeDurableLane(sessionexec.LaneControl)
+}
+
 func (r *Runner) emitCommandEvent(eventType string, cmd command.SessionCommand, err error, extras ...map[string]any) {
 	data := map[string]any{
 		"commandId": cmd.ID,
@@ -512,7 +772,7 @@ func (r *Runner) emitCommandEvent(eventType string, cmd command.SessionCommand, 
 func (r *Runner) handleSessionCommand(cmd command.SessionCommand) error {
 	switch cmd.Type {
 	case "input", "steer", "queue":
-		return r.processUserInput(cmd.Content)
+		return r.processUserInputWithIntent(cmd.Content, cmd.TaskIntent)
 	case "model":
 		return r.setModel(cmd.Content)
 	case "slash":
@@ -522,7 +782,7 @@ func (r *Runner) handleSessionCommand(cmd command.SessionCommand) error {
 	case "pause":
 		return r.pause()
 	case "resume":
-		return r.resume()
+		return r.resumeForCommand(cmd.ID)
 	default:
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
@@ -557,8 +817,13 @@ func (r *Runner) setModel(modelID string) error {
 
 // Stop gracefully stops the runner.
 func (r *Runner) Stop() {
+	if r == nil {
+		return
+	}
 	r.stopOnce.Do(func() {
 		r.mu.Lock()
+		activated := r.activated
+		lifecycleManaged := r.lifecycleManaged
 		r.state = StateStopped
 		if r.cancelFunc != nil {
 			r.cancelFunc()
@@ -569,7 +834,18 @@ func (r *Runner) Stop() {
 		}
 		r.mu.Unlock()
 
-		close(r.commandStop)
+		if r.commandStop != nil {
+			close(r.commandStop)
+		}
+		if lifecycleManaged && !activated {
+			if r.commandStopped != nil {
+				close(r.commandStopped)
+			}
+			return
+		}
+		if r.durable && r.commandStopped != nil {
+			<-r.commandStopped
+		}
 
 		r.emit(RunnerEvent{
 			Type:      EventStateChanged,
@@ -590,7 +866,9 @@ func (r *Runner) startMaxRuntimeTimer(maxRuntime time.Duration) {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			_ = r.persistSystemMessage(fmt.Sprintf("Session timed out after %s.", maxRuntime))
+			if !r.durable {
+				_ = r.persistSystemMessage(fmt.Sprintf("Session timed out after %s.", maxRuntime))
+			}
 			r.Stop()
 		case <-r.commandStop:
 			return
@@ -602,13 +880,17 @@ func (r *Runner) startMaxRuntimeTimer(maxRuntime time.Duration) {
 func (r *Runner) IsIdle() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.state == StatePaused {
+	if r.state != StateIdle || r.activeCommandID != "" || r.durableBuffering || len(r.durableBuffer) > 0 || r.durableEffects != 0 {
 		return false
 	}
 	return time.Since(r.lastActive) > r.idleTimeout
 }
 
 func (r *Runner) processUserInput(content string) error {
+	return r.processUserInputWithIntent(content, "")
+}
+
+func (r *Runner) processUserInputWithIntent(content string, taskIntent string) error {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return fmt.Errorf("empty input")
@@ -631,7 +913,7 @@ func (r *Runner) processUserInput(content string) error {
 	}
 
 	// Run the conversation loop
-	return r.runConversationLoop()
+	return r.runConversationLoopWithIntent(taskIntent)
 }
 
 // runConversationLoop drives one turn -- one or more model rounds until the
@@ -642,6 +924,10 @@ func (r *Runner) processUserInput(content string) error {
 // tested); the engine only owns the round loop, projection, ID backfill,
 // usage accumulation, and the loop guard around them.
 func (r *Runner) runConversationLoop() error {
+	return r.runConversationLoopWithIntent("")
+}
+
+func (r *Runner) runConversationLoopWithIntent(taskIntent string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
 	r.cancelFunc = cancel
@@ -652,12 +938,15 @@ func (r *Runner) runConversationLoop() error {
 		r.cancelFunc = nil
 		r.mu.Unlock()
 	}()
+	return r.runConversationLoopForCommand(ctx, nil, taskIntent)
+}
 
-	if r.State() == StateStopped || r.State() == StatePaused {
+func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *sessionexec.Command, taskIntent string) error {
+	if r.State() == StateStopped || (command == nil && r.State() == StatePaused) {
 		return nil
 	}
 
-	controller, err := r.newTurnController()
+	controller, err := r.newTurnControllerForCommand(command, taskIntent)
 	if err != nil {
 		r.emitError("failed to build turn controller", err)
 		return err
@@ -670,14 +959,22 @@ func (r *Runner) runConversationLoop() error {
 		r.mu.Unlock()
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return err
+		draft := ""
+		if result != nil {
+			draft = result.Content
 		}
-		r.emitError("model call failed", err)
+		if notice, ok := r.persistIncompleteTurnNotice(err, draft); ok {
+			r.emitIncompleteTurnEvent(notice)
+		} else if errors.Is(err, context.Canceled) {
+			return err
+		} else {
+			r.emitError("model call failed", err)
+		}
 		return err
 	}
 	if err := result.RequireConclusive(); err != nil {
-		r.emitError("agent turn incomplete", err)
+		notice, _ := r.persistIncompleteTurnNotice(err, result.Content)
+		r.emitIncompleteTurnEvent(notice)
 		return err
 	}
 
@@ -724,28 +1021,138 @@ func (r *Runner) runConversationLoop() error {
 func (r *Runner) persistFinalAssistantMessage(content, reasoning string, reasoningDetails []model.ReasoningDetail) {
 	r.conv.AddAssistantMessageWithReasoningDetails(content, reasoning, reasoningDetails)
 	assistantMsg := r.conv.Messages[len(r.conv.Messages)-1]
+	if buffered, err := r.bufferDurableConversationMessage(assistantMsg); buffered {
+		if err != nil {
+			r.emitError("failed to buffer assistant message", err)
+		}
+		return
+	}
 	if err := r.conv.SaveMessage(r.store, assistantMsg); err != nil {
 		r.emitError("failed to save assistant message", err)
 	}
+}
+
+func (r *Runner) persistIncompleteTurnNotice(err error, draft string) (agentloop.IncompleteResultNotice, bool) {
+	var incomplete *agentloop.IncompleteTurnError
+	if !errors.As(err, &incomplete) {
+		return agentloop.IncompleteResultNotice{}, false
+	}
+	notice := agentloop.PresentIncompleteResult(err)
+	if strings.TrimSpace(notice.Message) != "" {
+		_ = r.persistSystemMessage(notice.Message)
+	}
+	if strings.TrimSpace(draft) != "" {
+		_ = r.persistIncompleteDraft(draft)
+	}
+	return notice, true
+}
+
+func (r *Runner) persistIncompleteDraft(draft string) error {
+	draft = strings.TrimSpace(draft)
+	if draft == "" || r.conv == nil || r.store == nil {
+		return nil
+	}
+	content := "Preserved draft (incomplete):\n" + draft
+	msg := conversation.Message{
+		Role:        "assistant",
+		Content:     content,
+		Timestamp:   time.Now(),
+		Tokens:      conversation.CountTokens(content),
+		IsTruncated: true,
+	}
+	r.conv.Messages = append(r.conv.Messages, msg)
+	r.conv.TokenCount += msg.Tokens
+	if buffered, err := r.bufferDurableConversationMessage(msg); buffered {
+		if err != nil {
+			r.emitError("failed to buffer incomplete draft", err)
+		}
+		return err
+	}
+	if err := r.conv.SaveMessage(r.store, msg); err != nil {
+		r.emitError("failed to save incomplete draft", err)
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) emitIncompleteTurnEvent(notice agentloop.IncompleteResultNotice) {
+	if strings.TrimSpace(notice.Message) == "" {
+		notice = agentloop.PresentIncompleteResult(&agentloop.IncompleteTurnError{})
+	}
+	r.emit(RunnerEvent{
+		Type:      EventWarning,
+		SessionID: r.sessionID,
+		Timestamp: time.Now(),
+		Data: map[string]any{
+			"message":    notice.Message,
+			"code":       notice.Code,
+			"reason":     notice.Reason,
+			"nextAction": notice.NextAction,
+		},
+	})
 }
 
 // newTurnController wires the shared turn engine for one conversation turn.
 // A fresh Governor is created per turn (per user message), matching how the
 // pre-engine loop had no cross-turn round budget either.
 func (r *Runner) newTurnController() (*agentloop.Controller, error) {
-	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:          agentloop.New(agentloop.DefaultConfig()),
-		FinalizeOnStop:    true,
-		LifecycleObserver: telemetry.NewAgentLoopObserver(r.telemetry),
+	return r.newTurnControllerForCommand(nil, "")
+}
+
+func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command, taskIntent string) (*agentloop.Controller, error) {
+	if command != nil {
+		if err := sessionexec.ValidateCommandTaskIntent(command.Type, command.TaskIntent); err != nil {
+			return nil, err
+		}
+	} else if err := sessionexec.ValidateTaskIntent(taskIntent); err != nil {
+		return nil, err
+	}
+	dispatchTools := agentloop.ToolDispatcher(agentloop.ToolDispatcherFunc(r.dispatchToolCalls))
+	callModel := agentloop.ModelCaller(agentloop.ModelCallerFunc(r.callModel))
+	offeredToolsThisRound := false
+	if command != nil {
+		dispatchTools = agentloop.ContextualToolDispatcherFunc(func(ctx context.Context, calls []agentloop.ToolDispatchCall) ([]agentloop.ToolOutcome, error) {
+			if !offeredToolsThisRound {
+				return rejectUnexpectedHeadlessToolCalls(calls), nil
+			}
+			return r.dispatchToolCallsForCommand(ctx, command, calls)
+		})
+		callModel = agentloop.ContextualModelCallerFunc(func(ctx context.Context, call agentloop.ModelDispatchCall) (*model.ChatResponse, error) {
+			return r.callModelForCommand(ctx, command, call)
+		})
+	} else {
+		dispatchTools = agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+			if !offeredToolsThisRound {
+				return rejectUnexpectedHeadlessToolCalls(modelToolDispatchCalls(calls)), nil
+			}
+			return r.dispatchToolCalls(ctx, calls)
+		})
+	}
+	cfg := agentloop.ControllerConfig{
+		Governor:           agentloop.New(agentloop.DefaultConfig()),
+		FinalizeOnStop:     true,
+		CompletionContract: r.completionContractForCommand(command, taskIntent),
+		LifecycleObserver:  telemetry.NewAgentLoopObserver(r.telemetry),
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
+			if command != nil {
+				if err := r.currentDurableBufferError(); err != nil {
+					return model.ChatRequest{}, fmt.Errorf("durable transcript unavailable: %w", err)
+				}
+			}
 			modelID, err := model.ResolvePhaseModelRequired(r.config, r.modelManager, r.rulesEngine, "execution", r.modelOverride)
 			if err != nil {
 				return model.ChatRequest{}, err
 			}
-			return r.buildRawChatRequest(modelID), nil
+			route, err := r.modelManager.ResolveModelRoute(modelID)
+			if err != nil {
+				return model.ChatRequest{}, err
+			}
+			req := r.buildRawChatRequestForRoute(route)
+			offeredToolsThisRound = len(req.Tools) > 0
+			return req, nil
 		},
-		CallModel:     agentloop.ModelCallerFunc(r.callModel),
-		DispatchTools: agentloop.ToolDispatcherFunc(r.dispatchToolCalls),
+		CallModel:     callModel,
+		DispatchTools: dispatchTools,
 		// The sink records the mid-loop tool exchange only: assistant
 		// tool-call messages and their tool results, each persisted as it
 		// lands. Plain assistant messages are the turn's terminal output,
@@ -761,6 +1168,9 @@ func (r *Runner) newTurnController() (*agentloop.Controller, error) {
 				text, _ := model.ExtractTextContent(msg.Content)
 				r.conv.AddToolResponseMessage(msg.ToolCallID, msg.Name, text)
 				r.persistLatestConversationMessage()
+			case msg.Role == "user":
+				r.conv.AddUserMessage(model.ExtractTextContentOrEmpty(msg.Content))
+				r.persistLatestConversationMessage()
 			}
 		}),
 		ContextWindow: func(modelID string) int {
@@ -770,15 +1180,77 @@ func (r *Runner) newTurnController() (*agentloop.Controller, error) {
 			window, _ := r.modelManager.GetContextLength(modelID)
 			return window
 		},
-		Continuation:         r.continuationCoordinator(),
-		ContinuationEligible: r.continuationEligible,
-		ProviderID: func(modelID string) string {
+	}
+	if command != nil {
+		cfg.RunLedger = r.runLedger
+		cfg.Evidence = r.evidenceStore
+		cfg.StepJournal = r.stepJournal
+		cfg.RunID = command.RunID
+		cfg.SessionID = command.SessionID
+		cfg.TaskID = command.TaskID
+		cfg.TurnID = command.TurnID
+	} else {
+		cfg.Continuation = r.continuationCoordinator()
+		cfg.ContinuationEligible = r.continuationEligible
+		cfg.ProviderID = func(modelID string) string {
 			if r.modelManager == nil {
 				return ""
 			}
 			return r.modelManager.ProviderIDForModel(modelID)
-		},
-	})
+		}
+	}
+	return agentloop.NewController(cfg)
+}
+
+func modelToolDispatchCalls(calls []model.ToolCall) []agentloop.ToolDispatchCall {
+	out := make([]agentloop.ToolDispatchCall, len(calls))
+	for index, call := range calls {
+		out[index] = agentloop.ToolDispatchCall{
+			Call:               call,
+			ProviderToolCallID: call.ID,
+		}
+	}
+	return out
+}
+
+func rejectUnexpectedHeadlessToolCalls(calls []agentloop.ToolDispatchCall) []agentloop.ToolOutcome {
+	outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+	for _, dispatchCall := range calls {
+		name := strings.TrimSpace(dispatchCall.Call.Function.Name)
+		outcomes = append(outcomes, agentloop.ToolOutcome{
+			Content:     unexpectedToolCallMessage(name),
+			Success:     false,
+			EffectClass: "control",
+		})
+	}
+	return outcomes
+}
+
+func unexpectedToolCallMessage(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	return "Tool execution rejected: Buckley did not offer tool schemas for this model request, so no local tool was run for " + name + "."
+}
+
+func (r *Runner) completionContractForCommand(command *sessionexec.Command, taskIntent string) *agentloop.CompletionContract {
+	intent := agentloop.UnknownIntent
+	if command != nil {
+		parsed, err := agentloop.ParseTaskIntent(command.TaskIntent)
+		if err != nil {
+			parsed = agentloop.UnknownIntent
+		}
+		intent = parsed
+	} else if parsed, err := agentloop.ParseTaskIntent(taskIntent); err == nil {
+		intent = parsed
+	}
+	return &agentloop.CompletionContract{
+		RequirePostChangeVerification: true,
+		RequireObservableChange:       intent == agentloop.MutationIntent,
+		MaxRepairAttempts:             1,
+		TaskIntent:                    intent,
+	}
 }
 
 // continuationEligible reports whether this turn should attempt provider
@@ -789,6 +1261,13 @@ func (r *Runner) continuationEligible(modelID string) bool {
 		return false
 	}
 	return r.modelManager.SupportsContinuation(modelID)
+}
+
+func (r *Runner) continuationEligibleForRoute(route model.ModelRoute) bool {
+	if r == nil || r.config == nil || !r.config.Models.ProviderContinuation || r.modelManager == nil {
+		return false
+	}
+	return r.modelManager.SupportsContinuationForRoute(route)
 }
 
 // continuationCoordinator lazily creates and caches this session's
@@ -815,23 +1294,29 @@ func (r *Runner) continuationCoordinator() *model.ContinuationCoordinator {
 // directly-tested method and the Controller-driven turn loop never diverge.
 func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 	modelID := r.resolveExecutionModel()
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if r.modelManager != nil {
+		if resolved, err := r.modelManager.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
 
-	useContinuation := r.continuationEligible(modelID)
+	useContinuation := r.continuationEligibleForRoute(route)
 	var coordinator *model.ContinuationCoordinator
 	if useContinuation {
 		coordinator = r.continuationCoordinator()
 		useContinuation = coordinator != nil
 	}
 
-	req := r.buildRawChatRequest(modelID)
+	req := r.buildRawChatRequestForRoute(route)
 
 	contextWindow := 0
 	if r.modelManager != nil {
-		contextWindow, _ = r.modelManager.GetContextLength(modelID)
+		contextWindow, _ = r.modelManager.GetContextLengthForRoute(route)
 	}
 	providerID := ""
 	if useContinuation {
-		providerID = r.modelManager.ProviderIDForModel(modelID)
+		providerID = route.ProviderID
 	}
 	req = agentloop.ProjectForContinuation(req, contextWindow, coordinator, providerID, useContinuation)
 	return req, useContinuation
@@ -846,25 +1331,61 @@ func (r *Runner) buildChatRequest() (model.ChatRequest, bool) {
 // active because it is pin-unaware and could strip reasoning from the
 // region the window represents.
 func (r *Runner) buildRawChatRequest(modelID string) model.ChatRequest {
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if r.modelManager != nil {
+		if resolved, err := r.modelManager.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
+	return r.buildRawChatRequestForRoute(route)
+}
+
+func (r *Runner) buildRawChatRequestForRoute(route model.ModelRoute) model.ChatRequest {
+	modelID := route.RequestedModel
 	req := model.ChatRequest{
 		Model:     modelID,
 		SessionID: r.sessionID,
+		Route:     route,
 	}
 	req.Messages = r.conv.ToModelMessages()
-	if r.tools != nil && r.modelManager != nil && r.modelManager.SupportsTools(modelID) {
+	if r.modelManager != nil && r.modelManager.ToolsCatalogConfirmedUnavailableForRoute(route) {
+		req.ToolsCatalogConfirmedUnavailable = true
+	}
+	if r.tools != nil && r.modelManager != nil && r.modelManager.OfferToolsForRoute(route) {
 		req.Tools = r.tools.ToOpenAIFunctionsGoverned(r.evaluator, "interactive", "coding", nil, 0)
 		if len(req.Tools) > 0 {
 			req.ToolChoice = "auto"
 		}
+	} else if r.tools != nil && len(r.tools.List()) > 0 {
+		req.Messages = append(req.Messages, model.Message{
+			Role:    "system",
+			Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
+		})
 	}
-	if effort := model.ResolveReasoningEffort(r.config, r.modelManager, r.rulesEngine, modelID, "execution"); effort != "" {
+	if effort := model.ResolveReasoningEffort(r.config, routeReasoningChecker{manager: r.modelManager, route: route}, r.rulesEngine, route.SelectedModel, "execution"); effort != "" {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
-	if r.modelManager != nil && r.modelManager.SupportsParameter(modelID, "include_reasoning") {
+	if r.modelManager != nil && r.modelManager.SupportsParameterForRoute(route, "include_reasoning") {
 		include := true
 		req.IncludeReasoning = &include
 	}
 	return req
+}
+
+type routeReasoningChecker struct {
+	manager *model.Manager
+	route   model.ModelRoute
+}
+
+func (c routeReasoningChecker) SupportsReasoning(string) bool {
+	return c.manager != nil && c.manager.SupportsReasoningForRoute(c.route)
+}
+
+func (c routeReasoningChecker) ResolveReasoningCapability(string) model.CapabilityResolution {
+	if c.manager == nil {
+		return model.CapabilityResolution{Model: c.route.SelectedModel, ProviderID: c.route.ProviderID, Capability: "reasoning", State: model.CapabilityUnknown, Source: "checker_unavailable"}
+	}
+	return c.manager.ResolveReasoningCapabilityForRoute(c.route)
 }
 
 // callModel executes one model turn. When useContinuation is set, it calls
@@ -890,8 +1411,12 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 	continuationStatus := ""
 	var resp *model.ChatResponse
 	var err error
+	route := req.Route
+	if strings.TrimSpace(route.RequestedModel) == "" && r.modelManager != nil {
+		route, _ = r.modelManager.ResolveModelRoute(req.Model)
+	}
 	if useContinuation && r.continuation != nil {
-		resp, err = r.continuation.Call(ctx, req)
+		resp, err = r.continuation.CallForRoute(ctx, req, route)
 		if err != nil {
 			if resp != nil {
 				// The provider may have emitted billable material before the
@@ -901,7 +1426,7 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 				return resp, err
 			}
 			r.continuation.Reset()
-			resp, err = r.modelManager.ChatCompletion(ctx, req)
+			resp, err = r.modelManager.ChatCompletionForRoute(ctx, req, route)
 			continuationStatus = "reset"
 		} else if r.continuation.Hit() {
 			continuationStatus = "hit"
@@ -909,7 +1434,7 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 			continuationStatus = "reset"
 		}
 	} else {
-		resp, err = r.modelManager.ChatCompletion(ctx, req)
+		resp, err = r.modelManager.ChatCompletionForRoute(ctx, req, route)
 	}
 
 	if r.telemetry != nil {
@@ -943,6 +1468,24 @@ func (r *Runner) callModel(ctx context.Context, req model.ChatRequest, useContin
 	}
 
 	return resp, err
+}
+
+func (r *Runner) callModelForCommand(ctx context.Context, command *sessionexec.Command, call agentloop.ModelDispatchCall) (*model.ChatResponse, error) {
+	if command == nil || call.RunID != command.RunID || call.TaskID != command.TaskID ||
+		call.TurnID != command.TurnID || strings.TrimSpace(call.StepID) == "" ||
+		(call.Kind != "model" && call.Kind != "finalize") {
+		return nil, fmt.Errorf("durable model effect identity mismatch")
+	}
+	permit, err := r.beginDurableEffect(ctx, *command, call.StepID, sessionexec.EffectKindModel)
+	if err != nil {
+		return nil, err
+	}
+	response, callErr := r.callModel(ctx, call.Request, call.UseContinuation)
+	endErr := r.endDurableEffect(permit)
+	if endErr != nil {
+		endErr = fmt.Errorf("close durable model effect permit: %w", endErr)
+	}
+	return response, errors.Join(callErr, endErr)
 }
 
 // handleToolCalls appends msg's tool-call turn to the conversation, then
@@ -980,9 +1523,39 @@ func (r *Runner) handleToolCalls(ctx context.Context, msg model.Message) error {
 // ordinary (non-error) tool content. A non-nil error means ctx was
 // cancelled while waiting on an approval; the caller aborts the turn.
 func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+	contextual := make([]agentloop.ToolDispatchCall, len(toolCalls))
+	for index, call := range toolCalls {
+		contextual[index] = agentloop.ToolDispatchCall{
+			Call:               call,
+			ProviderToolCallID: call.ID,
+		}
+	}
+	return r.dispatchToolCallsWithContext(ctx, contextual)
+}
+
+func (r *Runner) dispatchToolCallsWithContext(ctx context.Context, toolCalls []agentloop.ToolDispatchCall) ([]agentloop.ToolOutcome, error) {
+	return r.dispatchToolCallsForCommand(ctx, nil, toolCalls)
+}
+
+func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessionexec.Command, toolCalls []agentloop.ToolDispatchCall) ([]agentloop.ToolOutcome, error) {
+	if err := r.currentDurableBufferError(); err != nil {
+		return nil, fmt.Errorf("durable transcript unavailable before tool dispatch: %w", err)
+	}
 	outcomes := make([]agentloop.ToolOutcome, 0, len(toolCalls))
 
-	for _, tc := range toolCalls {
+	for _, dispatchCall := range toolCalls {
+		if err := r.requireDurableExecutionEnabled(ctx); err != nil {
+			return outcomes, err
+		}
+		tc := dispatchCall.Call
+		providerToolCallID := strings.TrimSpace(dispatchCall.ProviderToolCallID)
+		if providerToolCallID == "" {
+			providerToolCallID = tc.ID
+		}
+		approvalID := strings.TrimSpace(dispatchCall.ApprovalID)
+		if approvalID == "" {
+			approvalID = tc.ID
+		}
 		decision := "auto"
 
 		r.emit(RunnerEvent{
@@ -990,7 +1563,8 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			SessionID: r.sessionID,
 			Timestamp: time.Now(),
 			Data: map[string]any{
-				"toolCallId": tc.ID,
+				"toolCallId": providerToolCallID,
+				"approvalId": approvalID,
 				"toolName":   tc.Function.Name,
 				"arguments":  tc.Function.Arguments,
 			},
@@ -998,11 +1572,52 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 
 		// Parse arguments
 		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			args = map[string]any{"raw": tc.Function.Arguments}
+		if strings.TrimSpace(tc.Function.Arguments) == "" {
+			args = map[string]any{}
+		} else if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			message := "Tool execution failed: invalid JSON arguments: " + err.Error()
+			decision = "rejected"
+			r.emit(RunnerEvent{
+				Type:      EventToolCallComplete,
+				SessionID: r.sessionID,
+				Timestamp: time.Now(),
+				Data: map[string]any{
+					"toolCallId": providerToolCallID,
+					"approvalId": approvalID,
+					"toolName":   tc.Function.Name,
+					"success":    false,
+					"error":      message,
+				},
+			})
+			if r.store != nil {
+				decidedBy := "system"
+				riskScore := 0
+				if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
+					if approvalDecision != "" {
+						decidedBy = approvalDecision
+					}
+					riskScore = score
+				}
+				if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
+					SessionID:  r.sessionID,
+					ApprovalID: approvalID,
+					ToolName:   tc.Function.Name,
+					ToolInput:  tc.Function.Arguments,
+					RiskScore:  riskScore,
+					Decision:   decision,
+					DecidedBy:  decidedBy,
+					ExecutedAt: time.Now(),
+					DurationMs: 0,
+					ToolOutput: message,
+				}); logErr != nil {
+					r.emitError("failed to log tool execution", logErr)
+				}
+			}
+			outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false, EffectClass: "control"})
+			continue
 		}
-		if args != nil && tc.ID != "" {
-			args[tool.ToolCallIDParam] = tc.ID
+		if args != nil && providerToolCallID != "" {
+			args[tool.ToolCallIDParam] = providerToolCallID
 		}
 
 		if strings.EqualFold(tc.Function.Name, "run_shell") {
@@ -1014,7 +1629,8 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 					SessionID: r.sessionID,
 					Timestamp: time.Now(),
 					Data: map[string]any{
-						"toolCallId": tc.ID,
+						"toolCallId": providerToolCallID,
+						"approvalId": approvalID,
 						"toolName":   tc.Function.Name,
 						"success":    false,
 						"error":      message,
@@ -1023,7 +1639,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 				if r.store != nil {
 					decidedBy := "system"
 					riskScore := 0
-					if approvalDecision, score := r.approvalAuditFields(tc.ID); approvalDecision != "" || score != 0 {
+					if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
 						if approvalDecision != "" {
 							decidedBy = approvalDecision
 						}
@@ -1031,7 +1647,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 					}
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: tc.ID,
+						ApprovalID: approvalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1052,7 +1668,7 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 
 		// Check if tool requires approval
 		if r.requiresApproval(tc.Function.Name, args) {
-			approved, err := r.waitForApproval(ctx, tc.ID, tc.Function.Name, args)
+			approved, err := r.waitForApproval(ctx, approvalID, providerToolCallID, tc.Function.Name, args)
 			if err != nil {
 				return outcomes, err
 			}
@@ -1064,17 +1680,18 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 					SessionID: r.sessionID,
 					Timestamp: time.Now(),
 					Data: map[string]any{
-						"toolCallId": tc.ID,
+						"toolCallId": providerToolCallID,
+						"approvalId": approvalID,
 						"toolName":   tc.Function.Name,
 						"success":    false,
 						"error":      message,
 					},
 				})
 				if r.store != nil {
-					decidedBy, riskScore := r.approvalAuditFields(tc.ID)
+					decidedBy, riskScore := r.approvalAuditFields(approvalID)
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: tc.ID,
+						ApprovalID: approvalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1092,17 +1709,45 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			}
 			decision = "approved"
 		}
+		if err := r.requireDurableExecutionEnabled(ctx); err != nil {
+			return outcomes, err
+		}
+		metadata := tool.DefaultMetadata()
+		if r.tools != nil {
+			if registered, ok := r.tools.Get(tc.Function.Name); ok {
+				metadata = tool.GetMetadata(registered)
+			}
+		}
+		effectClass := string(metadata.Impact)
+		observation := tooloutcome.BeginWithMetadata(ctx, r.toolOutcomeWorkDir(), metadata)
+		var permit sessionexec.EffectPermit
+		if command != nil {
+			if dispatchCall.RunID != command.RunID || dispatchCall.TaskID != command.TaskID ||
+				dispatchCall.TurnID != command.TurnID || strings.TrimSpace(dispatchCall.StepID) == "" {
+				return outcomes, fmt.Errorf("durable tool effect identity mismatch")
+			}
+			var err error
+			permit, err = r.beginDurableEffect(ctx, *command, dispatchCall.StepID, sessionexec.EffectKindTool)
+			if err != nil {
+				return outcomes, err
+			}
+		}
 
 		// Execute tool with timing
 		startTime := time.Now()
 		result, err := r.tools.ExecuteWithContext(ctx, tc.Function.Name, args)
+		if command != nil {
+			if endErr := r.endDurableEffect(permit); endErr != nil {
+				err = errors.Join(err, fmt.Errorf("close durable tool effect permit: %w", endErr))
+			}
+		}
 		duration := time.Since(startTime)
 
 		// Log to audit trail
-		decidedBy, riskScore := r.approvalAuditFields(tc.ID)
+		decidedBy, riskScore := r.approvalAuditFields(approvalID)
 		auditEntry := &storage.ToolAuditEntry{
 			SessionID:  r.sessionID,
-			ApprovalID: tc.ID, // Use tool call ID as approval reference if approved
+			ApprovalID: approvalID,
 			ToolName:   tc.Function.Name,
 			ToolInput:  tc.Function.Arguments,
 			RiskScore:  riskScore,
@@ -1121,7 +1766,8 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 				SessionID: r.sessionID,
 				Timestamp: time.Now(),
 				Data: map[string]any{
-					"toolCallId": tc.ID,
+					"toolCallId": providerToolCallID,
+					"approvalId": approvalID,
 					"toolName":   tc.Function.Name,
 					"success":    false,
 					"error":      err.Error(),
@@ -1132,7 +1778,12 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			if logErr := r.store.LogToolExecution(auditEntry); logErr != nil {
 				r.emitError("failed to log tool execution", logErr)
 			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: errorResult, Success: false, Error: err.Error()})
+			outcomes = append(outcomes, observation.Finish(ctx, agentloop.ToolOutcome{
+				Content:     errorResult,
+				Error:       err.Error(),
+				Success:     false,
+				EffectClass: effectClass,
+			}, metadata, result, err))
 			continue
 		}
 
@@ -1145,7 +1796,8 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			SessionID: r.sessionID,
 			Timestamp: time.Now(),
 			Data: map[string]any{
-				"toolCallId": tc.ID,
+				"toolCallId": providerToolCallID,
+				"approvalId": approvalID,
 				"toolName":   tc.Function.Name,
 				"success":    result.Success,
 				"output":     truncateOutput(resultContent, 1000),
@@ -1157,15 +1809,16 @@ func (r *Runner) dispatchToolCalls(ctx context.Context, toolCalls []model.ToolCa
 			r.emitError("failed to log tool execution", logErr)
 		}
 		yield := tool.ResultYieldForTool(tc.Function.Name, result, nil)
-		outcomes = append(outcomes, agentloop.ToolOutcome{
+		outcomes = append(outcomes, observation.Finish(ctx, agentloop.ToolOutcome{
 			Content:       resultContent,
 			Success:       result.Success,
 			Error:         result.Error,
 			Stderr:        builtinResultString(result, "stderr"),
+			EffectClass:   effectClass,
 			YieldObserved: yield.Observed,
 			YieldCount:    yield.Count,
 			YieldUnit:     yield.Unit,
-		})
+		}, metadata, result, nil))
 	}
 
 	return outcomes, nil
@@ -1177,6 +1830,16 @@ func builtinResultString(result *builtin.Result, key string) string {
 	}
 	value, _ := result.Data[key].(string)
 	return value
+}
+
+func (r *Runner) toolOutcomeWorkDir() string {
+	if r == nil || r.session == nil {
+		return ""
+	}
+	if project := strings.TrimSpace(r.session.ProjectPath); project != "" {
+		return project
+	}
+	return strings.TrimSpace(r.session.GitRepo)
 }
 
 func (r *Runner) approvalAuditFields(approvalID string) (string, int) {
@@ -1305,7 +1968,7 @@ func anyToInt(value any) (int, bool) {
 	}
 }
 
-func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName string, args map[string]any) (bool, error) {
+func (r *Runner) waitForApproval(ctx context.Context, approvalID, providerToolCallID, toolName string, args map[string]any) (bool, error) {
 	// Evaluate approval risk for display and audit storage.
 	var riskScore int
 	var riskReasons []string
@@ -1322,17 +1985,18 @@ func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName strin
 	expiresAt := time.Now().Add(5 * time.Minute)
 
 	approval := &PendingApproval{
-		ID:        toolCallID,
-		ToolName:  toolName,
-		ToolArgs:  args,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
+		ID:                 approvalID,
+		ProviderToolCallID: providerToolCallID,
+		ToolName:           toolName,
+		ToolArgs:           args,
+		CreatedAt:          time.Now(),
+		ExpiresAt:          expiresAt,
 	}
 
 	// Persist to storage
 	toolInputJSON, _ := json.Marshal(args)
 	storedApproval := &storage.PendingApproval{
-		ID:          toolCallID,
+		ID:          approvalID,
 		SessionID:   r.sessionID,
 		ToolName:    toolName,
 		ToolInput:   string(toolInputJSON),
@@ -1341,6 +2005,9 @@ func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName strin
 		Status:      "pending",
 		ExpiresAt:   expiresAt,
 		CreatedAt:   time.Now(),
+	}
+	if r.durable {
+		return r.waitForDurableApproval(ctx, approval, storedApproval)
 	}
 
 	if err := r.store.CreatePendingApproval(storedApproval); err != nil {
@@ -1363,7 +2030,8 @@ func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName strin
 		SessionID: r.sessionID,
 		Timestamp: time.Now(),
 		Data: map[string]any{
-			"id":          toolCallID,
+			"id":          approvalID,
+			"toolCallId":  providerToolCallID,
 			"toolName":    toolName,
 			"toolArgs":    args,
 			"riskScore":   riskScore,
@@ -1383,44 +2051,235 @@ func (r *Runner) waitForApproval(ctx context.Context, toolCallID, toolName strin
 	// Wait for approval response or timeout
 	select {
 	case <-ctx.Done():
-		r.updateApprovalStatus(toolCallID, "expired", "", "")
+		r.updateApprovalStatus(approvalID, "expired", "", "")
 		return false, ctx.Err()
 	case resp := <-r.approvalChan:
-		if resp.ID == toolCallID {
+		if resp.ID == approvalID {
 			status := "rejected"
 			if resp.Approved {
 				status = "approved"
 			}
-			r.updateApprovalStatus(toolCallID, status, "headless-runner", resp.Reason)
+			r.updateApprovalStatus(approvalID, status, "headless-runner", resp.Reason)
 			return resp.Approved, nil
 		}
 		return false, fmt.Errorf("approval ID mismatch")
 	case <-time.After(5 * time.Minute):
-		r.updateApprovalStatus(toolCallID, "expired", "", "timeout")
+		r.updateApprovalStatus(approvalID, "expired", "", "timeout")
 		return false, fmt.Errorf("approval timeout")
+	}
+}
+
+func (r *Runner) waitForDurableApproval(ctx context.Context, approval *PendingApproval, candidate *storage.PendingApproval) (bool, error) {
+	if r == nil || r.store == nil || approval == nil || candidate == nil {
+		return false, fmt.Errorf("durable approval storage unavailable")
+	}
+	stored, err := r.store.GetPendingApproval(candidate.ID)
+	if err != nil {
+		return false, fmt.Errorf("read durable approval: %w", err)
+	}
+	created := false
+	if stored == nil {
+		createErr := r.store.CreatePendingApproval(candidate)
+		if createErr == nil {
+			stored = candidate
+			created = true
+		} else {
+			// Another process may have inserted the same stable tool-call
+			// approval between our read and insert. Reconcile only the exact
+			// immutable request; every other conflict fails closed.
+			stored, err = r.store.GetPendingApproval(candidate.ID)
+			if err != nil {
+				return false, fmt.Errorf("reconcile durable approval: %w", err)
+			}
+			if stored == nil {
+				return false, fmt.Errorf("persist durable approval: %w", createErr)
+			}
+		}
+	}
+	if err := validateDurablePendingApproval(stored, candidate); err != nil {
+		return false, err
+	}
+	if decided, done, err := durableApprovalDecision(stored); done {
+		return decided, err
+	}
+
+	approval.CreatedAt = stored.CreatedAt
+	approval.ExpiresAt = stored.ExpiresAt
+	r.mu.Lock()
+	r.pendingApproval = approval
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		if r.pendingApproval != nil && r.pendingApproval.ID == approval.ID {
+			r.pendingApproval = nil
+		}
+		r.mu.Unlock()
+	}()
+
+	r.emit(RunnerEvent{
+		Type: EventApprovalRequired, SessionID: r.sessionID, Timestamp: time.Now(),
+		Data: map[string]any{
+			"id": approval.ID, "toolCallId": approval.ProviderToolCallID,
+			"toolName": approval.ToolName, "toolArgs": approval.ToolArgs,
+			"riskScore": stored.RiskScore, "riskReasons": stored.RiskReasons, "expiresAt": approval.ExpiresAt,
+		},
+	})
+	if created && r.pushWorker != nil {
+		if err := r.pushWorker.NotifyApprovalRequired(ctx, stored); err != nil {
+			r.emitError("failed to send push notification", err)
+		}
+	}
+
+	const durableApprovalPollInterval = 250 * time.Millisecond
+	poll := time.NewTicker(durableApprovalPollInterval)
+	defer poll.Stop()
+	expiresIn := time.Until(approval.ExpiresAt)
+	if expiresIn < 0 {
+		expiresIn = 0
+	}
+	timer := time.NewTimer(expiresIn)
+	defer timer.Stop()
+	for {
+		var expiredTimer bool
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+			expiredTimer = true
+		case <-poll.C:
+		case <-r.approvalChan:
+		}
+		if expiredTimer {
+			// ExpirePendingApproval performs the authoritative clock check
+			// and rereads the row under the same write lock. Never discard
+			// a concurrent approval or rejection returned by that call.
+			current, _, err := r.store.ExpirePendingApproval(candidate.ID, candidate.SessionID)
+			if err != nil {
+				return false, fmt.Errorf("expire durable approval: %w", err)
+			}
+			if err := validateDurablePendingApproval(current, candidate); err != nil {
+				return false, err
+			}
+			if decided, done, err := durableApprovalDecision(current); done {
+				return decided, err
+			}
+			// The local clock reached the candidate expiry first. The
+			// canonical row is still pending, so retry at its authoritative
+			// expiry (or soon when the clocks disagree) instead of timing
+			// out and discarding the pending approval.
+			expiresIn = time.Until(current.ExpiresAt)
+			if expiresIn <= 0 {
+				expiresIn = durableApprovalPollInterval
+			}
+			timer.Reset(expiresIn)
+			continue
+		}
+		current, err := r.store.GetPendingApproval(candidate.ID)
+		if err != nil {
+			return false, fmt.Errorf("poll durable approval: %w", err)
+		}
+		if err := validateDurablePendingApproval(current, candidate); err != nil {
+			return false, err
+		}
+		if decided, done, err := durableApprovalDecision(current); done {
+			return decided, err
+		}
+		// Expiration is decided by the database clock, not the local timer.
+		// A local clock can reach the stored expiry first; in that case the
+		// atomic expiry call returns the still-pending canonical row and the
+		// loop must continue until the database deadline or ctx expires.
+		if !current.ExpiresAt.After(time.Now().UTC()) {
+			current, _, err = r.store.ExpirePendingApproval(candidate.ID, candidate.SessionID)
+			if err != nil {
+				return false, fmt.Errorf("expire durable approval: %w", err)
+			}
+			if err := validateDurablePendingApproval(current, candidate); err != nil {
+				return false, err
+			}
+			if decided, done, err := durableApprovalDecision(current); done {
+				return decided, err
+			}
+			expiresIn = time.Until(current.ExpiresAt)
+			if expiresIn <= 0 {
+				expiresIn = durableApprovalPollInterval
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(expiresIn)
+		}
+	}
+}
+
+func validateDurablePendingApproval(stored, candidate *storage.PendingApproval) error {
+	if stored == nil || candidate == nil {
+		return fmt.Errorf("durable approval missing")
+	}
+	if stored.ID != candidate.ID || stored.SessionID != candidate.SessionID ||
+		stored.ToolName != candidate.ToolName || stored.ToolInput != candidate.ToolInput {
+		return fmt.Errorf("durable approval identity mismatch")
+	}
+	switch stored.Status {
+	case "pending", "approved", "rejected", "expired":
+		return nil
+	default:
+		return fmt.Errorf("durable approval has invalid status")
+	}
+}
+
+func durableApprovalDecision(stored *storage.PendingApproval) (bool, bool, error) {
+	if stored == nil {
+		return false, true, fmt.Errorf("durable approval missing")
+	}
+	switch stored.Status {
+	case "approved":
+		return true, true, nil
+	case "rejected":
+		return false, true, nil
+	case "expired":
+		return false, true, fmt.Errorf("approval expired")
+	default:
+		return false, false, nil
 	}
 }
 
 // updateApprovalStatus updates the approval status in storage.
 func (r *Runner) updateApprovalStatus(id, status, decidedBy, reason string) {
+	if r == nil || r.store == nil {
+		return
+	}
 	approval, err := r.store.GetPendingApproval(id)
 	if err != nil || approval == nil {
 		return
 	}
 
-	if approval.Status != "pending" {
-		return
-	}
-
-	approval.Status = status
-	if decidedBy != "" {
-		approval.DecidedBy = decidedBy
-	}
-	approval.DecidedAt = time.Now()
-	approval.DecisionReason = strings.TrimSpace(reason)
-
-	if err := r.store.UpdatePendingApproval(approval); err != nil {
-		r.emitError("failed to update approval status", err)
+	switch strings.TrimSpace(status) {
+	case "expired":
+		if _, _, err := r.store.ExpirePendingApproval(approval.ID, approval.SessionID); err != nil {
+			r.emitError("failed to expire pending approval", err)
+		}
+	case "approved", "rejected":
+		if _, _, err := r.store.DecidePendingApproval(
+			approval.ID, approval.SessionID, status, decidedBy, reason, time.Now().UTC(),
+		); err != nil && !errors.Is(err, storage.ErrApprovalDecisionConflict) {
+			r.emitError("failed to decide pending approval", err)
+		}
+	default:
+		if approval.Status != "pending" {
+			return
+		}
+		approval.Status = status
+		if decidedBy != "" {
+			approval.DecidedBy = decidedBy
+		}
+		approval.DecidedAt = time.Now()
+		approval.DecisionReason = strings.TrimSpace(reason)
+		if err := r.store.UpdatePendingApproval(approval); err != nil {
+			r.emitError("failed to update approval status", err)
+		}
 	}
 }
 
@@ -1524,11 +2383,52 @@ func (r *Runner) pause() error {
 }
 
 func (r *Runner) resume() error {
-	if r.State() != StatePaused {
+	return r.resumeForCommand("")
+}
+
+// resumeForCommand restores the session to processing when another command
+// is still active. A legacy command loop marks the resume command itself as
+// active, so its ID is excluded from that check.
+func (r *Runner) resumeForCommand(commandID string) error {
+	r.mu.Lock()
+	if r.state != StatePaused {
+		r.mu.Unlock()
 		return fmt.Errorf("session not paused")
 	}
-	r.setState(StateIdle)
+	r.mu.Unlock()
+	r.setResumedState(commandID)
 	return nil
+}
+
+// setResumedState applies the resumed projection without requiring the
+// caller's current state to be paused. Durable control commands preserve
+// their existing idempotent behavior while still reflecting active work.
+func (r *Runner) setResumedState(commandID string) {
+	r.mu.Lock()
+	activeCommandID := r.activeCommandID
+	if strings.TrimSpace(commandID) != "" && activeCommandID == commandID {
+		activeCommandID = ""
+	}
+	nextState := StateIdle
+	if activeCommandID != "" {
+		nextState = StateProcessing
+	}
+	oldState := r.state
+	r.state = nextState
+	r.lastActive = time.Now()
+	r.mu.Unlock()
+
+	if oldState != nextState {
+		r.emit(RunnerEvent{
+			Type:      EventStateChanged,
+			SessionID: r.sessionID,
+			Timestamp: time.Now(),
+			Data: map[string]any{
+				"state":     string(nextState),
+				"prevState": string(oldState),
+			},
+		})
+	}
 }
 
 func (r *Runner) setState(state RunnerState) {
@@ -1559,13 +2459,20 @@ func (r *Runner) emit(event RunnerEvent) {
 
 func (r *Runner) emitError(msg string, err error) {
 	r.setState(StateError)
+	errorText := ""
+	if err != nil {
+		errorText = err.Error()
+		if r.durable {
+			errorText = telemetry.SanitizeText(errorText, sessionexec.MaxErrorTextBytes)
+		}
+	}
 	r.emit(RunnerEvent{
 		Type:      EventError,
 		SessionID: r.sessionID,
 		Timestamp: time.Now(),
 		Data: map[string]any{
 			"message": msg,
-			"error":   err.Error(),
+			"error":   errorText,
 		},
 	})
 }
@@ -1580,6 +2487,12 @@ func (r *Runner) persistSystemMessage(content string) error {
 	}
 	r.conv.AddSystemMessage(content)
 	msg := r.conv.Messages[len(r.conv.Messages)-1]
+	if buffered, err := r.bufferDurableConversationMessage(msg); buffered {
+		if err != nil {
+			r.emitError("failed to buffer system message", err)
+		}
+		return err
+	}
 	if err := r.conv.SaveMessage(r.store, msg); err != nil {
 		r.emitError("failed to save system message", err)
 		return err
@@ -1592,6 +2505,12 @@ func (r *Runner) persistLatestConversationMessage() {
 		return
 	}
 	msg := r.conv.Messages[len(r.conv.Messages)-1]
+	if buffered, err := r.bufferDurableConversationMessage(msg); buffered {
+		if err != nil {
+			r.emitError("failed to buffer conversation message", err)
+		}
+		return
+	}
 	if err := r.conv.SaveMessage(r.store, msg); err != nil {
 		r.emitError("failed to save conversation message", err)
 	}
@@ -1840,6 +2759,10 @@ func (r *Runner) runPlansCommand() error {
 	if err != nil {
 		return err
 	}
+	return r.persistPlanList(plans)
+}
+
+func (r *Runner) persistPlanList(plans []orchestrator.Plan) error {
 	if len(plans) == 0 {
 		return r.persistSystemMessage("No saved plans found. Use /plan to create one.")
 	}
@@ -1921,7 +2844,10 @@ func (r *Runner) runWorkflowCommand(args []string) error {
 			note = strings.Join(args[1:], " ")
 		}
 		wf.Resume(note)
-		r.setState(StateIdle)
+		r.mu.RLock()
+		currentCommandID := r.activeCommandID
+		r.mu.RUnlock()
+		r.setResumedState(currentCommandID)
 		return r.persistSystemMessage(fmt.Sprintf("✓ Workflow resumed (%s)", note))
 	case "phases":
 		return r.persistSystemMessage(formatWorkflowPhases(wf.TaskPhases()))
@@ -2177,7 +3103,6 @@ func buildHeadlessSystemPrompt(basePrompt string, agentProfile string, projectCt
 		WorkDir:          workDir,
 		RootDir:          rootDir,
 		TaskType:         "coding",
-		ModelTier:        model.InferModelTier(""),
 		GTSAvailable:     binaryAvailable("gts"),
 	})
 }

@@ -921,6 +921,15 @@ func TestRunAgentPreservesPartialValueOnExecutionDeadline(t *testing.T) {
 	if result.Trace == nil || result.Trace.Tokens.Input != 100 {
 		t.Fatalf("partial trace = %#v, want retained accounting", result.Trace)
 	}
+	if len(result.Trace.ModelExecutions) != 1 || result.Trace.ModelExecutions[0].ResponseID != "resp-partial" {
+		t.Fatalf("partial aggregate identities = %+v, want resp-partial", result.Trace.ModelExecutions)
+	}
+	if len(result.Trace.Attempts) != 1 || result.Trace.Attempts[0].Trace == nil {
+		t.Fatalf("partial trace attempts = %#v, want retained failed attempt", result.Trace.Attempts)
+	}
+	if got := result.Trace.Attempts[0].Trace.ModelExecutions; len(got) != 1 || got[0].ResponseID != "resp-partial" {
+		t.Fatalf("partial attempt identities = %+v, want resp-partial", got)
+	}
 }
 
 func TestRunAgentDeadlineKeepsEarlierRejectedResponse(t *testing.T) {
@@ -1489,6 +1498,14 @@ func TestRunAgentAggregatesEveryPrimaryRetryAndCriticTrace(t *testing.T) {
 				i, attempt, wantPhases[i], wantAttempts[i], wantIDs[i])
 		}
 	}
+	if len(result.Trace.ModelExecutions) != len(wantIDs) {
+		t.Fatalf("aggregate model executions = %+v, want one per attempt", result.Trace.ModelExecutions)
+	}
+	for i, wantID := range wantIDs {
+		if got := result.Trace.ModelExecutions[i].ResponseID; got != "resp-"+wantID {
+			t.Fatalf("aggregate model execution %d response_id = %q, want %q", i, got, "resp-"+wantID)
+		}
+	}
 }
 
 func newTestAgentTrace(id string, input, output int, cost float64) *transparency.Trace {
@@ -1497,10 +1514,17 @@ func newTestAgentTrace(id string, input, output int, cost float64) *transparency
 		Timestamp: time.Unix(int64(input), 0),
 		Model:     "codex/gpt-5.6-terra",
 		Provider:  "codex",
-		Duration:  time.Duration(input) * time.Millisecond,
-		Tokens:    transparency.TokenUsage{Input: input, Output: output},
-		Cost:      cost,
-		Content:   id,
+		ModelExecutions: []transparency.ExecutionIdentityTrace{{
+			RequestedModel: "codex/gpt-5.6-terra",
+			SelectedModel:  "codex/gpt-5.6-terra",
+			ProviderID:     "codex",
+			ResponseModel:  "gpt-5.6-terra",
+			ResponseID:     "resp-" + id,
+		}},
+		Duration: time.Duration(input) * time.Millisecond,
+		Tokens:   transparency.TokenUsage{Input: input, Output: output},
+		Cost:     cost,
+		Content:  id,
 	}
 }
 

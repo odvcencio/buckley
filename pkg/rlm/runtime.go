@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/bus"
@@ -23,76 +24,31 @@ import (
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
-const coordinatorSystemPrompt = `You are the Buckley RLM Coordinator - an orchestration layer that delegates work to specialized sub-agents while maintaining strategic oversight.
+const coordinatorSystemPrompt = `You are Buckley's coordinator–worker runtime. Use the coordinator tools below; delegate file/shell work to workers.
 
-## Your Role
-You do NOT execute tools directly. Instead, you:
-1. Break down the user's request into discrete sub-tasks
-2. Delegate each sub-task to an appropriately-weighted sub-agent
-3. Review summaries and scratchpad entries to synthesize results
-4. Set the final answer when confident
+Use existing context when it is sufficient. Delegate only bounded missing work, and write each task with explicit output, evidence, and check expectations. Use delegate_batch only for independent tasks with no overlapping mutations; sequence dependent or risky work, especially when wall time is low.
 
-## Available Tools
+Tools:
+- delegate: one sub-agent task. Inputs: task, optional weight trivial|light|medium|heavy|reasoning (default medium), tools, system_prompt, max_iterations. Returns summary, scratchpad_key, agent_id, model, error.
+- delegate_batch: multiple tasks; parallel defaults true.
+- inspect: read a scratchpad entry by key when a summary is not enough.
+- set_answer: content, ready, confidence, artifacts, next_steps.
 
-**delegate** - Dispatch a single task to a sub-agent
-- task (required): Clear, actionable instruction for the sub-agent
-- weight: trivial|light|medium|heavy|reasoning (affects model selection)
-- tools: Optional list of allowed tools (e.g., ["file", "shell"])
-- Returns: summary, scratchpad_key, model used
+Weights: trivial=simple lookup/format; light=basic analysis/small edit; medium=multi-file or tests; heavy=complex refactor/architecture; reasoning=deep analysis/debugging.
 
-**delegate_batch** - Dispatch multiple independent tasks in parallel
-- tasks: Array of {task, weight, tools} objects
-- parallel: true (default) for concurrent execution
-- Use when tasks have no dependencies on each other
+For consequential claims, inspect the evidence. Model confidence is not verification. Retain useful drafts, failures, unknowns, and scratchpad keys in the answer. Call set_answer with ready=false when work is incomplete, evidence is missing, failures remain unresolved, or the result is only a draft.`
 
-**inspect** - Retrieve details from a scratchpad entry
-- key: The scratchpad_key returned from a delegate call
-- Use to get full context when a summary is insufficient
+const coordinatorToollessSystemPrompt = `You are Buckley's coordinator-worker runtime operating with a model that has no catalog-advertised tool/function calling support.
 
-**set_answer** - Declare your final response
-- content (required): The answer text
-- ready: true when answer is complete
-- confidence: 0.0-1.0 (must exceed threshold shown in context)
-- artifacts: Optional list of scratchpad keys for supporting data
-- next_steps: Optional suggestions for follow-up actions
+Do not emit, describe, or pretend to call coordinator tools. Do not claim that you delegated to workers, inspected scratchpad entries, read files, ran shell commands, or performed any other tool action unless that evidence is already present in the conversation.
 
-## Weight Selection Guide
+Provide the best direct synthesis from the supplied task and context. Be clear about constraints, unknowns, missing evidence, and any work that would require tool access or a worker-capable coordinator model. Return the answer text directly.`
 
-| Weight    | Use When                                    | Model Tier          |
-|-----------|---------------------------------------------|---------------------|
-| trivial   | Simple lookups, formatting, single-file reads | Fastest, cheapest  |
-| light     | Basic code analysis, small edits            | Fast, affordable    |
-| medium    | Multi-file operations, test writing         | Balanced (default)  |
-| heavy     | Complex refactoring, architecture decisions | High-quality        |
-| reasoning | Deep analysis, planning, debugging          | Extended thinking   |
-
-## Execution Strategy
-
-1. **Decompose**: Break the request into independent sub-tasks when possible
-2. **Parallelize**: Use delegate_batch for independent tasks to save time
-3. **Sequence**: Use delegate serially when tasks depend on prior results
-4. **Synthesize**: Combine sub-agent summaries into a coherent answer
-5. **Verify**: Use inspect if a summary lacks critical details
-
-## Budget Awareness
-The context shows your remaining tokens and wall time. Plan accordingly:
-- If tokens are low, use lighter weights and fewer delegations
-- If time is short, parallelize aggressively
-- Set partial answers with ready=false if you're running out of budget
-
-## Confidence Calibration
-- 0.9+: Fully confident, all sub-tasks succeeded
-- 0.7-0.9: Mostly confident, minor gaps acceptable
-- 0.5-0.7: Partial answer, flag uncertainties
-- <0.5: Incomplete, explain what's missing
-
-## Anti-patterns to Avoid
-- Don't delegate trivial work that you could infer from context
-- Don't inspect every scratchpad entry - summaries are usually sufficient
-- Don't set ready=true until you've synthesized all sub-agent results
-- Don't use heavy/reasoning weights for simple tasks (wastes budget)
-
-Remember: You see summaries, not raw output. Trust sub-agents to execute correctly and focus on coordination.`
+const (
+	coordinatorAnswerScratchpadTextBytes = 2048
+	coordinatorAnswerScratchpadItemBytes = 512
+	coordinatorAnswerScratchpadMaxItems  = 16
+)
 
 // IterationEvent captures progress for observers.
 type IterationEvent struct {
@@ -122,7 +78,7 @@ type RuntimeDeps struct {
 	GraftClient  *graft.Client // Optional graft coordination client
 }
 
-// Runtime is the RLM execution engine.
+// Runtime is the coordinator-worker coordinated execution engine.
 type Runtime struct {
 	config      Config
 	models      *model.Manager
@@ -144,6 +100,9 @@ type Runtime struct {
 
 // NewRuntime wires the runtime dependencies together.
 func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	cfg.Normalize()
 	if deps.Models == nil {
 		return nil, fmt.Errorf("model manager required")
@@ -164,6 +123,7 @@ func NewRuntime(cfg Config, deps RuntimeDeps) (*Runtime, error) {
 
 	dispatcher, err := NewBatchDispatcher(BatchDispatcherConfig{
 		MaxConcurrent: cfg.SubAgent.MaxConcurrent,
+		TaskTimeout:   cfg.SubAgent.Timeout,
 	}, BatchDispatcherDeps{
 		Router:      router,
 		Models:      deps.Models,
@@ -206,15 +166,15 @@ func (r *Runtime) OnIteration(hook IterationHook) {
 	r.hooksMu.Unlock()
 }
 
-// errCoordinatorAnswerReady signals the DispatchTools hook's post-dispatch
-// readiness check (token budget exhausted, confidence threshold met, or
-// set_answer(ready=true) already applied by the tool call itself): the
-// pre-migration coordinator loop's `for ... && !answer.Ready` condition
-// would end the loop right here, without one more model call. Returning
-// this from DispatchTools makes agentloop.Controller stop the turn
-// immediately for the same reason, at the same point, instead of spending
-// one more (budget-exceeding) model round before the caller notices Ready.
+// errCoordinatorAnswerReady signals an explicit set_answer(ready=true) with
+// nonblank content. Returning it from DispatchTools makes agentloop.Controller
+// stop the turn immediately without one more model round.
 var errCoordinatorAnswerReady = errors.New("rlm: coordinator answer ready")
+
+// errCoordinatorTokenBudgetExhausted stops the coordinator without accepting
+// a partial answer as complete. The retained Answer is useful evidence; the
+// nonnil error is the completion boundary.
+var errCoordinatorTokenBudgetExhausted = errors.New("rlm: coordinator token budget exhausted")
 
 // coordinatorGovernorConfig tunes pkg/agentloop.Governor for
 // Runtime.Execute. The coordinator's own maxIterations (CoordinatorConfig,
@@ -236,14 +196,13 @@ func coordinatorGovernorConfig(maxIterations int) agentloop.Config {
 //
 // Migrated onto pkg/agentloop.Controller (the shared turn engine): request
 // projection, tool-call ID backfill, and per-round Governor consultation
-// are Controller-owned. The coordinator's own budget/readiness logic (token
-// budget, confidence threshold, set_answer) is unchanged; it decides
-// whether to stop from inside the DispatchTools hook, exactly where the
-// pre-migration loop decided it, and stops Controller immediately via
-// errCoordinatorAnswerReady rather than letting one more model round run
-// after budget or confidence already say the answer is done. If the shared
-// Governor intervenes first, Controller reserves a tools-disabled synthesis
-// and Execute accepts only its conclusive final message.
+// are Controller-owned. The coordinator's explicit set_answer(ready=true)
+// stops Controller immediately via errCoordinatorAnswerReady. Budget and
+// deadline stops retain partial evidence but return nonnil incomplete errors;
+// confidence thresholds remain visible in context but do not promote
+// ready=false drafts into completed answers. If the shared Governor
+// intervenes first, Controller reserves a tools-disabled synthesis and
+// Execute accepts only its conclusive final message.
 func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("runtime is nil")
@@ -316,17 +275,28 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	registry := r.buildCoordinatorRegistry(ctx, &answer)
 	toolDefs := toolRegistryDefinitions(registry)
 	toolChoice := "auto"
-	if len(toolDefs) == 0 {
+	systemPrompt := coordinatorSystemPrompt
+	coordinatorModel := r.coordinatorModelID()
+	coordinatorRoute, err := r.models.ResolveModelRoute(coordinatorModel)
+	if err != nil {
+		return &answer, err
+	}
+	coordinatorToolless := catalogConfirmedToollessRoute(r.models, coordinatorRoute)
+	if coordinatorToolless {
+		registry = tool.NewEmptyRegistry()
+		toolDefs = nil
+		toolChoice = ""
+		systemPrompt = coordinatorToollessSystemPrompt
+	} else if len(toolDefs) == 0 {
 		toolChoice = "none"
 	}
 
 	messages := []model.Message{
-		{Role: "system", Content: coordinatorSystemPrompt},
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: r.buildCoordinatorContext(ctx, task, &answer, start, maxTokens, confidenceThreshold)},
 	}
-	coordinatorModel := r.coordinatorModelID()
 	sessionID := fmt.Sprintf("rlm-coordinator-%d", start.UnixNano())
-	contextWindow, _ := r.models.GetContextLength(coordinatorModel)
+	contextWindow, _ := r.models.GetContextLengthForRoute(coordinatorRoute)
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		answer.Iteration = round
@@ -346,16 +316,21 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			ToolChoice: toolChoice,
 			SessionID:  sessionID,
 		}
+		if coordinatorToolless {
+			req.ToolsCatalogConfirmedUnavailable = true
+		}
 		req.Messages = conversation.CompactModelMessagesForRequest(messages, req, contextWindow)
 		return req, nil
 	}
 
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
-		resp, err := r.models.ChatCompletion(ctx, req)
-		if err != nil {
-			return nil, err
+		resp, err := r.models.ChatCompletionForRoute(ctx, req, coordinatorRoute)
+		if resp != nil {
+			answer.TokensUsed += resp.Usage.TotalTokens
 		}
-		answer.TokensUsed += resp.Usage.TotalTokens
+		if err != nil {
+			return resp, err
+		}
 		return resp, nil
 	})
 
@@ -366,12 +341,11 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
 		}
 
-		if answer.TokensUsed >= maxTokens {
-			answer.Ready = true
+		if answer.Ready && strings.TrimSpace(answer.Content) == "" {
+			answer.Ready = false
 		}
-		if !answer.Ready && answer.Content != "" && answer.Confidence >= confidenceThreshold {
-			answer.Ready = true
-		}
+		answerReady := answer.Ready && strings.TrimSpace(answer.Content) != ""
+		tokenBudgetExhausted := maxTokens > 0 && answer.TokensUsed >= maxTokens
 
 		summaries := r.collectScratchpadSummaries(ctx, 6)
 		r.emitIteration(IterationEvent{
@@ -383,8 +357,11 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			Scratchpad:    summaries,
 		})
 
-		if answer.Ready {
+		if answerReady {
 			return outcomes, errCoordinatorAnswerReady
+		}
+		if tokenBudgetExhausted {
+			return outcomes, errCoordinatorTokenBudgetExhausted
 		}
 		return outcomes, nil
 	})
@@ -424,14 +401,32 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 			answer.Normalize()
 			return &answer, nil
 		}
-		if errors.Is(runErr, context.DeadlineExceeded) && runtimeDeadline {
-			answer.Ready = true
+		preserveCoordinatorPublicDraft(&answer, result)
+		if errors.Is(runErr, errCoordinatorTokenBudgetExhausted) {
+			answer.Ready = false
 			answer.Normalize()
-			return &answer, nil
+			r.emitBudgetWarning(answer.TokensUsed, maxTokens)
+			incomplete := &agentloop.IncompleteTurnError{
+				Code:   "token_budget",
+				Reason: "the coordinator token budget was exhausted before a complete answer was declared",
+			}
+			return &answer, errors.Join(incomplete, errCoordinatorTokenBudgetExhausted)
+		}
+		if errors.Is(runErr, context.DeadlineExceeded) && runtimeDeadline {
+			answer.Ready = false
+			answer.Normalize()
+			incomplete := &agentloop.IncompleteTurnError{
+				Code:   "runtime_deadline",
+				Reason: "the coordinator runtime deadline expired before a complete answer was declared",
+			}
+			return &answer, errors.Join(incomplete, runErr)
 		}
 		return &answer, runErr
 	}
 	if completionErr := result.RequireConclusive(); completionErr != nil {
+		preserveCoordinatorPublicDraft(&answer, result)
+		answer.Ready = false
+		answer.Normalize()
 		return &answer, completionErr
 	}
 
@@ -457,6 +452,18 @@ func (r *Runtime) Execute(ctx context.Context, task string) (*Answer, error) {
 	return &answer, nil
 }
 
+func preserveCoordinatorPublicDraft(answer *Answer, result *agentloop.Result) {
+	if answer == nil || result == nil {
+		return
+	}
+	if strings.TrimSpace(answer.Content) != "" {
+		return
+	}
+	if content := strings.TrimSpace(result.Content); content != "" {
+		answer.Content = content
+	}
+}
+
 func (r *Runtime) coordinatorModelID() string {
 	modelID := strings.TrimSpace(r.config.Coordinator.Model)
 	if modelID == "" || strings.EqualFold(modelID, "auto") {
@@ -468,10 +475,23 @@ func (r *Runtime) coordinatorModelID() string {
 func (r *Runtime) buildCoordinatorRegistry(ctx context.Context, answer *Answer) *tool.Registry {
 	registry := tool.NewEmptyRegistry()
 	ctxProvider := func() context.Context { return ctx }
-	registry.Register(NewDelegateTool(r.dispatcher, ctxProvider))
-	registry.Register(NewDelegateBatchTool(r.dispatcher, ctxProvider))
+	collectTaskResults := func(results []BatchResult) {
+		if answer != nil {
+			answer.appendTaskResults(results)
+		}
+	}
+	delegateTool := NewDelegateTool(r.dispatcher, ctxProvider)
+	delegateTool.onResults = collectTaskResults
+	registry.Register(delegateTool)
+	delegateBatchTool := NewDelegateBatchTool(r.dispatcher, ctxProvider)
+	delegateBatchTool.onResults = collectTaskResults
+	registry.Register(delegateBatchTool)
 	registry.Register(NewInspectTool(r.scratchpad, ctxProvider))
-	registry.Register(NewSetAnswerTool(answer))
+	setAnswerTool := NewSetAnswerTool(answer)
+	setAnswerTool.onSet = func(ctx context.Context, snapshot Answer) {
+		r.persistCoordinatorAnswerState(ctx, snapshot)
+	}
+	registry.Register(setAnswerTool)
 
 	// Validate via arbiter that coordinator role is restricted.
 	if r.engine != nil {
@@ -499,6 +519,98 @@ func (r *Runtime) buildCoordinatorRegistry(ctx context.Context, answer *Answer) 
 	}
 
 	return registry
+}
+
+func (r *Runtime) persistCoordinatorAnswerState(ctx context.Context, answer Answer) {
+	if r == nil || r.scratchpad == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload := publicCoordinatorAnswerSnapshot(answer)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	summary := answer.Content
+	if strings.TrimSpace(summary) == "" {
+		if answer.Ready {
+			summary = "coordinator answer marked ready"
+		} else {
+			summary = "coordinator answer draft retained"
+		}
+	}
+	_, _ = r.scratchpad.WriteDurableOnly(ctx, WriteRequest{
+		Type:      EntryTypeDecision,
+		Raw:       raw,
+		Summary:   limitUTF8String(summary, coordinatorAnswerScratchpadItemBytes),
+		Metadata:  map[string]any{"source": "coordinator.set_answer", "ready": answer.Ready},
+		CreatedBy: "coordinator",
+	})
+	if len(payload.Artifacts) == 0 {
+		return
+	}
+	artifactRaw, err := json.Marshal(map[string]any{
+		"artifacts": payload.Artifacts,
+		"ready":     payload.Ready,
+	})
+	if err != nil {
+		return
+	}
+	_, _ = r.scratchpad.WriteDurableOnly(ctx, WriteRequest{
+		Type:      EntryTypeArtifact,
+		Raw:       artifactRaw,
+		Summary:   limitUTF8String(strings.Join(payload.Artifacts, ", "), coordinatorAnswerScratchpadItemBytes),
+		Metadata:  map[string]any{"source": "coordinator.set_answer", "count": len(payload.Artifacts)},
+		CreatedBy: "coordinator",
+	})
+}
+
+type coordinatorAnswerScratchpadPayload struct {
+	Content    string   `json:"content,omitempty"`
+	Ready      bool     `json:"ready"`
+	Confidence float64  `json:"confidence"`
+	Artifacts  []string `json:"artifacts,omitempty"`
+	NextSteps  []string `json:"next_steps,omitempty"`
+}
+
+func publicCoordinatorAnswerSnapshot(answer Answer) coordinatorAnswerScratchpadPayload {
+	return coordinatorAnswerScratchpadPayload{
+		Content:    limitUTF8String(strings.TrimSpace(answer.Content), coordinatorAnswerScratchpadTextBytes),
+		Ready:      answer.Ready,
+		Confidence: clampConfidence(answer.Confidence),
+		Artifacts:  limitStringList(answer.Artifacts, coordinatorAnswerScratchpadMaxItems, coordinatorAnswerScratchpadItemBytes),
+		NextSteps:  limitStringList(answer.NextSteps, coordinatorAnswerScratchpadMaxItems, coordinatorAnswerScratchpadItemBytes),
+	}
+}
+
+func limitStringList(items []string, maxItems, maxBytes int) []string {
+	if maxItems <= 0 || maxBytes <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) > maxItems {
+		items = items[:maxItems]
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, limitUTF8String(item, maxBytes))
+	}
+	return out
+}
+
+func limitUTF8String(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && !utf8.ValidString(value[:maxBytes]) {
+		maxBytes--
+	}
+	return value[:maxBytes]
 }
 
 func (r *Runtime) buildCoordinatorContext(ctx context.Context, task string, answer *Answer, start time.Time, maxTokens int, confidenceThreshold float64) string {
@@ -603,6 +715,9 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 }
 
 func (r *Runtime) emitIteration(event IterationEvent) {
+	if r == nil || !r.config.Coordinator.StreamPartials {
+		return
+	}
 	r.hooksMu.RLock()
 	hooks := append([]IterationHook{}, r.hooks...)
 	r.hooksMu.RUnlock()
@@ -626,6 +741,22 @@ func (r *Runtime) emitIteration(event IterationEvent) {
 			Data:      data,
 		})
 	}
+}
+
+func (r *Runtime) emitBudgetWarning(tokensUsed, maxTokens int) {
+	if r == nil || r.telemetry == nil {
+		return
+	}
+	r.telemetry.Publish(telemetry.Event{
+		Type:      telemetry.EventRLMBudgetWarning,
+		SessionID: r.sessionID,
+		Data: map[string]any{
+			"tokens_used": tokensUsed,
+			"max_tokens":  maxTokens,
+			"reason":      "token_budget_exhausted",
+			"action":      "return_incomplete",
+		},
+	})
 }
 
 func (r *Runtime) emitTermination(termination agentloop.Termination) {

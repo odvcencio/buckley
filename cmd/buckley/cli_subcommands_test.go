@@ -949,12 +949,18 @@ func TestParseAgentRunArgs(t *testing.T) {
 		t.Fatalf("unexpected opts: %+v", opts)
 	}
 
-	opts, err = parseAgentRunArgs([]string{"--subagent", "coder", "--model", "test-model", "agent.yaml", "fix", "bug"})
+	opts, err = parseAgentRunArgs([]string{"--subagent", "coder", "--model", "test-model", "--task-intent", "mutation", "agent.yaml", "fix", "bug"})
 	if err != nil {
 		t.Fatalf("parseAgentRunArgs flag form: %v", err)
 	}
-	if opts.agentPath != "agent.yaml" || opts.subagent != "coder" || opts.model != "test-model" || opts.task != "fix bug" {
+	if opts.agentPath != "agent.yaml" || opts.subagent != "coder" || opts.model != "test-model" || opts.taskIntent != "mutation" || opts.task != "fix bug" {
 		t.Fatalf("unexpected flag opts: %+v", opts)
+	}
+	if _, err := parseAgentRunArgs([]string{"--task-intent=", "agent.yaml", "reviewer", "inspect"}); err == nil || !strings.Contains(err.Error(), "unknown, read_only, or mutation") {
+		t.Fatalf("empty --task-intent error = %v", err)
+	}
+	if _, err := parseAgentRunArgs([]string{"--task-intent", "question", "agent.yaml", "reviewer", "inspect"}); err == nil || !strings.Contains(err.Error(), "unknown, read_only, or mutation") {
+		t.Fatalf("invalid --task-intent error = %v", err)
 	}
 
 	opts, err = parseAgentRunArgs([]string{"--dry-run", "agent.yaml", "reviewer", "inspect"})

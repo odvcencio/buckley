@@ -2,8 +2,16 @@ package experiment
 
 import (
 	"database/sql"
+	"errors"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/transparency"
 
 	_ "modernc.org/sqlite"
 )
@@ -68,13 +76,17 @@ func setupTestDB(t *testing.T) *sql.DB {
 		prompt_tokens INTEGER,
 		completion_tokens INTEGER,
 		total_cost REAL,
+		usage_json TEXT,
+		cost_unknown INTEGER NOT NULL DEFAULT 0,
 		tool_calls INTEGER,
 		tool_successes INTEGER,
 		tool_failures INTEGER,
 		files_modified INTEGER,
 		lines_changed INTEGER,
 		started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		completed_at TIMESTAMP
+		completed_at TIMESTAMP,
+		input_manifest_json TEXT,
+		model_executions_json TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS experiment_evaluations (
@@ -177,6 +189,49 @@ func TestStore_CreateExperiment(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStore_CreateExperimentRollsBackAfterVariantMarshalError(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	invalid := &Experiment{
+		ID:   "exp-create-rollback",
+		Name: "rollback",
+		Task: Task{Prompt: "prompt"},
+		Variants: []Variant{{
+			ID:           "variant-bad",
+			Name:         "bad",
+			ModelID:      "model-a",
+			CustomConfig: map[string]any{"bad": func() {}},
+		}},
+	}
+	if err := store.CreateExperiment(invalid); err == nil {
+		t.Fatalf("CreateExperiment invalid custom config error = nil, want error")
+	}
+	var experimentRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM experiments WHERE id = ?`, invalid.ID).Scan(&experimentRows); err != nil {
+		t.Fatalf("count experiments: %v", err)
+	}
+	if experimentRows != 0 {
+		t.Fatalf("experiment rows after rollback = %d, want 0", experimentRows)
+	}
+
+	valid := &Experiment{
+		ID:       "exp-create-valid-after-rollback",
+		Name:     "valid",
+		Task:     Task{Prompt: "prompt"},
+		Variants: []Variant{{ID: "variant-ok", Name: "ok", ModelID: "model-a"}},
+	}
+	if err := store.CreateExperiment(valid); err != nil {
+		t.Fatalf("valid CreateExperiment after rollback: %v", err)
+	}
+	loaded, err := store.GetExperiment(valid.ID)
+	if err != nil {
+		t.Fatalf("GetExperiment: %v", err)
+	}
+	if loaded == nil || loaded.ID != valid.ID || len(loaded.Variants) != 1 {
+		t.Fatalf("loaded valid experiment = %#v", loaded)
 	}
 }
 
@@ -377,6 +432,690 @@ func TestStore_SaveRun(t *testing.T) {
 			}
 			if !tt.wantErr && tt.run != nil && tt.run.ID == "" {
 				t.Error("SaveRun() did not generate ID")
+			}
+		})
+	}
+}
+
+func TestStore_SaveRunInputManifestRoundTripAndCompletionPreserves(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:   "exp-manifest",
+		Name: "manifest",
+		Task: Task{Prompt: "test prompt", Context: map[string]string{"b": "2", "a": "1"}},
+		Variants: []Variant{
+			{ID: "var-1", Name: "v1", ModelID: "gpt-4", ProviderID: "openrouter"},
+		},
+		Criteria: []SuccessCriterion{{Name: "tests", Type: CriterionTestPass, Target: "go test ./...", Weight: 1}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	manifest, err := buildRunInputManifest(exp, exp.Variants[0], time.Minute)
+	if err != nil {
+		t.Fatalf("buildRunInputManifest: %v", err)
+	}
+	start := time.Now()
+	if err := store.SaveRun(&Run{
+		ID:            "run-manifest",
+		ExperimentID:  exp.ID,
+		VariantID:     "var-1",
+		Branch:        "experiment/exp-manifest/var-1",
+		Status:        RunRunning,
+		StartedAt:     start,
+		InputManifest: manifest,
+	}); err != nil {
+		t.Fatalf("SaveRun initial: %v", err)
+	}
+	completed := time.Now()
+	if err := store.SaveRun(&Run{
+		ID:           "run-manifest",
+		ExperimentID: exp.ID,
+		VariantID:    "var-1",
+		Branch:       "experiment/exp-manifest/var-1",
+		Status:       RunCompleted,
+		Output:       "done",
+		StartedAt:    start,
+		CompletedAt:  &completed,
+	}); err != nil {
+		t.Fatalf("SaveRun completion: %v", err)
+	}
+	got, err := store.GetRun("run-manifest")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got == nil || got.InputManifest == nil {
+		t.Fatalf("stored manifest = %#v, want preserved manifest", got)
+	}
+	if got.InputManifest.InputDigest != manifest.InputDigest || got.InputManifest.WorkloadDigest != manifest.WorkloadDigest {
+		t.Fatalf("manifest digest changed: got %#v want %#v", got.InputManifest, manifest)
+	}
+	if got.Status != RunCompleted || got.Output != "done" {
+		t.Fatalf("completion fields not saved: status=%q output=%q", got.Status, got.Output)
+	}
+}
+
+func TestStore_SaveRunInputManifestConflictDoesNotUpdateResultOrReparent(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:   "exp-conflict-a",
+		Name: "manifest",
+		Task: Task{Prompt: "test prompt"},
+		Variants: []Variant{
+			{ID: "var-1", Name: "v1", ModelID: "gpt-4"},
+			{ID: "var-2", Name: "v2", ModelID: "gpt-5"},
+		},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	manifest, err := buildRunInputManifest(exp, exp.Variants[0], time.Minute)
+	if err != nil {
+		t.Fatalf("build manifest: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-conflict", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning, Output: "initial", InputManifest: manifest}); err != nil {
+		t.Fatalf("SaveRun initial: %v", err)
+	}
+	changed, err := buildRunInputManifest(exp, exp.Variants[1], time.Minute)
+	if err != nil {
+		t.Fatalf("build changed manifest: %v", err)
+	}
+	err = store.SaveRun(&Run{ID: "run-conflict", ExperimentID: exp.ID, VariantID: "var-2", Status: RunCompleted, Output: "rewritten", InputManifest: changed})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun changed manifest/reparent error = %v, want ErrRunManifestConflict", err)
+	}
+	got, err := store.GetRun("run-conflict")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.VariantID != "var-1" || got.Status != RunRunning || got.Output != "initial" {
+		t.Fatalf("conflict updated row: variant=%q status=%q output=%q", got.VariantID, got.Status, got.Output)
+	}
+}
+
+func TestStore_SaveRunDoesNotRetroactivelyAttachManifestToLegacyRun(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-legacy-manifest",
+		Name:     "legacy",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "gpt-4"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-legacy", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "legacy"}); err != nil {
+		t.Fatalf("SaveRun legacy: %v", err)
+	}
+	manifest, err := buildRunInputManifest(exp, exp.Variants[0], time.Minute)
+	if err != nil {
+		t.Fatalf("build manifest: %v", err)
+	}
+	err = store.SaveRun(&Run{ID: "run-legacy", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "claimed", InputManifest: manifest})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun retroactive manifest error = %v, want ErrRunManifestConflict", err)
+	}
+	got, err := store.GetRun("run-legacy")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.InputManifest != nil || got.Output != "legacy" {
+		t.Fatalf("legacy row changed: manifest=%#v output=%q", got.InputManifest, got.Output)
+	}
+}
+
+func TestStore_GetRunRejectsMalformedInputManifest(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-malformed-manifest",
+		Name:     "malformed",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "gpt-4"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-malformed", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE experiment_runs SET input_manifest_json = ? WHERE id = ?`, `{"version":"wrong"}`, "run-malformed"); err != nil {
+		t.Fatalf("corrupt manifest: %v", err)
+	}
+	if _, err := store.GetRun("run-malformed"); err == nil {
+		t.Fatalf("GetRun malformed manifest error = nil, want error")
+	}
+	if _, err := store.ListRuns(exp.ID); err == nil {
+		t.Fatalf("ListRuns malformed manifest error = nil, want error")
+	}
+}
+
+func TestStore_SaveRunConflictingManifestRaceAcrossConnections(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "manifest-race.db")
+	base, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New base: %v", err)
+	}
+	storeA := NewStoreFromStorage(base)
+	exp := &Experiment{
+		ID:       "exp-race",
+		Name:     "race",
+		Task:     Task{Prompt: "race prompt"},
+		Variants: []Variant{{ID: "var-race", Name: "variant", ModelID: "model-a"}},
+	}
+	if err := storeA.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := base.Close(); err != nil {
+		t.Fatalf("close base: %v", err)
+	}
+
+	storageA, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New A: %v", err)
+	}
+	defer storageA.Close()
+	storageB, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New B: %v", err)
+	}
+	defer storageB.Close()
+	storeA = NewStoreFromStorage(storageA)
+	storeB := NewStoreFromStorage(storageB)
+
+	manifestA, err := buildRunInputManifest(exp, exp.Variants[0], time.Minute)
+	if err != nil {
+		t.Fatalf("build manifest A: %v", err)
+	}
+	expB := *exp
+	expB.Task.Prompt = "different race prompt"
+	manifestB, err := buildRunInputManifest(&expB, exp.Variants[0], time.Minute)
+	if err != nil {
+		t.Fatalf("build manifest B: %v", err)
+	}
+	if manifestA.InputDigest == manifestB.InputDigest {
+		t.Fatalf("test setup produced identical manifests")
+	}
+
+	type saveResult struct {
+		label    string
+		manifest *RunInputManifest
+		output   string
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan saveResult, 2)
+	var wg sync.WaitGroup
+	save := func(label string, store *Store, manifest *RunInputManifest, output string) {
+		defer wg.Done()
+		<-start
+		err := store.SaveRun(&Run{
+			ID:            "run-race",
+			ExperimentID:  exp.ID,
+			VariantID:     "var-race",
+			Branch:        "experiment/exp-race/var-race",
+			Status:        RunCompleted,
+			Output:        output,
+			StartedAt:     time.Now(),
+			InputManifest: manifest,
+		})
+		results <- saveResult{label: label, manifest: manifest, output: output, err: err}
+	}
+	wg.Add(2)
+	go save("A", storeA, manifestA, "winner-a")
+	go save("B", storeB, manifestB, "winner-b")
+	close(start)
+	wg.Wait()
+	close(results)
+
+	accepted := make([]saveResult, 0, 1)
+	conflicts := 0
+	for result := range results {
+		if result.err == nil {
+			accepted = append(accepted, result)
+			continue
+		}
+		if errors.Is(result.err, ErrRunManifestConflict) {
+			conflicts++
+			continue
+		}
+		t.Fatalf("save %s unexpected error: %v", result.label, result.err)
+	}
+	if len(accepted) != 1 || conflicts != 1 {
+		t.Fatalf("race results accepted=%d conflicts=%d, want 1/1", len(accepted), conflicts)
+	}
+	got, err := storeA.GetRun("run-race")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got == nil || got.InputManifest == nil {
+		t.Fatalf("GetRun = %#v, want manifest-backed winning run", got)
+	}
+	winner := accepted[0]
+	if got.Output != winner.output || got.InputManifest.InputDigest != winner.manifest.InputDigest {
+		t.Fatalf("mixed state: got output=%q digest=%s, winner output=%q digest=%s",
+			got.Output, got.InputManifest.InputDigest, winner.output, winner.manifest.InputDigest)
+	}
+}
+
+func TestStore_SaveRunModelExecutionsImmutable(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-model-exec",
+		Name:     "identity",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model", ProviderID: "provider-a"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning, Output: "running"}); err != nil {
+		t.Fatalf("SaveRun initial: %v", err)
+	}
+	identity := []model.ExecutionIdentity{{
+		RequestedModel: "requested/model",
+		SelectedModel:  "selected/model",
+		ProviderID:     "provider-a",
+		ResponseModel:  "reported/model",
+		ResponseID:     "resp-1",
+	}}
+	if err := store.SaveRun(&Run{ID: "run-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "completed", ModelExecutions: identity}); err != nil {
+		t.Fatalf("SaveRun terminal identity: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "nil preserve"}); err != nil {
+		t.Fatalf("SaveRun nil preserve: %v", err)
+	}
+	got, err := store.GetRun("run-identity")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Output != "nil preserve" || len(got.ModelExecutions) != 1 || got.ModelExecutions[0] != identity[0] {
+		t.Fatalf("run after nil preserve = %+v, want output update with identity preserved", got)
+	}
+	changed := []model.ExecutionIdentity{identity[0]}
+	changed[0].ResponseID = "resp-2"
+	err = store.SaveRun(&Run{ID: "run-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "rewritten", ModelExecutions: changed})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun changed identity error = %v, want ErrRunManifestConflict", err)
+	}
+	got, err = store.GetRun("run-identity")
+	if err != nil {
+		t.Fatalf("GetRun after conflict: %v", err)
+	}
+	if got.Output != "nil preserve" || got.ModelExecutions[0].ResponseID != "resp-1" {
+		t.Fatalf("identity conflict updated row: %+v", got)
+	}
+}
+
+func TestStore_SaveRunRejectsModelExecutionsForNonterminalRun(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-nonterminal-identity",
+		Name:     "identity",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	identity := []model.ExecutionIdentity{{
+		RequestedModel: "requested/model",
+		SelectedModel:  "requested/model",
+		ProviderID:     "provider-a",
+		ResponseModel:  "requested/model",
+		ResponseID:     "resp-1",
+	}}
+	err := store.SaveRun(&Run{ID: "run-nonterminal-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning, Output: "running", ModelExecutions: identity})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun nonterminal identity error = %v, want ErrRunManifestConflict", err)
+	}
+	var inserted int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM experiment_runs WHERE id = ?`, "run-nonterminal-identity").Scan(&inserted); err != nil {
+		t.Fatalf("count nonterminal identity row: %v", err)
+	}
+	if inserted != 0 {
+		t.Fatalf("nonterminal identity save inserted %d rows, want 0", inserted)
+	}
+
+	if err := store.SaveRun(&Run{ID: "run-nonterminal-update", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning, Output: "running"}); err != nil {
+		t.Fatalf("SaveRun running without identity: %v", err)
+	}
+	err = store.SaveRun(&Run{ID: "run-nonterminal-update", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning, Output: "claimed", ModelExecutions: identity})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun running update identity error = %v, want ErrRunManifestConflict", err)
+	}
+	got, err := store.GetRun("run-nonterminal-update")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Output != "running" || got.ModelExecutions != nil {
+		t.Fatalf("nonterminal identity update changed row: output=%q identities=%#v", got.Output, got.ModelExecutions)
+	}
+}
+
+func TestStore_SaveRunConflictingModelExecutionsRaceAcrossConnections(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "identity-race.db")
+	base, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New base: %v", err)
+	}
+	store := NewStoreFromStorage(base)
+	exp := &Experiment{
+		ID:       "exp-identity-race",
+		Name:     "race",
+		Task:     Task{Prompt: "race prompt"},
+		Variants: []Variant{{ID: "var-race", Name: "variant", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := base.Close(); err != nil {
+		t.Fatalf("close base: %v", err)
+	}
+
+	storageA, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New A: %v", err)
+	}
+	defer storageA.Close()
+	storageB, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New B: %v", err)
+	}
+	defer storageB.Close()
+	storeA := NewStoreFromStorage(storageA)
+	storeB := NewStoreFromStorage(storageB)
+
+	type saveResult struct {
+		label    string
+		identity []model.ExecutionIdentity
+		output   string
+		err      error
+	}
+	identityA := []model.ExecutionIdentity{{SelectedModel: "model-a", ProviderID: "provider-a", ResponseModel: "model-a", ResponseID: "resp-a"}}
+	identityB := []model.ExecutionIdentity{{SelectedModel: "model-b", ProviderID: "provider-b", ResponseModel: "model-b", ResponseID: "resp-b"}}
+	start := make(chan struct{})
+	results := make(chan saveResult, 2)
+	var wg sync.WaitGroup
+	save := func(label string, store *Store, identity []model.ExecutionIdentity, output string) {
+		defer wg.Done()
+		<-start
+		err := store.SaveRun(&Run{
+			ID:              "run-identity-race",
+			ExperimentID:    exp.ID,
+			VariantID:       "var-race",
+			Status:          RunCompleted,
+			Output:          output,
+			StartedAt:       time.Now(),
+			ModelExecutions: identity,
+		})
+		results <- saveResult{label: label, identity: identity, output: output, err: err}
+	}
+	wg.Add(2)
+	go save("A", storeA, identityA, "winner-a")
+	go save("B", storeB, identityB, "winner-b")
+	close(start)
+	wg.Wait()
+	close(results)
+
+	accepted := make([]saveResult, 0, 1)
+	conflicts := 0
+	for result := range results {
+		if result.err == nil {
+			accepted = append(accepted, result)
+			continue
+		}
+		if errors.Is(result.err, ErrRunManifestConflict) {
+			conflicts++
+			continue
+		}
+		t.Fatalf("save %s unexpected error: %v", result.label, result.err)
+	}
+	if len(accepted) != 1 || conflicts != 1 {
+		t.Fatalf("race results accepted=%d conflicts=%d, want 1/1", len(accepted), conflicts)
+	}
+	got, err := storeA.GetRun("run-identity-race")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	winner := accepted[0]
+	if got.Output != winner.output || len(got.ModelExecutions) != 1 || got.ModelExecutions[0] != winner.identity[0] {
+		t.Fatalf("mixed state: got output=%q identities=%+v, winner output=%q identities=%+v",
+			got.Output, got.ModelExecutions, winner.output, winner.identity)
+	}
+}
+
+func TestStore_SaveRunDoesNotRetroactivelyAttachModelExecutionsToLegacyTerminalRun(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-legacy-identity",
+		Name:     "legacy",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-legacy-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "legacy"}); err != nil {
+		t.Fatalf("SaveRun legacy: %v", err)
+	}
+	err := store.SaveRun(&Run{ID: "run-legacy-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted, Output: "claimed", ModelExecutions: []model.ExecutionIdentity{{SelectedModel: "selected/model"}}})
+	if !errors.Is(err, ErrRunManifestConflict) {
+		t.Fatalf("SaveRun retroactive identity error = %v, want ErrRunManifestConflict", err)
+	}
+	got, err := store.GetRun("run-legacy-identity")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if len(got.ModelExecutions) != 0 || got.Output != "legacy" {
+		t.Fatalf("legacy row changed: identities=%+v output=%q", got.ModelExecutions, got.Output)
+	}
+}
+
+func TestStore_SaveRunPersistsCapturedEmptyModelExecutions(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-empty-identity",
+		Name:     "empty",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-empty-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunRunning}); err != nil {
+		t.Fatalf("SaveRun initial: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-empty-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunFailed, ModelExecutions: []model.ExecutionIdentity{}}); err != nil {
+		t.Fatalf("SaveRun captured empty identity: %v", err)
+	}
+	got, err := store.GetRun("run-empty-identity")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.ModelExecutions == nil || len(got.ModelExecutions) != 0 {
+		t.Fatalf("model executions = %#v, want non-nil empty captured marker", got.ModelExecutions)
+	}
+	var raw sql.NullString
+	if err := db.QueryRow(`SELECT model_executions_json FROM experiment_runs WHERE id = ?`, "run-empty-identity").Scan(&raw); err != nil {
+		t.Fatalf("query raw model executions: %v", err)
+	}
+	if !raw.Valid || raw.String != "[]" {
+		t.Fatalf("raw model_executions_json = %#v, want []", raw)
+	}
+}
+
+func TestStore_SaveRunPreservesUsageEvidenceAndDoesNotAlias(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-usage-evidence",
+		Name:     "usage",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	reasoning := 3
+	usage := &transparency.TokenUsage{
+		Input:                10,
+		Output:               5,
+		ReportedTotal:        15,
+		ReportedReasoning:    &reasoning,
+		UsageEvidencePresent: true,
+	}
+	run := &Run{
+		ID:           "run-usage-evidence",
+		ExperimentID: exp.ID,
+		VariantID:    "var-1",
+		Status:       RunCompleted,
+		Metrics:      RunMetrics{TotalCost: 0.01, Usage: usage, CostUnknown: true},
+	}
+	if err := store.SaveRun(run); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	*usage.ReportedReasoning = 99
+	run.Metrics.Usage.Input = 999
+
+	got, err := store.GetRun("run-usage-evidence")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Metrics.Usage == nil || got.Metrics.Usage.Input != 10 || got.Metrics.Usage.ReportedReasoning == nil || *got.Metrics.Usage.ReportedReasoning != 3 || !got.Metrics.CostUnknown {
+		t.Fatalf("usage evidence = %+v costUnknown=%v, want retained original", got.Metrics.Usage, got.Metrics.CostUnknown)
+	}
+	*got.Metrics.Usage.ReportedReasoning = 42
+	again, err := store.GetRun("run-usage-evidence")
+	if err != nil {
+		t.Fatalf("GetRun again: %v", err)
+	}
+	if again.Metrics.Usage == nil || again.Metrics.Usage.ReportedReasoning == nil || *again.Metrics.Usage.ReportedReasoning != 3 {
+		t.Fatalf("stored usage aliases caller result: %+v", again.Metrics.Usage)
+	}
+	runs, err := store.ListRuns(exp.ID)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Metrics.Usage == nil || runs[0].Metrics.Usage.Input != 10 || !runs[0].Metrics.CostUnknown {
+		t.Fatalf("ListRuns usage = %+v", runs)
+	}
+}
+
+func TestStore_GetRunRejectsMalformedUsageEvidence(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-malformed-usage",
+		Name:     "malformed",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-malformed-usage", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE experiment_runs SET usage_json = ? WHERE id = ?`, `{"input":1} {}`, "run-malformed-usage"); err != nil {
+		t.Fatalf("corrupt usage evidence: %v", err)
+	}
+	if _, err := store.GetRun("run-malformed-usage"); err == nil {
+		t.Fatalf("GetRun malformed usage evidence error = nil, want error")
+	}
+	if _, err := store.ListRuns(exp.ID); err == nil {
+		t.Fatalf("ListRuns malformed usage evidence error = nil, want error")
+	}
+}
+
+func TestStore_GetRunRejectsMalformedModelExecutions(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-malformed-identity",
+		Name:     "malformed",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-malformed-identity", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE experiment_runs SET model_executions_json = ? WHERE id = ?`, "[{\"response_id\":\"bad\nid\"}]", "run-malformed-identity"); err != nil {
+		t.Fatalf("corrupt model executions: %v", err)
+	}
+	if _, err := store.GetRun("run-malformed-identity"); err == nil {
+		t.Fatalf("GetRun malformed model executions error = nil, want error")
+	}
+	if _, err := store.ListRuns(exp.ID); err == nil {
+		t.Fatalf("ListRuns malformed model executions error = nil, want error")
+	}
+}
+
+func TestStore_GetRunRejectsUnknownModelExecutionField(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-unknown-identity-field",
+		Name:     "malformed",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	if err := store.SaveRun(&Run{ID: "run-unknown-identity-field", ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE experiment_runs SET model_executions_json = ? WHERE id = ?`, `[{"selected_modle":"typo"}]`, "run-unknown-identity-field"); err != nil {
+		t.Fatalf("corrupt model executions: %v", err)
+	}
+	if _, err := store.GetRun("run-unknown-identity-field"); err == nil {
+		t.Fatalf("GetRun unknown model execution field error = nil, want error")
+	}
+}
+
+func TestStore_GetRunRejectsNullOrTrailingModelExecutionsJSON(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewStore(db)
+	exp := &Experiment{
+		ID:       "exp-bad-identity-json",
+		Name:     "malformed",
+		Task:     Task{Prompt: "test prompt"},
+		Variants: []Variant{{ID: "var-1", Name: "v1", ModelID: "requested/model"}},
+	}
+	if err := store.CreateExperiment(exp); err != nil {
+		t.Fatalf("CreateExperiment: %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "non-null empty", raw: ``},
+		{name: "non-null whitespace", raw: " \n\t"},
+		{name: "literal null", raw: `null`},
+		{name: "trailing object", raw: `[] {}`},
+		{name: "trailing garbage", raw: `[] nope`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runID := "run-" + strings.ReplaceAll(tt.name, " ", "-")
+			if err := store.SaveRun(&Run{ID: runID, ExperimentID: exp.ID, VariantID: "var-1", Status: RunCompleted}); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+			if _, err := db.Exec(`UPDATE experiment_runs SET model_executions_json = ? WHERE id = ?`, tt.raw, runID); err != nil {
+				t.Fatalf("corrupt model executions: %v", err)
+			}
+			if _, err := store.GetRun(runID); err == nil {
+				t.Fatalf("GetRun %s error = nil, want malformed model executions error", tt.name)
 			}
 		})
 	}

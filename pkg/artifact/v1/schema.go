@@ -139,6 +139,14 @@ func JSONSchema() map[string]any {
 	}
 }
 
+// SubmissionJSONSchema returns a schema for model submissions where Buckley
+// supplies schema_version and artifact_id after decoding.
+func SubmissionJSONSchema() map[string]any {
+	schema := JSONSchema()
+	schema["required"] = []string{"kind", "status", "title", "summary"}
+	return schema
+}
+
 // JSONSchemaBytes returns the canonical JSON encoding of JSONSchema. Go's
 // encoder sorts map keys, making the result suitable for cache keys and tests.
 func JSONSchemaBytes() ([]byte, error) {

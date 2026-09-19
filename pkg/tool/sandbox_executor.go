@@ -24,9 +24,10 @@ type SandboxRequest struct {
 
 // SandboxResult holds the output of a sandboxed command execution.
 type SandboxResult struct {
-	ExitCode int
-	Stdout   string
-	Stderr   string
-	Duration time.Duration
-	Killed   bool
+	ExitCode        int
+	Stdout          string
+	Stderr          string
+	Duration        time.Duration
+	Killed          bool
+	OutputTruncated bool
 }

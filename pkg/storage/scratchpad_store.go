@@ -153,6 +153,66 @@ func (s *Store) ListScratchpadEntries(ctx context.Context, limit int) ([]Scratch
 	return entries, rows.Err()
 }
 
+// ListScratchpadEntriesExcludingMetadataString returns entries ordered by
+// creation time while excluding rows whose valid JSON metadata contains an
+// exact string value for metadataKey. Malformed or legacy non-JSON metadata is
+// preserved and returned.
+func (s *Store) ListScratchpadEntriesExcludingMetadataString(ctx context.Context, metadataKey, metadataValue string, limit int) ([]ScratchpadEntry, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	if metadataKey == "" {
+		return s.ListScratchpadEntries(ctx, limit)
+	}
+
+	query := `
+		SELECT key, entry_type, raw, summary, metadata, created_by, created_at, updated_at
+		FROM rlm_scratchpad_entries
+		WHERE NOT CASE
+			WHEN metadata IS NOT NULL AND json_valid(metadata)
+				THEN COALESCE(json_extract(metadata, ?) = ?, 0)
+			ELSE 0
+		END
+		ORDER BY created_at DESC
+	`
+	args := []any{"$." + metadataKey, metadataValue}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := []ScratchpadEntry{}
+	for rows.Next() {
+		var entry ScratchpadEntry
+		var summary sql.NullString
+		var metadata sql.NullString
+		var createdBy sql.NullString
+		if err := rows.Scan(
+			&entry.Key,
+			&entry.EntryType,
+			&entry.Raw,
+			&summary,
+			&metadata,
+			&createdBy,
+			&entry.CreatedAt,
+			&entry.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		entry.Summary = summary.String
+		entry.Metadata = metadata.String
+		entry.CreatedBy = createdBy.String
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 // ListScratchpadEntriesByType returns scratchpad entries filtered by type, ordered by creation time (descending).
 func (s *Store) ListScratchpadEntriesByType(ctx context.Context, entryType string, limit int) ([]ScratchpadEntry, error) {
 	if s == nil || s.db == nil {

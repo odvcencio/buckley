@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/transparency"
 	"m31labs.dev/buckley/pkg/worktree"
 )
 
@@ -36,6 +38,11 @@ type AgentResult struct {
 	Files        []string       // Files modified
 	Metrics      map[string]int // Metrics like tokens used
 	TotalCost    float64
+	Usage        *transparency.TokenUsage
+	CostUnknown  bool
+	// ModelExecutions carries observed model-response identities in call order.
+	// Empty means unavailable, not inferred from the task request.
+	ModelExecutions []model.ExecutionIdentity
 }
 
 // AgentStatus represents the current status of an agent
@@ -48,24 +55,6 @@ const (
 	StatusFailed
 	StatusCancelled
 )
-
-// String returns the string representation of status
-func (s AgentStatus) String() string {
-	switch s {
-	case StatusIdle:
-		return "idle"
-	case StatusRunning:
-		return "running"
-	case StatusCompleted:
-		return "completed"
-	case StatusFailed:
-		return "failed"
-	case StatusCancelled:
-		return "cancelled"
-	default:
-		return "unknown"
-	}
-}
 
 // Agent represents a single agent worker
 type Agent struct {
@@ -109,15 +98,6 @@ type Config struct {
 	WorktreeRoot    string
 	TaskQueueSize   int
 	ResultQueueSize int
-}
-
-// DefaultConfig returns default configuration
-func DefaultConfig() Config {
-	return Config{
-		MaxAgents:       4,
-		TaskQueueSize:   100,
-		ResultQueueSize: 100,
-	}
 }
 
 // NewOrchestrator creates a new parallel orchestrator
@@ -189,32 +169,6 @@ func (o *Orchestrator) Submit(task *AgentTask) error {
 // Results returns the results channel
 func (o *Orchestrator) Results() <-chan *AgentResult {
 	return o.results
-}
-
-// Status returns the status of all agents
-func (o *Orchestrator) Status() map[string]*Agent {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-
-	status := make(map[string]*Agent)
-	for k, v := range o.agents {
-		status[k] = v
-	}
-	return status
-}
-
-// ActiveAgents returns the number of currently running agents
-func (o *Orchestrator) ActiveAgents() int {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-
-	count := 0
-	for _, agent := range o.agents {
-		if agent.Status == StatusRunning {
-			count++
-		}
-	}
-	return count
 }
 
 // worker processes tasks from the queue
@@ -330,51 +284,6 @@ func generateTaskID() string {
 	return fmt.Sprintf("task_%d", taskIDCounter.Add(1))
 }
 
-// BatchSubmit submits multiple tasks at once
-func (o *Orchestrator) BatchSubmit(tasks []*AgentTask) error {
-	for _, task := range tasks {
-		if err := o.Submit(task); err != nil {
-			return fmt.Errorf("failed to submit task %s: %w", task.ID, err)
-		}
-	}
-	return nil
-}
-
-// Wait waits for all submitted tasks to complete
-func (o *Orchestrator) Wait(timeout time.Duration) error {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
-			return fmt.Errorf("timeout waiting for tasks")
-		default:
-			if o.ActiveAgents() == 0 {
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-}
-
-// Cancel cancels a running task
-func (o *Orchestrator) Cancel(taskID string) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	for _, agent := range o.agents {
-		if agent.Task != nil && agent.Task.ID == taskID {
-			if agent.Status == StatusRunning {
-				agent.Status = StatusCancelled
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("task not found or not running: %s", taskID)
-}
-
 // Cleanup removes worktrees for completed tasks
 func (o *Orchestrator) Cleanup() error {
 	o.mu.Lock()
@@ -404,35 +313,4 @@ type Summary struct {
 	CompletedTasks int
 	FailedTasks    int
 	PendingTasks   int
-}
-
-// GetSummary returns a summary of the orchestrator state
-func (o *Orchestrator) GetSummary() Summary {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-
-	summary := Summary{
-		TotalAgents: len(o.agents),
-	}
-
-	for _, agent := range o.agents {
-		switch agent.Status {
-		case StatusRunning:
-			summary.ActiveAgents++
-		case StatusCompleted:
-			summary.CompletedTasks++
-		case StatusFailed:
-			summary.FailedTasks++
-		case StatusIdle:
-			summary.PendingTasks++
-		}
-	}
-
-	return summary
-}
-
-// FormatSummary returns a formatted string of the summary
-func (s Summary) FormatSummary() string {
-	return fmt.Sprintf("Agents: %d total, %d active | Tasks: %d completed, %d failed, %d pending",
-		s.TotalAgents, s.ActiveAgents, s.CompletedTasks, s.FailedTasks, s.PendingTasks)
 }

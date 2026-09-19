@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -185,6 +186,66 @@ func TestPRCreator_GeneratePR_NilPlan(t *testing.T) {
 	_, err := pc.GeneratePR(nil)
 	if err == nil {
 		t.Error("expected error for nil plan")
+	}
+}
+
+func TestPRCreatorGenerateDescriptionRejectsParseableTruncatedContent(t *testing.T) {
+	parseableTruncated := "## Summary\n\n- Add a complete-looking PR body\n\n## Testing\n\n- go test ./pkg/orchestrator"
+	pc := NewPRCreator(&mockPRModelClient{
+		response: chatResponseWithFinishReason(parseableTruncated, "length"),
+	}, nil)
+
+	description, err := pc.generateDescription(&Plan{FeatureName: "Utility safety"}, []string{"abc123 fix: utility safety"})
+	if err == nil {
+		t.Fatal("generateDescription succeeded with an incomplete finish reason")
+	}
+	if description != "" {
+		t.Fatalf("generateDescription returned incomplete PR content: %q", description)
+	}
+	var incomplete *IncompleteUtilityResponseError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteUtilityResponseError, got %T: %v", err, err)
+	}
+	if got := incomplete.FinishReason(); got != "length" {
+		t.Fatalf("FinishReason() = %q, want length", got)
+	}
+	if !strings.Contains(incomplete.PublicDraft(), "complete-looking PR body") {
+		t.Fatalf("PublicDraft() omitted public draft: %q", incomplete.PublicDraft())
+	}
+}
+
+func TestPRCreatorGenerateDescriptionIncompleteResponseErrorDoesNotLeakProviderDetails(t *testing.T) {
+	rawProviderErr := errors.New("provider raw failure: native reasoning says SECRET_RAW")
+	resp := chatResponseWithFinishReason("<think>private reasoning SECRET_THINK</think>\n## Summary\n\nPublic PR body", "length")
+	pc := NewPRCreator(&mockPRModelClient{
+		response: resp,
+		err:      rawProviderErr,
+	}, nil)
+
+	description, err := pc.generateDescription(&Plan{FeatureName: "Utility safety"}, []string{"abc123 fix: utility safety"})
+	if err == nil {
+		t.Fatal("generateDescription succeeded with response plus error")
+	}
+	if description != "" {
+		t.Fatalf("generateDescription returned incomplete PR content: %q", description)
+	}
+	var incomplete *IncompleteUtilityResponseError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteUtilityResponseError, got %T: %v", err, err)
+	}
+	if !errors.Is(err, rawProviderErr) {
+		t.Fatalf("expected provider error to unwrap from typed error")
+	}
+	for _, forbidden := range []string{"SECRET_RAW", "SECRET_THINK", "native reasoning", "<think>"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("Error() leaked %q: %q", forbidden, err.Error())
+		}
+		if strings.Contains(incomplete.PublicDraft(), forbidden) {
+			t.Fatalf("PublicDraft() leaked %q: %q", forbidden, incomplete.PublicDraft())
+		}
+	}
+	if !strings.Contains(incomplete.PublicDraft(), "Public PR body") {
+		t.Fatalf("PublicDraft() omitted public content: %q", incomplete.PublicDraft())
 	}
 }
 

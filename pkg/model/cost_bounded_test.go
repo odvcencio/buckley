@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +20,7 @@ func TestManagerNormalizeCostBoundedRequest_UsesProviderWireField(t *testing.T) 
 		wantMaxCompletion int
 	}{
 		{providerID: "openrouter", wantMaxTokens: 2080},
+		{providerID: "openai_compatible", wantMaxTokens: 2080},
 		{providerID: "litellm", wantMaxTokens: 2080},
 		{providerID: "openai", wantMaxCompletion: 2080},
 		{providerID: "anthropic", wantMaxTokens: 2080},
@@ -156,11 +156,14 @@ func TestManagerNormalizeCostBoundedRequest_PinsOpenRouterAndPreflightsWireTrans
 		t.Fatalf("normalization is not idempotent:\nfirst:  %#v\nsecond: %#v", normalized, twice)
 	}
 
-	if _, err := mgr.ChatCompletion(context.Background(), normalized); !errors.Is(err, ErrOpenRouterOSSAdmissionRequired) {
-		t.Fatalf("ChatCompletion error = %v, want OSS admission requirement", err)
+	if _, err := mgr.ChatCompletion(context.Background(), normalized); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
 	}
-	if len(provider.requests) != 0 {
-		t.Fatalf("provider requests = %d, non-ZDR preflight must stop before dispatch", len(provider.requests))
+	if !reflect.DeepEqual(provider.lastRequest, normalized) {
+		t.Fatalf("wire request differs from preflight:\npreflight: %#v\nwire:      %#v", normalized, provider.lastRequest)
+	}
+	if provider.lastRequest.Model != info.ID || len(provider.lastRequest.Models) != 0 || provider.lastRequest.Provider["allow_fallbacks"] != false {
+		t.Fatalf("wire request did not preserve exact route: %+v", provider.lastRequest)
 	}
 }
 
@@ -325,6 +328,13 @@ func TestManagerCalculateBoundedCost_RequiresAuthoritativePricingAndUsage(t *tes
 			wantErr:    "reported no token counts",
 		},
 		{
+			name:       "locally estimated usage",
+			providerID: "openai",
+			info:       positive,
+			usage:      Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, Estimated: true},
+			wantErr:    "not authoritative",
+		},
+		{
 			name:       "cache-write usage",
 			providerID: "openai",
 			info:       positive,
@@ -416,12 +426,12 @@ func TestOllamaCatalogMarksLocalPricingAuthoritative(t *testing.T) {
 	}
 }
 
-func TestManagerCalculateBoundedCost_RejectsUnknownZeroLiteLLMPricing(t *testing.T) {
+func TestManagerCalculateBoundedCost_RejectsUnknownZeroCompatiblePricing(t *testing.T) {
 	info := ModelInfo{ID: "proxy/model"}
-	mgr := newCostBoundedTestManager("litellm", info)
+	mgr := newCostBoundedTestManager("openai_compatible", info)
 	_, err := mgr.CalculateBoundedCost(info.ID, Usage{PromptTokens: 50, CompletionTokens: 10})
 	if err == nil || !strings.Contains(err.Error(), "zero price is not authoritative") {
-		t.Fatalf("error = %v, want unknown zero LiteLLM pricing rejected", err)
+		t.Fatalf("error = %v, want unknown zero compatible pricing rejected", err)
 	}
 }
 

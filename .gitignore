@@ -1,5 +1,6 @@
 # Binaries
 /buckley
+/cmd/buckley/buckley
 *.exe
 *.dll
 *.so
@@ -23,6 +24,7 @@ coverage.out
 .claude/
 
 # Buckley runtime
+/.tiller/
 .buckley/sessions/
 .buckley/logs/
 .buckley/memory.db

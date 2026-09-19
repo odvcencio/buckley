@@ -155,6 +155,7 @@ func (s *Server) basicAuthMiddleware(next http.Handler) http.Handler {
 		}
 		s.setSessionCookie(w, r, token)
 		ctx := context.WithValue(r.Context(), principalContextKey, principal)
+		ctx = context.WithValue(ctx, issuedAuthSessionContextKey, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

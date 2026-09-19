@@ -143,15 +143,36 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 	return tokens, nil
 }
 
-// RevokeAPIToken marks the token as revoked.
+// RevokeAPIToken marks the token as revoked and invalidates browser sessions
+// derived from that token in the same transaction.
 func (s *Store) RevokeAPIToken(id string) error {
 	if s == nil || s.db == nil {
 		return ErrStoreClosed
 	}
-	_, err := s.db.Exec(`UPDATE api_tokens SET revoked = 1 WHERE id = ?`, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("api token id required")
+	}
+	tx, err := s.db.Begin()
 	if err != nil {
+		return fmt.Errorf("beginning api token revocation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`UPDATE api_tokens SET revoked = 1 WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("revoking api token: %w", err)
 	}
+	if _, err := tx.Exec(`DELETE FROM web_sessions WHERE token_id = ?`, id); err != nil {
+		return fmt.Errorf("deleting api token web sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing api token revocation: %w", err)
+	}
+	committed = true
 	return nil
 }
 

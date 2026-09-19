@@ -40,7 +40,7 @@ func TestController_ReplaysCompletedModelStepWithoutCallingProvider(t *testing.T
 	ctx := context.Background()
 	providerCalls := 0
 	build := func(context.Context, int) (model.ChatRequest, error) {
-		return model.ChatRequest{Model: "test-model"}, nil
+		return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 	}
 	call := func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 		providerCalls++
@@ -94,7 +94,7 @@ func TestController_FailedToolEventCarriesBoundedDiagnostics(t *testing.T) {
 	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -160,7 +160,7 @@ func TestController_ReplaysOriginalChargedCostWithoutRepricing(t *testing.T) {
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -219,7 +219,7 @@ func TestController_ReplayAccountingPersistsOnceAcrossRunContinuations(t *testin
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 10}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 10}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -285,7 +285,7 @@ func TestController_ReplaysPersistedOverCeilingResponseWithoutDispatch(t *testin
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -423,6 +423,171 @@ func TestController_LegacyResponseReplayFailsClosedUnderCostCeiling(t *testing.T
 	}
 }
 
+func TestController_V1ResponseWithoutToolOfferReplayRejectsStructuredCall(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+	request := testToolRequest(model.ChatRequest{Model: "test-model"})
+	projected := ProjectForContinuation(request, 0, nil, "", false)
+	inputDigest, err := jsonDigest(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		taskID = "task-v1-no-tool-offer"
+		turnID = "task-v1-no-tool-offer/cp-001/turn-000"
+	)
+	stepID := StableStepID(runID, taskID, turnID, 1, "model", 0)
+	if _, _, err := ledger.BeginStep(ctx, runledger.ExecutionStep{
+		RunID: runID, TaskID: taskID, StepID: stepID, Kind: "model", IdempotencyKey: stepID, InputDigest: inputDigest,
+	}); err != nil {
+		t.Fatalf("BeginStep: %v", err)
+	}
+	body, err := modelstep.EncodeResponse(modelstep.ResponseEnvelope{
+		Version:  modelstep.ResponseVersion,
+		Response: toolCallResponse("legacy-v1-call", "write_file", `{}`, model.Usage{TotalTokens: 2}),
+	})
+	if err != nil {
+		t.Fatalf("EncodeResponse: %v", err)
+	}
+	if strings.Contains(string(body), "response_tools_offered") {
+		t.Fatalf("v1 fixture unexpectedly records response_tools_offered: %s", body)
+	}
+	stored, err := ev.Put(ctx, evidence.Object{Kind: evidence.KindModelResponse, MediaType: "application/json", InlineBody: body})
+	if err != nil {
+		t.Fatalf("put response evidence: %v", err)
+	}
+	if err := ledger.CompleteStep(ctx, runID, stepID, stored.ID, stored.ContentSHA256, time.Now().UTC()); err != nil {
+		t.Fatalf("CompleteStep: %v", err)
+	}
+
+	providerCalls := 0
+	dispatchCalls := 0
+	history := &recordingHistory{}
+	controller, err := NewController(ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) { return request, nil },
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			providerCalls++
+			return nil, testingError("provider must not run during v1 replay")
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			dispatchCalls++
+			return []ToolOutcome{{Content: "must not execute", Success: true}}, nil
+		}),
+		History:     history,
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      taskID,
+		TurnID:      turnID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := controller.Run(ctx)
+	var incomplete *IncompleteTurnError
+	if !errors.As(runErr, &incomplete) {
+		t.Fatalf("Run error=%v, want IncompleteTurnError", runErr)
+	}
+	if result.CompletionStatus != CompletionIncomplete || result.Termination.Code != "unoffered_tool_call" || !result.Partial || len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("result=%+v, want preserved unoffered structured response", result)
+	}
+	if providerCalls != 0 || dispatchCalls != 0 || len(history.messages) != 0 || result.ModelRequests != 1 {
+		t.Fatalf("provider=%d dispatch=%d history=%+v result=%+v", providerCalls, dispatchCalls, history.messages, result)
+	}
+	steps, err := ledger.ListSteps(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Kind != "model" {
+		t.Fatalf("steps=%+v, want only completed model step", steps)
+	}
+}
+
+func TestController_ResponseOfferFalsePartialResponsePersistsAndReplaysWithoutDispatch(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	ctx := t.Context()
+	request := testToolRequest(model.ChatRequest{Model: "test-model"})
+	providerErr := errors.New("provider stream interrupted after structured response")
+	dispatchCalls := 0
+	history := &recordingHistory{}
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) { return request, nil },
+		CallModel: ResponseToolOfferModelCallerFunc(func(context.Context, ModelDispatchCall) (*model.ChatResponse, bool, error) {
+			return toolCallResponse("partial-call", "write_file", `{}`, model.Usage{TotalTokens: 2}), false, providerErr
+		}),
+		DispatchTools: ToolDispatcherFunc(func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+			dispatchCalls++
+			return []ToolOutcome{{Content: "must not execute", Success: true}}, nil
+		}),
+		History:     history,
+		RunLedger:   ledger,
+		Evidence:    ev,
+		StepJournal: ledger,
+		RunID:       runID,
+		SessionID:   "durable-test",
+		TaskID:      "task-partial-no-tool-offer",
+		TurnID:      "task-partial-no-tool-offer/cp-001/turn-000",
+	}
+	first, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult, firstErr := first.Run(ctx)
+	var incomplete *IncompleteTurnError
+	if !errors.As(firstErr, &incomplete) || !errors.Is(firstErr, providerErr) {
+		t.Fatalf("first error=%v, want incomplete provider response", firstErr)
+	}
+	if firstResult.CompletionStatus != CompletionIncomplete || firstResult.FinishReason != FinishReasonModelError || !firstResult.Partial || dispatchCalls != 0 || len(history.messages) != 0 {
+		t.Fatalf("first result=%+v dispatch=%d history=%+v", firstResult, dispatchCalls, history.messages)
+	}
+	steps, err := ledger.ListSteps(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Kind != "model" || steps[0].OutputEvidenceID == "" {
+		t.Fatalf("steps=%+v, want one completed model step with response evidence", steps)
+	}
+	object, err := ev.Get(ctx, steps[0].OutputEvidenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := modelstep.ValidateResponseEvidence(steps[0].OutputEvidenceID, steps[0].OutputDigest, object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ResponseToolsOffered == nil || *decoded.ResponseToolsOffered || !decoded.Partial || decoded.ProviderError != providerErr.Error() {
+		t.Fatalf("decoded response offer=%v partial=%v provider_error=%q", decoded.ResponseToolsOffered, decoded.Partial, decoded.ProviderError)
+	}
+
+	replayProviderCalls := 0
+	replayHistory := &recordingHistory{}
+	config.CallModel = ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+		replayProviderCalls++
+		return nil, testingError("provider must not run during partial replay")
+	})
+	config.History = replayHistory
+	replay, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, replayErr := replay.Run(ctx)
+	if !errors.As(replayErr, &incomplete) {
+		t.Fatalf("replay error=%v, want incomplete", replayErr)
+	}
+	if replayed.CompletionStatus != CompletionIncomplete || replayed.FinishReason != FinishReasonModelError || !replayed.Partial || replayProviderCalls != 0 || dispatchCalls != 0 || len(replayHistory.messages) != 0 {
+		t.Fatalf("replay=%+v provider=%d dispatch=%d history=%+v", replayed, replayProviderCalls, dispatchCalls, replayHistory.messages)
+	}
+	steps, err = ledger.ListSteps(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Kind != "model" {
+		t.Fatalf("steps after replay=%+v, want no tool step", steps)
+	}
+}
+
 func TestController_IdenticalResponsesAtDifferentPricesKeepDistinctReplayCharges(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := t.Context()
@@ -445,7 +610,7 @@ func TestController_IdenticalResponsesAtDifferentPricesKeepDistinctReplayCharges
 				return item.cost, nil
 			},
 			BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-				return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+				return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 			},
 			CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 				return response, nil
@@ -490,7 +655,7 @@ func TestController_IdenticalResponsesAtDifferentPricesKeepDistinctReplayCharges
 				return 0.99, nil
 			},
 			BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-				return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+				return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 			},
 			CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 				providerCalls++
@@ -537,7 +702,7 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 			return float64(usage.TotalTokens) / 1_000_000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model", MaxTokens: 100}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -645,7 +810,7 @@ func TestController_ProviderPartialDurabilityFailureBlocksBillableRetry(t *testi
 			}
 			config := ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{Model: "test-model"}, nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					providerCalls++
@@ -753,7 +918,7 @@ func TestController_ProviderPartialUsesPrimaryTerminalBlockedStep(t *testing.T) 
 			}
 			config := ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{Model: "test-model"}, nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					providerCalls++
@@ -857,7 +1022,7 @@ func TestController_ConcurrentRunsDoNotDuplicateProviderCall(t *testing.T) {
 	var providerCalls atomic.Int32
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			if providerCalls.Add(1) == 1 {
@@ -960,7 +1125,7 @@ func TestController_SuccessfulProviderPostDispatchFailuresBlockRestart(t *testin
 			var providerCalls atomic.Int32
 			config := ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return model.ChatRequest{Model: "test-model"}, nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					providerCalls.Add(1)
@@ -1139,8 +1304,10 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	ctx := context.Background()
 	providerCalls := 0
 	dispatchCalls := 0
+	var observedEvidenceIDs []string
+	var observedReplayFlags []bool
 	build := func(context.Context, int) (model.ChatRequest, error) {
-		return model.ChatRequest{Model: "test-model"}, nil
+		return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 	}
 	firstProvider := func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 		providerCalls++
@@ -1156,6 +1323,11 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 			dispatchCalls++
 			return []ToolOutcome{{Content: "file contents", Success: true, EffectClass: "modifying"}}, nil
 		}),
+		ObserveToolOutcome: func(_ context.Context, _ model.ToolCall, outcome ToolOutcome, replayed bool) error {
+			observedEvidenceIDs = append(observedEvidenceIDs, outcome.EvidenceID)
+			observedReplayFlags = append(observedReplayFlags, replayed)
+			return nil
+		},
 		RunLedger:   ledger,
 		Evidence:    ev,
 		StepJournal: ledger,
@@ -1170,6 +1342,17 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	}
 	if _, err := first.Run(ctx); err != nil {
 		t.Fatalf("first Run: %v", err)
+	}
+	if len(observedEvidenceIDs) != 1 || observedEvidenceIDs[0] == "" || observedReplayFlags[0] {
+		t.Fatalf("live observed evidence ids=%v replay=%v, want one non-replayed evidence id", observedEvidenceIDs, observedReplayFlags)
+	}
+	toolStepID := StableStepID(runID, config.TaskID, config.TurnID, 1, "tool", 0)
+	liveStep, err := ledger.GetStep(ctx, runID, toolStepID)
+	if err != nil {
+		t.Fatalf("GetStep live tool outcome: %v", err)
+	}
+	if liveStep.OutputEvidenceID == "" || observedEvidenceIDs[0] != liveStep.OutputEvidenceID {
+		t.Fatalf("live observed evidence id=%q, want persisted step evidence id=%q", observedEvidenceIDs[0], liveStep.OutputEvidenceID)
 	}
 
 	replayProviderCalls := 0
@@ -1191,6 +1374,14 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	if replayProviderCalls != 0 || dispatchCalls != 1 {
 		t.Fatalf("replay calls = provider %d, original dispatch %d; want 0 and 1", replayProviderCalls, dispatchCalls)
 	}
+	replayedStep, err := ledger.GetStep(ctx, runID, toolStepID)
+	if err != nil {
+		t.Fatalf("GetStep replayed tool outcome: %v", err)
+	}
+	if len(observedEvidenceIDs) != 2 || observedEvidenceIDs[1] != liveStep.OutputEvidenceID ||
+		observedEvidenceIDs[1] != replayedStep.OutputEvidenceID || !observedReplayFlags[1] {
+		t.Fatalf("replay observed evidence ids=%v replay=%v persisted=%q, want original step evidence id=%q replayed", observedEvidenceIDs, observedReplayFlags, replayedStep.OutputEvidenceID, liveStep.OutputEvidenceID)
+	}
 	if got, _ := result.Message.Content.(string); got != "after tool" {
 		t.Fatalf("replayed final message = %q, want after tool", got)
 	}
@@ -1207,7 +1398,7 @@ func TestController_DispatchErrorBlocksAmbiguousSuffixUntilRerun(t *testing.T) {
 
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -1306,7 +1497,7 @@ func TestController_LargeToolResultStaysInEvidence(t *testing.T) {
 	providerCalls := 0
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -1375,7 +1566,7 @@ func TestController_StepEvidenceSurvivesRetentionUntilRunReleased(t *testing.T) 
 	ctx := context.Background()
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return model.ChatRequest{Model: "test-model"}, nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return textResponse("pinned result", model.Usage{}), nil

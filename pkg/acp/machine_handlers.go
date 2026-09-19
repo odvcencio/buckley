@@ -33,7 +33,7 @@ func (a *Agent) handleMachineSpawnAgent(ctx context.Context, req *Request) {
 
 	result, err := a.machineHandlers.OnSpawnAgent(ctx, params)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInternal, "spawn_agent failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "spawn_agent failed", nil)
 		return
 	}
 
@@ -54,7 +54,7 @@ func (a *Agent) handleMachineSteerAgent(ctx context.Context, req *Request) {
 	}
 
 	if err := a.machineHandlers.OnSteerAgent(ctx, params); err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInternal, "steer_agent failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "steer_agent failed", nil)
 		return
 	}
 
@@ -76,7 +76,7 @@ func (a *Agent) handleMachineListAgents(ctx context.Context, req *Request) {
 
 	result, err := a.machineHandlers.OnListAgents(ctx, params)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInternal, "list_agents failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "list_agents failed", nil)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (a *Agent) handleMachineEscalateMode(ctx context.Context, req *Request) {
 
 	result, err := a.machineHandlers.OnEscalateMode(ctx, params)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInternal, "escalate_mode failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "escalate_mode failed", nil)
 		return
 	}
 

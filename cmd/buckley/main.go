@@ -5,18 +5,23 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +29,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"m31labs.dev/buckley/pkg/acp"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	acpserver "m31labs.dev/buckley/pkg/acp/server"
 	"m31labs.dev/buckley/pkg/agentloop"
@@ -34,6 +40,7 @@ import (
 	projectconversation "m31labs.dev/buckley/pkg/conversation"
 	coordination "m31labs.dev/buckley/pkg/coordination/coordinator"
 	coordevents "m31labs.dev/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/graft"
 	"m31labs.dev/buckley/pkg/gts"
 	"m31labs.dev/buckley/pkg/ipc"
@@ -74,6 +81,21 @@ var agentProfileFlag string
 // initDependenciesFn allows tests to stub dependency initialization without hitting the network.
 var initDependenciesFn = initDependencies
 
+// agentProviderLock is a command-scoped bridge for the existing no-argument
+// dependency hook. runAgentRun holds agentProviderLockMu only while invoking
+// initDependenciesFn, so the initializer can observe the exact provider lock
+// without changing global config precedence or other command paths. The
+// atomic pointer makes the read safe for the initializer while the mutex
+// serializes command scopes and restores the prior state afterward.
+type agentProviderLockState struct {
+	providerID string
+}
+
+var (
+	agentProviderLockMu    sync.Mutex
+	agentProviderLockValue atomic.Pointer[agentProviderLockState]
+)
+
 // initReviewDependenciesFn keeps explicit review-only model overrides inside
 // dependency construction so provider registration sees every selected model.
 var initReviewDependenciesFn = initReviewDependencies
@@ -90,17 +112,7 @@ type orchestratorRunner interface {
 // newOrchestratorFn allows tests to stub orchestrator construction.
 var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry *tool.Registry, cfg *config.Config, workflow *orchestrator.WorkflowManager, planStore orchestrator.PlanStore) orchestratorRunner {
 	// Create rules engine (graceful degradation if it fails).
-	var arbEngine *rules.Engine
-	if home, err := os.UserHomeDir(); err == nil {
-		configDir := filepath.Join(home, ".buckley")
-		if e, err := rules.NewEngine(
-			rules.WithUserOverrides(filepath.Join(configDir, "rules")),
-		); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
-		} else {
-			arbEngine = e
-		}
-	}
+	arbEngine := newRulesEngine()
 
 	// Create GTS context pipeline if the gts binary is available.
 	var gtsPipeline *gts.Pipeline
@@ -110,13 +122,28 @@ var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry 
 	}
 
 	if cfg != nil && cfg.ExecutionMode() == config.ExecutionModeRLM {
-		r := rlmrunner.New(store, mgr, registry, cfg, workflow, planStore)
 		workDir := config.ResolveProjectRoot(cfg)
 		graftClient := graft.NewClient(workDir, "buckley")
-		r.SetGraftClient(graftClient)
-		return r
+		return rlmrunner.New(store, mgr, registry, cfg, workflow, planStore,
+			rlmrunner.WithRulesEngine(arbEngine),
+			rlmrunner.WithGraftClient(graftClient),
+		)
 	}
 	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
+}
+
+func newRulesEngine() *rules.Engine {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	configDir := filepath.Join(home, ".buckley")
+	engine, err := rules.NewEngine(rules.WithUserOverrides(filepath.Join(configDir, "rules")))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize rules engine: %v\n", err)
+		return nil
+	}
+	return engine
 }
 
 type startupOptions struct {
@@ -129,6 +156,8 @@ type startupOptions struct {
 	configPath       string
 	modelOverride    string
 	agentPath        string
+	taskIntent       agentloop.TaskIntent
+	taskIntentSet    bool
 	codeMode         bool
 	plainModeSet     bool
 	plainMode        bool
@@ -143,6 +172,7 @@ const (
 	startupPendingConfig
 	startupPendingModel
 	startupPendingAgent
+	startupPendingTaskIntent
 )
 
 type startupFlagState struct {
@@ -187,20 +217,25 @@ func main() {
 	promptFlag := opts.prompt
 	args := opts.args
 
+	// Load configuration before setup checks so a configured provider can satisfy model setup without invoking the legacy OpenRouter wizard.
+	cfg, err := loadConfiguredConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(2)
+	}
+
 	// Check core dependencies
 	checker := setup.NewChecker()
+	if cfg.Providers.HasReadyProvider() {
+		checker = setup.NewCheckerForReadyProvider()
+	}
 	if err := resolveDependencies(checker); err != nil {
 		fmt.Fprintf(os.Stderr, "Setup error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load configuration
-	var cfg *config.Config
-	if configPath != "" {
-		cfg, err = config.LoadFromPath(configPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	// Reload configuration in case the setup wizard populated a key or config.env.
+	cfg, err = loadConfiguredConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(2)
@@ -228,7 +263,7 @@ func main() {
 	}
 
 	if !cfg.Providers.HasReadyProvider() {
-		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_LITELLM_ENABLED=1).")
+		fmt.Fprintln(os.Stderr, "Error: configure at least one provider (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, BUCKLEY_OLLAMA_ENABLED=1, or BUCKLEY_OPENAI_COMPATIBLE_ENABLED=1).")
 		os.Exit(2)
 	}
 
@@ -281,7 +316,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShot(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
+		exitCode := executeOneShotWithTaskIntent(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode, opts.taskIntent)
 		os.Exit(exitCode)
 	}
 
@@ -297,10 +332,14 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShot(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode)
+				exitCode := executeOneShotWithTaskIntent(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode, opts.taskIntent)
 				os.Exit(exitCode)
 			}
 		}
+	}
+	if opts.taskIntentSet {
+		fmt.Fprintln(os.Stderr, "Error: --task-intent is only supported with -p or piped one-shot input")
+		os.Exit(2)
 	}
 
 	telemetryHub := telemetry.NewHub()
@@ -342,6 +381,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	embeddedIPC, _, err := startEmbeddedIPCServer(cfg, store, telemetryHub, nil, planStore, nil, modelManager)
+	if err != nil {
+		if codeRuntime != nil {
+			_ = codeRuntime.Fail(err)
+		}
+		fmt.Fprintf(os.Stderr, "Error starting IPC server: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Set up signal handler
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -350,7 +398,7 @@ func main() {
 		ctrl.Stop()
 	}()
 
-	runErr := ctrl.Run()
+	runErr := runInteractiveWithEmbeddedIPC(ctrl, embeddedIPC)
 	var codeModeCloseErr error
 	if codeRuntime != nil {
 		if runErr != nil {
@@ -370,7 +418,12 @@ func main() {
 
 // executeOneShot executes a single prompt and exits
 func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool) int {
-	return executeOneShotWithStepCap(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, 0)
+	return executeOneShotWithTaskIntent(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, agentloop.UnknownIntent)
+}
+
+func executeOneShotWithTaskIntent(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, taskIntent agentloop.TaskIntent) int {
+	limits := acpLoopLimits{TaskIntent: taskIntent}
+	return executeOneShotWithLimitsAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, limits, "")
 }
 
 // executeOneShotWithStepCap keeps the public one-shot path unchanged while
@@ -391,7 +444,20 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	outputSchema = strings.TrimSpace(outputSchema)
-	stepCap := limits.StepCap
+	var scopeErr error
+	limits, scopeErr = prepareOneShotSourceScope(limits, codeMode)
+	if scopeErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", scopeErr)
+		return 1
+	}
+	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	if len(limits.RequiredSourceText) > 0 && outputSchema != artifactv1.SchemaVersion {
+		fmt.Fprintln(os.Stderr, "Error: required source text needs buckley.artifact/v1 output")
+		return 1
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -430,6 +496,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
+	removeImplicitExternalCLIModelTools(registry, agentProfile, allowedTools)
 	if hookCloser, hookErr := registry.EnableConfiguredHooks(cfg.Hooks.Enabled, time.Duration(cfg.Hooks.DefaultTimeoutMs)*time.Millisecond); hookErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start plugin hooks: %v\n", hookErr)
 	} else if hookCloser != nil {
@@ -437,6 +504,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if err := bindOneShotSourceScope(registry, limits.SourceScope); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
 	if candidate, ok := registry.Get("spawn_subagent"); ok {
 		if subagents, ok := candidate.(*builtin.SubagentTool); ok {
 			if limits.ChildContract {
@@ -445,29 +516,41 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 			subagents.SetExecutionContext(limits.RunID, limits.TaskID)
 		}
 	}
+	limits = applyOneShotTaskIntentDefaults(limits)
 	adaptiveProtocol, protocolAvailable := compileOneShotAdaptiveProtocol(cfg, mgr, store, engine, resolvedModel, registry, outputSchema)
 	if protocolAvailable && !quietMode {
 		fmt.Fprintf(os.Stderr, "protocol: %s (%s; policy=%s; mode=%s)\n", adaptiveProtocol.ProtocolID, adaptiveProtocol.Receipt.PolicyOutcome, adaptiveProtocol.Receipt.PolicyVersion, adaptiveProtocol.Mode)
 	}
-	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
-		if executionStage := adaptiveProtocolExecutionStage(*adaptiveProtocol); executionStage.MaxTurns > 0 && (stepCap == 0 || executionStage.MaxTurns < stepCap) {
-			if !limits.ChildContract || stepCap > 0 {
-				stepCap = executionStage.MaxTurns
-			}
-		}
+	if protocolAvailable {
+		limits = applyOneShotProtocolLimits(limits, adaptiveProtocol, mgr, resolvedModel)
 	}
+	// Protocols may supply a broad discovery ladder for generic coding work.
+	// Reapply the typed task contract after protocol selection so a read-only
+	// context run never inherits an edit-forcing reserve.
+	limits = applyOneShotTaskIntentDefaults(limits)
 	var artifactSubmission *builtin.ArtifactSubmission
 	artifactContract := artifactv1.OutputContract{}
 	if outputSchema == artifactv1.SchemaVersion {
+		toolCalls := true
+		if mgr != nil {
+			route, routeErr := mgr.ResolveModelRoute(resolvedModel)
+			if routeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", routeErr)
+				return 1
+			}
+			limits.executionRoute = route
+			toolCalls = mgr.OfferToolsForRoute(route)
+		}
 		artifactContract = artifactv1.NegotiatedOutput(artifactv1.ProviderCapabilities{
-			ToolCalls: mgr == nil || mgr.SupportsTools(resolvedModel),
+			ToolCalls: toolCalls,
 		})
 		if artifactContract.Mode == artifactv1.OutputSubmitArtifact {
 			artifactSubmission = &builtin.ArtifactSubmission{}
 			registry.Register(&builtin.SubmitArtifactTool{Submission: artifactSubmission})
+			registry.SetArtifactSourceCapture(artifactSubmission)
 		}
 	}
-	autoCodeMode := protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
+	autoCodeMode := limits.SourceScope == nil && protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
 	enableCodeMode := codeMode || autoCodeMode
 	var codeRuntime *codeModeRuntime
 	var codeModeFailure error
@@ -514,16 +597,52 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
 	}
-	if toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil); toolFilter != nil {
+	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
+	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
+	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)
 	}
 
-	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), hyphaeProjectKnowledgeContext(cfg, cwd))
+	knowledge := ""
+	if limits.SourceScope == nil {
+		knowledge = hyphaeProjectKnowledgeContext(cfg, cwd)
+	} else {
+		projectContext = nil
+	}
+	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(agentProfile), knowledge)
+	if limits.SourceScope != nil {
+		systemPrompt += "\n\n" + sourceScopeInstruction(limits.SourceScope)
+	}
 	if _, enabled := registry.Get("exec_program"); enabled {
 		systemPrompt += "\n\n" + prompts.CodeModeSystemPrompt
 	}
 	if outputSchema == artifactv1.SchemaVersion {
 		systemPrompt = artifactv1.ArtifactPrompt(systemPrompt, artifactContract)
+		limits.FinalizationInstruction = artifactv1.SubmissionFallbackPrompt
+		limits.ValidateFinalResponse = func(response string) error {
+			_, err := resolveOneShotArtifact(response, artifactContract, artifactSubmission)
+			return err
+		}
+		limits.SubmittedResponse = func() (string, bool) {
+			if artifactSubmission == nil {
+				return "", false
+			}
+			artifact, ok := artifactSubmission.Artifact()
+			if !ok {
+				return "", false
+			}
+			raw, err := artifactv1.RenderJSON(artifact)
+			return string(raw), err == nil
+		}
+	}
+	if instruction := oneShotProtocolExecutionContract(adaptiveProtocol); instruction != "" {
+		systemPrompt += "\n\n" + instruction
+	}
+	if instruction := oneShotTaskIntentInstruction(limits.TaskIntent); instruction != "" {
+		systemPrompt += "\n\n" + instruction
+	}
+	if instruction := sourceTextRequirementInstruction(limits.RequiredSourceText); instruction != "" {
+		systemPrompt += "\n\n" + instruction
 	}
 	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
@@ -534,26 +653,29 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
 		defer cancel()
 	}
-	limits.StepCap = stepCap
-	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, nil, limits)
+	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr), limits)
 	if err != nil {
 		codeModeFailure = err
+		if outputSchema == artifactv1.SchemaVersion {
+			return printOneShotArtifactFailure(artifactSubmission, err, limits.RequiredSourceText...)
+		}
 		return printOneShotFailure(responseText, err)
 	}
 
 	if outputSchema == artifactv1.SchemaVersion {
 		artifact, artifactErr := resolveOneShotArtifact(responseText, artifactContract, artifactSubmission)
+		if artifactErr == nil {
+			artifact, artifactErr = applySourceTextRequirements(artifact, limits.RequiredSourceText)
+		}
 		if artifactErr != nil {
 			codeModeFailure = artifactErr
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", artifactErr)
-			return 1
+			return printOneShotArtifactFailure(artifactSubmission, artifactErr, limits.RequiredSourceText...)
 		}
 		artifactJSON, renderErr := artifactv1.RenderJSON(artifact)
 		artifactErr = renderErr
 		if artifactErr != nil {
 			codeModeFailure = fmt.Errorf("render artifact output: %w", artifactErr)
-			fmt.Fprintf(os.Stderr, "\nError: %v\n", codeModeFailure)
-			return 1
+			return printOneShotArtifactFailure(artifactSubmission, codeModeFailure, limits.RequiredSourceText...)
 		}
 		responseText = string(artifactJSON)
 	}
@@ -568,6 +690,124 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	return 0
 }
 
+const (
+	// Read-only one-shot work is primarily context gathering for a later
+	// investigator/orchestrator. Keep its envelope large enough to synthesize
+	// a real summary, but bounded enough that a model which keeps rereading
+	// cannot occupy the process indefinitely.
+	defaultReadOnlyToolCalls      = 16
+	defaultReadOnlyElapsedSeconds = 180
+	defaultReadOnlyOutputTokens   = 4096
+)
+
+func applyOneShotTaskIntentDefaults(limits acpLoopLimits) acpLoopLimits {
+	if limits.TaskIntent != agentloop.ReadOnlyIntent {
+		return limits
+	}
+	if limits.MaxToolCalls <= 0 {
+		limits.MaxToolCalls = defaultReadOnlyToolCalls
+	}
+	if limits.MaxElapsedSeconds <= 0 {
+		limits.MaxElapsedSeconds = defaultReadOnlyElapsedSeconds
+	}
+	if limits.MaxOutputTokens <= 0 {
+		limits.MaxOutputTokens = defaultReadOnlyOutputTokens
+	}
+	// Read-only work ends by reporting evidence. It must not be redirected
+	// into an edit window merely because a generic coding protocol supplied
+	// no-change thresholds.
+	limits.ReadOnlyWarningAt = 0
+	limits.ReadOnlyActionAt = 0
+	limits.MaxReadOnlyCalls = 0
+	return limits
+}
+
+func oneShotTaskIntentInstruction(intent agentloop.TaskIntent) string {
+	if intent != agentloop.ReadOnlyIntent {
+		return ""
+	}
+	return "Read-only context contract: gather only evidence relevant to the request, then finish with a concise summary for the next investigator or orchestrator. Include paths, symbols, or commands that support the summary, call out uncertainty, and do not edit or claim checks you did not run."
+}
+
+const oneShotProgressMinInterval = 10 * time.Second
+
+type oneShotProgress struct {
+	writer        io.Writer
+	now           func() time.Time
+	minInterval   time.Duration
+	lastEmit      time.Time
+	phase         string
+	thoughtChunks int
+	messageChunks int
+	toolCalls     int
+	toolUpdates   int
+	usageUpdates  int
+}
+
+func newOneShotProgressStream(writer io.Writer) acp.StreamFunc {
+	if quietMode || writer == nil {
+		return nil
+	}
+	progress := &oneShotProgress{
+		writer:      writer,
+		now:         time.Now,
+		minInterval: oneShotProgressMinInterval,
+		phase:       "starting",
+	}
+	return progress.Stream
+}
+
+func (p *oneShotProgress) Stream(update acp.SessionUpdate) error {
+	if p == nil {
+		return nil
+	}
+	switch update.SessionUpdate {
+	case acp.SessionUpdateAgentThoughtChunk:
+		p.phase = "thinking"
+		p.thoughtChunks++
+	case acp.SessionUpdateAgentMessageChunk:
+		p.phase = "receiving"
+		p.messageChunks++
+	case acp.SessionUpdateToolCall:
+		p.phase = "tool"
+		p.toolCalls++
+	case acp.SessionUpdateToolCallUpdate:
+		p.phase = "tool"
+		p.toolUpdates++
+	case acp.SessionUpdateUsageUpdate:
+		p.phase = "usage"
+		p.usageUpdates++
+	default:
+		return nil
+	}
+	p.emit(false)
+	return nil
+}
+
+func (p *oneShotProgress) emit(force bool) {
+	if p == nil || p.writer == nil {
+		return
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	if !force && !p.lastEmit.IsZero() && p.minInterval > 0 && now.Sub(p.lastEmit) < p.minInterval {
+		return
+	}
+	p.lastEmit = now
+	fmt.Fprintf(
+		p.writer,
+		"One-shot progress: phase=%s thought_chunks=%d message_chunks=%d tool_calls=%d tool_updates=%d usage_updates=%d\n",
+		p.phase,
+		p.thoughtChunks,
+		p.messageChunks,
+		p.toolCalls,
+		p.toolUpdates,
+		p.usageUpdates,
+	)
+}
+
 func printOneShotFailure(responseText string, err error) int {
 	var partial *partialStreamTurnError
 	var incomplete *agentloop.IncompleteTurnError
@@ -580,16 +820,49 @@ func printOneShotFailure(responseText string, err error) int {
 		fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
 		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
 	case errors.As(err, &incomplete):
+		notice := agentloop.PresentIncompleteResult(err)
 		if responseText != "" {
 			fmt.Print(responseText)
 			if !strings.HasSuffix(responseText, "\n") {
 				fmt.Println()
 			}
-			fmt.Println("\n[Incomplete result — completed evidence was preserved, but final synthesis did not complete.]")
 		}
-		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; preserved_output_bytes=%d)\n", len(responseText))
+		fmt.Printf("\n[%s]\n", notice.Message)
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; code=%s; preserved_output_bytes=%d)\n", notice.Code, len(responseText))
+		return 1
 	}
 	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+	return 1
+}
+
+func printOneShotArtifactFailure(submission *builtin.ArtifactSubmission, err error, requiredSourceText ...string) int {
+	var incomplete *agentloop.IncompleteTurnError
+	isIncomplete := errors.As(err, &incomplete)
+
+	reserve := 0
+	if len(requiredSourceText) > 0 {
+		reserve = sourceTextCoverageReserve
+	}
+	artifact := submission.RecoveryArtifactWithReserve(reserve)
+	artifact, coverageErr := applySourceTextRequirements(artifact, requiredSourceText)
+	if coverageErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: checking recovery source requirements: %v\n", coverageErr)
+		return 1
+	}
+	status := artifact.Status
+	if artifactJSON, renderErr := artifactv1.RenderJSON(artifact); renderErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: rendering recovery artifact: %v\n", renderErr)
+	} else {
+		fmt.Println(string(artifactJSON))
+	}
+
+	if isIncomplete {
+		notice := agentloop.PresentIncompleteResult(err)
+		fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1; code=%s)\n", status, notice.Code)
+		fmt.Fprintln(os.Stderr, "Incomplete turn; captured evidence preserved in recovery artifact.")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1)\nError: %v\n", status, err)
 	return 1
 }
 
@@ -623,6 +896,69 @@ func adaptiveProtocolExecutionStage(value protocol.Protocol) protocol.Stage {
 		return protocol.Stage{}
 	}
 	return value.Stages[len(value.Stages)-1]
+}
+
+func applyOneShotProtocolLimits(limits acpLoopLimits, compiled *protocol.Protocol, mgr *model.Manager, modelID string) acpLoopLimits {
+	if compiled == nil || compiled.Mode != protocol.ModeDynamic {
+		return limits
+	}
+	stage := adaptiveProtocolExecutionStage(*compiled)
+	if stage.MaxTurns > 0 && (limits.StepCap == 0 || stage.MaxTurns < limits.StepCap) {
+		if !limits.ChildContract || limits.StepCap > 0 {
+			limits.StepCap = stage.MaxTurns
+		}
+	}
+	modelMaxOutputTokens := 0
+	if stage.Request.MaxOutputTokens > 0 && mgr != nil {
+		if info, err := mgr.GetModelInfo(modelID); err == nil && info != nil {
+			modelMaxOutputTokens = info.MaxCompletionTokens
+		}
+	}
+	limits.MaxOutputTokens = minPositiveLimit(limits.MaxOutputTokens, stage.Request.MaxOutputTokens, modelMaxOutputTokens)
+	if stage.MaxReadOnlyCalls > 0 {
+		limits.ReadOnlyWarningAt = stage.ReadOnlyWarningAt
+		limits.ReadOnlyActionAt = stage.ReadOnlyActionAt
+		limits.MaxReadOnlyCalls = stage.MaxReadOnlyCalls
+	}
+	limits.VerificationDepth = stage.VerificationDepth
+	limits.MaxVerificationAttempts = stage.MaxVerificationAttempts
+	if strings.TrimSpace(stage.Request.ReasoningEffort) != "" {
+		reasoningMaxTokens := stage.Request.ReasoningMaxTokens
+		if reasoningMaxTokens > 0 && limits.MaxOutputTokens > 0 && reasoningMaxTokens > limits.MaxOutputTokens {
+			reasoningMaxTokens = limits.MaxOutputTokens
+		}
+		limits.ProtocolReasoning = &model.ReasoningConfig{
+			Effort:    stage.Request.ReasoningEffort,
+			MaxTokens: reasoningMaxTokens,
+		}
+	}
+	return limits
+}
+
+func minPositiveLimit(values ...int) int {
+	minimum := 0
+	for _, value := range values {
+		if value > 0 && (minimum == 0 || value < minimum) {
+			minimum = value
+		}
+	}
+	return minimum
+}
+
+func oneShotProtocolExecutionContract(compiled *protocol.Protocol) string {
+	if compiled == nil || compiled.Mode != protocol.ModeDynamic {
+		return ""
+	}
+	stage := adaptiveProtocolExecutionStage(*compiled)
+	prefix := "Execution contract: keep work within the requested scope."
+	if stage.ArchitectEditorSplit {
+		prefix = "Execution contract: this is one agent loop, not separate stage calls. Inspect the evidence and form a concise plan before editing; then keep changes within the requested scope."
+	}
+	attempts := stage.MaxVerificationAttempts
+	if attempts <= 0 {
+		return prefix + " Do not claim verification that was not performed."
+	}
+	return fmt.Sprintf("%s Use up to %d attempts for the cheapest relevant checks, cite their results, and verify material claims before reporting success. If checks are unavailable, say so and do not claim success.", prefix, attempts)
 }
 
 func compileOneShotAdaptiveProtocol(cfg *config.Config, mgr *model.Manager, store *storage.Store, engine *rules.Engine, modelID string, registry *tool.Registry, outputSchema string) (*protocol.Protocol, bool) {
@@ -678,8 +1014,10 @@ func compileOneShotAdaptiveProtocol(cfg *config.Config, mgr *model.Manager, stor
 
 // oneShotBehaviorProfile gives an explicit config profile precedence so an
 // operator can pin or roll back a protocol deterministically. In its absence,
-// the latest immutable aggregate profile from the local SQLite adapter is
-// eligible; the resulting version and digest still land in the receipt.
+// shadow mode may inspect the latest immutable candidate while dynamic mode
+// applies only the explicitly promoted candidate. Legacy and unknown modes do
+// not consult durable profiles. The selected version and digest still land in
+// the receipt.
 func oneShotBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *storage.Store, modelID string) (protocol.BehaviorProfile, bool, error) {
 	modelID = strings.TrimSpace(modelID)
 	if cfg != nil {
@@ -688,10 +1026,23 @@ func oneShotBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *stora
 			return profile, true, err
 		}
 	}
-	if store == nil {
+	if cfg == nil || store == nil {
 		return protocol.BehaviorProfile{}, false, nil
 	}
-	profile, found, err := storage.NewBehaviorProfileStore(store).Latest(context.Background(), modelID)
+	profiles := storage.NewBehaviorProfileStore(store)
+	var (
+		profile protocol.BehaviorProfile
+		found   bool
+		err     error
+	)
+	switch strings.ToLower(strings.TrimSpace(cfg.AdaptiveProtocol.Mode)) {
+	case protocol.ModeShadow:
+		profile, found, err = profiles.Latest(context.Background(), modelID)
+	case protocol.ModeDynamic:
+		profile, found, err = profiles.Promoted(context.Background(), modelID)
+	default:
+		return protocol.BehaviorProfile{}, false, nil
+	}
 	if err != nil || !found {
 		return protocol.BehaviorProfile{}, found, err
 	}
@@ -726,6 +1077,7 @@ func protocolProfileFromConfig(modelID string, mgr *model.Manager, source config
 			ParallelToolCalls:    source.ParallelToolCalls,
 			Continuation:         source.Continuation,
 			Reasoning:            source.Reasoning,
+			ReasoningEfforts:     append([]string(nil), source.ReasoningEfforts...),
 			CodeMode:             source.CodeMode,
 			ContextWindowTokens:  source.ContextWindowTokens,
 			SafeVisibleToolCount: source.SafeVisibleToolCount,
@@ -743,11 +1095,34 @@ func protocolProfileFromConfig(modelID string, mgr *model.Manager, source config
 			LatencyP95MS:                source.LatencyP95MS,
 			CostUSDPerMTokens:           source.CostUSDPerMTokens,
 		},
+		Review: reviewBehaviorProfileFromConfig(source.Review),
 	}
+	profile = profile.Normalize()
 	if err := profile.Validate(); err != nil {
 		return protocol.BehaviorProfile{}, err
 	}
 	return profile, nil
+}
+
+func reviewBehaviorProfileFromConfig(source config.ReviewBehaviorProfileConfig) *protocol.ReviewBehavior {
+	if source.Profile == "" &&
+		!source.WorkflowRiskSignals &&
+		source.SupportingContextTokens == 0 &&
+		len(source.ReasoningMaxTokensBySize) == 0 &&
+		len(source.ReasoningMaxTokensByEffort) == 0 &&
+		source.MinExplorationTimeoutSeconds == 0 &&
+		source.MinCriticExplorationTimeoutSeconds == 0 {
+		return nil
+	}
+	return &protocol.ReviewBehavior{
+		Profile:                            source.Profile,
+		WorkflowRiskSignals:                source.WorkflowRiskSignals,
+		SupportingContextTokens:            source.SupportingContextTokens,
+		ReasoningMaxTokensBySize:           source.ReasoningMaxTokensBySize,
+		ReasoningMaxTokensByEffort:         source.ReasoningMaxTokensByEffort,
+		MinExplorationTimeoutSeconds:       source.MinExplorationTimeoutSeconds,
+		MinCriticExplorationTimeoutSeconds: source.MinCriticExplorationTimeoutSeconds,
+	}
 }
 
 func resolveOneShotArtifact(response string, contract artifactv1.OutputContract, submission *builtin.ArtifactSubmission) (artifactv1.Artifact, error) {
@@ -756,14 +1131,47 @@ func resolveOneShotArtifact(response string, contract artifactv1.OutputContract,
 			return artifact, nil
 		}
 	}
-	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), []byte(response), contract.Mode, artifactv1.DecodeOptions{})
+	raw := []byte(response)
+	if len(raw) <= artifactv1.MaxProviderBytes && json.Valid(raw) {
+		decoder := json.NewDecoder(strings.NewReader(response))
+		decoder.UseNumber()
+		var params map[string]any
+		if err := decoder.Decode(&params); err == nil {
+			if _, hasRefs := params["source_refs"]; hasRefs {
+				_, hasArtifact := params["artifact"]
+				if len(params) != 2 || !hasArtifact {
+					return artifactv1.Artifact{}, fmt.Errorf("final JSON envelope must contain exactly the root keys artifact and source_refs")
+				}
+				if submission == nil {
+					submission = &builtin.ArtifactSubmission{}
+				}
+				result, err := (&builtin.SubmitArtifactTool{Submission: submission}).Execute(params)
+				if err != nil {
+					return artifactv1.Artifact{}, err
+				}
+				if !result.Success {
+					return artifactv1.Artifact{}, fmt.Errorf("%s", result.Error)
+				}
+				detached, _ := submission.Artifact()
+				return detached, nil
+			}
+		}
+	}
+	artifact, _, err := artifactv1.DecodeProviderOutput(context.Background(), raw, contract.Mode, artifactv1.DecodeOptions{})
 	if err != nil {
 		if contract.Mode == artifactv1.OutputSubmitArtifact {
 			return artifactv1.Artifact{}, fmt.Errorf("required artifact output was not submitted through submit_artifact or returned as valid JSON: %w", err)
 		}
 		return artifactv1.Artifact{}, fmt.Errorf("required artifact output is invalid: %w", err)
 	}
-	return artifact, nil
+	if submission == nil {
+		submission = &builtin.ArtifactSubmission{}
+	}
+	if err := submission.Submit(artifact); err != nil {
+		return artifactv1.Artifact{}, fmt.Errorf("finalize artifact output: %w", err)
+	}
+	detached, _ := submission.Artifact()
+	return detached, nil
 }
 
 func runPlanCommand(args []string) error {
@@ -793,6 +1201,9 @@ func runPlanCommand(args []string) error {
 	fmt.Printf("Generating plan for: %s\n", featureName)
 	plan, err := orch.PlanFeature(featureName, description)
 	if err != nil {
+		if draft, ok := orchestrator.IncompletePlanDraft(err); ok {
+			fmt.Printf("\nIncomplete plan draft retained:\n\n%s\n\n", draft)
+		}
 		return fmt.Errorf("failed to create plan: %w", err)
 	}
 
@@ -963,6 +1374,98 @@ func initDependencies() (*config.Config, *model.Manager, *storage.Store, error) 
 	return initDependenciesWithReviewCritic("", false)
 }
 
+func initAgentRunDependencies(modelID string) (*config.Config, *model.Manager, *storage.Store, error) {
+	restoreProviderLock := beginAgentProviderLock(modelID)
+	defer restoreProviderLock()
+	return initDependenciesFn()
+}
+
+func beginAgentProviderLock(modelID string) func() {
+	agentProviderLockMu.Lock()
+	previous := agentProviderLockValue.Load()
+	agentProviderLockValue.Store(&agentProviderLockState{providerID: providerLockFromModel(modelID)})
+	return func() {
+		agentProviderLockValue.Store(previous)
+		agentProviderLockMu.Unlock()
+	}
+}
+
+func activeAgentProviderLock() string {
+	state := agentProviderLockValue.Load()
+	if state == nil {
+		return ""
+	}
+	return state.providerID
+}
+
+var knownProviderLockIDs = [...]string{
+	"openrouter",
+	"openai",
+	"anthropic",
+	"google",
+	"ollama",
+	"openai_compatible",
+	"litellm",
+	"codex",
+}
+
+func providerLockFromModel(modelID string) string {
+	parts := strings.SplitN(strings.TrimSpace(modelID), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || strings.TrimSpace(parts[1]) == "" {
+		return ""
+	}
+	for _, providerID := range knownProviderLockIDs {
+		if parts[0] == providerID {
+			return providerID
+		}
+	}
+	return ""
+}
+
+func applyAgentProviderLock(cfg *config.Config) {
+	providerID := activeAgentProviderLock()
+	if cfg == nil || providerID == "" {
+		return
+	}
+
+	providers := cfg.Providers
+	locked := config.ProviderConfig{}
+	switch providerID {
+	case "openrouter":
+		locked.OpenRouter = providers.OpenRouter
+	case "openai":
+		locked.OpenAI = providers.OpenAI
+	case "anthropic":
+		locked.Anthropic = providers.Anthropic
+	case "google":
+		locked.Google = providers.Google
+	case "ollama":
+		locked.Ollama = providers.Ollama
+	case "openai_compatible":
+		locked.OpenAICompatible = providers.OpenAICompatible
+	case "litellm":
+		locked.LiteLLM = providers.LiteLLM
+	case "codex":
+		locked.Codex = providers.Codex
+	default:
+		return
+	}
+
+	// Keep only the canonical route for the locked provider. This prevents a
+	// stale model-routing entry or default provider from selecting another
+	// backend after the manager is constructed.
+	locked.ModelRouting = map[string]string{providerID + "/": providerID}
+	cfg.Providers = locked
+	cfg.Models.DefaultProvider = providerID
+}
+
+func loadConfiguredConfig() (*config.Config, error) {
+	if strings.TrimSpace(configPath) != "" {
+		return config.LoadFromPath(configPath)
+	}
+	return config.Load()
+}
+
 func initReviewDependencies(criticModel string) (*config.Config, *model.Manager, *storage.Store, error) {
 	return initDependenciesWithReviewCritic(criticModel, true)
 }
@@ -971,7 +1474,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	ensureBuckleyRuntimeIgnored()
 
 	// Load configuration
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return nil, nil, nil, withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
 	}
@@ -989,6 +1492,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	if prepareReviewCritic {
 		applyReviewCriticModelOverride(cfg, criticModel)
 	}
+	applyAgentProviderLock(cfg)
 	tool.SetResultEncoding(cfg.Encoding.UseToon)
 
 	cwd, err := os.Getwd()
@@ -1000,7 +1504,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	}
 
 	if !cfg.Providers.HasReadyProvider() {
-		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_LITELLM_ENABLED"), 2)
+		return nil, nil, nil, withExitCode(fmt.Errorf("no providers configured; set OPENROUTER_API_KEY (recommended) or enable BUCKLEY_OLLAMA_ENABLED / BUCKLEY_OPENAI_COMPATIBLE_ENABLED"), 2)
 	}
 
 	// Create model manager
@@ -1039,6 +1543,8 @@ func printHelp() {
 	fmt.Println("  buckley --plain                  Start with plain scrollback mode")
 	fmt.Println("  buckley --tui                    Force rich TUI interface")
 	fmt.Println("  buckley -p \"prompt\"              One-shot mode: run prompt and exit")
+	fmt.Println("  buckley --task-intent mutation -p \"prompt\"")
+	fmt.Println("                                   Require one-shot changes and verification")
 	fmt.Println()
 	fmt.Println("COMMANDS:")
 	fmt.Println("  plan <name> <desc>               Generate feature plan")
@@ -1057,6 +1563,8 @@ func printHelp() {
 	fmt.Println("  experiment diff <id|name>        Compare variant outputs side-by-side")
 	fmt.Println("  experiment replay <session-id>   Replay a session with a new model")
 	fmt.Println("  experiment profile <id|name>     Calibrate model behavior from measured runs")
+	fmt.Println("  experiment promote <model-id> <profile-version>")
+	fmt.Println("                                   Promote a calibrated profile for dynamic execution")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
 	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
@@ -1105,6 +1613,7 @@ func printHelp() {
 	fmt.Println("  --code-mode                      Offer audited exec_program for batched repository analysis (requires bubblewrap)")
 	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
 	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
+	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1199,22 +1708,26 @@ func runConfigCheck() error {
 	projectConfig := ".buckley/config.yaml"
 
 	fmt.Println("Configuration files:")
-	if _, err := os.Stat(userConfig); err == nil {
-		fmt.Printf("  ✓ User config:    %s\n", userConfig)
+	if explicit := strings.TrimSpace(configPath); explicit != "" {
+		fmt.Printf("  ✓ Explicit config: %s\n", explicit)
 	} else {
-		fmt.Printf("  - User config:    %s (not found)\n", userConfig)
-	}
-	if _, err := os.Stat(projectConfig); err == nil {
-		fmt.Printf("  ✓ Project config: %s\n", projectConfig)
-	} else {
-		fmt.Printf("  - Project config: %s (not found)\n", projectConfig)
+		if _, err := os.Stat(userConfig); err == nil {
+			fmt.Printf("  ✓ User config:    %s\n", userConfig)
+		} else {
+			fmt.Printf("  - User config:    %s (not found)\n", userConfig)
+		}
+		if _, err := os.Stat(projectConfig); err == nil {
+			fmt.Printf("  ✓ Project config: %s\n", projectConfig)
+		} else {
+			fmt.Printf("  - Project config: %s (not found)\n", projectConfig)
+		}
 	}
 	fmt.Println()
 
 	// Load and validate config before reporting credentials. OpenRouter can be
 	// supplied by ~/.buckley/config.env, so checking only process env would
 	// incorrectly report the configured review provider as missing.
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return withExitCode(err, 2)
 	}
@@ -1280,7 +1793,7 @@ func runConfigCheck() error {
 		fmt.Println("✗ No provider configured")
 		fmt.Println()
 		fmt.Println(`To fix: export OPENROUTER_API_KEY="<YOUR_OPENROUTER_API_KEY>"`)
-		fmt.Println("Or enable a local provider (BUCKLEY_OLLAMA_ENABLED=1 or BUCKLEY_LITELLM_ENABLED=1).")
+		fmt.Println("Or enable a local provider (BUCKLEY_OLLAMA_ENABLED=1 or BUCKLEY_OPENAI_COMPATIBLE_ENABLED=1).")
 		fmt.Println("Get a key at: https://openrouter.ai/keys")
 		return withExitCode(fmt.Errorf("no providers configured"), 2)
 	}
@@ -1289,7 +1802,7 @@ func runConfigCheck() error {
 }
 
 func runConfigShow() error {
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
 	}
@@ -1308,7 +1821,7 @@ func runConfigShow() error {
 	if privacyFallback == "" {
 		privacyFallback = "disabled"
 	}
-	fmt.Printf("  OpenRouter privacy fallback (legacy, inert): %s\n", privacyFallback)
+	fmt.Printf("  OpenRouter privacy fallback: %s\n", privacyFallback)
 	fmt.Printf("  Review budget: %s\n", configBudgetSummary(cfg.Buckbot.PerReviewBudgetUSD))
 	fmt.Printf("  Tool-call cap: %s\n", configLimitSummary(cfg.Buckbot.MaxToolCalls))
 	fmt.Println()
@@ -1424,7 +1937,7 @@ func printBashCompletion() {
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent --task-intent" -- "${cur}") )
             return 0
             ;;
         batch)
@@ -1483,6 +1996,10 @@ func printBashCompletion() {
             COMPREPLY=( $(compgen -f -- "${cur}") )
             return 0
             ;;
+        --task-intent)
+            COMPREPLY=( $(compgen -W "unknown read_only mutation" -- "${cur}") )
+            return 0
+            ;;
     esac
 
     COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
@@ -1537,6 +2054,7 @@ _buckley() {
         '-c[Use custom config file]:config file:_files' \
         '--config[Use custom config file]:config file:_files' \
         '--agent[Load a buckley.agent/v1 runtime profile]:agent spec:_files' \
+        '--task-intent[One-shot result contract]:intent:(unknown read_only mutation)' \
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
@@ -1646,6 +2164,7 @@ complete -c buckley -n __fish_use_subcommand -a version -d 'Show version informa
 complete -c buckley -s p -d 'Run prompt in one-shot mode'
 complete -c buckley -s c -l config -d 'Use custom config file' -r
 complete -c buckley -l agent -d 'Load a buckley.agent/v1 runtime profile' -r
+complete -c buckley -l task-intent -d 'One-shot result contract' -xa 'unknown read_only mutation'
 complete -c buckley -s q -l quiet -d 'Suppress non-essential output'
 complete -c buckley -l no-color -d 'Disable colored output'
 complete -c buckley -l tui -d 'Use rich TUI interface'
@@ -1825,11 +2344,15 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	filtered := make([]string, 0, len(raw))
 
 	for _, arg := range raw {
-		if state.consumePending(opts, arg) {
+		if consumed, err := state.consumePending(opts, arg); err != nil {
+			return nil, err
+		} else if consumed {
 			continue
 		}
 
-		if state.consumeStartupFlag(opts, arg, len(filtered) == 0) {
+		if consumed, err := state.consumeStartupFlag(opts, arg, len(filtered) == 0); err != nil {
+			return nil, err
+		} else if consumed {
 			continue
 		}
 		filtered = append(filtered, arg)
@@ -1859,7 +2382,7 @@ func startupOptionsFromEnv() *startupOptions {
 	return opts
 }
 
-func (s *startupFlagState) consumePending(opts *startupOptions, arg string) bool {
+func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (bool, error) {
 	switch s.pending {
 	case startupPendingPrompt:
 		opts.prompt = arg
@@ -1871,14 +2394,24 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) bool
 		opts.modelOverride = strings.TrimSpace(arg)
 	case startupPendingAgent:
 		opts.agentPath = strings.TrimSpace(arg)
+	case startupPendingTaskIntent:
+		if strings.TrimSpace(arg) == "" {
+			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
+		}
+		intent, err := agentloop.ParseTaskIntent(arg)
+		if err != nil {
+			return true, fmt.Errorf("invalid --task-intent: %w", err)
+		}
+		opts.taskIntent = intent
+		opts.taskIntentSet = true
 	default:
-		return false
+		return false, nil
 	}
 	s.pending = startupPendingNone
-	return true
+	return true, nil
 }
 
-func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
+func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, beforeCommand bool) (bool, error) {
 	switch arg {
 	case "--plain", "--no-tui":
 		opts.plainModeSet = true
@@ -1888,24 +2421,27 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 		opts.plainMode = false
 	case "--code-mode":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		opts.codeMode = true
 	case "-p":
+		if !beforeCommand {
+			return false, nil
+		}
 		s.pending = startupPendingPrompt
 	case "--encoding":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		s.pending = startupPendingEncoding
 	case "--encoding=toon":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		opts.encodingOverride = "toon"
 	case "--encoding=json", "--json":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		opts.encodingOverride = "json"
 	case "--quiet", "-q":
@@ -1916,38 +2452,56 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 		s.pending = startupPendingConfig
 	case "--model", "-m":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		s.pending = startupPendingModel
 		s.modelFlagSeen = true
 	case "--agent":
 		if !beforeCommand {
-			return false
+			return false, nil
 		}
 		s.pending = startupPendingAgent
 		s.agentFlagSeen = true
+	case "--task-intent":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending = startupPendingTaskIntent
 	default:
 		return s.consumeStartupValueFlag(opts, arg, beforeCommand)
 	}
-	return true
+	return true, nil
 }
 
-func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg string, beforeCommand bool) bool {
+func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg string, beforeCommand bool) (bool, error) {
 	if strings.HasPrefix(arg, "--config=") {
 		opts.configPath = strings.TrimPrefix(arg, "--config=")
-		return true
+		return true, nil
 	}
 	if strings.HasPrefix(arg, "--model=") && beforeCommand {
 		opts.modelOverride = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
 		s.modelFlagSeen = true
-		return true
+		return true, nil
 	}
 	if strings.HasPrefix(arg, "--agent=") && beforeCommand {
 		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
 		s.agentFlagSeen = true
-		return true
+		return true, nil
 	}
-	return false
+	if strings.HasPrefix(arg, "--task-intent=") && beforeCommand {
+		raw := strings.TrimPrefix(arg, "--task-intent=")
+		if strings.TrimSpace(raw) == "" {
+			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
+		}
+		intent, err := agentloop.ParseTaskIntent(raw)
+		if err != nil {
+			return true, fmt.Errorf("invalid --task-intent: %w", err)
+		}
+		opts.taskIntent = intent
+		opts.taskIntentSet = true
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s startupFlagState) validate(opts *startupOptions) error {
@@ -1962,6 +2516,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("--model requires a value")
 	case startupPendingAgent:
 		return fmt.Errorf("--agent requires a path")
+	case startupPendingTaskIntent:
+		return fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
 	}
 	if s.modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
 		return fmt.Errorf("--model requires a value")
@@ -2101,6 +2657,30 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 		return nil
 	}
 	return subtractToolNames(allowed, denied)
+}
+
+// removeImplicitExternalCLIModelTools keeps an API one-shot run on its selected
+// model transport. Legacy CLI delegation changes model backends, so it is not
+// part of the implicit full tool pool. An agent profile or child contract can
+// still opt in by naming the exact tool in its allowlist.
+func removeImplicitExternalCLIModelTools(registry *tool.Registry, profile *agentspec.RuntimeProfile, explicitAllowed []string) {
+	if registry == nil {
+		return
+	}
+	explicit := make(map[string]struct{})
+	for _, name := range cleanToolNames(explicitAllowed) {
+		explicit[name] = struct{}{}
+	}
+	if profile != nil && profile.Spec != nil {
+		for _, name := range cleanToolNames(profile.Spec.Tools.Allow) {
+			explicit[name] = struct{}{}
+		}
+	}
+	for _, name := range []string{"invoke_claude", "invoke_codex"} {
+		if _, allowed := explicit[name]; !allowed {
+			registry.Remove(name)
+		}
+	}
 }
 
 func toolsForTier(registry *tool.Registry, tier string) []string {
@@ -2267,7 +2847,93 @@ func isLoopbackAddress(addr string) bool {
 	}
 }
 
-func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager) (func(), string, error) {
+type interactiveController interface {
+	Run() error
+	Stop()
+}
+
+var errEmbeddedIPCStopped = errors.New("embedded IPC stopped")
+
+type embeddedIPCHandle struct {
+	cancel     context.CancelCauseFunc
+	cancelOnce sync.Once
+	finishOnce sync.Once
+	done       chan struct{}
+	mu         sync.Mutex
+	err        error
+}
+
+func newEmbeddedIPCHandle(cancel context.CancelCauseFunc) *embeddedIPCHandle {
+	return &embeddedIPCHandle{cancel: cancel, done: make(chan struct{})}
+}
+
+func (h *embeddedIPCHandle) finish(err error) {
+	if h == nil {
+		return
+	}
+	h.finishOnce.Do(func() {
+		h.mu.Lock()
+		h.err = err
+		h.mu.Unlock()
+		close(h.done)
+	})
+}
+
+func (h *embeddedIPCHandle) Wait() error {
+	if h == nil {
+		return nil
+	}
+	<-h.done
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+func (h *embeddedIPCHandle) Stop() error {
+	if h == nil {
+		return nil
+	}
+	h.cancelOnce.Do(func() {
+		h.cancel(errEmbeddedIPCStopped)
+	})
+	return h.Wait()
+}
+
+func runInteractiveWithEmbeddedIPC(controller interactiveController, embedded *embeddedIPCHandle) error {
+	if embedded == nil {
+		return controller.Run()
+	}
+	var lifecycleOrder atomic.Uint64
+	var ipcFailureOrder atomic.Uint64
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		if err := embedded.Wait(); err != nil {
+			ipcFailureOrder.Store(lifecycleOrder.Add(1))
+			controller.Stop()
+		}
+	}()
+	runErr := controller.Run()
+	runReturnOrder := lifecycleOrder.Add(1)
+	ipcErr := embedded.Stop()
+	<-watcherDone
+	if order := ipcFailureOrder.Load(); ipcErr != nil && order != 0 && order < runReturnOrder {
+		return fmt.Errorf("embedded IPC server: %w", ipcErr)
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if ipcErr != nil {
+		return fmt.Errorf("embedded IPC server: %w", ipcErr)
+	}
+	return nil
+}
+
+func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager) (*embeddedIPCHandle, string, error) {
+	return startEmbeddedIPCServerWithGrace(cfg, store, telemetryHub, commandGateway, planStore, workflow, models, 350*time.Millisecond)
+}
+
+func startEmbeddedIPCServerWithGrace(cfg *config.Config, store *storage.Store, telemetryHub *telemetry.Hub, commandGateway *command.Gateway, planStore orchestrator.PlanStore, workflow *orchestrator.WorkflowManager, models *model.Manager, startupGrace time.Duration) (*embeddedIPCHandle, string, error) {
 	ipcCfg := cfg.IPC
 	if !ipcCfg.Enabled {
 		return nil, "", nil
@@ -2297,29 +2963,67 @@ func startEmbeddedIPCServer(cfg *config.Config, store *storage.Store, telemetryH
 		ProjectRoot:       projectRoot,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	server := ipc.NewServer(serverCfg, store, telemetryHub, commandGateway, planStore, cfg, workflow, models)
-
-	errCh := make(chan error, 1)
+	server := serveNewServerFn(serverCfg, store, telemetryHub, commandGateway, planStore, cfg, workflow, models)
+	if err := configureEmbeddedIPCDurability(server, store); err != nil {
+		return nil, "", fmt.Errorf("configure embedded IPC durability: %w", err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	handle := newEmbeddedIPCHandle(cancel)
 	go func() {
-		errCh <- server.Start(ctx)
+		err := server.Start(ctx)
+		if errors.Is(context.Cause(ctx), errEmbeddedIPCStopped) && (err == nil || errors.Is(err, context.Canceled)) {
+			err = nil
+		} else if err == nil {
+			err = fmt.Errorf("embedded IPC server stopped unexpectedly")
+		}
+		handle.finish(err)
 	}()
 
+	timer := time.NewTimer(startupGrace)
+	defer timer.Stop()
 	select {
-	case err := <-errCh:
-		cancel()
-		if errors.Is(err, context.Canceled) {
-			return nil, "", nil
-		}
+	case <-handle.done:
+		err := handle.Wait()
+		_ = handle.Stop()
 		return nil, "", err
-	case <-time.After(350 * time.Millisecond):
+	case <-timer.C:
 	}
 
 	url := humanReadableURL(serverCfg.BindAddress)
-	stop := func() {
-		cancel()
+	return handle, url, nil
+}
+
+func configureEmbeddedIPCDurability(server ipcServer, store *storage.Store) error {
+	if isNilIPCServer(server) {
+		return fmt.Errorf("IPC server unavailable")
 	}
-	return stop, url, nil
+	durable, ok := server.(interface {
+		SetDurableStores(runledger.Store, evidence.Store) error
+	})
+	if !ok {
+		return fmt.Errorf("IPC server does not support durable observation")
+	}
+	ledger, evidenceStore, err := openServeDurableStores(store)
+	if err != nil {
+		return err
+	}
+	if err := durable.SetDurableStores(ledger, evidenceStore); err != nil {
+		return fmt.Errorf("publish embedded IPC durability: %w", err)
+	}
+	return nil
+}
+
+func isNilIPCServer(server ipcServer) bool {
+	if server == nil {
+		return true
+	}
+	value := reflect.ValueOf(server)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func humanReadableURL(bind string) string {
@@ -2370,7 +3074,9 @@ func startACPServer(cfg *config.Config, mgr *model.Manager, store *storage.Store
 		return nil, fmt.Errorf("init ACP coordinator: %w", err)
 	}
 
-	srv, err := acpserver.NewServer(coord, mgr, cfg, store)
+	// ACP RLM requests share this server-owned engine for the same policy hooks
+	// used by the selected CLI execution mode.
+	srv, err := acpserver.NewServer(coord, mgr, cfg, store, acpserver.WithRulesEngine(newRulesEngine()))
 	if err != nil {
 		eventStore.Close()
 		return nil, fmt.Errorf("init ACP gRPC server: %w", err)

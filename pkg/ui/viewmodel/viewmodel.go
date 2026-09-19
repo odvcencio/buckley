@@ -152,6 +152,7 @@ type AgentRun struct {
 	Model           string     `json:"model,omitempty"`
 	Status          string     `json:"status"`
 	Task            string     `json:"task,omitempty"`
+	TaskIsID        bool       `json:"-"`
 	StartedAt       time.Time  `json:"startedAt,omitempty"`
 	UpdatedAt       time.Time  `json:"updatedAt,omitempty"`
 	Children        []AgentRun `json:"children,omitempty"`

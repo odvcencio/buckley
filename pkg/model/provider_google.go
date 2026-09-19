@@ -147,8 +147,9 @@ func (p *GoogleProvider) ChatCompletionStream(ctx context.Context, req ChatReque
 			return
 		}
 		chunkChan <- StreamChunk{
-			ID:    resp.ID,
-			Model: resp.Model,
+			ID:                resp.ID,
+			Model:             resp.Model,
+			ExecutionIdentity: cloneExecutionIdentity(resp.ExecutionIdentity),
 			Choices: []StreamChoice{
 				{
 					Index: 0,
@@ -184,10 +185,23 @@ func (p *GoogleProvider) toGenerateContentRequest(req ChatRequest) (*googleReque
 		text := messageContentToText(msg.Content)
 		switch msg.Role {
 		case "system":
-			payload.SystemInstruction = append(payload.SystemInstruction, googlePart{Text: text})
-		case "user", "assistant":
+			if payload.SystemInstruction == nil {
+				payload.SystemInstruction = &googleContent{}
+			}
+			payload.SystemInstruction.Parts = append(payload.SystemInstruction.Parts, googlePart{Text: text})
+		case "user":
 			payload.Contents = append(payload.Contents, googleContent{
 				Role: msg.Role,
+				Parts: []googlePart{
+					{Text: text},
+				},
+			})
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				return nil, fmt.Errorf("google provider does not support tool conversations")
+			}
+			payload.Contents = append(payload.Contents, googleContent{
+				Role: "model",
 				Parts: []googlePart{
 					{Text: text},
 				},
@@ -196,14 +210,13 @@ func (p *GoogleProvider) toGenerateContentRequest(req ChatRequest) (*googleReque
 			return nil, fmt.Errorf("google provider does not support tool conversations")
 		}
 	}
-
 	return payload, nil
 }
 
 type googleRequest struct {
 	Model             string                  `json:"-"`
 	Contents          []googleContent         `json:"contents"`
-	SystemInstruction []googlePart            `json:"system_instruction,omitempty"`
+	SystemInstruction *googleContent          `json:"systemInstruction,omitempty"`
 	GenerationConfig  *googleGenerationConfig `json:"generationConfig,omitempty"`
 }
 
@@ -212,7 +225,7 @@ type googleGenerationConfig struct {
 }
 
 type googleContent struct {
-	Role  string       `json:"role"`
+	Role  string       `json:"role,omitempty"`
 	Parts []googlePart `json:"parts"`
 }
 
@@ -221,7 +234,9 @@ type googlePart struct {
 }
 
 type googleResponse struct {
-	Candidates []struct {
+	ResponseID   string `json:"responseId"`
+	ModelVersion string `json:"modelVersion"`
+	Candidates   []struct {
 		Content      googleContent `json:"content"`
 		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
@@ -251,7 +266,7 @@ func (g googleResponse) toChatResponse(model string) (*ChatResponse, error) {
 	}
 
 	return &ChatResponse{
-		ID:    "",
+		ID:    strings.TrimSpace(g.ResponseID),
 		Model: "google/" + model,
 		Choices: []Choice{
 			{
@@ -265,5 +280,6 @@ func (g googleResponse) toChatResponse(model string) (*ChatResponse, error) {
 			CompletionTokens: g.Usage.CandidateTokens,
 			TotalTokens:      g.Usage.TotalTokens,
 		},
+		ExecutionIdentity: observedExecutionIdentity(g.ResponseID, g.ModelVersion, nil),
 	}, nil
 }

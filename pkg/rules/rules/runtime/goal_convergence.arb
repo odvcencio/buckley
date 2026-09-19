@@ -1,0 +1,85 @@
+// Provider-neutral convergence routing for durable goal turns.
+//
+// The host supplies only harness-observed facts. This strategy prevents a
+// repetition guard from being erased when the goal scheduler starts another
+// equivalent turn. Existing explicit blockers remain authoritative.
+//
+// Inner tool-loop hard limits (round_limit, tool_call_limit) are terminal at
+// this durable-goal boundary: they park the goal even when workspace.state_changed
+// is true, so a completed fuse cannot be swallowed by the outer governor and
+// restarted as a fresh model loop. The repetition guards keep deferring to real
+// workspace progress.
+
+outcome GoalConvergenceDecision {
+    action: string
+    reason_code: string
+    reason: string
+}
+
+strategy goal_convergence returns GoalConvergenceDecision {
+    when {
+        turn.blocker_present == true
+    } then PreserveBlocker {
+        action: "continue",
+        reason_code: "explicit_blocker_present",
+        reason: "the turn already supplied an explicit blocker",
+    }
+
+    when {
+        termination.kind == "round_limit"
+    } then ParkRoundLimit {
+        action: "park",
+        reason_code: "round_limit_terminal",
+        reason: "inner tool loop exhausted its round limit; the durable goal must not restart an equivalent turn",
+    }
+
+    when {
+        termination.kind == "tool_call_limit"
+    } then ParkToolCallLimit {
+        action: "park",
+        reason_code: "tool_call_limit_terminal",
+        reason: "inner tool loop exhausted its tool call limit; the durable goal must not restart an equivalent turn",
+    }
+
+    when {
+        termination.kind == "exact_repeat"
+        and workspace.state_changed != true
+    } then ParkExactRepeat {
+        action: "park",
+        reason_code: "exact_repeat_without_state_change",
+        reason: "tool loop repeated an identical action and result without changing workspace state",
+    }
+
+    when {
+        termination.kind == "outcome_repeat"
+        and workspace.state_changed != true
+    } then ParkOutcomeRepeat {
+        action: "park",
+        reason_code: "outcome_repeat_without_state_change",
+        reason: "tool loop repeated the same outcome without changing workspace state",
+    }
+
+    when {
+        termination.kind == "action_cycle"
+        and workspace.state_changed != true
+    } then ParkActionCycle {
+        action: "park",
+        reason_code: "action_cycle_without_state_change",
+        reason: "tool loop entered a repeating action cycle without changing workspace state",
+    }
+
+    when {
+        termination.kind == "read_only_budget"
+        and workspace.state_changed != true
+    } then ParkReadOnlyBudget {
+        action: "park",
+        reason_code: "read_only_budget_without_state_change",
+        reason: "execute turn exhausted its bounded discovery budget without changing workspace state",
+    }
+
+    else Continue {
+        action: "continue",
+        reason_code: "no_stalled_turn",
+        reason: "no terminal stagnation condition requires parking",
+    }
+}

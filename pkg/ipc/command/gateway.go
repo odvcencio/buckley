@@ -9,10 +9,14 @@ import (
 
 // SessionCommand represents a high-level user instruction targeting a session.
 type SessionCommand struct {
-	SessionID string `json:"sessionId"`
-	ID        string `json:"commandId,omitempty"`
-	Type      string `json:"type"`
-	Content   string `json:"content"`
+	SessionID  string `json:"sessionId"`
+	ID         string `json:"commandId,omitempty"`
+	Type       string `json:"type"`
+	Content    string `json:"content"`
+	TaskIntent string `json:"taskIntent,omitempty"`
+	// AcceptedBy is authenticated adapter metadata and never part of the wire
+	// representation.
+	AcceptedBy string `json:"-"`
 }
 
 // EnsureID assigns the stable identity returned to clients and carried by

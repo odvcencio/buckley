@@ -103,8 +103,12 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 	if scope != "" {
 		header = action + "(" + scope + "): " + subject
 	}
-	if utf8.RuneCountInString(header) > HeaderLimit {
-		return fmt.Errorf("header exceeds %d characters", HeaderLimit)
+	if n := utf8.RuneCountInString(header); n > HeaderLimit {
+		over := n - HeaderLimit
+		if scope == "" {
+			return fmt.Errorf("header exceeds %d characters (%d): shorten the subject by at least %d characters", HeaderLimit, n, over)
+		}
+		return fmt.Errorf("header exceeds %d characters (%d): scope %q is %d characters and the subject is %d characters; use one short scope or none, and shorten the subject so the header drops by at least %d characters", HeaderLimit, n, scope, utf8.RuneCountInString(scope), utf8.RuneCountInString(subject), over)
 	}
 
 	nonEmptyBody := 0
@@ -112,7 +116,11 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		if hasCommitControl(bullet) {
 			return fmt.Errorf("body contains control characters")
 		}
-		if NormalizeBullet(bullet) != "" {
+		normalized := NormalizeBullet(bullet)
+		if strings.HasPrefix(normalized, "<arg_value>") {
+			return fmt.Errorf("body starts with tool markup; quote literal tags with backticks")
+		}
+		if normalized != "" {
 			nonEmptyBody++
 		}
 	}

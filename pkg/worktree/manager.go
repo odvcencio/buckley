@@ -232,13 +232,7 @@ func (wm *Manager) Remove(branchName string, deleteBranch bool) error {
 	cmd.Dir = wm.repoPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Try force remove if regular remove fails
-		cmd = exec.Command("git", "worktree", "remove", "--force", wtPath)
-		cmd.Dir = wm.repoPath
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("failed to remove worktree: %w\nOutput: %s", err, string(output))
-		}
+		return fmt.Errorf("failed to remove worktree; retained path %s: %w\nOutput: %s", wtPath, err, string(output))
 	}
 	_ = output // Output captured for error case above
 

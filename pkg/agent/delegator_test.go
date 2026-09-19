@@ -2,8 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/config"
 	pkgcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/tool"
@@ -204,5 +208,81 @@ func TestDelegate_NonExistentAgent(t *testing.T) {
 
 	if err.Error() != "sub-agent not found: non-existent" {
 		t.Errorf("Unexpected error message: %s", err.Error())
+	}
+}
+
+func TestDelegate_RetainsPublicResponseOnProviderError(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	delegator := NewDelegator(mgr, tool.NewEmptyRegistry(), map[string]*pkgcontext.SubAgentSpec{
+		"helper": {
+			Name:  "helper",
+			Model: "gpt-4o",
+		},
+	})
+	delegator.chatCompletion = func(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+		if req.Model != "gpt-4o" {
+			t.Fatalf("request model = %q, want gpt-4o", req.Model)
+		}
+		return &model.ChatResponse{
+			ID:    "resp-delegate-partial",
+			Model: "gpt-4o",
+			Choices: []model.Choice{{
+				Message: model.Message{
+					Role:             "assistant",
+					Content:          "<think>private-reasoning-sentinel</think>public retained draft",
+					Reasoning:        "message-reasoning-sentinel",
+					ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "reasoning-detail-sentinel"}},
+				},
+				FinishReason: "stop",
+			}},
+			Usage:        model.Usage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
+			UsagePresent: true,
+			ExecutionIdentity: &model.ExecutionIdentity{
+				RequestedModel: "gpt-4o",
+				SelectedModel:  "gpt-4o",
+				ProviderID:     "fake",
+				ResponseModel:  "gpt-4o",
+				ResponseID:     "resp-delegate-partial",
+			},
+		}, errors.New("provider secret: do not expose")
+	}
+
+	result, err := delegator.Delegate(context.Background(), "helper", "inspect this")
+	if !errors.Is(err, errDelegationIncomplete) {
+		t.Fatalf("error = %v, want delegation incomplete sentinel", err)
+	}
+	if result == nil {
+		t.Fatal("result is nil, want retained partial response")
+	}
+	if result.Success || !result.Incomplete {
+		t.Fatalf("success/incomplete = %v/%v, want failed incomplete result", result.Success, result.Incomplete)
+	}
+	if result.Output != "public retained draft" {
+		t.Fatalf("output = %q, want public draft with private reasoning stripped", result.Output)
+	}
+	if strings.Contains(result.Output, "private-reasoning-sentinel") || strings.Contains(result.ErrorMessage, "provider secret") {
+		t.Fatalf("result leaked private/raw provider material: %+v", result)
+	}
+	serialized, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	for _, forbidden := range []string{"private-reasoning-sentinel", "message-reasoning-sentinel", "reasoning-detail-sentinel", "provider secret"} {
+		if strings.Contains(string(serialized), forbidden) {
+			t.Fatalf("serialized result contains forbidden sentinel %q: %s", forbidden, string(serialized))
+		}
+	}
+	if result.Usage == nil || result.Usage.Input != 3 || result.Usage.Output != 4 || result.Usage.ReportedTotal != 7 || !result.Usage.UsageEvidencePresent {
+		t.Fatalf("usage = %+v, want retained response usage evidence", result.Usage)
+	}
+	if len(result.ModelExecutions) != 1 || result.ModelExecutions[0].ResponseID != "resp-delegate-partial" {
+		t.Fatalf("model executions = %+v, want retained response identity", result.ModelExecutions)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/modelprofile"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
 )
@@ -212,6 +213,79 @@ func TestReviewExecutionPlanPreservesQwenAdaptiveTurns(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionPlanUsesCustomProfileBehavior(t *testing.T) {
+	behavior := &modelprofile.ReviewBehavior{
+		Profile:                            modelprofile.ReviewProfileEvidenceFirst,
+		WorkflowRiskSignals:                true,
+		ReasoningMaxTokensBySize:           map[string]int{"broad": 7777},
+		ReasoningMaxTokensByEffort:         map[string]int{"low": 1234},
+		MinExplorationTimeoutSeconds:       88,
+		MinCriticExplorationTimeoutSeconds: 66,
+	}
+	adaptive := automatedReviewOptions{
+		modelID:           "local/renamed-reviewer",
+		adaptiveReasoning: true,
+		reviewBehavior:    behavior,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "broad",
+		reasoningEffort:    "medium",
+		reasoningMaxTokens: 1024,
+		explorationTimeout: 10 * time.Second,
+	})
+	if adaptive.reasoningMaxTokens != 7777 ||
+		adaptive.explorationTimeout != 88*time.Second ||
+		adaptive.criticExploration != 66*time.Second {
+		t.Fatalf("custom adaptive behavior = %#v", adaptive)
+	}
+
+	fixed := automatedReviewOptions{
+		modelID:           "local/renamed-reviewer",
+		reasoningEffort:   "low",
+		adaptiveReasoning: false,
+		reviewBehavior:    behavior,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "focused",
+		reasoningEffort:    "medium",
+		reasoningMaxTokens: 1024,
+	})
+	if fixed.reasoningMaxTokens != 1234 {
+		t.Fatalf("custom fixed behavior budget = %d, want 1234", fixed.reasoningMaxTokens)
+	}
+}
+
+func TestReviewExecutionPlanProfileOverridesModelNameDefaults(t *testing.T) {
+	opts := automatedReviewOptions{
+		modelID:           "qwen/qwen3.8-flash",
+		adaptiveReasoning: true,
+		reviewBehavior: &modelprofile.ReviewBehavior{
+			ReasoningMaxTokensBySize: map[string]int{"focused": 999},
+		},
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "focused",
+		reasoningEffort:    "low",
+		reasoningMaxTokens: 1024,
+		explorationTimeout: 10 * time.Second,
+	})
+	if opts.reasoningMaxTokens != 999 || opts.explorationTimeout != 10*time.Second {
+		t.Fatalf("profile behavior did not override Qwen defaults: %#v", opts)
+	}
+}
+
+func TestReviewExecutionPlanUnknownModelUsesGenericDefaults(t *testing.T) {
+	opts := automatedReviewOptions{
+		modelID:           "local/plain-reviewer",
+		adaptiveReasoning: true,
+	}.withExecutionPlan(reviewExecutionPlan{
+		sizeClass:          "broad",
+		reasoningEffort:    "medium",
+		reasoningMaxTokens: 1024,
+		explorationTimeout: 10 * time.Second,
+	})
+	if opts.reasoningMaxTokens != 1024 || opts.explorationTimeout != 10*time.Second {
+		t.Fatalf("unknown model received specialized review behavior: %#v", opts)
+	}
+}
+
 func TestReviewExecutionPlanRecognizesQwen38MaxProfile(t *testing.T) {
 	options := automatedReviewOptions{
 		modelID:           "qwen/qwen3.8-max",
@@ -253,7 +327,7 @@ func TestReviewExecutionPlanRecognizesDeepSeekV4ProProfile(t *testing.T) {
 	}
 	prompt := appendReviewExecutionPlan("review this", options)
 	for _, fragment := range []string{
-		"DeepSeek V4 Pro Profile",
+		"Structured Code Review Profile",
 		"structured tool-call channel exclusively",
 		"read-only code-mode program",
 		"Canopy inventory as a table of contents",
@@ -378,58 +452,147 @@ func TestReviewExecutionPlanPreservesExactModel(t *testing.T) {
 	}
 }
 
+func TestReviewExecutionOverlayFootprints(t *testing.T) {
+	base := "review this"
+	tests := []struct {
+		name     string
+		opts     automatedReviewOptions
+		maxBytes int
+		maxWords int
+	}{
+		{
+			name:     "generic",
+			maxBytes: 800,
+			maxWords: 110,
+			opts: automatedReviewOptions{
+				sizeClass:            "focused",
+				modelID:              "codex/gpt-5.6-luna",
+				reasoningEffort:      "low",
+				reasoningMaxTokens:   2048,
+				maxOutputTokens:      32768,
+				maxIterations:        8,
+				maxToolCalls:         12,
+				maxVerificationCalls: 2,
+				verificationTimeout:  90 * time.Second,
+				explorationTimeout:   3 * time.Minute,
+				synthesisLead:        75 * time.Second,
+			},
+		},
+		{
+			name:     "qwen",
+			maxBytes: 1800,
+			maxWords: 270,
+			opts: automatedReviewOptions{
+				sizeClass:            "focused",
+				modelID:              "qwen/qwen3.8-flash",
+				reasoningMaxTokens:   2048,
+				maxOutputTokens:      32768,
+				maxIterations:        8,
+				maxToolCalls:         12,
+				maxVerificationCalls: 2,
+				explorationTimeout:   3 * time.Minute,
+				synthesisLead:        75 * time.Second,
+			},
+		},
+		{
+			name:     "deepseek",
+			maxBytes: 1600,
+			maxWords: 240,
+			opts: automatedReviewOptions{
+				sizeClass:            "focused",
+				modelID:              deepSeekV4ProReviewModel,
+				reasoningEffort:      "low",
+				reasoningMaxTokens:   2048,
+				maxOutputTokens:      32768,
+				maxIterations:        8,
+				maxToolCalls:         12,
+				maxVerificationCalls: 2,
+				verificationTimeout:  90 * time.Second,
+				explorationTimeout:   3 * time.Minute,
+				synthesisLead:        75 * time.Second,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rendered := appendReviewExecutionPlan(base, tt.opts)
+			overlay := strings.TrimPrefix(rendered, base)
+			words := len(strings.Fields(overlay))
+			t.Logf("%s review overlay: %d bytes, %d words", tt.name, len(overlay), words)
+			if len(overlay) > tt.maxBytes {
+				t.Fatalf("%s review overlay grew to %d bytes; budget is %d", tt.name, len(overlay), tt.maxBytes)
+			}
+			if words > tt.maxWords {
+				t.Fatalf("%s review overlay grew to %d words; budget is %d", tt.name, words, tt.maxWords)
+			}
+		})
+	}
+}
+
 func TestAppendReviewExecutionPlanGuidesBoundedEvidenceCollection(t *testing.T) {
 	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
-		sizeClass:           "focused",
-		modelID:             "codex/gpt-5.6-luna",
-		reasoningEffort:     "low",
-		reasoningMaxTokens:  2048,
-		maxIterations:       8,
-		maxToolCalls:        12,
-		verificationTimeout: 90 * time.Second,
-		explorationTimeout:  3 * time.Minute,
-		synthesisLead:       75 * time.Second,
+		sizeClass:            "focused",
+		modelID:              "codex/gpt-5.6-luna",
+		reasoningEffort:      "low",
+		reasoningMaxTokens:   2048,
+		maxOutputTokens:      32768,
+		maxIterations:        8,
+		maxToolCalls:         12,
+		maxVerificationCalls: 2,
+		verificationTimeout:  90 * time.Second,
+		explorationTimeout:   3 * time.Minute,
+		synthesisLead:        75 * time.Second,
 	})
 	for _, want := range []string{
-		"Size class: FOCUSED",
-		"Model: codex/gpt-5.6-luna",
-		"Reasoning effort: LOW",
-		"Limit each model turn to 2048 reasoning tokens",
-		"Use at most 8 model turns.",
-		"Use at most 12 total inspection or verification calls.",
-		"Limit each verification command to 90 seconds",
-		"Finish evidence collection within 180 seconds",
-		"Keep the final 75 seconds",
-		`Return only the final review`,
-		`Start the first line with "## Grade:"`,
-		`In "## CI Status", write "- Build: STATE" and "- Tests: STATE"`,
-		"Do not bold the Build or Tests labels",
-		"When no feedback IDs exist, write exactly",
-		"`NONE_SUPPLIED` — no prior feedback was supplied",
-		"When feedback IDs exist, use `DISPOSITIONED` and copy every exact ID",
-		"Omit a candidate finding when your own analysis disproves or withdraws it",
-		"Omit future-hardening and style observations from Findings",
-		"Copy every source identifier and registry key exactly",
-		"Compare measurements only when their workload labels and settings match",
-		"List MINOR findings as Suggestions, not Blockers",
-		"Use REQUEST CHANGES only with a Blocker or proved current failure",
-		"Pending, unknown, absent, or stale remote CI alone requires Grade B with NEEDS DISCUSSION",
-		"Missing duplicate verification alone requires Grade B",
-		"not Blockers or Findings",
-		"Write the Falsification conclusion as one bare token",
-		"Write Findings only when Falsification concludes PROVED",
-		"Require a current failing input, violated invariant, failing check, or reproducible behavior",
-		"Use Buckley's harness-collected verification evidence first",
-		"Report an INCONCLUSIVE verification as UNAVAILABLE",
-		"Move possible rename, regeneration, test drift, and private test-hook concerns to Remarks",
-		"Do not expose analysis, repair commentary, progress text, or a plan",
-		"Keep the final review concise enough to fit the output limit",
-		"Do not repeat equivalent searches, builds, or tests",
-		"finish with a non-approval verdict",
+		"## Review Runtime",
+		"Scope: FOCUSED; model: codex/gpt-5.6-luna",
+		"reasoning LOW/2048 tokens per turn",
+		"output 32768 completion tokens after provider capability clamping",
+		"model turns 8; tool calls 12",
+		"evidence 180s; verification 90s per call; synthesis reserve 75s",
+		"Buckley owns the supplied baseline",
+		"focused retry capacity is 2 when offered",
+		"missing, pending, or unavailable verification without a proved defect requires Grade B",
+		"NEEDS DISCUSSION with Blockers NONE",
+		"CRITICAL/MAJOR findings are Blockers; MINOR findings are Suggestions",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	for _, duplicate := range []string{
+		"## Bounded Review Plan",
+		"Start the first line with",
+		"## CI Status",
+		"Feedback disposition",
+		"Write Findings only when",
+		"ASD-STE100",
+		"Do not expose analysis",
+	} {
+		if strings.Contains(prompt, duplicate) {
+			t.Fatalf("runtime facts repeat base contract %q:\n%s", duplicate, prompt)
+		}
+	}
+}
+
+func TestReviewExecutionPlanAddsValidatorVerdictMappingsToMergeReviews(t *testing.T) {
+	for _, modelID := range []string{"codex/gpt-5.6-luna", deepSeekV4ProReviewModel} {
+		t.Run(modelID, func(t *testing.T) {
+			prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+				sizeClass: "focused",
+				modelID:   modelID,
+			})
+			for _, want := range []string{
+				"missing, pending, or unavailable verification without a proved defect requires Grade B",
+				"NEEDS DISCUSSION with Blockers NONE",
+				"CRITICAL/MAJOR findings are Blockers; MINOR findings are Suggestions",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("%s prompt missing validator mapping %q:\n%s", modelID, want, prompt)
+				}
+			}
+		})
 	}
 }
 
@@ -442,14 +605,17 @@ func TestAppendReviewExecutionPlanLeavesToolCallsUnlimitedByDefault(t *testing.T
 		maxIterations:      4,
 		maxToolCalls:       0,
 	})
-	if !strings.Contains(prompt, "There is no per-review tool-call cap") {
+	if !strings.Contains(prompt, "model turns 4; tool calls unlimited") {
 		t.Fatalf("prompt does not explain the default unlimited tool-call policy:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "at most 0 total inspection") {
+	if strings.Contains(prompt, "tool calls 0") {
 		t.Fatalf("prompt incorrectly presents zero as a hard tool-call cap:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "There is no separate verification-call cap") {
+	if !strings.Contains(prompt, "focused retry capacity is unlimited when offered") {
 		t.Fatalf("prompt does not explain the default unlimited verification policy:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "/0 tokens per turn") {
+		t.Fatalf("prompt presents a missing reasoning budget as a zero-token cap:\n%s", prompt)
 	}
 }
 
@@ -554,11 +720,12 @@ func TestProjectReviewExecutionPlanLeavesTurnsToolsAndExplorationUnbounded(t *te
 	}
 }
 
-// TestAppendReviewExecutionPlanReusesSharedRuleConstants asserts the bounded
-// review plan's shared bullets are byte-identical to the single source of
-// truth in pkg/prompts, not a separately maintained copy of the wording.
-func TestAppendReviewExecutionPlanReusesSharedRuleConstants(t *testing.T) {
-	prompt := appendReviewExecutionPlan("review this", automatedReviewOptions{
+func TestAppendReviewExecutionPlanDoesNotRepeatBaseContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_REVIEW_BRANCH", "")
+	t.Setenv("BUCKLEY_PROMPT_REVIEW_BRANCH_FILE", "")
+	base := prompts.ReviewBranchWithToolsPrompt(time.Unix(0, 0))
+	prompt := appendReviewExecutionPlan(base, automatedReviewOptions{
 		sizeClass:           "focused",
 		modelID:             "codex/gpt-5.6-luna",
 		reasoningEffort:     "low",
@@ -569,13 +736,27 @@ func TestAppendReviewExecutionPlanReusesSharedRuleConstants(t *testing.T) {
 		explorationTimeout:  3 * time.Minute,
 		synthesisLead:       75 * time.Second,
 	})
+	overlay := strings.TrimPrefix(prompt, base)
+	for _, critical := range []string{
+		"APPROVE requires Build PASS plus Tests PASS",
+		"## Coverage",
+		"## Falsification",
+		"## Verdict",
+	} {
+		if !strings.Contains(prompt, critical) {
+			t.Fatalf("appended prompt lost base contract %q:\n%s", critical, prompt)
+		}
+	}
 	for _, rule := range []string{
 		prompts.RuleFindingsRequireProvedFalsification,
 		prompts.RuleDisprovedOrUnresolvedGoesToRemarks,
 		prompts.RuleUseHarnessVerificationEvidence,
 	} {
-		if !strings.Contains(prompt, rule) {
-			t.Fatalf("bounded review plan missing shared rule %q:\n%s", rule, prompt)
+		if strings.Contains(overlay, rule) {
+			t.Fatalf("runtime overlay repeats base review rule %q:\n%s", rule, prompt)
+		}
+		if count := strings.Count(prompt, rule); count != 1 {
+			t.Fatalf("base review rule %q rendered %d times, want once", rule, count)
 		}
 	}
 }

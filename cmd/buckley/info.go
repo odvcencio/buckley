@@ -52,16 +52,17 @@ type infoConfigSource struct {
 }
 
 type infoConfig struct {
-	Encoding       string `json:"encoding"`
-	ExecutionMode  string `json:"execution_mode"`
-	OneshotMode    string `json:"oneshot_mode"`
-	ApprovalMode   string `json:"approval_mode"`
-	TrustLevel     string `json:"trust_level"`
-	ProjectTrust   string `json:"project_trust"`
-	SandboxMode    string `json:"sandbox_mode"`
-	SandboxNetwork bool   `json:"sandbox_network"`
-	IPCEnabled     bool   `json:"ipc_enabled"`
-	IPCBind        string `json:"ipc_bind"`
+	Encoding          string `json:"encoding"`
+	ExecutionMode     string `json:"execution_mode"`
+	OneshotMode       string `json:"oneshot_mode"`
+	OneshotDataPolicy string `json:"oneshot_data_policy"`
+	ApprovalMode      string `json:"approval_mode"`
+	TrustLevel        string `json:"trust_level"`
+	ProjectTrust      string `json:"project_trust"`
+	SandboxMode       string `json:"sandbox_mode"`
+	SandboxNetwork    bool   `json:"sandbox_network"`
+	IPCEnabled        bool   `json:"ipc_enabled"`
+	IPCBind           string `json:"ipc_bind"`
 }
 
 type infoModels struct {
@@ -239,16 +240,17 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 			Config:      infoConfigSources(cwd),
 		},
 		Config: infoConfig{
-			Encoding:       infoEncoding(cfg),
-			ExecutionMode:  cfg.Execution.Mode,
-			OneshotMode:    cfg.Oneshot.Mode,
-			ApprovalMode:   cfg.Approval.Mode,
-			TrustLevel:     cfg.Orchestrator.TrustLevel,
-			ProjectTrust:   trustStatus.String(),
-			SandboxMode:    cfg.Sandbox.Mode,
-			SandboxNetwork: cfg.Sandbox.AllowNetwork,
-			IPCEnabled:     cfg.IPC.Enabled,
-			IPCBind:        cfg.IPC.Bind,
+			Encoding:          infoEncoding(cfg),
+			ExecutionMode:     cfg.Execution.Mode,
+			OneshotMode:       cfg.Oneshot.Mode,
+			OneshotDataPolicy: cfg.OneshotDataPolicy(),
+			ApprovalMode:      cfg.Approval.Mode,
+			TrustLevel:        cfg.Orchestrator.TrustLevel,
+			ProjectTrust:      trustStatus.String(),
+			SandboxMode:       cfg.Sandbox.Mode,
+			SandboxNetwork:    cfg.Sandbox.AllowNetwork,
+			IPCEnabled:        cfg.IPC.Enabled,
+			IPCBind:           cfg.IPC.Bind,
 		},
 		Models:      inspectModels(cfg),
 		Providers:   inspectProviders(cfg),
@@ -262,15 +264,7 @@ func buildInfoSnapshot() (infoSnapshot, error) {
 }
 
 func loadInfoConfig() (*config.Config, error) {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if strings.TrimSpace(configPath) != "" {
-		cfg, err = config.LoadFromPath(configPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
@@ -353,11 +347,11 @@ func inspectProviders(cfg *config.Config) []infoProvider {
 			BaseURL:    cfg.Providers.Ollama.BaseURL,
 		},
 		{
-			Name:       "litellm",
-			Enabled:    cfg.Providers.LiteLLM.Enabled,
-			Ready:      ready["litellm"],
-			Credential: optionalCredentialState(cfg.Providers.LiteLLM.APIKey),
-			BaseURL:    cfg.Providers.LiteLLM.BaseURL,
+			Name:       "openai_compatible",
+			Enabled:    cfg.Providers.OpenAICompatible.Enabled,
+			Ready:      ready["openai_compatible"],
+			Credential: optionalCredentialState(cfg.Providers.OpenAICompatible.APIKey),
+			BaseURL:    cfg.Providers.OpenAICompatible.BaseURL,
 		},
 		{
 			Name:       "codex",
@@ -366,6 +360,15 @@ func inspectProviders(cfg *config.Config) []infoProvider {
 			Credential: "not-required",
 			Command:    cfg.Providers.Codex.Command,
 		},
+	}
+	if cfg.Providers.LiteLLM.Enabled {
+		providers = append(providers, infoProvider{
+			Name:       "litellm (legacy)",
+			Enabled:    true,
+			Ready:      ready["litellm"],
+			Credential: optionalCredentialState(cfg.Providers.LiteLLM.APIKey),
+			BaseURL:    cfg.Providers.LiteLLM.BaseURL,
+		})
 	}
 	return providers
 }

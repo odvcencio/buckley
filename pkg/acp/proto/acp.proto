@@ -178,6 +178,59 @@ message SendMessageResponse {
   Message response = 1;
 }
 
+// PartialResult is a public-only status detail for non-OK unary ACP responses
+// that produced incomplete model-visible evidence before failing.
+message PartialResult {
+  string schema_version = 1;
+  bool incomplete = 2;
+  string status = 3;
+  string reason_code = 4;
+  string safe_error = 5;
+  Message partial_response = 6;
+  bool truncated = 7;
+  int32 original_draft_bytes = 8;
+  int32 omitted_task_results = 9;
+  int32 omitted_model_identities = 10;
+  repeated PartialTaskResult task_results = 11;
+  repeated PartialModelIdentity model_identities = 12;
+}
+
+message PartialTaskResult {
+  string task_id = 1;
+  string status = 2;
+  string summary = 3;
+  string error = 4;
+  string finish_reason = 5;
+  PartialUsage usage = 6;
+  int32 tool_call_count = 7;
+  int32 command_count = 8;
+}
+
+message PartialUsage {
+  int64 input_tokens = 1;
+  int64 output_tokens = 2;
+  int64 reasoning_tokens = 3;
+  int64 cached_input_tokens = 4;
+  int64 unclassified_tokens = 5;
+  int64 reported_total_tokens = 6;
+  optional int64 reported_reasoning_tokens = 7;
+  optional int64 reported_cached_input_tokens = 8;
+  int64 reported_cache_write_tokens = 9;
+  bool estimated = 10;
+  bool reported_usage_inconsistent = 11;
+  bool usage_evidence_present = 12;
+  bool usage_evidence_missing = 13;
+}
+
+message PartialModelIdentity {
+  string requested_model = 1;
+  string selected_model = 2;
+  string provider_id = 3;
+  string response_model = 4;
+  string response_id = 5;
+  bool execution_identity_conflicted = 6;
+}
+
 // Editor context and inline features
 message DocumentSnapshot {
   string uri = 1;

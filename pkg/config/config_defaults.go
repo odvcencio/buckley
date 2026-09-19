@@ -197,6 +197,9 @@ func DefaultConfig() *Config {
 				Enabled: false,
 				BaseURL: "http://localhost:11434",
 			},
+			OpenAICompatible: OpenAICompatibleConfig{
+				Enabled: false,
+			},
 			LiteLLM: LiteLLMConfig{
 				Enabled: false,
 				BaseURL: "http://localhost:4000",
@@ -207,25 +210,26 @@ func DefaultConfig() *Config {
 				Models:  []string{defaultCodexModel},
 			},
 			ModelRouting: map[string]string{
-				"openai/":    "openai",
-				"anthropic/": "anthropic",
-				"google/":    "google",
-				"deepseek/":  "openrouter",
-				"qwen/":      "openrouter",
-				"ollama/":    "ollama",
-				"litellm/":   "litellm",
-				"codex/":     "codex",
-				"gpt-":       "openai",
-				"claude-":    "anthropic",
-				"gemini-":    "google",
-				"o1-":        "openai",
-				"o3-":        "openai",
-				"chatgpt-":   "openai",
+				"openai/":            "openai",
+				"anthropic/":         "anthropic",
+				"google/":            "google",
+				"deepseek/":          "openrouter",
+				"qwen/":              "openrouter",
+				"ollama/":            "ollama",
+				"openai_compatible/": "openai_compatible",
+				"litellm/":           "litellm",
+				"codex/":             "codex",
+				"gpt-":               "openai",
+				"claude-":            "anthropic",
+				"gemini-":            "google",
+				"o1-":                "openai",
+				"o3-":                "openai",
+				"chatgpt-":           "openai",
 			},
 		},
 		PromptCache: PromptCacheConfig{
 			Enabled:        false,
-			Providers:      []string{"anthropic", "openrouter", "litellm", "openai"},
+			Providers:      []string{"anthropic", "openrouter", "openai_compatible", "litellm", "openai"},
 			SystemMessages: 1,
 			TailMessages:   2,
 			Key:            "",
@@ -330,7 +334,8 @@ func DefaultConfig() *Config {
 			DurableBackend: DefaultDurableBackend,
 		},
 		Oneshot: OneshotModeConfig{
-			Mode: DefaultOneshotMode,
+			Mode:       DefaultOneshotMode,
+			DataPolicy: DefaultOneshotDataPolicy,
 		},
 	}
 	applyDefaultRuntimeConfig(cfg)
@@ -342,15 +347,15 @@ func applyDefaultRuntimeConfig(cfg *Config) {
 		Coordinator: RLMCoordinatorConfig{
 			Model:               "auto",
 			MaxIterations:       10,
-			MaxTokensBudget:     0, // 0 = unlimited
+			MaxTokensBudget:     0, // 0 = runtime default (currently 100000)
 			MaxWallTime:         10 * time.Minute,
 			ConfidenceThreshold: 0.95,
-			StreamPartials:      true,
+			StreamPartials:      true, // Publish coordinator progress to iteration hooks and rlm iteration telemetry, not text-token streams.
 		},
 		SubAgent: RLMSubAgentConfig{
 			Model:         "",              // Empty = use execution model
 			MaxConcurrent: 3,               // Parallel sub-agent limit
-			Timeout:       5 * time.Minute, // Per-task timeout
+			Timeout:       5 * time.Minute, // Per-active-task cooperative deadline; queued concurrency/rate wait is excluded.
 		},
 		Scratchpad: RLMScratchpadConfig{
 			MaxEntriesMemory:  1000,

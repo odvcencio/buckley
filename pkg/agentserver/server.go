@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
@@ -120,8 +121,30 @@ type inlineResponse struct {
 	FinishReason string `json:"finish_reason,omitempty"`
 }
 
+const inlinePartialTextMaxBytes = 2048
+
+type inlineErrorResponse struct {
+	Error        string `json:"error"`
+	Incomplete   bool   `json:"incomplete"`
+	Accepted     *bool  `json:"accepted"`
+	Text         string `json:"text,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
 type proposeResponse struct {
 	Suggestions []*acppb.ProposedEdit `json:"suggestions"`
+}
+
+type proposeErrorResponse struct {
+	Error      string `json:"error"`
+	Incomplete bool   `json:"incomplete"`
+	Accepted   *bool  `json:"accepted"`
+	Text       string `json:"text,omitempty"`
+}
+
+type downstreamErrorResponse struct {
+	Error      string `json:"error"`
+	Incomplete bool   `json:"incomplete"`
 }
 
 func (s *Server) routes() {
@@ -161,7 +184,7 @@ func (s *Server) handleInline(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := s.client.StreamInlineCompletions(ctx, icReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("inline: %v", err), http.StatusInternalServerError)
+		writeInlineError(w, http.StatusInternalServerError, "", "")
 		return
 	}
 
@@ -182,10 +205,18 @@ func (s *Server) handleInline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if recvErr != nil && recvErr != io.EOF {
-		http.Error(w, fmt.Sprintf("inline stream: %v", recvErr), http.StatusInternalServerError)
+		writeInlineError(w, http.StatusInternalServerError, text, finish)
+		return
+	}
+	if !inlineFinishConclusive(finish) {
+		writeInlineError(w, http.StatusInternalServerError, text, finish)
 		return
 	}
 	writeJSON(w, inlineResponse{Text: text, FinishReason: finish})
+}
+
+func inlineFinishConclusive(finish string) bool {
+	return strings.EqualFold(strings.TrimSpace(finish), "stop")
 }
 
 func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +254,7 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.client.ProposeEdits(ctx, prReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("propose: %v", err), http.StatusInternalServerError)
+		writeProposeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -260,7 +291,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.client.ApplyEdits(ctx, apReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("apply: %v", err), http.StatusInternalServerError)
+		writeDownstreamError(w, http.StatusInternalServerError, "apply edits incomplete")
+		return
+	}
+	if resp == nil {
+		writeDownstreamError(w, http.StatusInternalServerError, "apply edits incomplete")
 		return
 	}
 
@@ -294,7 +329,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.client.UpdateEditorState(ctx, statusReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("status: %v", err), http.StatusInternalServerError)
+		writeDownstreamError(w, http.StatusInternalServerError, "editor status incomplete")
+		return
+	}
+	if resp == nil {
+		writeDownstreamError(w, http.StatusInternalServerError, "editor status incomplete")
 		return
 	}
 	writeJSON(w, resp)
@@ -385,6 +424,59 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func writeInlineError(w http.ResponseWriter, status int, text, finish string) {
+	accepted := false
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(inlineErrorResponse{
+		Error:        "inline completion incomplete",
+		Incomplete:   true,
+		Accepted:     &accepted,
+		Text:         trimUTF8Bytes(text, inlinePartialTextMaxBytes),
+		FinishReason: strings.TrimSpace(finish),
+	})
+}
+
+func writeProposeError(w http.ResponseWriter, status int, err error) {
+	accepted := false
+	var text string
+	if partial, ok := partialresult.Extract(err); ok {
+		text = partial.GetPartialResponse().GetContent()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(proposeErrorResponse{
+		Error:      "propose edits incomplete",
+		Incomplete: true,
+		Accepted:   &accepted,
+		Text:       trimUTF8Bytes(text, inlinePartialTextMaxBytes),
+	})
+}
+
+func writeDownstreamError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(downstreamErrorResponse{
+		Error:      message,
+		Incomplete: true,
+	})
+}
+
+func trimUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	var b strings.Builder
+	b.Grow(maxBytes)
+	for _, r := range value {
+		if b.Len()+len(string(r)) > maxBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func withAgentMetadata(ctx context.Context, agentID string) context.Context {
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
@@ -413,7 +505,7 @@ func (s *Server) handleViewState(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	state, err := s.view.BuildSessionState(ctx, sessionID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("view: %v", err), http.StatusInternalServerError)
+		writeDownstreamError(w, http.StatusInternalServerError, "view state unavailable")
 		return
 	}
 	if state == nil {

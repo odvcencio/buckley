@@ -20,7 +20,7 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, exitCode, duration, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
+	_, exitCode, duration, _, err := tool.runTestsForFramework(ctx, "go", ".", "", false, false)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled error, got %v", err)
 	}
@@ -34,9 +34,45 @@ func TestRunTestsToolTimeoutHonored(t *testing.T) {
 
 func TestRunTestsToolUnsupportedFramework(t *testing.T) {
 	tool := &RunTestsTool{}
-	_, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
+	_, _, _, _, err := tool.runTestsForFramework(context.Background(), "unknown", ".", "", false, false)
 	if err == nil {
 		t.Fatalf("expected error for unsupported framework")
+	}
+}
+
+func TestGenerateTestToolUsesConfiguredWorkDir(t *testing.T) {
+	project := t.TempDir()
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "sample.go"), []byte("package sample\n\nfunc Add(a, b int) int { return a + b }\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+	if err := os.Chdir(other); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	tool := &GenerateTestTool{}
+	tool.SetWorkDir(project)
+	result, err := tool.Execute(map[string]any{"source_file": "sample.go"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if _, err := os.Stat(filepath.Join(project, "sample_test.go")); err != nil {
+		t.Fatalf("project test file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "sample_test.go")); !os.IsNotExist(err) {
+		t.Fatalf("test file written in process cwd, stat err=%v", err)
 	}
 }
 
@@ -68,13 +104,13 @@ func TestDetectTestFrameworkGoMod(t *testing.T) {
 }
 
 func TestParseGoTestResults(t *testing.T) {
-	tool := &RunTestsTool{}
-	output := `--- PASS: TestOne
---- FAIL: TestTwo
---- SKIP: TestThree
---- PASS: TestFour`
-	passed, failed, skipped := tool.parseGoTestResults(output)
-	if passed != 2 || failed != 1 || skipped != 1 {
-		t.Fatalf("unexpected counts: pass=%d fail=%d skip=%d", passed, failed, skipped)
+	output := `{"Action":"pass","Package":"p","Test":"TestOne"}
+{"Action":"fail","Package":"p","Test":"TestTwo"}
+{"Action":"skip","Package":"p","Test":"TestThree"}
+{"Action":"pass","Package":"p","Test":"TestFour"}
+{"Action":"fail","Package":"p"}`
+	report := parseGoTestOutput(output)
+	if !report.complete || report.passed != 2 || report.failed != 1 || report.skipped != 1 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }

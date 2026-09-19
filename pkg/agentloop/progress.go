@@ -90,6 +90,17 @@ type ProgressSnapshot struct {
 	LastToolName              string `json:"last_tool_name,omitempty"`
 	LastYieldCount            int    `json:"last_yield_count,omitempty"`
 	LastYieldUnit             string `json:"last_yield_unit,omitempty"`
+	StateObservedCalls        int    `json:"state_observed_calls,omitempty"`
+	StateChangedCalls         int    `json:"state_changed_calls,omitempty"`
+	LastStateChangeSequence   int    `json:"last_state_change_sequence,omitempty"`
+	StateObservationFailures  int    `json:"state_observation_failures,omitempty"`
+	LastStateFailureSequence  int    `json:"last_state_failure_sequence,omitempty"`
+	LastStateObservationError string `json:"last_state_observation_error,omitempty"`
+	VerificationObservedCalls int    `json:"verification_observed_calls,omitempty"`
+	VerificationPassedCalls   int    `json:"verification_passed_calls,omitempty"`
+	LastVerificationSequence  int    `json:"last_verification_sequence,omitempty"`
+	LastVerificationPassed    bool   `json:"last_verification_passed,omitempty"`
+	sequence                  int
 }
 
 type progressTracker struct {
@@ -101,10 +112,31 @@ func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
 		return
 	}
 	t.snapshot.ToolCalls++
+	t.snapshot.sequence++
 	if outcome.Success {
 		t.snapshot.SuccessfulToolCalls++
 	} else {
 		t.snapshot.FailedToolCalls++
+	}
+	if outcome.StateObserved {
+		t.snapshot.StateObservedCalls++
+		if outcome.StateChanged {
+			t.snapshot.StateChangedCalls++
+			t.snapshot.LastStateChangeSequence = t.snapshot.sequence
+		}
+	}
+	if outcome.StateObservationFailed {
+		t.snapshot.StateObservationFailures++
+		t.snapshot.LastStateFailureSequence = t.snapshot.sequence
+		t.snapshot.LastStateObservationError = strings.TrimSpace(outcome.StateObservationError)
+	}
+	if outcome.VerificationObserved {
+		t.snapshot.VerificationObservedCalls++
+		t.snapshot.LastVerificationSequence = t.snapshot.sequence
+		t.snapshot.LastVerificationPassed = outcome.VerificationPassed
+		if outcome.VerificationPassed {
+			t.snapshot.VerificationPassedCalls++
+		}
 	}
 	if !outcome.YieldObserved {
 		return

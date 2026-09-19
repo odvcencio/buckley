@@ -79,17 +79,19 @@ func selectProjectSpace(spaces []Space, workDir, configuredSpace string) (Space,
 		return Space{}, false, nil
 	}
 	var match Space
+	matched := false
 	for _, space := range spaces {
 		candidate := strings.ToLower(spaceName(space.URI))
 		if candidate != projectName {
 			continue
 		}
-		if match.URI != "" {
+		if matched {
 			return Space{}, false, nil
 		}
+		matched = true
 		match = normalizedSpace(space)
 	}
-	if match.URI == "" {
+	if !matched {
 		return Space{}, false, nil
 	}
 	return match, true, nil

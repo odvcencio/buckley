@@ -2,12 +2,14 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/ipc/command"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -466,6 +468,38 @@ func TestRegistryEnsureSession(t *testing.T) {
 	})
 }
 
+func TestRegistryAcceptCommandValidatesBeforeEnsureSession(t *testing.T) {
+	store := newTestStore(t)
+	mgr := newTestModelManager(t)
+	sessionID := "validate-before-ensure"
+	now := time.Now().UTC()
+	if err := store.CreateSession(&storage.Session{
+		ID: sessionID, Principal: "alice", ProjectPath: t.TempDir(),
+		Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	registry := NewRegistry(RegistryConfig{
+		Store:        store,
+		ModelManager: mgr,
+		Config:       config.DefaultConfig(),
+	})
+	t.Cleanup(registry.Stop)
+
+	_, err := registry.AcceptCommand(context.Background(), command.SessionCommand{
+		SessionID:  sessionID,
+		Type:       "slash",
+		Content:    "/help",
+		TaskIntent: "mutation",
+	})
+	if !errors.Is(err, sessionexec.ErrValidation) {
+		t.Fatalf("AcceptCommand error = %v, want validation", err)
+	}
+	if got := registry.Count(); got != 0 {
+		t.Fatalf("registry activated %d runner(s), want none", got)
+	}
+}
+
 func TestRegistryCleanupIdleSessions(t *testing.T) {
 	store := newTestStore(t)
 	mgr := newTestModelManager(t)
@@ -488,21 +522,23 @@ func TestRegistryCleanupIdleSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	runner, ok := registry.GetSession(info.ID)
+	if !ok || runner == nil {
+		t.Fatal("created runner unavailable")
+	}
+	runner.setState(StateProcessing)
 
-	// Wait for session to become idle
+	// Active work may outlive the idle threshold without being evicted.
 	time.Sleep(10 * time.Millisecond)
-
-	// Trigger cleanup
 	registry.cleanupIdleSessions()
+	if registry.Count() != 1 {
+		t.Fatalf("processing session was evicted after idle timeout")
+	}
 
-	// Session should be removed
+	runner.setState(StateIdle)
+	registry.cleanupIdleSessions()
 	if registry.Count() != 0 {
-		// Check if runner is actually idle
-		runner, ok := registry.GetSession(info.ID)
-		if ok && runner != nil {
-			t.Logf("runner still exists, IsIdle=%v, State=%v", runner.IsIdle(), runner.State())
-		}
-		t.Errorf("expected 0 sessions after cleanup, got %d", registry.Count())
+		t.Errorf("expected idle session cleanup, got %d sessions", registry.Count())
 	}
 }
 

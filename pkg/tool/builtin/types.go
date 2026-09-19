@@ -1,5 +1,7 @@
 package builtin
 
+import "encoding/json"
+
 // ParameterSchema defines the parameters a tool accepts
 type ParameterSchema struct {
 	Type                 string                    `json:"type"`
@@ -18,6 +20,21 @@ type PropertySchema struct {
 	Properties           map[string]PropertySchema `json:"properties,omitempty"` // For nested object types
 	Required             []string                  `json:"required,omitempty"`
 	AdditionalProperties any                       `json:"additionalProperties,omitempty"`
+
+	// RawSchema is the authoritative wire schema when non-nil, preserving
+	// JSON Schema keywords absent from the convenience fields above.
+	RawSchema map[string]any `json:"-"`
+}
+
+// MarshalJSON emits RawSchema verbatim when present; otherwise it marshals a
+// local alias of PropertySchema (dropping the method set) to avoid recursion
+// and preserve the legacy wire format.
+func (p PropertySchema) MarshalJSON() ([]byte, error) {
+	if p.RawSchema != nil {
+		return json.Marshal(p.RawSchema)
+	}
+	type propertySchemaAlias PropertySchema
+	return json.Marshal(propertySchemaAlias(p))
 }
 
 // Result represents the result of a tool execution

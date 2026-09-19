@@ -209,6 +209,13 @@ func TestHandleWorkflowActionDispatchesCommand(t *testing.T) {
 	if dispatched.Content != "/plan cool-feature ship it" {
 		t.Fatalf("unexpected command content: %s", dispatched.Content)
 	}
+	if dispatched.ID == "" || dispatched.AcceptedBy != "unit" {
+		t.Fatalf("workflow command identity/actor = %+v", dispatched)
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || response["commandId"] != dispatched.ID {
+		t.Fatalf("workflow response=%s error=%v", rr.Body.String(), err)
+	}
 }
 
 func TestHandleCreateProject(t *testing.T) {

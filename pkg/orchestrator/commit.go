@@ -123,11 +123,17 @@ func (cg *CommitGenerator) Generate(task *Task) (*CommitInfo, error) {
 
 	resp, err := cg.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
+		if resp != nil {
+			return nil, NewIncompleteUtilityResponseError("commit generation", publicUtilityDraftFromResponse(resp), firstUtilityFinishReason(resp), err)
+		}
 		return nil, fmt.Errorf("commit generation failed: %w", err)
 	}
 
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("no response from model")
+	}
+	if finishReason := firstUtilityFinishReason(resp); !utilityFinishReasonIsStop(finishReason) {
+		return nil, NewIncompleteUtilityResponseError("commit generation", publicUtilityDraftFromResponse(resp), finishReason, nil)
 	}
 
 	// Parse response into CommitInfo

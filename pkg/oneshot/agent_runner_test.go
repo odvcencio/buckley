@@ -2,21 +2,42 @@ package oneshot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/rlm"
 	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/transparency"
 )
+
+func newAgentRunnerTestManager(t *testing.T, server *httptest.Server) *model.Manager {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.Enabled = true
+	cfg.Providers.OpenAI.APIKey = "test-key"
+	cfg.Providers.OpenAI.BaseURL = server.URL
+	cfg.Models.DefaultProvider = "openai"
+	mgr, err := model.NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return mgr
+}
 
 func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {
 	if got := effectiveAgentMaxCostUSD("codex", 0.15); got != 0 {
@@ -32,6 +53,78 @@ func TestNativeCodexReviewRunsWithoutCatalogPricing(t *testing.T) {
 	}
 	if got := effectiveAgentInvocationCost("openrouter", pricing, tokens); got != 3 {
 		t.Fatalf("OpenRouter invocation cost = %v, want 3", got)
+	}
+}
+
+func TestAgentRunnerPreservesModelExecutionIdentityInResultAndTrace(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		responseID string
+		finish     string
+		content    string
+		message    string
+		wantErr    bool
+	}{
+		{name: "complete stop", responseID: "chatcmpl-agent-complete", finish: "stop", content: "agent answer", message: `"content":"agent answer"`, wantErr: false},
+		{name: "incomplete length", responseID: "chatcmpl-agent-length", finish: "length", content: "public partial draft", message: `"content":"public partial draft","reasoning":"private-reasoning-sentinel","reasoning_details":[{"type":"reasoning.text","text":"private-reasoning-sentinel"}]`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{
+					"id":%q,"model":"gpt-4o",
+					"choices":[{"index":0,"message":{"role":"assistant",%s},"finish_reason":%q}],
+					"usage":{"prompt_tokens":13,"completion_tokens":17,"total_tokens":30}
+				}`, tt.responseID, tt.message, tt.finish)
+			}))
+			defer server.Close()
+
+			runner := NewAgentRunner(AgentRunnerConfig{
+				Models:   newAgentRunnerTestManager(t, server),
+				Registry: tool.NewEmptyRegistry(),
+				ModelID:  "gpt-4o",
+			})
+			result, err := runner.Run(context.Background(), "system", "task", nil, AgentExecutionOpts{MaxIterations: 1})
+			if tt.wantErr && err == nil {
+				t.Fatal("Run error = nil, want incomplete error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result == nil {
+				t.Fatal("Run result = nil")
+			}
+			if result.Incomplete != tt.wantErr {
+				t.Fatalf("Incomplete = %v, want %v", result.Incomplete, tt.wantErr)
+			}
+			if !strings.Contains(result.Response, tt.content) {
+				t.Fatalf("Response = %q, want public content %q", result.Response, tt.content)
+			}
+			if result.TokensUsed != 30 || result.InputTokens != 13 || result.OutputTokens != 17 {
+				t.Fatalf("tokens = %d/%d/%d, want retained usage 30/13/17", result.TokensUsed, result.InputTokens, result.OutputTokens)
+			}
+			if len(result.ModelExecutions) != 1 || result.ModelExecutions[0].ResponseID != tt.responseID {
+				t.Fatalf("result model executions = %+v, want response identity", result.ModelExecutions)
+			}
+			if len(result.Trace.ModelExecutions) != 1 || result.Trace.ModelExecutions[0].ResponseID != tt.responseID {
+				t.Fatalf("trace model executions = %+v, want response identity", result.Trace.ModelExecutions)
+			}
+			result.ModelExecutions[0].ResponseID = "mutated"
+			if result.Trace.ModelExecutions[0].ResponseID != tt.responseID {
+				t.Fatalf("trace identity aliased AgentResult slice: %+v", result.Trace.ModelExecutions)
+			}
+			encoded, err := json.Marshal(result.Trace)
+			if err != nil {
+				t.Fatalf("Marshal trace: %v", err)
+			}
+			raw := string(encoded)
+			if !strings.Contains(raw, `"model_executions"`) {
+				t.Fatalf("trace JSON = %s, want identity", raw)
+			}
+			if strings.Contains(raw, "private-reasoning-sentinel") || strings.Contains(result.Response, "private-reasoning-sentinel") {
+				t.Fatalf("private reasoning leaked through result/trace: response=%q trace=%s", result.Response, raw)
+			}
+		})
 	}
 }
 
@@ -87,6 +180,217 @@ func TestFormatIncompleteAgentResponseRetainsCompletedEvidence(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "\n") {
 		t.Fatal("salvage output must end with newline")
+	}
+}
+
+func TestAgentRunnerReviewSnapshotRetainsResultOnPostVerifyFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		forceVerifyFailed bool
+		skipToolLoop      bool
+		finalFinish       string
+		finalContent      string
+		wantModelCalls    int32
+		wantIdentities    int
+		wantTokens        int
+		wantInput         int
+		wantOutput        int
+		wantErrParts      []string
+	}{
+		{
+			name:           "baseline snapshot success",
+			finalFinish:    "stop",
+			finalContent:   "final review from immutable snapshot",
+			wantModelCalls: 2,
+			wantIdentities: 2,
+			wantTokens:     31,
+			wantInput:      22,
+			wantOutput:     9,
+		},
+		{
+			name:              "verification failure retains completed work",
+			forceVerifyFailed: true,
+			finalFinish:       "stop",
+			finalContent:      "final review before verification failure",
+			wantModelCalls:    2,
+			wantIdentities:    2,
+			wantTokens:        31,
+			wantInput:         22,
+			wantOutput:        9,
+			wantErrParts:      []string{"API review changed the captured source snapshot", "tracked source differs from immutable snapshot"},
+		},
+		{
+			name:              "truncation and verification failure retain completed work",
+			forceVerifyFailed: true,
+			skipToolLoop:      true,
+			finalFinish:       "length",
+			finalContent:      "public partial draft before verification failure",
+			wantModelCalls:    1,
+			wantIdentities:    1,
+			wantTokens:        18,
+			wantInput:         7,
+			wantOutput:        11,
+			wantErrParts:      []string{"execute task", "API review changed the captured source snapshot", "tracked source differs from immutable snapshot"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newAgentRunnerSnapshotFixture(t)
+			t.Chdir(repo)
+			marker := filepath.Join(t.TempDir(), "fail-post-verify")
+			installPostVerificationDiffGitWrapper(t, marker)
+			snapshot, err := model.CaptureReviewSnapshot(context.Background(), repo, model.ReviewSnapshotPolicy{Mode: model.ReviewSnapshotHead})
+			if err != nil {
+				t.Fatalf("CaptureReviewSnapshot: %v", err)
+			}
+			if snapshot == nil || strings.TrimSpace(snapshot.Commit()) == "" {
+				t.Fatalf("snapshot = %#v, want captured commit", snapshot)
+			}
+
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				call := calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				switch call {
+				case 1:
+					if tt.skipToolLoop {
+						if tt.forceVerifyFailed {
+							if err := os.WriteFile(marker, []byte("fail\n"), 0o600); err != nil {
+								t.Errorf("write marker: %v", err)
+							}
+						}
+						fmt.Fprintf(w, `{
+							"id":"chatcmpl-snapshot-truncated","model":"gpt-4o",
+							"choices":[{"index":0,"message":{"role":"assistant","content":%q,"reasoning":"private-reasoning-sentinel","reasoning_details":[{"type":"reasoning.text","text":"private-reasoning-sentinel"}]},"finish_reason":%q}],
+							"usage":{"prompt_tokens":7,"completion_tokens":11,"total_tokens":18}
+						}`, tt.finalContent, tt.finalFinish)
+						return
+					}
+					fmt.Fprint(w, `{
+						"id":"chatcmpl-snapshot-tool","model":"gpt-4o",
+						"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_snapshot_read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"review.txt\"}"}}]},"finish_reason":"tool_calls"}],
+						"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+					}`)
+				case 2:
+					if tt.forceVerifyFailed {
+						if err := os.WriteFile(marker, []byte("fail\n"), 0o600); err != nil {
+							t.Errorf("write marker: %v", err)
+						}
+					}
+					fmt.Fprintf(w, `{
+						"id":"chatcmpl-snapshot-final","model":"gpt-4o",
+						"choices":[{"index":0,"message":{"role":"assistant","content":%q,"reasoning":"private-reasoning-sentinel","reasoning_details":[{"type":"reasoning.text","text":"private-reasoning-sentinel"}]},"finish_reason":%q}],
+						"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}
+					}`, tt.finalContent, tt.finalFinish)
+				default:
+					t.Errorf("unexpected model call %d", call)
+					fmt.Fprint(w, `{"id":"chatcmpl-extra","model":"gpt-4o","choices":[]}`)
+				}
+			}))
+			defer server.Close()
+
+			runner := NewAgentRunner(AgentRunnerConfig{
+				Models:   newAgentRunnerTestManager(t, server),
+				Registry: tool.NewEmptyRegistry(),
+				ModelID:  "gpt-4o",
+			})
+			result, err := runner.Run(context.Background(), "system", "review", []string{"read_file"}, AgentExecutionOpts{
+				ReviewSnapshot: snapshot,
+				MaxIterations:  2,
+			})
+			if len(tt.wantErrParts) == 0 {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if result == nil {
+					t.Fatal("Run result = nil")
+				}
+				if result.Incomplete {
+					t.Fatalf("Incomplete = true, want false: %s", result.Response)
+				}
+				if result.Response != tt.finalContent {
+					t.Fatalf("Response = %q, want %q", result.Response, tt.finalContent)
+				}
+				if result.Trace == nil {
+					t.Fatal("Trace = nil, want retained trace")
+				}
+				if result.Trace.Error != "" {
+					t.Fatalf("trace error = %q, want empty", result.Trace.Error)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("Run error = nil, want retained incomplete error")
+				}
+				for _, want := range tt.wantErrParts {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("Run error = %q, missing %q", err.Error(), want)
+					}
+				}
+				if result == nil {
+					t.Fatal("Run result = nil, want retained incomplete result")
+				}
+				if !result.Incomplete {
+					t.Fatalf("Incomplete = false, want true")
+				}
+				retainedWants := []string{"Incomplete agent result", tt.finalContent}
+				if !tt.skipToolLoop {
+					retainedWants = append(retainedWants, "read_file", "31 total")
+				}
+				for _, want := range append(retainedWants, tt.wantErrParts...) {
+					if !strings.Contains(result.Response, want) {
+						t.Fatalf("retained response missing %q:\n%s", want, result.Response)
+					}
+				}
+				if result.Trace == nil {
+					t.Fatal("Trace = nil, want retained trace")
+				}
+				for _, want := range tt.wantErrParts {
+					if !strings.Contains(result.Trace.Error, want) {
+						t.Fatalf("trace error = %q, missing %q", result.Trace.Error, want)
+					}
+				}
+			}
+			if calls.Load() != tt.wantModelCalls {
+				t.Fatalf("model calls = %d, want actual tool loop/finalization count %d", calls.Load(), tt.wantModelCalls)
+			}
+			if result.TokensUsed != tt.wantTokens || result.InputTokens != tt.wantInput || result.OutputTokens != tt.wantOutput {
+				t.Fatalf("tokens = %d/%d/%d, want retained %d/%d/%d", result.TokensUsed, result.InputTokens, result.OutputTokens, tt.wantTokens, tt.wantInput, tt.wantOutput)
+			}
+			if tt.skipToolLoop {
+				if len(result.ToolCalls) != 0 {
+					t.Fatalf("tool calls = %+v, want none for one-turn truncation case", result.ToolCalls)
+				}
+			} else {
+				if len(result.ToolCalls) != 1 || result.ToolCalls[0].Name != "read_file" || !result.ToolCalls[0].Success {
+					t.Fatalf("tool calls = %+v, want successful snapshot read_file", result.ToolCalls)
+				}
+				if !strings.Contains(result.ToolCalls[0].Result, "captured snapshot truth") {
+					t.Fatalf("tool result = %q, want captured snapshot content", result.ToolCalls[0].Result)
+				}
+			}
+			if len(result.ModelExecutions) != tt.wantIdentities {
+				t.Fatalf("result model executions = %+v, want %d retained response identities", result.ModelExecutions, tt.wantIdentities)
+			}
+			if tt.skipToolLoop {
+				if result.ModelExecutions[0].ResponseID != "chatcmpl-snapshot-truncated" {
+					t.Fatalf("result model executions = %+v, want truncated identity", result.ModelExecutions)
+				}
+			} else if result.ModelExecutions[0].ResponseID != "chatcmpl-snapshot-tool" || result.ModelExecutions[1].ResponseID != "chatcmpl-snapshot-final" {
+				t.Fatalf("result model executions = %+v, want retained loopback responses", result.ModelExecutions)
+			}
+			if result.Trace == nil || len(result.Trace.ModelExecutions) != tt.wantIdentities {
+				t.Fatalf("trace model executions = %+v, want retained identities", result.Trace)
+			}
+			if tt.skipToolLoop {
+				if result.Trace.ModelExecutions[0].ResponseID != "chatcmpl-snapshot-truncated" {
+					t.Fatalf("trace model executions = %+v, want truncated identity", result.Trace.ModelExecutions)
+				}
+			} else if result.Trace.ModelExecutions[1].ResponseID != "chatcmpl-snapshot-final" {
+				t.Fatalf("trace model executions = %+v, want final identity", result.Trace.ModelExecutions)
+			}
+			if strings.Contains(result.Response, "private-reasoning-sentinel") || strings.Contains(result.Trace.Content, "private-reasoning-sentinel") {
+				t.Fatalf("private reasoning leaked into retained public surfaces: response=%q trace=%q", result.Response, result.Trace.Content)
+			}
+		})
 	}
 }
 
@@ -339,4 +643,41 @@ func runReviewRegistryGit(t *testing.T, dir string, args ...string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
+}
+
+func newAgentRunnerSnapshotFixture(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	runReviewRegistryGit(t, repo, "init", "-q")
+	runReviewRegistryGit(t, repo, "config", "user.email", "test@example.com")
+	runReviewRegistryGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "review.txt"), []byte("captured snapshot truth\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewRegistryGit(t, repo, "add", "review.txt")
+	runReviewRegistryGit(t, repo, "commit", "-m", "initial")
+	return repo
+}
+
+func installPostVerificationDiffGitWrapper(t *testing.T, marker string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("look up real git: %v", err)
+	}
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+REAL_GIT=%q
+FAIL_MARKER=%q
+if [ -f "$FAIL_MARKER" ] && [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--binary" ] && [ "$8" = "HEAD" ] && [ "$9" = "--" ]; then
+	printf 'diff --git a/review.txt b/review.txt\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111 100644\n--- a/review.txt\n+++ b/review.txt\n@@ -1 +1 @@\n-captured snapshot truth\n+mutated snapshot truth\n'
+	exit 0
+fi
+exec "$REAL_GIT" "$@"
+`, realGit, marker)
+	if err := os.WriteFile(wrapperPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write git wrapper: %v", err)
+	}
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

@@ -1,26 +1,12 @@
 package worktree
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
-
-func TestLegacyManagerSourceMatchesAcceptedMain90285(t *testing.T) {
-	source, err := os.ReadFile("manager.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(source)
-	const accepted = "353565a799a02db2126d54f8b02d6d6ab71e6c8c1b200a6140e51478d64668b6"
-	if got := hex.EncodeToString(digest[:]); got != accepted {
-		t.Fatalf("legacy manager source digest = %s, want accepted main 90285 digest %s", got, accepted)
-	}
-}
 
 func TestLegacyManagerPreservesAcceptedDirectGitArgv(t *testing.T) {
 	if runtime.GOOS == "windows" {

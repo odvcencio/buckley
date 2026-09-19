@@ -66,7 +66,7 @@ func postEditDiagnostics(absPath string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), postEditDiagnosticsTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "go", "build", ".")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", os.DevNull, ".")
 	cmd.Dir = packageDir
 	output, err := cmd.CombinedOutput()
 	if err == nil {

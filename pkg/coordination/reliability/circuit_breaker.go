@@ -143,6 +143,14 @@ func NewCircuitBreaker(config CircuitBreakerConfig) *CircuitBreaker {
 
 // Execute runs the given function through the circuit breaker
 func (cb *CircuitBreaker) Execute(fn func() error) error {
+	return cb.ExecuteWithResultFilter(fn, nil)
+}
+
+// ExecuteWithResultFilter runs the given function through the circuit breaker.
+// When shouldRecord returns false for the function's error, the call remains
+// admitted and returned to the caller but does not update success/failure
+// counters or transition circuit state.
+func (cb *CircuitBreaker) ExecuteWithResultFilter(fn func() error, shouldRecord func(error) bool) error {
 	cb.mu.Lock()
 	cb.totalCalls++
 	cb.mu.Unlock()
@@ -152,6 +160,9 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	}
 
 	err := fn()
+	if shouldRecord != nil && !shouldRecord(err) {
+		return err
+	}
 	cb.recordResult(err)
 	return err
 }

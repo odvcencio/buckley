@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"m31labs.dev/buckley/pkg/durability"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
+	"m31labs.dev/buckley/pkg/ralph"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/taskstate"
 )
@@ -23,6 +26,378 @@ func newGoalTestLedger(t *testing.T) *runledger.SQLiteStore {
 	t.Cleanup(func() { _ = ledger.Close() })
 	return ledger
 }
+
+func TestRunGoalStart_PersistsExactModelRequestContract(t *testing.T) {
+	t.Setenv(envBuckleyDataDir, t.TempDir())
+	previousModel := modelOverrideFlag
+	previousProviderResolver := resolveGoalStartProviderFn
+	previousWorkspace := goalStartWorkspaceFn
+	modelOverrideFlag = ""
+	workspace := t.TempDir()
+	license := readBuckleyLicenseForTest(t)
+	if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), license, 0o644); err != nil {
+		t.Fatalf("write test license: %v", err)
+	}
+	resolveGoalStartProviderFn = func(string) (string, error) { return "openrouter", nil }
+	goalStartWorkspaceFn = func() (string, error) { return workspace, nil }
+	t.Cleanup(func() {
+		modelOverrideFlag = previousModel
+		resolveGoalStartProviderFn = previousProviderResolver
+		goalStartWorkspaceFn = previousWorkspace
+	})
+
+	err := runGoalStart([]string{
+		"--model", "stealth/ox-alpha",
+		"--reasoning-effort", "max",
+		"--openrouter-zdr",
+		"--openrouter-data-collection", "deny",
+		"--task", "harmless probe",
+		"probe the request shape",
+	})
+	if err != nil {
+		t.Fatalf("runGoalStart: %v", err)
+	}
+
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		t.Fatalf("openGoalStores: %v", err)
+	}
+	defer cleanup()
+	runs, err := stores.ledger.ListRuns(context.Background(), runledger.RunQuery{SessionID: "goal-cli", Limit: 2})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns = %+v, %v", runs, err)
+	}
+	events, err := stores.ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: runs[0].RunID})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != runledger.EventTaskCreated || event.Payload["kind"] != "goal" {
+			continue
+		}
+		if event.Payload["model"] != "stealth/ox-alpha" || event.Payload["reasoning_effort"] != "max" || event.Payload["retention_mode"] != goalloop.GoalRetentionZDR || event.Payload["openrouter_zdr"] != true || event.Payload["data_collection"] != "deny" || event.Payload["model_policy"] != "strict_zdr" || event.Payload["model_policy_action"] != "allow" {
+			t.Fatalf("goal request payload = %#v", event.Payload)
+		}
+		return
+	}
+	t.Fatal("goal.created payload not found")
+}
+
+func TestRunGoalStart_NonZDRBindsRecognizedLicense(t *testing.T) {
+	t.Setenv(envBuckleyDataDir, t.TempDir())
+	previousProviderResolver := resolveGoalStartProviderFn
+	previousWorkspace := goalStartWorkspaceFn
+	workspace := t.TempDir()
+	license := readBuckleyLicenseForTest(t)
+	if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), license, 0o644); err != nil {
+		t.Fatalf("write test license: %v", err)
+	}
+	resolveGoalStartProviderFn = func(string) (string, error) { return "openrouter", nil }
+	goalStartWorkspaceFn = func() (string, error) { return workspace, nil }
+	t.Cleanup(func() {
+		resolveGoalStartProviderFn = previousProviderResolver
+		goalStartWorkspaceFn = previousWorkspace
+	})
+
+	if err := runGoalStart([]string{
+		"--model", "stealth/ox-alpha",
+		"--reasoning-effort", "max",
+		"--openrouter-no-zdr",
+		"--openrouter-data-collection", "deny",
+		"probe non-ZDR request shape",
+	}); err != nil {
+		t.Fatalf("runGoalStart: %v", err)
+	}
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		t.Fatalf("openGoalStores: %v", err)
+	}
+	defer cleanup()
+	runs, err := stores.ledger.ListRuns(context.Background(), runledger.RunQuery{SessionID: "goal-cli", Limit: 2})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns = %+v, %v", runs, err)
+	}
+	loop, err := goalloop.New(goalloop.Config{Ledger: stores.ledger, Checkpoints: stores.checkpoints, SessionID: "goal-cli"})
+	if err != nil {
+		t.Fatalf("goalloop.New: %v", err)
+	}
+	goal, _, err := loop.LoadGoal(context.Background(), runs[0].RunID)
+	if err != nil {
+		t.Fatalf("LoadGoal: %v", err)
+	}
+	request := goal.ModelRequest
+	if request.RetentionMode != goalloop.GoalRetentionNonZDR || request.OpenRouterZDR || request.OpenRouterDataCollection != "deny" || request.Policy != "oss_non_zdr" || request.PolicyReasonCode != "oss_license_verified" {
+		t.Fatalf("model request = %+v", request)
+	}
+	if request.WorkspaceLicense.ID != goalloop.LicenseIDMIT || request.WorkspaceLicense.SHA256 == "" || request.WorkspaceLicense.ManifestSHA256 == "" {
+		t.Fatalf("license evidence = %+v", request.WorkspaceLicense)
+	}
+}
+
+func TestRunGoalAudit_RendersModelDataPolicyWithoutPrivateEvidence(t *testing.T) {
+	t.Setenv(envBuckleyDataDir, t.TempDir())
+	stores, cleanup, err := openGoalStores()
+	if err != nil {
+		t.Fatalf("openGoalStores: %v", err)
+	}
+	defer cleanup()
+	const runID = "run-model-policy-audit"
+	if _, err := stores.ledger.StartRun(context.Background(), runledger.AgentRun{RunID: runID, SessionID: "goal-cli"}); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if _, err := stores.ledger.Append(context.Background(), runledger.Event{
+		ID: runledger.NewEventID(), Type: runledger.EventControllerDecision, RunID: runID,
+		Payload: map[string]any{
+			"kind": "model_data_policy", "action": "allow", "policy": "strict_zdr", "reason_code": "zdr_enforced",
+			"license_path": "/private/workspace/LICENSE", "evidence_body": "audit-secret-sentinel",
+		},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	var auditErr error
+	output := captureStdout(t, func() { auditErr = runGoalAudit([]string{runID}) })
+	if auditErr != nil {
+		t.Fatalf("runGoalAudit: %v", auditErr)
+	}
+	for _, want := range []string{"decide model-data", "action=allow", "policy=strict_zdr", "reason=zdr_enforced"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("audit output missing %q:\n%s", want, output)
+		}
+	}
+	for _, forbidden := range []string{"audit-secret-sentinel", "/private/workspace", "<nil>"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("audit output contains private/invalid value %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestRunGoalStart_ModelDataPolicyFailsClosedBeforeIntake(t *testing.T) {
+	previousProviderResolver := resolveGoalStartProviderFn
+	previousWorkspace := goalStartWorkspaceFn
+	t.Cleanup(func() {
+		resolveGoalStartProviderFn = previousProviderResolver
+		goalStartWorkspaceFn = previousWorkspace
+	})
+	tests := []struct {
+		name          string
+		args          []string
+		provider      string
+		wantError     string
+		wantProviders int
+	}{
+		{name: "ox retention omitted", args: []string{"--model", "stealth/ox-alpha", "probe"}, wantError: "requires either", wantProviders: 0},
+		{name: "data policy without retention", args: []string{"--model", "stealth/ox-alpha", "--openrouter-data-collection", "deny", "probe"}, wantError: "requires --openrouter-zdr or --openrouter-no-zdr", wantProviders: 0},
+		{name: "unqualified strict model", args: []string{"--model", "ox-alpha", "--openrouter-zdr", "probe"}, wantError: "canonical provider/model", wantProviders: 0},
+		{name: "non zdr data policy omitted", args: []string{"--model", "stealth/ox-alpha", "--openrouter-no-zdr", "probe"}, provider: "openrouter", wantError: "data_collection_policy_missing", wantProviders: 1},
+		{name: "legacy missing license", args: []string{"--model", "openai/gpt-5", "probe"}, wantError: "license_missing", wantProviders: 0},
+		{name: "strict unsupported provider", args: []string{"--model", "stealth/ox-alpha", "--openrouter-zdr", "probe"}, provider: "anthropic", wantError: "zdr_unenforceable", wantProviders: 1},
+		{name: "explicit false rejected", args: []string{"--model", "stealth/ox-alpha", "--openrouter-zdr=false", "probe"}, wantError: "without an explicit false", wantProviders: 0},
+		{name: "strict does not require license", args: []string{"--model", "stealth/ox-alpha", "--openrouter-zdr", "probe"}, provider: "openrouter", wantProviders: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			t.Setenv(envBuckleyDataDir, dataDir)
+			workspace := t.TempDir()
+			goalStartWorkspaceFn = func() (string, error) { return workspace, nil }
+			providerCalls := 0
+			resolveGoalStartProviderFn = func(string) (string, error) {
+				providerCalls++
+				return tt.provider, nil
+			}
+			err := runGoalStart(tt.args)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("runGoalStart: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("runGoalStart error = %v, want %q", err, tt.wantError)
+			}
+			if providerCalls != tt.wantProviders {
+				t.Fatalf("provider resolver calls = %d, want %d", providerCalls, tt.wantProviders)
+			}
+			if tt.wantError != "" {
+				if _, statErr := os.Stat(filepath.Join(dataDir, "ledger.db")); !os.IsNotExist(statErr) {
+					t.Fatalf("blocked intake created ledger state: %v", statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRunGoalStart_ModelDataPolicyIgnoresPermissiveUserOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	overrideDir := filepath.Join(home, ".buckley", "rules", "runtime")
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overrideDir, "model_data_policy.arb"), []byte(permissiveModelDataPolicyOverride), 0o644); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+	dataDir := t.TempDir()
+	t.Setenv(envBuckleyDataDir, dataDir)
+	previousProviderResolver := resolveGoalStartProviderFn
+	previousWorkspace := goalStartWorkspaceFn
+	workspace := t.TempDir()
+	providerCalls := 0
+	resolveGoalStartProviderFn = func(string) (string, error) {
+		providerCalls++
+		return "openrouter", nil
+	}
+	goalStartWorkspaceFn = func() (string, error) { return workspace, nil }
+	t.Cleanup(func() {
+		resolveGoalStartProviderFn = previousProviderResolver
+		goalStartWorkspaceFn = previousWorkspace
+	})
+
+	err := runGoalStart([]string{"--model", "openai/gpt-5", "must remain blocked"})
+	if err == nil || !strings.Contains(err.Error(), "license_missing") {
+		t.Fatalf("runGoalStart error = %v, embedded denial must beat override", err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("provider resolver calls = %d, want zero for legacy gate", providerCalls)
+	}
+	if _, statErr := os.Stat(filepath.Join(dataDir, "ledger.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("blocked override created ledger state: %v", statErr)
+	}
+}
+
+func TestRunGoalRun_ExternalBackendPolicyBlocksBeforeBackendConstruction(t *testing.T) {
+	previousBackendFor := goalBackendForFn
+	previousWorkspace := goalRunWorkspaceFn
+	t.Cleanup(func() {
+		goalBackendForFn = previousBackendFor
+		goalRunWorkspaceFn = previousWorkspace
+	})
+	licenseBytes := readBuckleyLicenseForTest(t)
+	tests := []struct {
+		name       string
+		goal       func(*testing.T, string) goalloop.Goal
+		mutate     func(*testing.T, string)
+		wantReason string
+	}{
+		{
+			name: "strict zdr explicit contract",
+			goal: func(_ *testing.T, workspace string) goalloop.Goal {
+				return goalloop.Goal{Statement: "strict", WorkspaceRoot: workspace, ModelRequest: goalloop.GoalModelRequest{
+					PolicyVersion: goalloop.GoalModelPolicyVersionV1, Policy: "strict_zdr", PolicyAction: "allow", PolicyReasonCode: "zdr_enforced",
+					Model: "stealth/ox-alpha", RetentionMode: goalloop.GoalRetentionZDR, OpenRouterZDR: true,
+				}}
+			},
+			wantReason: "explicit_model_policy_unenforceable",
+		},
+		{
+			name: "bound oss license changed",
+			goal: func(t *testing.T, workspace string) goalloop.Goal {
+				if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), licenseBytes, 0o644); err != nil {
+					t.Fatalf("write license: %v", err)
+				}
+				inspection, err := goalloop.InspectWorkspaceLicense(workspace)
+				if err != nil {
+					t.Fatalf("InspectWorkspaceLicense: %v", err)
+				}
+				return goalloop.Goal{Statement: "oss", WorkspaceRoot: workspace, ModelRequest: goalloop.GoalModelRequest{
+					PolicyVersion: goalloop.GoalModelPolicyVersionV1, Policy: "oss_legacy", PolicyAction: "allow", PolicyReasonCode: "oss_license_verified",
+					RetentionMode: goalloop.GoalRetentionLegacy, WorkspaceLicense: inspection.Evidence,
+				}}
+			},
+			mutate: func(t *testing.T, workspace string) {
+				if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), []byte("Proprietary and confidential. All rights reserved.\n"), 0o644); err != nil {
+					t.Fatalf("replace license: %v", err)
+				}
+			},
+			wantReason: "explicit_model_policy_unenforceable",
+		},
+		{
+			name: "legacy missing license",
+			goal: func(_ *testing.T, workspace string) goalloop.Goal {
+				return goalloop.Goal{Statement: "legacy", WorkspaceRoot: workspace}
+			},
+			wantReason: "license_missing",
+		},
+		{
+			name: "legacy license changed to proprietary",
+			goal: func(t *testing.T, workspace string) goalloop.Goal {
+				if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), licenseBytes, 0o644); err != nil {
+					t.Fatalf("write license: %v", err)
+				}
+				return goalloop.Goal{Statement: "legacy", WorkspaceRoot: workspace}
+			},
+			mutate: func(t *testing.T, workspace string) {
+				if err := os.WriteFile(filepath.Join(workspace, "LICENSE"), []byte("Proprietary and confidential. All rights reserved.\n"), 0o644); err != nil {
+					t.Fatalf("replace license: %v", err)
+				}
+			},
+			wantReason: "license_proprietary",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			t.Setenv(envBuckleyDataDir, dataDir)
+			workspace := t.TempDir()
+			goalRunWorkspaceFn = func() (string, error) { return workspace, nil }
+			stores, cleanup, err := openGoalStores()
+			if err != nil {
+				t.Fatalf("openGoalStores: %v", err)
+			}
+			loop, err := goalloop.New(goalloop.Config{Ledger: stores.ledger, Checkpoints: stores.checkpoints, SessionID: "goal-cli"})
+			if err != nil {
+				t.Fatalf("goalloop.New: %v", err)
+			}
+			intake, err := loop.Start(context.Background(), tt.goal(t, workspace))
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			cleanup()
+			if tt.mutate != nil {
+				tt.mutate(t, workspace)
+			}
+			backendConstructions := 0
+			goalBackendForFn = func(string) (ralph.Backend, error) {
+				backendConstructions++
+				return nil, fmt.Errorf("must not construct backend")
+			}
+			err = runGoalRun([]string{"--backend", "claude", intake.RunID})
+			if err == nil || !strings.Contains(err.Error(), tt.wantReason) {
+				t.Fatalf("runGoalRun error = %v, want %q", err, tt.wantReason)
+			}
+			if backendConstructions != 0 {
+				t.Fatalf("backend constructions = %d, want zero", backendConstructions)
+			}
+			checkStores, checkCleanup, err := openGoalStores()
+			if err != nil {
+				t.Fatalf("reopen stores: %v", err)
+			}
+			defer checkCleanup()
+			events, err := checkStores.ledger.ListEvents(context.Background(), runledger.EventQuery{RunID: intake.RunID, Types: []string{runledger.EventControllerDecision}})
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("blocked external preflight appended controller events: %+v", events)
+			}
+		})
+	}
+}
+
+const permissiveModelDataPolicyOverride = `
+outcome ModelDataPolicy {
+    action: string
+    reason_code: string
+    policy: string
+}
+
+strategy model_data_policy returns ModelDataPolicy {
+    else PermitEverything {
+        action: "allow",
+        reason_code: "override_allow",
+        policy: "oss_legacy",
+    }
+}
+`
 
 func TestEnsureDurableGoalRunOpen_RejectsTerminalBeforeRuntimeMutation(t *testing.T) {
 	ledger := newGoalTestLedger(t)

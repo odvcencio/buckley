@@ -110,6 +110,80 @@ func (t *RuntimeStateTracker) GetAgentRuns(sessionID string) []AgentRun {
 	return buildAgentRunTree(sess.agentRuns)
 }
 
+// MergeAgentRuns joins durable run rows with the telemetry-derived live
+// overlay. Durable nodes are the base projection, while live nodes contribute
+// fresher fields for the same stable run ID. The result is rebuilt into a
+// deterministic parent/child tree so a run cannot be rendered twice when a
+// worker is both persisted and currently attached.
+func MergeAgentRuns(durable, live []AgentRun) []AgentRun {
+	if len(durable) == 0 && len(live) == 0 {
+		return nil
+	}
+
+	nodes := make(map[string]AgentRun, len(durable)+len(live))
+	var add func([]AgentRun)
+	add = func(runs []AgentRun) {
+		for _, run := range runs {
+			children := run.Children
+			run.Children = nil
+			if strings.TrimSpace(run.ID) != "" {
+				if existing, ok := nodes[run.ID]; ok {
+					run = mergeAgentRun(existing, run)
+				}
+				nodes[run.ID] = run
+			}
+			add(children)
+		}
+	}
+	add(durable)
+	add(live)
+	return buildAgentRunTree(nodes)
+}
+
+func mergeAgentRun(base, overlay AgentRun) AgentRun {
+	merged := base
+	baseTerminal := isTerminalAgentStatus(base.Status)
+	if strings.TrimSpace(overlay.ParentID) != "" && strings.TrimSpace(base.ParentID) == "" {
+		merged.ParentID = overlay.ParentID
+	}
+	merged.ParentSessionID = firstNonEmpty(overlay.ParentSessionID, base.ParentSessionID)
+	merged.Agent = firstNonEmpty(overlay.Agent, base.Agent)
+	merged.Persona = firstNonEmpty(overlay.Persona, base.Persona)
+	merged.Model = firstNonEmpty(overlay.Model, base.Model)
+	switch {
+	case base.TaskIsID && strings.TrimSpace(base.Task) != "":
+		merged.Task = base.Task
+		merged.TaskIsID = true
+	case overlay.TaskIsID && strings.TrimSpace(overlay.Task) != "":
+		merged.Task = overlay.Task
+		merged.TaskIsID = true
+	case strings.TrimSpace(overlay.Task) != "":
+		merged.Task = overlay.Task
+		merged.TaskIsID = false
+	}
+	overlayStatus := overlay.Status
+	if !baseTerminal && !base.UpdatedAt.IsZero() && !overlay.UpdatedAt.IsZero() && overlay.UpdatedAt.Before(base.UpdatedAt) {
+		overlayStatus = ""
+	}
+	merged.Status = mergeAgentStatus(base.Status, overlayStatus)
+	if !overlay.StartedAt.IsZero() && (base.StartedAt.IsZero() || overlay.StartedAt.Before(base.StartedAt)) {
+		merged.StartedAt = overlay.StartedAt
+	}
+	if !baseTerminal && !overlay.UpdatedAt.IsZero() && (base.UpdatedAt.IsZero() || !overlay.UpdatedAt.Before(base.UpdatedAt)) {
+		merged.UpdatedAt = overlay.UpdatedAt
+	}
+	return merged
+}
+
+func mergeAgentStatus(base, overlay string) string {
+	base = normalizeAgentStatus(base)
+	overlay = normalizeAgentStatus(overlay)
+	if isTerminalAgentStatus(base) {
+		return base
+	}
+	return firstNonEmpty(overlay, base, "running")
+}
+
 // SetStreaming directly sets the streaming state for a session.
 // This is called by the orchestrator/controller when streaming starts/ends.
 func (t *RuntimeStateTracker) SetStreaming(sessionID string, streaming bool) {
@@ -420,7 +494,7 @@ func normalizeAgentStatus(status string) string {
 
 func isTerminalAgentStatus(status string) bool {
 	switch normalizeAgentStatus(status) {
-	case "completed", "failed", "cancelled":
+	case "completed", "failed", "cancelled", "blocked":
 		return true
 	default:
 		return false

@@ -13,6 +13,7 @@ import (
 type DelegateTool struct {
 	dispatcher  *BatchDispatcher
 	ctxProvider func() context.Context
+	onResults   func([]BatchResult)
 }
 
 // NewDelegateTool constructs a delegate tool.
@@ -35,6 +36,10 @@ func (t *DelegateTool) Parameters() builtin.ParameterSchema {
 			"task": {
 				Type:        "string",
 				Description: "Task description for the sub-agent",
+			},
+			"id": {
+				Type:        "string",
+				Description: "Optional caller-supplied task ID to echo in the result",
 			},
 			"weight": {
 				Type:        "string",
@@ -83,11 +88,19 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 			AllowedTools:  tools,
 			SystemPrompt:  systemPrompt,
 			MaxIterations: maxIterations,
+			ID:            parseString(params["id"]),
 		}},
 		Parallel: false,
 	})
+	if t.onResults != nil {
+		t.onResults(results)
+	}
 	if err != nil {
-		return &builtin.Result{Success: false, Error: err.Error()}, nil
+		data := delegateResultData(results)
+		if data == nil {
+			return &builtin.Result{Success: false, Error: err.Error()}, nil
+		}
+		return &builtin.Result{Success: false, Data: data, Error: err.Error()}, nil
 	}
 	if len(results) == 0 {
 		return &builtin.Result{Success: false, Error: "no result returned"}, nil
@@ -101,6 +114,7 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 			"agent_id":       res.AgentID,
 			"model":          res.ModelUsed,
 			"error":          res.Error,
+			"task_id":        res.TaskID,
 		},
 		Error: res.Error,
 	}, nil
@@ -110,6 +124,7 @@ func (t *DelegateTool) Execute(params map[string]any) (*builtin.Result, error) {
 type DelegateBatchTool struct {
 	dispatcher  *BatchDispatcher
 	ctxProvider func() context.Context
+	onResults   func([]BatchResult)
 }
 
 // NewDelegateBatchTool constructs a delegate_batch tool.
@@ -164,6 +179,36 @@ func (t *DelegateBatchTool) Execute(params map[string]any) (*builtin.Result, err
 	}
 
 	results, execErr := t.dispatcher.Execute(ctx, BatchRequest{Tasks: tasks, Parallel: parallel})
+	if t.onResults != nil {
+		t.onResults(results)
+	}
+
+	result := &builtin.Result{
+		Success: execErr == nil,
+		Data:    delegateBatchResultData(results),
+	}
+	if execErr != nil {
+		result.Error = execErr.Error()
+	}
+	return result, nil
+}
+
+func delegateResultData(results []BatchResult) map[string]any {
+	if len(results) == 0 {
+		return nil
+	}
+	res := results[0]
+	return map[string]any{
+		"task_id":        res.TaskID,
+		"agent_id":       res.AgentID,
+		"summary":        res.Summary,
+		"scratchpad_key": res.RawKey,
+		"model":          res.ModelUsed,
+		"error":          res.Error,
+	}
+}
+
+func delegateBatchResultData(results []BatchResult) map[string]any {
 	data := make([]map[string]any, 0, len(results))
 	for _, res := range results {
 		data = append(data, map[string]any{
@@ -175,17 +220,7 @@ func (t *DelegateBatchTool) Execute(params map[string]any) (*builtin.Result, err
 			"error":          res.Error,
 		})
 	}
-
-	result := &builtin.Result{
-		Success: execErr == nil,
-		Data: map[string]any{
-			"results": data,
-		},
-	}
-	if execErr != nil {
-		result.Error = execErr.Error()
-	}
-	return result, nil
+	return map[string]any{"results": data}
 }
 
 // InspectTool returns scratchpad summaries for the coordinator.
@@ -256,6 +291,7 @@ func (t *InspectTool) Execute(params map[string]any) (*builtin.Result, error) {
 // SetAnswerTool updates the runtime answer state.
 type SetAnswerTool struct {
 	answer *Answer
+	onSet  func(context.Context, Answer)
 }
 
 // NewSetAnswerTool constructs a set_answer tool.
@@ -301,6 +337,10 @@ func (t *SetAnswerTool) Parameters() builtin.ParameterSchema {
 }
 
 func (t *SetAnswerTool) Execute(params map[string]any) (*builtin.Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *SetAnswerTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*builtin.Result, error) {
 	if t == nil || t.answer == nil {
 		return &builtin.Result{Success: false, Error: "answer state unavailable"}, nil
 	}
@@ -317,6 +357,13 @@ func (t *SetAnswerTool) Execute(params map[string]any) (*builtin.Result, error) 
 	t.answer.Artifacts = parseStringSlice(params["artifacts"])
 	t.answer.NextSteps = parseStringSlice(params["next_steps"])
 	t.answer.Normalize()
+
+	if t.onSet != nil {
+		snapshot := *t.answer
+		snapshot.Artifacts = append([]string(nil), t.answer.Artifacts...)
+		snapshot.NextSteps = append([]string(nil), t.answer.NextSteps...)
+		t.onSet(ctx, snapshot)
+	}
 
 	return &builtin.Result{Success: true}, nil
 }
@@ -371,6 +418,13 @@ func parseWeight(input any) Weight {
 		}
 	}
 	return Weight("")
+}
+
+func parseString(input any) string {
+	if value, ok := input.(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func parseStringSlice(input any) []string {

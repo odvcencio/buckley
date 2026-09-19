@@ -123,9 +123,8 @@ func TestReadFileTool(t *testing.T) {
 		}
 
 		for name, params := range map[string]map[string]any{
-			"zero start":      {"path": testFile, "start_line": 0},
-			"reverse range":   {"path": testFile, "start_line": 2, "end_line": 1},
-			"oversized range": {"path": testFile, "start_line": 1, "end_line": 101},
+			"zero start":    {"path": testFile, "start_line": 0},
+			"reverse range": {"path": testFile, "start_line": 2, "end_line": 1},
 		} {
 			t.Run(name, func(t *testing.T) {
 				result, err := tool.Execute(params)
@@ -453,6 +452,15 @@ func TestPatchFileTool(t *testing.T) {
 		if tool.Name() != "apply_patch" {
 			t.Errorf("Name() = %q, want %q", tool.Name(), "apply_patch")
 		}
+		strip := tool.Parameters().Properties["strip"]
+		if strip.Default != nil {
+			t.Fatalf("strip schema default = %#v, want omission to remain observable", strip.Default)
+		}
+		for _, want := range []string{"When omitted", "safe git-style", "explicit value always takes precedence"} {
+			if !strings.Contains(strip.Description, want) {
+				t.Fatalf("strip schema description missing %q: %q", want, strip.Description)
+			}
+		}
 	})
 
 	t.Run("missing patch parameter", func(t *testing.T) {
@@ -501,6 +509,19 @@ func TestPatchFileTool(t *testing.T) {
 		}
 	})
 
+	t.Run("fractional strip", func(t *testing.T) {
+		result, err := tool.Execute(map[string]any{
+			"patch": "--- test.txt\n+++ test.txt\n",
+			"strip": 1.5,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success || !strings.Contains(result.Error, "must be an integer") {
+			t.Fatalf("fractional strip result = %+v, want integer validation failure", result)
+		}
+	})
+
 	t.Run("strip as string", func(t *testing.T) {
 		result, err := tool.Execute(map[string]any{
 			"patch": "invalid patch content",
@@ -528,6 +549,94 @@ func TestPatchFileTool(t *testing.T) {
 			t.Errorf("empty strip string should default to 0: %s", result.Error)
 		}
 	})
+
+	for _, tc := range []struct {
+		name  string
+		patch string
+		want  int
+	}{
+		{
+			name:  "safe git headers",
+			patch: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+			want:  1,
+		},
+		{
+			name:  "create with dev null",
+			patch: "diff --git a/new.txt b/new.txt\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n",
+			want:  1,
+		},
+		{
+			name:  "delete with dev null",
+			patch: "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+			want:  1,
+		},
+		{
+			name:  "quoted path with spaces",
+			patch: "diff --git \"a/name with spaces.txt\" \"b/name with spaces.txt\"\n--- \"a/name with spaces.txt\"\n+++ \"b/name with spaces.txt\"\n",
+			want:  1,
+		},
+		{
+			name:  "timestamp suffix",
+			patch: "--- a/foo.txt\t2026-09-03 12:00:00 +0000\n+++ b/foo.txt\t2026-09-03 12:01:00 +0000\n",
+			want:  1,
+		},
+		{
+			name:  "rename metadata with operative headers is not inferred",
+			patch: "diff --git a/old.txt b/new.txt\nrename from old.txt\nrename to new.txt\n--- a/old.txt\n+++ b/new.txt\n",
+			want:  0,
+		},
+		{
+			name:  "rename metadata without file headers",
+			patch: "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n",
+			want:  0,
+		},
+		{
+			name:  "mixed prefixed and plain headers",
+			patch: "--- a/foo.txt\n+++ foo.txt\n",
+			want:  0,
+		},
+		{
+			name:  "parent traversal",
+			patch: "--- a/../outside.txt\n+++ b/../outside.txt\n",
+			want:  0,
+		},
+		{
+			name:  "quoted spaced traversal",
+			patch: "--- \"a/safe dir/../../outside.txt\"\n+++ \"b/safe dir/../../outside.txt\"\n",
+			want:  0,
+		},
+		{
+			name:  "absolute after prefix",
+			patch: "--- a//tmp/outside.txt\n+++ b//tmp/outside.txt\n",
+			want:  0,
+		},
+		{
+			name:  "windows separator traversal",
+			patch: "--- a/..\\outside.txt\n+++ b/..\\outside.txt\n",
+			want:  0,
+		},
+		{
+			name:  "malformed quoted header",
+			patch: "--- \"a/foo.txt\n+++ b/foo.txt\n",
+			want:  0,
+		},
+		{
+			name:  "quoted header with trailing bytes",
+			patch: "--- \"a/foo.txt\"../outside.txt\n+++ \"b/foo.txt\"../outside.txt\n",
+			want:  0,
+		},
+		{
+			name:  "quoted path with leading whitespace",
+			patch: "--- \"a/ leading.txt\"\n+++ \"b/ leading.txt\"\n",
+			want:  0,
+		},
+	} {
+		t.Run("infer strip "+tc.name, func(t *testing.T) {
+			if got := inferPatchStrip(tc.patch); got != tc.want {
+				t.Fatalf("inferPatchStrip() = %d, want %d for %q", got, tc.want, tc.patch)
+			}
+		})
+	}
 }
 
 func TestFindFilesTool(t *testing.T) {

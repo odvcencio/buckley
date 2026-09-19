@@ -1,0 +1,30 @@
+[
+  {
+    "item": "array",
+    "path": "pkg/encoding/toon/codec_test.go",
+    "start_line": 51,
+    "end_line": 51,
+    "quote": "\"results[3]{key,type,summary}:\""
+  },
+  {
+    "item": "object",
+    "path": "pkg/encoding/toon/codec_test.go",
+    "start_line": 56,
+    "end_line": 56,
+    "quote": "\"data{success,error}:\""
+  },
+  {
+    "item": "mixed",
+    "path": "pkg/encoding/toon/codec_test.go",
+    "start_line": 71,
+    "end_line": 71,
+    "quote": "\"Here are the results:\\nresults[2]{name,value}:\\n  alice,100\\n  bob,200\""
+  },
+  {
+    "item": "empty",
+    "path": "pkg/encoding/toon/codec_test.go",
+    "start_line": 76,
+    "end_line": 76,
+    "quote": "\"\""
+  }
+]

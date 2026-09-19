@@ -3,8 +3,14 @@ package lsp
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	pb "m31labs.dev/buckley/pkg/acp/proto"
 	buckleyversion "m31labs.dev/buckley/pkg/version"
 )
@@ -364,6 +370,188 @@ func TestLSPBridge_ProposeApply_NotConnected(t *testing.T) {
 		Context:   &pb.EditorContext{Document: &pb.DocumentSnapshot{Uri: "file:///tmp/x", Content: "x"}},
 	}); err == nil {
 		t.Fatal("UpdateEditorState expected error when not initialized")
+	}
+}
+
+func TestBridge_HandleTextQuery_OrdinaryErrorAndNilResponseAreSafe(t *testing.T) {
+	bridge := newInitializedBridgeForBoundaryTest(t)
+	const secret = "hostile text-query secret"
+	bridge.grpcClient = &mockAgentCommunicationClient{
+		sendMessageFunc: func(context.Context, *pb.SendMessageRequest, ...grpc.CallOption) (*pb.SendMessageResponse, error) {
+			return nil, status.Error(codes.Internal, "raw upstream "+secret)
+		},
+	}
+
+	response, err := bridge.HandleTextQuery(context.Background(), "hello")
+	if response != "" {
+		t.Fatalf("response = %q, want no accepted text", response)
+	}
+	if err == nil || err.Error() != "coordinator error" {
+		t.Fatalf("error = %v, want stable coordinator error", err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("ordinary error unwrap = %v, want nil", errors.Unwrap(err))
+	}
+
+	bridge.grpcClient = &mockAgentCommunicationClient{
+		sendMessageFunc: func(context.Context, *pb.SendMessageRequest, ...grpc.CallOption) (*pb.SendMessageResponse, error) {
+			return nil, nil
+		},
+	}
+	response, err = bridge.HandleTextQuery(context.Background(), "hello")
+	if response != "" {
+		t.Fatalf("nil response text = %q, want none", response)
+	}
+	if err == nil || err.Error() != "empty response from coordinator" {
+		t.Fatalf("nil response error = %v, want stable empty response error", err)
+	}
+}
+
+func TestBridge_HandleTextQuery_TypedPartialSanitizesCause(t *testing.T) {
+	bridge := newInitializedBridgeForBoundaryTest(t)
+	const secret = "hostile text partial cause"
+	bridge.grpcClient = &mockAgentCommunicationClient{
+		sendMessageFunc: func(context.Context, *pb.SendMessageRequest, ...grpc.CallOption) (*pb.SendMessageResponse, error) {
+			return nil, typedPartialStatusError(t, codes.ResourceExhausted, "raw text "+secret, "public text draft")
+		},
+	}
+
+	response, err := bridge.HandleTextQuery(context.Background(), "hello")
+	if response != "" {
+		t.Fatalf("response = %q, want no accepted text", response)
+	}
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("typed partial code = %v, want ResourceExhausted", status.Code(err))
+	}
+	if incomplete.Result.GetPartialResponse().GetContent() != "public text draft" {
+		t.Fatalf("partial response = %+v", incomplete.Result.GetPartialResponse())
+	}
+}
+
+func TestBridge_EditorUnaryErrorsAreSafeAndFailClosed(t *testing.T) {
+	bridge := newInitializedBridgeForBoundaryTest(t)
+	const secret = "hostile editor secret"
+	client := &mockEditorBridgeClient{
+		proposeFunc: func(context.Context, *pb.ProposeEditsRequest, ...grpc.CallOption) (*pb.ProposeEditsResponse, error) {
+			return &pb.ProposeEditsResponse{Summary: "must not be accepted"}, status.Error(codes.PermissionDenied, "raw propose "+secret)
+		},
+		applyFunc: func(context.Context, *pb.ApplyEditsRequest, ...grpc.CallOption) (*pb.ApplyEditsResponse, error) {
+			return &pb.ApplyEditsResponse{Applied: true, Message: "must not be accepted"}, status.Error(codes.Internal, "raw apply "+secret)
+		},
+		updateFunc: func(context.Context, *pb.UpdateEditorStateRequest, ...grpc.CallOption) (*pb.UpdateEditorStateResponse, error) {
+			return &pb.UpdateEditorStateResponse{PlanState: "must not be accepted"}, errors.New("raw update " + secret)
+		},
+	}
+	bridge.grpcClient = client
+
+	proposed, err := bridge.ProposeEdits(context.Background(), &pb.ProposeEditsRequest{Instruction: "x"})
+	if proposed != nil || err == nil || err.Error() != "propose edits failed" {
+		t.Fatalf("ProposeEdits response=%+v error=%v, want nil safe failure", proposed, err)
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("ProposeEdits code = %v, want PermissionDenied", status.Code(err))
+	}
+	assertErrorChainOmits(t, err, secret)
+
+	applied, err := bridge.ApplyEdits(context.Background(), &pb.ApplyEditsRequest{Edits: []*pb.TextEdit{{Uri: "file:///tmp/x", NewText: "x"}}})
+	if applied != nil || err == nil || err.Error() != "apply edits failed" {
+		t.Fatalf("ApplyEdits response=%+v error=%v, want nil safe failure", applied, err)
+	}
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("ApplyEdits code = %v, want Internal", status.Code(err))
+	}
+	assertErrorChainOmits(t, err, secret)
+
+	state, err := bridge.UpdateEditorState(context.Background(), &pb.UpdateEditorStateRequest{})
+	if state != nil || err == nil || err.Error() != "update editor state failed" {
+		t.Fatalf("UpdateEditorState response=%+v error=%v, want nil safe failure", state, err)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("UpdateEditorState unwrap = %v, want nil", errors.Unwrap(err))
+	}
+	assertErrorChainOmits(t, err, secret)
+}
+
+func TestBridge_EditorUnaryNilSuccessResponsesAreSafe(t *testing.T) {
+	bridge := newInitializedBridgeForBoundaryTest(t)
+	bridge.grpcClient = &mockEditorBridgeClient{
+		proposeFunc: func(context.Context, *pb.ProposeEditsRequest, ...grpc.CallOption) (*pb.ProposeEditsResponse, error) {
+			return nil, nil
+		},
+		applyFunc: func(context.Context, *pb.ApplyEditsRequest, ...grpc.CallOption) (*pb.ApplyEditsResponse, error) {
+			return nil, nil
+		},
+		updateFunc: func(context.Context, *pb.UpdateEditorStateRequest, ...grpc.CallOption) (*pb.UpdateEditorStateResponse, error) {
+			return nil, nil
+		},
+	}
+
+	if response, err := bridge.ProposeEdits(context.Background(), &pb.ProposeEditsRequest{Instruction: "x"}); response != nil || err == nil || err.Error() != "propose edits unavailable" {
+		t.Fatalf("ProposeEdits nil success response=%+v error=%v", response, err)
+	}
+	if response, err := bridge.ApplyEdits(context.Background(), &pb.ApplyEditsRequest{}); response != nil || err == nil || err.Error() != "apply edits unavailable" {
+		t.Fatalf("ApplyEdits nil success response=%+v error=%v", response, err)
+	}
+	if response, err := bridge.UpdateEditorState(context.Background(), &pb.UpdateEditorStateRequest{}); response != nil || err == nil || err.Error() != "update editor state unavailable" {
+		t.Fatalf("UpdateEditorState nil success response=%+v error=%v", response, err)
+	}
+}
+
+func newInitializedBridgeForBoundaryTest(t *testing.T) *Bridge {
+	t.Helper()
+	bridge, err := NewBridge(&BridgeConfig{CoordinatorAddr: "localhost:50051", AgentID: "test-agent"})
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	if _, err := bridge.Initialize(context.Background(), InitializeParams{}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := bridge.Initialized(context.Background()); err != nil {
+		t.Fatalf("Initialized: %v", err)
+	}
+	return bridge
+}
+
+type mockEditorBridgeClient struct {
+	pb.AgentCommunicationClient
+	proposeFunc func(context.Context, *pb.ProposeEditsRequest, ...grpc.CallOption) (*pb.ProposeEditsResponse, error)
+	applyFunc   func(context.Context, *pb.ApplyEditsRequest, ...grpc.CallOption) (*pb.ApplyEditsResponse, error)
+	updateFunc  func(context.Context, *pb.UpdateEditorStateRequest, ...grpc.CallOption) (*pb.UpdateEditorStateResponse, error)
+}
+
+func (m *mockEditorBridgeClient) ProposeEdits(ctx context.Context, req *pb.ProposeEditsRequest, opts ...grpc.CallOption) (*pb.ProposeEditsResponse, error) {
+	if m.proposeFunc != nil {
+		return m.proposeFunc(ctx, req, opts...)
+	}
+	return nil, errors.New("proposeFunc not set")
+}
+
+func (m *mockEditorBridgeClient) ApplyEdits(ctx context.Context, req *pb.ApplyEditsRequest, opts ...grpc.CallOption) (*pb.ApplyEditsResponse, error) {
+	if m.applyFunc != nil {
+		return m.applyFunc(ctx, req, opts...)
+	}
+	return nil, errors.New("applyFunc not set")
+}
+
+func (m *mockEditorBridgeClient) UpdateEditorState(ctx context.Context, req *pb.UpdateEditorStateRequest, opts ...grpc.CallOption) (*pb.UpdateEditorStateResponse, error) {
+	if m.updateFunc != nil {
+		return m.updateFunc(ctx, req, opts...)
+	}
+	return nil, errors.New("updateFunc not set")
+}
+
+func assertErrorChainOmits(t *testing.T, err error, secret string) {
+	t.Helper()
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if strings.Contains(current.Error(), secret) {
+			t.Fatalf("error chain leaked secret in %T: %q", current, current.Error())
+		}
 	}
 }
 

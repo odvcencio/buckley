@@ -2,6 +2,8 @@ package rules
 
 import (
 	"testing"
+
+	"m31labs.dev/buckley/pkg/types"
 )
 
 // -----------------------------------------------------------------------------
@@ -75,6 +77,37 @@ func TestEngine_EvalStrategy_Approval(t *testing.T) {
 	}
 	if action != "allow" {
 		t.Errorf("got action %q, want %q", action, "allow")
+	}
+}
+
+func TestEngine_EvalStrategy_RuntimeProtocolReadOnlyReserve(t *testing.T) {
+	e := mustNewTestEngine(t)
+
+	result, err := e.EvalStrategy("runtime/protocol", "compile", map[string]any{
+		"model.class":                    "weak",
+		"model.code_mode":                true,
+		"task.class":                     "coding",
+		"task.parallelizable":            false,
+		"task.risk":                      "medium",
+		"rollout.dynamic":                true,
+		"rollout.auto_code_mode":         false,
+		"model.parallel_tool_calls":      false,
+		"model.continuation":             false,
+		"model.tool_reliability":         0.7,
+		"model.continuation_reliability": 0.0,
+	})
+	if err != nil {
+		t.Fatalf("EvalStrategy: %v", err)
+	}
+	adapted := types.StrategyResult{Params: result.Params}
+	if adapted.String("name") != "weak_typed_stages" {
+		t.Fatalf("policy outcome = %q, want weak_typed_stages", adapted.String("name"))
+	}
+	if adapted.Int("max_turns") != 14 {
+		t.Fatalf("max_turns = %d, want 14", adapted.Int("max_turns"))
+	}
+	if adapted.Int("read_only_warning_at") != 3 || adapted.Int("read_only_action_at") != 5 || adapted.Int("max_read_only_calls") != 9 {
+		t.Fatalf("read-only reserve = %d/%d/%d, want 3/5/9", adapted.Int("read_only_warning_at"), adapted.Int("read_only_action_at"), adapted.Int("max_read_only_calls"))
 	}
 }
 
@@ -644,6 +677,24 @@ func TestEngine_EvalStrategy_Reasoning_AllScenarios(t *testing.T) {
 			wantEffort: "high",
 		},
 		{
+			name: "commit task + model supports: low",
+			facts: map[string]any{
+				"reasoning": map[string]any{"config": "auto"},
+				"task":      map[string]any{"phase": "execution", "name": "commit"},
+				"model":     map[string]any{"supports_reasoning": true},
+			},
+			wantEffort: "low",
+		},
+		{
+			name: "pr task + model supports: medium",
+			facts: map[string]any{
+				"reasoning": map[string]any{"config": "auto"},
+				"task":      map[string]any{"phase": "execution", "name": "pr"},
+				"model":     map[string]any{"supports_reasoning": true},
+			},
+			wantEffort: "medium",
+		},
+		{
 			name: "execution phase + no reasoning: none",
 			facts: map[string]any{
 				"reasoning": map[string]any{"config": "auto"},
@@ -677,10 +728,13 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 	e := mustNewTestEngine(t)
 
 	tests := []struct {
-		name           string
-		facts          map[string]any
-		wantMaxRetries float64
-		wantContextBud float64
+		name                string
+		facts               map[string]any
+		wantMaxRetries      float64
+		wantContextBud      float64
+		wantMaxOutputTokens float64
+		wantTemperature     float64
+		wantRequireTool     bool
 	}{
 		{
 			name: "commit command",
@@ -688,8 +742,11 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "commit",
 				"token_count": 1000,
 			},
-			wantMaxRetries: 3,
-			wantContextBud: 8000,
+			wantMaxRetries:      3,
+			wantContextBud:      8000,
+			wantMaxOutputTokens: 4096,
+			wantTemperature:     0.2,
+			wantRequireTool:     true,
 		},
 		{
 			name: "pr command",
@@ -697,8 +754,11 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "pr",
 				"token_count": 5000,
 			},
-			wantMaxRetries: 3,
-			wantContextBud: 16000,
+			wantMaxRetries:      3,
+			wantContextBud:      16000,
+			wantMaxOutputTokens: 8192,
+			wantTemperature:     0.2,
+			wantRequireTool:     true,
 		},
 		{
 			name: "review command",
@@ -706,8 +766,11 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "review",
 				"token_count": 10000,
 			},
-			wantMaxRetries: 2,
-			wantContextBud: 32000,
+			wantMaxRetries:      2,
+			wantContextBud:      32000,
+			wantMaxOutputTokens: 0,
+			wantTemperature:     0,
+			wantRequireTool:     false,
 		},
 		{
 			name: "PR review command",
@@ -715,8 +778,11 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "review-pr",
 				"token_count": 10000,
 			},
-			wantMaxRetries: 2,
-			wantContextBud: 32000,
+			wantMaxRetries:      2,
+			wantContextBud:      32000,
+			wantMaxOutputTokens: 0,
+			wantTemperature:     0,
+			wantRequireTool:     false,
 		},
 		{
 			name: "unknown command: default config",
@@ -724,8 +790,11 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 				"command":     "hunt",
 				"token_count": 1000,
 			},
-			wantMaxRetries: 2,
-			wantContextBud: 8000,
+			wantMaxRetries:      2,
+			wantContextBud:      8000,
+			wantMaxOutputTokens: 0,
+			wantTemperature:     0,
+			wantRequireTool:     false,
 		},
 	}
 
@@ -748,6 +817,27 @@ func TestEngine_EvalStrategy_Oneshot_AllScenarios(t *testing.T) {
 			}
 			if v, ok := contextBudget.(float64); !ok || v != tt.wantContextBud {
 				t.Errorf("context_budget: got %v (%T), want %v", contextBudget, contextBudget, tt.wantContextBud)
+			}
+			maxOutputTokens, ok := result.Params["max_output_tokens"]
+			if !ok {
+				t.Fatal("expected 'max_output_tokens' in result params")
+			}
+			if v, ok := maxOutputTokens.(float64); !ok || v != tt.wantMaxOutputTokens {
+				t.Errorf("max_output_tokens: got %v (%T), want %v", maxOutputTokens, maxOutputTokens, tt.wantMaxOutputTokens)
+			}
+			temperature, ok := result.Params["temperature"]
+			if !ok {
+				t.Fatal("expected 'temperature' in result params")
+			}
+			if v, ok := temperature.(float64); !ok || v != tt.wantTemperature {
+				t.Errorf("temperature: got %v (%T), want %v", temperature, temperature, tt.wantTemperature)
+			}
+			requireTool, ok := result.Params["require_tool"]
+			if !ok {
+				t.Fatal("expected 'require_tool' in result params")
+			}
+			if v, ok := requireTool.(bool); !ok || v != tt.wantRequireTool {
+				t.Errorf("require_tool: got %v (%T), want %v", requireTool, requireTool, tt.wantRequireTool)
 			}
 		})
 	}

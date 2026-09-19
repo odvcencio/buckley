@@ -114,11 +114,17 @@ func (pc *PRCreator) generateDescription(plan *Plan, commits []string) (string, 
 
 	resp, err := pc.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
+		if resp != nil {
+			return "", NewIncompleteUtilityResponseError("PR description generation", publicUtilityDraftFromResponse(resp), firstUtilityFinishReason(resp), err)
+		}
 		return "", fmt.Errorf("PR description generation failed: %w", err)
 	}
 
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response from model")
+	}
+	if finishReason := firstUtilityFinishReason(resp); !utilityFinishReasonIsStop(finishReason) {
+		return "", NewIncompleteUtilityResponseError("PR description generation", publicUtilityDraftFromResponse(resp), finishReason, nil)
 	}
 
 	return model.ExtractTextContent(resp.Choices[0].Message.Content)

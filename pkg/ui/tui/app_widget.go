@@ -570,6 +570,7 @@ func (a *WidgetApp) showCommandPalette() {
 		{ID: "cancel", Category: "Session", Label: "Cancel Response", Shortcut: "/cancel"},
 		{ID: "steer", Category: "Session", Label: "Steer Active Response", Shortcut: "/steer"},
 		{ID: "queue", Category: "Session", Label: "Queue Follow-up", Shortcut: "/queue"},
+		{ID: "task", Category: "Session", Label: "Task Intent Request", Shortcut: "/task"},
 
 		// Navigation commands
 		{ID: "toggle-sidebar", Category: "View", Label: "Toggle Navigator", Shortcut: "Ctrl+B"},
@@ -633,6 +634,7 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/cancel", Label: "/cancel", Description: "Cancel current response"},
 		{ID: "/steer ", Label: "/steer", Description: "Interrupt and redirect the active response"},
 		{ID: "/queue ", Label: "/queue", Description: "Queue a follow-up without interrupting"},
+		{ID: "/task mutation ", Label: "/task", Description: "Run a request with explicit task intent"},
 		{ID: "/agents", Label: "/agents", Description: "List subagent runs"},
 		{ID: "/agent spawn ", Label: "/agent spawn", Description: "Start a generic or named subagent"},
 		{ID: "/agent send ", Label: "/agent send", Description: "Command one, a group, or all subagents"},
@@ -1276,6 +1278,8 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 		a.prefillInput("/steer ")
 	case "queue":
 		a.prefillInput("/queue ")
+	case "task":
+		a.prefillInput("/task mutation ")
 
 	// View commands
 	case "toggle-sidebar":

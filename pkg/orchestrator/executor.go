@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -579,6 +580,10 @@ func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
 		}
 		result, err := e.reviewer.Review(task, builderResult)
 		if err != nil {
+			var incomplete *IncompleteReviewError
+			if errors.As(err, &incomplete) {
+				return err
+			}
 			if e.shouldSkipReviewErrors() {
 				fmt.Printf("Warning: review skipped due to error: %v\n", err)
 				return nil
@@ -757,10 +762,16 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 
 	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
 	if err != nil {
+		if resp != nil {
+			return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), firstRepairFinishReason(resp), err)
+		}
 		return "", err
 	}
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response choices from model")
+	}
+	if finishReason := firstRepairFinishReason(resp); !repairFinishReasonIsStop(finishReason) {
+		return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), finishReason, nil)
 	}
 
 	return model.ExtractTextContent(resp.Choices[0].Message.Content)
@@ -825,10 +836,16 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 
 	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
 	if err != nil {
+		if resp != nil {
+			return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), firstRepairFinishReason(resp), err)
+		}
 		return "", err
 	}
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response choices from model")
+	}
+	if finishReason := firstRepairFinishReason(resp); !repairFinishReasonIsStop(finishReason) {
+		return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), finishReason, nil)
 	}
 
 	return model.ExtractTextContent(resp.Choices[0].Message.Content)

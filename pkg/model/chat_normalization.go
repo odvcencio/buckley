@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -15,8 +16,17 @@ type pendingToolCall struct {
 	name string
 }
 
+type providerTransformOptions struct {
+	PreserveReasoningMessages bool
+}
+
 func normalizeProviderChatRequest(req ChatRequest, providerID string) ChatRequest {
-	req.Messages = normalizeChatMessages(req.Messages, providerID, req.Model)
+	return normalizeProviderChatRequestWithOptions(req, providerID, providerTransformOptions{})
+}
+
+func normalizeProviderChatRequestWithOptions(req ChatRequest, providerID string, opts providerTransformOptions) ChatRequest {
+	req.Messages = normalizeChatMessagesWithOptions(req.Messages, providerID, req.Model, opts)
+	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	if needsNoopToolForHistory(req, providerID) {
 		req.Tools = []map[string]any{noopToolDefinition()}
 		if strings.TrimSpace(req.ToolChoice) == "" {
@@ -29,7 +39,37 @@ func normalizeProviderChatRequest(req ChatRequest, providerID string) ChatReques
 	return req
 }
 
+// NormalizeReasoningConfig keeps provider wire requests on one reasoning
+// dialect: effort-based reasoning wins over a token budget when both are
+// present, while token-budget-only callers keep their budget.
+func NormalizeReasoningConfig(reasoning *ReasoningConfig) *ReasoningConfig {
+	if reasoning == nil {
+		return nil
+	}
+	normalized := *reasoning
+	normalized.Effort = strings.ToLower(strings.TrimSpace(normalized.Effort))
+	if normalized.Effort != "" {
+		normalized.MaxTokens = 0
+	}
+	if normalized.Enabled != nil {
+		enabled := *normalized.Enabled
+		normalized.Enabled = &enabled
+	}
+	if normalized.Exclude != nil {
+		exclude := *normalized.Exclude
+		normalized.Exclude = &exclude
+	}
+	if normalized.Effort == "" && normalized.MaxTokens == 0 && normalized.Enabled == nil && normalized.Exclude == nil {
+		return nil
+	}
+	return &normalized
+}
+
 func normalizeChatMessages(messages []Message, providerID, modelID string) []Message {
+	return normalizeChatMessagesWithOptions(messages, providerID, modelID, providerTransformOptions{})
+}
+
+func normalizeChatMessagesWithOptions(messages []Message, providerID, modelID string, opts providerTransformOptions) []Message {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -57,6 +97,13 @@ func normalizeChatMessages(messages []Message, providerID, modelID string) []Mes
 					}
 					if strings.TrimSpace(call.Function.Arguments) == "" {
 						call.Function.Arguments = "{}"
+					} else if !strings.HasPrefix(strings.TrimSpace(call.Function.Arguments), "{") || !json.Valid([]byte(call.Function.Arguments)) {
+						// Only wrap request history; raw transcript and dispatch
+						// arguments stay unchanged.
+						wrapped, _ := json.Marshal(map[string]string{
+							"_buckley_invalid_tool_arguments": call.Function.Arguments,
+						})
+						call.Function.Arguments = string(wrapped)
 					}
 
 					toolSeq++
@@ -77,7 +124,9 @@ func normalizeChatMessages(messages []Message, providerID, modelID string) []Mes
 				if strings.TrimSpace(msg.Reasoning) == "" {
 					continue
 				}
-				msg.Content = msg.Reasoning
+				if !opts.PreserveReasoningMessages {
+					msg.Content = msg.Reasoning
+				}
 			}
 		case "tool":
 			msg.ToolCallID = strings.TrimSpace(msg.ToolCallID)
@@ -99,7 +148,7 @@ func normalizeChatMessages(messages []Message, providerID, modelID string) []Mes
 			}
 		}
 
-		if !preservesReasoningMessages(providerID) {
+		if !preservesReasoningMessages(providerID, opts) {
 			msg.Reasoning = ""
 			msg.ReasoningDetails = nil
 		}
@@ -109,7 +158,10 @@ func normalizeChatMessages(messages []Message, providerID, modelID string) []Mes
 	return repairToolMessageSequence(normalized)
 }
 
-func preservesReasoningMessages(providerID string) bool {
+func preservesReasoningMessages(providerID string, opts providerTransformOptions) bool {
+	if opts.PreserveReasoningMessages {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(providerID)) {
 	case "openrouter":
 		return true
@@ -339,7 +391,11 @@ func needsNoopToolForHistory(req ChatRequest, providerID string) bool {
 	if len(req.Tools) > 0 {
 		return false
 	}
-	if !strings.Contains(strings.ToLower(providerID), "litellm") {
+	if req.ToolsCatalogConfirmedUnavailable {
+		return false
+	}
+	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	if providerID != "openai_compatible" && providerID != "litellm" {
 		return false
 	}
 	return hasToolCallHistory(req.Messages)

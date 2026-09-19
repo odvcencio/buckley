@@ -1,0 +1,145 @@
+{
+  "kind": "buckley.experiment.snapshot",
+  "version": "buckley-experiment-snapshot-v1",
+  "exporter": "buckley experiment snapshot exporter v1",
+  "exported_at": "2026-09-05T15:00:00Z",
+  "provenance": "retained supplied evaluation evidence; not re-executed/attested; export is not an atomic database snapshot; checksum covers snapshot JSON self-consistency only and is not execution attestation; exporter identity is not historical harness identity",
+  "experiment": {
+    "ID": "exp-v1-fixture",
+    "Name": "snapshot v1 fixture",
+    "Description": "synthetic retained fixture",
+    "Hypothesis": "retained rows compare offline",
+    "Task": {
+      "Prompt": "produce ok",
+      "Context": {
+        "case": "fixture"
+      },
+      "WorkingDir": ".",
+      "Timeout": 1000000000,
+      "Files": [
+        "pkg/example.go"
+      ],
+      "Scope": [
+        "pkg/..."
+      ]
+    },
+    "Variants": [
+      {
+        "ID": "variant-v1",
+        "Name": "fixture variant",
+        "ModelID": "provider/model",
+        "ProviderID": "provider",
+        "SystemPrompt": null,
+        "Temperature": null,
+        "MaxTokens": null,
+        "ToolsAllowed": [
+          "memory_echo"
+        ],
+        "CustomConfig": {
+          "seed": "9007199254740993"
+        },
+        "Files": null,
+        "Scope": null
+      }
+    ],
+    "Criteria": [
+      {
+        "ID": 1,
+        "Name": "contains ok",
+        "Type": "contains",
+        "Target": "ok",
+        "Weight": 1
+      }
+    ],
+    "Status": "completed",
+    "CreatedAt": "2026-09-05T15:00:00Z",
+    "CompletedAt": "2026-09-05T15:00:01Z"
+  },
+  "runs": [
+    {
+      "ID": "run-v1",
+      "ExperimentID": "exp-v1-fixture",
+      "VariantID": "variant-v1",
+      "SessionID": "session-v1",
+      "Branch": "experiment/v1",
+      "Status": "completed",
+      "Output": "ok retained full output",
+      "Files": [
+        "pkg/example.go"
+      ],
+      "Metrics": {
+        "DurationMs": 1000,
+        "PromptTokens": 10,
+        "CompletionTokens": 4,
+        "TotalCost": 0,
+        "ToolCalls": 1,
+        "ToolSuccesses": 1,
+        "ToolFailures": 0,
+        "FilesModified": 1,
+        "LinesChanged": 0
+      },
+      "Error": null,
+      "StartedAt": "2026-09-05T15:00:00Z",
+      "CompletedAt": "2026-09-05T15:00:01Z",
+      "InputManifest": {
+        "version": "experiment-run-input-v1",
+        "input_digest": "a7a2668096859675a4835ec89cb18e9c9a08e5140f7cf2ef2f47b294671242d6",
+        "workload_digest": "dad6c0130b15b6b5b0128192d224a228c78753ab0b0f5e863087cc814c805e9c",
+        "task": {
+          "prompt_hash": "ea0b39b1b494dd51630a2f86fc7d32f33ba6cf78dc57973279eb75461533d07e",
+          "context_hash": "4ff4e98132a70554a6af1eb52cf36fa904d3bd51e6d444a3409f04440c182bc2",
+          "working_dir": ".",
+          "effective_timeout_ms": 1000,
+          "files_hash": "60c0e6220f55e6522291135ecc365b185e8f06e5c1bb2d7a6fb93daa62934ebc",
+          "scope_hash": "901e9cc399636154af97346cb5b8cc8309bdf73e10cf0e3d81bdbaac78e495e0"
+        },
+        "variant": {
+          "id": "variant-v1",
+          "name": "fixture variant",
+          "requested_model_id": "provider/model",
+          "requested_provider_id": "provider",
+          "system_prompt_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "tools_allowed_hash": "db86752b784e1a9139acf90646d92398ca3bf5ff825906f9767114ab5342e637",
+          "custom_config_hash": "dd9d0720435ea2ff872f57c7eed808fbf7a1da4396086ca2deebc2f5383d6338",
+          "files_hash": "60c0e6220f55e6522291135ecc365b185e8f06e5c1bb2d7a6fb93daa62934ebc",
+          "scope_hash": "901e9cc399636154af97346cb5b8cc8309bdf73e10cf0e3d81bdbaac78e495e0"
+        },
+        "criteria": [
+          {
+            "id": 1,
+            "name": "contains ok",
+            "type": "contains",
+            "weight": 1,
+            "target_hash": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
+          }
+        ]
+      },
+      "ModelExecutions": [
+        {
+          "requested_model": "provider/model",
+          "selected_model": "provider/model",
+          "provider_id": "provider",
+          "response_model": "provider/model-release",
+          "response_id": "resp-v1"
+        }
+      ]
+    }
+  ],
+  "evaluations": {
+    "run-v1": [
+      {
+        "ID": 0,
+        "RunID": "run-v1",
+        "CriterionID": 1,
+        "Passed": true,
+        "Score": 1,
+        "Details": "ok retained",
+        "EvaluatedAt": "2026-09-05T15:00:01Z"
+      }
+    ]
+  },
+  "digest": {
+    "algorithm": "sha256",
+    "value": "5ffc8a8e94ecd28f86074c17e9b000ef33a3697d8b3c595f879d5d97e9df9a50"
+  }
+}

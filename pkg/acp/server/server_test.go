@@ -13,6 +13,8 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/coordination/coordinator"
 	"m31labs.dev/buckley/pkg/coordination/events"
+	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/rlm/configadapter"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -25,6 +27,107 @@ func TestNewServer(t *testing.T) {
 	require.NotNil(t, srv)
 
 	assert.NotNil(t, srv.coordinator)
+}
+
+func TestResolveRLMConfigAppliesConfiguredTiers(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Tiers = map[string]config.RLMTierConfig{
+		"light": {
+			Model:             "acp-light",
+			Provider:          "openrouter",
+			Models:            []string{"acp-light", "acp-fallback"},
+			MaxCostPerMillion: 2.5,
+			MinContextWindow:  24000,
+			Prefer:            []string{"quality", "cost"},
+			Requires:          []string{"extended_thinking"},
+		},
+	}
+
+	got := resolveRLMConfig(cfg)
+	light := got.Tiers[rlm.WeightLight]
+	assert.Equal(t, "acp-light", light.Model)
+	assert.Equal(t, "openrouter", light.Provider)
+	assert.Equal(t, []string{"acp-light", "acp-fallback"}, light.Models)
+	assert.Equal(t, 2.5, light.MaxCostPerMillion)
+	assert.Equal(t, 24000, light.MinContextWindow)
+	assert.Equal(t, []string{"quality", "cost"}, light.Prefer)
+	assert.Equal(t, []string{"extended_thinking"}, light.Requires)
+	assert.Contains(t, got.Tiers, rlm.WeightReasoning)
+
+	source := cfg.RLM.Tiers["light"]
+	source.Models[0] = "mutated-source"
+	source.Prefer[0] = "mutated-source"
+	source.Requires[0] = "mutated-source"
+	cfg.RLM.Tiers["light"] = source
+	assert.Equal(t, []string{"acp-light", "acp-fallback"}, got.Tiers[rlm.WeightLight].Models)
+	assert.Equal(t, []string{"quality", "cost"}, got.Tiers[rlm.WeightLight].Prefer)
+	assert.Equal(t, []string{"extended_thinking"}, got.Tiers[rlm.WeightLight].Requires)
+}
+
+func TestResolveRLMConfigTiersOnlyKeepsDefaultTrueBooleans(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Tiers = map[string]config.RLMTierConfig{
+		"light": {Models: []string{"acp-light"}},
+	}
+
+	got := resolveRLMConfig(cfg)
+
+	assert.True(t, got.Coordinator.StreamPartials)
+	assert.True(t, got.Scratchpad.PersistArtifacts)
+	assert.True(t, got.Scratchpad.PersistDecisions)
+	assert.Equal(t, []string{"acp-light"}, got.Tiers[rlm.WeightLight].Models)
+}
+
+func TestResolveRLMConfigMatchesSharedAdapter(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "defaults"},
+		{
+			name: "false compatibility progress option",
+			cfg: &config.Config{RLM: config.RLMConfig{
+				Coordinator: config.RLMCoordinatorConfig{Model: "coordinator", StreamPartials: false},
+				Scratchpad:  config.RLMScratchpadConfig{PersistArtifacts: false, PersistDecisions: false},
+			}},
+		},
+		{
+			name: "empty list override",
+			cfg: &config.Config{RLM: config.RLMConfig{Tiers: map[string]config.RLMTierConfig{
+				"light": {Models: []string{}, Prefer: []string{}, Requires: []string{}},
+			}}},
+		},
+		{
+			name: "tier pins caps and requirements",
+			cfg: &config.Config{RLM: config.RLMConfig{Tiers: map[string]config.RLMTierConfig{
+				"reasoning": {
+					Model:             "reasoning-pin",
+					MaxCostPerMillion: 18.5,
+					MinContextWindow:  196000,
+					Requires:          []string{"extended_thinking", "reasoning"},
+				},
+			}}},
+		},
+		{
+			name: "all active fields",
+			cfg: &config.Config{RLM: config.RLMConfig{
+				Coordinator: config.RLMCoordinatorConfig{
+					Model: "coordinator", MaxIterations: 17, MaxTokensBudget: 12345,
+					MaxWallTime: 42 * time.Second, ConfidenceThreshold: 0.42,
+				},
+				SubAgent: config.RLMSubAgentConfig{Model: "worker", MaxConcurrent: 9, Timeout: 8 * time.Second},
+				Scratchpad: config.RLMScratchpadConfig{
+					MaxEntriesMemory: 77, MaxRawBytesMemory: 88, EvictionPolicy: "fifo", DefaultTTL: 13 * time.Second,
+				},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, configadapter.Resolve(tt.cfg), resolveRLMConfig(tt.cfg))
+		})
+	}
 }
 
 func TestRegisterAgentRPC(t *testing.T) {

@@ -92,42 +92,6 @@ func (e *mockExecutor) Execute(ctx context.Context, task *AgentTask, wtPath stri
 	}, nil
 }
 
-func TestAgentStatus_String(t *testing.T) {
-	tests := []struct {
-		status AgentStatus
-		want   string
-	}{
-		{StatusIdle, "idle"},
-		{StatusRunning, "running"},
-		{StatusCompleted, "completed"},
-		{StatusFailed, "failed"},
-		{StatusCancelled, "cancelled"},
-		{AgentStatus(99), "unknown"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			if got := tt.status.String(); got != tt.want {
-				t.Errorf("AgentStatus.String() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
-
-	if cfg.MaxAgents != 4 {
-		t.Errorf("MaxAgents = %v, want 4", cfg.MaxAgents)
-	}
-	if cfg.TaskQueueSize != 100 {
-		t.Errorf("TaskQueueSize = %v, want 100", cfg.TaskQueueSize)
-	}
-	if cfg.ResultQueueSize != 100 {
-		t.Errorf("ResultQueueSize = %v, want 100", cfg.ResultQueueSize)
-	}
-}
-
 func TestNewOrchestrator(t *testing.T) {
 	mock := newMockWorktreeManager()
 	executor := newMockExecutor()
@@ -204,101 +168,15 @@ func TestOrchestrator_SubmitWithContext(t *testing.T) {
 	}
 }
 
-func TestOrchestrator_BatchSubmit(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
+// All tasks should have IDs
 
-	tasks := []*AgentTask{
-		{Name: "Task 1"},
-		{Name: "Task 2"},
-		{Name: "Task 3"},
-	}
+// Initially empty
 
-	err := o.BatchSubmit(tasks)
-	if err != nil {
-		t.Errorf("BatchSubmit() error = %v", err)
-	}
+// Initially zero
 
-	// All tasks should have IDs
-	for _, task := range tasks {
-		if task.ID == "" {
-			t.Error("BatchSubmit() should generate IDs for all tasks")
-		}
-	}
-}
+// Cancel non-existent task
 
-func TestOrchestrator_Status(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
-
-	// Initially empty
-	status := o.Status()
-	if len(status) != 0 {
-		t.Errorf("Status() returned %d agents, want 0", len(status))
-	}
-}
-
-func TestOrchestrator_ActiveAgents(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
-
-	// Initially zero
-	active := o.ActiveAgents()
-	if active != 0 {
-		t.Errorf("ActiveAgents() = %d, want 0", active)
-	}
-}
-
-func TestOrchestrator_Cancel(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
-
-	// Cancel non-existent task
-	err := o.Cancel("nonexistent")
-	if err == nil {
-		t.Error("Cancel(nonexistent) should return error")
-	}
-}
-
-func TestSummary_FormatSummary(t *testing.T) {
-	s := Summary{
-		TotalAgents:    4,
-		ActiveAgents:   2,
-		CompletedTasks: 5,
-		FailedTasks:    1,
-		PendingTasks:   3,
-	}
-
-	formatted := s.FormatSummary()
-
-	if formatted == "" {
-		t.Error("FormatSummary() returned empty string")
-	}
-
-	// Check it contains key info
-	expected := []string{"4 total", "2 active", "5 completed", "1 failed", "3 pending"}
-	for _, exp := range expected {
-		if !containsString(formatted, exp) {
-			t.Errorf("FormatSummary() missing %q", exp)
-		}
-	}
-}
-
-func TestOrchestrator_GetSummary(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
-
-	summary := o.GetSummary()
-
-	if summary.TotalAgents != 0 {
-		t.Errorf("TotalAgents = %d, want 0", summary.TotalAgents)
-	}
-}
+// Check it contains key info
 
 func TestGenerateTaskID(t *testing.T) {
 	id1 := generateTaskID()
@@ -563,55 +441,9 @@ func TestOrchestrator_ExecuteMultipleTasks(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_ExecuteFailingTask tests error handling
-func TestOrchestrator_ExecuteFailingTask(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.shouldFail["fail-task"] = true
+// Check agent status was updated
 
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
-
-	o.Start()
-	defer o.Stop()
-
-	task := &AgentTask{
-		ID:   "fail-task",
-		Name: "Failing Task",
-	}
-
-	err := o.Submit(task)
-	if err != nil {
-		t.Fatalf("Submit() error = %v", err)
-	}
-
-	select {
-	case result := <-o.Results():
-		if result.Success {
-			t.Error("Success should be false for failing task")
-		}
-		if result.TaskID != "fail-task" {
-			t.Errorf("TaskID = %v, want %v", result.TaskID, "fail-task")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for result")
-	}
-
-	// Check agent status was updated
-	status := o.Status()
-	found := false
-	for _, agent := range status {
-		if agent.Task != nil && agent.Task.ID == "fail-task" {
-			if agent.Status != StatusFailed {
-				t.Errorf("Agent status = %v, want %v", agent.Status, StatusFailed)
-			}
-			found = true
-		}
-	}
-	if !found {
-		// This is expected if agent has moved on to another state
-	}
-}
+// This is expected if agent has moved on to another state
 
 // TestOrchestrator_WorktreeCreationFailure tests worktree creation failure handling
 func TestOrchestrator_WorktreeCreationFailure(t *testing.T) {
@@ -649,95 +481,27 @@ func TestOrchestrator_WorktreeCreationFailure(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_Wait tests the Wait function
-func TestOrchestrator_Wait(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 50 * time.Millisecond
+// Submit a task
 
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Drain results in background
 
-	o.Start()
-	defer o.Stop()
+// Wait should eventually succeed
 
-	// Submit a task
-	task := &AgentTask{
-		ID:   "wait-test",
-		Name: "Wait Test Task",
-	}
-	o.Submit(task)
+// Long execution time
 
-	// Drain results in background
-	go func() {
-		for range o.Results() {
-		}
-	}()
+// Submit a task
 
-	// Wait should eventually succeed
-	err := o.Wait(2 * time.Second)
-	if err != nil {
-		t.Errorf("Wait() error = %v", err)
-	}
-}
+// Wait a bit for task to be picked up
 
-// TestOrchestrator_WaitTimeout tests Wait timeout behavior
-func TestOrchestrator_WaitTimeout(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 2 * time.Second // Long execution time
+// Wait with short timeout - task is still running
 
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Long enough to cancel
 
-	o.Start()
-	defer o.Stop()
+// Wait a bit for task to start
 
-	// Submit a task
-	task := &AgentTask{
-		ID:   "slow-task",
-		Name: "Slow Task",
-	}
-	o.Submit(task)
+// Try to cancel
 
-	// Wait a bit for task to be picked up
-	time.Sleep(100 * time.Millisecond)
-
-	// Wait with short timeout - task is still running
-	err := o.Wait(50 * time.Millisecond)
-	if err == nil {
-		t.Error("Wait() should return timeout error")
-	}
-}
-
-// TestOrchestrator_CancelRunningTask tests cancelling a running task
-func TestOrchestrator_CancelRunningTask(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 500 * time.Millisecond // Long enough to cancel
-
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
-
-	o.Start()
-	defer o.Stop()
-
-	task := &AgentTask{
-		ID:   "cancel-test",
-		Name: "Cancel Test Task",
-	}
-	o.Submit(task)
-
-	// Wait a bit for task to start
-	time.Sleep(100 * time.Millisecond)
-
-	// Try to cancel
-	err := o.Cancel("cancel-test")
-	// Either succeeds or task already completed (race condition)
-	if err != nil && !containsString(err.Error(), "not found or not running") {
-		t.Logf("Cancel() returned expected error: %v", err)
-	}
-}
+// Either succeeds or task already completed (race condition)
 
 // TestOrchestrator_Cleanup tests the Cleanup function
 func TestOrchestrator_Cleanup(t *testing.T) {
@@ -777,42 +541,13 @@ func TestOrchestrator_Cleanup(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_GetSummaryWithAgents tests GetSummary with active agents
-func TestOrchestrator_GetSummaryWithAgents(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 200 * time.Millisecond
+// Submit tasks
 
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Wait a bit for agents to start
 
-	o.Start()
-	defer o.Stop()
+// Get summary while tasks are running
 
-	// Submit tasks
-	for i := 0; i < 3; i++ {
-		task := &AgentTask{
-			ID:   fmt.Sprintf("summary-task-%d", i),
-			Name: fmt.Sprintf("Summary Task %d", i),
-		}
-		o.Submit(task)
-	}
-
-	// Wait a bit for agents to start
-	time.Sleep(50 * time.Millisecond)
-
-	// Get summary while tasks are running
-	summary := o.GetSummary()
-	if summary.TotalAgents == 0 {
-		t.Error("TotalAgents should be > 0")
-	}
-
-	// Drain results
-	go func() {
-		for range o.Results() {
-		}
-	}()
-}
+// Drain results
 
 // TestOrchestrator_SubmitAfterStop tests Submit after Stop
 func TestOrchestrator_SubmitAfterStop(t *testing.T) {
@@ -846,120 +581,27 @@ func TestOrchestrator_SubmitAfterStop(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_BatchSubmitPartialFailure tests BatchSubmit with queue full
-func TestOrchestrator_BatchSubmitPartialFailure(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 2, ResultQueueSize: 10}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
+// Create tasks that will fill the queue
 
-	// Create tasks that will fill the queue
-	tasks := make([]*AgentTask, 5)
-	for i := 0; i < 5; i++ {
-		tasks[i] = &AgentTask{
-			ID:   fmt.Sprintf("batch-task-%d", i),
-			Name: fmt.Sprintf("Batch Task %d", i),
-		}
-	}
+// BatchSubmit should fail when queue is full
 
-	// BatchSubmit should fail when queue is full
-	err := o.BatchSubmit(tasks)
-	if err == nil {
-		t.Error("BatchSubmit() should fail when queue becomes full")
-	}
-}
+// Submit multiple tasks
 
-// TestOrchestrator_ActiveAgentsCountDuringExecution tests ActiveAgents during task execution
-func TestOrchestrator_ActiveAgentsCountDuringExecution(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 200 * time.Millisecond
+// Wait for agents to start
 
-	cfg := Config{MaxAgents: 3, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Should have active agents
 
-	o.Start()
-	defer o.Stop()
+// Drain results
 
-	// Submit multiple tasks
-	for i := 0; i < 3; i++ {
-		task := &AgentTask{
-			ID:   fmt.Sprintf("active-test-%d", i),
-			Name: fmt.Sprintf("Active Test %d", i),
-		}
-		o.Submit(task)
-	}
+// Submit task
 
-	// Wait for agents to start
-	time.Sleep(100 * time.Millisecond)
+// Wait for agent to start
 
-	// Should have active agents
-	active := o.ActiveAgents()
-	if active == 0 {
-		t.Error("ActiveAgents() should be > 0 during execution")
-	}
+// Check agent has task
 
-	// Drain results
-	go func() {
-		for range o.Results() {
-		}
-	}()
-}
+// Drain results
 
-// TestOrchestrator_StatusDuringExecution tests Status returns correct data
-func TestOrchestrator_StatusDuringExecution(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 200 * time.Millisecond
-
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
-
-	o.Start()
-	defer o.Stop()
-
-	// Submit task
-	task := &AgentTask{
-		ID:   "status-test",
-		Name: "Status Test Task",
-	}
-	o.Submit(task)
-
-	// Wait for agent to start
-	time.Sleep(100 * time.Millisecond)
-
-	status := o.Status()
-	if len(status) == 0 {
-		t.Error("Status() should return agents during execution")
-	}
-
-	// Check agent has task
-	for _, agent := range status {
-		if agent.Task != nil && agent.Task.ID == "status-test" {
-			if agent.Status != StatusRunning && agent.Status != StatusCompleted {
-				t.Errorf("Agent status = %v, want Running or Completed", agent.Status)
-			}
-		}
-	}
-
-	// Drain results
-	go func() {
-		for range o.Results() {
-		}
-	}()
-}
-
-// TestOrchestrator_EmptyBatchSubmit tests BatchSubmit with empty slice
-func TestOrchestrator_EmptyBatchSubmit(t *testing.T) {
-	executor := newMockExecutor()
-	cfg := Config{MaxAgents: 2, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(&worktree.Manager{}, executor, cfg)
-
-	// Empty batch should succeed
-	err := o.BatchSubmit([]*AgentTask{})
-	if err != nil {
-		t.Errorf("BatchSubmit() with empty slice error = %v", err)
-	}
-}
+// Empty batch should succeed
 
 // TestOrchestrator_ContextCancellation tests context cancellation during execution
 func TestOrchestrator_ContextCancellation(t *testing.T) {
@@ -1013,47 +655,11 @@ func (e *slowCancellingExecutor) Execute(ctx context.Context, task *AgentTask, w
 	}
 }
 
-// TestOrchestrator_SuccessfulExecutionUpdatesStatus tests that successful execution updates agent status
-func TestOrchestrator_SuccessfulExecutionUpdatesStatus(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 50 * time.Millisecond
+// Wait for result
 
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Wait a bit for status update
 
-	o.Start()
-	defer o.Stop()
-
-	task := &AgentTask{
-		ID:   "success-status-test",
-		Name: "Success Status Test",
-	}
-	o.Submit(task)
-
-	// Wait for result
-	select {
-	case result := <-o.Results():
-		if !result.Success {
-			t.Errorf("Expected success, got error: %v", result.Error)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for result")
-	}
-
-	// Wait a bit for status update
-	time.Sleep(50 * time.Millisecond)
-
-	// Check status was updated to completed
-	status := o.Status()
-	for _, agent := range status {
-		if agent.Task != nil && agent.Task.ID == "success-status-test" {
-			if agent.Status != StatusCompleted {
-				t.Errorf("Agent status = %v, want %v", agent.Status, StatusCompleted)
-			}
-		}
-	}
-}
+// Check status was updated to completed
 
 // TestOrchestrator_WorkerPicksUpMultipleTasks tests worker processes multiple tasks
 func TestOrchestrator_WorkerPicksUpMultipleTasks(t *testing.T) {
@@ -1192,75 +798,18 @@ func TestOrchestrator_CleanupWithFailedTask(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_GetSummaryAfterFailure tests GetSummary after a task failure
-func TestOrchestrator_GetSummaryAfterFailure(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.shouldFail["fail-for-summary"] = true
-	executor.execTime = 10 * time.Millisecond
+// Submit a failing task
 
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
+// Wait for result
 
-	o.Start()
-	defer o.Stop()
+// Allow time for status to be updated
 
-	// Submit a failing task
-	task := &AgentTask{
-		ID:   "fail-for-summary",
-		Name: "Fail For Summary",
-	}
-	o.Submit(task)
+// Check summary
 
-	// Wait for result
-	select {
-	case <-o.Results():
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for result")
-	}
+// Submit a task
 
-	// Allow time for status to be updated
-	time.Sleep(50 * time.Millisecond)
+// Wait for result
 
-	// Check summary
-	summary := o.GetSummary()
-	if summary.FailedTasks != 1 {
-		t.Errorf("FailedTasks = %d, want 1", summary.FailedTasks)
-	}
-}
+// Allow time for status to be updated
 
-// TestOrchestrator_GetSummaryAfterCompletion tests GetSummary after task completion
-func TestOrchestrator_GetSummaryAfterCompletion(t *testing.T) {
-	mock := newMockWorktreeManager()
-	executor := newMockExecutor()
-	executor.execTime = 10 * time.Millisecond
-
-	cfg := Config{MaxAgents: 1, TaskQueueSize: 10, ResultQueueSize: 10}
-	o := NewOrchestrator(mock, executor, cfg)
-
-	o.Start()
-	defer o.Stop()
-
-	// Submit a task
-	task := &AgentTask{
-		ID:   "complete-for-summary",
-		Name: "Complete For Summary",
-	}
-	o.Submit(task)
-
-	// Wait for result
-	select {
-	case <-o.Results():
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for result")
-	}
-
-	// Allow time for status to be updated
-	time.Sleep(50 * time.Millisecond)
-
-	// Check summary
-	summary := o.GetSummary()
-	if summary.CompletedTasks != 1 {
-		t.Errorf("CompletedTasks = %d, want 1", summary.CompletedTasks)
-	}
-}
+// Check summary

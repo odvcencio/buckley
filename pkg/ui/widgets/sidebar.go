@@ -144,7 +144,7 @@ type Sidebar struct {
 	experimentVariants []ExperimentVariant
 	showExperiment     bool
 
-	// RLM section
+	// Coordination section
 	rlmStatus     *RLMStatus
 	rlmScratchpad []RLMScratchpadEntry
 	showRLM       bool
@@ -554,7 +554,7 @@ func (s *Sidebar) renderRLM(buf *runtime.Buffer, x, y, width int) int {
 		icon = '▶'
 	}
 	buf.Set(x, y, icon, s.headerStyle)
-	buf.SetString(x+2, y, "RLM", s.headerStyle)
+	buf.SetString(x+2, y, "Coordination", s.headerStyle)
 	y++
 
 	if !s.showRLM {
@@ -759,7 +759,7 @@ func (s *Sidebar) handleKey(key runtime.KeyMsg) runtime.HandleResult {
 		case '6': // Toggle experiments
 			s.showExperiment = !s.showExperiment
 			return runtime.Handled()
-		case '7': // Toggle RLM
+		case '7': // Toggle coordination
 			s.showRLM = !s.showRLM
 			return runtime.Handled()
 		case '8': // Toggle sessions

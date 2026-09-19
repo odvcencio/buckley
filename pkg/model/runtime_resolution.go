@@ -21,6 +21,7 @@ func ResolvePhaseModel(cfg *config.Config, checker ReasoningChecker, engine *rul
 	resolver := NewResolver(engine, ResolverConfig{
 		Planning:  cfg.Models.Planning,
 		Execution: cfg.Models.Execution,
+		Light:     cfg.Models.Light,
 		Review:    cfg.Models.Review,
 	}, checker)
 
@@ -48,10 +49,44 @@ func ResolvePhaseModelRequired(cfg *config.Config, checker ReasoningChecker, eng
 
 // ResolveReasoningEffort determines the reasoning effort for a phase/model pair.
 func ResolveReasoningEffort(cfg *config.Config, checker ReasoningChecker, engine *rules.Engine, modelID, phase string) string {
+	return ResolveReasoningEffortForTask(cfg, checker, engine, modelID, phase, "")
+}
+
+// ResolveReasoningEffortForTask determines the reasoning effort for a
+// phase/model/task tuple. Task names let one-shot utility commands opt into
+// bounded useful reasoning without changing the broader execution default.
+func ResolveReasoningEffortForTask(cfg *config.Config, checker ReasoningChecker, engine *rules.Engine, modelID, phase, taskName string) string {
+	effort, _ := ResolveReasoningEffortForTaskWithCapability(cfg, checker, engine, modelID, phase, taskName)
+	return effort
+}
+
+// ResolveReasoningEffortForTaskWithCapability determines the reasoning effort
+// and returns any richer capability evidence exposed by the checker.
+func ResolveReasoningEffortForTaskWithCapability(cfg *config.Config, checker ReasoningChecker, engine *rules.Engine, modelID, phase, taskName string) (string, CapabilityResolution) {
 	modelID = strings.TrimSpace(modelID)
-	if modelID == "" || checker == nil || !checker.SupportsReasoning(modelID) {
-		return ""
+	capability := CapabilityResolution{
+		Model:      modelID,
+		Capability: "reasoning",
+		State:      CapabilityUnknown,
+		Source:     "checker_unavailable",
 	}
+	if modelID == "" || checker == nil {
+		return "", capability
+	}
+	if resolver, ok := checker.(interface {
+		ResolveReasoningCapability(string) CapabilityResolution
+	}); ok {
+		capability = resolver.ResolveReasoningCapability(modelID)
+	} else if checker.SupportsReasoning(modelID) {
+		capability = CapabilityResolution{Model: modelID, Capability: "reasoning", State: CapabilitySupported, Source: "boolean_checker"}
+	} else {
+		capability = CapabilityResolution{Model: modelID, Capability: "reasoning", State: CapabilityUnknown, Source: "boolean_checker"}
+	}
+	if !capability.Supported() {
+		return "", capability
+	}
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	taskName = strings.ToLower(strings.TrimSpace(taskName))
 
 	configured := "auto"
 	if cfg != nil {
@@ -70,58 +105,35 @@ func ResolveReasoningEffort(cfg *config.Config, checker ReasoningChecker, engine
 	if engine != nil {
 		result, err := engine.EvalStrategy("reasoning", "reasoning_mode", map[string]any{
 			"reasoning": map[string]any{"config": configured},
-			"task":      map[string]any{"phase": phase},
+			"task":      map[string]any{"phase": phase, "name": taskName, "command": taskName},
 			"model":     map[string]any{"supports_reasoning": true},
 		})
 		if err == nil {
 			effort, _ := result.Params["effort"].(string)
 			effort = strings.TrimSpace(effort)
 			if effort == "" || effort == "none" {
-				return ""
+				return "", capability
 			}
-			return effort
+			return effort, capability
 		}
 	}
 
 	switch configured {
 	case "off":
-		return ""
+		return "", capability
 	case "minimal", "low", "medium", "high", "xhigh":
-		return configured
+		return configured, capability
 	default:
 		if phase == "planning" || phase == "review" {
-			return "high"
+			return "high", capability
 		}
-		return ""
-	}
-}
-
-// InferModelTier returns a coarse model tier for prompt assembly policies.
-func InferModelTier(modelID string) string {
-	lower := strings.ToLower(strings.TrimSpace(modelID))
-	switch {
-	case lower == "":
-		return "standard"
-	case strings.Contains(lower, "haiku"),
-		strings.Contains(lower, "mini"),
-		strings.Contains(lower, "flash"),
-		strings.Contains(lower, "nano"),
-		strings.Contains(lower, "lite"),
-		strings.Contains(lower, "small"),
-		strings.Contains(lower, "fast"):
-		return "fast"
-	case strings.Contains(lower, "opus"),
-		strings.Contains(lower, "o1"),
-		strings.Contains(lower, "o3"),
-		strings.Contains(lower, "gpt-5"),
-		strings.Contains(lower, "glm-5.2"),
-		strings.Contains(lower, "kimi-k2.7-code"),
-		strings.Contains(lower, "qwen3.7-max"),
-		strings.Contains(lower, "thinking"),
-		strings.Contains(lower, "pro"):
-		return "premium"
-	default:
-		return "standard"
+		switch taskName {
+		case "commit":
+			return "low", capability
+		case "pr":
+			return "medium", capability
+		}
+		return "", capability
 	}
 }
 

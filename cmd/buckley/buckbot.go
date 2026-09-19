@@ -32,6 +32,73 @@ type buckbotReviewIntake struct {
 	BudgetUSD       float64
 }
 
+type buckbotInlineValidationError struct {
+	err error
+}
+
+func (e *buckbotInlineValidationError) Error() string {
+	if e == nil || e.err == nil {
+		return "post GitHub review: inline comment validation failed"
+	}
+	return e.err.Error()
+}
+
+func (e *buckbotInlineValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+type buckbotReviewDeliveryError struct {
+	cause           error
+	summaryPosted   bool
+	inlineTotal     int
+	inlineAttempted int
+	inlineFailed    int
+	locations       []string
+	ambiguous       bool
+}
+
+func (e *buckbotReviewDeliveryError) Error() string {
+	if e == nil {
+		return "post GitHub review: delivery incomplete"
+	}
+	parts := []string{"post GitHub review: delivery incomplete"}
+	if e.summaryPosted {
+		parts = append(parts, "summary posted")
+	}
+	if e.inlineTotal > 0 {
+		if e.inlineFailed > 0 {
+			parts = append(parts, fmt.Sprintf("%d of %d inline comments failed", e.inlineFailed, e.inlineTotal))
+		} else {
+			parts = append(parts, fmt.Sprintf("stopped after %d of %d inline comments", e.inlineAttempted, e.inlineTotal))
+		}
+	}
+	if len(e.locations) > 0 {
+		parts = append(parts, "locations: "+strings.Join(e.locations, ", "))
+	}
+	if e.ambiguous {
+		parts = append(parts, "delivery state ambiguous")
+	}
+	if e.cause != nil {
+		parts = append(parts, "cause: "+e.cause.Error())
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *buckbotReviewDeliveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func isBuckbotInlineValidationError(err error) bool {
+	var validationErr *buckbotInlineValidationError
+	return errors.As(err, &validationErr)
+}
+
 func isRetryableBuckbotError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
@@ -127,21 +194,78 @@ func postBuckbotReview(ctx context.Context, event gitwatcher.PullRequestEvent, r
 		marker := buckbotInlineReviewMarker(event, finalMarker, comment)
 		comment["body"] = marker + "\n" + fmt.Sprint(comment["body"])
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	if err := postBuckbotReviewPayloadFn(ctx, event, review, inlineComments); err != nil {
 		if len(inlineComments) == 0 {
+			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if !isBuckbotInlineValidationError(err) {
 			return err
 		}
 		slog.Warn("Buckbot inline review batch was rejected; preserving the summary and retrying each line comment", "repository", event.Repository, "pr", event.Number, "error", err)
 		if fallbackErr := postBuckbotReviewPayloadFn(ctx, event, review, nil); fallbackErr != nil {
 			return fmt.Errorf("%v; summary fallback: %w", err, fallbackErr)
 		}
+		deliveryErr := &buckbotReviewDeliveryError{
+			cause:         err,
+			summaryPosted: true,
+			inlineTotal:   len(inlineComments),
+		}
 		for _, comment := range inlineComments {
-			if commentErr := postBuckbotReviewPayloadFn(ctx, event, "", []map[string]any{comment}); commentErr != nil {
-				slog.Warn("Buckbot skipped one rejected inline comment", "repository", event.Repository, "pr", event.Number, "path", comment["path"], "line", comment["line"], "error", commentErr)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				deliveryErr.cause = ctxErr
+				deliveryErr.ambiguous = true
+				return deliveryErr
 			}
+			deliveryErr.inlineAttempted++
+			if commentErr := postBuckbotReviewPayloadFn(ctx, event, "", []map[string]any{comment}); commentErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					deliveryErr.cause = ctxErr
+					deliveryErr.inlineFailed++
+					deliveryErr.locations = appendBoundedBuckbotLocation(deliveryErr.locations, comment)
+					deliveryErr.ambiguous = true
+					return deliveryErr
+				}
+				deliveryErr.inlineFailed++
+				deliveryErr.locations = appendBoundedBuckbotLocation(deliveryErr.locations, comment)
+				if isBuckbotInlineValidationError(commentErr) {
+					slog.Warn("Buckbot skipped one rejected inline comment", "repository", event.Repository, "pr", event.Number, "path", comment["path"], "line", comment["line"], "error", commentErr)
+					continue
+				}
+				deliveryErr.cause = commentErr
+				deliveryErr.ambiguous = true
+				return deliveryErr
+			}
+		}
+		if deliveryErr.inlineFailed > 0 {
+			return deliveryErr
 		}
 	}
 	return nil
+}
+
+func appendBoundedBuckbotLocation(locations []string, comment map[string]any) []string {
+	const maxLocations = 5
+	if len(locations) >= maxLocations {
+		return locations
+	}
+	path := strings.TrimSpace(fmt.Sprint(comment["path"]))
+	line := strings.TrimSpace(fmt.Sprint(comment["line"]))
+	if path == "" && line == "" {
+		return append(locations, "unknown")
+	}
+	if line == "" {
+		return append(locations, path)
+	}
+	if path == "" {
+		return append(locations, "line "+line)
+	}
+	return append(locations, path+":"+line)
 }
 
 func formatBuckbotGitHubReview(parsed *commands.ParsedReview, review, headSHA string) string {
@@ -287,9 +411,62 @@ func postBuckbotReviewPayloadREST(ctx context.Context, event gitwatcher.PullRequ
 		"--input", "-",
 	}, payload)
 	if err != nil {
-		return fmt.Errorf("post GitHub review: %w: %s", err, strings.TrimSpace(string(output)))
+		detail := strings.TrimSpace(string(output))
+		postErr := fmt.Errorf("post GitHub review: %w: %s", err, detail)
+		if isBuckbotRESTInlineValidation(detail) {
+			return &buckbotInlineValidationError{err: postErr}
+		}
+		return postErr
 	}
 	return nil
+}
+
+func isBuckbotRESTInlineValidation(output string) bool {
+	if !strings.Contains(strings.ToLower(output), "http 422") {
+		return false
+	}
+	jsonStart := strings.Index(output, "{")
+	if jsonStart < 0 {
+		return false
+	}
+	var response struct {
+		Message string `json:"message"`
+		Errors  []struct {
+			Resource string `json:"resource"`
+			Field    string `json:"field"`
+			Code     string `json:"code"`
+			Message  string `json:"message"`
+		} `json:"errors"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader([]byte(output[jsonStart:])))
+	if err := decoder.Decode(&response); err != nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(response.Message), "validation failed") {
+		return false
+	}
+	if len(response.Errors) == 0 {
+		return false
+	}
+	for _, item := range response.Errors {
+		resource := strings.ToLower(strings.TrimSpace(item.Resource))
+		field := strings.ToLower(strings.TrimSpace(item.Field))
+		code := strings.ToLower(strings.TrimSpace(item.Code))
+		message := strings.ToLower(item.Message)
+		if code == "spam" || code == "abuse" || strings.Contains(message, "spam") || strings.Contains(message, "abuse") {
+			return false
+		}
+		if resource != "pullrequestreviewcomment" {
+			return false
+		}
+		switch field {
+		case "line", "path", "position", "side":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 const buckbotReviewPostIdentityQuery = `query($owner: String!, $name: String!, $number: Int!) {
@@ -431,6 +608,10 @@ func isGitHubRESTThrottleError(err error) bool {
 func isRetryableBuckbotPostError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var deliveryErr *buckbotReviewDeliveryError
+	if errors.As(err, &deliveryErr) {
+		return deliveryErr.ambiguous && isRetryableBuckbotPostError(deliveryErr.cause)
 	}
 	if isRetryableBuckbotError(err) || isGitHubRESTThrottleError(err) {
 		return true

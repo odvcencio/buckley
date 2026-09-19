@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/runledger"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestParseServeCommandOptions(t *testing.T) {
@@ -55,6 +60,58 @@ func TestParseServeCommandOptions(t *testing.T) {
 		if !containsString(opts.allowedOrigins, want) {
 			t.Fatalf("allowedOrigins missing %q: %v", want, opts.allowedOrigins)
 		}
+	}
+}
+
+func TestOpenServeDurableStoresUsesCanonicalStorageDatabase(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.New(filepath.Join(dir, "custom.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ledger, evidenceStore, err := openServeDurableStores(store)
+	if err != nil {
+		t.Fatalf("openServeDurableStores: %v", err)
+	}
+
+	run, err := ledger.StartRun(context.Background(), runledger.AgentRun{SessionID: "serve-session", AgentID: "child", Backend: "local-process"})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if _, err := ledger.GetRun(context.Background(), run.RunID); err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	object, err := evidenceStore.Put(context.Background(), evidence.Object{
+		Kind:       evidence.KindSubagentTask,
+		MediaType:  "text/plain",
+		InlineBody: bytes.Repeat([]byte("bounded task contract"), evidence.InlineThreshold),
+	})
+	if err != nil {
+		t.Fatalf("evidence.Put: %v", err)
+	}
+	if object.ID == "" {
+		t.Fatal("evidence object has no stable id")
+	}
+	if object.Storage != evidence.StorageBlob || object.BlobPath == "" {
+		t.Fatalf("evidence storage = %q path %q, want out-of-line blob", object.Storage, object.BlobPath)
+	}
+	expectedBlobRoot := filepath.Join(dir, "evidence")
+	rel, err := filepath.Rel(expectedBlobRoot, object.BlobPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("blob path %q is outside custom database root %q", object.BlobPath, expectedBlobRoot)
+	}
+	if _, err := os.Stat(object.BlobPath); err != nil {
+		t.Fatalf("stat evidence blob: %v", err)
+	}
+
+	var evidenceTables int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'evidence_objects'`).Scan(&evidenceTables); err != nil {
+		t.Fatalf("inspect evidence schema: %v", err)
+	}
+	if evidenceTables != 1 {
+		t.Fatalf("evidence schema was not composed onto canonical database")
 	}
 }
 

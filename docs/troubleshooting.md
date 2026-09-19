@@ -124,6 +124,32 @@ rejection message names the tool; the audit shows which phase was active.
 Set `BUCKLEY_DATA_DIR` to relocate the databases — useful for keeping an
 experiment's state out of your main history.
 
+### A SQLite operation is slow or did not stop exactly at my cancellation deadline.
+Deadline-bearing steady-state `sessionexec` command/effect mutations shorten
+SQLite busy waits to the caller deadline. This is a contention-wait/context
+contract, not a strict wall-clock promise. After durable acceptance, foreground
+cancellation is asynchronous: a pre-permit cancellation prevents model/tool
+dispatch, but `EndEffect`, `Complete`, and fallback `Release` cleanup can use
+fresh bounded contexts (currently 5 seconds each). Those operations are
+deliberately not constrained by the original request deadline, so sequential
+cleanup can outlast it while preserving no-replay/effect fencing. Under
+continued contention, that safety path can leave ambiguity or blocked recovery
+rather than replaying work.
+
+Observation endpoints may materialize expiry/ambiguity state; they use
+caller-bounded retry slices and are write-capable for contention diagnosis.
+Startup/WAL setup, migrations, manual/contextless paths, and experiment-store
+persistence remain outside the caller-deadline SLA and can wait according to
+their configured busy/retry policy.
+
+If a run appears stuck on storage, first preserve the run/session/evidence IDs
+and logs, then check for another Buckley process or external SQLite client
+holding the database. After the holder exits, retry the operation normally. Do
+not force or replay an ambiguous/blocked effect; use normal recovery or
+privileged ambiguity reconciliation. Do not assume cancelled experiment
+persistence was deadline-bounded, and avoid deleting or rewriting the database
+to clear a lock.
+
 **Can I move a goal to another machine?**
 Copy `ledger.db`. Reports and audits render identically anywhere, because
 they are built from durable state rather than from a live session.

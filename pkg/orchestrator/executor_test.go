@@ -1,13 +1,17 @@
 package orchestrator
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"go.uber.org/mock/gomock"
 
+	"m31labs.dev/buckley/pkg/artifact"
 	orchestratorMocks "m31labs.dev/buckley/pkg/orchestrator/mocks"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -33,6 +37,12 @@ func mockChatResponse(content string) *model.ChatResponse {
 			},
 		},
 	}
+}
+
+func mockChatResponseWithFinishReason(content, finishReason string) *model.ChatResponse {
+	resp := mockChatResponse(content)
+	resp.Choices[0].FinishReason = finishReason
+	return resp
 }
 
 func TestNewExecutor(t *testing.T) {
@@ -471,6 +481,125 @@ func TestExecutor_SelfHealing(t *testing.T) {
 	}
 
 	os.Remove("go.mod")
+}
+
+func TestExecutor_HandleErrorRejectsIncompleteSelfHealBeforeApply(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	target := "self_heal_should_not_apply.txt"
+	parseableTruncated := "```filepath:" + target + "\npartial contents\n```"
+
+	ctrl, mockModel := setupMockModel(t)
+	defer ctrl.Finish()
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).
+		Return(mockChatResponseWithFinishReason(parseableTruncated, "length"), nil).Times(1)
+
+	plan := &Plan{
+		ID:          "test-plan",
+		FeatureName: "Test Feature",
+		Description: "Test Plan",
+		Tasks: []Task{
+			{ID: "1", Title: "Self-heal Incomplete", Description: "Reject incomplete self-heal"},
+		},
+	}
+
+	executor := NewExecutor(plan, &storage.Store{}, mockModel, tool.NewRegistry(), &config.Config{}, &Planner{}, nil, nil)
+	executor.maxRetries = 1
+
+	err := executor.handleError(&plan.Tasks[0], fmt.Errorf("verification failed"))
+	if err == nil {
+		t.Fatal("expected incomplete self-heal response to fail")
+	}
+	var incomplete *IncompleteRepairError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteRepairError, got %T: %v", err, err)
+	}
+	if got := incomplete.FinishReason(); got != "length" {
+		t.Fatalf("FinishReason() = %q, want length", got)
+	}
+	if got := incomplete.PublicDraft(); got != parseableTruncated {
+		t.Fatalf("PublicDraft() = %q, want parseable truncated draft", got)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("expected %s not to be applied, stat err: %v", target, statErr)
+	}
+}
+
+func TestExecutor_ApplyReviewFixesRejectsIncompleteResponseWithSafeDraftBeforeApply(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	target := "review_fix_should_not_apply.txt"
+	publicPrefix := "```filepath:" + target + "\npartial contents\n```"
+	longPublic := publicPrefix + "\n" + strings.Repeat("a", maxIncompleteRepairDraftBytes) + "🌕"
+	content := "<think>private chain of thought</think>\n" + longPublic
+	providerErr := fmt.Errorf("provider transport exposed raw secret")
+
+	ctrl, mockModel := setupMockModel(t)
+	defer ctrl.Finish()
+	resp := mockChatResponseWithFinishReason(content, "length")
+	resp.Choices[0].Message.Reasoning = "private reasoning field"
+	resp.Choices[0].Message.ReasoningDetails = []model.ReasoningDetail{{Type: "reasoning.text", Text: "private reasoning detail"}}
+	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).
+		Return(resp, providerErr).Times(1)
+
+	plan := &Plan{
+		ID:          "test-plan",
+		FeatureName: "Test Feature",
+		Description: "Test Plan",
+		Tasks: []Task{
+			{ID: "1", Title: "Review Fix Incomplete", Description: "Reject incomplete review fix"},
+		},
+	}
+	executor := NewExecutor(plan, &storage.Store{}, mockModel, tool.NewRegistry(), &config.Config{}, &Planner{}, nil, nil)
+
+	_, err := executor.applyReviewFixes(&plan.Tasks[0], &ReviewResult{
+		Summary: "needs changes",
+		Issues: []artifact.Issue{{
+			Severity:    "critical",
+			Category:    "Correctness",
+			Title:       "Fix target",
+			Description: "The target file needs a fix.",
+			Location:    target + ":1",
+			Fix:         "Update the file.",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected incomplete review repair response to fail")
+	}
+	var incomplete *IncompleteRepairError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteRepairError, got %T: %v", err, err)
+	}
+	if err.Error() != "repair response incomplete" {
+		t.Fatalf("Error() = %q, want stable typed error", err.Error())
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatal("expected incomplete repair error to unwrap provider error")
+	}
+	draft := incomplete.PublicDraft()
+	if !strings.HasPrefix(draft, publicPrefix) {
+		t.Fatalf("PublicDraft() prefix = %q, want %q", draft[:min(len(draft), len(publicPrefix))], publicPrefix)
+	}
+	for _, private := range []string{"private chain of thought", "private reasoning field", "private reasoning detail", "provider transport exposed raw secret"} {
+		if strings.Contains(draft, private) || strings.Contains(err.Error(), private) {
+			t.Fatalf("private/provider detail %q leaked through draft or Error()", private)
+		}
+	}
+	if len(draft) > maxIncompleteRepairDraftBytes {
+		t.Fatalf("PublicDraft() length = %d, want <= %d", len(draft), maxIncompleteRepairDraftBytes)
+	}
+	if !utf8.ValidString(draft) {
+		t.Fatalf("PublicDraft() is not valid UTF-8: %q", draft)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("expected %s not to be applied, stat err: %v", target, statErr)
+	}
 }
 
 func contains(s, substr string) bool {

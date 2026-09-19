@@ -51,7 +51,6 @@ Buckley uses [Uber's gomock](https://github.com/uber-go/mock) for generating tes
 | `PersonaProvider` | `pkg/prompts` | `mock_persona_provider_test.go` | `mockgen -package=prompts -destination=pkg/prompts/mock_persona_provider_test.go github.com/odvcencio/buckley/pkg/prompts PersonaProvider` |
 | `Provider` | `pkg/model` | `mock_provider_test.go` | `mockgen -package=model -destination=pkg/model/mock_provider_test.go github.com/odvcencio/buckley/pkg/model Provider` |
 | `Tool` | `pkg/tool` | `mock_tool_test.go` | `mockgen -package=tool -destination=pkg/tool/mock_tool_test.go github.com/odvcencio/buckley/pkg/tool Tool` |
-| `commandRunner` | `pkg/github` | `mock_runner_test.go` | `mockgen -package=github -destination=pkg/github/mock_runner_test.go github.com/odvcencio/buckley/pkg/github commandRunner` |
 | `gitCommandRunner` | `pkg/session` | `mock_git_runner_test.go` | `mockgen -package=session -destination=pkg/session/mock_git_runner_test.go github.com/odvcencio/buckley/pkg/session gitCommandRunner` |
 
 ### Generating a New Mock
@@ -200,11 +199,9 @@ Different package types have different coverage targets:
 - `pkg/tool/builtin` - Built-in tools
 - `pkg/artifact` - Artifact management
 - `pkg/skill` - Skill system (Current: 86.3%)
-- `pkg/cost` - Cost tracking
 
 ### Integration Packages (Target: 40%+)
 - `pkg/ipc` - IPC communication
-- `pkg/github` - GitHub integration
 - `pkg/session` - Session management
 
 ### UI/CLI (Target: 30%+)
@@ -325,6 +322,17 @@ GO_TEST_TARGET=all ./scripts/test.sh
 
 # Combine flags
 GO_TEST_RACE=1 GO_TEST_TIMEOUT=30m ./scripts/test.sh
+```
+
+### Unreachable Code Check
+
+CI fails when a function becomes unreachable from `./cmd/buckley` and is not
+listed in `scripts/deadcode-baseline.txt`. Run the check locally, and refresh
+the baseline after you remove dead code:
+
+```bash
+./scripts/check-deadcode.sh
+./scripts/check-deadcode.sh --update
 ```
 
 ### Coverage Analysis

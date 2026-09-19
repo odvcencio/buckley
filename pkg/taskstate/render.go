@@ -56,6 +56,11 @@ func RenderMarkdown(s CheckpointState) string {
 		}
 	}
 
+	if s.CompletionEvidence.Version != 0 && (s.CompletionEvidence.RequiresVerification() || s.CompletionEvidence.EvidencedPass()) {
+		b.WriteString("\n# Completion Evidence\n")
+		b.WriteString("- " + completionEvidenceStatusLine(s.CompletionEvidence) + "\n")
+	}
+
 	if s.Blocker != nil {
 		b.WriteString("\n# Parked\n")
 		line := fmt.Sprintf("- blocked: %s", s.Blocker.Reason)
@@ -98,4 +103,26 @@ func RenderMarkdown(s CheckpointState) string {
 	}
 
 	return b.String()
+}
+
+func completionEvidenceStatusLine(state CompletionEvidenceState) string {
+	state = state.Sanitize()
+	status := strings.TrimSpace(state.VerificationStatus)
+	if status == "" {
+		status = "clean"
+	}
+	line := "status: " + status
+	if state.StateChangeObserved {
+		line += "; state change observed"
+	}
+	if state.StateObservationFailed {
+		line += "; state observation failed"
+		if strings.TrimSpace(state.StateObservationError) != "" {
+			line += ": " + strings.TrimSpace(state.StateObservationError)
+		}
+	}
+	if strings.TrimSpace(state.VerificationEvidenceID) != "" {
+		line += "; evidence: `" + strings.TrimSpace(state.VerificationEvidenceID) + "`"
+	}
+	return line
 }

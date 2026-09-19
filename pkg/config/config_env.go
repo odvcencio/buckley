@@ -63,13 +63,14 @@ var envStrategies = map[string]envStrategy{
 	"encoding.use_toon":                envUseToon,
 	"diagnostics.network_logs_enabled": envNetworkLogs,
 
-	"providers.openrouter": envOpenRouterProvider,
-	"providers.openai":     envOpenAIProvider,
-	"providers.anthropic":  envAnthropicProvider,
-	"providers.google":     envGoogleProvider,
-	"providers.ollama":     envOllamaProvider,
-	"providers.litellm":    envLiteLLMProvider,
-	"providers.codex":      envCodexProvider,
+	"providers.openrouter":        envOpenRouterProvider,
+	"providers.openai":            envOpenAIProvider,
+	"providers.anthropic":         envAnthropicProvider,
+	"providers.google":            envGoogleProvider,
+	"providers.ollama":            envOllamaProvider,
+	"providers.openai_compatible": envOpenAICompatibleProvider,
+	"providers.litellm":           envLegacyLiteLLMProvider,
+	"providers.codex":             envCodexProvider,
 
 	"experiment.max_concurrent":     envExperimentMaxConcurrent,
 	"experiment.default_timeout":    envExperimentDefaultTimeout,
@@ -284,13 +285,29 @@ func envOllamaProvider(ctx envCtx, field reflect.Value, path []string) {
 	}
 }
 
-// envLiteLLMProvider applies BUCKLEY_LITELLM_ENABLED,
+// envOpenAICompatibleProvider applies the canonical OpenAI-compatible env vars.
+func envOpenAICompatibleProvider(ctx envCtx, field reflect.Value, path []string) {
+	p := field.Addr().Interface().(*OpenAICompatibleConfig)
+	if v, ok := envBool("BUCKLEY_OPENAI_COMPATIBLE_ENABLED"); ok {
+		p.Enabled = v
+	}
+	if v := os.Getenv("BUCKLEY_OPENAI_COMPATIBLE_BASE_URL"); v != "" {
+		p.BaseURL = v
+		p.Enabled = true
+	}
+	if v := os.Getenv("BUCKLEY_OPENAI_COMPATIBLE_API_KEY"); v != "" {
+		p.APIKey = v
+		p.Enabled = true
+	}
+}
+
+// envLegacyLiteLLMProvider applies BUCKLEY_LITELLM_ENABLED,
 // BUCKLEY_LITELLM_BASE_URL (falling back to the unprefixed
 // LITELLM_BASE_URL, which does not enable the provider), and
 // BUCKLEY_LITELLM_API_KEY (falling back to the unprefixed
 // LITELLM_API_KEY, which -- unlike the base URL fallback -- does enable
 // the provider, matching the pre-reflection asymmetry).
-func envLiteLLMProvider(ctx envCtx, field reflect.Value, path []string) {
+func envLegacyLiteLLMProvider(ctx envCtx, field reflect.Value, path []string) {
 	p := field.Addr().Interface().(*LiteLLMConfig)
 	if v, ok := envBool("BUCKLEY_LITELLM_ENABLED"); ok {
 		p.Enabled = v

@@ -62,6 +62,19 @@ func TestPromptEnvOverrideApplied(t *testing.T) {
 	}
 }
 
+func TestCommitToolPromptAppliesOverrideToProvidedDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "{{DEFAULT_PROMPT}}\n\nKeep the body focused.\nGenerated {{CURRENT_TIME}}")
+	now := time.Date(2025, 12, 13, 12, 0, 0, 0, time.UTC)
+	defaultPrompt := "Use the generate_commit tool."
+
+	got := CommitToolPrompt(defaultPrompt, now)
+	want := defaultPrompt + "\n\nKeep the body focused.\nGenerated " + now.Format(time.RFC3339)
+	if got != want {
+		t.Fatalf("CommitToolPrompt() = %q, want %q", got, want)
+	}
+}
+
 func TestReviewSubKindsSupportEnvAndFileOverrides(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

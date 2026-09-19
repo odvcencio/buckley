@@ -15,7 +15,7 @@ const (
 	defaultOpenRouterModel        = defaultOpenRouterChatModel
 	defaultOpenRouterChatModel    = "z-ai/glm-5.2"
 	defaultOpenRouterUtilityModel = "qwen/qwen3.6-flash"
-	defaultOpenRouterCommitModel  = "qwen/qwen3.7-flash"
+	defaultOpenRouterCommitModel  = "qwen/qwen3.8-flash"
 	legacyOpenRouterCommitModel   = "qwen/qwen3.7-plus"
 	defaultBuckbotModel           = "deepseek/deepseek-v4-pro-0813"
 	defaultBuckbotCriticModel     = "qwen/qwen3.8-max"
@@ -41,22 +41,30 @@ const (
 
 // Default configuration values exported for documentation and validation
 const (
-	DefaultPlanningModel    = defaultOpenRouterModel
-	DefaultExecutionModel   = defaultOpenRouterModel
-	DefaultReviewModel      = defaultOpenRouterModel
-	DefaultProvider         = "openrouter"
-	DefaultExecutionMode    = ExecutionModeClassic // RLM is experimental
-	DefaultOneshotMode      = ExecutionModeClassic
-	DefaultTrustLevel       = "balanced"
-	DefaultApprovalMode     = "safe"
-	DefaultSessionBudget    = 10.00
-	DefaultDailyBudget      = 20.00
-	DefaultMonthlyBudget    = 200.00
-	DefaultIPCBind          = "127.0.0.1:4488"
-	DefaultCompactThreshold = 0.75
-	DefaultMaxSelfHeal      = 3
-	DefaultMaxReviewCycles  = 3
-	DefaultCodexModel       = defaultCodexModel
+	DefaultPlanningModel  = defaultOpenRouterModel
+	DefaultExecutionModel = defaultOpenRouterModel
+	DefaultReviewModel    = defaultOpenRouterModel
+	DefaultProvider       = "openrouter"
+	DefaultExecutionMode  = ExecutionModeClassic // coordinated execution is experimental
+	DefaultOneshotMode    = ExecutionModeClassic
+	// DefaultOneshotDataPolicy leaves one-shot commit/PR requests to
+	// OpenRouter's normal routing: no forced provider.zdr or
+	// provider.data_collection field, and no goal-engine model-data-policy
+	// contract enforced. Buckbot's independent openrouter_privacy_fallback
+	// opt-in (see Buckbot.OpenRouterPrivacyFallback) is unaffected. Set
+	// "zdr" or "deny" to opt back into the stricter, contract-enforced
+	// behavior this used to apply unconditionally.
+	DefaultOneshotDataPolicy = "none"
+	DefaultTrustLevel        = "balanced"
+	DefaultApprovalMode      = "safe"
+	DefaultSessionBudget     = 10.00
+	DefaultDailyBudget       = 20.00
+	DefaultMonthlyBudget     = 200.00
+	DefaultIPCBind           = "127.0.0.1:4488"
+	DefaultCompactThreshold  = 0.75
+	DefaultMaxSelfHeal       = 3
+	DefaultMaxReviewCycles   = 3
+	DefaultCodexModel        = defaultCodexModel
 )
 
 type providerModelDefaults struct {
@@ -160,6 +168,7 @@ type Config struct {
 	Input          InputConfig        `yaml:"input"`
 	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
 	Notify         NotifyConfig       `yaml:"notify"`
+	Launch         LaunchConfig       `yaml:"launch"`
 
 	// Context Fabric / durable agent runtime scaffolding. All flags default
 	// off or to current (legacy) behavior; no runtime code reads these yet.
@@ -168,6 +177,35 @@ type Config struct {
 	AdaptiveProtocol AdaptiveProtocolConfig `yaml:"adaptive_protocol"`
 	AgentOperations  AgentOperationsConfig  `yaml:"agent_operations"`
 	Metrics          MetricsConfig          `yaml:"metrics"`
+}
+
+// LaunchConfig contains operator-owned admission contracts for unattended
+// launches. Workspace project configuration is never consulted by the launch
+// operator loader.
+type LaunchConfig struct {
+	WorkerImage LaunchWorkerImageConfig `yaml:"worker_image"`
+}
+
+// LaunchWorkerImageConfig pins the exact locally installed worker image that
+// launch admission may create. Reference must be a canonical repo@sha256
+// value; ImageID, OS, and Architecture are compared with Docker's inspection
+// result before the workspace is mounted.
+type LaunchWorkerImageConfig struct {
+	Reference           string `yaml:"reference"`
+	ImageID             string `yaml:"image_id"`
+	OS                  string `yaml:"os"`
+	Architecture        string `yaml:"architecture"`
+	ModuleLockSHA256    string `yaml:"module_lock_sha256"`
+	ToolchainLockSHA256 string `yaml:"toolchain_lock_sha256"`
+	ArtifactDir         string `yaml:"artifact_dir"`
+}
+
+// LaunchOperatorConfig is the bounded projection consumed by launch
+// preflight. It deliberately excludes credentials and ordinary project
+// settings.
+type LaunchOperatorConfig struct {
+	WorkerImage LaunchWorkerImageConfig
+	Diagnostics DiagnosticsConfig
 }
 
 // NotifyConfig controls async notifications for human-in-the-loop workflows
@@ -199,6 +237,7 @@ type SlackConfig struct {
 type ModelConfig struct {
 	Planning        string              `yaml:"planning" env:"BUCKLEY_MODEL_PLANNING"`
 	Execution       string              `yaml:"execution" env:"BUCKLEY_MODEL_EXECUTION"`
+	Light           string              `yaml:"light" env:"BUCKLEY_MODEL_LIGHT"`
 	Review          string              `yaml:"review" env:"BUCKLEY_MODEL_REVIEW"`
 	Curated         []string            `yaml:"curated"`
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
@@ -268,19 +307,21 @@ func (c *Config) GetUtilityTodoPlanModel() string {
 // ProviderConfig defines provider settings and API keys. Every section
 // below is hook-owned in config_env.go (envOpenRouterProvider,
 // envOpenAIProvider, envAnthropicProvider, envGoogleProvider,
-// envOllamaProvider, envLiteLLMProvider, envCodexProvider) instead of
+// envOllamaProvider, envOpenAICompatibleProvider, envLegacyLiteLLMProvider,
+// envCodexProvider) instead of
 // tag-dispatched: ProviderSettings is reused across five providers with
 // different env var names and different implicit-enable rules per
 // provider, so a struct tag on the shared type can't express it.
 type ProviderConfig struct {
-	OpenRouter   ProviderSettings  `yaml:"openrouter"`
-	OpenAI       ProviderSettings  `yaml:"openai"`
-	Anthropic    ProviderSettings  `yaml:"anthropic"`
-	Google       ProviderSettings  `yaml:"google"`
-	Ollama       ProviderSettings  `yaml:"ollama"`
-	LiteLLM      LiteLLMConfig     `yaml:"litellm"`
-	Codex        CodexConfig       `yaml:"codex"`
-	ModelRouting map[string]string `yaml:"model_routing"` // Maps model prefix to provider
+	OpenRouter       ProviderSettings       `yaml:"openrouter"`
+	OpenAI           ProviderSettings       `yaml:"openai"`
+	Anthropic        ProviderSettings       `yaml:"anthropic"`
+	Google           ProviderSettings       `yaml:"google"`
+	Ollama           ProviderSettings       `yaml:"ollama"`
+	OpenAICompatible OpenAICompatibleConfig `yaml:"openai_compatible"`
+	LiteLLM          LiteLLMConfig          `yaml:"litellm"`
+	Codex            CodexConfig            `yaml:"codex"`
+	ModelRouting     map[string]string      `yaml:"model_routing"` // Maps model prefix to provider
 }
 
 // ProviderSettings contains settings for a specific provider
@@ -290,15 +331,23 @@ type ProviderSettings struct {
 	BaseURL string `yaml:"base_url"` // Optional custom base URL
 }
 
-// LiteLLMConfig configures the LiteLLM proxy provider.
-type LiteLLMConfig struct {
-	Enabled   bool                 `yaml:"enabled"`
-	BaseURL   string               `yaml:"base_url"`
-	APIKey    string               `yaml:"api_key"`
-	Models    []string             `yaml:"models"`
-	Fallbacks map[string][]string  `yaml:"fallbacks"`
-	Router    *LiteLLMRouterConfig `yaml:"router"`
+// OpenAICompatibleConfig configures an OpenAI-compatible API provider.
+type OpenAICompatibleConfig struct {
+	Enabled                              bool                          `yaml:"enabled"`
+	BaseURL                              string                        `yaml:"base_url"`
+	APIKey                               string                        `yaml:"api_key"`
+	Models                               []string                      `yaml:"models"`
+	SupportedParameters                  map[string][]string           `yaml:"supported_parameters"`
+	ContextLengths                       map[string]int                `yaml:"context_lengths"`
+	StreamIdleTimeout                    time.Duration                 `yaml:"stream_idle_timeout"`
+	StreamFirstContentTimeout            time.Duration                 `yaml:"stream_first_content_timeout"`
+	StreamFirstContentMaxReasoningChunks int                           `yaml:"stream_first_content_max_reasoning_chunks"`
+	Fallbacks                            map[string][]string           `yaml:"fallbacks"`
+	Router                               *OpenAICompatibleRouterConfig `yaml:"router"`
 }
+
+// LiteLLMConfig is the deprecated name for OpenAICompatibleConfig.
+type LiteLLMConfig = OpenAICompatibleConfig
 
 // CodexConfig configures Codex CLI as a chat provider.
 type CodexConfig struct {
@@ -307,13 +356,16 @@ type CodexConfig struct {
 	Models  []string `yaml:"models"`
 }
 
-// LiteLLMRouterConfig defines routing behavior for LiteLLM proxies.
-type LiteLLMRouterConfig struct {
+// OpenAICompatibleRouterConfig defines routing behavior for compatible proxies.
+type OpenAICompatibleRouterConfig struct {
 	Strategy       string   `yaml:"strategy"`
 	NumRetries     int      `yaml:"num_retries"`
 	TimeoutSeconds int      `yaml:"timeout_seconds"`
 	FallbackModels []string `yaml:"fallback_models"`
 }
+
+// LiteLLMRouterConfig is the deprecated name for OpenAICompatibleRouterConfig.
+type LiteLLMRouterConfig = OpenAICompatibleRouterConfig
 
 // PromptCacheConfig controls provider prompt caching options.
 type PromptCacheConfig struct {
@@ -379,7 +431,9 @@ type OrchestratorConfig struct {
 
 const (
 	ExecutionModeClassic = "classic"
-	ExecutionModeRLM     = "rlm"
+	// ExecutionModeRLM is the legacy mode key that selects coordinated
+	// execution. Keep the literal stable for existing configuration.
+	ExecutionModeRLM = "rlm"
 )
 
 // Durable backend names for goal execution (spec.durable-execution-dapr).
@@ -405,13 +459,25 @@ type ExecutionModeConfig struct {
 // OneshotModeConfig controls the strategy for one-shot commands.
 type OneshotModeConfig struct {
 	Mode string `yaml:"mode" env:"BUCKLEY_ONESHOT_MODE"`
+
+	// DataPolicy controls whether the one-shot OpenRouter backend (commit,
+	// PR) attaches provider privacy fields and enforces the goal-engine
+	// model-data-policy contract. Valid values: "none" (default — no
+	// provider.zdr/data_collection field, no contract check), "zdr" (force
+	// zero data retention, relaxing only for a recognized OSS-licensed
+	// workspace, matching the durable goal engine's own rule), or "deny"
+	// (force non-ZDR retention with provider.data_collection=deny). See
+	// DefaultOneshotDataPolicy.
+	DataPolicy string `yaml:"data_policy" env:"BUCKLEY_ONESHOT_DATA_POLICY"`
 }
 
-// RLMConfig controls the Recursive Language Model runtime.
+// RLMConfig controls Buckley's coordinator–worker runtime. The historical
+// "rlm" configuration key remains for compatibility.
 type RLMConfig struct {
-	Coordinator RLMCoordinatorConfig `yaml:"coordinator"`
-	SubAgent    RLMSubAgentConfig    `yaml:"sub_agent"`
-	Scratchpad  RLMScratchpadConfig  `yaml:"scratchpad"`
+	Coordinator RLMCoordinatorConfig     `yaml:"coordinator"`
+	SubAgent    RLMSubAgentConfig        `yaml:"sub_agent"`
+	Scratchpad  RLMScratchpadConfig      `yaml:"scratchpad"`
+	Tiers       map[string]RLMTierConfig `yaml:"tiers"`
 }
 
 // RLMCoordinatorConfig controls coordinator behavior.
@@ -421,14 +487,19 @@ type RLMCoordinatorConfig struct {
 	MaxTokensBudget     int           `yaml:"max_tokens_budget"`
 	MaxWallTime         time.Duration `yaml:"max_wall_time"`
 	ConfidenceThreshold float64       `yaml:"confidence_threshold"`
-	StreamPartials      bool          `yaml:"stream_partials"`
+	// StreamPartials controls coordinator progress publication to iteration
+	// hooks and rlm iteration telemetry. It does not enable text-token
+	// streaming. The historical rlm configuration namespace is retained for
+	// compatibility.
+	StreamPartials bool `yaml:"stream_partials"`
 }
 
-// RLMSubAgentConfig controls sub-agent behavior.
+// RLMSubAgentConfig controls sub-agent behavior for the coordinator–worker
+// runtime.
 type RLMSubAgentConfig struct {
 	Model         string        `yaml:"model"`          // Model for all sub-agents (default: execution model)
 	MaxConcurrent int           `yaml:"max_concurrent"` // Parallel execution limit
-	Timeout       time.Duration `yaml:"timeout"`        // Per-task timeout
+	Timeout       time.Duration `yaml:"timeout"`        // Per-active-task cooperative deadline; queued concurrency/rate wait is excluded and parent contexts still win.
 }
 
 // RLMScratchpadConfig controls scratchpad retention.
@@ -439,6 +510,18 @@ type RLMScratchpadConfig struct {
 	DefaultTTL        time.Duration `yaml:"default_ttl"`
 	PersistArtifacts  bool          `yaml:"persist_artifacts"`
 	PersistDecisions  bool          `yaml:"persist_decisions"`
+}
+
+// RLMTierConfig mirrors the public, compatibility-safe subset of runtime
+// tier-routing controls under the historical rlm namespace.
+type RLMTierConfig struct {
+	Model             string   `yaml:"model"`
+	Provider          string   `yaml:"provider"`
+	Models            []string `yaml:"models"`
+	MaxCostPerMillion float64  `yaml:"max_cost_per_million"`
+	MinContextWindow  int      `yaml:"min_context_window"`
+	Prefer            []string `yaml:"prefer"`
+	Requires          []string `yaml:"requires"`
 }
 
 // IsZero reports whether the RLM config is entirely unset.
@@ -457,7 +540,8 @@ func (c RLMConfig) IsZero() bool {
 		c.Scratchpad.EvictionPolicy == "" &&
 		c.Scratchpad.DefaultTTL == 0 &&
 		!c.Scratchpad.PersistArtifacts &&
-		!c.Scratchpad.PersistDecisions
+		!c.Scratchpad.PersistDecisions &&
+		len(c.Tiers) == 0
 }
 
 // PlanningConfig controls intelligent planning behavior
@@ -582,8 +666,35 @@ type SandboxConfig struct {
 type DockerSandboxConfig struct {
 	Enabled        bool   `yaml:"enabled" env:"BUCKLEY_DOCKER_SANDBOX_ENABLED"`
 	Image          string `yaml:"image" env:"BUCKLEY_DOCKER_SANDBOX_IMAGE"`
+	Binary         string `yaml:"binary"`
 	WorkspaceMount string `yaml:"workspace_mount"`
-	ReadOnlyRoot   bool   `yaml:"read_only_root"`
+	// ContainerUser pins the numeric UID:GID used by a trusted adapter. It is
+	// never loaded from project or operator configuration.
+	ContainerUser string `yaml:"-"`
+	ReadOnlyRoot  bool   `yaml:"read_only_root"`
+	// EphemeralHome mounts a private tmpfs home and points HOME/TMP variables
+	// at container-private storage. It is opt-in to preserve interactive
+	// sandbox behavior; strict launch profiles require it.
+	EphemeralHome bool `yaml:"ephemeral_home"`
+	// HideGitMetadata overlays the workspace .git entry inside the container.
+	// Strict launch profiles require it; generic sandboxes preserve their
+	// existing behavior unless explicitly enabled.
+	HideGitMetadata bool `yaml:"hide_git_metadata"`
+	// StrictCleanup propagates container removal failures and removes the
+	// container on command timeout. Strict launch profiles require it.
+	StrictCleanup bool `yaml:"strict_cleanup"`
+	// NeverPull requires Docker to use an already-present image. It is opt-in
+	// so generic interactive sandboxes retain their existing image behavior.
+	NeverPull bool `yaml:"never_pull"`
+	// Entrypoint optionally overrides the image entrypoint. Strict launch
+	// profiles use /bin/sleep so worker-image defaults cannot run on creation.
+	Entrypoint string `yaml:"entrypoint"`
+	// IsolatedClientEnv prevents ambient Docker context, credential, and socket
+	// variables from changing the daemon used by a strict launch profile.
+	IsolatedClientEnv bool `yaml:"isolated_client_env"`
+	// MaxOutputBytes bounds captured stdout and stderr together. Zero preserves
+	// the legacy unbounded behavior; strict launch profiles require a bound.
+	MaxOutputBytes int64 `yaml:"max_output_bytes"`
 	// NetworkEnabled (BUCKLEY_DOCKER_SANDBOX_NETWORK) is a *bool so a
 	// project config can distinguish "not set" from "set to false"; the
 	// generic dispatcher only supports value types, so this is handled by
@@ -968,10 +1079,9 @@ type BuckbotConfig struct {
 	Model       string `yaml:"model"`
 	CriticModel string `yaml:"critic_model"`
 	Reasoning   string `yaml:"reasoning"`
-	// OpenRouterPrivacyFallback retains the legacy
-	// zdr_then_data_collection_deny value for parsing compatibility, but the
-	// policy is inert and cannot authorize a privacy downgrade. Strict ZDR is
-	// the only dispatchable posture until a trusted host mints OSS admission.
+	// OpenRouterPrivacyFallback is opt-in because falling back from ZDR to
+	// data_collection=deny deliberately relaxes a strict ZDR requirement.
+	// Supported value: zdr_then_data_collection_deny.
 	OpenRouterPrivacyFallback string `yaml:"openrouter_privacy_fallback"`
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.

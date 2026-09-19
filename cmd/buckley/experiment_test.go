@@ -167,6 +167,90 @@ func TestCalibratedExperimentProfiles_PersistenceIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCalibratedExperimentProfiles_SkipsZeroObservationAttributionCaveats(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "buckley.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	profiles := storage.NewBehaviorProfileStore(store)
+	taskSuccessKnown := true
+	calibrations := []experiment.ModelCalibration{
+		{
+			ModelID:            "requested/model",
+			AttributionCaveats: []string{"run skipped: selected model differed"},
+		},
+		{
+			ModelID: "good/model", ProviderID: "openrouter", MeasuredAt: time.Now(),
+			Observations: []modelprofile.Observation{{Succeeded: true, TaskSuccessObserved: &taskSuccessKnown}},
+		},
+	}
+	got, err := calibratedExperimentProfiles(context.Background(), profiles, calibrations, "experiment-exp-1", "", true)
+	if err != nil {
+		t.Fatalf("calibratedExperimentProfiles: %v", err)
+	}
+	if len(got) != 1 || got[0].ModelID != "good/model" {
+		t.Fatalf("profiles = %+v, want only attributable profile", got)
+	}
+	if stored, err := profiles.List(context.Background(), "requested/model"); err != nil || len(stored) != 0 {
+		t.Fatalf("skipped model profiles = %+v, %v; want none", stored, err)
+	}
+}
+
+func TestCalibratedExperimentProfilesRejectsProviderKeyCollision(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "buckley.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	profiles := storage.NewBehaviorProfileStore(store)
+	taskSuccessKnown := true
+	calibrations := []experiment.ModelCalibration{
+		{
+			ModelID:    "same/model",
+			ProviderID: "provider-a",
+			MeasuredAt: time.Now(),
+			Observations: []modelprofile.Observation{{
+				Succeeded:           true,
+				TaskSuccessObserved: &taskSuccessKnown,
+			}},
+		},
+		{
+			ModelID:    "same/model",
+			ProviderID: "provider-b",
+			MeasuredAt: time.Now(),
+			Observations: []modelprofile.Observation{{
+				Succeeded:           true,
+				TaskSuccessObserved: &taskSuccessKnown,
+			}},
+		},
+	}
+	_, err = calibratedExperimentProfiles(context.Background(), profiles, calibrations, "experiment-exp-1", "", true)
+	if err == nil || !strings.Contains(err.Error(), "multiple providers") {
+		t.Fatalf("calibratedExperimentProfiles error = %v, want provider collision", err)
+	}
+	if stored, err := profiles.List(context.Background(), "same/model"); err != nil || len(stored) != 0 {
+		t.Fatalf("stored profiles = %+v, %v; want none after provider collision", stored, err)
+	}
+}
+
+func TestWriteExperimentProfiles_ShowsAttributionCaveats(t *testing.T) {
+	profile := modelprofile.Profile{
+		ModelID: "good/model", Version: "experiment-exp-1", SampleSize: 1,
+		Samples: modelprofile.SampleCounts{TaskSuccess: 1},
+		Metrics: modelprofile.Metrics{TaskSuccessRate: 1},
+	}
+	var out bytes.Buffer
+	if err := writeExperimentProfiles(&out, []modelprofile.Profile{profile}, true, []string{"requested/model: run skipped: selected model differed"}); err != nil {
+		t.Fatalf("writeExperimentProfiles: %v", err)
+	}
+	for _, want := range []string{"Attribution caveats:", "requested/model: run skipped: selected model differed"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("profile output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestWriteExperimentProfiles_ShowsUsableEfficiencySummary(t *testing.T) {
 	profile := modelprofile.Profile{
 		ModelID: "cheap/model", Version: "experiment-exp-1", SampleSize: 2,
@@ -181,5 +265,125 @@ func TestWriteExperimentProfiles_ShowsUsableEfficiencySummary(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("profile output missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestWriteExperimentProfiles_ShowsAttemptsSeparateFromAssessedOutcomes(t *testing.T) {
+	profiles := []modelprofile.Profile{
+		{
+			ModelID: "unknown/model", Version: "experiment-exp-unknown", SampleSize: 2,
+			Samples: modelprofile.SampleCounts{TaskSuccessUnknown: 2, Latency: 2, Cost: 2},
+			Metrics: modelprofile.Metrics{AverageTaskLatencyMS: 150, AverageCostUSDPerTask: 0.03},
+		},
+		{
+			ModelID: "mixed/model", Version: "experiment-exp-mixed", SampleSize: 3,
+			Samples: modelprofile.SampleCounts{TaskSuccess: 2, TaskSuccessUnknown: 1, Latency: 3, Cost: 3},
+			Metrics: modelprofile.Metrics{TaskSuccessRate: 0.5, AverageTaskLatencyMS: 200, AverageCostUSDPerTask: 0.04},
+		},
+	}
+	var out bytes.Buffer
+	if err := writeExperimentProfiles(&out, profiles, true); err != nil {
+		t.Fatalf("writeExperimentProfiles: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"MODEL", "TASKS", "ASSESSED",
+		"unknown/model",
+		"150ms", "$0.0300",
+		"mixed/model",
+		"200ms", "$0.0400",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("profile output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "$0.0000") {
+		t.Fatalf("profile output should not render unavailable cost/success as zero:\n%s", got)
+	}
+	rows := profileOutputRows(got)
+	if got := rows["unknown/model"]; len(got) < 10 || got[2] != "2" || got[3] != "0" || got[4] != "-" {
+		t.Fatalf("unknown/model row = %v, want tasks=2 assessed=0 success=-\n%s", got, out.String())
+	}
+	if got := rows["mixed/model"]; len(got) < 10 || got[2] != "3" || got[3] != "2" || got[4] != "50.0%" {
+		t.Fatalf("mixed/model row = %v, want tasks=3 assessed=2 success=50.0%%\n%s", got, out.String())
+	}
+}
+
+func profileOutputRows(output string) map[string][]string {
+	rows := make(map[string][]string)
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			rows[fields[0]] = fields
+		}
+	}
+	return rows
+}
+
+func TestRunExperimentPromote_PromotesStoredCandidate(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv(envBuckleyDataDir, dataDir)
+	store, err := storage.New(filepath.Join(dataDir, "buckley.db"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	profile := modelprofile.Profile{
+		SchemaVersion: modelprofile.SchemaVersion,
+		ModelID:       "cheap/model",
+		Version:       "experiment-exp-1",
+		Class:         modelprofile.ClassBalanced,
+		SampleSize:    20,
+		Confidence:    0.9,
+		MeasuredAt:    time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC),
+		Capabilities:  modelprofile.Capabilities{ToolCalls: true},
+		Metrics: modelprofile.Metrics{
+			ToolReliability:             0.9,
+			ArgumentRepairReliability:   0.9,
+			StructuredOutputReliability: 0.9,
+			ParallelCallReliability:     0.9,
+			EditFidelity:                0.9,
+			VerificationPassRate:        0.9,
+			ContinuationReliability:     0.9,
+		},
+	}
+	if err := storage.NewBehaviorProfileStore(store).Put(context.Background(), profile); err != nil {
+		t.Fatalf("Put profile: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	digest, err := profile.Digest()
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runExperimentCommand([]string{"promote", "cheap/model", "experiment-exp-1"}); err != nil {
+			t.Fatalf("runExperimentCommand promote: %v", err)
+		}
+	})
+	for _, want := range []string{"Promoted model behavior profile", "cheap/model", "experiment-exp-1", digest, "balanced"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("promote output missing %q:\n%s", want, out)
+		}
+	}
+
+	reopened, err := storage.New(filepath.Join(dataDir, "buckley.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+	promoted, ok, err := storage.NewBehaviorProfileStore(reopened).Promoted(context.Background(), "cheap/model")
+	if err != nil || !ok || promoted.Version != "experiment-exp-1" {
+		t.Fatalf("Promoted = %+v, %v, %v", promoted, ok, err)
+	}
+}
+
+func TestRunExperimentPromote_MissingCandidateFails(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv(envBuckleyDataDir, dataDir)
+	err := runExperimentCommand([]string{"promote", "cheap/model", "missing"})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("runExperimentCommand promote missing candidate err = %v, want not found", err)
 	}
 }

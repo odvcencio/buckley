@@ -98,25 +98,3 @@ type Task struct {
 	ID   string
 	Data []byte
 }
-
-// Config holds configuration for creating a MessageBus.
-type Config struct {
-	// URL is the NATS server URL (e.g., "nats://localhost:4222").
-	// Ignored for in-memory bus.
-	URL string
-
-	// Name is a client identifier for debugging/monitoring.
-	Name string
-
-	// Timeout is the default timeout for operations.
-	Timeout time.Duration
-}
-
-// DefaultConfig returns a Config with sensible defaults.
-func DefaultConfig() Config {
-	return Config{
-		URL:     "nats://localhost:4222",
-		Name:    "buckley",
-		Timeout: 30 * time.Second,
-	}
-}
