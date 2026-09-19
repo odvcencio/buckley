@@ -8,6 +8,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // ToolCallIDParam allows callers to attach a stable tool call ID for telemetry.
@@ -15,12 +16,13 @@ const ToolCallIDParam = "__buckley_tool_call_id"
 
 // Registry manages all available tools
 type Registry struct {
-	mu          sync.RWMutex
-	tools       map[string]Tool
-	toolKinds   map[string]string // tool name → ACP tool_call kind
-	middlewares []Middleware
-	executor    Executor
-	hooks       *HookRegistry
+	mu              sync.RWMutex
+	tools           map[string]Tool
+	toolKinds       map[string]string // tool name → ACP tool_call kind
+	middlewares     []Middleware
+	executor        Executor
+	hooks           *HookRegistry
+	artifactSources *builtin.ArtifactSubmission
 
 	containerCompose string
 	containerWorkDir string

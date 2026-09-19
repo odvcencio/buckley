@@ -37,6 +37,15 @@ func NewChecker() *Checker {
 	}
 }
 
+// NewCheckerForReadyProvider constructs a dependency checker for a configuration that already has a ready model provider.
+func NewCheckerForReadyProvider() *Checker {
+	return &Checker{
+		required: []Dependency{
+			gitDependency(),
+		},
+	}
+}
+
 // CheckAll returns the dependencies that are currently missing
 func (c *Checker) CheckAll() ([]Dependency, error) {
 	missing := []Dependency{}

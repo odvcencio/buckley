@@ -14,6 +14,7 @@ import (
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/tooloutcome"
 )
 
 type toolLoopState struct {
@@ -22,9 +23,11 @@ type toolLoopState struct {
 	progress       toolLoopProgress
 	governor       *agentloop.Governor
 	guardReason    string
+	toolsOffered   bool
 	contextScale   float64
 	contextRetries int
 	projection     conversation.ContextProjectionStats
+	route          model.ModelRoute
 
 	// lastProviderFinishReason is the raw finish_reason string the provider
 	// reported on the most recent model call (e.g. "stop", "length",
@@ -43,6 +46,15 @@ type toolLoopState struct {
 	continuation     *model.ContinuationCoordinator
 	useContinuation  bool
 	codeModeRecovery *tool.CodeModeRecoveryState
+
+	// deferCompletionText keeps assistant text from being streamed as an
+	// accepted-looking answer while the completion contract has outstanding
+	// workspace/verification debt. Tool progress and reasoning still render
+	// live; the buffered text remains available to Controller for repair or
+	// incomplete-result reporting.
+	deferCompletionText             bool
+	completionRequiresObservableSet bool
+	completionStateObservationBad   bool
 }
 
 // toolLoopResult keeps provider-owned completion metadata separate from a
@@ -91,35 +103,41 @@ type toolLoopProgress struct {
 // AddToolResponseMessage) -- stay exactly as they were, wired in as
 // Controller hooks. See newToolLoopController.
 func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelID string) (toolLoopResult, error) {
+	return c.runToolLoopWithIntent(ctx, sess, modelID, agentloop.UnknownIntent)
+}
+
+func (c *Controller) runToolLoopWithIntent(ctx context.Context, sess *SessionState, modelID string, taskIntent agentloop.TaskIntent) (toolLoopResult, error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
 		return toolLoopResult{}, err
 	}
 
-	state := c.newToolLoopState(sess, modelID)
+	state := c.newToolLoopState(sess, modelID, taskIntent)
 	allowedTools := toolLoopAllowedTools(sess)
 
-	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state)
+	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state, taskIntent)
 	if err != nil {
 		return toolLoopResult{}, err
 	}
 
-	// accumulatedUsage sums every Controller.Run attempt's internally
-	// accumulated usage, including attempts that later errored (a context-
-	// length or tools-unsupported retry starts a fresh Result{} on the same
-	// Controller/Governor, so usage from rounds that already succeeded
-	// before the error would otherwise be lost). This mirrors the pre-engine
-	// loop, where state.totalUsage accumulated across every outer-loop
-	// iteration including retries.
-	var accumulatedUsage model.Usage
+	// latestUsage is the Controller's cumulative usage snapshot for this
+	// controller instance. A retry after a recoverable model error calls
+	// Controller.Run again on the same controller, whose next Result already
+	// starts from prior totals; adding snapshots would double-count completed
+	// rounds.
+	var latestUsage model.Usage
 	for {
 		if ctx.Err() != nil {
 			return toolLoopResult{}, ctx.Err()
 		}
 		result, err := ctrl.Run(ctx)
 		if result != nil {
-			accumulatedUsage = model.AddUsage(accumulatedUsage, result.Usage)
+			latestUsage = result.Usage
 		}
 		if err != nil {
+			if partial, ok := retainedPartialToolLoopResult(result, &state); ok {
+				c.markIncompleteToolLoopCompletion(&state, result.Termination.Reason)
+				return partial, err
+			}
 			// The context/tools-unsupported fallbacks mutate state
 			// (contextScale/contextRetries, useTools) and ask for a retry by
 			// returning nil; Controller.Run is safe to call again on the
@@ -132,7 +150,8 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			}
 			var incomplete *agentloop.IncompleteTurnError
 			if result != nil && errors.As(err, &incomplete) {
-				usage := accumulatedUsage
+				c.markIncompleteToolLoopCompletion(&state, result.Termination.Reason)
+				usage := latestUsage
 				return toolLoopResult{
 					Text:              result.Content,
 					Usage:             &usage,
@@ -142,13 +161,14 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 			return toolLoopResult{}, err
 		}
 		if completionErr := result.RequireConclusive(); completionErr != nil {
-			usage := accumulatedUsage
+			c.markIncompleteToolLoopCompletion(&state, result.Termination.Reason)
+			usage := latestUsage
 			return toolLoopResult{Text: result.Content, Usage: &usage, HarnessStopReason: result.Termination.Reason}, completionErr
 		}
 
 		switch result.FinishReason {
 		case agentloop.FinishReasonLoopGuard:
-			finished, finishErr := c.finishToolLoopResponse(sess, result.Message, accumulatedUsage, "", &state)
+			finished, finishErr := c.finishToolLoopResponse(sess, result.Message, latestUsage, "", &state)
 			finished.HarnessStopReason = result.Termination.Reason
 			return finished, finishErr
 		case agentloop.FinishReasonEmptyChoices:
@@ -162,7 +182,7 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 		// normal completion); the provider's raw finish_reason -- what
 		// modelFinishReasonNotice and readyStatusForFinishReason key off --
 		// is state.lastProviderFinishReason, captured by the CallModel hook.
-		return c.finishToolLoopResponse(sess, result.Message, accumulatedUsage, state.lastProviderFinishReason, &state)
+		return c.finishToolLoopResponse(sess, result.Message, latestUsage, state.lastProviderFinishReason, &state)
 	}
 }
 
@@ -176,14 +196,27 @@ func (c *Controller) validateToolLoopInputs(sess *SessionState) error {
 	return nil
 }
 
-func (c *Controller) newToolLoopState(sess *SessionState, modelID string) toolLoopState {
+func (c *Controller) newToolLoopState(sess *SessionState, modelID string, taskIntents ...agentloop.TaskIntent) toolLoopState {
+	taskIntent := agentloop.UnknownIntent
+	if len(taskIntents) > 0 {
+		taskIntent = taskIntents[0]
+	}
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if c != nil && c.modelMgr != nil {
+		if resolved, err := c.modelMgr.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
 	return toolLoopState{
 		useTools: !c.consumeDisableToolsNextTurn(sess) &&
 			sess.ToolRegistry != nil &&
-			c.modelMgr.SupportsTools(modelID),
-		governor:         newInteractiveToolLoopGovernor(c.cfg),
-		contextScale:     1,
-		codeModeRecovery: &tool.CodeModeRecoveryState{},
+			c.modelMgr.OfferToolsForRoute(route),
+		governor:                        newInteractiveToolLoopGovernor(c.cfg),
+		contextScale:                    1,
+		route:                           route,
+		codeModeRecovery:                &tool.CodeModeRecoveryState{},
+		deferCompletionText:             taskIntent == agentloop.MutationIntent,
+		completionRequiresObservableSet: taskIntent == agentloop.MutationIntent,
 	}
 }
 
@@ -213,6 +246,13 @@ func (c *Controller) continuationEligible(modelID string) bool {
 		return false
 	}
 	return c.modelMgr.SupportsContinuation(modelID)
+}
+
+func (c *Controller) continuationEligibleForRoute(route model.ModelRoute) bool {
+	if c == nil || c.cfg == nil || !c.cfg.Models.ProviderContinuation || c.modelMgr == nil {
+		return false
+	}
+	return c.modelMgr.SupportsContinuationForRoute(route)
 }
 
 // newToolLoopController wires the shared turn engine (pkg/agentloop) for
@@ -249,12 +289,16 @@ func (c *Controller) continuationEligible(modelID string) bool {
 // already suppressed via ParallelToolCalls=false whenever the provider
 // advertises support for it, so this narrows to providers that both omit
 // that parameter and have a model choose multiple calls in one turn.
-func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState) (*agentloop.Controller, error) {
+func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState, taskIntent agentloop.TaskIntent) (*agentloop.Controller, error) {
 	currentRound := 0
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		currentRound = round
-		req, nextUseTools := c.buildToolLoopRequestWithState(sess, modelID, state.useTools, allowedTools, state)
+		route, err := c.modelMgr.ResolveModelRoute(modelID)
+		if err != nil {
+			return model.ChatRequest{}, err
+		}
+		req, nextUseTools := c.buildToolLoopRequestWithStateForRoute(sess, route, state.useTools, allowedTools, state)
 		state.useTools = nextUseTools
 		return req, nil
 	}
@@ -268,34 +312,43 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 			iteration = 0
 		}
 		resp, err := c.callToolLoopTurn(ctx, sess, modelID, iteration, req, state)
-		if err != nil {
-			return resp, err
-		}
 		if resp != nil && len(resp.Choices) > 0 {
 			resp.Choices[0].Message.ToolCalls = normalizeToolLoopCalls(sess.ToolRegistry, resp.Choices[0].Message.ToolCalls, allowedTools)
 			state.lastProviderFinishReason = resp.Choices[0].FinishReason
+		}
+		if err != nil {
+			return resp, err
 		}
 		return resp, nil
 	})
 
 	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+		if !state.toolsOffered {
+			return c.rejectUnexpectedToolLoopCalls(ctx, state, calls), nil
+		}
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
 		for i, tc := range calls {
 			if ctx.Err() != nil {
 				return outcomes, ctx.Err()
 			}
+			metadata := c.toolLoopMetadata(sess, tc.Function.Name)
+			observation := tooloutcome.BeginWithMetadata(ctx, c.workDir, metadata)
 			modelResult, result, execErr := c.toolLoopExecuteOne(ctx, sess, tc, i+1, len(calls), allowedTools, state)
 			success := execErr == nil && result != nil && result.Success
 			yield := tool.ResultYieldForTool(tc.Function.Name, result, execErr)
-			outcomes = append(outcomes, agentloop.ToolOutcome{
+			outcome := agentloop.ToolOutcome{
 				Content:       modelResult,
 				Success:       success,
 				Error:         toolLoopResultError(result, execErr),
 				Stderr:        toolLoopResultString(result, "stderr"),
+				EffectClass:   string(metadata.Impact),
 				YieldObserved: yield.Observed,
 				YieldCount:    yield.Count,
 				YieldUnit:     yield.Unit,
-			})
+			}
+			outcome = observation.Finish(ctx, outcome, metadata, result, execErr)
+			updateToolLoopCompletionDebt(state, outcome)
+			outcomes = append(outcomes, outcome)
 		}
 		return outcomes, nil
 	})
@@ -307,18 +360,25 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		case msg.Role == "tool":
 			sess.Conversation.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
 			c.saveLatestConversationMessage(sess)
+		case msg.Role == "user":
+			if c.app != nil {
+				c.app.SetStatus("Checking changes")
+			}
+			sess.Conversation.AddUserMessage(model.ExtractTextContentOrEmpty(msg.Content))
+			c.saveLatestConversationMessage(sess)
 		}
 	})
 
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:          state.governor,
-		Progress:          newInteractiveProgressController(c.cfg),
-		FinalizeOnStop:    true,
-		LifecycleObserver: telemetry.NewAgentLoopObserver(c.telemetry),
-		BuildRequest:      buildRequest,
-		CallModel:         callModel,
-		DispatchTools:     dispatch,
-		History:           history,
+		Governor:           state.governor,
+		Progress:           newInteractiveProgressController(c.cfg),
+		FinalizeOnStop:     true,
+		CompletionContract: toolLoopCompletionContract(taskIntent),
+		LifecycleObserver:  telemetry.NewAgentLoopObserver(c.telemetry),
+		BuildRequest:       buildRequest,
+		CallModel:          callModel,
+		DispatchTools:      dispatch,
+		History:            history,
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0
@@ -347,6 +407,89 @@ func toolLoopResultString(result *builtin.Result, key string) string {
 	return value
 }
 
+func toolLoopCompletionContract(taskIntent agentloop.TaskIntent) *agentloop.CompletionContract {
+	if !taskIntent.Valid() {
+		taskIntent = agentloop.UnknownIntent
+	}
+	return &agentloop.CompletionContract{
+		RequirePostChangeVerification: true,
+		RequireObservableChange:       taskIntent == agentloop.MutationIntent,
+		MaxRepairAttempts:             1,
+		TaskIntent:                    taskIntent,
+	}
+}
+
+func retainedPartialToolLoopResult(result *agentloop.Result, state *toolLoopState) (toolLoopResult, bool) {
+	if result == nil || !result.Partial {
+		return toolLoopResult{}, false
+	}
+	text := strings.TrimSpace(result.Content)
+	if text == "" {
+		text = strings.TrimSpace(model.ExtractTextContentOrEmpty(result.Message.Content))
+	}
+	usage := result.Usage
+	out := toolLoopResult{
+		Text:                 text,
+		Usage:                &usage,
+		HarnessStopReason:    result.Termination.Reason,
+		ProviderFinishReason: "",
+	}
+	if state != nil {
+		out.ProviderFinishReason = state.lastProviderFinishReason
+	}
+	return out, true
+}
+
+func (c *Controller) toolLoopMetadata(sess *SessionState, name string) tool.ToolMetadata {
+	if sess == nil || sess.ToolRegistry == nil {
+		return tool.DefaultMetadata()
+	}
+	registered, ok := sess.ToolRegistry.Get(name)
+	if !ok {
+		return tool.DefaultMetadata()
+	}
+	return tool.GetMetadata(registered)
+}
+
+func updateToolLoopCompletionDebt(state *toolLoopState, outcome agentloop.ToolOutcome) {
+	if state == nil {
+		return
+	}
+	if outcome.StateObservationFailed {
+		state.completionStateObservationBad = true
+		state.deferCompletionText = true
+		return
+	}
+	if outcome.StateChanged {
+		state.completionRequiresObservableSet = false
+		state.deferCompletionText = true
+		return
+	}
+	if outcome.VerificationObserved && !state.completionStateObservationBad {
+		if state.completionRequiresObservableSet {
+			state.deferCompletionText = true
+			return
+		}
+		state.deferCompletionText = !outcome.VerificationPassed
+	}
+}
+
+func (c *Controller) markIncompleteToolLoopCompletion(state *toolLoopState, reason string) {
+	if c == nil || c.app == nil || state == nil || !state.progress.roundRendered {
+		return
+	}
+	if strings.TrimSpace(state.progress.roundRenderedText) == "" {
+		return
+	}
+	detail := strings.TrimSpace(reason)
+	if detail == "" {
+		detail = "the turn stopped before Buckley could accept a conclusive final answer"
+	}
+	c.app.ReplaceLastMessage("Buckley could not accept this streamed draft as final because " + strings.TrimSuffix(detail, ".") + ".")
+	state.progress.roundRendered = false
+	state.progress.roundRenderedText = ""
+}
+
 // callToolLoopTurn executes one model turn, using the continuation-aware
 // non-streaming path when this turn is eligible (decision 0001) and falling
 // back to the normal streaming path otherwise. req already carries the full
@@ -367,7 +510,7 @@ func (c *Controller) callToolLoopTurn(ctx context.Context, sess *SessionState, m
 		status += ", " + projection
 	}
 	c.app.StartProcessStatus(status)
-	resp, err := state.continuation.Call(ctx, req)
+	resp, err := state.continuation.CallForRoute(ctx, req, req.Route)
 	c.app.StopProcessStatus()
 	if err == nil {
 		state.projection.ContinuationHit = state.continuation.Hit()
@@ -393,7 +536,7 @@ func (c *Controller) handleToolLoopModelError(err error, state *toolLoopState) e
 	if c.handleToolLoopContextError(err, state) {
 		return nil
 	}
-	if state != nil && state.useTools && isToolUnsupportedError(err) {
+	if state != nil && state.useTools && model.IsToolUnsupportedError(err) {
 		c.app.SetStatus("Retrying without tools")
 		state.useTools = false
 		return nil
@@ -413,7 +556,17 @@ func (c *Controller) buildToolLoopRequest(sess *SessionState, modelID string, us
 }
 
 func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID string, useTools bool, allowedTools []string, state *toolLoopState) (model.ChatRequest, bool) {
-	useContinuation := state != nil && c.continuationEligible(modelID)
+	route := model.ModelRoute{RequestedModel: modelID, SelectedModel: modelID}
+	if c != nil && c.modelMgr != nil {
+		if resolved, err := c.modelMgr.ResolveModelRoute(modelID); err == nil {
+			route = resolved
+		}
+	}
+	return c.buildToolLoopRequestWithStateForRoute(sess, route, useTools, allowedTools, state)
+}
+
+func (c *Controller) buildToolLoopRequestWithStateForRoute(sess *SessionState, route model.ModelRoute, useTools bool, allowedTools []string, state *toolLoopState) (model.ChatRequest, bool) {
+	useContinuation := state != nil && c.continuationEligibleForRoute(route)
 	var coordinator *model.ContinuationCoordinator
 	if useContinuation {
 		coordinator = c.continuationCoordinatorForSession(sess)
@@ -421,8 +574,12 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 	}
 
 	req := model.ChatRequest{
-		Model:     modelID,
+		Model:     route.RequestedModel,
 		SessionID: sess.ID,
+		Route:     route,
+	}
+	if c.modelMgr != nil && c.modelMgr.ToolsCatalogConfirmedUnavailableForRoute(route) {
+		req.ToolsCatalogConfirmedUnavailable = true
 	}
 	if useContinuation {
 		req.Messages = c.buildContinuationMessagesForSession(sess)
@@ -430,37 +587,45 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 		req.Messages = c.buildMessagesForSession(sess)
 	}
 
-	if useTools && sess.ToolRegistry != nil {
+	if useTools && sess.ToolRegistry != nil && (c.modelMgr == nil || c.modelMgr.OfferToolsForRoute(route)) {
 		tools := sess.ToolRegistry.ToOpenAIFunctionsGoverned(c.evaluator, "interactive", "coding", allowedTools, 0)
 		if len(tools) > 0 {
 			req.Tools = tools
 			req.ToolChoice = "auto"
-			if c.modelMgr != nil && c.modelMgr.SupportsParameter(modelID, "parallel_tool_calls") {
+			if c.modelMgr != nil && c.modelMgr.SupportsParameterForRoute(route, "parallel_tool_calls") {
 				sequential := false
 				req.ParallelToolCalls = &sequential
 			}
 		} else {
 			useTools = false
 		}
+	} else {
+		useTools = false
+		if sess.ToolRegistry != nil && len(sess.ToolRegistry.List()) > 0 {
+			req.Messages = append(req.Messages, model.Message{
+				Role:    "system",
+				Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
+			})
+		}
 	}
 
-	if c.modelMgr != nil && c.modelMgr.SupportsReasoning(modelID) {
+	if c.modelMgr != nil && c.modelMgr.SupportsReasoningForRoute(route) {
 		exclude := false
 		req.Reasoning = &model.ReasoningConfig{Exclude: &exclude}
-		if effort := model.ResolveReasoningEffort(c.cfg, c.modelMgr, c.rulesEngine, modelID, "execution"); effort != "" {
+		if effort := model.ResolveReasoningEffort(c.cfg, tuiRouteReasoningChecker{manager: c.modelMgr, route: route}, c.rulesEngine, route.SelectedModel, "execution"); effort != "" {
 			req.Reasoning.Effort = effort
 		} else {
 			enabled := true
 			req.Reasoning.Enabled = &enabled
 		}
 	}
-	if c.modelMgr != nil && c.modelMgr.SupportsParameter(modelID, "include_reasoning") {
+	if c.modelMgr != nil && c.modelMgr.SupportsParameterForRoute(route, "include_reasoning") {
 		include := true
 		req.IncludeReasoning = &include
 	}
 	contextWindow := 0
 	if c.modelMgr != nil {
-		contextWindow, _ = c.modelMgr.GetContextLength(modelID)
+		contextWindow, _ = c.modelMgr.GetContextLengthForRoute(route)
 	}
 	scale := 1.0
 	if state != nil && state.contextScale > 0 {
@@ -469,8 +634,7 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 
 	pinnedFromIndex := 0
 	if useContinuation {
-		providerID := c.modelMgr.ProviderIDForModel(modelID)
-		coordinator.Restore(providerID, modelID, req.Messages)
+		coordinator.Restore(route.ProviderID, route.SelectedModel, req.Messages)
 		pinnedFromIndex = coordinator.PinnedFromIndex()
 	}
 
@@ -491,8 +655,26 @@ func (c *Controller) buildToolLoopRequestWithState(sess *SessionState, modelID s
 		state.projection = projection
 		state.useContinuation = useContinuation
 		state.continuation = coordinator
+		state.route = route
+		state.toolsOffered = len(req.Tools) > 0
 	}
 	return req, useTools
+}
+
+type tuiRouteReasoningChecker struct {
+	manager *model.Manager
+	route   model.ModelRoute
+}
+
+func (c tuiRouteReasoningChecker) SupportsReasoning(string) bool {
+	return c.manager != nil && c.manager.SupportsReasoningForRoute(c.route)
+}
+
+func (c tuiRouteReasoningChecker) ResolveReasoningCapability(string) model.CapabilityResolution {
+	if c.manager == nil {
+		return model.CapabilityResolution{Model: c.route.SelectedModel, ProviderID: c.route.ProviderID, Capability: "reasoning", State: model.CapabilityUnknown, Source: "checker_unavailable"}
+	}
+	return c.manager.ResolveReasoningCapabilityForRoute(c.route)
 }
 
 func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatRequest, modelID string, iteration int, sess *SessionState, state *toolLoopState) (*model.ChatResponse, error) {
@@ -508,7 +690,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	c.app.StartProcessStatus(status)
 	defer c.app.StopProcessStatus()
 
-	chunks, errs := c.modelMgr.ChatCompletionStream(ctx, req)
+	chunks, errs := c.modelMgr.ChatCompletionStreamForRoute(ctx, req, req.Route)
 	accumulator := model.AcquireStreamAccumulator()
 	defer model.ReleaseStreamAccumulator(accumulator)
 	if state != nil {
@@ -534,8 +716,9 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 			usage = *streamedUsage
 		}
 		return &model.ChatResponse{
-			ID:    responseID,
-			Model: responseModel,
+			ID:                responseID,
+			Model:             responseModel,
+			ExecutionIdentity: accumulator.ExecutionIdentity(),
 			Choices: []model.Choice{{
 				Message:      message,
 				FinishReason: finishReason,
@@ -551,9 +734,41 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 		}
 		return nil, err
 	}
+	processChunk := func(chunk model.StreamChunk) {
+		if chunk.ID != "" {
+			responseID = chunk.ID
+		}
+		if chunk.Model != "" {
+			responseModel = chunk.Model
+		}
+		accumulator.Add(chunk)
+		for _, choice := range chunk.Choices {
+			receivedChoice = true
+			c.appendReasoningProgress(state, choice.Delta)
+			c.appendTextProgress(state, sess, choice.Delta.Content)
+			if choice.FinishReason != nil {
+				finishReason = *choice.FinishReason
+			}
+		}
+	}
+	drainReadyChunks := func() {
+		if chunks == nil {
+			return
+		}
+		ready := len(chunks)
+		for i := 0; i < ready; i++ {
+			chunk, ok := <-chunks
+			if !ok {
+				chunks = nil
+				return
+			}
+			processChunk(chunk)
+		}
+	}
 	for chunks != nil || errs != nil {
 		select {
 		case <-ctx.Done():
+			drainReadyChunks()
 			c.closeTextProgress(state, sess, "")
 			return partialResponseIfObserved(ctx.Err())
 		case chunk, ok := <-chunks:
@@ -561,27 +776,14 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 				chunks = nil
 				continue
 			}
-			if chunk.ID != "" {
-				responseID = chunk.ID
-			}
-			if chunk.Model != "" {
-				responseModel = chunk.Model
-			}
-			accumulator.Add(chunk)
-			for _, choice := range chunk.Choices {
-				receivedChoice = true
-				c.appendReasoningProgress(state, choice.Delta)
-				c.appendTextProgress(state, sess, choice.Delta.Content)
-				if choice.FinishReason != nil {
-					finishReason = *choice.FinishReason
-				}
-			}
+			processChunk(chunk)
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
 				continue
 			}
 			if err != nil {
+				drainReadyChunks()
 				c.closeTextProgress(state, sess, "")
 				return partialResponseIfObserved(err)
 			}
@@ -602,8 +804,9 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 		usage = *streamedUsage
 	}
 	return &model.ChatResponse{
-		ID:    responseID,
-		Model: responseModel,
+		ID:                responseID,
+		Model:             responseModel,
+		ExecutionIdentity: accumulator.ExecutionIdentity(),
 		Choices: []model.Choice{{
 			Message:      message,
 			FinishReason: finishReason,
@@ -636,19 +839,21 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	c.app.ReplaceLastMessage(display)
 }
 
-// appendTextProgress streams one assistant text delta into the transcript:
-// it seeds an empty assistant bubble on the first non-empty delta this
-// round (so StreamChunk has something to append into), then forwards the
-// delta through the existing StreamChunk/coalescer machinery. text is
-// buffered in state.progress.textBuf so closeTextProgress can detect a
-// token-parsing correction (inline tool-call markup) once the round
-// finishes.
+// appendTextProgress streams one assistant text delta into the transcript
+// only when the current completion state has no outstanding verification
+// debt. It always buffers text in state.progress.textBuf so the controller
+// can still validate, repair, or report incomplete drafts without making a
+// premature answer look accepted on screen.
 func (c *Controller) appendTextProgress(state *toolLoopState, sess *SessionState, text string) {
 	if c == nil || c.app == nil || state == nil || sess == nil || text == "" {
 		return
 	}
 	if !state.progress.started {
 		state.progress.started = true
+	}
+	if state.deferCompletionText {
+		state.progress.textBuf.WriteString(text)
+		return
 	}
 	// A new assistant bubble is about to become the last message; any
 	// reasoning bubble that was open no longer is.
@@ -835,6 +1040,34 @@ func (c *Controller) toolLoopExecuteOne(ctx context.Context, sess *SessionState,
 		c.appendCodeModeRecoveryProgress(state, guidance)
 	}
 	return modelResult, result, execErr
+}
+
+func (c *Controller) rejectUnexpectedToolLoopCalls(ctx context.Context, state *toolLoopState, calls []model.ToolCall) []agentloop.ToolOutcome {
+	outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+	for _, tc := range calls {
+		err := fmt.Errorf("tool schemas were not offered for this model request")
+		if c != nil {
+			c.appendToolCallProgress(state, tc)
+			c.appendToolResultProgress(state, tc.Function.Name, nil, err)
+		}
+		outcomes = append(outcomes, agentloop.ToolOutcome{
+			Content:     unexpectedToolLoopCallMessage(tc.Function.Name),
+			Success:     false,
+			EffectClass: "control",
+		})
+		if ctx.Err() != nil {
+			return outcomes
+		}
+	}
+	return outcomes
+}
+
+func unexpectedToolLoopCallMessage(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	return "Tool execution rejected: Buckley did not offer tool schemas for this model request, so no local tool was run for " + name + "."
 }
 
 // executeToolLoopCall runs one tool call and applies the loop guard and
@@ -1201,26 +1434,6 @@ func toolDisplayMessage(name string, result *builtin.Result, execErr error) stri
 		return summary
 	}
 	return ""
-}
-
-func isToolUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "not support") {
-		return true
-	}
-	if strings.Contains(lower, "tool") && strings.Contains(lower, "unsupported") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool calling") {
-		return true
-	}
-	if strings.Contains(lower, "does not support tool response") {
-		return true
-	}
-	return false
 }
 
 func resolveToolCallName(registry *tool.Registry, name string, allowed []string) (string, bool) {

@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rlm"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -82,6 +84,10 @@ type AgentResult struct {
 	InputTokens  int
 	OutputTokens int
 
+	// Usage preserves rich provider usage evidence when available. Scalar token
+	// fields remain populated for older callers.
+	Usage transparency.TokenUsage
+
 	// Duration is how long execution took
 	Duration time.Duration
 
@@ -96,6 +102,10 @@ type AgentResult struct {
 	// instead contribute explicit ToolCalls from the constrained verification
 	// tool.
 	ExecutionEvidence []model.CommandExecutionEvidence
+
+	// ModelExecutions records observed model-response identities in call order.
+	// Empty identity fields mean the provider did not supply them.
+	ModelExecutions []model.ExecutionIdentity
 }
 
 // AgentToolCall is the provider-neutral record of one tool invocation.
@@ -234,42 +244,43 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 
 	// Execute task
 	agentResult, executionErr := agent.Execute(ctx, task)
+	var verifyErr error
 	if opts.ReviewSnapshot != nil && snapshotWorkDir != "" {
 		verifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		verifyErr := model.VerifyReviewWorkspace(verifyCtx, snapshotWorkDir, opts.ReviewSnapshot)
+		verifyErr = model.VerifyReviewWorkspace(verifyCtx, snapshotWorkDir, opts.ReviewSnapshot)
 		cancel()
-		if verifyErr != nil {
-			return nil, fmt.Errorf("API review changed the captured source snapshot: %w", verifyErr)
-		}
 	}
+	resultErr := agentRunnerRetainedResultError(executionErr, verifyErr)
 	if agentResult == nil {
-		if executionErr != nil {
-			return nil, fmt.Errorf("execute task: %w", executionErr)
+		if resultErr != nil {
+			return nil, resultErr
 		}
 		return nil, fmt.Errorf("execute task returned no result")
 	}
-	if executionErr == nil {
+	if resultErr == nil {
 		reviewCodeModeStatus = "completed"
 	}
 
 	duration := time.Since(start)
 	response := agentResult.Summary
-	if executionErr != nil {
-		response = formatIncompleteAgentResponse(agentResult, executionErr)
+	if resultErr != nil {
+		response = formatIncompleteAgentResponse(agentResult, resultErr)
 	}
 
 	// Build result
 	result := &AgentResult{
 		Response:          response,
-		Incomplete:        executionErr != nil,
+		Incomplete:        resultErr != nil,
 		FinishReason:      agentResult.FinishReason,
 		ToolCalls:         convertAgentToolCalls(agentResult.ToolCalls),
 		TokensUsed:        agentResult.TokensUsed,
 		InputTokens:       agentResult.InputTokens,
 		OutputTokens:      agentResult.OutputTokens,
+		Usage:             transparency.CloneTokenUsage(agentResult.Usage),
 		Duration:          duration,
 		ProviderID:        providerID,
 		ExecutionEvidence: append([]model.CommandExecutionEvidence(nil), agentResult.ExecutionEvidence...),
+		ModelExecutions:   cloneAgentModelExecutions(agentResult.ModelExecutions),
 	}
 
 	// Build trace for transparency
@@ -278,10 +289,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 		result.ProviderID = providerID
 	}
 	builder := transparency.NewTraceBuilder(traceID, modelToUse, providerID)
-	tokens := transparency.TokenUsage{
-		Input:  agentResult.InputTokens,
-		Output: agentResult.OutputTokens,
-	}
+	tokens := agentResultTokenUsage(result)
 
 	// Extract tool names for trace
 	var toolNames []string
@@ -298,25 +306,17 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 	builder.WithResponse(&transparency.ResponseTrace{
 		FinishReason: agentResult.FinishReason,
 	})
+	builder.WithModelExecutions(agentModelExecutionsForTrace(result.ModelExecutions))
+	if resultErr != nil {
+		builder.WithError(resultErr)
+	}
 
 	// Calculate API cost only when the provider publishes token pricing.
 	// Native Codex runs through the user's CLI subscription.
-	cost := 0.0
-	if providerID != "codex" {
-		pricing := transparency.ModelPricing{
-			InputPerMillion:  3.0,
-			OutputPerMillion: 15.0,
-		}
-		if r.models != nil {
-			if info, err := r.models.GetModelInfo(modelToUse); err == nil {
-				pricing.InputPerMillion = info.Pricing.Prompt
-				pricing.OutputPerMillion = info.Pricing.Completion
-			}
-		}
-		cost = effectiveAgentInvocationCost(providerID, pricing, tokens)
-	}
+	cost, costUnknown := agentRunnerInvocationCost(r.models, providerID, modelToUse, tokens)
 
 	result.Trace = builder.Complete(tokens, cost)
+	result.Trace.CostUnknown = costUnknown
 	result.Trace.Duration = duration
 
 	// Record in ledger
@@ -325,15 +325,54 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			Model:        modelToUse,
 			Tokens:       tokens,
 			Cost:         cost,
+			CostUnknown:  costUnknown,
 			Latency:      duration,
 			InvocationID: traceID,
 		})
 	}
 
-	if executionErr != nil {
-		return result, fmt.Errorf("execute task: %w", executionErr)
+	if resultErr != nil {
+		return result, resultErr
 	}
 	return result, nil
+}
+
+func agentRunnerRetainedResultError(executionErr, verifyErr error) error {
+	var resultErrs []error
+	if executionErr != nil {
+		resultErrs = append(resultErrs, fmt.Errorf("execute task: %w", executionErr))
+	}
+	if verifyErr != nil {
+		resultErrs = append(resultErrs, fmt.Errorf("API review changed the captured source snapshot: %w", verifyErr))
+	}
+	return errors.Join(resultErrs...)
+}
+
+func cloneAgentModelExecutions(input []model.ExecutionIdentity) []model.ExecutionIdentity {
+	if input == nil {
+		return nil
+	}
+	out := make([]model.ExecutionIdentity, len(input))
+	copy(out, input)
+	return out
+}
+
+func agentModelExecutionsForTrace(input []model.ExecutionIdentity) []transparency.ExecutionIdentityTrace {
+	if input == nil {
+		return nil
+	}
+	out := make([]transparency.ExecutionIdentityTrace, len(input))
+	for i, identity := range input {
+		out[i] = transparency.ExecutionIdentityTrace{
+			RequestedModel: identity.RequestedModel,
+			SelectedModel:  identity.SelectedModel,
+			ProviderID:     identity.ProviderID,
+			ResponseModel:  identity.ResponseModel,
+			ResponseID:     identity.ResponseID,
+			Conflicted:     identity.Conflicted,
+		}
+	}
+	return out
 }
 
 func reviewToolAllowed(allowedTools []string, name string) bool {
@@ -548,6 +587,52 @@ func effectiveAgentInvocationCost(providerID string, pricing transparency.ModelP
 		return 0
 	}
 	return pricing.Calculate(tokens)
+}
+
+func agentRunnerInvocationCost(models *model.Manager, providerID, modelID string, tokens transparency.TokenUsage) (float64, bool) {
+	if providerID == "codex" {
+		return 0, false
+	}
+	if models == nil {
+		return 0, true
+	}
+	info, err := models.GetModelInfo(modelID)
+	if err != nil || info == nil || !info.PricingKnown {
+		return 0, true
+	}
+	pricing := transparency.ModelPricing{
+		InputPerMillion:  info.Pricing.Prompt,
+		OutputPerMillion: info.Pricing.Completion,
+	}
+	return effectiveAgentInvocationCost(providerID, pricing, tokens), transparency.CostUnknownForUsage(tokens, pricing)
+}
+
+func agentResultTokenUsage(result *AgentResult) transparency.TokenUsage {
+	if result == nil {
+		return transparency.TokenUsage{}
+	}
+	if modelusage.HasEvidence(result.Usage) {
+		return transparency.CloneTokenUsage(result.Usage)
+	}
+	return legacyAgentRunnerTokenUsage(result.TokensUsed, result.InputTokens, result.OutputTokens)
+}
+
+func legacyAgentRunnerTokenUsage(total, input, output int) transparency.TokenUsage {
+	tokens := transparency.TokenUsage{Input: input, Output: output}
+	if input == 0 && output == 0 && total > 0 {
+		tokens.Unclassified = total
+	} else if extra := total - input - output; extra > 0 {
+		tokens.Unclassified = extra
+	}
+	return tokens
+}
+
+func legacyFrameworkAgentTokenUsage(total, input, output int) transparency.TokenUsage {
+	tokens := transparency.TokenUsage{Input: input, Output: output}
+	if input == 0 && output == 0 && total > 0 {
+		tokens.Unclassified = total
+	}
+	return tokens
 }
 
 func formatIncompleteAgentResponse(result *rlm.SubAgentResult, cause error) string {

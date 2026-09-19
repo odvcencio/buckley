@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ func New(loop *goalloop.Loop, runID, workerRoot string, goal goalloop.Goal, spec
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return nil, fmt.Errorf("goalrunner: run ID is required")
+	}
+	if err := goal.Validate(); err != nil {
+		return nil, fmt.Errorf("goalrunner: invalid goal for run %s: %w", runID, err)
 	}
 	actualRoot, err := goalloop.NormalizeWorkspaceRoot(workerRoot)
 	if err != nil {
@@ -153,6 +157,79 @@ func (r *Runner) NextBatch(ctx context.Context, req durability.NextBatchRequest)
 	return durability.NextBatchResponse{Tasks: batch}, nil
 }
 
+// NextBatchV2 is the GoalWorkflowV5 terminal-aware scheduler. It keeps
+// NextBatch's legacy empty-pull behavior immutable while making deferred,
+// exhausted, blocked, and parked task IDs explicit to the new workflow.
+func (r *Runner) NextBatchV2(ctx context.Context, req durability.NextBatchV2Request) (durability.NextBatchResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.NextBatchResponse{}, err
+	}
+	queue, err := r.loop.BuildQueue(ctx, req.RunID)
+	if err != nil {
+		return durability.NextBatchResponse{}, err
+	}
+	excluded := make(map[string]bool, len(req.Deferred)+len(req.ExcludedTaskIDs))
+	for _, taskID := range req.Deferred {
+		excluded[taskID] = true
+	}
+	for _, taskID := range req.ExcludedTaskIDs {
+		excluded[taskID] = true
+	}
+	candidates := make([]durability.TaskClaim, 0, len(queue))
+	for _, item := range queue {
+		if excluded[item.TaskID] {
+			continue
+		}
+		candidates = append(candidates, durability.TaskClaim{TaskID: item.TaskID, Claims: r.specs[item.TaskID].Claims})
+	}
+	batch := partitionIndependent(candidates, req.MaxParallel)
+	if len(batch) == 0 {
+		incomplete, err := r.incompleteTaskIDsV2(ctx, req)
+		if err != nil {
+			return durability.NextBatchResponse{}, err
+		}
+		return durability.NextBatchResponse{Done: true, IncompleteTaskIDs: incomplete}, nil
+	}
+	return durability.NextBatchResponse{Tasks: batch}, nil
+}
+
+// incompleteTaskIDs reports resumable work that BuildQueue intentionally
+// excludes (blocked/parked tasks and bounded-yield IDs). It is only consulted
+// at a terminal pull, keeping ordinary batch scheduling cheap.
+func (r *Runner) incompleteTaskIDsV2(ctx context.Context, req durability.NextBatchV2Request) ([]string, error) {
+	seen := make(map[string]struct{}, len(req.Deferred)+len(req.ExcludedTaskIDs))
+	for _, taskID := range req.Deferred {
+		if strings.TrimSpace(taskID) != "" {
+			seen[taskID] = struct{}{}
+		}
+	}
+	for _, taskID := range req.ExcludedTaskIDs {
+		if strings.TrimSpace(taskID) != "" {
+			seen[taskID] = struct{}{}
+		}
+	}
+	report, err := r.loop.Report(ctx, req.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("goalrunner: inspect incomplete tasks: %w", err)
+	}
+	for _, parked := range report.Parked {
+		if parked.TaskID != "" {
+			seen[parked.TaskID] = struct{}{}
+		}
+	}
+	for _, action := range report.NextActions {
+		if action.TaskID != "" {
+			seen[action.TaskID] = struct{}{}
+		}
+	}
+	incomplete := make([]string, 0, len(seen))
+	for taskID := range seen {
+		incomplete = append(incomplete, taskID)
+	}
+	sort.Strings(incomplete)
+	return incomplete, nil
+}
+
 // partitionIndependent greedily takes tasks in queue order whose claims
 // do not overlap with claims already taken, bounded by maxParallel. A
 // task without claims implicitly claims the whole workspace: it only
@@ -260,6 +337,176 @@ func (r *Runner) ResolveApproval(ctx context.Context, resolution durability.Appr
 	return nil
 }
 
+// RecordRetryWaiting implements durability.RetryWaiter. The event payload is
+// deliberately limited to stable IDs, policy labels, and timer coordinates;
+// the blocker explanation remains in the task checkpoint.
+func (r *Runner) RecordRetryWaiting(ctx context.Context, wait durability.RetryWait) error {
+	var err error
+	wait, err = r.canonicalRetryWait(wait)
+	if err != nil {
+		return err
+	}
+	_, err = r.loop.Ledger().Append(ctx, runledger.Event{
+		ID:        runledger.StableEventID(runledger.EventDurableRetryWaiting, wait.RunID, wait.TaskID, wait.WorkflowInstanceID, wait.WaitID),
+		Type:      runledger.EventDurableRetryWaiting,
+		Timestamp: time.Now().UTC(),
+		RunID:     wait.RunID,
+		TaskID:    wait.TaskID,
+		Payload: map[string]any{
+			"workflow_instance_id":        wait.WorkflowInstanceID,
+			"wait_id":                     wait.WaitID,
+			"category":                    wait.Category,
+			"reason_code":                 wait.ReasonCode,
+			"retry_after_unix_ms":         wait.RetryAfterUnixMS,
+			"ordinal":                     wait.Ordinal,
+			"expected_checkpoint_id":      wait.ExpectedCheckpointID,
+			"expected_checkpoint_version": wait.ExpectedCheckpointVersion,
+			"blocker_digest":              wait.BlockerDigest,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalrunner: record retry wait %s: %w", wait.WaitID, err)
+	}
+	return nil
+}
+
+// WakeRetry implements durability.RetryWaiter. Unpark is intentionally
+// idempotent: Dapr may redeliver this activity after the checkpoint save but
+// before the activity acknowledgement.
+func (r *Runner) WakeRetry(ctx context.Context, wait durability.RetryWait) error {
+	_, err := r.WakeRetryV2(ctx, wait)
+	return err
+}
+
+// WakeRetryV2 returns the checkpoint CAS disposition to TaskWorkflowV4 so a
+// stale timer can never emit a resolved event or schedule another turn.
+func (r *Runner) WakeRetryV2(ctx context.Context, wait durability.RetryWait) (durability.RetryWakeResult, error) {
+	var err error
+	wait, err = r.canonicalRetryWait(wait)
+	if err != nil {
+		return durability.RetryWakeResult{}, err
+	}
+	wakeResult, err := r.loop.UnparkRetry(ctx, wait.RunID, wait.TaskID, goalloop.RetryWake{
+		WaitID:                    wait.WaitID,
+		ExpectedCheckpointID:      wait.ExpectedCheckpointID,
+		ExpectedCheckpointVersion: wait.ExpectedCheckpointVersion,
+		BlockerDigest:             wait.BlockerDigest,
+		Category:                  wait.Category,
+		ReasonCode:                wait.ReasonCode,
+	})
+	if err != nil {
+		return durability.RetryWakeResult{}, fmt.Errorf("goalrunner: wake retry %s: %w", wait.WaitID, err)
+	}
+	return durability.RetryWakeResult{Disposition: string(wakeResult.Disposition), TaskStatus: wakeResult.TaskStatus}, nil
+}
+
+// ResolveRetry implements durability.RetryWaiter. Stable event identity
+// makes a redelivered resolution a no-op in the run ledger.
+func (r *Runner) ResolveRetry(ctx context.Context, wait durability.RetryWait) error {
+	var err error
+	wait, err = r.canonicalRetryWait(wait)
+	if err != nil {
+		return err
+	}
+	_, err = r.loop.Ledger().Append(ctx, runledger.Event{
+		ID:        runledger.StableEventID(runledger.EventDurableRetryResolved, wait.RunID, wait.TaskID, wait.WorkflowInstanceID, wait.WaitID),
+		Type:      runledger.EventDurableRetryResolved,
+		Timestamp: time.Now().UTC(),
+		RunID:     wait.RunID,
+		TaskID:    wait.TaskID,
+		Payload: map[string]any{
+			"workflow_instance_id":        wait.WorkflowInstanceID,
+			"wait_id":                     wait.WaitID,
+			"category":                    wait.Category,
+			"reason_code":                 wait.ReasonCode,
+			"retry_after_unix_ms":         wait.RetryAfterUnixMS,
+			"ordinal":                     wait.Ordinal,
+			"expected_checkpoint_id":      wait.ExpectedCheckpointID,
+			"expected_checkpoint_version": wait.ExpectedCheckpointVersion,
+			"blocker_digest":              wait.BlockerDigest,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("goalrunner: resolve retry %s: %w", wait.WaitID, err)
+	}
+	return nil
+}
+
+func (r *Runner) canonicalRetryWait(wait durability.RetryWait) (durability.RetryWait, error) {
+	if err := r.validateRun(wait.RunID); err != nil {
+		return durability.RetryWait{}, err
+	}
+	if strings.TrimSpace(wait.TaskID) == "" {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait task ID is required")
+	}
+	if strings.TrimSpace(wait.WorkflowInstanceID) == "" {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait workflow instance ID is required")
+	}
+	if !validRetryWaitID(wait.WaitID) {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait ID is invalid")
+	}
+	if wait.Ordinal <= 0 {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait %s has invalid ordinal %d", wait.WaitID, wait.Ordinal)
+	}
+	if wait.RetryAfterUnixMS <= 0 {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait %s has invalid deadline", wait.WaitID)
+	}
+	if !validCheckpointID(wait.ExpectedCheckpointID) || wait.ExpectedCheckpointVersion <= 0 {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait %s has invalid checkpoint identity", wait.WaitID)
+	}
+	if !validLowerHexDigest(wait.BlockerDigest) {
+		return durability.RetryWait{}, fmt.Errorf("goalrunner: retry wait %s has invalid blocker digest", wait.WaitID)
+	}
+	wait.Category, wait.ReasonCode = canonicalRetryCodes(wait.Category, wait.ReasonCode)
+	return wait, nil
+}
+
+func canonicalRetryCodes(category, reasonCode string) (string, string) {
+	switch category + "/" + reasonCode {
+	case "provider/retryable_capacity", "governance/authorization_required", "dependency/external_dependency", "execution/blocked":
+		return category, reasonCode
+	default:
+		return "execution", "blocked"
+	}
+}
+
+func validRetryWaitID(value string) bool {
+	if len(value) < len("retry-1-")+16 || len(value) > 80 || !strings.HasPrefix(value, "retry-") {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validCheckpointID(value string) bool {
+	if len(value) != 29 || !strings.HasPrefix(value, "cp_") {
+		return false
+	}
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	for _, r := range value[len("cp_"):] {
+		if !strings.ContainsRune(alphabet, r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validLowerHexDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // RunTurn implements the workspace-bound V2 activity over Loop.TurnStep.
 func (r *Runner) RunTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
 	if err := r.validateRun(req.RunID); err != nil {
@@ -268,7 +515,19 @@ func (r *Runner) RunTurn(ctx context.Context, req durability.TurnRequest) (durab
 	if err := r.validateWorkspace(req.WorkspaceRoot); err != nil {
 		return durability.TurnResponse{}, err
 	}
-	return r.runTurn(ctx, req)
+	return r.runTurn(ctx, req, false)
+}
+
+// RunTurnV3 implements the receipt-backed activity without changing the V2
+// adapter used by in-flight workflows.
+func (r *Runner) RunTurnV3(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+	if err := r.validateRun(req.RunID); err != nil {
+		return durability.TurnResponse{}, err
+	}
+	if err := r.validateWorkspace(req.WorkspaceRoot); err != nil {
+		return durability.TurnResponse{}, err
+	}
+	return r.runTurn(ctx, req, true)
 }
 
 // RunLegacyTurn serves only in-flight V1/V2 task histories whose serialized
@@ -283,17 +542,17 @@ func (r *Runner) RunLegacyTurn(ctx context.Context, req durability.TurnRequest) 
 			return durability.TurnResponse{}, err
 		}
 	}
-	return r.runTurn(ctx, req)
+	return r.runTurn(ctx, req, false)
 }
 
-func (r *Runner) runTurn(ctx context.Context, req durability.TurnRequest) (durability.TurnResponse, error) {
+func (r *Runner) runTurn(ctx context.Context, req durability.TurnRequest, receiptBacked bool) (durability.TurnResponse, error) {
 	var drive goalloop.DriveSnapshot
 	if len(req.Drive) > 0 {
 		if err := json.Unmarshal(req.Drive, &drive); err != nil {
 			return durability.TurnResponse{}, fmt.Errorf("goalrunner: decode drive snapshot: %w", err)
 		}
 	}
-	step, err := r.loop.TurnStep(ctx, goalloop.TurnStepRequest{
+	stepReq := goalloop.TurnStepRequest{
 		RunID:      req.RunID,
 		TaskID:     req.TaskID,
 		Goal:       r.goal,
@@ -308,7 +567,15 @@ func (r *Runner) runTurn(ctx context.Context, req durability.TurnRequest) (durab
 		},
 		WorkflowInstanceID: req.WorkflowInstanceID,
 		ActivityName:       "run_turn",
-	})
+	}
+	var step goalloop.TurnStepResponse
+	var err error
+	if receiptBacked {
+		stepReq.ActivityName = "run_turn.v3"
+		step, err = r.loop.TurnStepV3(ctx, stepReq)
+	} else {
+		step, err = r.loop.TurnStep(ctx, stepReq)
+	}
 	if err != nil {
 		return durability.TurnResponse{}, err
 	}
@@ -317,13 +584,20 @@ func (r *Runner) runTurn(ctx context.Context, req durability.TurnRequest) (durab
 		return durability.TurnResponse{}, fmt.Errorf("goalrunner: marshal drive snapshot: %w", err)
 	}
 	return durability.TurnResponse{
-		Kind:         string(step.Kind),
-		Decision:     string(step.Decision),
-		Status:       step.Status,
-		Drive:        next,
-		TurnSpentUSD: step.TurnSpentUSD,
-		Rounds:       step.Rounds,
-		ToolCalls:    step.ToolCalls,
+		Kind:                      string(step.Kind),
+		Decision:                  string(step.Decision),
+		Status:                    step.Status,
+		Drive:                     next,
+		TurnSpentUSD:              step.TurnSpentUSD,
+		Rounds:                    step.Rounds,
+		ToolCalls:                 step.ToolCalls,
+		BlockerCategory:           step.BlockerCategory,
+		BlockerReasonCode:         step.BlockerReasonCode,
+		RetryAfterUnixMS:          step.RetryAfterUnixMS,
+		RetryOrdinal:              step.RetryOrdinal,
+		ExpectedCheckpointID:      step.ExpectedCheckpointID,
+		ExpectedCheckpointVersion: step.ExpectedCheckpointVersion,
+		BlockerDigest:             step.BlockerDigest,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/agent"
 	"m31labs.dev/buckley/pkg/bus"
@@ -33,11 +35,15 @@ import (
 	"m31labs.dev/buckley/pkg/graft"
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/rlm/configadapter"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 // Server implements the Zed ACP gRPC service.
@@ -52,6 +58,7 @@ type Server struct {
 	sessions      map[string]*acppb.Session
 	toolApprover  *security.ToolApprover
 	telemetryHub  *telemetry.Hub
+	engine        *rules.Engine
 	liveWorkflows map[string]*orchestrator.WorkflowManager
 	liveMux       sync.RWMutex
 
@@ -76,6 +83,17 @@ type Server struct {
 	// Context handles storage
 	contextHandles   map[string]*ContextHandleData
 	contextHandleMux sync.RWMutex
+}
+
+// Option configures a Server at construction time.
+type Option func(*Server)
+
+// WithRulesEngine supplies the optional Arbiter engine for RLM requests. A nil
+// engine preserves the legacy fail-open behavior.
+func WithRulesEngine(engine *rules.Engine) Option {
+	return func(s *Server) {
+		s.engine = engine
+	}
 }
 
 // SessionContext tracks files and metadata for a session.
@@ -112,7 +130,7 @@ type ContextHandleData struct {
 }
 
 // NewServer creates a new ACP gRPC server
-func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *config.Config, store *storage.Store) (*Server, error) {
+func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *config.Config, store *storage.Store, opts ...Option) (*Server, error) {
 	if coord == nil {
 		return nil, fmt.Errorf("coordinator is required")
 	}
@@ -128,7 +146,7 @@ func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *confi
 	// Default to in-memory task history
 	taskHistory := agent.NewInMemoryTaskHistory()
 
-	return &Server{
+	server := &Server{
 		coordinator:      coord,
 		models:           models,
 		cfg:              cfg,
@@ -146,7 +164,13 @@ func NewServer(coord *coordinator.Coordinator, models *model.Manager, cfg *confi
 		sessionContexts:  make(map[string]*SessionContext),
 		pendingApprovals: make(map[string]*PendingApproval),
 		contextHandles:   make(map[string]*ContextHandleData),
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
+	return server, nil
 }
 
 // SetMessageBus configures the server to use a specific message bus.
@@ -188,7 +212,7 @@ func (s *Server) GetAgentInfo(ctx context.Context, req *acppb.GetAgentInfoReques
 	}
 	agent, err := s.coordinator.GetAgent(ctx, req.AgentId)
 	if err != nil {
-		return nil, statusError(codes.NotFound, err.Error())
+		return nil, statusError(codes.NotFound, "agent not found")
 	}
 	return &acppb.AgentInfo{
 		Id:           agent.ID,
@@ -348,9 +372,12 @@ func (s *Server) UpdateSessionContext(_ context.Context, req *acppb.ContextDelta
 }
 
 // SendMessage handles a simple request/response for editor integrations.
-func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
+func (s *Server) SendMessage(ctx context.Context, req *acppb.SendMessageRequest) (*acppb.SendMessageResponse, error) {
 	if req.GetMessage() == nil || strings.TrimSpace(req.Message.Content) == "" {
 		return nil, statusError(codes.InvalidArgument, "message required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	if s.models == nil {
@@ -368,9 +395,15 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 			},
 			Temperature: 0.2,
 		}
-		resp, err := s.models.ChatCompletion(context.Background(), chatReq)
+		resp, err := s.models.ChatCompletion(ctx, chatReq)
 		if err != nil {
-			return nil, statusError(codes.Internal, err.Error())
+			if detail := acpPartialResultFromModelResponse(resp, err); detail != nil {
+				return nil, acpPartialStatusError(detail, err)
+			}
+			return nil, statusError(acpCodeForError(err), acpSafeError("model", err))
+		}
+		if resp == nil {
+			return nil, statusError(codes.Internal, "model returned no response")
 		}
 		content := ""
 		if len(resp.Choices) > 0 {
@@ -387,23 +420,34 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 	if s.cfg.ExecutionMode() == config.ExecutionModeRLM {
 		sessionID := ulid.Make().String()
 		runtime, cleanup, err := s.buildRLMRuntime(sessionID, req.AgentId)
-		if err == nil && runtime != nil {
-			answer, execErr := runtime.Execute(context.Background(), req.Message.Content)
-			if cleanup != nil {
-				cleanup()
-			}
-			if execErr == nil && answer != nil && strings.TrimSpace(answer.Content) != "" {
-				return &acppb.SendMessageResponse{
-					Response: &acppb.Message{
-						Role:    "assistant",
-						Content: answer.Content,
-					},
-				}, nil
-			}
-			if execErr != nil {
-				return nil, statusError(codes.Internal, execErr.Error())
-			}
+		if err != nil {
+			return nil, statusError(codes.Internal, "runtime unavailable")
 		}
+		if runtime == nil {
+			return nil, statusError(codes.Internal, "runtime unavailable")
+		}
+		answer, execErr := runtime.Execute(ctx, req.Message.Content)
+		if cleanup != nil {
+			cleanup()
+		}
+		if execErr != nil {
+			if detail := acpPartialResultFromAnswer(answer, execErr); detail != nil {
+				return nil, acpPartialStatusError(detail, execErr)
+			}
+			return nil, statusError(acpCodeForError(execErr), acpSafeError("execution", execErr))
+		}
+		if answer != nil && strings.TrimSpace(answer.Content) != "" && answer.Ready {
+			return &acppb.SendMessageResponse{
+				Response: &acppb.Message{
+					Role:    "assistant",
+					Content: answer.Content,
+				},
+			}, nil
+		}
+		if detail := acpPartialResultFromAnswer(answer, nil); detail != nil {
+			return nil, acpPartialStatusError(detail, nil)
+		}
+		return nil, statusError(codes.Internal, "model returned empty response")
 	}
 
 	sessionID := req.GetAgentId()
@@ -413,17 +457,17 @@ func (s *Server) SendMessage(_ context.Context, req *acppb.SendMessageRequest) (
 
 	orch, cleanup, err := s.buildOrchestratorContext(sessionID, req.AgentId)
 	if err != nil {
-		return nil, statusError(codes.Internal, err.Error())
+		return nil, acpSafeStatusError("execution", err)
 	}
 	defer cleanup()
 
 	featureName := fmt.Sprintf("acp-send-%s", sessionID)
 	desc := req.Message.Content
 	if _, err := orch.PlanFeature(featureName, desc); err != nil {
-		return nil, statusError(codes.Internal, err.Error())
+		return nil, acpSafeStatusError("execution", err)
 	}
 	if err := orch.ExecutePlan(); err != nil {
-		return nil, statusError(codes.Internal, err.Error())
+		return nil, acpSafeStatusError("execution", err)
 	}
 
 	reply := &acppb.Message{
@@ -438,23 +482,55 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 	if strings.TrimSpace(req.Query) == "" {
 		return statusError(codes.InvalidArgument, "query required")
 	}
-	// If orchestrator wiring unavailable, fall back to direct LLM stream.
-	if s.models == nil || s.store == nil || s.cfg == nil {
-		msgs := []string{
-			"Processing task...",
-			fmt.Sprintf("Task: %s", req.Query),
-			"Done.",
+	if s.models == nil {
+		return statusError(codes.FailedPrecondition, "model manager unavailable")
+	}
+
+	// If orchestrator wiring is unavailable, use one real direct model request
+	// rather than fabricating Processing/Done events.
+	if s.store == nil || s.cfg == nil {
+		execModel := s.models.GetExecutionModel()
+		chatReq := model.ChatRequest{
+			Model: execModel,
+			Messages: []model.Message{
+				{Role: "system", Content: "You are Buckley completing editor tasks for ACP clients."},
+				{Role: "user", Content: req.Query},
+			},
+			Temperature: 0.2,
 		}
-		for _, msg := range msgs {
-			event := &acppb.TaskEvent{
-				TaskId:  req.TaskId,
-				Message: msg,
+		resp, err := s.models.ChatCompletion(stream.Context(), chatReq)
+		if err != nil {
+			if detail := acpPartialResultFromModelResponse(resp, err); detail != nil {
+				if sendErr := stream.Send(acpIncompleteTaskEvent(req.TaskId, detail)); sendErr != nil {
+					return sendErr
+				}
+				return acpPartialStatusError(detail, err)
 			}
-			if err := stream.Send(event); err != nil {
-				return err
-			}
+			return statusError(acpCodeForError(err), acpSafeError("model", err))
 		}
-		return nil
+		if resp == nil {
+			return statusError(codes.Internal, "model returned no response")
+		}
+		content := ""
+		if len(resp.Choices) > 0 {
+			content = extractMessageText(resp.Choices[0].Message)
+		}
+		if strings.TrimSpace(content) == "" {
+			return statusError(codes.Internal, "model returned empty response")
+		}
+		return stream.Send(&acppb.TaskEvent{
+			TaskId:    req.TaskId,
+			Status:    "completed",
+			Message:   content,
+			Timestamp: timestamppb.Now(),
+		})
+	}
+
+	if s.cfg == nil {
+		return statusError(codes.FailedPrecondition, "configuration unavailable")
+	}
+	if s.store == nil {
+		return statusError(codes.FailedPrecondition, "storage unavailable")
 	}
 
 	if s.cfg.ExecutionMode() == config.ExecutionModeRLM {
@@ -464,28 +540,44 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 		}
 
 		runtime, cleanup, err := s.buildRLMRuntime(sessionID, req.AgentId)
-		if err == nil && runtime != nil {
-			runtime.OnIteration(func(event rlm.IterationEvent) {
-				message := fmt.Sprintf("Iteration %d/%d (ready=%t, tokens=%d)", event.Iteration, event.MaxIterations, event.Ready, event.TokensUsed)
-				if event.Ready && strings.TrimSpace(event.Summary) != "" {
-					message = event.Summary
-				}
-				_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: message})
-			})
-
-			answer, execErr := runtime.Execute(stream.Context(), req.Query)
-			if cleanup != nil {
-				cleanup()
-			}
-			if execErr != nil {
-				_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Execution failed: %v", execErr)})
-				return statusError(codes.Internal, execErr.Error())
-			}
-			if answer != nil && strings.TrimSpace(answer.Content) != "" {
-				_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: answer.Content})
-			}
-			return nil
+		if err != nil {
+			return statusError(codes.Internal, "runtime unavailable")
 		}
+		if runtime == nil {
+			return statusError(codes.Internal, "runtime unavailable")
+		}
+		runtime.OnIteration(func(event rlm.IterationEvent) {
+			message := fmt.Sprintf("Iteration %d/%d (ready=%t, tokens=%d)", event.Iteration, event.MaxIterations, event.Ready, event.TokensUsed)
+			if event.Ready && strings.TrimSpace(event.Summary) != "" {
+				message = event.Summary
+			}
+			_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: message})
+		})
+
+		answer, execErr := runtime.Execute(stream.Context(), req.Query)
+		if cleanup != nil {
+			cleanup()
+		}
+		if execErr != nil {
+			if detail := acpPartialResultFromAnswer(answer, execErr); detail != nil {
+				if err := stream.Send(acpIncompleteTaskEvent(req.TaskId, detail)); err != nil {
+					return err
+				}
+				return acpPartialStatusError(detail, execErr)
+			}
+			return statusError(acpCodeForError(execErr), acpSafeError("execution", execErr))
+		}
+		if answer != nil && strings.TrimSpace(answer.Content) != "" && answer.Ready {
+			if err := stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Status: "completed", Message: answer.Content}); err != nil {
+				return err
+			}
+		} else if detail := acpPartialResultFromAnswer(answer, nil); detail != nil {
+			if err := stream.Send(acpIncompleteTaskEvent(req.TaskId, detail)); err != nil {
+				return err
+			}
+			return acpPartialStatusError(detail, nil)
+		}
+		return nil
 	}
 
 	if err := stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: "Planning task…"}); err != nil {
@@ -499,7 +591,7 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 
 	orch, cleanup, err := s.buildOrchestratorContext(sessionID, req.AgentId)
 	if err != nil {
-		return statusError(codes.Internal, err.Error())
+		return acpSafeStatusError("execution", err)
 	}
 	defer cleanup()
 
@@ -513,8 +605,10 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 	}
 
 	if _, err := orch.PlanFeature(featureName, req.Query); err != nil {
-		_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Plan failed: %v", err)})
-		return statusError(codes.Internal, err.Error())
+		if sendErr := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); sendErr != nil {
+			return sendErr
+		}
+		return acpSafeStatusError("execution", err)
 	}
 
 	if err := stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: "Executing plan…"}); err != nil {
@@ -529,17 +623,20 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 	select {
 	case <-ctx.Done():
 		orch.Cancel() // propagate cancel to orchestrator
-		_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: "Task cancelled"})
-		return context.Canceled
+		if err := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); err != nil {
+			return err
+		}
+		return acpSafeStatusError("execution", ctx.Err())
 	case err := <-execDone:
 		if err != nil {
-			_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Execution failed: %v", err)})
-			return statusError(codes.Internal, err.Error())
+			if sendErr := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); sendErr != nil {
+				return sendErr
+			}
+			return acpSafeStatusError("execution", err)
 		}
 	}
 
 	if err := stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: "✅ Task completed"}); err != nil {
-		_ = stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: fmt.Sprintf("Execution failed: %v", err)})
 		return err
 	}
 
@@ -565,6 +662,286 @@ func extractMessageText(msg model.Message) string {
 	}
 }
 
+func acpPartialResultFromModelResponse(resp *model.ChatResponse, err error) *acppb.PartialResult {
+	if resp == nil {
+		return nil
+	}
+	content := ""
+	if len(resp.Choices) > 0 {
+		content = extractMessageText(resp.Choices[0].Message)
+	}
+	detail := newACPPartialResult(acpSafeError("model", err), acpReasonCode(err))
+	if strings.TrimSpace(content) != "" {
+		detail.PartialResponse = &acppb.Message{Role: "assistant", Content: acpIncompleteDraftMessage(content, detail)}
+	}
+	if usage := modelusage.FromResponse(resp); modelusage.HasEvidence(usage) {
+		detail.TaskResults = append(detail.TaskResults, &acppb.PartialTaskResult{
+			Status:       "incomplete",
+			Summary:      content,
+			FinishReason: acpModelFinishReason(resp),
+			Usage:        acpPartialUsage(usage),
+		})
+	}
+	if resp.ExecutionIdentity != nil {
+		detail.ModelIdentities = append(detail.ModelIdentities, acpPartialModelIdentity(*resp.ExecutionIdentity))
+	}
+	if detail.PartialResponse == nil && len(detail.TaskResults) == 0 && len(detail.ModelIdentities) == 0 {
+		return nil
+	}
+	return acpBuildPartialResult(detail)
+}
+
+func acpPartialResultFromAnswer(answer *rlm.Answer, err error) *acppb.PartialResult {
+	if answer == nil {
+		return nil
+	}
+	detail := newACPPartialResult(acpSafeError("execution", err), acpReasonCode(err))
+	if strings.TrimSpace(answer.Content) != "" {
+		detail.PartialResponse = &acppb.Message{Role: "assistant", Content: acpIncompleteDraftMessage(answer.Content, detail)}
+	}
+	for _, result := range answer.TaskResults {
+		if len(detail.TaskResults) >= partialresult.MaxTaskResults {
+			detail.OmittedTaskResults++
+		} else {
+			detail.TaskResults = append(detail.TaskResults, acpPartialTaskResult(result))
+		}
+		for _, identity := range result.ModelExecutions {
+			if len(detail.ModelIdentities) >= partialresult.MaxModelIdentities {
+				detail.OmittedModelIdentities++
+				continue
+			}
+			detail.ModelIdentities = append(detail.ModelIdentities, acpPartialModelIdentity(identity))
+		}
+	}
+	if detail.PartialResponse == nil && len(detail.TaskResults) == 0 && len(detail.ModelIdentities) == 0 {
+		return nil
+	}
+	return acpBuildPartialResult(detail)
+}
+
+func acpProposeFailurePartial(proposed []*acppb.ProposedEdit, resp *model.ChatResponse, err error) *acppb.PartialResult {
+	if len(proposed) > 0 {
+		return acpPartialResultFromProposedEdit(proposed[0], err)
+	}
+	return acpPartialResultFromModelResponse(resp, err)
+}
+
+func acpPartialResultFromProposedEdit(edit *acppb.ProposedEdit, err error) *acppb.PartialResult {
+	return acpPartialResultFromProposedEditWithStatus(edit, acpSafeError("model", err), acpReasonCode(err))
+}
+
+func acpPartialResultFromProposedEditWithStatus(edit *acppb.ProposedEdit, safeError, reason string) *acppb.PartialResult {
+	if edit == nil {
+		return nil
+	}
+	var draft string
+	for _, textEdit := range edit.Edits {
+		if textEdit == nil {
+			continue
+		}
+		if strings.TrimSpace(textEdit.NewText) != "" {
+			draft = textEdit.NewText
+			break
+		}
+	}
+	if strings.TrimSpace(draft) == "" {
+		return nil
+	}
+	detail := newACPPartialResult(safeError, reason)
+	detail.PartialResponse = &acppb.Message{Role: "assistant", Content: acpIncompleteDraftMessage(draft, detail)}
+	return acpBuildPartialResult(detail)
+}
+
+func newACPPartialResult(safeError, reason string) *acppb.PartialResult {
+	if strings.TrimSpace(safeError) == "" {
+		safeError = "execution incomplete"
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "error"
+	}
+	return &acppb.PartialResult{
+		SchemaVersion: partialresult.SchemaVersion,
+		Incomplete:    true,
+		Status:        "incomplete",
+		ReasonCode:    reason,
+		SafeError:     safeError,
+	}
+}
+
+func acpPartialTaskResult(result rlm.BatchResult) *acppb.PartialTaskResult {
+	status := "completed"
+	if strings.TrimSpace(result.Error) != "" {
+		status = "failed"
+	}
+	return &acppb.PartialTaskResult{
+		TaskId:        result.TaskID,
+		Status:        status,
+		Summary:       result.Summary,
+		Error:         acpSafePublicTaskError(result.Error),
+		FinishReason:  result.FinishReason,
+		Usage:         acpPartialUsage(result.Usage),
+		ToolCallCount: int32(min(len(result.ToolCalls), math.MaxInt32)),
+		CommandCount:  int32(min(len(result.ExecutionEvidence), math.MaxInt32)),
+	}
+}
+
+func acpPartialUsage(usage transparency.TokenUsage) *acppb.PartialUsage {
+	out := &acppb.PartialUsage{
+		InputTokens:               int64(usage.Input),
+		OutputTokens:              int64(usage.Output),
+		ReasoningTokens:           int64(usage.Reasoning),
+		CachedInputTokens:         int64(usage.CachedInput),
+		UnclassifiedTokens:        int64(usage.Unclassified),
+		ReportedTotalTokens:       int64(usage.ReportedTotal),
+		ReportedCacheWriteTokens:  int64(usage.ReportedCacheWrite),
+		Estimated:                 usage.Estimated,
+		ReportedUsageInconsistent: usage.ReportedUsageInconsistent,
+		UsageEvidencePresent:      usage.UsageEvidencePresent,
+		UsageEvidenceMissing:      usage.UsageEvidenceMissing,
+	}
+	if usage.ReportedReasoning != nil {
+		v := int64(*usage.ReportedReasoning)
+		out.ReportedReasoningTokens = &v
+	}
+	if usage.ReportedCachedInput != nil {
+		v := int64(*usage.ReportedCachedInput)
+		out.ReportedCachedInputTokens = &v
+	}
+	return out
+}
+
+func acpPartialModelIdentity(identity model.ExecutionIdentity) *acppb.PartialModelIdentity {
+	return &acppb.PartialModelIdentity{
+		RequestedModel:              identity.RequestedModel,
+		SelectedModel:               identity.SelectedModel,
+		ProviderId:                  identity.ProviderID,
+		ResponseModel:               identity.ResponseModel,
+		ResponseId:                  identity.ResponseID,
+		ExecutionIdentityConflicted: identity.Conflicted,
+	}
+}
+
+func acpPartialStatusError(detail *acppb.PartialResult, err error) error {
+	if detail == nil {
+		return statusError(acpCodeForError(err), acpSafeError("execution", err))
+	}
+	return partialresult.StatusError(acpCodeForError(err), detail.SafeError, detail)
+}
+
+func acpIncompleteTaskEvent(taskID string, detail *acppb.PartialResult) *acppb.TaskEvent {
+	message := "Incomplete draft (not accepted)"
+	if detail != nil && detail.PartialResponse != nil && strings.TrimSpace(detail.PartialResponse.Content) != "" {
+		message = detail.PartialResponse.Content
+	}
+	return &acppb.TaskEvent{
+		TaskId:    taskID,
+		Status:    "incomplete",
+		Message:   message,
+		Timestamp: timestamppb.Now(),
+	}
+}
+
+func acpClassicIncompleteTaskEvent(taskID string) *acppb.TaskEvent {
+	return &acppb.TaskEvent{
+		TaskId:    taskID,
+		Status:    "incomplete",
+		Message:   "Task incomplete (not accepted)",
+		Timestamp: timestamppb.Now(),
+	}
+}
+
+func acpSafeToolOutput(status string) string {
+	switch status {
+	case "denied":
+		return "tool execution denied"
+	default:
+		return "tool execution failed"
+	}
+}
+
+func acpSafeStatusError(kind string, err error) error {
+	return statusError(acpCodeForError(err), acpSafeError(kind, err))
+}
+
+func acpSafeError(kind string, err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "request canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request deadline exceeded"
+	case kind == "model":
+		return "model response incomplete"
+	default:
+		return "execution incomplete"
+	}
+}
+
+func acpReasonCode(err error) string {
+	switch {
+	case err == nil:
+		return "incomplete"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "error"
+	}
+}
+
+func acpCodeForError(err error) codes.Code {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return codes.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return codes.DeadlineExceeded
+	default:
+		return codes.Internal
+	}
+}
+
+func acpFinishReasonNonConclusive(reason string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(reason))
+	if model.IsTruncatedFinishReason(trimmed) {
+		return true
+	}
+	switch trimmed {
+	case "content_filter", "tool_calls", "function_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func acpIncompleteDraftMessage(content string, detail *acppb.PartialResult) string {
+	if detail != nil {
+		detail.OriginalDraftBytes = int32(min(len(content), math.MaxInt32))
+	}
+	return content
+}
+
+func acpSafePublicTaskError(errText string) string {
+	if strings.TrimSpace(errText) == "" {
+		return ""
+	}
+	return "task failed"
+}
+
+func acpModelFinishReason(resp *model.ChatResponse) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return resp.Choices[0].FinishReason
+}
+
+func acpBuildPartialResult(detail *acppb.PartialResult) *acppb.PartialResult {
+	built, err := partialresult.Build(detail)
+	if err != nil {
+		return nil
+	}
+	return built
+}
+
 // buildRLMRuntime constructs an RLM runtime for ACP requests.
 func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(), error) {
 	registry := tool.NewRegistry()
@@ -586,6 +963,7 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 		Bus:          s.messageBus,
 		Telemetry:    s.telemetryHub,
 		SessionID:    sessionID,
+		Engine:       s.engine,
 		GraftClient:  graftClient,
 	})
 	if err != nil {
@@ -597,56 +975,7 @@ func (s *Server) buildRLMRuntime(sessionID, agentID string) (*rlm.Runtime, func(
 }
 
 func resolveRLMConfig(cfg *config.Config) rlm.Config {
-	base := rlm.DefaultConfig()
-	if cfg == nil || cfg.RLM.IsZero() {
-		return base
-	}
-
-	rlmCfg := cfg.RLM
-	if strings.TrimSpace(rlmCfg.Coordinator.Model) != "" {
-		base.Coordinator.Model = rlmCfg.Coordinator.Model
-	}
-	if rlmCfg.Coordinator.MaxIterations != 0 {
-		base.Coordinator.MaxIterations = rlmCfg.Coordinator.MaxIterations
-	}
-	if rlmCfg.Coordinator.MaxTokensBudget != 0 {
-		base.Coordinator.MaxTokensBudget = rlmCfg.Coordinator.MaxTokensBudget
-	}
-	if rlmCfg.Coordinator.MaxWallTime != 0 {
-		base.Coordinator.MaxWallTime = rlmCfg.Coordinator.MaxWallTime
-	}
-	if rlmCfg.Coordinator.ConfidenceThreshold != 0 {
-		base.Coordinator.ConfidenceThreshold = rlmCfg.Coordinator.ConfidenceThreshold
-	}
-	base.Coordinator.StreamPartials = rlmCfg.Coordinator.StreamPartials
-
-	if strings.TrimSpace(rlmCfg.SubAgent.Model) != "" {
-		base.SubAgent.Model = rlmCfg.SubAgent.Model
-	}
-	if rlmCfg.SubAgent.MaxConcurrent != 0 {
-		base.SubAgent.MaxConcurrent = rlmCfg.SubAgent.MaxConcurrent
-	}
-	if rlmCfg.SubAgent.Timeout != 0 {
-		base.SubAgent.Timeout = rlmCfg.SubAgent.Timeout
-	}
-
-	if rlmCfg.Scratchpad.MaxEntriesMemory != 0 {
-		base.Scratchpad.MaxEntriesMemory = rlmCfg.Scratchpad.MaxEntriesMemory
-	}
-	if rlmCfg.Scratchpad.MaxRawBytesMemory != 0 {
-		base.Scratchpad.MaxRawBytesMemory = rlmCfg.Scratchpad.MaxRawBytesMemory
-	}
-	if strings.TrimSpace(rlmCfg.Scratchpad.EvictionPolicy) != "" {
-		base.Scratchpad.EvictionPolicy = rlmCfg.Scratchpad.EvictionPolicy
-	}
-	if rlmCfg.Scratchpad.DefaultTTL != 0 {
-		base.Scratchpad.DefaultTTL = rlmCfg.Scratchpad.DefaultTTL
-	}
-	base.Scratchpad.PersistArtifacts = rlmCfg.Scratchpad.PersistArtifacts
-	base.Scratchpad.PersistDecisions = rlmCfg.Scratchpad.PersistDecisions
-
-	base.Normalize()
-	return base
+	return configadapter.Resolve(cfg)
 }
 
 // buildOrchestratorContext constructs a fresh orchestrator stack for ACP requests.
@@ -738,7 +1067,7 @@ func (s *Server) SubscribeTaskEvents(req *acppb.TaskSubscription, stream acppb.A
 		return nil
 	})
 	if err != nil {
-		return statusError(codes.Internal, fmt.Sprintf("subscribe failed: %v", err))
+		return statusError(codes.Internal, "subscribe failed")
 	}
 	defer sub.Unsubscribe()
 
@@ -860,13 +1189,15 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	})
 	if s.toolApprover != nil {
 		if err := s.toolApprover.CheckToolAccess(claimsCtx, req.Tool); err != nil {
-			_ = stream.Send(&acppb.ToolExecutionEvent{
+			if sendErr := stream.Send(&acppb.ToolExecutionEvent{
 				ExecutionId: req.Tool,
 				Status:      "denied",
-				Output:      err.Error(),
+				Output:      acpSafeToolOutput("denied"),
 				Timestamp:   timestamppb.Now(),
-			})
-			return statusError(codes.PermissionDenied, err.Error())
+			}); sendErr != nil {
+				return sendErr
+			}
+			return statusError(codes.PermissionDenied, acpSafeToolOutput("denied"))
 		}
 	}
 
@@ -876,8 +1207,10 @@ func (s *Server) RequestToolExecution(req *acppb.ToolExecutionRequest, stream ac
 	}
 	res, err := registry.ExecuteWithContext(stream.Context(), req.Tool, params)
 	if err != nil {
-		_ = stream.Send(&acppb.ToolExecutionEvent{ExecutionId: req.Tool, Status: "failed", Output: err.Error(), Timestamp: timestamppb.Now()})
-		return statusError(codes.Internal, err.Error())
+		if sendErr := stream.Send(&acppb.ToolExecutionEvent{ExecutionId: req.Tool, Status: "failed", Output: acpSafeToolOutput("failed"), Timestamp: timestamppb.Now()}); sendErr != nil {
+			return sendErr
+		}
+		return statusError(codes.Internal, acpSafeToolOutput("failed"))
 	}
 
 	out := ""
@@ -1071,6 +1404,10 @@ func (s *Server) StreamInlineCompletions(req *acppb.InlineCompletionRequest, str
 			}
 			text := extractChunkText(chunk)
 			if strings.TrimSpace(text) == "" {
+				if chunk.Error != nil {
+					s.recordActivity(req.AgentId, req.SessionId, "inline_completion", "model response incomplete", "error")
+					return statusError(codes.Internal, "model response incomplete")
+				}
 				continue
 			}
 			if err := stream.Send(&acppb.InlineCompletionEvent{
@@ -1081,18 +1418,26 @@ func (s *Server) StreamInlineCompletions(req *acppb.InlineCompletionRequest, str
 			}); err != nil {
 				return err
 			}
+			if chunk.Error != nil {
+				s.recordActivity(req.AgentId, req.SessionId, "inline_completion", "model response incomplete", "error")
+				return statusError(codes.Internal, "model response incomplete")
+			}
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
 				continue
 			}
 			if err != nil {
-				s.recordActivity(req.AgentId, req.SessionId, "inline_completion", err.Error(), "error")
-				return statusError(codes.Internal, fmt.Sprintf("stream error: %v", err))
+				s.recordActivity(req.AgentId, req.SessionId, "inline_completion", acpSafeError("model", err), "error")
+				return statusError(acpCodeForError(err), acpSafeError("model", err))
 			}
 		}
 	}
 
+	if acpFinishReasonNonConclusive(finishReason) {
+		s.recordActivity(req.AgentId, req.SessionId, "inline_completion", "model response incomplete", "error")
+		return statusError(codes.Internal, "model response incomplete")
+	}
 	s.recordActivity(req.AgentId, req.SessionId, "inline_completion", "completed", "working")
 	s.publishTelemetry(telemetry.EventEditorInline, req.SessionId, "", map[string]any{
 		"model":         execModel,
@@ -1161,10 +1506,28 @@ func (s *Server) ProposeEdits(ctx context.Context, req *acppb.ProposeEditsReques
 
 		modelResp, err := s.models.ChatCompletion(ctx, chatReq)
 		if err != nil {
-			return nil, statusError(codes.Internal, fmt.Sprintf("model error: %v", err))
+			if detail := acpProposeFailurePartial(proposed, modelResp, err); detail != nil {
+				return nil, acpPartialStatusError(detail, err)
+			}
+			return nil, statusError(acpCodeForError(err), acpSafeError("model", err))
+		}
+		if modelResp == nil {
+			if detail := acpProposeFailurePartial(proposed, nil, nil); detail != nil {
+				return nil, acpPartialStatusError(detail, nil)
+			}
+			return nil, statusError(codes.Internal, "model returned no response")
 		}
 		if len(modelResp.Choices) == 0 {
+			if detail := acpProposeFailurePartial(proposed, modelResp, nil); detail != nil {
+				return nil, acpPartialStatusError(detail, nil)
+			}
 			return nil, statusError(codes.Internal, "model returned no choices")
+		}
+		if acpFinishReasonNonConclusive(modelResp.Choices[0].FinishReason) {
+			if detail := acpProposeFailurePartial(proposed, modelResp, nil); detail != nil {
+				return nil, acpPartialStatusError(detail, nil)
+			}
+			return nil, statusError(codes.Internal, "model response incomplete")
 		}
 		if modelResp.Usage.TotalTokens > 0 {
 			s.publishUsage(execModel, &modelResp.Usage, req.SessionId, "")
@@ -1172,6 +1535,9 @@ func (s *Server) ProposeEdits(ctx context.Context, req *acppb.ProposeEditsReques
 
 		newText := extractMessageText(modelResp.Choices[0].Message)
 		if strings.TrimSpace(newText) == "" {
+			if detail := acpProposeFailurePartial(proposed, modelResp, nil); detail != nil {
+				return nil, acpPartialStatusError(detail, nil)
+			}
 			return nil, statusError(codes.Internal, "model returned empty edit")
 		}
 
@@ -1216,7 +1582,14 @@ func (s *Server) ProposeEdits(ctx context.Context, req *acppb.ProposeEditsReques
 			DryRun:    false,
 		})
 		if applyErr != nil {
-			return nil, statusError(codes.Internal, fmt.Sprintf("apply edits: %v", applyErr))
+			if detail := acpPartialResultFromProposedEditWithStatus(proposed[0], "edit application failed", "apply_failed"); detail != nil {
+				code := status.Code(applyErr)
+				if code == codes.OK {
+					code = codes.Internal
+				}
+				return nil, partialresult.StatusError(code, "edit application failed", detail)
+			}
+			return nil, statusError(codes.Internal, "edit application failed")
 		}
 		editResp.Summary = fmt.Sprintf("Applied edit for %s", doc.Uri)
 	}
@@ -1251,35 +1624,46 @@ func (s *Server) ApplyEdits(_ context.Context, req *acppb.ApplyEditsRequest) (*a
 		}
 		path, err := s.resolvePath(edit.Uri)
 		if err != nil {
-			return nil, statusError(codes.InvalidArgument, err.Error())
+			return nil, statusError(codes.InvalidArgument, "invalid edit target")
 		}
 		fileEdits[path] = append(fileEdits[path], edit)
 	}
 
 	appliedPaths := make([]string, 0, len(fileEdits))
-	for path, edits := range fileEdits {
+	paths := make([]string, 0, len(fileEdits))
+	for path := range fileEdits {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	updatedFiles := make(map[string]string, len(paths))
+	for _, path := range paths {
+		edits := fileEdits[path]
 		content := ""
 		if data, err := os.ReadFile(path); err == nil {
 			content = string(data)
 		} else if !os.IsNotExist(err) {
-			return nil, statusError(codes.Internal, fmt.Sprintf("read %s: %v", path, err))
+			return nil, statusError(codes.Internal, "could not read edit target")
 		}
 
 		updated, err := applyTextEdits(content, edits)
 		if err != nil {
-			return nil, statusError(codes.InvalidArgument, fmt.Sprintf("apply edits for %s: %v", path, err))
+			return nil, statusError(codes.InvalidArgument, "invalid text edit")
 		}
 
 		appliedPaths = append(appliedPaths, path)
+		updatedFiles[path] = updated
+	}
+
+	for _, path := range paths {
 		if req.DryRun {
 			continue
 		}
 
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return nil, statusError(codes.Internal, fmt.Sprintf("prepare dir for %s: %v", path, err))
+			return nil, statusError(codes.Internal, "could not prepare edit target")
 		}
-		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-			return nil, statusError(codes.Internal, fmt.Sprintf("write %s: %v", path, err))
+		if err := os.WriteFile(path, []byte(updatedFiles[path]), 0o644); err != nil {
+			return nil, statusError(codes.Internal, "could not write edit target")
 		}
 	}
 
@@ -1348,14 +1732,14 @@ func (s *Server) UpdateEditorState(_ context.Context, req *acppb.UpdateEditorSta
 
 	todos, err := s.store.GetTodos(req.SessionId)
 	if err != nil {
-		return nil, statusError(codes.Internal, fmt.Sprintf("get todos: %v", err))
+		return nil, statusError(codes.Internal, "editor state unavailable")
 	}
 	if len(todos) == 0 {
 		resp.TodoState = "none"
 	} else {
 		active, err := s.store.GetActiveTodo(req.SessionId)
 		if err != nil {
-			return nil, statusError(codes.Internal, fmt.Sprintf("get active todo: %v", err))
+			return nil, statusError(codes.Internal, "editor state unavailable")
 		}
 		completed := 0
 		for _, t := range todos {

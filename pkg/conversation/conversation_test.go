@@ -2,10 +2,13 @@ package conversation
 
 import (
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -564,6 +567,108 @@ func TestNeedsCompaction(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestStorageMessage_ParityAcrossImmediateAndBulkPersistence(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "storage-message.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sessionID := "session-storage-message"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := store.CreateSession(&storage.Session{
+		ID: sessionID, Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := Message{
+		Role: "assistant",
+		Content: []model.ContentPart{
+			{Type: "text", Text: "result"},
+			{Type: "image_url", ImageURL: &model.ImageURL{URL: "data:image/png;base64,AA==", Detail: "low"}},
+		},
+		Timestamp: now,
+		Tokens:    42,
+		ToolCalls: []model.ToolCall{{
+			ID: "call_123", Type: "function",
+			Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"README.md"}`},
+		}},
+		Reasoning: "bounded reasoning",
+		ReasoningDetails: []model.ReasoningDetail{{
+			Type: "reasoning.encrypted", Data: "opaque", Format: "anthropic-claude-v1", HasIndex: true,
+		}},
+		IsSummary:   true,
+		IsTruncated: true,
+	}
+	want, err := StorageMessage(sessionID, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := New(sessionID)
+	if err := conv.SaveMessage(store, message); err != nil {
+		t.Fatal(err)
+	}
+	assertProjection := func(got storage.Message) {
+		t.Helper()
+		got.ID = 0
+		want.ID = 0
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("storage projection mismatch\n got: %#v\nwant: %#v", got, want)
+		}
+	}
+	stored, err := store.GetMessages(sessionID, 100, 0)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("immediate messages = %#v, %v", stored, err)
+	}
+	assertProjection(stored[0])
+	conv.Messages = []Message{message}
+	if err := conv.SaveAllMessages(store); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = store.GetMessages(sessionID, 100, 0)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("bulk messages = %#v, %v", stored, err)
+	}
+	assertProjection(stored[0])
+}
+
+func TestStorageMessage_LegacyPersistenceRemainsLosslessWhileDurableRejects(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "legacy-storage-message.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sessionID := "legacy session id with spaces"
+	now := time.Now().UTC()
+	if err := store.CreateSession(&storage.Session{
+		ID: sessionID, Status: storage.SessionStatusActive, CreatedAt: now, LastActive: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := Message{
+		Role: "tool", Content: strings.Repeat("x", sessionexec.MaxTranscriptEntryBytes+1),
+		ToolCallID: "provider call id with spaces", Name: "legacy tool name", Timestamp: now,
+	}
+	conv := New(sessionID)
+	if err := conv.SaveMessage(store, message); err != nil {
+		t.Fatalf("legacy SaveMessage: %v", err)
+	}
+	stored, err := store.GetAllMessages(sessionID)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("legacy messages = %d, %v", len(stored), err)
+	}
+	if len(stored[0].Content) != sessionexec.MaxTranscriptEntryBytes+1 ||
+		stored[0].ToolCallID != message.ToolCallID || stored[0].Name != message.Name {
+		t.Fatalf("legacy projection lost data: %+v", stored[0])
+	}
+	if _, err := sessionexec.ValidateTranscriptEntries([]sessionexec.TranscriptEntry{{
+		Ordinal: 0, Role: stored[0].Role, Content: stored[0].Content,
+		ContentType: stored[0].ContentType, ToolCallID: stored[0].ToolCallID,
+		Name: stored[0].Name, Tokens: int64(stored[0].Tokens),
+	}}, 0); err == nil {
+		t.Fatal("durable transcript accepted legacy-only oversized/provider-correlated message")
 	}
 }
 

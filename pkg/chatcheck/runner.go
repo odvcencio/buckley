@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 const (
@@ -73,20 +75,21 @@ type SuiteResult struct {
 }
 
 type TurnResult struct {
-	Index         int           `json:"index"`
-	User          string        `json:"user"`
-	Text          string        `json:"text"`
-	Model         string        `json:"model"`
-	Latency       time.Duration `json:"-"`
-	LatencyMillis int64         `json:"latency_ms"`
-	Usage         model.Usage   `json:"usage"`
-	Finish        string        `json:"finish,omitempty"`
-	Err           string        `json:"error,omitempty"`
-	ToolCalls     int           `json:"tool_calls"`
-	Reasoning     bool          `json:"reasoning"`
-	CharLength    int           `json:"char_length"`
-	Passed        bool          `json:"passed"`
-	Checks        []CheckResult `json:"checks,omitempty"`
+	Index           int                                   `json:"index"`
+	User            string                                `json:"user"`
+	Text            string                                `json:"text"`
+	Model           string                                `json:"model"`
+	Latency         time.Duration                         `json:"-"`
+	LatencyMillis   int64                                 `json:"latency_ms"`
+	Usage           model.Usage                           `json:"usage"`
+	Finish          string                                `json:"finish,omitempty"`
+	Err             string                                `json:"error,omitempty"`
+	ToolCalls       int                                   `json:"tool_calls"`
+	Reasoning       bool                                  `json:"reasoning"`
+	CharLength      int                                   `json:"char_length"`
+	ModelExecutions []transparency.ExecutionIdentityTrace `json:"model_executions,omitempty"`
+	Passed          bool                                  `json:"passed"`
+	Checks          []CheckResult                         `json:"checks,omitempty"`
 }
 
 type CheckResult struct {
@@ -429,37 +432,25 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 			Latency: time.Since(start),
 		}
 		turnResult.LatencyMillis = turnResult.Latency.Milliseconds()
+		var extractErr error
+		if resp != nil {
+			extractErr = populateTurnResultFromResponse(&turnResult, resp, ctrlResult)
+			result.Usage = model.AddUsage(result.Usage, turnResult.Usage)
+		}
 		if err != nil {
 			return failTurn(result, turnResult, fmt.Errorf("turn %d chat completion: %w", i+1, err))
 		}
-		if strings.TrimSpace(resp.Model) != "" {
-			turnResult.Model = resp.Model
-		}
-		turnResult.Usage = resp.Usage
-		result.Usage.PromptTokens += resp.Usage.PromptTokens
-		result.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		result.Usage.TotalTokens += resp.Usage.TotalTokens
 		if ctrlResult.FinishReason == agentloop.FinishReasonEmptyChoices {
 			err := fmt.Errorf("turn %d chat completion: %w", i+1, model.NoResponseChoicesError(req, resp))
 			return failTurn(result, turnResult, err)
 		}
-
-		choice := resp.Choices[0]
-		msg := choice.Message
-		text, extractErr := model.ExtractTextContent(msg.Content)
-		if extractErr != nil && strings.TrimSpace(msg.Reasoning) == "" {
+		if extractErr != nil {
 			err := fmt.Errorf("turn %d extract response text: %w", i+1, extractErr)
 			return failTurn(result, turnResult, err)
 		}
-		if strings.TrimSpace(text) == "" && strings.TrimSpace(msg.Reasoning) != "" {
-			text = strings.TrimSpace(msg.Reasoning)
-		}
-		text = strings.TrimSpace(text)
-		turnResult.Text = text
-		turnResult.Finish = choice.FinishReason
-		turnResult.ToolCalls = len(msg.ToolCalls)
-		turnResult.Reasoning = strings.TrimSpace(msg.Reasoning) != "" || len(msg.ReasoningDetails) > 0
-		turnResult.CharLength = len(text)
+		choice := resp.Choices[0]
+		msg := choice.Message
+		text := turnResult.Text
 
 		for _, check := range turnChecks {
 			if err := check(i+1, turn, msg, text, &turnResult.Checks); err != nil {
@@ -487,8 +478,8 @@ func (r Runner) Run(ctx context.Context, scenario Scenario) (*Result, error) {
 // is observed by the turn's checks (max_tool_calls), never dispatched --
 // so CallModel captures the raw response for the checks, then hands the
 // engine a copy with the tool calls stripped, ending the round without a
-// ToolDispatcher. The raw response is non-nil whenever the returned error
-// is nil.
+// ToolDispatcher. The raw response is non-nil whenever the provider returned
+// a response, including terminal partial response+error cases.
 func (r Runner) runTurn(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, *agentloop.Result, error) {
 	var raw *model.ChatResponse
 	ctrl, err := agentloop.NewController(agentloop.ControllerConfig{
@@ -497,27 +488,88 @@ func (r Runner) runTurn(ctx context.Context, req model.ChatRequest) (*model.Chat
 		},
 		CallModel: agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			resp, err := r.Client.ChatCompletion(ctx, req)
-			if err != nil {
-				return nil, err
-			}
 			if resp == nil {
+				if err != nil {
+					return nil, err
+				}
 				return nil, model.NilChatResponseError(req)
 			}
 			raw = resp
 			if len(resp.Choices) == 0 {
-				return resp, nil
+				return resp, err
 			}
 			engineCopy := *resp
 			engineCopy.Choices = append([]model.Choice(nil), resp.Choices...)
 			engineCopy.Choices[0].Message.ToolCalls = nil
-			return &engineCopy, nil
+			return &engineCopy, err
 		}),
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 	ctrlResult, err := ctrl.Run(ctx)
+	if err != nil {
+		return raw, ctrlResult, err
+	}
+	if ctrlResult != nil && ctrlResult.FinishReason == agentloop.FinishReasonEmptyChoices {
+		return raw, ctrlResult, nil
+	}
+	if conclusiveErr := ctrlResult.RequireConclusive(); conclusiveErr != nil {
+		return raw, ctrlResult, conclusiveErr
+	}
 	return raw, ctrlResult, err
+}
+
+func populateTurnResultFromResponse(turn *TurnResult, resp *model.ChatResponse, ctrlResult *agentloop.Result) error {
+	if turn == nil || resp == nil {
+		return nil
+	}
+	if strings.TrimSpace(resp.Model) != "" {
+		turn.Model = resp.Model
+	}
+	turn.Usage = model.AddUsage(model.Usage{}, resp.Usage)
+	turn.ModelExecutions = chatcheckModelExecutionsForTrace(ctrlResult, resp)
+	if len(resp.Choices) == 0 {
+		return nil
+	}
+	choice := resp.Choices[0]
+	msg := choice.Message
+	text, err := model.ExtractTextContent(msg.Content)
+	text = strings.TrimSpace(text)
+	turn.Text = text
+	turn.Finish = choice.FinishReason
+	turn.ToolCalls = len(msg.ToolCalls)
+	turn.Reasoning = strings.TrimSpace(msg.Reasoning) != "" || len(msg.ReasoningDetails) > 0
+	turn.CharLength = len(text)
+	return err
+}
+
+func chatcheckModelExecutionsForTrace(ctrlResult *agentloop.Result, resp *model.ChatResponse) []transparency.ExecutionIdentityTrace {
+	if ctrlResult != nil && ctrlResult.ModelExecutions != nil {
+		return chatcheckExecutionIdentitiesForTrace(ctrlResult.ModelExecutions)
+	}
+	if resp == nil || resp.ExecutionIdentity == nil {
+		return nil
+	}
+	return chatcheckExecutionIdentitiesForTrace([]model.ExecutionIdentity{*resp.ExecutionIdentity})
+}
+
+func chatcheckExecutionIdentitiesForTrace(input []model.ExecutionIdentity) []transparency.ExecutionIdentityTrace {
+	if input == nil {
+		return nil
+	}
+	out := make([]transparency.ExecutionIdentityTrace, len(input))
+	for i, identity := range input {
+		out[i] = transparency.ExecutionIdentityTrace{
+			RequestedModel: identity.RequestedModel,
+			SelectedModel:  identity.SelectedModel,
+			ProviderID:     identity.ProviderID,
+			ResponseModel:  identity.ResponseModel,
+			ResponseID:     identity.ResponseID,
+			Conflicted:     identity.Conflicted,
+		}
+	}
+	return out
 }
 
 // turnCheckFunc validates one aspect of a turn's response against turn's
@@ -674,9 +726,7 @@ func (r Runner) RunSuite(ctx context.Context, name string, scenarios []Scenario)
 			finalizeResult(result, result.StartedAt)
 		}
 		suite.Results = append(suite.Results, *result)
-		suite.Usage.PromptTokens += result.Usage.PromptTokens
-		suite.Usage.CompletionTokens += result.Usage.CompletionTokens
-		suite.Usage.TotalTokens += result.Usage.TotalTokens
+		suite.Usage = model.AddUsage(suite.Usage, result.Usage)
 		if err != nil || !result.Passed {
 			failures = append(failures, normalized.Name)
 		}
@@ -691,13 +741,25 @@ func failTurn(result *Result, turn TurnResult, err error) (*Result, error) {
 	if err == nil {
 		err = fmt.Errorf("chat check failed")
 	}
-	turn.Err = err.Error()
+	safeErr := chatcheckResultError(err)
+	turn.Err = safeErr
 	turn.Passed = false
 	if result != nil {
-		result.Error = err.Error()
+		result.Error = safeErr
 		result.Turns = append(result.Turns, turn)
 	}
 	return result, err
+}
+
+func chatcheckResultError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var incomplete *agentloop.IncompleteTurnError
+	if errors.As(err, &incomplete) && incomplete != nil {
+		return agentloop.PresentIncompleteResult(err).Message
+	}
+	return err.Error()
 }
 
 func finalizeSuiteResult(result *SuiteResult, started time.Time) {

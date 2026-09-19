@@ -159,9 +159,6 @@ func runCommitCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.backend == oneshotBackendAPI {
-		return unavailableOneshotCommandAPIError("commit")
-	}
 
 	if err := prepareCommitIndex(opts); err != nil {
 		return err
@@ -265,7 +262,13 @@ func prepareCommitIndex(opts commitCommandOptions) error {
 }
 
 func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, func(), error) {
+	preflightFallbackModel, preflightFallback := selectAvailableDefaultCommitModelBeforeInit(opts)
+	restoreProviderLock := func() {}
+	if preflightFallback {
+		restoreProviderLock = beginAgentProviderLock("openrouter/" + preflightFallbackModel)
+	}
 	cfg, mgr, store, err := initOneshotDependencies(opts.backend)
+	restoreProviderLock()
 	cleanup := func() {
 		if store != nil {
 			store.Close()
@@ -281,20 +284,19 @@ func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, 
 		cleanup()
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
 	}
-
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  3.0,
-		OutputPerMillion: 15.0,
+	fellBack := preflightFallback
+	if fellBack {
+		modelID = preflightFallbackModel
+	} else if selected, unavailable := selectAvailableDefaultCommitModel(opts, cfg, mgr, modelID); unavailable {
+		modelID = selected
+		fellBack = true
 	}
-	if opts.backend == oneshotBackendAPI && mgr != nil {
-		if info, err := oneshotModelInfoFn(mgr, modelID); err == nil {
-			pricing.InputPerMillion = info.Pricing.Prompt
-			pricing.OutputPerMillion = info.Pricing.Completion
-		}
+	if fellBack && !quietMode {
+		termOut.Warn("Local commit model unavailable; using %s", modelID)
 	}
 
 	ledger := transparency.NewCostLedger()
-	invoker, err := newOneshotToolInvokerFn(opts.backend, modelID, cfg, mgr, pricing, ledger)
+	invoker, err := newOneshotToolInvoker(opts.backend, "commit", modelID, cfg, mgr, ledger)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -537,17 +539,10 @@ func printCost(trace *transparency.Trace, ledger *transparency.CostLedger) {
 	termOut.Newline()
 
 	tokens := trace.Tokens
-	var tokensLine string
-	if tokens.Reasoning > 0 {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out · %d reasoning = %d total",
-			tokens.Input, tokens.Output, tokens.Reasoning, tokens.Total())
-	} else {
-		tokensLine = fmt.Sprintf("Tokens: %d in · %d out = %d total",
-			tokens.Input, tokens.Output, tokens.Total())
-	}
+	tokensLine := formatTokenUsageLine(tokens)
 
 	summary := ledger.Summary()
-	costLine := fmt.Sprintf("Cost: $%.4f · Session: $%.4f", trace.Cost, summary.SessionCost)
+	costLine := formatTraceCostLine(trace, summary)
 
 	termOut.Dim("%s", tokensLine)
 	termOut.Dim("%s", costLine)
@@ -558,8 +553,7 @@ func printError(err error, trace *transparency.Trace) {
 	termOut.Error("%s", err.Error())
 
 	if trace != nil {
-		termOut.Dim("Tokens used: %d · Cost: $%.4f (still charged)",
-			trace.Tokens.Total(), trace.Cost)
+		termOut.Dim("%s", formatTraceErrorUsageLine(trace))
 	}
 }
 
@@ -744,8 +738,18 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	var commitEnv []string
+	if !useGraft && len(paths) > 0 {
+		env, cleanup, err := prepareScopedCommitIndex(ctx, paths)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		commitEnv = env
+	}
+
 	if expected.Valid() {
-		actual, err := collectStagedChangeMetadata(paths)
+		actual, err := collectStagedChangeMetadataWithEnv(paths, commitEnv)
 		if err != nil {
 			return fmt.Errorf("recheck staged change identity: %w", err)
 		}
@@ -790,12 +794,9 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 	var cmd *exec.Cmd
 	if useGraft {
 		cmd = exec.CommandContext(ctx, "graft", "commit", "-m", message)
-	} else if len(paths) > 0 {
-		// git commit -F <msg> -- <paths...>
-		commitArgs := append([]string{"commit", "-F", tmpPath, "--"}, paths...)
-		cmd = exec.CommandContext(ctx, "git", commitArgs...)
 	} else {
 		cmd = exec.CommandContext(ctx, "git", "commit", "-F", tmpPath)
+		cmd.Env = commitEnv
 	}
 	if compactOutput {
 		var stderr bytes.Buffer
@@ -864,6 +865,10 @@ func metadataForOutput(metadata commitmsg.ChangeMetadata, enabled bool) commitms
 // collectStagedChangeMetadata hashes the exact staged diff and records only
 // aggregate counts. It never returns paths or source content to the caller.
 func collectStagedChangeMetadata(paths []string) (commitmsg.ChangeMetadata, error) {
+	return collectStagedChangeMetadataWithEnv(paths, nil)
+}
+
+func collectStagedChangeMetadataWithEnv(paths []string, env []string) (commitmsg.ChangeMetadata, error) {
 	args := []string{"diff", "--cached", "--binary", "--no-ext-diff", "--no-color"}
 	if len(paths) > 0 {
 		args = append(args, "--")
@@ -871,6 +876,7 @@ func collectStagedChangeMetadata(paths []string) (commitmsg.ChangeMetadata, erro
 	}
 
 	cmd := exec.Command("git", args...)
+	cmd.Env = env
 	hash := sha256.New()
 	cmd.Stdout = hash
 	var stderr bytes.Buffer
@@ -889,6 +895,7 @@ func collectStagedChangeMetadata(paths []string) (commitmsg.ChangeMetadata, erro
 		numstatArgs = append(numstatArgs, paths...)
 	}
 	numstat := exec.Command("git", numstatArgs...)
+	numstat.Env = env
 	output, err := numstat.Output()
 	if err != nil {
 		return commitmsg.ChangeMetadata{}, fmt.Errorf("git numstat: %w", err)

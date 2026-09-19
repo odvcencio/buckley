@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/coordination/coordinator"
@@ -75,11 +77,8 @@ func TestInsecureLocalAuth_AllowsStreamRPCWithoutMTLS(t *testing.T) {
 		t.Fatalf("StreamTask() error = %v", err)
 	}
 
-	ev, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("Recv() error = %v", err)
-	}
-	if ev.GetMessage() == "" {
-		t.Fatalf("expected streamed message, got %#v", ev)
+	_, err = stream.Recv()
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Recv() error = %v, want handler-level FailedPrecondition proving auth allowed the stream RPC", err)
 	}
 }

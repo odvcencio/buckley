@@ -41,6 +41,17 @@ func NoResponseChoicesMessage(req ChatRequest, resp *ChatResponse) string {
 	return strings.Join(parts, " ")
 }
 
+// IsToolUnsupportedError recognizes unsupported tool requests from provider
+// error text.
+func IsToolUnsupportedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "tool") &&
+		(strings.Contains(lower, "not support") || strings.Contains(lower, "unsupported"))
+}
+
 func requestModelID(req ChatRequest, resp *ChatResponse) string {
 	modelID := strings.TrimSpace(req.Model)
 	if modelID == "" && resp != nil {

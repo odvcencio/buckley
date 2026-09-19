@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,39 @@ type ModelsDevModel struct {
 	Limit            ModelsDevLimit      `json:"limit"`
 	Cost             ModelsDevCost       `json:"cost"`
 	Modalities       ModelsDevModalities `json:"modalities"`
+
+	capabilityFields map[string]struct{}
+}
+
+// UnmarshalJSON records which models.dev capability booleans were explicitly
+// present, preserving the public bool fields for existing Go literal callers.
+func (m *ModelsDevModel) UnmarshalJSON(data []byte) error {
+	type modelsDevModelAlias ModelsDevModel
+	var decoded modelsDevModelAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = ModelsDevModel(decoded)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for _, field := range modelsDevCapabilityFieldNames {
+		value, ok := raw[field]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			continue
+		}
+		var present bool
+		if err := json.Unmarshal(value, &present); err != nil {
+			return fmt.Errorf("models.dev: decode %s capability: %w", field, err)
+		}
+		if m.capabilityFields == nil {
+			m.capabilityFields = make(map[string]struct{})
+		}
+		m.capabilityFields[field] = struct{}{}
+	}
+	return nil
 }
 
 // ModelsDevLimit is a model's context/output token limits.
@@ -102,6 +136,8 @@ func FetchModelsDevCatalog(ctx context.Context, httpClient *http.Client, url str
 func MergeModelsDevCatalog(base map[string]ModelInfo, catalog ModelsDevCatalog) map[string]ModelInfo {
 	merged := make(map[string]ModelInfo, len(base))
 	for id, info := range base {
+		info.SupportedParameters = append([]string(nil), info.SupportedParameters...)
+		info.supportedParameterEvidence = cloneStringSet(info.supportedParameterEvidence)
 		merged[id] = info
 	}
 
@@ -126,9 +162,8 @@ func MergeModelsDevCatalog(base map[string]ModelInfo, catalog ModelsDevCatalog) 
 				info.Pricing = ModelPricing{Prompt: m.Cost.Input, Completion: m.Cost.Output}
 			}
 			info.Architecture.Modality = modelsDevModality(m.Modalities)
-			if params := modelsDevSupportedParameters(m); len(params) > 0 {
-				info.SupportedParameters = params
-			}
+			info.SupportedParameters = mergeModelsDevSupportedParameters(info.SupportedParameters, m)
+			markModelsDevSupportedParameterEvidence(&info, m)
 			merged[compositeID] = info
 		}
 	}
@@ -160,4 +195,110 @@ func modelsDevSupportedParameters(m ModelsDevModel) []string {
 		params = append(params, "structured_output")
 	}
 	return params
+}
+
+type modelsDevCapabilityUpdate struct {
+	field  string
+	add    string
+	remove []string
+}
+
+var modelsDevCapabilityUpdates = []modelsDevCapabilityUpdate{
+	{field: "tool_call", add: "tools", remove: []string{"tools", "functions"}},
+	{field: "reasoning", add: "reasoning", remove: []string{"reasoning", "reasoning_effort"}},
+	{field: "attachment", add: "attachment", remove: []string{"attachment"}},
+	{field: "temperature", add: "temperature", remove: []string{"temperature"}},
+	{field: "structured_output", add: "structured_output", remove: []string{"structured_output"}},
+}
+
+var modelsDevCapabilityFieldNames = []string{
+	"tool_call",
+	"reasoning",
+	"attachment",
+	"temperature",
+	"structured_output",
+}
+
+func mergeModelsDevSupportedParameters(existing []string, m ModelsDevModel) []string {
+	params := append([]string(nil), existing...)
+	for _, update := range modelsDevCapabilityUpdates {
+		value, known := modelsDevCapabilityValue(m, update)
+		if !known {
+			continue
+		}
+		if value {
+			params = addModelParameter(params, update.add)
+			continue
+		}
+		params = removeModelParameters(params, update.remove)
+	}
+	return params
+}
+
+func markModelsDevSupportedParameterEvidence(info *ModelInfo, m ModelsDevModel) {
+	for _, update := range modelsDevCapabilityUpdates {
+		if _, known := modelsDevCapabilityValue(m, update); !known {
+			continue
+		}
+		info.markSupportedParameterEvidence(append([]string{update.add}, update.remove...)...)
+	}
+}
+
+func cloneStringSet(in map[string]struct{}) map[string]struct{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(in))
+	for key := range in {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func modelsDevCapabilityValue(m ModelsDevModel, update modelsDevCapabilityUpdate) (bool, bool) {
+	if m.capabilityFields != nil {
+		if _, ok := m.capabilityFields[update.field]; !ok {
+			return false, false
+		}
+		return modelsDevCapabilityBool(m, update.field), true
+	}
+	if modelsDevCapabilityBool(m, update.field) {
+		return true, true
+	}
+	return false, false
+}
+
+func modelsDevCapabilityBool(m ModelsDevModel, field string) bool {
+	switch field {
+	case "tool_call":
+		return m.ToolCall
+	case "reasoning":
+		return m.Reasoning
+	case "attachment":
+		return m.Attachment
+	case "temperature":
+		return m.Temperature
+	case "structured_output":
+		return m.StructuredOutput
+	default:
+		return false
+	}
+}
+
+func addModelParameter(params []string, param string) []string {
+	if containsString(params, param) {
+		return params
+	}
+	return append(params, param)
+}
+
+func removeModelParameters(params []string, remove []string) []string {
+	out := params[:0]
+	for _, param := range params {
+		if containsString(remove, param) {
+			continue
+		}
+		out = append(out, param)
+	}
+	return out
 }

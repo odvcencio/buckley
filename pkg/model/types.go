@@ -1,8 +1,10 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -132,77 +134,116 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
-// OpenRouterRetentionMode is Buckley's internal retention contract for an
-// OpenRouter request. It is never serialized to the provider; the wire policy
-// must independently assert the same posture.
-type OpenRouterRetentionMode string
-
-const (
-	OpenRouterRetentionUnspecified OpenRouterRetentionMode = ""
-	OpenRouterRetentionZDR         OpenRouterRetentionMode = "zdr"
-	OpenRouterRetentionNonZDR      OpenRouterRetentionMode = "non_zdr"
-)
-
-// RequestRetryMode controls retry loops in Buckley's OpenRouter Client and
-// Manager layers. Direct non-OpenRouter ProviderTransport adapters do not
-// consume it. It is an internal execution contract and never enters provider
-// JSON.
-type RequestRetryMode string
-
-const (
-	RequestRetryDefault       RequestRetryMode = ""
-	RequestRetrySingleAttempt RequestRetryMode = "single_attempt"
-)
-
-// openRouterOSSAdmission is an opaque process-local capability. There is
-// intentionally no constructor in this change: non-ZDR OpenRouter dispatch
-// remains disabled until a trusted host admission path can mint one.
-type openRouterOSSAdmission struct{}
-
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
-	Model                string                  `json:"model"`
-	Models               []string                `json:"models,omitempty"` // OpenRouter fallback model list
-	Messages             []Message               `json:"messages"`
-	Temperature          float64                 `json:"temperature,omitempty"`
-	MaxTokens            int                     `json:"max_tokens,omitempty"`
-	MaxCompletionTokens  int                     `json:"max_completion_tokens,omitempty"`
-	Stream               bool                    `json:"stream"`
-	StreamOptions        *StreamOptions          `json:"stream_options,omitempty"`
-	Tools                []map[string]any        `json:"tools,omitempty"`               // OpenAI function definitions
-	ToolChoice           string                  `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
-	ParallelToolCalls    *bool                   `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
-	Reasoning            *ReasoningConfig        `json:"reasoning,omitempty"`           // Reasoning config for supported models
-	IncludeReasoning     *bool                   `json:"include_reasoning,omitempty"`   // OpenRouter legacy reasoning toggle
-	Transforms           []string                `json:"transforms,omitempty"`          // Provider-specific prompt transforms (e.g., OpenRouter)
-	Provider             map[string]any          `json:"provider,omitempty"`            // OpenRouter provider routing preferences
-	ResponseFormat       map[string]any          `json:"response_format,omitempty"`     // JSON mode or JSON schema
-	Seed                 *int                    `json:"seed,omitempty"`
-	ServiceTier          string                  `json:"service_tier,omitempty"`
-	SessionID            string                  `json:"session_id,omitempty"`             // OpenRouter observability/session grouping
-	Metadata             map[string]string       `json:"metadata,omitempty"`               // OpenRouter request metadata
-	Trace                map[string]string       `json:"trace,omitempty"`                  // OpenRouter tracing metadata
-	CacheControl         *CacheControl           `json:"cache_control,omitempty"`          // OpenRouter top-level prompt caching
-	PromptCacheKey       string                  `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
-	PromptCacheRetention string                  `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
-	PromptCache          *PromptCache            `json:"-"`
-	OpenRouterRetention  OpenRouterRetentionMode `json:"-"`
-	RetryMode            RequestRetryMode        `json:"-"`
-	openRouterAdmission  *openRouterOSSAdmission
+	Model                string            `json:"model"`
+	Models               []string          `json:"models,omitempty"` // OpenRouter fallback model list
+	Messages             []Message         `json:"messages"`
+	Temperature          float64           `json:"temperature,omitempty"`
+	MaxTokens            int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  int               `json:"max_completion_tokens,omitempty"`
+	Stream               bool              `json:"stream"`
+	StreamOptions        *StreamOptions    `json:"stream_options,omitempty"`
+	Tools                []map[string]any  `json:"tools,omitempty"`               // OpenAI function definitions
+	ToolChoice           string            `json:"tool_choice,omitempty"`         // "auto", "none", or specific function
+	ParallelToolCalls    *bool             `json:"parallel_tool_calls,omitempty"` // OpenRouter/OpenAI parallel tool calls
+	Reasoning            *ReasoningConfig  `json:"reasoning,omitempty"`           // Reasoning config for supported models
+	IncludeReasoning     *bool             `json:"include_reasoning,omitempty"`   // OpenRouter legacy reasoning toggle
+	Transforms           []string          `json:"transforms,omitempty"`          // Provider-specific prompt transforms (e.g., OpenRouter)
+	Provider             map[string]any    `json:"provider,omitempty"`            // OpenRouter provider routing preferences
+	ResponseFormat       map[string]any    `json:"response_format,omitempty"`     // JSON mode or JSON schema
+	Seed                 *int              `json:"seed,omitempty"`
+	ServiceTier          string            `json:"service_tier,omitempty"`
+	SessionID            string            `json:"session_id,omitempty"`             // OpenRouter observability/session grouping
+	Metadata             map[string]string `json:"metadata,omitempty"`               // OpenRouter request metadata
+	Trace                map[string]string `json:"trace,omitempty"`                  // OpenRouter tracing metadata
+	CacheControl         *CacheControl     `json:"cache_control,omitempty"`          // OpenRouter top-level prompt caching
+	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
+	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
+	PromptCache          *PromptCache      `json:"-"`
+	// Route is the authoritative provider/model decision used when this
+	// request was built. It lets dispatch fail closed if routing hooks drift
+	// before provider invocation, and it never enters provider JSON.
+	Route ModelRoute `json:"-"`
+	// ToolsCatalogConfirmedUnavailable is an internal semantic marker set
+	// when Buckley deliberately omitted tool schemas because authoritative
+	// provider metadata for the exact selected route confirms neither tools
+	// nor functions are advertised. Provider compatibility transforms use it
+	// to avoid reintroducing synthetic tool schemas after surprise tool-call
+	// rejection history. It never enters provider JSON.
+	ToolsCatalogConfirmedUnavailable bool `json:"-"`
+	// RetryMode is an internal execution contract. It never enters provider
+	// JSON; launch admission uses single_attempt so Dapr remains the sole retry
+	// owner for model effects.
+	RetryMode RequestRetryMode `json:"-"`
 	// ReviewSnapshot pins native verification to the immutable Git state
 	// captured once for an entire review run. Native providers materialize it;
 	// API-backed review tools are bound to the same descriptor by the agent runner.
 	ReviewSnapshot *ReviewSnapshot `json:"-"`
 }
 
+// ModelAttemptEvidence records bounded, durable evidence about a single model
+// attempt. It deliberately carries no prompt, message, completion content,
+// reasoning, error text, or arbitrary metadata -- only usage, presence,
+// finish reason, and completeness flags.
+type ModelAttemptEvidence struct {
+	Usage             Usage              `json:"usage"`
+	UsagePresent      bool               `json:"usage_present"`
+	FinishReason      string             `json:"finish_reason,omitempty"`
+	Incomplete        bool               `json:"incomplete"`
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
+}
+
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
-	ID                string                     `json:"id"`
-	Model             string                     `json:"model"`
-	Choices           []Choice                   `json:"choices"`
-	Usage             Usage                      `json:"usage"`
+	ID      string   `json:"id"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+	// UsagePresent distinguishes a wire response that never carried a "usage"
+	// object (OpenRouter's early-committed-200 network failure shell -- see
+	// the stealth/ox-alpha empty-response incident) from one that carried an
+	// honest, literally-zero usage object. Usage alone renders both as
+	// 0/0/0, which made the two indistinguishable in evidence and let a
+	// transport failure masquerade as a clean, tokenless stop. UnmarshalJSON
+	// derives this from the raw payload; callers that build a ChatResponse
+	// directly (tests, in-process fixtures) must set it explicitly.
+	UsagePresent      bool                       `json:"usage_present"`
 	Error             *ErrorDetail               `json:"error,omitempty"`
 	ExecutionEvidence []CommandExecutionEvidence `json:"execution_evidence,omitempty"`
+	AttemptEvidence   []ModelAttemptEvidence     `json:"attempt_evidence,omitempty"`
+	ExecutionIdentity *ExecutionIdentity         `json:"execution_identity,omitempty"`
+}
+
+// UnmarshalJSON decodes a ChatResponse and derives UsagePresent. When the
+// payload already carries an explicit "usage_present" key -- true once this
+// response has round-tripped through Buckley's own durable evidence
+// envelope, which always re-marshals a literal "usage" object regardless of
+// whether the original wire response had one -- that explicit value wins.
+// Otherwise (a raw provider response, or evidence recorded before this
+// field existed) presence is derived from whether the "usage" key itself
+// appears in the payload at all.
+func (r *ChatResponse) UnmarshalJSON(data []byte) error {
+	type chatResponseAlias ChatResponse
+	var aux chatResponseAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	var probe struct {
+		Usage        json.RawMessage `json:"usage"`
+		UsagePresent *bool           `json:"usage_present"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if probe.UsagePresent != nil {
+		aux.UsagePresent = *probe.UsagePresent
+	} else {
+		trimmed := bytes.TrimSpace(probe.Usage)
+		aux.UsagePresent = len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+	}
+	*r = ChatResponse(aux)
+	return nil
 }
 
 // CommandExecutionEvidence records a native provider command event. ExitCode
@@ -220,18 +261,28 @@ type CommandExecutionEvidence struct {
 
 // Choice represents a completion choice
 type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
+	Index   int     `json:"index"`
+	Message Message `json:"message"`
+	// FinishReason is OpenRouter's (or the upstream OpenAI-compatible
+	// provider's) normalized stop reason.
+	FinishReason string `json:"finish_reason"`
+	// NativeFinishReason is the upstream provider's own, unnormalized stop
+	// reason, which OpenRouter passes through beside FinishReason. A 200
+	// response whose network transport to the upstream provider failed after
+	// OpenRouter had already committed the status line reports
+	// "network_error" here with an empty message and no usage object; that
+	// value is otherwise indistinguishable from a genuine empty completion.
+	NativeFinishReason string `json:"native_finish_reason,omitempty"`
 }
 
 // StreamChunk represents a single chunk from a streaming chat completion.
 type StreamChunk struct {
-	ID      string         `json:"id"`
-	Model   string         `json:"model"`
-	Choices []StreamChoice `json:"choices"`
-	Usage   *Usage         `json:"usage,omitempty"` // Only present in final chunk
-	Error   *ErrorDetail   `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
+	ID                string             `json:"id"`
+	Model             string             `json:"model"`
+	Choices           []StreamChoice     `json:"choices"`
+	Usage             *Usage             `json:"usage,omitempty"` // Only present in final chunk
+	Error             *ErrorDetail       `json:"error,omitempty"` // OpenRouter may report mid-stream failures in-band
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
 }
 
 // StreamChoice represents a streaming choice
@@ -246,8 +297,36 @@ type MessageDelta struct {
 	Role             string            `json:"role,omitempty"`
 	Content          string            `json:"content,omitempty"`
 	Reasoning        string            `json:"reasoning,omitempty"`         // For thinking/reasoning models
+	ReasoningContent bool              `json:"-"`                           // True when Reasoning came from provider-native reasoning_content
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter's reasoning_details format
 	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+}
+
+func (d *MessageDelta) UnmarshalJSON(data []byte) error {
+	type messageDeltaWithReasoning struct {
+		Role             string            `json:"role,omitempty"`
+		Content          string            `json:"content,omitempty"`
+		Reasoning        string            `json:"reasoning,omitempty"`
+		ReasoningContent string            `json:"reasoning_content,omitempty"`
+		ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
+		ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+	}
+	var aux messageDeltaWithReasoning
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	d.Role = aux.Role
+	d.Content = aux.Content
+	d.Reasoning = aux.Reasoning
+	if d.Reasoning == "" {
+		d.Reasoning = aux.ReasoningContent
+		d.ReasoningContent = aux.ReasoningContent != ""
+	} else {
+		d.ReasoningContent = false
+	}
+	d.ReasoningDetails = aux.ReasoningDetails
+	d.ToolCalls = aux.ToolCalls
+	return nil
 }
 
 // ReasoningDetail represents a reasoning block from OpenRouter's reasoning_details format.
@@ -450,6 +529,10 @@ type Usage struct {
 	PromptTokensDetails    *PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
 	CompletionTokenDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
 	CacheWriteTokens       int                     `json:"cache_write_tokens,omitempty"`
+	// Estimated is true when Buckley derived the counts locally because the
+	// provider did not return usage. Estimated usage is useful for context and
+	// telemetry, but must not be treated as an authoritative provider invoice.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 type PromptTokensDetails struct {
@@ -467,6 +550,7 @@ func AddUsage(total Usage, next Usage) Usage {
 	total.CompletionTokens += next.CompletionTokens
 	total.TotalTokens += next.TotalTokens
 	total.CacheWriteTokens += next.CacheWriteTokens
+	total.Estimated = total.Estimated || next.Estimated
 	if next.PromptTokensDetails != nil {
 		if total.PromptTokensDetails == nil {
 			total.PromptTokensDetails = &PromptTokensDetails{}
@@ -480,6 +564,26 @@ func AddUsage(total Usage, next Usage) Usage {
 		total.CompletionTokenDetails.ReasoningTokens += next.CompletionTokenDetails.ReasoningTokens
 	}
 	return total
+}
+
+// EstimateChatUsage derives a best-effort request/response token count for a
+// completed chat round whose provider omitted usage. It uses the same local
+// JSON-envelope byte estimator as admission control and deliberately marks the
+// result non-authoritative. Callers enforcing a dollar ceiling must charge a
+// conservative pre-dispatch reservation instead of pricing this estimate.
+func EstimateChatUsage(req ChatRequest, response Message) Usage {
+	promptTokens := EstimateRequestTokens(req).Total
+	responseBytes := estimateMessageBytes(response)
+	completionTokens := responseBytes / 4
+	if completionTokens == 0 && responseBytes > 0 {
+		completionTokens = 1
+	}
+	return Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		Estimated:        true,
+	}
 }
 
 // RequestTokenEstimate describes the approximate model input footprint.
@@ -1094,6 +1198,19 @@ type ModelCatalog struct {
 	Data []ModelInfo `json:"data"`
 }
 
+func (c *ModelCatalog) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+		return err
+	}
+	type modelCatalogAlias ModelCatalog
+	var decoded modelCatalogAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = ModelCatalog(decoded)
+	return nil
+}
+
 // ModelInfo represents information about a model
 type ModelInfo struct {
 	ID            string `json:"id"`
@@ -1109,55 +1226,186 @@ type ModelInfo struct {
 	// PricingKnown records that a provider catalog explicitly supplied both
 	// prompt and completion prices. It distinguishes an authoritative free
 	// model from a zero-value ModelPricing whose prices are simply unavailable.
-	PricingKnown        bool         `json:"-"`
-	Created             int64        `json:"created"` // Unix timestamp
-	Architecture        Architecture `json:"architecture,omitempty"`
-	SupportedParameters []string     `json:"supported_parameters,omitempty"`
+	PricingKnown bool `json:"-"`
+	// RawPricing retains the bounded exact catalog lexemes used by launch
+	// admission. Cost reporting continues to use Pricing; safety decisions must
+	// use RawPricing so tiny nonzero values cannot underflow through float64.
+	RawPricing map[string]string `json:"-"`
+	// RawPricingJSON is a best-effort copy of the provider's exact pricing
+	// value. Ordinary catalog consumers tolerate null, future, complex, and
+	// oversized pricing values; launch admission revalidates this raw value
+	// against its stricter bounded contract.
+	RawPricingJSON      json.RawMessage `json:"-"`
+	Created             int64           `json:"created"` // Unix timestamp
+	Architecture        Architecture    `json:"architecture,omitempty"`
+	SupportedParameters []string        `json:"supported_parameters,omitempty"`
+	// supportedParametersComplete means supported_parameters was advertised as
+	// a complete provider list. supportedParameterEvidence records individual
+	// parameters whose support was explicitly stated by partial metadata.
+	supportedParametersComplete bool
+	supportedParameterEvidence  map[string]struct{}
 }
 
 // UnmarshalJSON accepts the common top-level catalog shape and OpenRouter's
 // nested top_provider.max_completion_tokens capability in one place.
 func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+		return err
+	}
+	// Decode every ordinary field without invoking ModelPricing's strict
+	// numeric parser. Provider catalogs have historically carried null, future,
+	// and occasionally non-standard pricing values; those must not make an
+	// otherwise usable model record unreadable.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	rawPricing, pricingPresent := fields["pricing"]
+	rawSupportedParameters, supportedParametersPresent := fields["supported_parameters"]
+	rawComplete, completePresent := fields["x_buckley_supported_parameters_complete"]
+	rawEvidence, evidencePresent := fields["x_buckley_supported_parameter_evidence"]
+	delete(fields, "pricing")
+	delete(fields, "supported_parameters")
+	delete(fields, "x_buckley_supported_parameters_complete")
+	delete(fields, "x_buckley_supported_parameter_evidence")
 	type modelInfoAlias ModelInfo
 	var base modelInfoAlias
-	if err := json.Unmarshal(data, &base); err != nil {
+	baseData, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(baseData, &base); err != nil {
 		return err
 	}
 	var capabilities struct {
 		TopProvider struct {
 			MaxCompletionTokens int `json:"max_completion_tokens"`
 		} `json:"top_provider"`
-		Pricing map[string]json.RawMessage `json:"pricing"`
 	}
 	if err := json.Unmarshal(data, &capabilities); err != nil {
 		return err
 	}
 	*m = ModelInfo(base)
-	m.PricingKnown = explicitPricingValue(capabilities.Pricing["prompt"]) &&
-		explicitPricingValue(capabilities.Pricing["completion"])
+	supportedParametersMalformed := false
+	if supportedParametersPresent {
+		trimmed := bytes.TrimSpace(rawSupportedParameters)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+			params, ok := decodeSupportedParameterStrings(trimmed)
+			if ok {
+				m.SupportedParameters = params
+				m.supportedParametersComplete = true
+			} else {
+				m.SupportedParameters = nil
+				m.supportedParametersComplete = false
+				supportedParametersMalformed = true
+			}
+		}
+	}
+	if completePresent && !supportedParametersMalformed {
+		var complete bool
+		if err := json.Unmarshal(rawComplete, &complete); err == nil {
+			m.supportedParametersComplete = complete
+		}
+	}
+	if evidencePresent && !supportedParametersMalformed {
+		var evidence []string
+		if err := json.Unmarshal(rawEvidence, &evidence); err == nil {
+			m.setSupportedParameterEvidence(evidence...)
+		}
+	}
+	if pricingPresent {
+		m.RawPricingJSON = append(json.RawMessage(nil), rawPricing...)
+		// Keep ordinary cost behavior for conventional pricing, while ignoring
+		// malformed/future shapes for compatibility.
+		var pricing ModelPricing
+		if err := json.Unmarshal(rawPricing, &pricing); err == nil {
+			m.Pricing = pricing
+		}
+		if parsed, err := decodeCatalogPricing(rawPricing); err == nil {
+			m.RawPricing = parsed
+			m.PricingKnown = validCatalogPrice(parsed["prompt"]) && validCatalogPrice(parsed["completion"])
+		}
+	}
 	if m.MaxCompletionTokens <= 0 {
 		m.MaxCompletionTokens = capabilities.TopProvider.MaxCompletionTokens
 	}
 	return nil
 }
 
-func explicitPricingValue(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
+func decodeSupportedParameterStrings(data []byte) ([]string, bool) {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, false
 	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return false
+	params := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = bytes.TrimSpace(item)
+		if len(item) == 0 || item[0] != '"' {
+			return nil, false
+		}
+		var param string
+		if err := json.Unmarshal(item, &param); err != nil {
+			return nil, false
+		}
+		params = append(params, param)
 	}
-	switch value := value.(type) {
-	case float64:
-		return true
-	case string:
-		_, err := strconv.ParseFloat(value, 64)
-		return err == nil
-	default:
-		return false
+	return params, true
+}
+
+func (m ModelInfo) MarshalJSON() ([]byte, error) {
+	type modelInfoAlias ModelInfo
+	type modelInfoWire struct {
+		modelInfoAlias
+		SupportedParameters         []string `json:"supported_parameters,omitempty"`
+		SupportedParametersComplete *bool    `json:"x_buckley_supported_parameters_complete,omitempty"`
+		SupportedParameterEvidence  []string `json:"x_buckley_supported_parameter_evidence,omitempty"`
 	}
+	wire := modelInfoWire{modelInfoAlias: modelInfoAlias(m)}
+	wire.modelInfoAlias.SupportedParameters = nil
+	if len(m.SupportedParameters) > 0 || m.supportedParametersComplete {
+		wire.SupportedParameters = append([]string(nil), m.SupportedParameters...)
+	}
+	if m.supportedParametersComplete {
+		value := true
+		wire.SupportedParametersComplete = &value
+	} else if len(m.SupportedParameters) > 0 || len(m.supportedParameterEvidence) > 0 {
+		value := false
+		wire.SupportedParametersComplete = &value
+	}
+	wire.SupportedParameterEvidence = m.supportedParameterEvidenceList()
+	return json.Marshal(wire)
+}
+
+func rejectDuplicateTopLevelJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return fmt.Errorf("model catalog object is invalid")
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return fmt.Errorf("model catalog object is invalid")
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("model catalog object contains duplicate top-level field %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("model catalog object is invalid")
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return fmt.Errorf("model catalog object is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("model catalog object has trailing data")
+	}
+	return nil
 }
 
 // Architecture contains model architecture details
@@ -1218,6 +1466,11 @@ func (p *ModelPricing) UnmarshalJSON(data []byte) error {
 type ErrorResponse struct {
 	Error              ErrorDetail     `json:"error"`
 	OpenRouterMetadata json.RawMessage `json:"openrouter_metadata,omitempty"`
+	// LimitSource identifies a non-standard OpenRouter 429 body carrying only
+	// {"limit_source":"upstream_provider_shared_pool"} -- no "error" envelope
+	// at all -- when an upstream provider's own shared rate-limit pool, not
+	// OpenRouter itself, rejected the request.
+	LimitSource string `json:"limit_source,omitempty"`
 }
 
 // ErrorDetail contains error information
@@ -1265,6 +1518,21 @@ type APIError struct {
 	RequestID  string
 	Retryable  bool
 	RetryAfter time.Duration
+	// LimitSource carries OpenRouter's non-standard 429 `limit_source` field
+	// (see ErrorResponse.LimitSource). Empty for every other error shape.
+	LimitSource string
+}
+
+// SharedPoolLimitSource is the OpenRouter `limit_source` value that marks a
+// 429 as an upstream provider's own shared rate-limit pool rejecting the
+// request, distinct from an OpenRouter-side limit. It must never abort a run
+// on its first occurrence; see (*APIError).IsSharedPoolRateLimit.
+const SharedPoolLimitSource = "upstream_provider_shared_pool"
+
+// IsSharedPoolRateLimit reports whether this is OpenRouter's non-standard
+// {"limit_source":"upstream_provider_shared_pool"} 429 body.
+func (e *APIError) IsSharedPoolRateLimit() bool {
+	return e != nil && e.StatusCode == 429 && e.LimitSource == SharedPoolLimitSource
 }
 
 // Error implements the error interface

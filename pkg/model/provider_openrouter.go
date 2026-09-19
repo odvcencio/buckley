@@ -25,6 +25,22 @@ func (p *OpenRouterProvider) RefreshCatalog() (*ModelCatalog, error) {
 	return p.client.RefreshCatalog()
 }
 
+func (p *OpenRouterProvider) CatalogSourceURL() string {
+	if p == nil || p.client == nil {
+		return ""
+	}
+	return p.client.CatalogSourceURL()
+}
+
+func (*OpenRouterProvider) openRouterCatalogAuthority() {}
+
+func (p *OpenRouterProvider) refreshOfficialOpenRouterCatalog(ctx context.Context) (*officialCatalogObservation, error) {
+	if p == nil || p.client == nil {
+		return nil, context.Canceled
+	}
+	return p.client.refreshOfficialOpenRouterCatalog(ctx)
+}
+
 // GetModelInfo fetches info for the supplied model.
 func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 	return p.client.GetModelInfo(modelID)
@@ -32,17 +48,11 @@ func (p *OpenRouterProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 
 // ChatCompletion executes a standard completion.
 func (p *OpenRouterProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if err := validateModelDispatch(req, p.ID()); err != nil {
-		return nil, err
-	}
 	return p.client.ChatCompletion(ctx, req)
 }
 
 // ChatCompletionStream executes a streaming completion.
 func (p *OpenRouterProvider) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
-	if err := validateModelDispatch(req, p.ID()); err != nil {
-		return streamErrorChannels(err)
-	}
 	return p.client.ChatCompletionStream(ctx, req)
 }
 

@@ -37,6 +37,17 @@ type Session struct {
 
 // CreateSession creates a new session with retry logic for database locks.
 func (s *Store) CreateSession(session *Session) error {
+	if err := s.CreateSessionUnpublished(session); err != nil {
+		return err
+	}
+	s.PublishSessionCreated(session)
+	return nil
+}
+
+// CreateSessionUnpublished persists a session without notifying observers.
+// Callers must either publish the created event after the session becomes
+// usable or delete the unpublished row on rollback.
+func (s *Store) CreateSessionUnpublished(session *Session) error {
 	status := strings.TrimSpace(strings.ToLower(session.Status))
 	if status == "" {
 		status = SessionStatusActive
@@ -78,8 +89,6 @@ func (s *Store) CreateSession(session *Session) error {
 		)
 
 		if err == nil {
-			clone := *session
-			s.notify(newEvent(EventSessionCreated, session.ID, session.ID, clone))
 			return nil
 		}
 
@@ -97,6 +106,16 @@ func (s *Store) CreateSession(session *Session) error {
 	}
 
 	return err
+}
+
+// PublishSessionCreated notifies observers after an unpublished session has
+// completed its caller-controlled activation boundary.
+func (s *Store) PublishSessionCreated(session *Session) {
+	if s == nil || session == nil {
+		return
+	}
+	clone := *session
+	s.notify(newEvent(EventSessionCreated, session.ID, session.ID, clone))
 }
 
 // GetSession retrieves a session by ID.
@@ -511,12 +530,28 @@ func (s *Store) UpdateSessionPauseState(sessionID string, reason, question strin
 
 // DeleteSession deletes a session and all related data (cascades to messages, api_calls).
 func (s *Store) DeleteSession(sessionID string) error {
-	query := `DELETE FROM sessions WHERE session_id = ?`
-	_, err := s.db.Exec(query, sessionID)
-	if err != nil {
+	if err := s.DeleteSessionUnpublished(sessionID); err != nil {
 		return err
 	}
 
 	s.notify(newEvent(EventSessionDeleted, sessionID, sessionID, nil))
 	return nil
+}
+
+// DeleteSessionUnpublished removes a session without notifying observers. It
+// is intended only for rolling back CreateSessionUnpublished.
+func (s *Store) DeleteSessionUnpublished(sessionID string) error {
+	query := `DELETE FROM sessions WHERE session_id = ?`
+	var err error
+	for attempt := 0; attempt <= 3; attempt++ {
+		_, err = s.db.Exec(query, sessionID)
+		if err == nil {
+			return nil
+		}
+		if !IsSQLiteBusyError(err) || attempt == 3 {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond * time.Duration(1<<uint(attempt)))
+	}
+	return err
 }

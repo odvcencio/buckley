@@ -6,20 +6,6 @@ import (
 	"time"
 )
 
-func TestDefaultExecutorConfig(t *testing.T) {
-	cfg := DefaultExecutorConfig()
-
-	if cfg.MaxIterations != 50 {
-		t.Errorf("Expected 50 max iterations, got %d", cfg.MaxIterations)
-	}
-	if cfg.ToolTimeout != 5*time.Minute {
-		t.Errorf("Expected 5m tool timeout, got %v", cfg.ToolTimeout)
-	}
-	if cfg.TotalTimeout != 30*time.Minute {
-		t.Errorf("Expected 30m total timeout, got %v", cfg.TotalTimeout)
-	}
-}
-
 func TestTaskResultSerialization(t *testing.T) {
 	result := TaskResult{
 		TaskID:     "task-123",

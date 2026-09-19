@@ -205,6 +205,53 @@ func TestMessage_UnmarshalJSONCapturesReasoning(t *testing.T) {
 	}
 }
 
+func TestMessageDelta_UnmarshalJSONCapturesReasoningContentAlias(t *testing.T) {
+	var chunk StreamChunk
+	raw := `{"id":"chatcmpl-1","model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"private chain","content":"final"},"finish_reason":null}]}`
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(chunk.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(chunk.Choices))
+	}
+	delta := chunk.Choices[0].Delta
+	if delta.Reasoning != "private chain" {
+		t.Fatalf("reasoning = %q, want alias content", delta.Reasoning)
+	}
+	if !delta.ReasoningContent {
+		t.Fatal("ReasoningContent = false, want true for reasoning_content alias")
+	}
+	if delta.Content != "final" {
+		t.Fatalf("content = %q, want final", delta.Content)
+	}
+}
+
+func TestMessageDelta_UnmarshalJSONKeepsCanonicalReasoningMarkerFalse(t *testing.T) {
+	var chunk StreamChunk
+	raw := `{"id":"chatcmpl-1","model":"glm","choices":[{"index":0,"delta":{"reasoning":"private chain"},"finish_reason":null}]}`
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	delta := chunk.Choices[0].Delta
+	if delta.Reasoning != "private chain" {
+		t.Fatalf("reasoning = %q, want canonical reasoning", delta.Reasoning)
+	}
+	if delta.ReasoningContent {
+		t.Fatal("ReasoningContent = true, want false for canonical reasoning")
+	}
+}
+
+func TestMessageDelta_UnmarshalJSONReasoningFieldWinsOverAlias(t *testing.T) {
+	var delta MessageDelta
+	raw := `{"reasoning":"canonical","reasoning_content":"alias","content":"done"}`
+	if err := json.Unmarshal([]byte(raw), &delta); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if delta.Reasoning != "canonical" {
+		t.Fatalf("reasoning = %q, want canonical reasoning field", delta.Reasoning)
+	}
+}
+
 func TestMessage_MarshalJSONPreservesReasoning(t *testing.T) {
 	msg := Message{
 		Role:      "assistant",
@@ -234,6 +281,179 @@ func TestMessage_MarshalJSONPreservesReasoning(t *testing.T) {
 	}
 	if !strings.Contains(string(blob), `"index":0`) {
 		t.Fatalf("expected zero index to be preserved, got: %s", string(blob))
+	}
+}
+
+// TestChoice_UnmarshalJSONCapturesNativeFinishReason covers the OpenRouter
+// early-200 transport failure shell from the stealth/ox-alpha incident:
+// choices[0].native_finish_reason is "network_error" beside the normalized
+// finish_reason, and must survive decoding so callers can classify it.
+func TestChoice_UnmarshalJSONCapturesNativeFinishReason(t *testing.T) {
+	raw := `{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop","native_finish_reason":"network_error"}`
+	var choice Choice
+	if err := json.Unmarshal([]byte(raw), &choice); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if choice.FinishReason != "stop" {
+		t.Fatalf("finish_reason = %q, want stop", choice.FinishReason)
+	}
+	if choice.NativeFinishReason != "network_error" {
+		t.Fatalf("native_finish_reason = %q, want network_error", choice.NativeFinishReason)
+	}
+}
+
+// TestChatResponse_UsagePresent covers the three shapes that matter for
+// distinguishing an OpenRouter early-200 transport failure shell (no usage
+// object at all) from an honest, literally-zero usage object, and from
+// Buckley's own durable evidence envelope re-marshaling a response that
+// already carries an explicit usage_present flag.
+func TestChatResponse_UsagePresent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "usage key absent -- the transport failure shell",
+			raw:  `{"id":"gen-1","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop","native_finish_reason":"network_error"}]}`,
+			want: false,
+		},
+		{
+			name: "usage key null",
+			raw:  `{"id":"gen-1","choices":[],"usage":null}`,
+			want: false,
+		},
+		{
+			name: "usage key present with literal zero fields",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+			want: true,
+		},
+		{
+			name: "usage key present with nonzero fields",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			want: true,
+		},
+		{
+			name: "explicit usage_present false wins over a re-marshaled usage key",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"usage_present":false}`,
+			want: false,
+		},
+		{
+			name: "explicit usage_present true is trusted even with zero usage",
+			raw:  `{"id":"gen-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"usage_present":true}`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp ChatResponse
+			if err := json.Unmarshal([]byte(tt.raw), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if resp.UsagePresent != tt.want {
+				t.Fatalf("UsagePresent = %v, want %v", resp.UsagePresent, tt.want)
+			}
+		})
+	}
+}
+
+// TestChatResponse_UsagePresentRoundTripsThroughMarshal covers the case that
+// motivated the explicit usage_present-key precedence rule: Buckley's own
+// durable evidence envelope always re-marshals a ChatResponse, which always
+// emits a literal "usage" object (Usage has no omitempty) regardless of
+// whether the original wire response ever had one. Without trusting the
+// explicit key on the second decode, every replayed absent-usage response
+// would silently flip to "present" on replay.
+func TestChatResponse_UsagePresentRoundTripsThroughMarshal(t *testing.T) {
+	original := ChatResponse{
+		Choices:      []Choice{{Message: Message{Role: "assistant"}, NativeFinishReason: "network_error"}},
+		UsagePresent: false,
+	}
+	blob, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"usage":{`) {
+		t.Fatalf("expected the re-marshal to always emit a literal usage object, got: %s", blob)
+	}
+	var decoded ChatResponse
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.UsagePresent {
+		t.Fatalf("UsagePresent = true after round-trip, want false to survive despite the re-marshaled usage object")
+	}
+	if decoded.Choices[0].NativeFinishReason != "network_error" {
+		t.Fatalf("native_finish_reason did not round-trip: %+v", decoded.Choices[0])
+	}
+}
+
+func TestChatResponse_AttemptEvidenceRoundTripsWithoutText(t *testing.T) {
+	secret := "SENTINEL-SECRET-PROMPT-TEXT"
+	evidence := []ModelAttemptEvidence{
+		{
+			Usage: Usage{
+				PromptTokens:     120,
+				CompletionTokens: 45,
+				TotalTokens:      165,
+				PromptTokensDetails: &PromptTokensDetails{
+					CachedTokens: 30,
+				},
+				CompletionTokenDetails: &CompletionTokenDetails{
+					ReasoningTokens: 12,
+				},
+				CacheWriteTokens: 7,
+			},
+			UsagePresent: true,
+			FinishReason: "stop",
+			Incomplete:   false,
+		},
+		{
+			Usage: Usage{
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				TotalTokens:      0,
+			},
+			UsagePresent: false,
+			FinishReason: "length",
+			Incomplete:   true,
+		},
+	}
+	original := ChatResponse{
+		ID:              "resp-1",
+		Model:           "test-model",
+		AttemptEvidence: evidence,
+	}
+	blob, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ChatResponse
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(decoded.AttemptEvidence, original.AttemptEvidence) {
+		t.Fatalf("attempt evidence did not round-trip: got %+v, want %+v", decoded.AttemptEvidence, original.AttemptEvidence)
+	}
+	var raw struct {
+		AttemptEvidence []map[string]json.RawMessage `json:"attempt_evidence"`
+	}
+	if err := json.Unmarshal(blob, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if len(raw.AttemptEvidence) != 2 {
+		t.Fatalf("expected 2 attempt evidence records, got %d", len(raw.AttemptEvidence))
+	}
+	allowed := map[string]bool{"usage": true, "usage_present": true, "finish_reason": true, "incomplete": true}
+	for i, obj := range raw.AttemptEvidence {
+		for k := range obj {
+			if !allowed[k] {
+				t.Fatalf("attempt evidence %d has disallowed key %q", i, k)
+			}
+		}
+	}
+	if strings.Contains(string(blob), secret) {
+		t.Fatalf("encoded JSON contains sentinel secret text")
 	}
 }
 
@@ -328,32 +548,11 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 		Metadata:            map[string]string{"surface": "test"},
 		Trace:               map[string]string{"trace_id": "trace-1"},
 		CacheControl:        &CacheControl{Type: "ephemeral", TTL: "1h"},
-		OpenRouterRetention: OpenRouterRetentionNonZDR,
-		RetryMode:           RequestRetrySingleAttempt,
-		openRouterAdmission: &openRouterOSSAdmission{},
 	}
 
 	blob, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(blob, &wire); err != nil {
-		t.Fatalf("decode request JSON: %v", err)
-	}
-	for _, key := range []string{
-		"OpenRouterRetention",
-		"open_router_retention",
-		"openrouter_retention",
-		"RetryMode",
-		"retry_mode",
-		"openRouterAdmission",
-		"open_router_admission",
-		"openrouter_admission",
-	} {
-		if _, leaked := wire[key]; leaked {
-			t.Fatalf("internal request key %q leaked into %#v", key, wire)
-		}
 	}
 	out := string(blob)
 	for _, want := range []string{
@@ -368,11 +567,6 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %s in %s", want, out)
-		}
-	}
-	for _, forbidden := range []string{"openrouter_retention", "retry_mode", "openRouterAdmission"} {
-		if strings.Contains(out, forbidden) {
-			t.Fatalf("internal request contract %q leaked into %s", forbidden, out)
 		}
 	}
 }

@@ -384,7 +384,7 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, req *Request) {
 			_ = a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
 			return
 		}
-		_ = a.transport.SendError(req.ID, ErrCodeInternal, "Prompt failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInternal, "Prompt failed", nil)
 		return
 	}
 
@@ -471,7 +471,7 @@ func (a *Agent) handleSessionSetConfigOption(ctx context.Context, req *Request) 
 
 	options, err := a.handlers.OnSetConfigOption(ctx, session, params.ConfigID, value)
 	if err != nil {
-		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Set config option failed", err.Error())
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Set config option failed", nil)
 		return
 	}
 

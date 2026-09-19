@@ -42,6 +42,7 @@ type ToolMetadata struct {
 	Summary      string   // Template for result summary: "Found {count} matches in {files} files"
 	Impact       Impact   // Operation impact level
 	Cost         Cost     // Resource cost
+	Verification bool     // True only for trusted tools that execute verification/checks
 	ExampleUsage string   // Example of how to use this tool
 }
 
@@ -63,12 +64,40 @@ type RichTool interface {
 	Metadata() ToolMetadata
 }
 
+// TrustedVerificationTool marks in-process tools whose implementation is a
+// trusted execution/check surface. Names and generic testing categories alone
+// must not grant verification evidence because plugin/external tools can
+// replace built-ins by name.
+type TrustedVerificationTool interface {
+	TrustedVerification() bool
+}
+
+type ConservativeMutationTool interface {
+	ConservativeMutation() bool
+}
+
 // GetMetadata returns metadata for a tool, with fallback to defaults
 func GetMetadata(t Tool) ToolMetadata {
+	var metadata ToolMetadata
 	if rt, ok := t.(RichTool); ok {
-		return rt.Metadata()
+		metadata = rt.Metadata()
+	} else if conservative, ok := t.(ConservativeMutationTool); ok && conservative.ConservativeMutation() {
+		metadata = ToolMetadata{
+			Category: CategoryExternal,
+			Impact:   ImpactDestructive,
+			Cost:     CostExpensive,
+			Intent:   "Calling external tool",
+			Summary:  "External tool call completed",
+		}
+	} else {
+		metadata = inferMetadata(t)
 	}
-	return inferMetadata(t)
+	if verifier, ok := t.(TrustedVerificationTool); ok && verifier.TrustedVerification() {
+		metadata.Verification = true
+	} else {
+		metadata.Verification = false
+	}
+	return metadata
 }
 
 // toolMetadataOverrides holds per-tool metadata for tools whose real
@@ -97,6 +126,55 @@ var toolMetadataOverrides = map[string]ToolMetadata{
 		Intent:   "Executing code snippet",
 		Summary:  "Code snippet executed",
 	},
+	"run_tests": {
+		Category: CategoryTesting,
+		Impact:   ImpactReadOnly,
+		Cost:     CostFree,
+		Intent:   "Running tests",
+		Summary:  "Tests completed",
+	},
+	"run_verification": {
+		Category: CategoryTesting,
+		Impact:   ImpactReadOnly,
+		Cost:     CostFree,
+		Intent:   "Running verification",
+		Summary:  "Verification completed",
+	},
+	"generate_test": {
+		Category: CategoryTesting,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Generating tests",
+		Summary:  "Test generation completed",
+	},
+	"insert_text": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Inserting text",
+		Summary:  "Text inserted",
+	},
+	"search_replace": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Replacing text",
+		Summary:  "Text replaced",
+	},
+	"excel": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Working with spreadsheet",
+		Summary:  "Spreadsheet operation completed",
+	},
+	"mark_conflict_resolved": {
+		Category: CategoryGit,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Marking conflict resolved",
+		Summary:  "Conflict resolution staged",
+	},
 	// code_callgraph, code_refs, and code_impact shell out to the canopy CLI
 	// for read-only structural analysis. Explicit entries pin them to the
 	// filesystem/read-only tier rather than relying on inferMetadata's
@@ -121,6 +199,55 @@ var toolMetadataOverrides = map[string]ToolMetadata{
 		Cost:     CostFree,
 		Intent:   "Computing blast radius",
 		Summary:  "Impact query completed",
+	},
+	"generate_docstring": {
+		Category: CategoryDocumentation,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Generating documentation",
+		Summary:  "Documentation generated",
+	},
+	"create_skill": {
+		Category: CategoryFilesystem,
+		Impact:   ImpactModifying,
+		Cost:     CostFree,
+		Intent:   "Creating skill",
+		Summary:  "Skill created",
+	},
+	"manage_embeddings_index": {
+		Category: CategoryCodebase,
+		Impact:   ImpactModifying,
+		Cost:     CostExpensive,
+		Intent:   "Managing embeddings index",
+		Summary:  "Embeddings index operation completed",
+	},
+	"invoke_codex": {
+		Category: CategoryDelegation,
+		Impact:   ImpactModifying,
+		Cost:     CostExpensive,
+		Intent:   "Delegating to Codex",
+		Summary:  "Codex delegation completed",
+	},
+	"invoke_claude": {
+		Category: CategoryDelegation,
+		Impact:   ImpactModifying,
+		Cost:     CostExpensive,
+		Intent:   "Delegating to Claude",
+		Summary:  "Claude delegation completed",
+	},
+	"invoke_buckley": {
+		Category: CategoryDelegation,
+		Impact:   ImpactModifying,
+		Cost:     CostExpensive,
+		Intent:   "Delegating to Buckley",
+		Summary:  "Buckley delegation completed",
+	},
+	"spawn_subagent": {
+		Category: CategoryDelegation,
+		Impact:   ImpactModifying,
+		Cost:     CostExpensive,
+		Intent:   "Spawning subagent",
+		Summary:  "Subagent completed",
 	},
 }
 

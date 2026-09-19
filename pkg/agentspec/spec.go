@@ -1,8 +1,11 @@
 package agentspec
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -113,6 +116,25 @@ type TerminalSpec struct {
 	Sandbox SandboxSpec       `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 }
 
+func decodeStrictYAML(data []byte, out any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return fmt.Errorf("expected a single YAML document")
+}
+
 func LoadFile(path string) (*Spec, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -120,7 +142,7 @@ func LoadFile(path string) (*Spec, error) {
 	}
 	spec, err := Parse(data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing agent spec %s: %w", path, err)
 	}
 	baseDir := filepath.Dir(path)
 	spec.Instructions.Files = cleanRelativePaths(baseDir, spec.Instructions.Files)
@@ -134,7 +156,7 @@ func LoadFile(path string) (*Spec, error) {
 
 func Parse(data []byte) (*Spec, error) {
 	var spec Spec
-	if err := yaml.Unmarshal(data, &spec); err != nil {
+	if err := decodeStrictYAML(data, &spec); err != nil {
 		return nil, fmt.Errorf("parsing agent spec: %w", err)
 	}
 	return &spec, nil

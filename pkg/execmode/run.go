@@ -22,10 +22,12 @@ const (
 
 // Result is one program run's outcome.
 type Result struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Duration time.Duration
+	Stdout          string
+	Stderr          string
+	ExitCode        int
+	Duration        time.Duration
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // Runner executes model-written Go programs against a jailed broker. The
@@ -168,15 +170,19 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	// WaitDelay backstops pipe readers held by orphans.
 	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedWriter{buf: &stdout}
-	cmd.Stderr = &limitedWriter{buf: &stderr}
+	stdoutW := &limitedWriter{buf: &stdout}
+	stderrW := &limitedWriter{buf: &stderr}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	started := time.Now()
 	err = cmd.Run()
 	result := Result{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		Duration: time.Since(started),
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		Duration:        time.Since(started),
+		StdoutTruncated: stdoutW.truncated,
+		StderrTruncated: stderrW.truncated,
 	}
 	if err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
@@ -235,19 +241,17 @@ func sharedGoCache() string {
 }
 
 type limitedWriter struct {
-	buf *bytes.Buffer
+	buf       *bytes.Buffer
+	truncated bool
 }
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
-	remaining := maxOutputBytes - w.buf.Len()
-	if remaining <= 0 {
-		return len(p), nil
+	keep := min(len(p), max(0, maxOutputBytes-w.buf.Len()))
+	if keep < len(p) {
+		w.truncated = true
 	}
-	if len(p) > remaining {
-		w.buf.Write(p[:remaining])
-		return len(p), nil
-	}
-	return w.buf.Write(p)
+	w.buf.Write(p[:keep])
+	return len(p), nil
 }
 
 // scaffold writes the scratch module: go.mod, the caps client package,
@@ -286,6 +290,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 )
 
 var client = &http.Client{Transport: &http.Transport{
@@ -325,6 +330,18 @@ func ReadFile(path string) (content string, truncated bool, err error) {
 	}
 	err = call("/v1/files/read", map[string]any{"path": path}, &out)
 	return out.Content, out.Truncated, err
+}
+
+// ReadFileChunk returns up to 256 KiB of a workspace-relative file starting
+// at byte offset. Continue large files by advancing offset by int64(len(data))
+// until truncated is false.
+func ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error) {
+	var out struct {
+		Data      []byte ` + "`json:\"data\"`" + `
+		Truncated bool   ` + "`json:\"truncated\"`" + `
+	}
+	err = call("/v1/files/read", map[string]any{"path": path, "offset": strconv.FormatInt(offset, 10)}, &out)
+	return out.Data, out.Truncated, err
 }
 
 type listPage struct {
@@ -396,23 +413,22 @@ func SearchTextGlob(pattern, glob string) ([]Match, bool, error) {
 // whole model turns (the first live run spent seven).
 const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.ReadFile(path string) (content string, truncated bool, err error)\n" +
+	"  caps.ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error)\n" +
 	"  caps.ListDir(dir string) (entries []string, err error)        // one level; dirs end in \"/\"\n" +
 	"  caps.WalkDir(dir string) (entries []string, err error)        // whole tree, workspace-relative paths\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
 	"  type Match struct { File string; Line int; Text string }\n" +
-	"Paths are workspace-relative. Example:\n" +
+	"Paths are workspace-relative. One program may make at most 32 broker operations; paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Large files: use ReadFileChunk and continue by advancing offset by int64(len(data)) until truncated is false; every call counts toward the 32-operation budget, so check errors and stop promptly. Chunk reads do not pin a file snapshot. Data is raw bytes, so carry a line split across chunk boundaries when doing line-based extraction. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
-	"import (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"execprogram/caps\"\n)\n\n" +
+	"import (\n\t\"fmt\"\n\n\t\"execprogram/caps\"\n)\n\n" +
 	"func main() {\n" +
-	"\tfiles, err := caps.WalkDir(\".\")\n" +
+	"\tmatches, capped, err := caps.SearchTextGlob(\"TODO\", \"*.go\")\n" +
 	"\tif err != nil {\n\t\tpanic(err)\n\t}\n" +
-	"\tcount := 0\n" +
-	"\tfor _, f := range files {\n" +
-	"\t\tif !strings.HasSuffix(f, \".go\") {\n\t\t\tcontinue\n\t\t}\n" +
-	"\t\tbody, _, err := caps.ReadFile(f)\n" +
-	"\t\tif err != nil {\n\t\t\tcontinue\n\t\t}\n" +
-	"\t\tcount += strings.Count(body, \"TODO\")\n" +
+	"\tlimit := len(matches)\n" +
+	"\tif limit > 5 {\n\t\tlimit = 5\n\t}\n" +
+	"\tfmt.Printf(\"matches=%d capped=%v\\n\", len(matches), capped)\n" +
+	"\tfor _, match := range matches[:limit] {\n" +
+	"\t\tfmt.Printf(\"%s:%d %s\\n\", match.File, match.Line, match.Text)\n" +
 	"\t}\n" +
-	"\tfmt.Printf(\"todos=%d\\n\", count)\n" +
 	"}"

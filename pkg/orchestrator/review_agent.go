@@ -237,11 +237,22 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 
 	resp, err := a.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
+		if resp != nil {
+			incomplete := NewIncompleteReviewError(publicReviewDraftFromResponse(resp), firstReviewFinishReason(resp), err)
+			a.logFailure(task.ID, incomplete)
+			return nil, incomplete
+		}
 		a.logFailure(task.ID, err)
 		return nil, fmt.Errorf("review request failed: %w", err)
 	}
-	if len(resp.Choices) == 0 {
+	if resp == nil || len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("review model returned no choices")
+	}
+
+	if finishReason := firstReviewFinishReason(resp); !reviewFinishReasonIsStop(finishReason) {
+		incomplete := NewIncompleteReviewError(publicReviewDraftFromResponse(resp), finishReason, nil)
+		a.logFailure(task.ID, incomplete)
+		return nil, incomplete
 	}
 
 	content, err := model.ExtractTextContent(resp.Choices[0].Message.Content)

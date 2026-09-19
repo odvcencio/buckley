@@ -101,6 +101,41 @@ func TestCheckpointState_Validate(t *testing.T) {
 			mutate:  func(s *CheckpointState) { s.Status = StatusBlocked },
 			wantErr: "requires a blocker",
 		},
+		{
+			name: "completion evidence unknown version",
+			mutate: func(s *CheckpointState) {
+				s.CompletionEvidence = CompletionEvidenceState{Version: 99}
+			},
+			wantErr: "unknown version",
+		},
+		{
+			name: "completion evidence state change without status",
+			mutate: func(s *CheckpointState) {
+				s.CompletionEvidence = CompletionEvidenceState{Version: 1, StateChangeObserved: true}
+			},
+			wantErr: "observed state change requires verification status",
+		},
+		{
+			name: "completion evidence pass without evidence",
+			mutate: func(s *CheckpointState) {
+				s.CompletionEvidence = CompletionEvidenceState{Version: 1, VerificationStatus: VerificationPass}
+			},
+			wantErr: "pass requires an evidence id",
+		},
+		{
+			name: "completed with pending completion evidence",
+			mutate: func(s *CheckpointState) {
+				s.Status = StatusCompleted
+				s.Checks[1].Status = VerificationPass
+				s.Checks[1].EvidenceID = "ev_2"
+				s.CompletionEvidence = CompletionEvidenceState{
+					Version:             1,
+					StateChangeObserved: true,
+					VerificationStatus:  VerificationPending,
+				}
+			},
+			wantErr: "completion evidence requires verification",
+		},
 	}
 
 	for _, tc := range cases {
@@ -316,6 +351,39 @@ func TestManager_SaveResumeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestManager_SaveIfLatest_AtomicallyExtendsExpectedCheckpoint(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	ctx := context.Background()
+	input := SaveInput{
+		State:     validState(),
+		Reason:    TriggerEditBatchEnd,
+		SessionID: "sess-cas",
+		RunID:     "run-cas",
+	}
+	root, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{})
+	if err != nil {
+		t.Fatalf("SaveIfLatest root: %v", err)
+	}
+	if root.Version != 1 || root.ParentCheckpointID != "" {
+		t.Fatalf("root = %+v, want version 1 without parent", root)
+	}
+	if _, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{}); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("duplicate root error = %v, want ErrCheckpointConflict", err)
+	}
+
+	input.State.Summary = "conditional successor"
+	successor, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{CheckpointID: root.CheckpointID, Version: root.Version})
+	if err != nil {
+		t.Fatalf("SaveIfLatest successor: %v", err)
+	}
+	if successor.Version != 2 || successor.ParentCheckpointID != root.CheckpointID {
+		t.Fatalf("successor = %+v, want version 2 chained to root", successor)
+	}
+	if _, err := mgr.SaveIfLatest(ctx, input, CheckpointExpectation{CheckpointID: root.CheckpointID, Version: root.Version}); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("stale successor error = %v, want ErrCheckpointConflict", err)
+	}
+}
+
 func TestManager_SaveRejectsInvalidState(t *testing.T) {
 	t.Parallel()
 	mgr, _ := newTestManager(t)
@@ -399,5 +467,69 @@ func TestVerificationDebt(t *testing.T) {
 	s.Completed[1].EvidenceID = "ev_3"
 	if got := s.VerificationDebt(); got != 0 {
 		t.Fatalf("debt = %d, want 0", got)
+	}
+	s.CompletionEvidence = CompletionEvidenceState{
+		Version:             1,
+		StateChangeObserved: true,
+		VerificationStatus:  VerificationPending,
+	}
+	if got := s.VerificationDebt(); got != 1 {
+		t.Fatalf("debt = %d, want 1 (completion evidence)", got)
+	}
+}
+
+func TestCompletionEvidenceRendersInCheckpointAndResume(t *testing.T) {
+	t.Parallel()
+	s := validState()
+	s.CompletionEvidence = CompletionEvidenceState{
+		Version:                1,
+		StateChangeObserved:    true,
+		VerificationStatus:     VerificationPending,
+		StateObservationFailed: true,
+		StateObservationError:  "fingerprint timed out",
+	}
+	checkpoint := runledger.TaskCheckpoint{CheckpointID: "cp_1", Version: 2, Reason: string(TriggerDecisionRecorded)}
+
+	rendered := RenderMarkdown(s)
+	for _, want := range []string{"# Completion Evidence", "status: pending", "state observation failed: fingerprint timed out"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("checkpoint render missing %q:\n%s", want, rendered)
+		}
+	}
+	prompt := resumePrompt(s, checkpoint)
+	for _, want := range []string{"Verification debt: 2 unresolved check(s).", "Completion evidence: status: pending", "fingerprint timed out"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("resume prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestCompletionEvidenceObservationErrorIsSingleLineAndBounded(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 600) + "\n" + strings.Repeat("y", 600)
+	state := CompletionEvidenceState{
+		Version:                1,
+		StateObservationFailed: true,
+		StateObservationError:  long,
+		VerificationStatus:     VerificationInconclusive,
+	}.Sanitize()
+	if strings.ContainsAny(state.StateObservationError, "\n\t") {
+		t.Fatalf("sanitized error contains raw whitespace: %q", state.StateObservationError)
+	}
+	if got := len([]rune(state.StateObservationError)); got > maxCompletionEvidenceErrorRunes+1 {
+		t.Fatalf("sanitized error length = %d, want <= %d", got, maxCompletionEvidenceErrorRunes+1)
+	}
+
+	rendered := RenderMarkdown(CheckpointState{
+		Schema: SchemaVersion, TaskID: "task-1", Status: StatusInProgress,
+		CompletionEvidence: CompletionEvidenceState{
+			Version:                1,
+			StateObservationFailed: true,
+			StateObservationError:  long,
+			VerificationStatus:     VerificationInconclusive,
+		},
+	})
+	if strings.Contains(rendered, strings.Repeat("y", 100)) {
+		t.Fatalf("render leaked uncapped tail:\n%s", rendered)
 	}
 }

@@ -99,7 +99,7 @@ func submitArtifactContract(includeParameters bool) *SubmitArtifactContract {
 			"additionalProperties": false,
 			"required":             []string{"artifact"},
 			"properties": map[string]any{
-				"artifact": JSONSchema(),
+				"artifact": SubmissionJSONSchema(),
 			},
 		}
 	}
@@ -243,6 +243,19 @@ func decodeAndValidateSubmission(raw []byte) (Artifact, []Diagnostic, error) {
 	if err != nil {
 		return Artifact{}, []Diagnostic{invalid("submit_artifact.artifact", "submitted artifact is not a valid JSON object")}, err
 	}
+	var protocol struct {
+		SchemaVersion json.RawMessage `json:"schema_version"`
+		ArtifactID    json.RawMessage `json:"artifact_id"`
+	}
+	if err := json.Unmarshal(envelope.Artifact, &protocol); err != nil {
+		return Artifact{}, nil, err
+	}
+	if len(protocol.SchemaVersion) == 0 {
+		artifact.SchemaVersion = SchemaVersion
+	}
+	if len(protocol.ArtifactID) == 0 {
+		artifact.ArtifactID = artifact.Normalized().ArtifactID
+	}
 	if err := artifact.ValidateStrict(); err != nil {
 		return Artifact{}, validationDiagnostics(err), err
 	}
@@ -364,13 +377,18 @@ func validationDiagnostics(err error) []Diagnostic {
 	return append([]Diagnostic(nil), validation.Diagnostics...)
 }
 
+// SubmissionFallbackPrompt shares one valid envelope between tool submission
+// and final requests after the tool's schema has been removed.
+const SubmissionFallbackPrompt = `Minimal submission arguments: {"artifact":{"kind":"subagent_result","status":"incomplete","title":"Partial handoff","summary":"Observed coverage and limitations","incomplete_reasons":["Specific unfinished work or uncertainty"]},"source_refs":["all"]}. Buckley supplies omitted schema_version and artifact_id. Replace descriptive text and status with the actual result: completed only if the requested work and verification succeeded, incomplete for unfinished work, failed for failed verification, or blocked for a blocking dependency. Include incomplete_reasons for unfinished work; remove them when completed. Use ["all"] for all pages already captured in this run without copying IDs, explicit source_ref IDs for a subset, or [] if no captures exist; leave artifact.blocks and artifact.evidence_refs empty when selecting sources. Do not add an items field or use status complete. Do not claim coverage you have not verified. If tools are disabled, return only the same submission arguments as JSON; no surrounding prose or Markdown fences.`
+
 // ArtifactPrompt appends the negotiated contract to an existing model prompt
 // without making output requirements invisible in adapter-specific code.
 func ArtifactPrompt(base string, contract OutputContract) string {
 	base = strings.TrimSpace(base)
 	prompt := strings.TrimSpace(contract.Prompt)
 	if contract.Mode == OutputSubmitArtifact {
-		prompt = "When the task is complete, call submit_artifact exactly once with a complete buckley.artifact/v1 object. Do not replace that submission with prose or a Markdown fence."
+		prompt = "When the task is complete, call submit_artifact exactly once with a complete buckley.artifact/v1 object. Do not replace that submission with prose or a Markdown fence. " +
+			SubmissionFallbackPrompt
 	}
 	if prompt == "" {
 		prompt = "Produce a complete buckley.artifact/v1 result."

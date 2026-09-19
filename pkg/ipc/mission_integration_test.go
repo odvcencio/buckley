@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/ipc/command"
 	"m31labs.dev/buckley/pkg/mission"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -99,5 +102,72 @@ func TestMissionHandlersRecordActivityAndListAgents(t *testing.T) {
 	}
 	if bytes.Contains(rr2.Body.Bytes(), []byte("agent-2")) {
 		t.Fatalf("expected agent-2 to be filtered out, got %s", rr2.Body.String())
+	}
+}
+
+func TestMissionMessage_AcceptedCommandSurvivesActivityFailure(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.New(t.TempDir() + "/buckley.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sessionID := "mission-accepted-session"
+	now := time.Now().UTC()
+	if err := store.CreateSession(&storage.Session{
+		ID: sessionID, Principal: "test", Status: storage.SessionStatusActive,
+		CreatedAt: now, LastActive: now, ProjectPath: ".",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionToken(sessionID, "token123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER fail_mission_activity
+		BEFORE INSERT ON agent_activity BEGIN SELECT RAISE(FAIL, 'forced activity failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	gateway := command.NewGateway()
+	var acceptedCommand command.SessionCommand
+	gateway.Register(command.HandlerFunc(func(cmd command.SessionCommand) error {
+		acceptedCommand = cmd
+		_, err := store.Accept(context.Background(), sessionexec.AcceptRequest{
+			SessionID: cmd.SessionID, CommandID: cmd.ID, Type: cmd.Type,
+			Content: cmd.Content, AcceptedBy: cmd.AcceptedBy,
+		})
+		return err
+	}))
+	server := NewServer(Config{BindAddress: "127.0.0.1:0"}, store, nil, gateway, nil, cfg, nil, nil)
+	var logs bytes.Buffer
+	server.logger = log.New(&logs, "", 0)
+
+	body, _ := json.Marshal(mission.AgentMessageRequest{Message: "accepted once", SessionID: sessionID})
+	req := httptest.NewRequest(http.MethodPost, "/api/mission/agents/agent-1/message", bytes.NewReader(body))
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("agentID", "agent-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, &requestPrincipal{
+		Name: "test", Scope: storage.TokenScopeMember,
+	}))
+	req.Header.Set("X-Buckley-Session-Token", "token123")
+	rr := httptest.NewRecorder()
+
+	server.handleSendAgentMessage(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	summary, err := store.Summary(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Total != 1 || summary.Accepted != 1 {
+		t.Fatalf("accepted command summary = %+v", summary)
+	}
+	if acceptedCommand.ID == "" || acceptedCommand.AcceptedBy != "test" || acceptedCommand.SessionID != sessionID {
+		t.Fatalf("accepted mission command = %+v", acceptedCommand)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("activity after accepted command failed")) {
+		t.Fatalf("activity failure was not observable: %q", logs.String())
 	}
 }

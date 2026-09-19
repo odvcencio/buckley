@@ -19,6 +19,7 @@ var configValidators = []func(*Config) error{
 	validateTrustLevel,
 	validateExecutionModes,
 	validateReasoning,
+	validateOpenAICompatible,
 	validateApprovalMode,
 	validateSandbox,
 	validateToolMiddleware,
@@ -29,11 +30,14 @@ var configValidators = []func(*Config) error{
 	validateBatch,
 	validateIPC,
 	validateWorktrees,
+	validateRLMScratchpad,
+	validateRLMTiers,
 	func(c *Config) error { return c.MCP.Validate() },
 	func(c *Config) error { return c.Hooks.Validate() },
 	validateMemoryLimits,
 	validateAgentCostLimits,
 	validateBuckbotPrivacyFallback,
+	validateOneshotDataPolicy,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -69,7 +73,7 @@ func validateExecutionModes(c *Config) error {
 		return fmt.Errorf("invalid execution mode: %s (valid: classic, rlm)", c.Execution.Mode)
 	}
 	if mode := strings.ToLower(strings.TrimSpace(c.Oneshot.Mode)); mode != "" && mode != ExecutionModeClassic {
-		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; RLM is only an execution mode)", c.Oneshot.Mode)
+		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; coordinated execution (legacy mode key: rlm) is only an execution mode)", c.Oneshot.Mode)
 	}
 	validBackends := map[string]bool{
 		DurableBackendLocal: true,
@@ -93,6 +97,28 @@ func validateReasoning(c *Config) error {
 	}
 	if !validReasoning[reasoning] {
 		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
+	}
+	return nil
+}
+
+func validateOpenAICompatible(c *Config) error {
+	if c.Providers.OpenAICompatible.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.OpenAICompatible.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.openai_compatible.stream_first_content_max_reasoning_chunks must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamIdleTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_idle_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentTimeout < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_timeout must be >= 0")
+	}
+	if c.Providers.LiteLLM.StreamFirstContentMaxReasoningChunks < 0 {
+		return fmt.Errorf("providers.litellm.stream_first_content_max_reasoning_chunks must be >= 0")
 	}
 	return nil
 }
@@ -170,6 +196,38 @@ func validateToolsPoolMode(c *Config) error {
 	}
 	if !validPoolModes[strings.ToLower(mode)] {
 		return fmt.Errorf("invalid tools.default_pool_mode: %s (valid: full, standard, read_only, simple)", c.Tools.DefaultPoolMode)
+	}
+	return nil
+}
+
+func validateRLMScratchpad(c *Config) error {
+	policy := strings.ToLower(strings.TrimSpace(c.RLM.Scratchpad.EvictionPolicy))
+	switch policy {
+	case "", "lru", "fifo":
+		return nil
+	default:
+		return fmt.Errorf("rlm.scratchpad.eviction_policy must be lru or fifo")
+	}
+}
+
+func validateRLMTiers(c *Config) error {
+	valid := map[string]bool{
+		"trivial":   true,
+		"light":     true,
+		"medium":    true,
+		"heavy":     true,
+		"reasoning": true,
+	}
+	for name, tier := range c.RLM.Tiers {
+		if !valid[name] {
+			return fmt.Errorf("rlm.tiers.%s must be one of: trivial, light, medium, heavy, reasoning", name)
+		}
+		if tier.MaxCostPerMillion < 0 {
+			return fmt.Errorf("rlm.tiers.%s.max_cost_per_million must be >= 0", name)
+		}
+		if tier.MinContextWindow < 0 {
+			return fmt.Errorf("rlm.tiers.%s.min_context_window must be >= 0", name)
+		}
 	}
 	return nil
 }
@@ -301,6 +359,16 @@ func validateBuckbotPrivacyFallback(c *Config) error {
 	}
 }
 
+func validateOneshotDataPolicy(c *Config) error {
+	value := strings.ToLower(strings.TrimSpace(c.Oneshot.DataPolicy))
+	switch value {
+	case "", "none", "zdr", "deny":
+		return nil
+	default:
+		return fmt.Errorf("oneshot.data_policy has unsupported value %q (valid: none, zdr, deny)", c.Oneshot.DataPolicy)
+	}
+}
+
 // ValidationWarnings returns non-fatal warnings about the configuration.
 // These don't prevent operation but indicate potential security or usability issues.
 func (c *Config) ValidationWarnings() []string {
@@ -318,6 +386,9 @@ func (c *Config) ValidationWarnings() []string {
 	}
 	if c.Providers.Google.APIKey != "" && os.Getenv("GOOGLE_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: Google API key is loaded from a configuration file. Consider using GOOGLE_API_KEY environment variable instead.")
+	}
+	if c.Providers.OpenAICompatible.APIKey != "" && os.Getenv("BUCKLEY_OPENAI_COMPATIBLE_API_KEY") == "" {
+		warnings = append(warnings, "SECURITY: OpenAI-compatible API key is loaded from a configuration file. Consider using BUCKLEY_OPENAI_COMPATIBLE_API_KEY instead.")
 	}
 	if c.Providers.LiteLLM.APIKey != "" && os.Getenv("BUCKLEY_LITELLM_API_KEY") == "" && os.Getenv("LITELLM_API_KEY") == "" {
 		warnings = append(warnings, "SECURITY: LiteLLM API key is loaded from a configuration file. Consider using BUCKLEY_LITELLM_API_KEY or LITELLM_API_KEY environment variables instead.")

@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/agentserver"
-	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
@@ -191,7 +190,7 @@ func debugJSON(w http.ResponseWriter, v any, status int) {
 // buildViewProvider wires the shared view assembler so editor clients can fetch view_state snapshots.
 // It is best-effort; failures leave the endpoint disabled.
 func buildViewProvider() (agentserver.ViewProvider, func(), error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return nil, func() {}, err
 	}

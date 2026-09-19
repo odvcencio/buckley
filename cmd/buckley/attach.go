@@ -15,7 +15,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"m31labs.dev/buckley/pkg/config"
 	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 	"m31labs.dev/buckley/pkg/ipc/proto/ipcpbconnect"
 )
@@ -89,7 +88,7 @@ func resolveDefaultAttachAddress() string {
 	if v := strings.TrimSpace(os.Getenv("BUCKLEY_IPC_ADDR")); v != "" {
 		return normalizeAttachAddress(v)
 	}
-	if cfg, err := config.Load(); err == nil && cfg != nil {
+	if cfg, err := loadConfiguredConfig(); err == nil && cfg != nil {
 		if bind := strings.TrimSpace(cfg.IPC.Bind); bind != "" {
 			return normalizeAttachAddress(bind)
 		}

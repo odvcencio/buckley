@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"go.uber.org/mock/gomock"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator/mocks"
 	"m31labs.dev/buckley/pkg/storage"
 )
@@ -602,6 +604,184 @@ func TestPlanner_SetPersonaProvider(t *testing.T) {
 
 // Plan validation tests
 
+func TestPlanner_GeneratePlan_ResponseErrorReturnsIncompletePublicDraft(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mocks.NewMockModelClient(ctrl)
+	mockPlanStore := NewMockPlanStore(ctrl)
+	cfg := config.DefaultConfig()
+
+	tempDB := t.TempDir() + "/test.db"
+	store, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatalf("Failed to create test store: %v", err)
+	}
+	defer store.Close()
+
+	planner := NewPlanner(mockClient, cfg, store, nil, mockPlanStore)
+	publicDraft := `{"description":"public draft","tasks":[{"id":"1","title":"draft task"}]}`
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message: model.Message{
+			Content:          "<think>PRIVATE_THINK_TAG</think>" + publicDraft,
+			Reasoning:        "PRIVATE_REASONING_FIELD",
+			ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "PRIVATE_REASONING_DETAIL"}},
+		},
+		FinishReason: "length",
+	}}}
+	rawProviderErr := errors.New("RAW_PROVIDER_ERROR_SENTINEL")
+	mockClient.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
+	mockClient.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, rawProviderErr)
+
+	plan, err := planner.GeneratePlan("Retain Draft", "return a partial draft")
+	if plan != nil {
+		t.Fatalf("GeneratePlan returned plan on incomplete response: %+v", plan)
+	}
+	var incomplete *IncompletePlanError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompletePlanError", err)
+	}
+	if got := incomplete.PublicDraft(); got != publicDraft {
+		t.Fatalf("draft = %q, want %q", got, publicDraft)
+	}
+	if got := err.Error(); got != "planning response incomplete" {
+		t.Fatalf("Error() = %q", got)
+	}
+	for _, sentinel := range []string{"PRIVATE_THINK_TAG", "PRIVATE_REASONING_FIELD", "PRIVATE_REASONING_DETAIL", "RAW_PROVIDER_ERROR_SENTINEL"} {
+		if strings.Contains(incomplete.PublicDraft(), sentinel) || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("incomplete outcome leaked sentinel %q: draft=%q err=%q", sentinel, incomplete.PublicDraft(), err.Error())
+		}
+	}
+}
+
+func TestPlanner_GeneratePlan_ResponseErrorWithPrivateOnlyDraftReturnsSafeIncomplete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mocks.NewMockModelClient(ctrl)
+	mockPlanStore := NewMockPlanStore(ctrl)
+	cfg := config.DefaultConfig()
+
+	tempDB := t.TempDir() + "/test.db"
+	store, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatalf("Failed to create test store: %v", err)
+	}
+	defer store.Close()
+
+	planner := NewPlanner(mockClient, cfg, store, nil, mockPlanStore)
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message: model.Message{
+			Content:          "<think>PRIVATE_THINK_TAG</think>",
+			Reasoning:        "PRIVATE_REASONING_FIELD",
+			ReasoningDetails: []model.ReasoningDetail{{Type: "reasoning.text", Text: "PRIVATE_REASONING_DETAIL"}},
+		},
+		FinishReason: "length",
+	}}}
+	rawProviderErr := errors.New("RAW_PROVIDER_ERROR_SENTINEL")
+	mockClient.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
+	mockClient.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, rawProviderErr)
+
+	plan, err := planner.GeneratePlan("Private Draft", "return only private reasoning")
+	if plan != nil {
+		t.Fatalf("GeneratePlan returned plan on incomplete response: %+v", plan)
+	}
+	var incomplete *IncompletePlanError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompletePlanError", err)
+	}
+	if got := incomplete.PublicDraft(); got != "" {
+		t.Fatalf("draft = %q, want empty", got)
+	}
+	if draft, ok := IncompletePlanDraft(err); ok || draft != "" {
+		t.Fatalf("IncompletePlanDraft = %q, %v; want empty, false", draft, ok)
+	}
+	if got := err.Error(); got != "planning response incomplete" {
+		t.Fatalf("Error() = %q", got)
+	}
+	formatted := fmt.Sprintf("%v", err)
+	if formatted != "planning response incomplete" {
+		t.Fatalf("formatted error = %q", formatted)
+	}
+	for _, sentinel := range []string{"PRIVATE_THINK_TAG", "PRIVATE_REASONING_FIELD", "PRIVATE_REASONING_DETAIL", "RAW_PROVIDER_ERROR_SENTINEL"} {
+		if strings.Contains(incomplete.PublicDraft(), sentinel) || strings.Contains(err.Error(), sentinel) || strings.Contains(formatted, sentinel) {
+			t.Fatalf("incomplete outcome leaked sentinel %q: draft=%q err=%q formatted=%q", sentinel, incomplete.PublicDraft(), err.Error(), formatted)
+		}
+	}
+}
+
+func TestPlanner_GeneratePlan_TruncatedResponseDoesNotProducePlan(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mocks.NewMockModelClient(ctrl)
+	mockPlanStore := NewMockPlanStore(ctrl)
+	cfg := config.DefaultConfig()
+
+	tempDB := t.TempDir() + "/test.db"
+	store, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatalf("Failed to create test store: %v", err)
+	}
+	defer store.Close()
+
+	planner := NewPlanner(mockClient, cfg, store, nil, mockPlanStore)
+	parseablePlan := validPlanJSON("parseable but incomplete")
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message:      model.Message{Content: parseablePlan},
+		FinishReason: "length",
+	}}}
+	mockClient.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
+	mockClient.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, nil)
+
+	plan, err := planner.GeneratePlan("Truncated Plan", "draft a plan")
+	if plan != nil {
+		t.Fatalf("GeneratePlan returned plan on length finish: %+v", plan)
+	}
+	var incomplete *IncompletePlanError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %v, want IncompletePlanError", err)
+	}
+	if incomplete.PublicDraft() != parseablePlan {
+		t.Fatalf("draft = %q, want %q", incomplete.PublicDraft(), parseablePlan)
+	}
+	if incomplete.FinishReason() != "length" {
+		t.Fatalf("finish reason = %q, want length", incomplete.FinishReason())
+	}
+}
+
+func TestPlanner_GeneratePlan_StopResponseStillProducesPlan(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mocks.NewMockModelClient(ctrl)
+	mockPlanStore := NewMockPlanStore(ctrl)
+	cfg := config.DefaultConfig()
+
+	tempDB := t.TempDir() + "/test.db"
+	store, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatalf("Failed to create test store: %v", err)
+	}
+	defer store.Close()
+
+	planner := NewPlanner(mockClient, cfg, store, nil, mockPlanStore)
+	resp := &model.ChatResponse{Choices: []model.Choice{{
+		Message:      model.Message{Content: validPlanJSON("complete plan")},
+		FinishReason: "stop",
+	}}}
+	mockClient.EXPECT().SupportsReasoning(gomock.Any()).Return(false).AnyTimes()
+	mockClient.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, nil)
+
+	plan, err := planner.GeneratePlan("Complete Plan", "draft a plan")
+	if err != nil {
+		t.Fatalf("GeneratePlan returned error: %v", err)
+	}
+	if plan == nil || plan.FeatureName != "Complete Plan" || len(plan.Tasks) != 1 {
+		t.Fatalf("unexpected plan: %+v", plan)
+	}
+}
+
 func TestPlanner_GeneratePlan_EmptyFeatureName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -626,6 +806,10 @@ func TestPlanner_GeneratePlan_EmptyFeatureName(t *testing.T) {
 	if err.Error() != "feature name cannot be empty" {
 		t.Errorf("Expected 'feature name cannot be empty' error, got: %v", err)
 	}
+}
+
+func validPlanJSON(description string) string {
+	return `{"description":"` + description + `","architecture":"test architecture","tasks":[{"id":"1","title":"Task 1","description":"Do the thing","type":"implementation","files":["pkg/example.go"],"dependencies":[],"estimated_time":"10m","verification":["go test ./pkg/example"]}]}`
 }
 
 func TestPlanner_GeneratePlan_EmptyDescription(t *testing.T) {

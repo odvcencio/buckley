@@ -107,6 +107,8 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
+func (t *RunVerificationTool) TrustedVerification() bool { return true }
+
 func (t *RunVerificationTool) Description() string {
 	return "Run a focused build, test, or check against the immutable review snapshot. AGENTS.md rules are enforced before launch. Requests needing Docker, CI, or another unavailable surface return INCONCLUSIVE, not a host command. For Go approval evidence use kind=test (compiles and runs available tests); packages with no test files return build-only proof. A Node package with no declared test script returns explicit NOT_APPLICABLE test-policy evidence without launching a command; approval still requires its build gate to pass. The command runs in a private disposable copy, the source snapshot stays read-only, and network is disabled."
 }

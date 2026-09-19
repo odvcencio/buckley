@@ -13,8 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/conversation"
@@ -96,6 +99,7 @@ type QueuedMessage struct {
 	Acknowledged bool
 	DisableTools bool
 	Steering     bool
+	TaskIntent   agentloop.TaskIntent
 }
 
 // SessionState holds the state for a single session.
@@ -554,6 +558,10 @@ func (c *Controller) handleSubmit(text string) {
 }
 
 func (c *Controller) submitPrompt(text string, steering bool) {
+	c.submitPromptWithIntent(text, steering, agentloop.UnknownIntent)
+}
+
+func (c *Controller) submitPromptWithIntent(text string, steering bool, taskIntent agentloop.TaskIntent) {
 	c.mu.Lock()
 
 	// Get current session
@@ -574,6 +582,7 @@ func (c *Controller) submitPrompt(text string, steering bool) {
 			Timestamp:    time.Now(),
 			DisableTools: disableTools,
 			Steering:     steering,
+			TaskIntent:   taskIntent,
 		})
 		cancel := sess.Cancel
 		queued := len(sess.MessageQueue)
@@ -606,7 +615,52 @@ func (c *Controller) submitPrompt(text string, steering bool) {
 	c.mu.Unlock()
 
 	// Start streaming response for this session
-	go c.streamResponse(ctx, text, sess)
+	go c.streamResponseWithIntent(ctx, text, sess, taskIntent)
+}
+
+func (c *Controller) handleTaskCommand(text string, commandName string) {
+	intentRaw, prompt, ok := parseTUITaskCommand(text, commandName)
+	if !ok || strings.TrimSpace(prompt) == "" {
+		c.app.AddMessage("Usage: /task <unknown|read_only|mutation> <request>", "system")
+		return
+	}
+	intent, err := parseTUITaskIntent(intentRaw)
+	if err != nil {
+		c.app.AddMessage(err.Error(), "system")
+		return
+	}
+	c.submitPromptWithIntent(prompt, true, intent)
+}
+
+func parseTUITaskCommand(text string, commandName string) (intentRaw string, prompt string, ok bool) {
+	rest := strings.TrimPrefix(text, commandName)
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	if rest == "" {
+		return "", "", false
+	}
+	intentEnd := len(rest)
+	for i, r := range rest {
+		if unicode.IsSpace(r) {
+			intentEnd = i
+			break
+		}
+	}
+	if intentEnd == len(rest) {
+		return "", "", false
+	}
+	_, delimiterWidth := utf8.DecodeRuneInString(rest[intentEnd:])
+	if delimiterWidth == 0 {
+		return "", "", false
+	}
+	return rest[:intentEnd], rest[intentEnd+delimiterWidth:], true
+}
+
+func parseTUITaskIntent(raw string) (agentloop.TaskIntent, error) {
+	intent, err := agentloop.ParseTaskIntent(raw)
+	if err != nil {
+		return "", err
+	}
+	return intent, nil
 }
 
 // handleCommand processes slash commands.
@@ -693,6 +747,9 @@ func (c *Controller) handleCommand(text string) {
 		}
 		c.submitPrompt(prompt, true)
 
+	case "/task":
+		c.handleTaskCommand(text, parts[0])
+
 	case "/agent", "/agents":
 		c.handleSubagentCommand(parts[1:])
 
@@ -715,6 +772,7 @@ func (c *Controller) handleCommand(text string) {
   /redo                - Restore a turn /undo reverted
   /steer <message>     - Interrupt and redirect the active response
   /queue <message>     - Run a follow-up after the active response
+  /task <intent> <request> - Run with unknown, read_only, or mutation intent
   /agents              - List active subagents
   /agent spawn [@name] <task> - Start a generic or named subagent
   /agent send <target> <message> - Command one, a group, or all subagents
@@ -1315,7 +1373,6 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 		RootDir:           c.workDir,
 		SkillsDescription: skillDescriptions,
 		TaskType:          "coding",
-		ModelTier:         model.InferModelTier(model.ResolvePhaseModel(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)),
 		GTSAvailable:      commandAvailable("gts"),
 	})
 }
@@ -1868,6 +1925,6 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 	c.mu.Unlock()
 
 	// Stream response (this will recursively process remaining queue)
-	c.streamResponse(ctx, queued.Content, sess)
+	c.streamResponseWithIntent(ctx, queued.Content, sess, queued.TaskIntent)
 	return true
 }

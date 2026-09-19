@@ -376,6 +376,101 @@ func TestClient_ChatCompletion(t *testing.T) {
 	}
 }
 
+func TestClient_ChatCompletionReasoningEffortOmitsMaxTokens(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id": "test-id",
+			"model": "google/gemini-3.8-flash",
+			"choices": [{
+				"message": {"role": "assistant", "content": "ok"},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "google/gemini-3.8-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "medium", MaxTokens: 2048},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+
+	reasoning, ok := captured["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %#v, want nested OpenRouter reasoning", captured["reasoning"])
+	}
+	if got := reasoning["effort"]; got != "medium" {
+		t.Fatalf("reasoning.effort = %v, want medium", got)
+	}
+	if _, ok := reasoning["max_tokens"]; ok {
+		t.Fatalf("reasoning.max_tokens should be omitted when effort is present: %#v", reasoning)
+	}
+	if _, ok := captured["reasoning_effort"]; ok {
+		t.Fatalf("OpenRouter request should not use compatible top-level reasoning_effort: %#v", captured)
+	}
+}
+
+func TestClient_ChatCompletionStreamReasoningEffortOmitsMaxTokens(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"test-id\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:     "provider-neutral-model",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{Effort: "medium", MaxTokens: 2048},
+	})
+	drainTestChatStream(t, chunks, errs)
+
+	reasoning, ok := captured["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "medium" {
+		t.Fatalf("reasoning = %#v, want nested effort medium", captured["reasoning"])
+	}
+	if _, ok := reasoning["max_tokens"]; ok {
+		t.Fatalf("stream reasoning.max_tokens should be omitted when effort is present: %#v", reasoning)
+	}
+}
+
+func drainTestChatStream(t *testing.T, chunks <-chan StreamChunk, errs <-chan error) {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for chunks != nil || errs != nil {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				chunks = nil
+			}
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if err != nil {
+				t.Fatalf("stream error: %v", err)
+			}
+		case <-timer.C:
+			t.Fatal("timeout draining test stream")
+		}
+	}
+}
+
 // TestClient_ChatCompletionStream tests streaming chat completion
 func TestClient_ChatCompletionStream(t *testing.T) {
 	tests := []struct {
@@ -814,6 +909,12 @@ func TestExtractThinkingContent(t *testing.T) {
 			wantThinking: "Just thinking, no output",
 			wantContent:  "",
 		},
+		{
+			name:         "unterminated_thinking_block",
+			input:        "Public answer before thinking.\n<think>PRIVATE_UNTERMINATED_THINKING",
+			wantThinking: "PRIVATE_UNTERMINATED_THINKING",
+			wantContent:  "Public answer before thinking.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1177,6 +1278,51 @@ func TestClient_ChatCompletion_ExhaustedRateLimitPreservesProviderDetails(t *tes
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
+	}
+}
+
+// TestClient_ChatCompletion_SharedPoolRateLimitIsClassified covers
+// OpenRouter's non-standard 429 body -- just
+// {"limit_source":"upstream_provider_shared_pool"}, no "error" envelope at
+// all -- for an upstream provider's own shared quota rejecting the request.
+// parseError must still surface it as a structured, classifiable *APIError
+// instead of losing the condition in a bare status-line message.
+func TestClient_ChatCompletion_SharedPoolRateLimitIsClassified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"limit_source":"upstream_provider_shared_pool"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         time.Millisecond,
+		Multiplier:          2,
+	})
+	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err == nil {
+		t.Fatal("expected a shared-pool rate-limit error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("errors.As(APIError) failed for %T: %v", err, err)
+	}
+	if apiErr.StatusCode != 429 {
+		t.Fatalf("StatusCode = %d, want 429", apiErr.StatusCode)
+	}
+	if apiErr.LimitSource != SharedPoolLimitSource {
+		t.Fatalf("LimitSource = %q, want %q", apiErr.LimitSource, SharedPoolLimitSource)
+	}
+	if !apiErr.IsSharedPoolRateLimit() {
+		t.Fatalf("IsSharedPoolRateLimit() = false, want true for %+v", apiErr)
+	}
+	if !strings.Contains(apiErr.Message, "upstream_provider_shared_pool") {
+		t.Fatalf("Message = %q, want it to name the limit_source instead of a bare status line", apiErr.Message)
 	}
 }
 

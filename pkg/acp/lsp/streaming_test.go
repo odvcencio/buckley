@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	pb "m31labs.dev/buckley/pkg/acp/proto"
 )
 
@@ -53,7 +55,8 @@ func (m *mockStreamTaskClient) Recv() (*pb.TaskEvent, error) {
 // mockAgentCommunicationClientWithStreaming extends the mock client with streaming support
 type mockAgentCommunicationClientWithStreaming struct {
 	mockAgentCommunicationClient
-	streamTaskFunc func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error)
+	streamTaskFunc   func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error)
+	streamInlineFunc func(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error)
 }
 
 func (m *mockAgentCommunicationClientWithStreaming) StreamTask(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error) {
@@ -61,6 +64,36 @@ func (m *mockAgentCommunicationClientWithStreaming) StreamTask(ctx context.Conte
 		return m.streamTaskFunc(ctx, req, opts...)
 	}
 	return nil, errors.New("streamTaskFunc not set")
+}
+
+func (m *mockAgentCommunicationClientWithStreaming) StreamInlineCompletions(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error) {
+	if m.streamInlineFunc != nil {
+		return m.streamInlineFunc(ctx, req, opts...)
+	}
+	return nil, errors.New("streamInlineFunc not set")
+}
+
+type mockInlineCompletionClient struct {
+	grpc.ClientStream
+	events   []*pb.InlineCompletionEvent
+	idx      int
+	err      error
+	recvFunc func() (*pb.InlineCompletionEvent, error)
+}
+
+func (m *mockInlineCompletionClient) Recv() (*pb.InlineCompletionEvent, error) {
+	if m.recvFunc != nil {
+		return m.recvFunc()
+	}
+	if m.idx < len(m.events) {
+		ev := m.events[m.idx]
+		m.idx++
+		return ev, nil
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, io.EOF
 }
 
 func TestBridge_HandleStreamQuery(t *testing.T) {
@@ -239,12 +272,96 @@ func TestBridge_HandleStreamQuery_StreamError(t *testing.T) {
 	// Should return stream ID but also an error
 	assert.NotEmpty(t, streamID)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stream error")
+	assert.Equal(t, "stream query incomplete", err.Error())
 
 	// Verify we received chunks before the error
 	require.Len(t, chunks, 2)
 	assert.Equal(t, "Chunk 1", chunks[0])
 	assert.Equal(t, "Chunk 2", chunks[1])
+}
+
+func TestBridge_HandleStreamQuery_TypedPartialErrorPreservesPriorChunks(t *testing.T) {
+	config := &BridgeConfig{
+		CoordinatorAddr: "localhost:50051",
+		AgentID:         "test-agent",
+	}
+	bridge, err := NewBridge(config)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	_, err = bridge.Initialize(ctx, InitializeParams{})
+	require.NoError(t, err)
+	require.NoError(t, bridge.Initialized(ctx))
+
+	const secret = "hostile stream partial cause"
+	partialErr := typedPartialStatusError(t, codes.Internal, "raw terminal "+secret, "public terminal draft")
+	mockStream := &mockStreamTaskClient{
+		events: []*pb.TaskEvent{{TaskId: "task-1", Status: "running", Message: "Chunk 1"}},
+	}
+	var recvCount int
+	mockStream.recvFunc = func() (*pb.TaskEvent, error) {
+		mockStream.mu.Lock()
+		defer mockStream.mu.Unlock()
+		if recvCount < len(mockStream.events) {
+			event := mockStream.events[recvCount]
+			recvCount++
+			return event, nil
+		}
+		return nil, partialErr
+	}
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamTaskFunc: func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error) {
+			return mockStream, nil
+		},
+	}
+
+	var chunks []string
+	streamID, err := bridge.HandleStreamQuery(ctx, "test query", func(chunk string, done bool) error {
+		chunks = append(chunks, chunk)
+		return nil
+	})
+	assert.NotEmpty(t, streamID)
+	require.Error(t, err)
+	require.Equal(t, []string{"Chunk 1"}, chunks)
+
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("typed partial code = %v, want Internal", status.Code(err))
+	}
+	if incomplete.Result.GetPartialResponse().GetContent() != "public terminal draft" {
+		t.Fatalf("partial response = %+v", incomplete.Result.GetPartialResponse())
+	}
+}
+
+func TestBridge_HandleStreamQuery_TypedPartialStartErrorSanitizesCause(t *testing.T) {
+	bridge := newInitializedStreamingBridge(t)
+	const secret = "hostile stream start partial cause"
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamTaskFunc: func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error) {
+			return nil, typedPartialStatusError(t, codes.Unavailable, "raw start "+secret, "public start draft")
+		},
+	}
+
+	streamID, err := bridge.HandleStreamQuery(context.Background(), "test query", func(chunk string, done bool) error {
+		t.Fatalf("callback called on start typed partial: chunk=%q done=%t", chunk, done)
+		return nil
+	})
+	assert.NotEmpty(t, streamID)
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("typed partial code = %v, want Unavailable", status.Code(err))
+	}
+	if incomplete.Result.GetPartialResponse().GetContent() != "public start draft" {
+		t.Fatalf("partial response = %+v", incomplete.Result.GetPartialResponse())
+	}
 }
 
 func TestBridge_HandleStreamQuery_EmptyQuery(t *testing.T) {
@@ -399,7 +516,7 @@ func TestBridge_HandleStreamQuery_Cancellation(t *testing.T) {
 
 	// Should have an error due to cancellation
 	require.Error(t, streamErr)
-	assert.Contains(t, streamErr.Error(), "stream error")
+	assert.Equal(t, "stream query incomplete", streamErr.Error())
 }
 
 func TestBridge_CancelStream(t *testing.T) {
@@ -706,7 +823,191 @@ func TestBridge_StreamStartError(t *testing.T) {
 	}
 
 	// Should fail to start stream
-	_, err = bridge.HandleStreamQuery(ctx, "test query", callback)
+	streamID, err := bridge.HandleStreamQuery(ctx, "test query", callback)
+	assert.NotEmpty(t, streamID)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to start stream")
+	assert.Equal(t, "stream query unavailable", err.Error())
+}
+
+func TestBridge_HandleStreamQuery_OrdinaryErrorsAreSafe(t *testing.T) {
+	bridge := newInitializedStreamingBridge(t)
+	const secret = "provider-secret-stream-query"
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamTaskFunc: func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error) {
+			return nil, status.Error(codes.Internal, "start failed "+secret)
+		},
+	}
+	streamID, err := bridge.HandleStreamQuery(context.Background(), "test query", func(chunk string, done bool) error {
+		t.Fatalf("callback called on start failure: chunk=%q done=%t", chunk, done)
+		return nil
+	})
+	assert.NotEmpty(t, streamID)
+	require.Error(t, err)
+	if err.Error() != "stream query unavailable" || strings.Contains(err.Error(), secret) || errors.Unwrap(err) != nil {
+		t.Fatalf("start error = %q, unwrap=%v; want safe unwrapped error", err.Error(), errors.Unwrap(err))
+	}
+
+	var doneCalls int
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamTaskFunc: func(ctx context.Context, req *pb.TaskStreamRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamTaskClient, error) {
+			return &mockStreamTaskClient{
+				recvFunc: func() func() (*pb.TaskEvent, error) {
+					var sent bool
+					return func() (*pb.TaskEvent, error) {
+						if !sent {
+							sent = true
+							return &pb.TaskEvent{Message: "public chunk"}, nil
+						}
+						return nil, status.Error(codes.Internal, "terminal failed "+secret)
+					}
+				}(),
+			}, nil
+		},
+	}
+	var chunks []string
+	streamID, err = bridge.HandleStreamQuery(context.Background(), "test query", func(chunk string, done bool) error {
+		if done {
+			doneCalls++
+		}
+		chunks = append(chunks, chunk)
+		return nil
+	})
+	assert.NotEmpty(t, streamID)
+	require.Error(t, err)
+	if err.Error() != "stream query incomplete" || strings.Contains(err.Error(), secret) || errors.Unwrap(err) != nil {
+		t.Fatalf("terminal error = %q, unwrap=%v; want safe unwrapped error", err.Error(), errors.Unwrap(err))
+	}
+	require.Equal(t, []string{"public chunk"}, chunks)
+	require.Zero(t, doneCalls)
+}
+
+func TestBridge_StreamInlineCompletions_OrdinaryErrorsAreSafe(t *testing.T) {
+	bridge := newInitializedStreamingBridge(t)
+	const secret = "provider-secret-inline"
+	req := &pb.InlineCompletionRequest{SessionId: "inline-session"}
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamInlineFunc: func(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error) {
+			return nil, status.Error(codes.Internal, "start failed "+secret)
+		},
+	}
+	streamID, err := bridge.StreamInlineCompletions(context.Background(), req, func(text string, done bool) error {
+		t.Fatalf("callback called on start failure: text=%q done=%t", text, done)
+		return nil
+	})
+	require.Equal(t, "inline-session", streamID)
+	require.Error(t, err)
+	if err.Error() != "inline completion unavailable" || strings.Contains(err.Error(), secret) || errors.Unwrap(err) != nil {
+		t.Fatalf("start error = %q, unwrap=%v; want safe unwrapped error", err.Error(), errors.Unwrap(err))
+	}
+
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamInlineFunc: func(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error) {
+			return &mockInlineCompletionClient{
+				events: []*pb.InlineCompletionEvent{{Text: "public inline"}},
+				err:    status.Error(codes.Internal, "terminal failed "+secret),
+			}, nil
+		},
+	}
+	var calls []string
+	var doneCalls int
+	streamID, err = bridge.StreamInlineCompletions(context.Background(), req, func(text string, done bool) error {
+		if done {
+			doneCalls++
+		}
+		calls = append(calls, text)
+		return nil
+	})
+	require.Equal(t, "inline-session", streamID)
+	require.Error(t, err)
+	if err.Error() != "inline completion incomplete" || strings.Contains(err.Error(), secret) || errors.Unwrap(err) != nil {
+		t.Fatalf("terminal error = %q, unwrap=%v; want safe unwrapped error", err.Error(), errors.Unwrap(err))
+	}
+	require.Equal(t, []string{"public inline"}, calls)
+	require.Zero(t, doneCalls)
+}
+
+func TestBridge_StreamInlineCompletions_TypedPartialErrorPreserved(t *testing.T) {
+	bridge := newInitializedStreamingBridge(t)
+	const secret = "hostile inline partial cause"
+	partialErr := typedPartialStatusError(t, codes.Internal, "raw inline "+secret, "public inline draft")
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamInlineFunc: func(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error) {
+			return &mockInlineCompletionClient{
+				events: []*pb.InlineCompletionEvent{{Text: "public prefix"}},
+				err:    partialErr,
+			}, nil
+		},
+	}
+	var calls []string
+	streamID, err := bridge.StreamInlineCompletions(context.Background(), &pb.InlineCompletionRequest{SessionId: "inline-session"}, func(text string, done bool) error {
+		calls = append(calls, text)
+		return nil
+	})
+	require.Equal(t, "inline-session", streamID)
+	require.Equal(t, []string{"public prefix"}, calls)
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("typed partial code = %v, want Internal", status.Code(err))
+	}
+	if incomplete.Result.GetPartialResponse().GetContent() != "public inline draft" {
+		t.Fatalf("partial response = %+v", incomplete.Result.GetPartialResponse())
+	}
+}
+
+func TestBridge_StreamInlineCompletions_TypedPartialStartErrorSanitizesCause(t *testing.T) {
+	bridge := newInitializedStreamingBridge(t)
+	const secret = "hostile inline start partial cause"
+	bridge.grpcClient = &mockAgentCommunicationClientWithStreaming{
+		streamInlineFunc: func(ctx context.Context, req *pb.InlineCompletionRequest, opts ...grpc.CallOption) (pb.AgentCommunication_StreamInlineCompletionsClient, error) {
+			return nil, typedPartialStatusError(t, codes.ResourceExhausted, "raw inline start "+secret, "public inline start draft")
+		},
+	}
+
+	streamID, err := bridge.StreamInlineCompletions(context.Background(), &pb.InlineCompletionRequest{SessionId: "inline-session"}, func(text string, done bool) error {
+		t.Fatalf("callback called on start typed partial: text=%q done=%t", text, done)
+		return nil
+	})
+	require.Equal(t, "inline-session", streamID)
+	var incomplete *partialresult.IncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want partialresult.IncompleteError", err, err)
+	}
+	assertErrorChainOmits(t, err, secret)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("typed partial code = %v, want ResourceExhausted", status.Code(err))
+	}
+	if incomplete.Result.GetPartialResponse().GetContent() != "public inline start draft" {
+		t.Fatalf("partial response = %+v", incomplete.Result.GetPartialResponse())
+	}
+}
+
+func newInitializedStreamingBridge(t *testing.T) *Bridge {
+	t.Helper()
+	bridge, err := NewBridge(&BridgeConfig{CoordinatorAddr: "localhost:50051", AgentID: "test-agent"})
+	require.NoError(t, err)
+	ctx := context.Background()
+	_, err = bridge.Initialize(ctx, InitializeParams{})
+	require.NoError(t, err)
+	require.NoError(t, bridge.Initialized(ctx))
+	return bridge
+}
+
+func typedPartialStatusError(t *testing.T, code codes.Code, statusMessage, draft string) error {
+	t.Helper()
+	detail, err := partialresult.Build(&pb.PartialResult{
+		ReasonCode: "provider_error",
+		SafeError:  "ACP response incomplete",
+		PartialResponse: &pb.Message{
+			Role:    "assistant",
+			Content: draft,
+		},
+	})
+	require.NoError(t, err)
+	st, err := status.New(code, statusMessage).WithDetails(detail)
+	require.NoError(t, err)
+	return st.Err()
 }

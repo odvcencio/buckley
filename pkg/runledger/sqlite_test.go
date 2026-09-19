@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,83 @@ func TestStartRun_Defaults(t *testing.T) {
 	if got.SessionID != "sess-1" {
 		t.Fatalf("SessionID = %q, want sess-1", got.SessionID)
 	}
+}
+
+func TestListRunsNewestOrderAppliesBeforeLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	started := time.Date(2026, 8, 20, 8, 0, 0, 0, time.UTC)
+	for i, id := range []string{"run-a", "run-b", "run-c", "run-d"} {
+		if _, err := store.StartRun(ctx, AgentRun{
+			RunID:     id,
+			SessionID: "session-order",
+			StartedAt: started.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("StartRun(%s): %v", id, err)
+		}
+	}
+
+	oldest, err := store.ListRuns(ctx, RunQuery{SessionID: "session-order", Limit: 2})
+	if err != nil {
+		t.Fatalf("ListRuns(oldest): %v", err)
+	}
+	if len(oldest) != 2 || oldest[0].RunID != "run-a" || oldest[1].RunID != "run-b" {
+		t.Fatalf("oldest runs = %+v", oldest)
+	}
+	newest, err := store.ListRuns(ctx, RunQuery{SessionID: "session-order", Limit: 2, Order: RunOrderNewestFirst})
+	if err != nil {
+		t.Fatalf("ListRuns(newest): %v", err)
+	}
+	if len(newest) != 2 || newest[0].RunID != "run-d" || newest[1].RunID != "run-c" {
+		t.Fatalf("newest runs = %+v", newest)
+	}
+}
+
+func TestListRunsOrdersVariableWidthFractionalTimestampsChronologically(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 8, 20, 8, 0, 0, 0, time.UTC)
+	for _, run := range []AgentRun{
+		{RunID: "fraction-100", SessionID: "session-fractions", StartedAt: base.Add(100 * time.Millisecond)},
+		{RunID: "fraction-120-b", SessionID: "session-fractions", StartedAt: base.Add(120 * time.Millisecond)},
+		{RunID: "fraction-120-a", SessionID: "session-fractions", StartedAt: base.Add(120 * time.Millisecond)},
+	} {
+		if _, err := store.StartRun(ctx, run); err != nil {
+			t.Fatalf("StartRun(%s): %v", run.RunID, err)
+		}
+	}
+
+	ascending, err := store.ListRuns(ctx, RunQuery{SessionID: "session-fractions"})
+	if err != nil {
+		t.Fatalf("ListRuns(ascending): %v", err)
+	}
+	if got := runIDs(ascending); !reflect.DeepEqual(got, []string{"fraction-100", "fraction-120-a", "fraction-120-b"}) {
+		t.Fatalf("ascending IDs = %v", got)
+	}
+
+	descending, err := store.ListRuns(ctx, RunQuery{SessionID: "session-fractions", Order: RunOrderNewestFirst})
+	if err != nil {
+		t.Fatalf("ListRuns(descending): %v", err)
+	}
+	if got := runIDs(descending); !reflect.DeepEqual(got, []string{"fraction-120-b", "fraction-120-a", "fraction-100"}) {
+		t.Fatalf("descending IDs = %v", got)
+	}
+
+	newest, err := store.ListRuns(ctx, RunQuery{SessionID: "session-fractions", Order: RunOrderNewestFirst, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRuns(newest limit): %v", err)
+	}
+	if got := runIDs(newest); !reflect.DeepEqual(got, []string{"fraction-120-b"}) {
+		t.Fatalf("newest limited IDs = %v", got)
+	}
+}
+
+func runIDs(runs []AgentRun) []string {
+	ids := make([]string, len(runs))
+	for i := range runs {
+		ids[i] = runs[i].RunID
+	}
+	return ids
 }
 
 func TestEndRun(t *testing.T) {

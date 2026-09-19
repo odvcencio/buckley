@@ -65,30 +65,30 @@ func TestPromptBuilder_BudgetEnforcement(t *testing.T) {
 }
 
 func TestPromptBuilder_WithEvaluator(t *testing.T) {
-	eval := &mockAssemblyEvaluator{omitGitDiff: true}
+	eval := &mockAssemblyEvaluator{omitInstructions: true}
 	builder := NewPromptBuilder(eval)
 	builder.AddSection("system", "system prompt", false)
-	builder.AddSection("git_diff", "diff content", true)
 	builder.AddSection("instructions", "user instructions", true)
+	builder.AddSection("working_directory", "Working Directory: /tmp/project", true)
 
-	sections := builder.Build(PromptContext{ModelTier: "fast", GitDiffLines: 600})
+	sections := builder.Build(PromptContext{})
 	for _, s := range sections {
-		if strings.Contains(s, "diff content") {
-			t.Error("expected git_diff section to be omitted")
+		if strings.Contains(s, "user instructions") {
+			t.Error("expected instructions section to be omitted")
 		}
 	}
 	if len(sections) != 2 {
-		t.Errorf("expected 2 sections (system + instructions), got %d", len(sections))
+		t.Errorf("expected 2 sections (system + working directory), got %d", len(sections))
 	}
 }
 
 type mockAssemblyEvaluator struct {
-	omitGitDiff bool
+	omitInstructions bool
 }
 
 func (m *mockAssemblyEvaluator) EvalStrategy(domain, name string, facts map[string]any) (types.StrategyResult, error) {
 	return types.StrategyResult{Params: map[string]any{
-		"omit_git_diff":       m.omitGitDiff,
+		"omit_instructions":   m.omitInstructions,
 		"include_gts_context": false,
 		"max_chars":           float64(MaxTotalInstructionChars),
 	}}, nil

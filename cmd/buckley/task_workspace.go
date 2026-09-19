@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/giturl"
 )
 
@@ -108,7 +107,7 @@ func enterExistingTaskRepo() (string, bool, error) {
 
 func validateTaskRepoURL(repoURL string) error {
 	policy := giturl.ClonePolicy{}
-	if cfg, err := config.Load(); err == nil && cfg != nil {
+	if cfg, err := loadConfiguredConfig(); err == nil && cfg != nil {
 		policy = cfg.GitClone
 	}
 	if err := giturl.ValidateCloneURL(policy, repoURL); err != nil {

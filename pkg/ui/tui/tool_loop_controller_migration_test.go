@@ -100,7 +100,7 @@ func TestRunToolLoopControllerStopsOnExactRepeatAndSynthesizes(t *testing.T) {
 
 // TestRunToolLoopControllerRetriesWithoutToolsOnUnsupportedError proves
 // the reactive tools-off fallback (handleToolLoopModelError,
-// isToolUnsupportedError) still works when CallModel's error propagates
+// model.IsToolUnsupportedError) still works when CallModel's error propagates
 // through agentloop.Controller.Run: the first request advertises tools and
 // the provider rejects them mid-stream; runToolLoop's retry loop turns
 // state.useTools off and calls ctrl.Run again, which succeeds without

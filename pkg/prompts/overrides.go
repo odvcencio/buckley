@@ -37,6 +37,12 @@ func resolvePrompt(kind string, defaultPrompt string, now time.Time) string {
 	return applyPlaceholders(override, defaultPrompt, now)
 }
 
+// CommitToolPrompt applies the configured commit override to a caller-provided,
+// tool-compatible default prompt.
+func CommitToolPrompt(defaultPrompt string, now time.Time) string {
+	return resolvePrompt("commit", defaultPrompt, now)
+}
+
 func resolveOverride(kind string) string {
 	kind = strings.TrimSpace(kind)
 	if kind == "" {

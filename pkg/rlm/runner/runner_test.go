@@ -2,11 +2,15 @@ package runner
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/rlm"
+	"m31labs.dev/buckley/pkg/rlm/configadapter"
 )
 
 func TestNew(t *testing.T) {
@@ -112,6 +116,185 @@ func TestRunner_initRuntime_NilModels(t *testing.T) {
 	err := runner.initRuntime()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "model manager required")
+}
+
+func TestRunnerRLMConfigNilOrZeroKeepsDefaults(t *testing.T) {
+	defaults := rlm.DefaultConfig()
+
+	assert.Equal(t, defaults, runnerRLMConfig(nil))
+	assert.Equal(t, defaults, runnerRLMConfig(&config.Config{}))
+}
+
+func TestRunnerRLMConfigMatchesSharedAdapter(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "defaults"},
+		{
+			name: "false compatibility progress option",
+			cfg: &config.Config{RLM: config.RLMConfig{
+				Coordinator: config.RLMCoordinatorConfig{Model: "coordinator", StreamPartials: false},
+				Scratchpad:  config.RLMScratchpadConfig{PersistArtifacts: false, PersistDecisions: false},
+			}},
+		},
+		{
+			name: "empty list override",
+			cfg: &config.Config{RLM: config.RLMConfig{Tiers: map[string]config.RLMTierConfig{
+				"light": {Models: []string{}, Prefer: []string{}, Requires: []string{}},
+			}}},
+		},
+		{
+			name: "tier pins caps and requirements",
+			cfg: &config.Config{RLM: config.RLMConfig{Tiers: map[string]config.RLMTierConfig{
+				"reasoning": {
+					Model:             "reasoning-pin",
+					MaxCostPerMillion: 18.5,
+					MinContextWindow:  196000,
+					Requires:          []string{"extended_thinking", "reasoning"},
+				},
+			}}},
+		},
+		{
+			name: "all active fields",
+			cfg: &config.Config{RLM: config.RLMConfig{
+				Coordinator: config.RLMCoordinatorConfig{
+					Model: "coordinator", MaxIterations: 17, MaxTokensBudget: 12345,
+					MaxWallTime: 42 * time.Second, ConfidenceThreshold: 0.42,
+				},
+				SubAgent: config.RLMSubAgentConfig{Model: "worker", MaxConcurrent: 9, Timeout: 8 * time.Second},
+				Scratchpad: config.RLMScratchpadConfig{
+					MaxEntriesMemory: 77, MaxRawBytesMemory: 88, EvictionPolicy: "fifo", DefaultTTL: 13 * time.Second,
+				},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, configadapter.Resolve(tt.cfg), runnerRLMConfig(tt.cfg))
+		})
+	}
+}
+
+func TestRunnerRLMConfigAppliesEveryActiveRLMField(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Coordinator.Model = "coordinator-model"
+	cfg.RLM.Coordinator.MaxIterations = 17
+	cfg.RLM.Coordinator.MaxTokensBudget = 12345
+	cfg.RLM.Coordinator.MaxWallTime = 42 * time.Second
+	cfg.RLM.Coordinator.ConfidenceThreshold = 0.42
+	cfg.RLM.Coordinator.StreamPartials = false
+	cfg.RLM.SubAgent.Model = "worker-model"
+	cfg.RLM.SubAgent.MaxConcurrent = 9
+	cfg.RLM.SubAgent.Timeout = 8 * time.Second
+	cfg.RLM.Scratchpad.MaxEntriesMemory = 77
+	cfg.RLM.Scratchpad.MaxRawBytesMemory = 88
+	cfg.RLM.Scratchpad.EvictionPolicy = "fifo"
+	cfg.RLM.Scratchpad.DefaultTTL = 13 * time.Second
+	cfg.RLM.Scratchpad.PersistArtifacts = false
+	cfg.RLM.Scratchpad.PersistDecisions = false
+	cfg.RLM.Tiers = map[string]config.RLMTierConfig{
+		"light": {
+			Model:             "configured-light",
+			Provider:          "openrouter",
+			Models:            []string{"configured-light", "configured-fallback"},
+			MaxCostPerMillion: 1.25,
+			MinContextWindow:  12000,
+			Prefer:            []string{"cost", "quality"},
+			Requires:          []string{"extended_thinking"},
+		},
+	}
+
+	got := runnerRLMConfig(cfg)
+
+	assert.Equal(t, "coordinator-model", got.Coordinator.Model)
+	assert.Equal(t, 17, got.Coordinator.MaxIterations)
+	assert.Equal(t, 12345, got.Coordinator.MaxTokensBudget)
+	assert.Equal(t, 42*time.Second, got.Coordinator.MaxWallTime)
+	assert.Equal(t, 0.42, got.Coordinator.ConfidenceThreshold)
+	assert.False(t, got.Coordinator.StreamPartials)
+
+	assert.Equal(t, "worker-model", got.SubAgent.Model)
+	assert.Equal(t, 9, got.SubAgent.MaxConcurrent)
+	assert.Equal(t, 8*time.Second, got.SubAgent.Timeout)
+
+	assert.Equal(t, 77, got.Scratchpad.MaxEntriesMemory)
+	assert.Equal(t, int64(88), got.Scratchpad.MaxRawBytesMemory)
+	assert.Equal(t, "fifo", got.Scratchpad.EvictionPolicy)
+	assert.Equal(t, 13*time.Second, got.Scratchpad.DefaultTTL)
+	assert.False(t, got.Scratchpad.PersistArtifacts)
+	assert.False(t, got.Scratchpad.PersistDecisions)
+
+	light := got.Tiers[rlm.WeightLight]
+	assert.Equal(t, "configured-light", light.Model)
+	assert.Equal(t, "openrouter", light.Provider)
+	assert.Equal(t, []string{"configured-light", "configured-fallback"}, light.Models)
+	assert.Equal(t, 1.25, light.MaxCostPerMillion)
+	assert.Equal(t, 12000, light.MinContextWindow)
+	assert.Equal(t, []string{"cost", "quality"}, light.Prefer)
+	assert.Equal(t, []string{"extended_thinking"}, light.Requires)
+	assert.Contains(t, got.Tiers, rlm.WeightReasoning)
+
+	source := cfg.RLM.Tiers["light"]
+	source.Models[0] = "mutated-source"
+	source.Prefer[0] = "mutated-source"
+	source.Requires[0] = "mutated-source"
+	cfg.RLM.Tiers["light"] = source
+	assert.Equal(t, []string{"configured-light", "configured-fallback"}, got.Tiers[rlm.WeightLight].Models)
+	assert.Equal(t, []string{"cost", "quality"}, got.Tiers[rlm.WeightLight].Prefer)
+	assert.Equal(t, []string{"extended_thinking"}, got.Tiers[rlm.WeightLight].Requires)
+}
+
+func TestRunnerRLMConfigActiveBooleanFieldsOverrideDefaults(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Coordinator.Model = "active"
+	cfg.RLM.Coordinator.StreamPartials = false
+	cfg.RLM.Scratchpad.PersistArtifacts = false
+	cfg.RLM.Scratchpad.PersistDecisions = false
+
+	got := runnerRLMConfig(cfg)
+
+	assert.False(t, got.Coordinator.StreamPartials)
+	assert.False(t, got.Scratchpad.PersistArtifacts)
+	assert.False(t, got.Scratchpad.PersistDecisions)
+}
+
+func TestRunnerRLMConfigTiersOnlyKeepsDefaultTrueBooleans(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Tiers = map[string]config.RLMTierConfig{
+		"light": {Models: []string{"configured-light"}},
+	}
+
+	got := runnerRLMConfig(cfg)
+
+	assert.True(t, got.Coordinator.StreamPartials)
+	assert.True(t, got.Scratchpad.PersistArtifacts)
+	assert.True(t, got.Scratchpad.PersistDecisions)
+	assert.Equal(t, []string{"configured-light"}, got.Tiers[rlm.WeightLight].Models)
+}
+
+func TestRunnerRLMConfigConfiguredLightTierSelectsModel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RLM.Tiers = map[string]config.RLMTierConfig{
+		"light": {
+			Models:            []string{"unknown-price", "configured-light", "expensive"},
+			MaxCostPerMillion: 2.00,
+			MinContextWindow:  16000,
+			Prefer:            []string{"cost"},
+		},
+	}
+	got := runnerRLMConfig(cfg)
+	router, err := rlm.NewModelRouterWithCatalog(&model.ModelCatalog{Data: []model.ModelInfo{
+		{ID: "unknown-price", ContextLength: 32000, Pricing: model.ModelPricing{Prompt: 0, Completion: 0}, PricingKnown: false},
+		{ID: "configured-light", ContextLength: 16000, Pricing: model.ModelPricing{Prompt: 1.0, Completion: 1.5}, PricingKnown: true},
+		{ID: "expensive", ContextLength: 32000, Pricing: model.ModelPricing{Prompt: 9.0, Completion: 9.0}, PricingKnown: true},
+	}}, got, rlm.RouterOptions{})
+	require.NoError(t, err)
+
+	modelID, err := router.Select(rlm.WeightLight)
+	require.NoError(t, err)
+	assert.Equal(t, "configured-light", modelID)
 }
 
 func TestRunner_ensureRuntime_AlreadyInitialized(t *testing.T) {

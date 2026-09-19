@@ -11,8 +11,14 @@ import (
 
 // Config controls bounded agent-loop execution and stagnation detection.
 type Config struct {
-	MaxRounds          int
-	MaxToolCalls       int
+	MaxRounds    int
+	MaxToolCalls int
+	// ReadOnlyWarningAt, ReadOnlyActionAt, and MaxReadOnlyCalls form an
+	// escalation ladder for discovery that produces evidence but never changes
+	// state. Zero MaxReadOnlyCalls disables this fuse.
+	ReadOnlyWarningAt  int
+	ReadOnlyActionAt   int
+	MaxReadOnlyCalls   int
 	ExactRepeatLimit   int
 	OutcomeRepeatLimit int
 	CycleMaxLength     int
@@ -45,8 +51,9 @@ type Decision struct {
 type Governor struct {
 	config Config
 
-	rounds    int
-	toolCalls int
+	rounds        int
+	toolCalls     int
+	evidenceCalls int
 
 	exactCounts   map[string]int
 	outcomeCounts map[string]int
@@ -54,6 +61,75 @@ type Governor struct {
 
 	maxExactCount   int
 	maxOutcomeCount int
+	readOnlyCalls   int
+}
+
+// ObserveEffect tracks whether tool work is advancing beyond discovery.
+// It is separate from Observe so callers that do not classify effects retain
+// the existing governor behavior.
+func (g *Governor) ObserveEffect(effectClass string, success bool) Decision {
+	return g.ObserveProgress(effectClass, success, false, false)
+}
+
+// ObserveProgress tracks convergence using observed workspace change when a
+// dispatcher can provide it. Effect metadata remains the conservative
+// fallback for adapters that do not yet observe workspace state. Call this
+// before Observe so a confirmed change starts a fresh evidence window without
+// resetting the run's hard limits.
+func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, stateChanged bool) Decision {
+	if g == nil {
+		return Decision{}
+	}
+	if success && stateObserved && stateChanged {
+		clear(g.exactCounts)
+		clear(g.outcomeCounts)
+		g.actionHistory = g.actionHistory[:0]
+		g.maxExactCount = 0
+		g.maxOutcomeCount = 0
+		g.evidenceCalls = 0
+		g.readOnlyCalls = 0
+		return Decision{}
+	}
+	if g.config.MaxReadOnlyCalls <= 0 {
+		return Decision{}
+	}
+	effectClass = strings.ToLower(strings.TrimSpace(effectClass))
+	if effectClass == "control" || effectClass == "" {
+		return Decision{}
+	}
+	if stateObserved {
+		g.readOnlyCalls++
+	} else {
+		switch effectClass {
+		case "readonly":
+			g.readOnlyCalls++
+		default:
+			if success {
+				g.readOnlyCalls = 0
+				return Decision{}
+			}
+			g.readOnlyCalls++
+		}
+	}
+	if g.readOnlyCalls >= g.config.MaxReadOnlyCalls {
+		reason := fmt.Sprintf("tool loop used %d calls without a successful state-changing action", g.readOnlyCalls)
+		return stopDecision("read_only_budget", reason, g.readOnlyCalls)
+	}
+	if g.config.ReadOnlyWarningAt > 0 && g.readOnlyCalls == g.config.ReadOnlyWarningAt {
+		return Decision{
+			Kind:  "read_only_budget_warning",
+			Count: g.readOnlyCalls,
+			Nudge: "Harness checkpoint: discovery is consuming its bounded budget without changing state. Preserve your creative latitude, but now choose and state the smallest viable implementation slice supported by the evidence. Prefer executing that slice over broadening discovery; otherwise complete a read-only task or report a concrete blocker.",
+		}
+	}
+	if g.config.ReadOnlyActionAt > 0 && g.readOnlyCalls == g.config.ReadOnlyActionAt {
+		return Decision{
+			Kind:  "read_only_action_required",
+			Count: g.readOnlyCalls,
+			Nudge: "Harness action boundary: the evidence budget is nearly exhausted. The next tool work must make an observable workspace change, complete the task if it is read-only, or report a concrete blocker. Further discovery without action will be parked deterministically.",
+		}
+	}
+	return Decision{}
 }
 
 // New constructs a progress-aware loop governor.
@@ -96,9 +172,19 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 
 	actionKey := digest(name + "\x00" + arguments)
 	exactKey := digest(actionKey + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
-	outcomeKey := digest(name + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
+	// A successful result is evidence about the specific action that produced
+	// it. Different searches can legitimately return the same empty result,
+	// and treating those as one repeated outcome can stop broad discovery
+	// before the agent reaches an edit. Failed outcomes remain argument-agnostic
+	// so changing paths or queries cannot evade a persistent tool failure.
+	outcomeScope := name
+	if success {
+		outcomeScope += "\x00" + arguments
+	}
+	outcomeKey := digest(outcomeScope + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
 
 	g.toolCalls++
+	g.evidenceCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
 	if g.exactCounts[exactKey] > g.maxExactCount {
@@ -207,17 +293,25 @@ func (g *Governor) RepetitionPressure() float64 {
 // both "new" say nothing about stagnation yet.
 const evidenceNoveltyMinSamples = 4
 
-// EvidenceNovelty reports the fraction of observed tool outcomes that were
-// first occurrences (0 = every outcome was a repeat, 1 = all new), and
-// whether enough outcomes exist for the signal to mean anything. Outcome
+// EvidenceNovelty reports the fraction of tool outcomes since the latest
+// successful observed state change that were first occurrences (0 = every
+// outcome was a repeat, 1 = all new), and whether enough outcomes exist for
+// the signal to mean anything. Outcome
 // identity uses the same canonicalized evidence hashing the repeat
 // detectors use: a changed content hash is new evidence, a re-read is not.
 func (g *Governor) EvidenceNovelty() (float64, bool) {
-	if g == nil || g.toolCalls == 0 {
+	if g == nil || g.evidenceCalls == 0 {
 		return 0, false
 	}
-	novelty := float64(len(g.outcomeCounts)) / float64(g.toolCalls)
-	return novelty, g.toolCalls >= evidenceNoveltyMinSamples
+	novelty := float64(len(g.outcomeCounts)) / float64(g.evidenceCalls)
+	return novelty, g.evidenceCalls >= evidenceNoveltyMinSamples
+}
+
+// ActionRequired reports whether discovery has crossed the action boundary.
+// Dispatchers can use this signal to narrow capabilities without interpreting
+// model prose. A successful observed state change resets the boundary.
+func (g *Governor) ActionRequired() bool {
+	return g != nil && g.config.ReadOnlyActionAt > 0 && g.readOnlyCalls >= g.config.ReadOnlyActionAt
 }
 
 func normalizedConfig(config Config) Config {
@@ -227,6 +321,20 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxToolCalls <= 0 {
 		config.MaxToolCalls = defaults.MaxToolCalls
+	}
+	if config.MaxReadOnlyCalls > 0 {
+		if config.ReadOnlyWarningAt <= 0 {
+			config.ReadOnlyWarningAt = max(config.MaxReadOnlyCalls/2, 1)
+		}
+		if config.ReadOnlyWarningAt >= config.MaxReadOnlyCalls {
+			config.ReadOnlyWarningAt = max(config.MaxReadOnlyCalls-1, 1)
+		}
+		if config.ReadOnlyActionAt <= config.ReadOnlyWarningAt {
+			config.ReadOnlyActionAt = config.MaxReadOnlyCalls - 4
+		}
+		if config.ReadOnlyActionAt <= config.ReadOnlyWarningAt || config.ReadOnlyActionAt >= config.MaxReadOnlyCalls {
+			config.ReadOnlyActionAt = 0
+		}
 	}
 	if config.ExactRepeatLimit < 2 {
 		config.ExactRepeatLimit = defaults.ExactRepeatLimit

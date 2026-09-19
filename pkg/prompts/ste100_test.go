@@ -6,18 +6,15 @@ import (
 	"time"
 )
 
-// TestSTE100MarkerPresentAtEachWiringSite asserts the ASD-STE100 marker
-// line reaches every prompt site required by decision 0011: commit
-// generation, PR generation, and buckley review (branch and PR).
-func TestSTE100MarkerPresentAtEachWiringSite(t *testing.T) {
+// TestSTE100MarkerPresentAtProseGenerationSites asserts that ASD-STE100 stays
+// scoped to prose Buckley writes, rather than becoming review policy.
+func TestSTE100MarkerPresentAtProseGenerationSites(t *testing.T) {
 	const marker = "ASD-STE100 profile:"
 	now := time.Unix(0, 0)
 
 	cases := map[string]string{
-		"commit":        commitDefault(now),
-		"pr":            prDefault(now),
-		"review-branch": reviewBranchWithToolsDefault(now),
-		"review-pr":     reviewPRDefault(now),
+		"commit": commitDefault(now),
+		"pr":     prDefault(now),
 	}
 
 	for name, prompt := range cases {
@@ -49,24 +46,27 @@ func TestSTE100ProseBlockContent(t *testing.T) {
 	}
 }
 
-// TestSTE100ReviewTenetContent asserts the review tenet names every
-// checked violation category and requires a suggested rewrite per flag.
-func TestSTE100ReviewTenetContent(t *testing.T) {
-	for _, want := range []string{
-		"ASD-STE100 profile:",
-		"commit messages, PR titles/descriptions, and added doc or",
-		"Passive voice",
-		"20 words",
-		"25 words",
-		"Noun clusters",
-		"Inconsistent terminology",
-		"undefined at first use",
-		"suggested rewrite",
-		"MINOR finding",
-	} {
-		if !strings.Contains(ste100ReviewTenet, want) {
-			t.Errorf("ste100ReviewTenet missing %q", want)
-		}
+func TestReviewPromptsDoNotInjectSTE100StyleAudit(t *testing.T) {
+	now := time.Unix(0, 0)
+	reviews := map[string]string{
+		"branch":  reviewBranchWithToolsDefault(now),
+		"project": reviewProjectDefault(now),
+		"pr":      reviewPRCompactDefault(now),
+	}
+	for name, prompt := range reviews {
+		t.Run(name, func(t *testing.T) {
+			for _, forbidden := range []string{
+				"ASD-STE100 profile:",
+				"Passive voice where active voice reads clearly",
+				"Noun clusters of more than three nouns",
+				"suggested rewrite",
+				"Report violations as a MINOR finding",
+			} {
+				if strings.Contains(prompt, forbidden) {
+					t.Fatalf("review prompt contains removed style-audit tenet %q", forbidden)
+				}
+			}
+		})
 	}
 }
 

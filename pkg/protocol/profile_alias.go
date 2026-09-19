@@ -18,6 +18,7 @@ type (
 	ModelClass         = modelprofile.Class
 	Capabilities       = modelprofile.Capabilities
 	BehaviorMetrics    = modelprofile.Metrics
+	ReviewBehavior     = modelprofile.ReviewBehavior
 	BehaviorProfile    = modelprofile.Profile
 	Observation        = modelprofile.Observation
 	ProfileStore       = modelprofile.Store

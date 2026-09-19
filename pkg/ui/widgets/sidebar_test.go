@@ -271,6 +271,18 @@ func TestSidebar_Render(t *testing.T) {
 	}
 }
 
+func TestSidebar_RenderRLMHeaderUsesCoordinationLabel(t *testing.T) {
+	s := NewSidebar()
+	s.SetRLMStatus(&RLMStatus{Iteration: 1}, nil)
+
+	buf := runtime.NewBuffer(24, 3)
+	s.renderRLM(buf, 0, 0, 24)
+
+	if got := readBufferRunes(buf, 2, 0, len("Coordination")); got != "Coordination" {
+		t.Fatalf("RLM section header = %q, want %q", got, "Coordination")
+	}
+}
+
 func TestSidebar_RenderProgressBar_PercentFits(t *testing.T) {
 	s := NewSidebar()
 	buf := runtime.NewBuffer(30, 1)

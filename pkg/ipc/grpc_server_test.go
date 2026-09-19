@@ -17,6 +17,7 @@ import (
 	"m31labs.dev/buckley/pkg/ipc/command"
 	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
 	"m31labs.dev/buckley/pkg/orchestrator"
+	"m31labs.dev/buckley/pkg/sessionexec"
 	"m31labs.dev/buckley/pkg/storage"
 )
 
@@ -27,8 +28,10 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 	}
 	defer store.Close()
 
+	var received command.SessionCommand
 	gateway := command.NewGateway()
 	gateway.Register(command.HandlerFunc(func(cmd command.SessionCommand) error {
+		received = cmd
 		return nil
 	}))
 
@@ -52,6 +55,7 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 		SessionId:    "s1",
 		Type:         "input",
 		Content:      "hello",
+		TaskIntent:   "mutation",
 		SessionToken: "session-token",
 	})
 
@@ -78,6 +82,9 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 	}
 	if resp.Msg.CommandId == "" {
 		t.Fatal("SendCommand returned an empty command ID")
+	}
+	if received.AcceptedBy != "member" || received.TaskIntent != "mutation" {
+		t.Fatalf("received command = %+v, want actor and task intent", received)
 	}
 }
 
@@ -206,6 +213,12 @@ func TestGRPCWorkflowActionDispatchesSlashCommand(t *testing.T) {
 	if want := "/workflow pause test pause"; calls[0].Content != want {
 		t.Fatalf("command content=%q want %q", calls[0].Content, want)
 	}
+	if calls[0].AcceptedBy != "member" {
+		t.Fatalf("workflow acceptedBy=%q want member", calls[0].AcceptedBy)
+	}
+	if calls[0].ID == "" {
+		t.Fatal("workflow command ID is empty")
+	}
 }
 
 func TestGRPCWorkflowActionRequiresSessionToken(t *testing.T) {
@@ -319,6 +332,10 @@ func TestGRPCWorkflowActionExecuteResumesPlanWhenProvided(t *testing.T) {
 	if calls[1].Content != "/execute task-7" {
 		t.Fatalf("second command=%q want /execute task-7", calls[1].Content)
 	}
+	if calls[0].ID == "" || calls[1].ID == "" || calls[0].ID == calls[1].ID ||
+		calls[0].AcceptedBy != "member" || calls[1].AcceptedBy != "member" {
+		t.Fatalf("execute command identities/actors = %+v", calls)
+	}
 }
 
 func TestGRPCCreateHeadlessSessionPassesBranchAndEnv(t *testing.T) {
@@ -343,6 +360,7 @@ func TestGRPCCreateHeadlessSessionPassesBranchAndEnv(t *testing.T) {
 		InitialPrompt: "hello",
 		Model:         "test-model",
 		Branch:        "feature/test",
+		TaskIntent:    "mutation",
 		Env: map[string]string{
 			"FOO": "bar",
 		},
@@ -374,6 +392,9 @@ func TestGRPCCreateHeadlessSessionPassesBranchAndEnv(t *testing.T) {
 	if registry.createReq.Branch != "feature/test" {
 		t.Fatalf("branch=%q want %q", registry.createReq.Branch, "feature/test")
 	}
+	if registry.createReq.TaskIntent != "mutation" {
+		t.Fatalf("task intent=%q want %q", registry.createReq.TaskIntent, "mutation")
+	}
 	if got := registry.createReq.Env["FOO"]; got != "bar" {
 		t.Fatalf("env[FOO]=%q want %q", got, "bar")
 	}
@@ -394,6 +415,39 @@ func TestGRPCCreateHeadlessSessionPassesBranchAndEnv(t *testing.T) {
 	}
 	if resp.Msg.Branch != "feature/test" {
 		t.Fatalf("resp branch=%q want %q", resp.Msg.Branch, "feature/test")
+	}
+}
+
+func TestGRPCCreateHeadlessSessionInvalidTaskIntentRejectedBeforeCreate(t *testing.T) {
+	store, err := storage.New(t.TempDir() + "/buckley.db")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
+	registry := newFakeHeadlessRegistry()
+	registry.createErr = sessionexec.ErrValidation
+	server.SetHeadlessRegistry(registry)
+	svc := NewGRPCService(server)
+
+	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
+		Name:  "member",
+		Scope: storage.TokenScopeMember,
+	})
+
+	_, err = svc.CreateHeadlessSession(memberCtx, connect.NewRequest(&ipcpb.CreateHeadlessRequest{
+		Project:       "/tmp/project",
+		InitialPrompt: "hello",
+		TaskIntent:    "chat",
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateHeadlessSession error=%v code=%v want invalid argument", err, connect.CodeOf(err))
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.createCalls != 0 {
+		t.Fatalf("CreateSession calls=%d want 0", registry.createCalls)
 	}
 }
 
@@ -520,12 +574,29 @@ func TestGRPCApproveToolCallDispatchesDecisionToSession(t *testing.T) {
 	if cmd.Type != "approval" {
 		t.Fatalf("cmd type=%q want approval", cmd.Type)
 	}
+	if cmd.AcceptedBy != "alice" {
+		t.Fatalf("approval acceptedBy=%q want alice", cmd.AcceptedBy)
+	}
+	if cmd.ID == "" {
+		t.Fatal("approval notification command ID is empty")
+	}
 	var decision headless.ApprovalResponse
 	if err := json.Unmarshal([]byte(cmd.Content), &decision); err != nil {
 		t.Fatalf("unmarshal approval payload: %v (content=%q)", err, cmd.Content)
 	}
 	if decision.ID != "approval-1" || !decision.Approved {
 		t.Fatalf("decision=%+v want id=approval-1 approved=true", decision)
+	}
+	firstCommandID := cmd.ID
+	repeated, err := svc.ApproveToolCall(memberCtx, connect.NewRequest(&ipcpb.ApproveToolCallRequest{ApprovalId: "approval-1"}))
+	if err != nil || !repeated.Msg.Success {
+		t.Fatalf("repeated ApproveToolCall response=%+v error=%v", repeated, err)
+	}
+	registry.mu.Lock()
+	repeatedCommand := registry.lastCommand
+	registry.mu.Unlock()
+	if repeatedCommand.ID == "" || repeatedCommand.ID == firstCommandID || repeatedCommand.AcceptedBy != "alice" {
+		t.Fatalf("repeated approval notification = %+v", repeatedCommand)
 	}
 }
 
@@ -602,12 +673,31 @@ func TestGRPCRejectToolCallDispatchesDecisionToSession(t *testing.T) {
 	if cmd.Type != "approval" {
 		t.Fatalf("cmd type=%q want approval", cmd.Type)
 	}
+	if cmd.AcceptedBy != "alice" {
+		t.Fatalf("rejection acceptedBy=%q want alice", cmd.AcceptedBy)
+	}
+	if cmd.ID == "" {
+		t.Fatal("rejection notification command ID is empty")
+	}
 	var decision headless.ApprovalResponse
 	if err := json.Unmarshal([]byte(cmd.Content), &decision); err != nil {
 		t.Fatalf("unmarshal approval payload: %v (content=%q)", err, cmd.Content)
 	}
 	if decision.ID != "approval-1" || decision.Approved || decision.Reason != "nope" {
 		t.Fatalf("decision=%+v want id=approval-1 approved=false reason=nope", decision)
+	}
+	firstCommandID := cmd.ID
+	repeated, err := svc.RejectToolCall(memberCtx, connect.NewRequest(&ipcpb.RejectToolCallRequest{
+		ApprovalId: "approval-1", Reason: "nope",
+	}))
+	if err != nil || !repeated.Msg.Success {
+		t.Fatalf("repeated RejectToolCall response=%+v error=%v", repeated, err)
+	}
+	registry.mu.Lock()
+	repeatedCommand := registry.lastCommand
+	registry.mu.Unlock()
+	if repeatedCommand.ID == "" || repeatedCommand.ID == firstCommandID || repeatedCommand.AcceptedBy != "alice" {
+		t.Fatalf("repeated rejection notification = %+v", repeatedCommand)
 	}
 }
 

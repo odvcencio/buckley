@@ -13,6 +13,7 @@ import (
 	"m31labs.dev/buckley/pkg/gitwatcher"
 	knowledgehyphae "m31labs.dev/buckley/pkg/knowledge/hyphae"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelprofile"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/rules"
@@ -212,7 +213,7 @@ func runReviewPRCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(cfg, mgr)
+	runtime, err := newReviewCommandRuntime(cfg, mgr, store)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -375,6 +376,7 @@ type automatedReviewOptions struct {
 	reasoningEffort            string
 	reasoningMaxTokens         int
 	maxOutputTokens            int
+	reviewBehavior             *modelprofile.ReviewBehavior
 	depth                      reviewDepth
 	adaptiveCodexModel         bool
 	adaptiveReasoning          bool
@@ -517,19 +519,29 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 }
 
 func reviewContextProvidersForModel(modelID string) []commands.PRContextProvider {
+	return reviewContextProvidersForBehavior(modelID, nil)
+}
+
+func reviewContextProvidersForBehavior(modelID string, behavior *modelprofile.ReviewBehavior) []commands.PRContextProvider {
 	providers := []commands.PRContextProvider{knowledgehyphae.NewReviewContextProvider()}
-	if isQwenReviewModel(modelID) {
+	opts := automatedReviewOptions{modelID: modelID, reviewBehavior: behavior}
+	if effective := effectiveReviewBehavior(opts); effective != nil && effective.WorkflowRiskSignals {
 		providers = append(providers, commands.NewWorkflowRiskContextProvider())
 	}
 	return providers
 }
 
 func reviewSupportingContextBudget(modelID string, requested int) int {
+	return reviewSupportingContextBudgetForBehavior(modelID, requested, nil)
+}
+
+func reviewSupportingContextBudgetForBehavior(modelID string, requested int, behavior *modelprofile.ReviewBehavior) int {
 	if requested > 0 {
 		return requested
 	}
-	if isDeepSeekV4ProReviewModel(modelID) {
-		return deepSeekSupportingContext
+	opts := automatedReviewOptions{modelID: modelID, reviewBehavior: behavior}
+	if effective := effectiveReviewBehavior(opts); effective != nil && effective.SupportingContextTokens > 0 {
+		return effective.SupportingContextTokens
 	}
 	return 0
 }
@@ -547,11 +559,11 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 
 	contextOpts := commands.DefaultPRContextOptions()
 	contextOpts.Context = ctx
-	contextOpts.Providers = reviewContextProvidersForModel(opts.modelID)
+	contextOpts.Providers = reviewContextProvidersForBehavior(opts.modelID, opts.reviewBehavior)
 	if opts.maxDiffBytes > 0 {
 		contextOpts.MaxDiffBytes = opts.maxDiffBytes
 	}
-	if supportingContext := reviewSupportingContextBudget(opts.modelID, opts.maxSupportingContextTokens); supportingContext > 0 {
+	if supportingContext := reviewSupportingContextBudgetForBehavior(opts.modelID, opts.maxSupportingContextTokens, opts.reviewBehavior); supportingContext > 0 {
 		contextOpts.MaxSupportingContextTokens = supportingContext
 	}
 	prCtx, audit, err := commands.AssemblePRContextWithOptions(prRef, contextOpts)
@@ -743,6 +755,7 @@ func runPRReviewSharded(
 	}
 	spinner.SetMessage(fmt.Sprintf("Running %s %d-shard review with %s reasoning...", reviewDepthLabel(opts.depth), len(shards.Shards), opts.reasoningEffort))
 
+	shardResults := make([]*reviewCommandResult, len(shards.Shards))
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
 		shardOpts := opts.withVerificationTargetBudget(shard.Files)
@@ -780,20 +793,22 @@ func runPRReviewSharded(
 				ExpectedCommit: prCtx.PR.HeadSHA,
 			},
 		})
+		shardResult := reviewResultFromAgent(fwResult, audit)
+		shardResults[index] = shardResult
 		if runErr != nil {
 			return nil, runErr
 		}
-		result, ok := fwResult.Value.(*commands.ReviewAgentResult)
-		if !ok || result.Parsed == nil {
+		if shardResult.parsed == nil {
 			return nil, fmt.Errorf("shard %d produced no parsed review", index+1)
 		}
-		return result.Parsed, nil
+		return shardResult.parsed, nil
 	}
 
 	shardReviews, runErr := commands.RunPRShardsConcurrently(ctx, shards.Shards, concurrency, run)
 	if runErr != nil {
 		spinner.StopWithError(runErr.Error())
-		return nil, prCtx.PR, fmt.Errorf("sharded review failed: %w", runErr)
+		reviewErr := fmt.Errorf("sharded review failed: %w", runErr)
+		return incompleteShardedPRReviewResult(audit, shardResults, reviewErr), prCtx.PR, reviewErr
 	}
 
 	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
@@ -801,20 +816,110 @@ func runPRReviewSharded(
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())
 		revalidationErr := fmt.Errorf("review target changed or could not be revalidated: %w", err)
-		return &reviewCommandResult{
-			reviewText:    markIncompleteReview(rendered, revalidationErr.Error()),
+		return (&reviewCommandResult{
+			reviewText:    rendered,
 			incomplete:    true,
 			incompleteWhy: revalidationErr.Error(),
 			contextAudit:  audit,
-		}, prCtx.PR, revalidationErr
+			trace:         aggregatePRShardTraces(shardResults),
+		}).withShardedReviewEvidence(shardResults), prCtx.PR, revalidationErr
 	}
 
 	spinner.StopWithSuccess(fmt.Sprintf("%d-shard PR review complete", len(shards.Shards)))
-	return &reviewCommandResult{
+	return (&reviewCommandResult{
 		reviewText:   rendered,
 		parsed:       merged,
 		contextAudit: audit,
-	}, prCtx.PR, nil
+		trace:        aggregatePRShardTraces(shardResults),
+	}).withShardedReviewEvidence(shardResults), prCtx.PR, nil
+}
+
+func incompleteShardedPRReviewResult(audit *transparency.ContextAudit, shardResults []*reviewCommandResult, reviewErr error) *reviewCommandResult {
+	result := &reviewCommandResult{
+		reviewText:    renderIncompleteShardDrafts(shardResults),
+		incomplete:    true,
+		incompleteWhy: reviewErr.Error(),
+		contextAudit:  audit,
+		trace:         aggregatePRShardTraces(shardResults),
+	}
+	return result.withShardedReviewEvidence(shardResults)
+}
+
+func (result *reviewCommandResult) withShardedReviewEvidence(shardResults []*reviewCommandResult) *reviewCommandResult {
+	if result == nil {
+		return nil
+	}
+	for _, shardResult := range shardResults {
+		if shardResult == nil {
+			continue
+		}
+		result.attempts += shardResult.attempts
+		result.primary += shardResult.primary
+		result.criticAttempts += shardResult.criticAttempts
+		result.hostEvidence += shardResult.hostEvidence
+		result.hostPasses += shardResult.hostPasses
+		result.hostNotApplicable += shardResult.hostNotApplicable
+		result.toolEvidence = append(result.toolEvidence, shardResult.toolEvidence...)
+		result.commandEvidence = append(result.commandEvidence, shardResult.commandEvidence...)
+	}
+	if result.incomplete {
+		result.reviewText = appendReviewEvidenceDiagnostics(result.reviewText, result.toolEvidence, result.commandEvidence)
+		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)
+		result.reviewText = markIncompleteReview(result.reviewText, result.incompleteWhy)
+		result.parsed = nil
+	}
+	return result
+}
+
+func aggregatePRShardTraces(shardResults []*reviewCommandResult) *transparency.Trace {
+	var attempts []transparency.TraceAttempt
+	for i, shardResult := range shardResults {
+		if shardResult == nil {
+			continue
+		}
+		attempts = append(attempts, shardTraceAttempts(i, shardResult.trace)...)
+	}
+	return transparency.AggregateTraceAttempts(attempts)
+}
+
+func shardTraceAttempts(shardIndex int, trace *transparency.Trace) []transparency.TraceAttempt {
+	if trace == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("shard %d", shardIndex+1)
+	if len(trace.Attempts) == 0 {
+		return []transparency.TraceAttempt{{Phase: prefix, Attempt: 1, Trace: trace}}
+	}
+	attempts := make([]transparency.TraceAttempt, 0, len(trace.Attempts))
+	for _, attempt := range trace.Attempts {
+		if attempt.Trace == nil {
+			continue
+		}
+		phase := strings.TrimSpace(attempt.Phase)
+		if phase == "" {
+			phase = "attempt"
+		}
+		attempts = append(attempts, transparency.TraceAttempt{
+			Phase:           prefix + "/" + phase,
+			Attempt:         attempt.Attempt,
+			ValidationError: attempt.ValidationError,
+			Trace:           attempt.Trace,
+		})
+	}
+	return attempts
+}
+
+func renderIncompleteShardDrafts(shardResults []*reviewCommandResult) string {
+	var b strings.Builder
+	b.WriteString("## Incomplete sharded review\n\n")
+	b.WriteString("The sharded PR review did not complete. Completed shard drafts and execution evidence are preserved below for diagnosis only.\n")
+	for i, shardResult := range shardResults {
+		if shardResult == nil || strings.TrimSpace(shardResult.reviewText) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### Shard %d draft\n\n%s\n", i+1, strings.TrimSpace(shardResult.reviewText))
+	}
+	return b.String()
 }
 
 func writePRReviewOutput(outputFile, reviewText string, prInfo *commands.PRInfo) error {

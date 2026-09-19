@@ -1,0 +1,240 @@
+// Model data-retention policy for durable goal turns.
+//
+// The host supplies workspace license evidence and provider capabilities as
+// facts. This strategy owns only the governed allow/block outcome; filesystem
+// inspection and request construction remain in the host.
+
+outcome ModelDataPolicy {
+    action: string
+    reason_code: string
+    policy: string
+}
+
+strategy model_data_policy returns ModelDataPolicy {
+    // Strict ZDR is permitted only when the selected provider can actually
+    // enforce ZDR. A strict policy never needs an OSS-license exception.
+    when {
+        privacy.retention_mode == "zdr"
+        and privacy.zdr_enforceable == true
+    } then StrictZDRAllow {
+        action: "allow",
+        reason_code: "zdr_enforced",
+        policy: "strict_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "zdr"
+        and privacy.zdr_enforceable != true
+    } then StrictZDRUnenforceable {
+        action: "block",
+        reason_code: "zdr_unenforceable",
+        policy: "strict_zdr",
+    }
+
+    // Explicit non-ZDR is an OpenRouter data-policy contract. Do not let a
+    // provider with different privacy semantics inherit that exception.
+    when {
+        privacy.retention_mode == "non_zdr"
+        and provider.name != "openrouter"
+    } then NonZDRProviderUnsupported {
+        action: "block",
+        reason_code: "provider_privacy_unsupported",
+        policy: "oss_non_zdr",
+    }
+
+    // Explicit non-ZDR is allowed only with the strongest available
+    // OpenRouter data policy and a currently verified OSS workspace.
+    when {
+        privacy.retention_mode == "non_zdr"
+        and privacy.data_collection != "deny"
+    } then NonZDRDataPolicyMissing {
+        action: "block",
+        reason_code: "data_collection_policy_missing",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and privacy.data_collection == "deny"
+        and workspace.license_status == "recognized_oss"
+        and workspace.license_digest_match == true
+    } then NonZDROSSAllow {
+        action: "allow",
+        reason_code: "oss_license_verified",
+        policy: "oss_non_zdr",
+    }
+
+    // Legacy contracts have no explicit data-collection assertion, but still
+    // require the same bound, verified OSS evidence.
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "recognized_oss"
+        and workspace.license_digest_match == true
+    } then LegacyOSSAllow {
+        action: "allow",
+        reason_code: "oss_license_verified",
+        policy: "oss_legacy",
+    }
+
+    // Keep each non-ZDR evidence failure observable as its own stable reason
+    // code. Unsupported is intentionally distinct from proprietary: the
+    // host's conservative recognizer found a license-shaped file, but not an
+    // allowed OSS license family.
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "missing"
+    } then NonZDRLicenseMissing {
+        action: "block",
+        reason_code: "license_missing",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "ambiguous"
+    } then NonZDRLicenseAmbiguous {
+        action: "block",
+        reason_code: "license_ambiguous",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "proprietary"
+    } then NonZDRLicenseProprietary {
+        action: "block",
+        reason_code: "license_proprietary",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "unreadable"
+    } then NonZDRLicenseUnreadable {
+        action: "block",
+        reason_code: "license_unreadable",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "changed"
+    } then NonZDRLicenseChanged {
+        action: "block",
+        reason_code: "license_changed",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "unsupported"
+    } then NonZDRLicenseUnsupported {
+        action: "block",
+        reason_code: "license_unsupported",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and workspace.license_status == "recognized_oss"
+        and workspace.license_digest_match != true
+    } then NonZDRLicenseDigestMismatch {
+        action: "block",
+        reason_code: "license_digest_mismatch",
+        policy: "oss_non_zdr",
+    }
+
+    // Legacy migrations use the same evidence classifications, but retain
+    // their own policy label so audit records cannot blur migration behavior
+    // with an explicitly non-ZDR contract.
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "missing"
+    } then LegacyLicenseMissing {
+        action: "block",
+        reason_code: "license_missing",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "ambiguous"
+    } then LegacyLicenseAmbiguous {
+        action: "block",
+        reason_code: "license_ambiguous",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "proprietary"
+    } then LegacyLicenseProprietary {
+        action: "block",
+        reason_code: "license_proprietary",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "unreadable"
+    } then LegacyLicenseUnreadable {
+        action: "block",
+        reason_code: "license_unreadable",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "changed"
+    } then LegacyLicenseChanged {
+        action: "block",
+        reason_code: "license_changed",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "unsupported"
+    } then LegacyLicenseUnsupported {
+        action: "block",
+        reason_code: "license_unsupported",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status == "recognized_oss"
+        and workspace.license_digest_match != true
+    } then LegacyLicenseDigestMismatch {
+        action: "block",
+        reason_code: "license_digest_mismatch",
+        policy: "oss_legacy",
+    }
+
+    when {
+        privacy.retention_mode == "non_zdr"
+        and privacy.data_collection == "deny"
+        and workspace.license_status != "recognized_oss"
+    } then NonZDRLicenseStatusInvalid {
+        action: "block",
+        reason_code: "license_status_invalid",
+        policy: "oss_non_zdr",
+    }
+
+    when {
+        privacy.retention_mode == "legacy"
+        and workspace.license_status != "recognized_oss"
+    } then LegacyLicenseStatusInvalid {
+        action: "block",
+        reason_code: "license_status_invalid",
+        policy: "oss_legacy",
+    }
+
+    // Unknown or missing retention modes are not eligible for a permissive
+    // interpretation. Keep the outcome policy value within the public enum.
+    else InvalidPolicyContract {
+        action: "block",
+        reason_code: "policy_contract_invalid",
+        policy: "oss_non_zdr",
+    }
+}

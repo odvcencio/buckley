@@ -40,6 +40,13 @@ func NewAgentLoopObserver(hub *Hub) lifecycle.Observer {
 		putIdentifier(data, "step_id", source.StepID)
 		putIdentifier(data, "model", source.ModelID)
 		putIdentifier(data, "provider", source.ProviderID)
+		putIdentifier(data, "requested_model", source.RequestedModel)
+		putIdentifier(data, "selected_model", source.SelectedModel)
+		putIdentifier(data, "response_model", source.ResponseModel)
+		putIdentifier(data, "response_id", source.ResponseID)
+		if source.ExecutionIdentityConflicted {
+			data["execution_identity_conflicted"] = true
+		}
 		putIdentifier(data, "tool", source.ToolName)
 		putIdentifier(data, "call_id", source.ToolCallID)
 		putPositiveCounter(data, "round", source.Round)
@@ -61,6 +68,9 @@ func NewAgentLoopObserver(hub *Hub) lifecycle.Observer {
 		putPositiveCounter(data, "prompt_tokens", source.Usage.PromptTokens)
 		putPositiveCounter(data, "completion_tokens", source.Usage.CompletionTokens)
 		putPositiveCounter(data, "total_tokens", source.Usage.TotalTokens)
+		if source.Usage.Estimated {
+			data["usage_estimated"] = true
+		}
 		if source.CostUSD > 0 && !math.IsNaN(source.CostUSD) && !math.IsInf(source.CostUSD, 0) {
 			data["cost_usd"] = source.CostUSD
 		}

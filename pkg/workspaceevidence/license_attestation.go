@@ -821,13 +821,13 @@ func singleGitLine(raw []byte) (string, error) {
 	return string(raw), nil
 }
 
-type boundedBuffer struct {
+type licenseBoundedBuffer struct {
 	buffer   bytes.Buffer
 	limit    int
 	exceeded bool
 }
 
-func (b *boundedBuffer) Write(p []byte) (int, error) {
+func (b *licenseBoundedBuffer) Write(p []byte) (int, error) {
 	remaining := b.limit - b.buffer.Len()
 	if remaining <= 0 {
 		b.exceeded = true
@@ -951,8 +951,8 @@ func boundedGitOutput(ctx context.Context, root string, limit int, args ...strin
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=" + os.DevNull,
 	}
-	stdout := &boundedBuffer{limit: limit}
-	stderr := &boundedBuffer{limit: maxGitErrorBytes}
+	stdout := &licenseBoundedBuffer{limit: limit}
+	stderr := &licenseBoundedBuffer{limit: maxGitErrorBytes}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err = cmd.Run()

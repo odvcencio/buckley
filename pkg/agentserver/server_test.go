@@ -13,10 +13,37 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"m31labs.dev/buckley/pkg/acp/partialresult"
 	acppb "m31labs.dev/buckley/pkg/acp/proto"
 	"m31labs.dev/buckley/pkg/ui/viewmodel"
 )
+
+const inlinePartialTextMaxBytesForTest = 2048
+
+type inlineErrorResponseForTest struct {
+	Error        string `json:"error"`
+	Incomplete   bool   `json:"incomplete"`
+	Accepted     *bool  `json:"accepted"`
+	Text         string `json:"text"`
+	FinishReason string `json:"finish_reason"`
+}
+
+type proposeErrorResponseForTest struct {
+	Error       string                `json:"error"`
+	Incomplete  bool                  `json:"incomplete"`
+	Accepted    *bool                 `json:"accepted"`
+	Text        string                `json:"text"`
+	Suggestions []*acppb.ProposedEdit `json:"suggestions"`
+}
+
+type downstreamErrorResponseForTest struct {
+	Error      string `json:"error"`
+	Incomplete bool   `json:"incomplete"`
+	Accepted   *bool  `json:"accepted"`
+	Applied    *bool  `json:"applied"`
+}
 
 // --- Fake/Stub implementations ---
 
@@ -59,8 +86,10 @@ type mockACPClient struct {
 	proposeErr     error
 	applyResp      *acppb.ApplyEditsResponse
 	applyErr       error
+	applyNilResp   bool
 	statusResp     *acppb.UpdateEditorStateResponse
 	statusErr      error
+	statusNilResp  bool
 	lastProposeReq *acppb.ProposeEditsRequest
 	lastApplyReq   *acppb.ApplyEditsRequest
 	lastStatusReq  *acppb.UpdateEditorStateRequest
@@ -88,6 +117,9 @@ func (m *mockACPClient) ApplyEdits(_ context.Context, req *acppb.ApplyEditsReque
 	if m.applyErr != nil {
 		return nil, m.applyErr
 	}
+	if m.applyNilResp {
+		return nil, nil
+	}
 	if m.applyResp != nil {
 		return m.applyResp, nil
 	}
@@ -98,6 +130,9 @@ func (m *mockACPClient) UpdateEditorState(_ context.Context, req *acppb.UpdateEd
 	m.lastStatusReq = req
 	if m.statusErr != nil {
 		return nil, m.statusErr
+	}
+	if m.statusNilResp {
+		return nil, nil
 	}
 	if m.statusResp != nil {
 		return m.statusResp, nil
@@ -219,6 +254,159 @@ func TestInlineCompletionReturns500OnStreamError(t *testing.T) {
 	}
 }
 
+func TestInlineCompletionStreamErrorRetainsBoundedUnacceptedPartial(t *testing.T) {
+	const secret = "provider-secret-terminal"
+	stream := &fakeInlineStream{
+		events: []*acppb.InlineCompletionEvent{
+			{Text: "public "},
+			{Text: "prefix", FinishReason: "length"},
+		},
+		err: errors.New("boom " + secret),
+	}
+	srv := New(stubACPClient{stream: stream})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Error != "inline completion incomplete" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want incomplete accepted=false", body)
+	}
+	if body.Text != "public prefix" || body.FinishReason != "length" {
+		t.Fatalf("body text/finish = %q/%q, want retained public prefix", body.Text, body.FinishReason)
+	}
+	if strings.Contains(rec.Body.String(), secret) || strings.Count(rec.Body.String(), "public prefix") != 1 {
+		t.Fatalf("body leaked secret or duplicated partial: %q", rec.Body.String())
+	}
+}
+
+func TestInlineCompletionInitialStreamFailureIsSafeAndEmpty(t *testing.T) {
+	const secret = "provider-secret-initial"
+	srv := New(stubACPClient{err: errors.New("dial failed " + secret)})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Text != "" || body.FinishReason != "" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want safe empty incomplete response", body)
+	}
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(rec.Body.String(), "dial failed") {
+		t.Fatalf("body leaked raw initial error: %q", rec.Body.String())
+	}
+}
+
+func TestInlineCompletionSuccessOmitsIncompleteLabels(t *testing.T) {
+	stream := &fakeInlineStream{
+		events: []*acppb.InlineCompletionEvent{
+			{Text: "hello "},
+			{Text: "world", FinishReason: "stop"},
+		},
+	}
+	srv := New(stubACPClient{stream: stream})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body["text"] != "hello world" || body["finish_reason"] != "stop" {
+		t.Fatalf("body = %+v, want normal inline success", body)
+	}
+	if _, ok := body["incomplete"]; ok {
+		t.Fatalf("success body should omit incomplete label: %+v", body)
+	}
+	if _, ok := body["accepted"]; ok {
+		t.Fatalf("success body should omit accepted label: %+v", body)
+	}
+}
+
+func TestInlineCompletionStreamErrorBoundsUTF8Partial(t *testing.T) {
+	chunk := strings.Repeat("🙂", inlinePartialTextMaxBytesForTest)
+	stream := &fakeInlineStream{
+		events: []*acppb.InlineCompletionEvent{{Text: chunk}},
+		err:    errors.New("terminal failure"),
+	}
+	srv := New(stubACPClient{stream: stream})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if len(body.Text) > inlinePartialTextMaxBytesForTest {
+		t.Fatalf("partial bytes=%d want <= %d", len(body.Text), inlinePartialTextMaxBytesForTest)
+	}
+	if strings.ContainsRune(body.Text, '\uFFFD') {
+		t.Fatalf("partial should remain valid UTF-8 without replacement rune: %q", body.Text)
+	}
+}
+
+func TestInlineCompletionEOFWithNonConclusiveFinishIsSafeIncomplete(t *testing.T) {
+	stream := &fakeInlineStream{
+		events: []*acppb.InlineCompletionEvent{
+			{Text: "public "},
+			{Text: "prefix", FinishReason: "length"},
+		},
+		err: io.EOF,
+	}
+	srv := New(stubACPClient{stream: stream})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Error != "inline completion incomplete" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want incomplete accepted=false", body)
+	}
+	if body.Text != "public prefix" || body.FinishReason != "length" {
+		t.Fatalf("body text/finish = %q/%q, want retained public prefix and nonconclusive finish", body.Text, body.FinishReason)
+	}
+	if strings.Count(rec.Body.String(), "public prefix") != 1 {
+		t.Fatalf("body duplicated partial: %q", rec.Body.String())
+	}
+}
+
+func TestInlineCompletionEOFWithUnknownFinishIsSafeIncomplete(t *testing.T) {
+	stream := &fakeInlineStream{
+		events: []*acppb.InlineCompletionEvent{
+			{Text: "public prefix", FinishReason: "mystery"},
+		},
+		err: io.EOF,
+	}
+	srv := New(stubACPClient{stream: stream})
+
+	rec := serveInlineCompletion(t, srv)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Text != "public prefix" || body.FinishReason != "mystery" || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want bounded unaccepted partial with original finish", body)
+	}
+}
+
 func TestInlineCompletionMethodNotAllowed(t *testing.T) {
 	srv := New(&mockACPClient{})
 	req := httptest.NewRequest(http.MethodGet, "/inline_complete", nil)
@@ -289,6 +477,15 @@ func TestInlineCompletionWithSelection(t *testing.T) {
 	}
 }
 
+func serveInlineCompletion(t *testing.T, srv *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","prompt":"p","document":{"uri":"file:///tmp/main.go","language_id":"go","content":"package main\n"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/inline_complete", bytes.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	return rec
+}
+
 // --- Propose edits handler tests ---
 
 func TestProposeEditsSuccess(t *testing.T) {
@@ -313,9 +510,22 @@ func TestProposeEditsSuccess(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Fix bug") {
 		t.Errorf("response should contain suggestion: %s", rec.Body.String())
 	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["incomplete"]; ok {
+		t.Fatalf("success body should omit incomplete label: %+v", body)
+	}
+	if _, ok := body["accepted"]; ok {
+		t.Fatalf("success body should omit accepted label: %+v", body)
+	}
 	// Verify request params
 	if client.lastProposeReq.MaxSuggestions != 3 {
 		t.Errorf("max_suggestions=%d want 3", client.lastProposeReq.MaxSuggestions)
+	}
+	if client.lastProposeReq.Apply {
+		t.Errorf("propose request should not auto-apply edits")
 	}
 }
 
@@ -367,7 +577,7 @@ func TestProposeEditsNegativeMaxSuggestions(t *testing.T) {
 }
 
 func TestProposeEditsClientError(t *testing.T) {
-	client := &mockACPClient{proposeErr: errors.New("rpc failed")}
+	client := &mockACPClient{proposeErr: errors.New("rpc failed provider-secret-status")}
 	srv := New(client)
 
 	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","instruction":"fix","max_suggestions":1,"document":{"uri":"file:///x","language_id":"go","content":""}}`)
@@ -378,6 +588,59 @@ func TestProposeEditsClientError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want %d", rec.Code, http.StatusInternalServerError)
 	}
+	var body proposeErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "propose edits incomplete" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want incomplete accepted=false", body)
+	}
+	if body.Text != "" {
+		t.Fatalf("ordinary error should not invent draft text: %q", body.Text)
+	}
+	if len(body.Suggestions) != 0 {
+		t.Fatalf("ordinary error should not return accepted suggestions: %+v", body.Suggestions)
+	}
+	if strings.Contains(rec.Body.String(), "provider-secret-status") || strings.Contains(rec.Body.String(), "rpc failed") {
+		t.Fatalf("raw propose error leaked in body: %s", rec.Body.String())
+	}
+}
+
+func TestProposeEditsTypedPartialReturnsBoundedUnacceptedDraft(t *testing.T) {
+	publicDraft := strings.Repeat("go✓", 900)
+	client := &mockACPClient{
+		proposeErr: partialresult.StatusError(codes.Internal, "safe incomplete", &acppb.PartialResult{
+			ReasonCode:      "provider_error",
+			PartialResponse: &acppb.Message{Role: "assistant", Content: publicDraft},
+		}),
+	}
+	srv := New(client)
+
+	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","instruction":"fix","max_suggestions":1,"document":{"uri":"file:///x","language_id":"go","content":""}}`)
+	req := httptest.NewRequest(http.MethodPost, "/propose_edits", bytes.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body proposeErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "propose edits incomplete" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want incomplete accepted=false", body)
+	}
+	if body.Text == "" || len(body.Text) > inlinePartialTextMaxBytesForTest || !strings.HasPrefix(publicDraft, body.Text) {
+		t.Fatalf("text length=%d prefix=%t want bounded public draft", len(body.Text), strings.HasPrefix(publicDraft, body.Text))
+	}
+	if len(body.Suggestions) != 0 {
+		t.Fatalf("partial error should not return accepted suggestions: %+v", body.Suggestions)
+	}
+	if !client.lastProposeReq.GetApply() {
+		return
+	}
+	t.Fatalf("propose request should not auto-apply edits")
 }
 
 // --- Apply edits handler tests ---
@@ -466,7 +729,7 @@ func TestApplyEditsInvalidRange(t *testing.T) {
 }
 
 func TestApplyEditsClientError(t *testing.T) {
-	client := &mockACPClient{applyErr: errors.New("apply failed")}
+	client := &mockACPClient{applyErr: errors.New("apply failed provider-secret-path-/tmp/hidden")}
 	srv := New(client)
 
 	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","edits":[{"uri":"file:///x","new_text":"y"}]}`)
@@ -476,6 +739,43 @@ func TestApplyEditsClientError(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want %d", rec.Code, http.StatusInternalServerError)
+	}
+	var body downstreamErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "apply edits incomplete" || !body.Incomplete {
+		t.Fatalf("body = %+v, want generic incomplete apply error", body)
+	}
+	if body.Accepted != nil || body.Applied != nil {
+		t.Fatalf("apply error should not claim accepted/applied state: %+v", body)
+	}
+	if strings.Contains(rec.Body.String(), "provider-secret-path") || strings.Contains(rec.Body.String(), "apply failed") {
+		t.Fatalf("raw apply error leaked in body: %s", rec.Body.String())
+	}
+}
+
+func TestApplyEditsNilResponseIsSafeIncompleteJSON(t *testing.T) {
+	client := &mockACPClient{applyNilResp: true}
+	srv := New(client)
+
+	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","dry_run":true,"edits":[{"uri":"file:///x","new_text":"y"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/apply_edits", bytes.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body downstreamErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "apply edits incomplete" || !body.Incomplete || body.Accepted != nil || body.Applied != nil {
+		t.Fatalf("body = %+v, want generic incomplete apply nil-response error", body)
+	}
+	if !client.lastApplyReq.GetDryRun() {
+		t.Fatal("dry_run should still be passed through")
 	}
 }
 
@@ -553,7 +853,7 @@ func TestStatusInvalidDocument(t *testing.T) {
 }
 
 func TestStatusClientError(t *testing.T) {
-	client := &mockACPClient{statusErr: errors.New("status failed")}
+	client := &mockACPClient{statusErr: errors.New("status failed provider-secret-status")}
 	srv := New(client)
 
 	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","document":{"uri":"file:///x","language_id":"go","content":""}}`)
@@ -563,6 +863,40 @@ func TestStatusClientError(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want %d", rec.Code, http.StatusInternalServerError)
+	}
+	var body downstreamErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "editor status incomplete" || !body.Incomplete {
+		t.Fatalf("body = %+v, want generic incomplete status error", body)
+	}
+	if body.Accepted != nil || body.Applied != nil {
+		t.Fatalf("status error should not claim accepted/applied state: %+v", body)
+	}
+	if strings.Contains(rec.Body.String(), "provider-secret-status") || strings.Contains(rec.Body.String(), "status failed") {
+		t.Fatalf("raw status error leaked in body: %s", rec.Body.String())
+	}
+}
+
+func TestStatusNilResponseIsSafeIncompleteJSON(t *testing.T) {
+	client := &mockACPClient{statusNilResp: true}
+	srv := New(client)
+
+	reqBody := []byte(`{"agent_id":"a1","session_id":"s1","document":{"uri":"file:///x","language_id":"go","content":""}}`)
+	req := httptest.NewRequest(http.MethodPost, "/status", bytes.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body downstreamErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "editor status incomplete" || !body.Incomplete || body.Accepted != nil || body.Applied != nil {
+		t.Fatalf("body = %+v, want generic incomplete status nil-response error", body)
 	}
 }
 
@@ -623,7 +957,7 @@ func TestViewStateMissingSessionID(t *testing.T) {
 }
 
 func TestViewStateProviderError(t *testing.T) {
-	vp := &mockViewProvider{err: errors.New("provider failed")}
+	vp := &mockViewProvider{err: errors.New("provider failed provider-secret-view /tmp/private")}
 	srv := New(&mockACPClient{}, WithViewProvider(vp))
 
 	req := httptest.NewRequest(http.MethodGet, "/view_state?session_id=s1", nil)
@@ -632,6 +966,19 @@ func TestViewStateProviderError(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want %d", rec.Code, http.StatusInternalServerError)
+	}
+	var body downstreamErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error != "view state unavailable" || !body.Incomplete {
+		t.Fatalf("body = %+v, want generic incomplete view error", body)
+	}
+	if body.Accepted != nil || body.Applied != nil {
+		t.Fatalf("view error should not claim accepted/applied state: %+v", body)
+	}
+	if strings.Contains(rec.Body.String(), "provider-secret-view") || strings.Contains(rec.Body.String(), "provider failed") || strings.Contains(rec.Body.String(), "/tmp/private") {
+		t.Fatalf("raw view provider error leaked in body: %s", rec.Body.String())
 	}
 }
 
@@ -994,12 +1341,15 @@ func TestEmptyStreamResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want %d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
-	// Should return empty text
-	if !strings.Contains(rec.Body.String(), `"text":""`) {
-		t.Errorf("expected empty text in response: %s", rec.Body.String())
+	var body inlineErrorResponseForTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%q", err, rec.Body.String())
+	}
+	if body.Text != "" || body.FinishReason != "" || !body.Incomplete || body.Accepted == nil || *body.Accepted {
+		t.Fatalf("body = %+v, want safe empty incomplete response", body)
 	}
 }
 

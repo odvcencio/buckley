@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+
+	"m31labs.dev/buckley/pkg/acp/partialresult"
+	acppb "m31labs.dev/buckley/pkg/acp/proto"
 )
 
 // JSONRPCMessage represents a JSON-RPC 2.0 message
@@ -178,9 +182,18 @@ func (b *Bridge) handleRequest(ctx context.Context, msg *JSONRPCMessage) *JSONRP
 
 		responseText, err := b.HandleTextQuery(ctx, params.Query)
 		if err != nil {
+			var incomplete *partialresult.IncompleteError
+			if errors.As(err, &incomplete) {
+				response.Error = &JSONRPCError{
+					Code:    InternalError,
+					Message: incomplete.Error(),
+					Data:    marshalPartialResultErrorData(incomplete.Result),
+				}
+				return response
+			}
 			response.Error = &JSONRPCError{
 				Code:    InternalError,
-				Message: err.Error(),
+				Message: "request failed: coordinator error",
 			}
 			return response
 		}
@@ -217,6 +230,38 @@ func (b *Bridge) handleRequest(ctx context.Context, msg *JSONRPCMessage) *JSONRP
 	}
 
 	return response
+}
+
+func marshalPartialResultErrorData(result *acppb.PartialResult) json.RawMessage {
+	if result == nil {
+		return nil
+	}
+	data := struct {
+		SchemaVersion string `json:"schema_version"`
+		Incomplete    bool   `json:"incomplete"`
+		Status        string `json:"status,omitempty"`
+		ReasonCode    string `json:"reason_code,omitempty"`
+		SafeError     string `json:"safe_error,omitempty"`
+		Partial       string `json:"partial_response,omitempty"`
+		Truncated     bool   `json:"truncated,omitempty"`
+		TaskResults   int    `json:"task_results,omitempty"`
+	}{
+		SchemaVersion: result.GetSchemaVersion(),
+		Incomplete:    result.GetIncomplete(),
+		Status:        result.GetStatus(),
+		ReasonCode:    result.GetReasonCode(),
+		SafeError:     result.GetSafeError(),
+		Truncated:     result.GetTruncated(),
+		TaskResults:   len(result.GetTaskResults()),
+	}
+	if result.GetPartialResponse() != nil {
+		data.Partial = result.GetPartialResponse().GetContent()
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // handleNotification processes a JSON-RPC notification

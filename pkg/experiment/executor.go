@@ -3,6 +3,7 @@ package experiment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -20,11 +21,13 @@ import (
 	projectcontext "m31labs.dev/buckley/pkg/context"
 	"m31labs.dev/buckley/pkg/encoding/toon"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/parallel"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/buckley/pkg/touch"
+	"m31labs.dev/buckley/pkg/transparency"
 )
 
 type experimentExecutor struct {
@@ -41,6 +44,25 @@ type runMetrics struct {
 	toolSuccesses    int
 	toolFailures     int
 	totalCost        float64
+	usage            transparency.TokenUsage
+	usageEvidence    bool
+	costUnknown      bool
+	modelExecutions  []model.ExecutionIdentity
+}
+
+type runConversationResult struct {
+	output          string
+	metrics         runMetrics
+	files           []string
+	modelExecutions []model.ExecutionIdentity
+	toolOutcomes    []agentloop.ToolOutcome
+}
+
+type toolCallExecution struct {
+	payload          string
+	filePath         string
+	success          bool
+	delegationResult *agent.DelegationResult
 }
 
 func (e *experimentExecutor) Execute(ctx context.Context, task *parallel.AgentTask, wtPath string) (*parallel.AgentResult, error) {
@@ -69,24 +91,30 @@ func (e *experimentExecutor) Execute(ctx context.Context, task *parallel.AgentTa
 	}
 
 	registry := e.buildRegistry(task, wtPath)
-	output, metrics, files, err := e.runConversation(runCtx, modelID, registry, task.Prompt, task.Context["system_prompt"], task.Context["temperature"], task.Context["max_tokens"])
+	conversation, err := e.runConversation(runCtx, modelID, registry, task.Prompt, task.Context["system_prompt"], task.Context["temperature"], task.Context["max_tokens"])
 	result.Duration = time.Since(start)
-	result.Output = output
+	result.Output = conversation.output
 	diffFiles, diffStats, diffErr := diffStatsFromWorktree(wtPath)
 	if diffErr == nil {
-		files = mergeFiles(files, diffFiles)
+		conversation.files = mergeFiles(conversation.files, diffFiles)
 	}
-	result.Files = files
+	result.Files = conversation.files
 	result.Metrics = map[string]int{
-		"prompt_tokens":     metrics.promptTokens,
-		"completion_tokens": metrics.completionTokens,
-		"tool_calls":        metrics.toolCalls,
-		"tool_successes":    metrics.toolSuccesses,
-		"tool_failures":     metrics.toolFailures,
-		"files_modified":    len(files),
+		"prompt_tokens":     conversation.metrics.promptTokens,
+		"completion_tokens": conversation.metrics.completionTokens,
+		"tool_calls":        conversation.metrics.toolCalls,
+		"tool_successes":    conversation.metrics.toolSuccesses,
+		"tool_failures":     conversation.metrics.toolFailures,
+		"files_modified":    len(conversation.files),
 		"lines_changed":     diffStats.Insertions + diffStats.Deletions,
 	}
-	result.TotalCost = metrics.totalCost
+	result.TotalCost = conversation.metrics.totalCost
+	if conversation.metrics.usageEvidence {
+		usage := transparency.CloneTokenUsage(conversation.metrics.usage)
+		result.Usage = &usage
+	}
+	result.CostUnknown = conversation.metrics.costUnknown
+	result.ModelExecutions = cloneModelExecutions(conversation.modelExecutions)
 	if err != nil {
 		result.Success = false
 		result.Error = err
@@ -138,12 +166,16 @@ func (e *experimentExecutor) buildRegistry(task *parallel.AgentTask, wtPath stri
 // sent the raw, unprojected transcript to the model on every round: the
 // engine's projection step now bounds every request the same way the other
 // migrated callers' requests are bounded.
-func (e *experimentExecutor) runConversation(ctx context.Context, modelID string, registry *tool.Registry, prompt string, systemOverride string, temperatureRaw string, maxTokensRaw string) (string, runMetrics, []string, error) {
+func (e *experimentExecutor) runConversation(ctx context.Context, modelID string, registry *tool.Registry, prompt string, systemOverride string, temperatureRaw string, maxTokensRaw string) (runConversationResult, error) {
 	metrics := runMetrics{}
 	filesTouched := map[string]struct{}{}
 	codec := toon.New(e.config.Encoding.UseToon)
 	maxTokens := e.config.Experiment.MaxTokensPerRun
 	maxCost := e.config.Experiment.MaxCostPerRun
+	route, err := e.modelManager.ResolveModelRoute(modelID)
+	if err != nil {
+		return runConversationResult{metrics: metrics, files: collectFiles(filesTouched)}, err
+	}
 
 	systemPrompt := "You are Buckley, an AI development assistant. Use the available tools to implement tasks. Run commands with run_shell, read/write files with file tools, and check git status when needed.\n\n" +
 		"For analysis tasks: run the commands and report results (no file changes needed).\n" +
@@ -161,22 +193,39 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		{Role: "user", Content: buildImplementationPrompt(prompt)},
 	}
 
+	offerTools := e.modelManager.OfferToolsForRoute(route)
+	toolsCatalogConfirmedUnavailable := e.modelManager.ToolsCatalogConfirmedUnavailableForRoute(route)
 	tools := []map[string]any(nil)
 	toolChoice := ""
-	if e.modelManager.SupportsTools(modelID) {
+	if offerTools {
 		tools = registry.ToOpenAIFunctions()
-		toolChoice = "auto"
+		if len(tools) > 0 {
+			toolChoice = "auto"
+		}
+	} else if toolsCatalogConfirmedUnavailable {
+		messages = append(messages, model.Message{
+			Role:    "system",
+			Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
+		})
 	}
 
 	const maxIterations = 10
+	lastRequestHadToolSchemas := false
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		requestTools := tools
+		requestToolChoice := toolChoice
+		lastRequestHadToolSchemas = len(requestTools) > 0
 		req := model.ChatRequest{
-			Model:       modelID,
+			Model:       route.RequestedModel,
 			Messages:    messages,
-			Tools:       tools,
-			ToolChoice:  toolChoice,
+			Tools:       requestTools,
+			ToolChoice:  requestToolChoice,
 			Temperature: 0.2,
+			Route:       route,
+		}
+		if toolsCatalogConfirmedUnavailable {
+			req.ToolsCatalogConfirmedUnavailable = true
 		}
 		if temp, ok := parseFloat(temperatureRaw); ok {
 			req.Temperature = temp
@@ -184,14 +233,36 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		if maxTokensOverride, ok := parseInt(maxTokensRaw); ok {
 			req.MaxTokens = maxTokensOverride
 		}
-		if reasoning := strings.TrimSpace(e.config.Models.Reasoning); reasoning != "" && e.modelManager.SupportsReasoning(modelID) {
+		if reasoning := strings.TrimSpace(e.config.Models.Reasoning); reasoning != "" && e.modelManager.SupportsReasoningForRoute(route) {
 			req.Reasoning = &model.ReasoningConfig{Effort: reasoning}
 		}
 		return req, nil
 	}
 
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, useContinuation bool) (*model.ChatResponse, error) {
-		resp, err := e.modelManager.ChatCompletion(ctx, req)
+		resp, err := e.modelManager.ChatCompletionForRoute(ctx, req, route)
+		if resp != nil {
+			usage := modelusage.FromResponse(resp)
+			if modelusage.HasEvidence(usage) {
+				metrics.usage = transparency.AddTokenUsage(metrics.usage, usage)
+				metrics.usageEvidence = true
+				if cost, ok := e.authoritativeResponseCost(modelID, resp, usage); ok {
+					metrics.totalCost += cost
+				} else {
+					metrics.costUnknown = true
+				}
+			}
+			metrics.promptTokens += resp.Usage.PromptTokens
+			metrics.completionTokens += resp.Usage.CompletionTokens
+			totalTokens := metrics.promptTokens + metrics.completionTokens
+			if maxTokens > 0 && totalTokens > maxTokens {
+				capErr := fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
+				if err != nil {
+					return resp, errors.Join(capErr, err)
+				}
+				return resp, capErr
+			}
+		}
 		if err != nil {
 			// Preserve a response returned with a provider/transport error;
 			// Controller will account and expose it as an incomplete partial
@@ -201,43 +272,60 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		if resp == nil || len(resp.Choices) == 0 {
 			return resp, nil
 		}
-		metrics.promptTokens += resp.Usage.PromptTokens
-		metrics.completionTokens += resp.Usage.CompletionTokens
-		totalTokens := metrics.promptTokens + metrics.completionTokens
-		if maxTokens > 0 && totalTokens > maxTokens {
-			return nil, fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
-		}
-		if maxCost > 0 {
-			cost, costErr := e.modelManager.CalculateCostFromTokens(modelID, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-			if costErr != nil {
-				return nil, fmt.Errorf("cost tracking unavailable for model %s: %w", modelID, costErr)
-			}
-			metrics.totalCost += cost
-			if metrics.totalCost > maxCost {
-				return nil, fmt.Errorf("max cost per run exceeded (%.4f > %.4f)", metrics.totalCost, maxCost)
-			}
-		}
 		return resp, nil
 	})
 
+	var observedToolOutcomes []agentloop.ToolOutcome
 	dispatchTools := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
+		if !lastRequestHadToolSchemas {
+			for _, tc := range calls {
+				name := strings.TrimSpace(tc.Function.Name)
+				if name == "" {
+					name = "unknown"
+				}
+				outcome := agentloop.ToolOutcome{
+					Content:     fmt.Sprintf("No local tool was run for %s because the preceding model request did not include tool schemas.", name),
+					Success:     false,
+					EffectClass: "control",
+				}
+				outcomes = append(outcomes, outcome)
+				observedToolOutcomes = append(observedToolOutcomes, outcome)
+			}
+			return outcomes, nil
+		}
 		for _, tc := range calls {
 			metrics.toolCalls++
-			payload, filePath, err := executeToolCall(ctx, registry, codec, tc)
-			success := err == nil
+			execution, err := executeToolCall(ctx, registry, codec, tc)
+			if execution.filePath != "" {
+				filesTouched[execution.filePath] = struct{}{}
+			}
+			var capErr error
+			if execution.delegationResult != nil {
+				capErr = e.applyDelegationEvidence(&metrics, execution.delegationResult, maxTokens, maxCost)
+				if capErr != nil {
+					if err != nil {
+						err = errors.Join(err, capErr)
+					} else {
+						err = capErr
+					}
+				}
+			}
+			if err != nil && execution.payload == "" {
+				execution.payload = fmt.Sprintf("Error: %v", err)
+			}
+			success := err == nil && execution.success
 			if success {
 				metrics.toolSuccesses++
 			} else {
 				metrics.toolFailures++
 			}
-			if filePath != "" {
-				filesTouched[filePath] = struct{}{}
+			outcome := agentloop.ToolOutcome{Content: execution.payload, Success: success}
+			outcomes = append(outcomes, outcome)
+			observedToolOutcomes = append(observedToolOutcomes, outcome)
+			if capErr != nil {
+				return outcomes, err
 			}
-			if err != nil {
-				payload = fmt.Sprintf("Error: %v", err)
-			}
-			outcomes = append(outcomes, agentloop.ToolOutcome{Content: payload, Success: success})
 		}
 		return outcomes, nil
 	})
@@ -258,48 +346,64 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 		CycleRepeats:       maxIterations + 1,
 	})
 
-	controller, err := agentloop.NewController(agentloop.ControllerConfig{
+	controllerConfig := agentloop.ControllerConfig{
 		Governor:      governor,
 		BuildRequest:  buildRequest,
 		CallModel:     callModel,
 		DispatchTools: dispatchTools,
 		History:       history,
 		ContextWindow: func(modelID string) int {
-			window, _ := e.modelManager.GetContextLength(modelID)
+			window, _ := e.modelManager.GetContextLengthForRoute(route)
 			return window
 		},
-	})
+	}
+	if maxCost > 0 {
+		controllerConfig.MaxCostUSD = maxCost
+		controllerConfig.CostForUsage = func(usage model.Usage) (float64, error) {
+			return e.modelManager.CalculateBoundedCost(modelID, usage)
+		}
+		controllerConfig.NormalizeCostBoundedRequest = e.modelManager.NormalizeCostBoundedRequest
+	}
+	controller, err := agentloop.NewController(controllerConfig)
 	if err != nil {
-		return "", metrics, collectFiles(filesTouched), err
+		return runConversationResult{metrics: metrics, files: collectFiles(filesTouched), toolOutcomes: cloneToolOutcomes(observedToolOutcomes)}, err
 	}
 
 	result, err := controller.Run(ctx)
 	if err != nil {
 		output := ""
+		var executions []model.ExecutionIdentity
 		if result != nil {
 			output = result.Content
+			executions = mergeModelExecutions(result.ModelExecutions, metrics.modelExecutions)
+		} else {
+			executions = cloneModelExecutions(metrics.modelExecutions)
 		}
-		return output, metrics, collectFiles(filesTouched), err
+		return runConversationResult{output: output, metrics: metrics, files: collectFiles(filesTouched), modelExecutions: executions, toolOutcomes: cloneToolOutcomes(observedToolOutcomes)}, err
 	}
 	if conclusiveErr := result.RequireConclusive(); conclusiveErr != nil {
 		output := ""
+		var executions []model.ExecutionIdentity
 		if result != nil {
 			output = result.Content
+			executions = mergeModelExecutions(result.ModelExecutions, metrics.modelExecutions)
+		} else {
+			executions = cloneModelExecutions(metrics.modelExecutions)
 		}
-		return output, metrics, collectFiles(filesTouched), conclusiveErr
+		return runConversationResult{output: output, metrics: metrics, files: collectFiles(filesTouched), modelExecutions: executions, toolOutcomes: cloneToolOutcomes(observedToolOutcomes)}, conclusiveErr
 	}
 
 	text, err := model.ExtractTextContent(result.Message.Content)
 	if err != nil {
-		return "", metrics, collectFiles(filesTouched), err
+		return runConversationResult{metrics: metrics, files: collectFiles(filesTouched), modelExecutions: mergeModelExecutions(result.ModelExecutions, metrics.modelExecutions), toolOutcomes: cloneToolOutcomes(observedToolOutcomes)}, err
 	}
-	return text, metrics, collectFiles(filesTouched), nil
+	return runConversationResult{output: text, metrics: metrics, files: collectFiles(filesTouched), modelExecutions: mergeModelExecutions(result.ModelExecutions, metrics.modelExecutions), toolOutcomes: cloneToolOutcomes(observedToolOutcomes)}, nil
 }
 
-func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (string, string, error) {
+func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (toolCallExecution, error) {
 	var params map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
-		return "", "", fmt.Errorf("failed to parse tool arguments: %w", err)
+		return toolCallExecution{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 	if params == nil {
 		params = make(map[string]any)
@@ -311,13 +415,29 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 	rich := touch.ExtractFromArgs(call.Function.Name, params)
 	result, err := registry.ExecuteWithContext(ctx, call.Function.Name, params)
 	if err != nil {
-		return "", normalizeFilePath(rich.FilePath), err
+		return toolCallExecution{filePath: normalizeFilePath(rich.FilePath)}, err
 	}
 	if result == nil {
-		return "", normalizeFilePath(rich.FilePath), fmt.Errorf("tool returned no result")
+		return toolCallExecution{filePath: normalizeFilePath(rich.FilePath)}, fmt.Errorf("tool returned no result")
 	}
+	delegationResult := delegationEvidenceFromToolResult(call.Function.Name, result)
 	if !result.Success {
-		return "", normalizeFilePath(rich.FilePath), fmt.Errorf("tool execution failed: %s", result.Error)
+		if delegationResult == nil {
+			return toolCallExecution{filePath: normalizeFilePath(rich.FilePath)}, fmt.Errorf("tool execution failed: %s", result.Error)
+		}
+		payload := result.Data
+		if payload == nil {
+			payload = result.DisplayData
+		}
+		encoded, encErr := codec.Marshal(payload)
+		if encErr != nil {
+			return toolCallExecution{filePath: normalizeFilePath(rich.FilePath), delegationResult: delegationResult}, encErr
+		}
+		return toolCallExecution{
+			payload:          string(encoded),
+			filePath:         normalizeFilePath(rich.FilePath),
+			delegationResult: delegationResult,
+		}, nil
 	}
 
 	payload := result.Data
@@ -326,7 +446,7 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 	}
 	encoded, err := codec.Marshal(payload)
 	if err != nil {
-		return "", normalizeFilePath(rich.FilePath), err
+		return toolCallExecution{filePath: normalizeFilePath(rich.FilePath), delegationResult: delegationResult}, err
 	}
 
 	filePath := ""
@@ -337,7 +457,127 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 		}
 	}
 
-	return string(encoded), filePath, nil
+	return toolCallExecution{payload: string(encoded), filePath: filePath, success: true, delegationResult: delegationResult}, nil
+}
+
+func (e *experimentExecutor) applyDelegationEvidence(metrics *runMetrics, result *agent.DelegationResult, maxTokens int, maxCost float64) error {
+	if metrics == nil || result == nil {
+		return nil
+	}
+	if result.Usage != nil {
+		metrics.usage = transparency.AddTokenUsage(metrics.usage, *result.Usage)
+		metrics.usageEvidence = true
+	}
+	metrics.promptTokens += result.InputTokens
+	metrics.completionTokens += result.OutputTokens
+	if result.CostUnknown {
+		metrics.costUnknown = true
+	} else if result.Cost != 0 {
+		metrics.totalCost += result.Cost
+	}
+	metrics.modelExecutions = mergeModelExecutions(metrics.modelExecutions, result.ModelExecutions)
+	if maxTokens > 0 {
+		totalTokens := metrics.promptTokens + metrics.completionTokens
+		if totalTokens > maxTokens {
+			return fmt.Errorf("max tokens per run exceeded (%d > %d)", totalTokens, maxTokens)
+		}
+	}
+	if maxCost > 0 {
+		if metrics.costUnknown {
+			modelID := strings.TrimSpace(result.ModelUsed)
+			if modelID == "" {
+				modelID = "delegated model"
+			}
+			return fmt.Errorf("cost tracking unavailable for model %s: retained usage evidence is not authoritatively priceable", modelID)
+		}
+		if metrics.totalCost > maxCost {
+			return fmt.Errorf("max cost per run exceeded (%.4f > %.4f)", metrics.totalCost, maxCost)
+		}
+	}
+	return nil
+}
+
+func delegationEvidenceFromToolResult(toolName string, result *builtin.Result) *agent.DelegationResult {
+	if strings.TrimSpace(toolName) != "delegate_task" || result == nil || result.Data == nil {
+		return nil
+	}
+	raw, ok := result.Data["delegation_result"]
+	if !ok {
+		return nil
+	}
+	delegationResult, ok := raw.(*agent.DelegationResult)
+	if !ok || delegationResult == nil {
+		return nil
+	}
+	return cloneDelegationResult(delegationResult)
+}
+
+func cloneDelegationResult(result *agent.DelegationResult) *agent.DelegationResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	if result.Usage != nil {
+		usage := transparency.CloneTokenUsage(*result.Usage)
+		cloned.Usage = &usage
+	}
+	cloned.ModelExecutions = cloneModelExecutions(result.ModelExecutions)
+	return &cloned
+}
+
+func cloneToolOutcomes(outcomes []agentloop.ToolOutcome) []agentloop.ToolOutcome {
+	if outcomes == nil {
+		return nil
+	}
+	return append([]agentloop.ToolOutcome(nil), outcomes...)
+}
+
+func mergeModelExecutions(base, extra []model.ExecutionIdentity) []model.ExecutionIdentity {
+	out := cloneModelExecutions(base)
+	for _, identity := range extra {
+		if containsModelExecution(out, identity) {
+			continue
+		}
+		out = append(out, identity)
+	}
+	return out
+}
+
+func containsModelExecution(identities []model.ExecutionIdentity, candidate model.ExecutionIdentity) bool {
+	for _, identity := range identities {
+		if identity == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *experimentExecutor) authoritativeResponseCost(modelID string, resp *model.ChatResponse, usage transparency.TokenUsage) (float64, bool) {
+	if e == nil || e.modelManager == nil || resp == nil || !modelusage.HasEvidence(usage) {
+		return 0, false
+	}
+	info, err := e.modelManager.GetModelInfo(modelID)
+	if err != nil {
+		return 0, false
+	}
+	pricing := transparency.ModelPricing{
+		InputPerMillion:  info.Pricing.Prompt,
+		OutputPerMillion: info.Pricing.Completion,
+	}
+	if transparency.CostUnknownForUsage(usage, pricing) {
+		return 0, false
+	}
+	if resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0 {
+		if resp.UsagePresent && info.PricingKnown && info.Pricing.Prompt == 0 && info.Pricing.Completion == 0 {
+			return 0, true
+		}
+		return 0, false
+	}
+	cost, err := e.modelManager.CalculateBoundedCost(modelID, resp.Usage)
+	if err != nil {
+		return 0, false
+	}
+	return cost, true
 }
 
 func parseTimeout(raw string) time.Duration {
@@ -563,17 +803,41 @@ func (t *delegateTaskTool) Execute(params map[string]any) (*builtin.Result, erro
 	if err != nil {
 		return &builtin.Result{
 			Success: false,
-			Error:   err.Error(),
+			Error:   "delegate task incomplete",
+			Data:    delegationToolData(result),
 		}, nil
 	}
 
 	return &builtin.Result{
 		Success: result.Success,
-		Data: map[string]any{
-			"output":      result.Output,
-			"model_used":  result.ModelUsed,
-			"tokens_used": result.TokensUsed,
-			"cost":        result.Cost,
-		},
+		Data:    delegationToolData(result),
 	}, nil
+}
+
+func delegationToolData(result *agent.DelegationResult) map[string]any {
+	data := map[string]any{
+		"accepted": false,
+	}
+	if result == nil {
+		data["incomplete"] = true
+		return data
+	}
+	data["output"] = result.Output
+	data["model_used"] = result.ModelUsed
+	data["tokens_used"] = result.TokensUsed
+	data["input_tokens"] = result.InputTokens
+	data["output_tokens"] = result.OutputTokens
+	data["cost"] = result.Cost
+	data["cost_unknown"] = result.CostUnknown
+	data["finish_reason"] = result.FinishReason
+	data["incomplete"] = result.Incomplete
+	data["accepted"] = result.Success && !result.Incomplete
+	if result.Usage != nil {
+		data["usage"] = transparency.CloneTokenUsage(*result.Usage)
+	}
+	if len(result.ModelExecutions) > 0 {
+		data["model_executions"] = cloneModelExecutions(result.ModelExecutions)
+	}
+	data["delegation_result"] = cloneDelegationResult(result)
+	return data
 }

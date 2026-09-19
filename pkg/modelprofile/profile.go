@@ -21,17 +21,33 @@ const (
 	ClassWeak     Class = "weak"
 	ClassBalanced Class = "balanced"
 	ClassFrontier Class = "frontier"
+
+	ReviewProfileEvidenceFirst        = "evidence_first"
+	ReviewProfileStructuredCodeReview = "structured_code_review"
 )
 
 type Capabilities struct {
-	ToolCalls            bool `json:"tool_calls"`
-	NativeJSONSchema     bool `json:"native_json_schema"`
-	ParallelToolCalls    bool `json:"parallel_tool_calls"`
-	Continuation         bool `json:"continuation"`
-	Reasoning            bool `json:"reasoning"`
-	CodeMode             bool `json:"code_mode"`
-	ContextWindowTokens  int  `json:"context_window_tokens,omitempty"`
-	SafeVisibleToolCount int  `json:"safe_visible_tool_count,omitempty"`
+	ToolCalls            bool     `json:"tool_calls"`
+	NativeJSONSchema     bool     `json:"native_json_schema"`
+	ParallelToolCalls    bool     `json:"parallel_tool_calls"`
+	Continuation         bool     `json:"continuation"`
+	Reasoning            bool     `json:"reasoning"`
+	ReasoningEfforts     []string `json:"reasoning_efforts,omitempty"`
+	CodeMode             bool     `json:"code_mode"`
+	ContextWindowTokens  int      `json:"context_window_tokens,omitempty"`
+	SafeVisibleToolCount int      `json:"safe_visible_tool_count,omitempty"`
+}
+
+// ReviewBehavior carries review-command behavior that is not a raw capability
+// measurement but still needs to travel with a calibrated/custom model profile.
+type ReviewBehavior struct {
+	Profile                            string         `json:"profile,omitempty"`
+	WorkflowRiskSignals                bool           `json:"workflow_risk_signals,omitempty"`
+	SupportingContextTokens            int            `json:"supporting_context_tokens,omitempty"`
+	ReasoningMaxTokensBySize           map[string]int `json:"reasoning_max_tokens_by_size,omitempty"`
+	ReasoningMaxTokensByEffort         map[string]int `json:"reasoning_max_tokens_by_effort,omitempty"`
+	MinExplorationTimeoutSeconds       int            `json:"min_exploration_timeout_seconds,omitempty"`
+	MinCriticExplorationTimeoutSeconds int            `json:"min_critic_exploration_timeout_seconds,omitempty"`
 }
 
 type Metrics struct {
@@ -56,33 +72,35 @@ type Metrics struct {
 // SampleCounts preserves the denominator for every independently observed
 // metric. Optional signals must not be diluted by unrelated task samples.
 type SampleCounts struct {
-	TaskSuccess      int `json:"task_success,omitempty"`
-	ToolReliability  int `json:"tool_reliability,omitempty"`
-	ArgumentRepair   int `json:"argument_repair,omitempty"`
-	StructuredOutput int `json:"structured_output,omitempty"`
-	ParallelCall     int `json:"parallel_call,omitempty"`
-	EditFidelity     int `json:"edit_fidelity,omitempty"`
-	Verification     int `json:"verification,omitempty"`
-	Continuation     int `json:"continuation,omitempty"`
-	Latency          int `json:"latency,omitempty"`
-	Tokens           int `json:"tokens,omitempty"`
-	Cost             int `json:"cost,omitempty"`
+	TaskSuccess        int `json:"task_success,omitempty"`
+	TaskSuccessUnknown int `json:"task_success_unknown,omitempty"`
+	ToolReliability    int `json:"tool_reliability,omitempty"`
+	ArgumentRepair     int `json:"argument_repair,omitempty"`
+	StructuredOutput   int `json:"structured_output,omitempty"`
+	ParallelCall       int `json:"parallel_call,omitempty"`
+	EditFidelity       int `json:"edit_fidelity,omitempty"`
+	Verification       int `json:"verification,omitempty"`
+	Continuation       int `json:"continuation,omitempty"`
+	Latency            int `json:"latency,omitempty"`
+	Tokens             int `json:"tokens,omitempty"`
+	Cost               int `json:"cost,omitempty"`
 }
 
 // Profile is immutable once stored. Version and Digest give every compiled
 // protocol a replayable measurement identity.
 type Profile struct {
-	SchemaVersion string       `json:"schema_version"`
-	ModelID       string       `json:"model_id"`
-	Provider      string       `json:"provider,omitempty"`
-	Version       string       `json:"version"`
-	Class         Class        `json:"class,omitempty"`
-	SampleSize    int          `json:"sample_size"`
-	Confidence    float64      `json:"confidence"`
-	MeasuredAt    time.Time    `json:"measured_at"`
-	Capabilities  Capabilities `json:"capabilities"`
-	Metrics       Metrics      `json:"metrics"`
-	Samples       SampleCounts `json:"samples,omitempty"`
+	SchemaVersion string          `json:"schema_version"`
+	ModelID       string          `json:"model_id"`
+	Provider      string          `json:"provider,omitempty"`
+	Version       string          `json:"version"`
+	Class         Class           `json:"class,omitempty"`
+	SampleSize    int             `json:"sample_size"`
+	Confidence    float64         `json:"confidence"`
+	MeasuredAt    time.Time       `json:"measured_at"`
+	Capabilities  Capabilities    `json:"capabilities"`
+	Metrics       Metrics         `json:"metrics"`
+	Samples       SampleCounts    `json:"samples,omitempty"`
+	Review        *ReviewBehavior `json:"review,omitempty"`
 }
 
 func (p Profile) Normalize() Profile {
@@ -95,6 +113,8 @@ func (p Profile) Normalize() Profile {
 	p.Version = strings.TrimSpace(p.Version)
 	p.Class = Class(strings.ToLower(strings.TrimSpace(string(p.Class))))
 	p.MeasuredAt = p.MeasuredAt.UTC().Round(0)
+	p.Capabilities.ReasoningEfforts = normalizeReasoningEfforts(p.Capabilities.ReasoningEfforts)
+	p.Review = NormalizeReviewBehavior(p.Review)
 	return p
 }
 
@@ -118,6 +138,16 @@ func (p Profile) Validate() error {
 	if p.Class != "" && p.Class != ClassWeak && p.Class != ClassBalanced && p.Class != ClassFrontier {
 		return fmt.Errorf("profile class must be weak, balanced, or frontier")
 	}
+	seenReasoningEfforts := make(map[string]struct{}, len(p.Capabilities.ReasoningEfforts))
+	for _, effort := range p.Capabilities.ReasoningEfforts {
+		if reasoningEffortRank(effort) < 0 {
+			return fmt.Errorf("profile reasoning effort %q is unsupported", effort)
+		}
+		if _, duplicate := seenReasoningEfforts[effort]; duplicate {
+			return fmt.Errorf("profile reasoning effort %q is duplicated", effort)
+		}
+		seenReasoningEfforts[effort] = struct{}{}
+	}
 	ratioMeasurements := [...]struct {
 		name  string
 		value float64
@@ -139,6 +169,9 @@ func (p Profile) Validate() error {
 	if p.Capabilities.ContextWindowTokens < 0 || p.Capabilities.SafeVisibleToolCount < 0 || p.Metrics.EffectiveContextTokens < 0 || p.Metrics.LatencyP50MS < 0 || p.Metrics.LatencyP95MS < 0 {
 		return fmt.Errorf("profile measurements must not be negative")
 	}
+	if err := validateReviewBehavior(p.Review); err != nil {
+		return err
+	}
 	finiteMeasurements := [...]struct {
 		name  string
 		value float64
@@ -159,6 +192,7 @@ func (p Profile) Validate() error {
 		count int
 	}{
 		{name: "task_success", count: p.Samples.TaskSuccess},
+		{name: "task_success_unknown", count: p.Samples.TaskSuccessUnknown},
 		{name: "tool_reliability", count: p.Samples.ToolReliability},
 		{name: "argument_repair", count: p.Samples.ArgumentRepair},
 		{name: "structured_output", count: p.Samples.StructuredOutput},
@@ -175,7 +209,155 @@ func (p Profile) Validate() error {
 			return fmt.Errorf("profile %s samples must be between 0 and sample_size", measurement.name)
 		}
 	}
+	if p.Samples.TaskSuccessUnknown > p.SampleSize-p.Samples.TaskSuccess {
+		return fmt.Errorf("profile task success known and unknown samples must not exceed sample_size")
+	}
 	return nil
+}
+
+func NormalizeReviewBehavior(behavior *ReviewBehavior) *ReviewBehavior {
+	if behavior == nil {
+		return nil
+	}
+	normalized := *behavior
+	normalized.Profile = strings.ToLower(strings.TrimSpace(normalized.Profile))
+	normalized.ReasoningMaxTokensBySize = normalizeReviewTokenMap(normalized.ReasoningMaxTokensBySize)
+	normalized.ReasoningMaxTokensByEffort = normalizeReviewTokenMap(normalized.ReasoningMaxTokensByEffort)
+	return &normalized
+}
+
+func DefaultReviewBehaviorForModel(modelID string) *ReviewBehavior {
+	switch {
+	case isQwenReviewModel(modelID):
+		return &ReviewBehavior{
+			Profile:                            ReviewProfileEvidenceFirst,
+			WorkflowRiskSignals:                true,
+			ReasoningMaxTokensBySize:           map[string]int{"focused": 2048, "standard": 3072, "broad": 4096, "project": 4096},
+			ReasoningMaxTokensByEffort:         map[string]int{"minimal": 512, "low": 1024, "medium": 2048, "high": 4096, "xhigh": 8192},
+			MinExplorationTimeoutSeconds:       100,
+			MinCriticExplorationTimeoutSeconds: 75,
+		}
+	case isDeepSeekV4ProReviewModel(modelID):
+		return &ReviewBehavior{
+			Profile:                      ReviewProfileStructuredCodeReview,
+			SupportingContextTokens:      32_000,
+			ReasoningMaxTokensBySize:     map[string]int{"focused": 3072, "standard": 6144, "broad": 8192, "project": 8192},
+			ReasoningMaxTokensByEffort:   map[string]int{"minimal": 1024, "low": 2048, "medium": 4096, "high": 8192, "xhigh": 8192},
+			MinExplorationTimeoutSeconds: 90,
+		}
+	default:
+		return nil
+	}
+}
+
+func isQwenReviewModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	return modelID == "qwen/qwen3.7-plus" ||
+		strings.HasSuffix(modelID, "/qwen3.7-plus") ||
+		modelID == "qwen/qwen3.7-flash" ||
+		strings.HasSuffix(modelID, "/qwen3.7-flash") ||
+		modelID == "qwen/qwen3.8-flash" ||
+		strings.HasSuffix(modelID, "/qwen3.8-flash") ||
+		modelID == "qwen/qwen3.8-max" ||
+		strings.HasSuffix(modelID, "/qwen3.8-max")
+}
+
+func isDeepSeekV4ProReviewModel(modelID string) bool {
+	return strings.EqualFold(strings.TrimSpace(modelID), "deepseek/deepseek-v4-pro-0813")
+}
+
+func normalizeReviewTokenMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make(map[string]int, len(values))
+	for key, value := range values {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "" {
+			normalized[key] = value
+		}
+	}
+	if len(normalized) != len(values) {
+		original := make(map[string]int, len(values))
+		for key, value := range values {
+			original[key] = value
+		}
+		return original
+	}
+	return normalized
+}
+
+func validateReviewBehavior(behavior *ReviewBehavior) error {
+	if behavior == nil {
+		return nil
+	}
+	switch behavior.Profile {
+	case "", "generic", ReviewProfileEvidenceFirst, ReviewProfileStructuredCodeReview:
+	default:
+		return fmt.Errorf("profile review profile %q is unsupported", behavior.Profile)
+	}
+	if behavior.SupportingContextTokens < 0 || behavior.MinExplorationTimeoutSeconds < 0 || behavior.MinCriticExplorationTimeoutSeconds < 0 {
+		return fmt.Errorf("profile review measurements must not be negative")
+	}
+	for key, value := range behavior.ReasoningMaxTokensBySize {
+		switch key {
+		case "focused", "standard", "broad", "project":
+		default:
+			return fmt.Errorf("profile review size %q is unsupported", key)
+		}
+		if value <= 0 {
+			return fmt.Errorf("profile review size %q token budget must be positive", key)
+		}
+	}
+	for key, value := range behavior.ReasoningMaxTokensByEffort {
+		if reasoningEffortRank(key) < 0 {
+			return fmt.Errorf("profile review reasoning effort %q is unsupported", key)
+		}
+		if value <= 0 {
+			return fmt.Errorf("profile review reasoning effort %q token budget must be positive", key)
+		}
+	}
+	return nil
+}
+
+func normalizeReasoningEfforts(efforts []string) []string {
+	if len(efforts) == 0 {
+		return nil
+	}
+	normalized := make([]string, len(efforts))
+	for i, effort := range efforts {
+		normalized[i] = strings.ToLower(strings.TrimSpace(effort))
+	}
+	sort.SliceStable(normalized, func(i, j int) bool {
+		left, right := reasoningEffortRank(normalized[i]), reasoningEffortRank(normalized[j])
+		if left < 0 || right < 0 {
+			if left < 0 && right < 0 {
+				return normalized[i] < normalized[j]
+			}
+			return right < 0
+		}
+		return left < right
+	})
+	return normalized
+}
+
+func reasoningEffortRank(effort string) int {
+	switch effort {
+	case "minimal":
+		return 0
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	case "xhigh":
+		return 4
+	case "max":
+		return 5
+	default:
+		return -1
+	}
 }
 
 func (p Profile) ResolvedClass() Class {
@@ -189,7 +371,7 @@ func (p Profile) ResolvedClass() Class {
 	if p.Samples.TaskSuccess >= 10 && p.Metrics.TaskSuccessRate < 0.75 {
 		return ClassWeak
 	}
-	frontierTaskEvidence := p.Samples.TaskSuccess == 0 || (p.Samples.TaskSuccess >= 20 && p.Metrics.TaskSuccessRate >= 0.90)
+	frontierTaskEvidence := (p.Samples.TaskSuccess == 0 && p.Samples.TaskSuccessUnknown == 0) || (p.Samples.TaskSuccess >= 20 && p.Metrics.TaskSuccessRate >= 0.90)
 	if frontierTaskEvidence && p.Capabilities.Continuation && p.Capabilities.ParallelToolCalls && p.Metrics.ContinuationReliability >= 0.90 && p.Metrics.ParallelCallReliability >= 0.90 && p.Metrics.EffectiveContextTokens >= 96*1024 {
 		return ClassFrontier
 	}
@@ -211,20 +393,25 @@ func (p Profile) Digest() (string, error) {
 
 // Observation contains only aggregate evaluation signals, never user source.
 type Observation struct {
-	Succeeded          bool
-	ToolSucceeded      *bool
-	ArgumentRepaired   *bool
-	StructuredOutput   *bool
-	ParallelCall       *bool
-	EditFaithful       *bool
-	VerificationPassed *bool
-	ContinuationWorked *bool
-	LatencyMS          int64
-	PromptTokens       int
-	CompletionTokens   int
-	TokensObserved     bool
-	CostUSD            float64
-	CostObserved       bool
+	Succeeded bool
+	// TaskSuccessObserved distinguishes explicit unknown task outcomes from
+	// legacy callers. Nil keeps the historical interpretation that Succeeded is
+	// observed task evidence; false records operational metrics without adding
+	// success or failure evidence.
+	TaskSuccessObserved *bool
+	ToolSucceeded       *bool
+	ArgumentRepaired    *bool
+	StructuredOutput    *bool
+	ParallelCall        *bool
+	EditFaithful        *bool
+	VerificationPassed  *bool
+	ContinuationWorked  *bool
+	LatencyMS           int64
+	PromptTokens        int
+	CompletionTokens    int
+	TokensObserved      bool
+	CostUSD             float64
+	CostObserved        bool
 }
 
 func Aggregate(base Profile, observations []Observation, measuredAt time.Time) (Profile, error) {
@@ -243,7 +430,7 @@ func Aggregate(base Profile, observations []Observation, measuredAt time.Time) (
 	next := base
 	next.SampleSize += len(observations)
 	next.MeasuredAt = measuredAt.UTC().Round(0)
-	next.Metrics.TaskSuccessRate, next.Samples.TaskSuccess = aggregateSuccess(base.Metrics.TaskSuccessRate, base.Samples.TaskSuccess, observations)
+	next.Metrics.TaskSuccessRate, next.Samples.TaskSuccess, next.Samples.TaskSuccessUnknown = aggregateSuccess(base.Metrics.TaskSuccessRate, base.Samples.TaskSuccess, base.Samples.TaskSuccessUnknown, observations)
 	next.Metrics.ToolReliability, next.Samples.ToolReliability = aggregateRatio(base.Metrics.ToolReliability, metricSampleCount(base.Samples.ToolReliability, base), observations, func(o Observation) *bool { return o.ToolSucceeded })
 	next.Metrics.ArgumentRepairReliability, next.Samples.ArgumentRepair = aggregateRatio(base.Metrics.ArgumentRepairReliability, metricSampleCount(base.Samples.ArgumentRepair, base), observations, func(o Observation) *bool { return o.ArgumentRepaired })
 	next.Metrics.StructuredOutputReliability, next.Samples.StructuredOutput = aggregateRatio(base.Metrics.StructuredOutputReliability, metricSampleCount(base.Samples.StructuredOutput, base), observations, func(o Observation) *bool { return o.StructuredOutput })
@@ -280,7 +467,7 @@ func Aggregate(base Profile, observations []Observation, measuredAt time.Time) (
 		}
 	}
 	next.Metrics.CostUSDPerSuccessfulTask = 0
-	if next.Samples.Cost == next.Samples.TaskSuccess && next.Samples.TaskSuccess > 0 {
+	if next.Samples.Cost == next.SampleSize && next.Samples.TaskSuccess == next.SampleSize && next.Samples.TaskSuccess > 0 {
 		successes := next.Metrics.TaskSuccessRate * float64(next.Samples.TaskSuccess)
 		if successes > 0 {
 			next.Metrics.CostUSDPerSuccessfulTask = next.Metrics.AverageCostUSDPerTask * float64(next.Samples.Cost) / successes
@@ -292,15 +479,23 @@ func Aggregate(base Profile, observations []Observation, measuredAt time.Time) (
 	return next, nil
 }
 
-func aggregateSuccess(previous float64, prior int, observations []Observation) (float64, int) {
-	weighted := previous * float64(prior)
+func aggregateSuccess(previous float64, priorKnown int, priorUnknown int, observations []Observation) (float64, int, int) {
+	weighted := previous * float64(priorKnown)
+	known, unknown := priorKnown, priorUnknown
 	for _, observation := range observations {
+		if observation.TaskSuccessObserved != nil && !*observation.TaskSuccessObserved {
+			unknown++
+			continue
+		}
+		known++
 		if observation.Succeeded {
 			weighted++
 		}
 	}
-	count := prior + len(observations)
-	return weighted / float64(count), count
+	if known == 0 {
+		return previous, 0, unknown
+	}
+	return weighted / float64(known), known, unknown
 }
 
 func aggregateRatio(previous float64, prior int, observations []Observation, extract func(Observation) *bool) (float64, int) {
@@ -340,7 +535,7 @@ func metricSampleCount(recorded int, profile Profile) int {
 	// Profiles written before per-signal sample counts used SampleSize as
 	// every ratio's denominator. Once task samples are recorded, zero means
 	// this specific signal was genuinely not observed.
-	if profile.Samples.TaskSuccess > 0 {
+	if profile.Samples.TaskSuccess > 0 || profile.Samples.TaskSuccessUnknown > 0 {
 		return 0
 	}
 	return profile.SampleSize

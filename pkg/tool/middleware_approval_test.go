@@ -13,6 +13,8 @@ import (
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
+const postApprovalExecutionTimeout = 5 * time.Second
+
 func TestApprovalMiddlewareWriteFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "note.txt")
@@ -70,7 +72,7 @@ func TestApprovalMiddlewareWriteFile(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(postApprovalExecutionTimeout):
 		t.Fatal("execution timed out waiting for approval")
 	}
 
@@ -142,9 +144,11 @@ func TestApprovalMiddlewareRunCode(t *testing.T) {
 		t.Fatalf("approve code: %v", err)
 	}
 
+	// The mission approval decision timeout remains 2s above. Once approved,
+	// run_code still needs time for the poll interval plus real subprocess work.
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(postApprovalExecutionTimeout):
 		t.Fatal("run_code timed out waiting for approval")
 	}
 	if execErr != nil {

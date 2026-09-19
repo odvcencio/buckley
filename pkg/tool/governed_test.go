@@ -168,3 +168,14 @@ func TestGovernedToolNames_EvaluatorModeOverridesConfiguredDefault(t *testing.T)
 		t.Fatalf("GovernedToolNames() = %v, want all 3 tools (evaluator mode must override configured default)", got)
 	}
 }
+
+type mockEvaluator struct {
+	results map[[2]string]types.StrategyResult
+}
+
+func (m *mockEvaluator) EvalStrategy(domain, name string, facts map[string]any) (types.StrategyResult, error) {
+	if r, ok := m.results[[2]string{domain, name}]; ok {
+		return r, nil
+	}
+	return types.StrategyResult{Params: map[string]any{"timeout_seconds": float64(120)}}, nil
+}

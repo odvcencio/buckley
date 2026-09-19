@@ -26,7 +26,6 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 		RootDir:           root,
 		SkillsDescription: "Skills:\n- Example skill",
 		TaskType:          "coding",
-		ModelTier:         "premium",
 	})
 
 	for _, want := range []string{
@@ -43,6 +42,36 @@ func TestBuildRuntimeSystemPrompt_IncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected prompt to contain %q\nfull prompt:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestDefaultToolUseSystemPromptOutcomeFirst(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []string{
+		"questions and read-only tasks",
+		"observable scoped change",
+		"cheapest relevant verification after the final change",
+		"Never claim",
+		"blocked or incomplete",
+	} {
+		if !strings.Contains(DefaultToolUseSystemPrompt, want) {
+			t.Fatalf("default tool-use prompt missing %q:\n%s", want, DefaultToolUseSystemPrompt)
+		}
+	}
+	for _, old := range []string{"Always take action with tools", "MUST use tools"} {
+		if strings.Contains(DefaultToolUseSystemPrompt, old) {
+			t.Fatalf("default tool-use prompt retained old pressure %q:\n%s", old, DefaultToolUseSystemPrompt)
+		}
+	}
+}
+
+func TestBuildRuntimeSystemPrompt_UsesSharedDefaultToolUsePrompt(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildRuntimeSystemPrompt(RuntimePromptInput{})
+	if prompt != DefaultToolUseSystemPrompt {
+		t.Fatalf("default runtime prompt = %q, want shared default %q", prompt, DefaultToolUseSystemPrompt)
 	}
 }
 

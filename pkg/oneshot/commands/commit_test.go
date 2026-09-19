@@ -4,7 +4,56 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/prompts"
 )
+
+func isolateCommitPrompt(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
+}
+
+func TestCommitDefinitionSystemPrompt_DefaultPreservesToolContract(t *testing.T) {
+	isolateCommitPrompt(t)
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if got != commitSystemPrompt {
+		t.Fatalf("SystemPrompt() changed the default prompt:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("default prompt does not preserve the generate_commit contract:\n%s", got)
+	}
+}
+
+func TestCommitDefinitionSystemPrompt_AppliesEnvOverride(t *testing.T) {
+	isolateCommitPrompt(t)
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "{{DEFAULT_PROMPT}}\n\nPrefer one precise body bullet.")
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if !strings.Contains(got, "Prefer one precise body bullet.") {
+		t.Fatalf("SystemPrompt() did not apply the environment override:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("environment override lost the generate_commit contract:\n%s", got)
+	}
+}
+
+func TestCommitDefinitionSystemPrompt_AppliesSavedOverride(t *testing.T) {
+	isolateCommitPrompt(t)
+	if err := prompts.SaveOverride("commit", "{{DEFAULT_PROMPT}}\n\nPrefer durable, high-level wording."); err != nil {
+		t.Fatalf("SaveOverride(commit): %v", err)
+	}
+
+	got := (CommitDefinition{}).SystemPrompt()
+	if !strings.Contains(got, "Prefer durable, high-level wording.") {
+		t.Fatalf("SystemPrompt() did not apply the saved override:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the generate_commit tool") {
+		t.Fatalf("saved override lost the generate_commit contract:\n%s", got)
+	}
+}
 
 func TestCommitDefinitionRejectsMalformedStructuredOutput(t *testing.T) {
 	tests := []struct {
@@ -27,6 +76,53 @@ func TestCommitDefinitionRejectsMalformedStructuredOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCommitResultBodyAcceptsStringOrArray locks the tolerant unmarshal that
+// fixed the 2026-09-04 openai_compatible/glm-5.3-flash regression: the model
+// returned "body" as a single newline-joined string instead of the
+// documented array of bullets, and json.Unmarshal into a bare []string
+// failed the whole generation after all retries ("cannot unmarshal string
+// into Go struct field CommitResult.body of type []string"). Body now uses
+// StringList (see pr.go), so both shapes decode.
+func TestCommitResultBodyAcceptsStringOrArray(t *testing.T) {
+	t.Parallel()
+
+	t.Run("array", func(t *testing.T) {
+		raw := []byte(`{"action":"fix","subject":"widget","body":["a","b"]}`)
+		value, err := (CommitDefinition{}).Unmarshal(raw)
+		if err != nil {
+			t.Fatalf("Unmarshal() array form: %v", err)
+		}
+		cr := value.(*CommitResult)
+		if len(cr.Body) != 2 || cr.Body[0] != "a" || cr.Body[1] != "b" {
+			t.Fatalf("Body = %v, want [a b]", cr.Body)
+		}
+	})
+
+	t.Run("newline-joined string", func(t *testing.T) {
+		raw := []byte(`{"action":"fix","subject":"widget","body":"line one\n\nline two"}`)
+		value, err := (CommitDefinition{}).Unmarshal(raw)
+		if err != nil {
+			t.Fatalf("Unmarshal() string form: %v", err)
+		}
+		cr := value.(*CommitResult)
+		if len(cr.Body) != 2 || cr.Body[0] != "line one" || cr.Body[1] != "line two" {
+			t.Fatalf("Body = %v, want [line one, line two]", cr.Body)
+		}
+	})
+
+	t.Run("empty string", func(t *testing.T) {
+		raw := []byte(`{"action":"fix","subject":"widget","body":""}`)
+		value, err := (CommitDefinition{}).Unmarshal(raw)
+		if err != nil {
+			t.Fatalf("Unmarshal() empty string form: %v", err)
+		}
+		cr := value.(*CommitResult)
+		if len(cr.Body) != 0 {
+			t.Fatalf("Body = %v, want empty", cr.Body)
+		}
+	})
 }
 
 func TestCommitResultFormatUsesBreakingReasonAndNormalizesBullets(t *testing.T) {

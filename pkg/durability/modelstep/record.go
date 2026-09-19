@@ -23,13 +23,14 @@ const (
 // ResponseEnvelope is the replayable provider response and its original
 // accounting projection.
 type ResponseEnvelope struct {
-	Version        string              `json:"version"`
-	Response       *model.ChatResponse `json:"response"`
-	ChargedCostUSD float64             `json:"charged_cost_usd,omitempty"`
-	CostRecorded   bool                `json:"cost_recorded"`
-	PricingError   string              `json:"pricing_error,omitempty"`
-	Partial        bool                `json:"partial,omitempty"`
-	ProviderError  string              `json:"provider_error,omitempty"`
+	Version              string              `json:"version"`
+	Response             *model.ChatResponse `json:"response"`
+	ResponseToolsOffered *bool               `json:"response_tools_offered,omitempty"`
+	ChargedCostUSD       float64             `json:"charged_cost_usd,omitempty"`
+	CostRecorded         bool                `json:"cost_recorded"`
+	PricingError         string              `json:"pricing_error,omitempty"`
+	Partial              bool                `json:"partial,omitempty"`
+	ProviderError        string              `json:"provider_error,omitempty"`
 }
 
 // BlockedMarker is the terminal record for a provider response whose durable
@@ -46,13 +47,14 @@ type BlockedMarker struct {
 
 // DecodedResponse is the validated projection used for replay/accounting.
 type DecodedResponse struct {
-	Response       *model.ChatResponse
-	ChargedCostUSD float64
-	CostRecorded   bool
-	PricingError   string
-	Partial        bool
-	ProviderError  string
-	Legacy         bool
+	Response             *model.ChatResponse
+	ResponseToolsOffered *bool
+	ChargedCostUSD       float64
+	CostRecorded         bool
+	PricingError         string
+	Partial              bool
+	ProviderError        string
+	Legacy               bool
 }
 
 // BlockedReplay is a validated blocked marker plus its optional response.
@@ -119,12 +121,13 @@ func DecodeResponse(body []byte) (DecodedResponse, error) {
 		return DecodedResponse{}, err
 	}
 	return DecodedResponse{
-		Response:       envelope.Response,
-		ChargedCostUSD: envelope.ChargedCostUSD,
-		CostRecorded:   envelope.CostRecorded,
-		PricingError:   envelope.PricingError,
-		Partial:        envelope.Partial,
-		ProviderError:  envelope.ProviderError,
+		Response:             envelope.Response,
+		ResponseToolsOffered: envelope.ResponseToolsOffered,
+		ChargedCostUSD:       envelope.ChargedCostUSD,
+		CostRecorded:         envelope.CostRecorded,
+		PricingError:         envelope.PricingError,
+		Partial:              envelope.Partial,
+		ProviderError:        envelope.ProviderError,
 	}, nil
 }
 

@@ -16,13 +16,132 @@ type TokenUsage struct {
 	// Reasoning tokens (for thinking models like kimi-k2)
 	Reasoning int `json:"reasoning,omitempty"`
 
+	// Unclassified tokens reported only as a total with no known input/output
+	// split. These count toward totals but are not priced as a guessed split.
+	Unclassified int `json:"unclassified,omitempty"`
+
 	// CachedInput tokens that were cache hits (reduced cost)
 	CachedInput int `json:"cached_input,omitempty"`
+
+	// ReportedTotal preserves a provider-reported total separately from
+	// Buckley's additive total so inconsistent or total-only usage survives
+	// without double-counting.
+	ReportedTotal int `json:"reported_total,omitempty"`
+
+	// ReportedReasoning preserves provider reasoning-token details that are a
+	// subset of completion/output tokens, not additional billable tokens.
+	ReportedReasoning *int `json:"reported_reasoning,omitempty"`
+
+	// ReportedCachedInput preserves provider cached-prompt details that are a
+	// subset of input tokens. Pricing requires authoritative cache rates.
+	ReportedCachedInput *int `json:"reported_cached_input,omitempty"`
+
+	// ReportedCacheWrite preserves provider cache-write details. Pricing
+	// requires authoritative cache-write rates.
+	ReportedCacheWrite int `json:"reported_cache_write,omitempty"`
+
+	// ReportedUsageInconsistent marks provider usage details that contradicted
+	// themselves before aggregation, such as a reported total below the reported
+	// split or invalid negative/subset counts.
+	ReportedUsageInconsistent bool `json:"reported_usage_inconsistent,omitempty"`
+
+	// Estimated marks locally derived usage that should not be treated as an
+	// authoritative provider invoice.
+	Estimated bool `json:"estimated,omitempty"`
+
+	// UsageEvidencePresent records that a real response carried provider usage
+	// evidence, even when the reported counts were explicitly zero.
+	UsageEvidencePresent bool `json:"usage_evidence_present,omitempty"`
+
+	// UsageEvidenceMissing records that a real model response was observed but
+	// did not carry provider usage evidence. Counts remain as reported/absent;
+	// cost inference must not treat the response as a known free invocation.
+	UsageEvidenceMissing bool `json:"usage_evidence_missing,omitempty"`
 }
 
 // Total returns the total token count.
 func (tu TokenUsage) Total() int {
-	return tu.Input + tu.Output + tu.Reasoning
+	return tu.Input + tu.Output + tu.Reasoning + tu.Unclassified
+}
+
+// CloneTokenUsage returns a deep copy of usage metadata, including optional
+// provider detail pointers.
+func CloneTokenUsage(usage TokenUsage) TokenUsage {
+	if usage.ReportedReasoning != nil {
+		value := *usage.ReportedReasoning
+		usage.ReportedReasoning = &value
+	}
+	if usage.ReportedCachedInput != nil {
+		value := *usage.ReportedCachedInput
+		usage.ReportedCachedInput = &value
+	}
+	return usage
+}
+
+// AddTokenUsage combines usage while preserving non-additive provider details
+// separately from Buckley's legacy additive total.
+func AddTokenUsage(total, next TokenUsage) TokenUsage {
+	total = CloneTokenUsage(total)
+	total.Input += next.Input
+	total.Output += next.Output
+	total.Reasoning += next.Reasoning
+	total.Unclassified += next.Unclassified
+	total.CachedInput += next.CachedInput
+	total.ReportedTotal += next.ReportedTotal
+	total.ReportedCacheWrite += next.ReportedCacheWrite
+	total.ReportedUsageInconsistent = total.ReportedUsageInconsistent || next.ReportedUsageInconsistent
+	total.Estimated = total.Estimated || next.Estimated
+	total.UsageEvidencePresent = total.UsageEvidencePresent || next.UsageEvidencePresent
+	total.UsageEvidenceMissing = total.UsageEvidenceMissing || next.UsageEvidenceMissing
+	if next.ReportedReasoning != nil {
+		if total.ReportedReasoning == nil {
+			total.ReportedReasoning = new(int)
+		}
+		*total.ReportedReasoning += *next.ReportedReasoning
+	}
+	if next.ReportedCachedInput != nil {
+		if total.ReportedCachedInput == nil {
+			total.ReportedCachedInput = new(int)
+		}
+		*total.ReportedCachedInput += *next.ReportedCachedInput
+	}
+	return total
+}
+
+// CostUnknownForUsage reports whether a token record cannot be priced as an
+// authoritative subtotal with the supplied basic pricing table.
+func CostUnknownForUsage(tokens TokenUsage, pricing ModelPricing) bool {
+	if tokens.Estimated || tokens.Unclassified > 0 || tokens.ReportedUsageInconsistent {
+		return true
+	}
+	if tokens.UsageEvidenceMissing && (pricing.InputPerMillion != 0 || pricing.OutputPerMillion != 0 ||
+		pricing.ReasoningPerMillion != 0 || pricing.CachedInputPerMillion != 0) {
+		return true
+	}
+	if tokens.Input < 0 || tokens.Output < 0 || tokens.Reasoning < 0 || tokens.Unclassified < 0 ||
+		tokens.CachedInput < 0 || tokens.ReportedTotal < 0 || tokens.ReportedCacheWrite < 0 {
+		return true
+	}
+	if tokens.ReportedReasoning != nil {
+		if *tokens.ReportedReasoning < 0 || *tokens.ReportedReasoning > tokens.Output {
+			return true
+		}
+		if *tokens.ReportedReasoning > 0 && pricing.ReasoningPerMillion > 0 {
+			return true
+		}
+	}
+	if tokens.ReportedCachedInput != nil {
+		if *tokens.ReportedCachedInput < 0 || *tokens.ReportedCachedInput > tokens.Input {
+			return true
+		}
+		if *tokens.ReportedCachedInput > 0 {
+			return true
+		}
+	}
+	if tokens.ReportedCacheWrite > 0 {
+		return true
+	}
+	return false
 }
 
 // CostEntry represents the cost of a single LLM invocation.
@@ -38,6 +157,10 @@ type CostEntry struct {
 
 	// Cost in USD
 	Cost float64 `json:"cost"`
+
+	// CostUnknown reports that Cost is only a known subtotal because this
+	// invocation had usage without authoritative pricing.
+	CostUnknown bool `json:"cost_unknown,omitempty"`
 
 	// Latency of the request
 	Latency time.Duration `json:"latency"`
@@ -68,6 +191,7 @@ func (cl *CostLedger) Record(entry CostEntry) {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now()
 	}
+	entry.Tokens = CloneTokenUsage(entry.Tokens)
 	cl.entries = append(cl.entries, entry)
 }
 
@@ -90,10 +214,7 @@ func (cl *CostLedger) SessionTokens() TokenUsage {
 
 	var total TokenUsage
 	for _, e := range cl.entries {
-		total.Input += e.Tokens.Input
-		total.Output += e.Tokens.Output
-		total.Reasoning += e.Tokens.Reasoning
-		total.CachedInput += e.Tokens.CachedInput
+		total = AddTokenUsage(total, e.Tokens)
 	}
 	return total
 }
@@ -111,7 +232,10 @@ func (cl *CostLedger) Entries() []CostEntry {
 	defer cl.mu.Unlock()
 
 	entries := make([]CostEntry, len(cl.entries))
-	copy(entries, cl.entries)
+	for i, entry := range cl.entries {
+		entry.Tokens = CloneTokenUsage(entry.Tokens)
+		entries[i] = entry
+	}
 	return entries
 }
 
@@ -130,22 +254,63 @@ func (cl *CostLedger) TodayTotal() float64 {
 	return total
 }
 
+// SessionCostUnknown reports whether any invocation in the current session had
+// usage without authoritative pricing.
+func (cl *CostLedger) SessionCostUnknown() bool {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	for _, e := range cl.entries {
+		if e.CostUnknown {
+			return true
+		}
+	}
+	return false
+}
+
+// TodayCostUnknown reports whether today's known subtotal has unknown-priced
+// invocations.
+func (cl *CostLedger) TodayCostUnknown() bool {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	for _, e := range cl.entries {
+		if e.CostUnknown && e.Timestamp.UTC().Truncate(24*time.Hour).Equal(today) {
+			return true
+		}
+	}
+	return false
+}
+
 // Summary returns a human-readable cost summary.
 type CostSummary struct {
-	SessionCost     float64    `json:"session_cost"`
-	TodayCost       float64    `json:"today_cost"`
-	SessionTokens   TokenUsage `json:"session_tokens"`
-	InvocationCount int        `json:"invocation_count"`
+	SessionCost        float64    `json:"session_cost"`
+	SessionCostUnknown bool       `json:"session_cost_unknown,omitempty"`
+	TodayCost          float64    `json:"today_cost"`
+	TodayCostUnknown   bool       `json:"today_cost_unknown,omitempty"`
+	SessionTokens      TokenUsage `json:"session_tokens"`
+	InvocationCount    int        `json:"invocation_count"`
 }
 
 // Summary returns aggregated cost data.
 func (cl *CostLedger) Summary() CostSummary {
-	return CostSummary{
-		SessionCost:     cl.SessionTotal(),
-		TodayCost:       cl.TodayTotal(),
-		SessionTokens:   cl.SessionTokens(),
-		InvocationCount: cl.InvocationCount(),
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var summary CostSummary
+	summary.InvocationCount = len(cl.entries)
+	for _, e := range cl.entries {
+		summary.SessionCost += e.Cost
+		summary.SessionCostUnknown = summary.SessionCostUnknown || e.CostUnknown
+		summary.SessionTokens = AddTokenUsage(summary.SessionTokens, e.Tokens)
+		if e.Timestamp.UTC().Truncate(24 * time.Hour).Equal(today) {
+			summary.TodayCost += e.Cost
+			summary.TodayCostUnknown = summary.TodayCostUnknown || e.CostUnknown
+		}
 	}
+	return summary
 }
 
 // ModelPricing contains per-model pricing information.

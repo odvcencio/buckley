@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestExtractJSON_CodeBlockPriority(t *testing.T) {
@@ -185,6 +187,72 @@ func TestNewCommitGenerator(t *testing.T) {
 	}
 }
 
+func TestCommitGeneratorGenerateRejectsParseableTruncatedJSON(t *testing.T) {
+	dir := stagedOrchestratorRepo(t)
+	t.Chdir(dir)
+
+	parseableTruncated := `{"action":"fix","scope":"commit","summary":"guard incomplete output","body":"Reject parseable drafts before commit","breaking":false,"issues":["123"]}`
+	cg := NewCommitGenerator(&mockPRModelClient{
+		response: chatResponseWithFinishReason(parseableTruncated, "length"),
+	}, nil)
+
+	commit, err := cg.Generate(&Task{Title: "Guard commit generation", Description: "Reject incomplete utility output"})
+	if err == nil {
+		t.Fatal("Generate succeeded with an incomplete finish reason")
+	}
+	if commit != nil {
+		t.Fatalf("Generate returned CommitInfo for incomplete output: %#v", commit)
+	}
+	var incomplete *IncompleteUtilityResponseError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteUtilityResponseError, got %T: %v", err, err)
+	}
+	if got := incomplete.FinishReason(); got != "length" {
+		t.Fatalf("FinishReason() = %q, want length", got)
+	}
+	if !strings.Contains(incomplete.PublicDraft(), "guard incomplete output") {
+		t.Fatalf("PublicDraft() omitted public draft: %q", incomplete.PublicDraft())
+	}
+}
+
+func TestCommitGeneratorGenerateIncompleteResponseErrorDoesNotLeakProviderDetails(t *testing.T) {
+	dir := stagedOrchestratorRepo(t)
+	t.Chdir(dir)
+
+	rawProviderErr := errors.New("provider raw failure: native reasoning says SECRET_RAW")
+	resp := chatResponseWithFinishReason("<think>private reasoning SECRET_THINK</think>\n{\"action\":\"fix\",\"summary\":\"public subject\",\"body\":\"public body\"}", "length")
+	cg := NewCommitGenerator(&mockPRModelClient{
+		response: resp,
+		err:      rawProviderErr,
+	}, nil)
+
+	commit, err := cg.Generate(&Task{Title: "Guard commit generation", Description: "Reject incomplete utility output"})
+	if err == nil {
+		t.Fatal("Generate succeeded with response plus error")
+	}
+	if commit != nil {
+		t.Fatalf("Generate returned CommitInfo for response plus error: %#v", commit)
+	}
+	var incomplete *IncompleteUtilityResponseError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected IncompleteUtilityResponseError, got %T: %v", err, err)
+	}
+	if !errors.Is(err, rawProviderErr) {
+		t.Fatalf("expected provider error to unwrap from typed error")
+	}
+	for _, forbidden := range []string{"SECRET_RAW", "SECRET_THINK", "native reasoning", "<think>"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("Error() leaked %q: %q", forbidden, err.Error())
+		}
+		if strings.Contains(incomplete.PublicDraft(), forbidden) {
+			t.Fatalf("PublicDraft() leaked %q: %q", forbidden, incomplete.PublicDraft())
+		}
+	}
+	if !strings.Contains(incomplete.PublicDraft(), "public subject") {
+		t.Fatalf("PublicDraft() omitted public content: %q", incomplete.PublicDraft())
+	}
+}
+
 func TestCommitGeneratorGetDiffDoesNotStageUnrelatedWorktreeChanges(t *testing.T) {
 	dir := t.TempDir()
 	orchestratorGit(t, dir, "init", "-q")
@@ -227,6 +295,26 @@ func TestCommitGeneratorFormatCommitMessageIncludesOpaqueMetadata(t *testing.T) 
 		if strings.Contains(message, forbidden) {
 			t.Fatalf("formatted commit leaked specific change detail %q: %q", forbidden, message)
 		}
+	}
+}
+
+func stagedOrchestratorRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	orchestratorGit(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("ready\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orchestratorGit(t, dir, "add", "tracked.txt")
+	return dir
+}
+
+func chatResponseWithFinishReason(content, finishReason string) *model.ChatResponse {
+	return &model.ChatResponse{
+		Choices: []model.Choice{{
+			Message:      model.Message{Role: "assistant", Content: content},
+			FinishReason: finishReason,
+		}},
 	}
 }
 

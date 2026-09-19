@@ -13,13 +13,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +35,10 @@ const (
 	// transparently follows next_cursor, so programs still receive complete
 	// listings without one oversized broker response.
 	maxListEntries = 500
+	// DefaultCapabilityCallLimit bounds the total broker operations one
+	// exec_program can fan out internally. Program-level composition remains
+	// useful, but it cannot turn one model tool call into unbounded crawling.
+	DefaultCapabilityCallLimit = 32
 )
 
 // AuditRecord is one capability call's durable trace: what was asked,
@@ -86,6 +93,10 @@ type Broker struct {
 	granted map[string]bool
 	expires time.Time
 
+	callMu            sync.Mutex
+	capabilityCalls   int
+	capabilityCallMax int
+
 	server   *http.Server
 	socket   string
 	listener net.Listener
@@ -114,6 +125,16 @@ func WithTokenTTL(ttl time.Duration) BrokerOption {
 	}
 }
 
+// WithCapabilityCallLimit overrides the per-program capability operation
+// budget. Non-positive values retain the safe default.
+func WithCapabilityCallLimit(limit int) BrokerOption {
+	return func(b *Broker) {
+		if limit > 0 {
+			b.capabilityCallMax = limit
+		}
+	}
+}
+
 // NewBroker jails capabilities to workspaceRoot and wires the audit sink.
 // Both are required; the token is generated per broker and expires.
 func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Broker, error) {
@@ -129,10 +150,11 @@ func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Br
 		return nil, fmt.Errorf("execmode: generate token: %w", err)
 	}
 	broker := &Broker{
-		root:    root,
-		token:   hex.EncodeToString(buf),
-		audit:   audit,
-		expires: time.Now().Add(DefaultTokenTTL),
+		root:              root,
+		token:             hex.EncodeToString(buf),
+		audit:             audit,
+		expires:           time.Now().Add(DefaultTokenTTL),
+		capabilityCallMax: DefaultCapabilityCallLimit,
 	}
 	WithCapabilities(ReadOnlySet...)(broker)
 	for _, opt := range opts {
@@ -207,6 +229,12 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 			http.Error(w, "capability "+method+" is not granted to this run", http.StatusForbidden)
 			return
 		}
+		if !b.consumeCapabilityCall() {
+			detail := fmt.Sprintf("capability call budget exhausted (%d per program)", b.capabilityCallMax)
+			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: detail, Timestamp: time.Now().UTC()})
+			http.Error(w, detail, http.StatusTooManyRequests)
+			return
+		}
 
 		var params map[string]any
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&params); err != nil {
@@ -234,6 +262,16 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 	}
 }
 
+func (b *Broker) consumeCapabilityCall() bool {
+	b.callMu.Lock()
+	defer b.callMu.Unlock()
+	if b.capabilityCalls >= b.capabilityCallMax {
+		return false
+	}
+	b.capabilityCalls++
+	return true
+}
+
 // jail resolves a workspace-relative path and rejects anything that
 // escapes the root, including through symlinks.
 func (b *Broker) jail(rel string) (string, error) {
@@ -258,14 +296,38 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(full)
+	f, err := os.Open(full)
 	if err != nil {
 		return nil, err
 	}
-	truncated := false
-	if len(data) > maxReadBytes {
+	defer f.Close()
+	// Decimal strings preserve int64 offsets through JSON without rounding.
+	raw, chunk := params["offset"]
+	if chunk {
+		s, isStr := raw.(string)
+		if !isStr {
+			return nil, fmt.Errorf("files.read offset must be a decimal string, got %T", raw)
+		}
+		off, parseErr := strconv.ParseInt(s, 10, 64)
+		if parseErr != nil || off < 0 {
+			return nil, fmt.Errorf("files.read invalid offset %q: want a non-negative decimal integer", s)
+		}
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("seek to offset %d: %w", off, err)
+		}
+	}
+	// Read at most one byte past the cap so an exactly maxReadBytes file
+	// still reports truncated=false without pulling the whole file in.
+	data, readErr := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
+	if readErr != nil {
+		return nil, readErr
+	}
+	truncated := len(data) > maxReadBytes
+	if truncated {
 		data = data[:maxReadBytes]
-		truncated = true
+	}
+	if chunk {
+		return map[string]any{"data": data, "truncated": truncated}, nil
 	}
 	return map[string]any{"content": string(data), "truncated": truncated}, nil
 }
@@ -377,7 +439,7 @@ func listCursor(value any) (int, error) {
 }
 
 func skipDirName(name string) bool {
-	return name == ".git" || name == "node_modules" || name == "vendor"
+	return name == ".git" || name == ".worktrees" || name == "node_modules" || name == "vendor"
 }
 
 // searchText finds literal matches, optionally restricted to files whose

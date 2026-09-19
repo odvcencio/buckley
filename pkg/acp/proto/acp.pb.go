@@ -1336,6 +1336,464 @@ func (x *SendMessageResponse) GetResponse() *Message {
 	return nil
 }
 
+// PartialResult is a public-only status detail for non-OK unary ACP responses
+// that produced incomplete model-visible evidence before failing.
+type PartialResult struct {
+	state                  protoimpl.MessageState  `protogen:"open.v1"`
+	SchemaVersion          string                  `protobuf:"bytes,1,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	Incomplete             bool                    `protobuf:"varint,2,opt,name=incomplete,proto3" json:"incomplete,omitempty"`
+	Status                 string                  `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	ReasonCode             string                  `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
+	SafeError              string                  `protobuf:"bytes,5,opt,name=safe_error,json=safeError,proto3" json:"safe_error,omitempty"`
+	PartialResponse        *Message                `protobuf:"bytes,6,opt,name=partial_response,json=partialResponse,proto3" json:"partial_response,omitempty"`
+	Truncated              bool                    `protobuf:"varint,7,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	OriginalDraftBytes     int32                   `protobuf:"varint,8,opt,name=original_draft_bytes,json=originalDraftBytes,proto3" json:"original_draft_bytes,omitempty"`
+	OmittedTaskResults     int32                   `protobuf:"varint,9,opt,name=omitted_task_results,json=omittedTaskResults,proto3" json:"omitted_task_results,omitempty"`
+	OmittedModelIdentities int32                   `protobuf:"varint,10,opt,name=omitted_model_identities,json=omittedModelIdentities,proto3" json:"omitted_model_identities,omitempty"`
+	TaskResults            []*PartialTaskResult    `protobuf:"bytes,11,rep,name=task_results,json=taskResults,proto3" json:"task_results,omitempty"`
+	ModelIdentities        []*PartialModelIdentity `protobuf:"bytes,12,rep,name=model_identities,json=modelIdentities,proto3" json:"model_identities,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *PartialResult) Reset() {
+	*x = PartialResult{}
+	mi := &file_acp_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartialResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartialResult) ProtoMessage() {}
+
+func (x *PartialResult) ProtoReflect() protoreflect.Message {
+	mi := &file_acp_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartialResult.ProtoReflect.Descriptor instead.
+func (*PartialResult) Descriptor() ([]byte, []int) {
+	return file_acp_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *PartialResult) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
+func (x *PartialResult) GetIncomplete() bool {
+	if x != nil {
+		return x.Incomplete
+	}
+	return false
+}
+
+func (x *PartialResult) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *PartialResult) GetReasonCode() string {
+	if x != nil {
+		return x.ReasonCode
+	}
+	return ""
+}
+
+func (x *PartialResult) GetSafeError() string {
+	if x != nil {
+		return x.SafeError
+	}
+	return ""
+}
+
+func (x *PartialResult) GetPartialResponse() *Message {
+	if x != nil {
+		return x.PartialResponse
+	}
+	return nil
+}
+
+func (x *PartialResult) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *PartialResult) GetOriginalDraftBytes() int32 {
+	if x != nil {
+		return x.OriginalDraftBytes
+	}
+	return 0
+}
+
+func (x *PartialResult) GetOmittedTaskResults() int32 {
+	if x != nil {
+		return x.OmittedTaskResults
+	}
+	return 0
+}
+
+func (x *PartialResult) GetOmittedModelIdentities() int32 {
+	if x != nil {
+		return x.OmittedModelIdentities
+	}
+	return 0
+}
+
+func (x *PartialResult) GetTaskResults() []*PartialTaskResult {
+	if x != nil {
+		return x.TaskResults
+	}
+	return nil
+}
+
+func (x *PartialResult) GetModelIdentities() []*PartialModelIdentity {
+	if x != nil {
+		return x.ModelIdentities
+	}
+	return nil
+}
+
+type PartialTaskResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Summary       string                 `protobuf:"bytes,3,opt,name=summary,proto3" json:"summary,omitempty"`
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	FinishReason  string                 `protobuf:"bytes,5,opt,name=finish_reason,json=finishReason,proto3" json:"finish_reason,omitempty"`
+	Usage         *PartialUsage          `protobuf:"bytes,6,opt,name=usage,proto3" json:"usage,omitempty"`
+	ToolCallCount int32                  `protobuf:"varint,7,opt,name=tool_call_count,json=toolCallCount,proto3" json:"tool_call_count,omitempty"`
+	CommandCount  int32                  `protobuf:"varint,8,opt,name=command_count,json=commandCount,proto3" json:"command_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PartialTaskResult) Reset() {
+	*x = PartialTaskResult{}
+	mi := &file_acp_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartialTaskResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartialTaskResult) ProtoMessage() {}
+
+func (x *PartialTaskResult) ProtoReflect() protoreflect.Message {
+	mi := &file_acp_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartialTaskResult.ProtoReflect.Descriptor instead.
+func (*PartialTaskResult) Descriptor() ([]byte, []int) {
+	return file_acp_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *PartialTaskResult) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *PartialTaskResult) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *PartialTaskResult) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *PartialTaskResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *PartialTaskResult) GetFinishReason() string {
+	if x != nil {
+		return x.FinishReason
+	}
+	return ""
+}
+
+func (x *PartialTaskResult) GetUsage() *PartialUsage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+func (x *PartialTaskResult) GetToolCallCount() int32 {
+	if x != nil {
+		return x.ToolCallCount
+	}
+	return 0
+}
+
+func (x *PartialTaskResult) GetCommandCount() int32 {
+	if x != nil {
+		return x.CommandCount
+	}
+	return 0
+}
+
+type PartialUsage struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	InputTokens               int64                  `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens              int64                  `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	ReasoningTokens           int64                  `protobuf:"varint,3,opt,name=reasoning_tokens,json=reasoningTokens,proto3" json:"reasoning_tokens,omitempty"`
+	CachedInputTokens         int64                  `protobuf:"varint,4,opt,name=cached_input_tokens,json=cachedInputTokens,proto3" json:"cached_input_tokens,omitempty"`
+	UnclassifiedTokens        int64                  `protobuf:"varint,5,opt,name=unclassified_tokens,json=unclassifiedTokens,proto3" json:"unclassified_tokens,omitempty"`
+	ReportedTotalTokens       int64                  `protobuf:"varint,6,opt,name=reported_total_tokens,json=reportedTotalTokens,proto3" json:"reported_total_tokens,omitempty"`
+	ReportedReasoningTokens   *int64                 `protobuf:"varint,7,opt,name=reported_reasoning_tokens,json=reportedReasoningTokens,proto3,oneof" json:"reported_reasoning_tokens,omitempty"`
+	ReportedCachedInputTokens *int64                 `protobuf:"varint,8,opt,name=reported_cached_input_tokens,json=reportedCachedInputTokens,proto3,oneof" json:"reported_cached_input_tokens,omitempty"`
+	ReportedCacheWriteTokens  int64                  `protobuf:"varint,9,opt,name=reported_cache_write_tokens,json=reportedCacheWriteTokens,proto3" json:"reported_cache_write_tokens,omitempty"`
+	Estimated                 bool                   `protobuf:"varint,10,opt,name=estimated,proto3" json:"estimated,omitempty"`
+	ReportedUsageInconsistent bool                   `protobuf:"varint,11,opt,name=reported_usage_inconsistent,json=reportedUsageInconsistent,proto3" json:"reported_usage_inconsistent,omitempty"`
+	UsageEvidencePresent      bool                   `protobuf:"varint,12,opt,name=usage_evidence_present,json=usageEvidencePresent,proto3" json:"usage_evidence_present,omitempty"`
+	UsageEvidenceMissing      bool                   `protobuf:"varint,13,opt,name=usage_evidence_missing,json=usageEvidenceMissing,proto3" json:"usage_evidence_missing,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *PartialUsage) Reset() {
+	*x = PartialUsage{}
+	mi := &file_acp_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartialUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartialUsage) ProtoMessage() {}
+
+func (x *PartialUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_acp_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartialUsage.ProtoReflect.Descriptor instead.
+func (*PartialUsage) Descriptor() ([]byte, []int) {
+	return file_acp_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *PartialUsage) GetInputTokens() int64 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetOutputTokens() int64 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetReasoningTokens() int64 {
+	if x != nil {
+		return x.ReasoningTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetCachedInputTokens() int64 {
+	if x != nil {
+		return x.CachedInputTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetUnclassifiedTokens() int64 {
+	if x != nil {
+		return x.UnclassifiedTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetReportedTotalTokens() int64 {
+	if x != nil {
+		return x.ReportedTotalTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetReportedReasoningTokens() int64 {
+	if x != nil && x.ReportedReasoningTokens != nil {
+		return *x.ReportedReasoningTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetReportedCachedInputTokens() int64 {
+	if x != nil && x.ReportedCachedInputTokens != nil {
+		return *x.ReportedCachedInputTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetReportedCacheWriteTokens() int64 {
+	if x != nil {
+		return x.ReportedCacheWriteTokens
+	}
+	return 0
+}
+
+func (x *PartialUsage) GetEstimated() bool {
+	if x != nil {
+		return x.Estimated
+	}
+	return false
+}
+
+func (x *PartialUsage) GetReportedUsageInconsistent() bool {
+	if x != nil {
+		return x.ReportedUsageInconsistent
+	}
+	return false
+}
+
+func (x *PartialUsage) GetUsageEvidencePresent() bool {
+	if x != nil {
+		return x.UsageEvidencePresent
+	}
+	return false
+}
+
+func (x *PartialUsage) GetUsageEvidenceMissing() bool {
+	if x != nil {
+		return x.UsageEvidenceMissing
+	}
+	return false
+}
+
+type PartialModelIdentity struct {
+	state                       protoimpl.MessageState `protogen:"open.v1"`
+	RequestedModel              string                 `protobuf:"bytes,1,opt,name=requested_model,json=requestedModel,proto3" json:"requested_model,omitempty"`
+	SelectedModel               string                 `protobuf:"bytes,2,opt,name=selected_model,json=selectedModel,proto3" json:"selected_model,omitempty"`
+	ProviderId                  string                 `protobuf:"bytes,3,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
+	ResponseModel               string                 `protobuf:"bytes,4,opt,name=response_model,json=responseModel,proto3" json:"response_model,omitempty"`
+	ResponseId                  string                 `protobuf:"bytes,5,opt,name=response_id,json=responseId,proto3" json:"response_id,omitempty"`
+	ExecutionIdentityConflicted bool                   `protobuf:"varint,6,opt,name=execution_identity_conflicted,json=executionIdentityConflicted,proto3" json:"execution_identity_conflicted,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
+}
+
+func (x *PartialModelIdentity) Reset() {
+	*x = PartialModelIdentity{}
+	mi := &file_acp_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartialModelIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartialModelIdentity) ProtoMessage() {}
+
+func (x *PartialModelIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_acp_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartialModelIdentity.ProtoReflect.Descriptor instead.
+func (*PartialModelIdentity) Descriptor() ([]byte, []int) {
+	return file_acp_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *PartialModelIdentity) GetRequestedModel() string {
+	if x != nil {
+		return x.RequestedModel
+	}
+	return ""
+}
+
+func (x *PartialModelIdentity) GetSelectedModel() string {
+	if x != nil {
+		return x.SelectedModel
+	}
+	return ""
+}
+
+func (x *PartialModelIdentity) GetProviderId() string {
+	if x != nil {
+		return x.ProviderId
+	}
+	return ""
+}
+
+func (x *PartialModelIdentity) GetResponseModel() string {
+	if x != nil {
+		return x.ResponseModel
+	}
+	return ""
+}
+
+func (x *PartialModelIdentity) GetResponseId() string {
+	if x != nil {
+		return x.ResponseId
+	}
+	return ""
+}
+
+func (x *PartialModelIdentity) GetExecutionIdentityConflicted() bool {
+	if x != nil {
+		return x.ExecutionIdentityConflicted
+	}
+	return false
+}
+
 // Editor context and inline features
 type DocumentSnapshot struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1353,7 +1811,7 @@ type DocumentSnapshot struct {
 
 func (x *DocumentSnapshot) Reset() {
 	*x = DocumentSnapshot{}
-	mi := &file_acp_proto_msgTypes[24]
+	mi := &file_acp_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1365,7 +1823,7 @@ func (x *DocumentSnapshot) String() string {
 func (*DocumentSnapshot) ProtoMessage() {}
 
 func (x *DocumentSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[24]
+	mi := &file_acp_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1378,7 +1836,7 @@ func (x *DocumentSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentSnapshot.ProtoReflect.Descriptor instead.
 func (*DocumentSnapshot) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{24}
+	return file_acp_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *DocumentSnapshot) GetUri() string {
@@ -1449,7 +1907,7 @@ type EditorContext struct {
 
 func (x *EditorContext) Reset() {
 	*x = EditorContext{}
-	mi := &file_acp_proto_msgTypes[25]
+	mi := &file_acp_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1461,7 +1919,7 @@ func (x *EditorContext) String() string {
 func (*EditorContext) ProtoMessage() {}
 
 func (x *EditorContext) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[25]
+	mi := &file_acp_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1474,7 +1932,7 @@ func (x *EditorContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EditorContext.ProtoReflect.Descriptor instead.
 func (*EditorContext) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{25}
+	return file_acp_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *EditorContext) GetDocument() *DocumentSnapshot {
@@ -1518,7 +1976,7 @@ type InlineCompletionRequest struct {
 
 func (x *InlineCompletionRequest) Reset() {
 	*x = InlineCompletionRequest{}
-	mi := &file_acp_proto_msgTypes[26]
+	mi := &file_acp_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1530,7 +1988,7 @@ func (x *InlineCompletionRequest) String() string {
 func (*InlineCompletionRequest) ProtoMessage() {}
 
 func (x *InlineCompletionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[26]
+	mi := &file_acp_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1543,7 +2001,7 @@ func (x *InlineCompletionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InlineCompletionRequest.ProtoReflect.Descriptor instead.
 func (*InlineCompletionRequest) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{26}
+	return file_acp_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *InlineCompletionRequest) GetAgentId() string {
@@ -1594,7 +2052,7 @@ type InlineCompletionEvent struct {
 
 func (x *InlineCompletionEvent) Reset() {
 	*x = InlineCompletionEvent{}
-	mi := &file_acp_proto_msgTypes[27]
+	mi := &file_acp_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1606,7 +2064,7 @@ func (x *InlineCompletionEvent) String() string {
 func (*InlineCompletionEvent) ProtoMessage() {}
 
 func (x *InlineCompletionEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[27]
+	mi := &file_acp_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1619,7 +2077,7 @@ func (x *InlineCompletionEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InlineCompletionEvent.ProtoReflect.Descriptor instead.
 func (*InlineCompletionEvent) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{27}
+	return file_acp_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *InlineCompletionEvent) GetCompletionId() string {
@@ -1668,7 +2126,7 @@ type TextEdit struct {
 
 func (x *TextEdit) Reset() {
 	*x = TextEdit{}
-	mi := &file_acp_proto_msgTypes[28]
+	mi := &file_acp_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1680,7 +2138,7 @@ func (x *TextEdit) String() string {
 func (*TextEdit) ProtoMessage() {}
 
 func (x *TextEdit) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[28]
+	mi := &file_acp_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1693,7 +2151,7 @@ func (x *TextEdit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextEdit.ProtoReflect.Descriptor instead.
 func (*TextEdit) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{28}
+	return file_acp_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *TextEdit) GetUri() string {
@@ -1731,7 +2189,7 @@ type ProposedEdit struct {
 
 func (x *ProposedEdit) Reset() {
 	*x = ProposedEdit{}
-	mi := &file_acp_proto_msgTypes[29]
+	mi := &file_acp_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1743,7 +2201,7 @@ func (x *ProposedEdit) String() string {
 func (*ProposedEdit) ProtoMessage() {}
 
 func (x *ProposedEdit) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[29]
+	mi := &file_acp_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1756,7 +2214,7 @@ func (x *ProposedEdit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposedEdit.ProtoReflect.Descriptor instead.
 func (*ProposedEdit) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{29}
+	return file_acp_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ProposedEdit) GetUri() string {
@@ -1815,7 +2273,7 @@ type ProposeEditsRequest struct {
 
 func (x *ProposeEditsRequest) Reset() {
 	*x = ProposeEditsRequest{}
-	mi := &file_acp_proto_msgTypes[30]
+	mi := &file_acp_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1827,7 +2285,7 @@ func (x *ProposeEditsRequest) String() string {
 func (*ProposeEditsRequest) ProtoMessage() {}
 
 func (x *ProposeEditsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[30]
+	mi := &file_acp_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1840,7 +2298,7 @@ func (x *ProposeEditsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeEditsRequest.ProtoReflect.Descriptor instead.
 func (*ProposeEditsRequest) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{30}
+	return file_acp_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ProposeEditsRequest) GetAgentId() string {
@@ -1897,7 +2355,7 @@ type ProposeEditsResponse struct {
 
 func (x *ProposeEditsResponse) Reset() {
 	*x = ProposeEditsResponse{}
-	mi := &file_acp_proto_msgTypes[31]
+	mi := &file_acp_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1909,7 +2367,7 @@ func (x *ProposeEditsResponse) String() string {
 func (*ProposeEditsResponse) ProtoMessage() {}
 
 func (x *ProposeEditsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[31]
+	mi := &file_acp_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1922,7 +2380,7 @@ func (x *ProposeEditsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeEditsResponse.ProtoReflect.Descriptor instead.
 func (*ProposeEditsResponse) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{31}
+	return file_acp_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ProposeEditsResponse) GetPlanId() string {
@@ -1966,7 +2424,7 @@ type ApplyEditsRequest struct {
 
 func (x *ApplyEditsRequest) Reset() {
 	*x = ApplyEditsRequest{}
-	mi := &file_acp_proto_msgTypes[32]
+	mi := &file_acp_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1978,7 +2436,7 @@ func (x *ApplyEditsRequest) String() string {
 func (*ApplyEditsRequest) ProtoMessage() {}
 
 func (x *ApplyEditsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[32]
+	mi := &file_acp_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1991,7 +2449,7 @@ func (x *ApplyEditsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyEditsRequest.ProtoReflect.Descriptor instead.
 func (*ApplyEditsRequest) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{32}
+	return file_acp_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ApplyEditsRequest) GetAgentId() string {
@@ -2040,7 +2498,7 @@ type ApplyEditsResponse struct {
 
 func (x *ApplyEditsResponse) Reset() {
 	*x = ApplyEditsResponse{}
-	mi := &file_acp_proto_msgTypes[33]
+	mi := &file_acp_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2052,7 +2510,7 @@ func (x *ApplyEditsResponse) String() string {
 func (*ApplyEditsResponse) ProtoMessage() {}
 
 func (x *ApplyEditsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[33]
+	mi := &file_acp_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2065,7 +2523,7 @@ func (x *ApplyEditsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyEditsResponse.ProtoReflect.Descriptor instead.
 func (*ApplyEditsResponse) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{33}
+	return file_acp_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ApplyEditsResponse) GetApplied() bool {
@@ -2102,7 +2560,7 @@ type UpdateEditorStateRequest struct {
 
 func (x *UpdateEditorStateRequest) Reset() {
 	*x = UpdateEditorStateRequest{}
-	mi := &file_acp_proto_msgTypes[34]
+	mi := &file_acp_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2114,7 +2572,7 @@ func (x *UpdateEditorStateRequest) String() string {
 func (*UpdateEditorStateRequest) ProtoMessage() {}
 
 func (x *UpdateEditorStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[34]
+	mi := &file_acp_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2127,7 +2585,7 @@ func (x *UpdateEditorStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEditorStateRequest.ProtoReflect.Descriptor instead.
 func (*UpdateEditorStateRequest) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{34}
+	return file_acp_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *UpdateEditorStateRequest) GetAgentId() string {
@@ -2177,7 +2635,7 @@ type UpdateEditorStateResponse struct {
 
 func (x *UpdateEditorStateResponse) Reset() {
 	*x = UpdateEditorStateResponse{}
-	mi := &file_acp_proto_msgTypes[35]
+	mi := &file_acp_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2189,7 +2647,7 @@ func (x *UpdateEditorStateResponse) String() string {
 func (*UpdateEditorStateResponse) ProtoMessage() {}
 
 func (x *UpdateEditorStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_acp_proto_msgTypes[35]
+	mi := &file_acp_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2202,7 +2660,7 @@ func (x *UpdateEditorStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEditorStateResponse.ProtoReflect.Descriptor instead.
 func (*UpdateEditorStateResponse) Descriptor() ([]byte, []int) {
-	return file_acp_proto_rawDescGZIP(), []int{35}
+	return file_acp_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *UpdateEditorStateResponse) GetPlanState() string {
@@ -2336,7 +2794,60 @@ const file_acp_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\v2\x17.buckley.acp.v1.MessageR\amessage\x127\n" +
 	"\acontext\x18\x03 \x01(\v2\x1d.buckley.acp.v1.EditorContextR\acontext\"J\n" +
 	"\x13SendMessageResponse\x123\n" +
-	"\bresponse\x18\x01 \x01(\v2\x17.buckley.acp.v1.MessageR\bresponse\"\x9c\x03\n" +
+	"\bresponse\x18\x01 \x01(\v2\x17.buckley.acp.v1.MessageR\bresponse\"\xc5\x04\n" +
+	"\rPartialResult\x12%\n" +
+	"\x0eschema_version\x18\x01 \x01(\tR\rschemaVersion\x12\x1e\n" +
+	"\n" +
+	"incomplete\x18\x02 \x01(\bR\n" +
+	"incomplete\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12\x1f\n" +
+	"\vreason_code\x18\x04 \x01(\tR\n" +
+	"reasonCode\x12\x1d\n" +
+	"\n" +
+	"safe_error\x18\x05 \x01(\tR\tsafeError\x12B\n" +
+	"\x10partial_response\x18\x06 \x01(\v2\x17.buckley.acp.v1.MessageR\x0fpartialResponse\x12\x1c\n" +
+	"\ttruncated\x18\a \x01(\bR\ttruncated\x120\n" +
+	"\x14original_draft_bytes\x18\b \x01(\x05R\x12originalDraftBytes\x120\n" +
+	"\x14omitted_task_results\x18\t \x01(\x05R\x12omittedTaskResults\x128\n" +
+	"\x18omitted_model_identities\x18\n" +
+	" \x01(\x05R\x16omittedModelIdentities\x12D\n" +
+	"\ftask_results\x18\v \x03(\v2!.buckley.acp.v1.PartialTaskResultR\vtaskResults\x12O\n" +
+	"\x10model_identities\x18\f \x03(\v2$.buckley.acp.v1.PartialModelIdentityR\x0fmodelIdentities\"\x9a\x02\n" +
+	"\x11PartialTaskResult\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
+	"\asummary\x18\x03 \x01(\tR\asummary\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12#\n" +
+	"\rfinish_reason\x18\x05 \x01(\tR\ffinishReason\x122\n" +
+	"\x05usage\x18\x06 \x01(\v2\x1c.buckley.acp.v1.PartialUsageR\x05usage\x12&\n" +
+	"\x0ftool_call_count\x18\a \x01(\x05R\rtoolCallCount\x12#\n" +
+	"\rcommand_count\x18\b \x01(\x05R\fcommandCount\"\xe5\x05\n" +
+	"\fPartialUsage\x12!\n" +
+	"\finput_tokens\x18\x01 \x01(\x03R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\x02 \x01(\x03R\foutputTokens\x12)\n" +
+	"\x10reasoning_tokens\x18\x03 \x01(\x03R\x0freasoningTokens\x12.\n" +
+	"\x13cached_input_tokens\x18\x04 \x01(\x03R\x11cachedInputTokens\x12/\n" +
+	"\x13unclassified_tokens\x18\x05 \x01(\x03R\x12unclassifiedTokens\x122\n" +
+	"\x15reported_total_tokens\x18\x06 \x01(\x03R\x13reportedTotalTokens\x12?\n" +
+	"\x19reported_reasoning_tokens\x18\a \x01(\x03H\x00R\x17reportedReasoningTokens\x88\x01\x01\x12D\n" +
+	"\x1creported_cached_input_tokens\x18\b \x01(\x03H\x01R\x19reportedCachedInputTokens\x88\x01\x01\x12=\n" +
+	"\x1breported_cache_write_tokens\x18\t \x01(\x03R\x18reportedCacheWriteTokens\x12\x1c\n" +
+	"\testimated\x18\n" +
+	" \x01(\bR\testimated\x12>\n" +
+	"\x1breported_usage_inconsistent\x18\v \x01(\bR\x19reportedUsageInconsistent\x124\n" +
+	"\x16usage_evidence_present\x18\f \x01(\bR\x14usageEvidencePresent\x124\n" +
+	"\x16usage_evidence_missing\x18\r \x01(\bR\x14usageEvidenceMissingB\x1c\n" +
+	"\x1a_reported_reasoning_tokensB\x1f\n" +
+	"\x1d_reported_cached_input_tokens\"\x93\x02\n" +
+	"\x14PartialModelIdentity\x12'\n" +
+	"\x0frequested_model\x18\x01 \x01(\tR\x0erequestedModel\x12%\n" +
+	"\x0eselected_model\x18\x02 \x01(\tR\rselectedModel\x12\x1f\n" +
+	"\vprovider_id\x18\x03 \x01(\tR\n" +
+	"providerId\x12%\n" +
+	"\x0eresponse_model\x18\x04 \x01(\tR\rresponseModel\x12\x1f\n" +
+	"\vresponse_id\x18\x05 \x01(\tR\n" +
+	"responseId\x12B\n" +
+	"\x1dexecution_identity_conflicted\x18\x06 \x01(\bR\x1bexecutionIdentityConflicted\"\x9c\x03\n" +
 	"\x10DocumentSnapshot\x12\x10\n" +
 	"\x03uri\x18\x01 \x01(\tR\x03uri\x12\x1f\n" +
 	"\vlanguage_id\x18\x02 \x01(\tR\n" +
@@ -2459,7 +2970,7 @@ func file_acp_proto_rawDescGZIP() []byte {
 	return file_acp_proto_rawDescData
 }
 
-var file_acp_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
+var file_acp_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_acp_proto_goTypes = []any{
 	(*RegisterAgentRequest)(nil),      // 0: buckley.acp.v1.RegisterAgentRequest
 	(*RegisterAgentResponse)(nil),     // 1: buckley.acp.v1.RegisterAgentResponse
@@ -2485,115 +2996,123 @@ var file_acp_proto_goTypes = []any{
 	(*Message)(nil),                   // 21: buckley.acp.v1.Message
 	(*SendMessageRequest)(nil),        // 22: buckley.acp.v1.SendMessageRequest
 	(*SendMessageResponse)(nil),       // 23: buckley.acp.v1.SendMessageResponse
-	(*DocumentSnapshot)(nil),          // 24: buckley.acp.v1.DocumentSnapshot
-	(*EditorContext)(nil),             // 25: buckley.acp.v1.EditorContext
-	(*InlineCompletionRequest)(nil),   // 26: buckley.acp.v1.InlineCompletionRequest
-	(*InlineCompletionEvent)(nil),     // 27: buckley.acp.v1.InlineCompletionEvent
-	(*TextEdit)(nil),                  // 28: buckley.acp.v1.TextEdit
-	(*ProposedEdit)(nil),              // 29: buckley.acp.v1.ProposedEdit
-	(*ProposeEditsRequest)(nil),       // 30: buckley.acp.v1.ProposeEditsRequest
-	(*ProposeEditsResponse)(nil),      // 31: buckley.acp.v1.ProposeEditsResponse
-	(*ApplyEditsRequest)(nil),         // 32: buckley.acp.v1.ApplyEditsRequest
-	(*ApplyEditsResponse)(nil),        // 33: buckley.acp.v1.ApplyEditsResponse
-	(*UpdateEditorStateRequest)(nil),  // 34: buckley.acp.v1.UpdateEditorStateRequest
-	(*UpdateEditorStateResponse)(nil), // 35: buckley.acp.v1.UpdateEditorStateResponse
-	nil,                               // 36: buckley.acp.v1.RegisterAgentRequest.MetadataEntry
-	nil,                               // 37: buckley.acp.v1.DiscoverAgentsRequest.TagsEntry
-	nil,                               // 38: buckley.acp.v1.CreateSessionRequest.MetadataEntry
-	nil,                               // 39: buckley.acp.v1.ContextDelta.MetadataEntry
-	nil,                               // 40: buckley.acp.v1.ToolExecutionRequest.ParametersEntry
-	nil,                               // 41: buckley.acp.v1.DocumentSnapshot.MetadataEntry
-	nil,                               // 42: buckley.acp.v1.EditorContext.MetadataEntry
-	(*AgentInfo)(nil),                 // 43: buckley.acp.v1.AgentInfo
-	(*GrantContext)(nil),              // 44: buckley.acp.v1.GrantContext
-	(*timestamppb.Timestamp)(nil),     // 45: google.protobuf.Timestamp
-	(*Range)(nil),                     // 46: buckley.acp.v1.Range
-	(*emptypb.Empty)(nil),             // 47: google.protobuf.Empty
-	(*ContextHandle)(nil),             // 48: buckley.acp.v1.ContextHandle
-	(*ServerCapabilities)(nil),        // 49: buckley.acp.v1.ServerCapabilities
-	(*CapabilityGrant)(nil),           // 50: buckley.acp.v1.CapabilityGrant
-	(*Session)(nil),                   // 51: buckley.acp.v1.Session
-	(*TaskEvent)(nil),                 // 52: buckley.acp.v1.TaskEvent
-	(*P2PEndpoint)(nil),               // 53: buckley.acp.v1.P2PEndpoint
+	(*PartialResult)(nil),             // 24: buckley.acp.v1.PartialResult
+	(*PartialTaskResult)(nil),         // 25: buckley.acp.v1.PartialTaskResult
+	(*PartialUsage)(nil),              // 26: buckley.acp.v1.PartialUsage
+	(*PartialModelIdentity)(nil),      // 27: buckley.acp.v1.PartialModelIdentity
+	(*DocumentSnapshot)(nil),          // 28: buckley.acp.v1.DocumentSnapshot
+	(*EditorContext)(nil),             // 29: buckley.acp.v1.EditorContext
+	(*InlineCompletionRequest)(nil),   // 30: buckley.acp.v1.InlineCompletionRequest
+	(*InlineCompletionEvent)(nil),     // 31: buckley.acp.v1.InlineCompletionEvent
+	(*TextEdit)(nil),                  // 32: buckley.acp.v1.TextEdit
+	(*ProposedEdit)(nil),              // 33: buckley.acp.v1.ProposedEdit
+	(*ProposeEditsRequest)(nil),       // 34: buckley.acp.v1.ProposeEditsRequest
+	(*ProposeEditsResponse)(nil),      // 35: buckley.acp.v1.ProposeEditsResponse
+	(*ApplyEditsRequest)(nil),         // 36: buckley.acp.v1.ApplyEditsRequest
+	(*ApplyEditsResponse)(nil),        // 37: buckley.acp.v1.ApplyEditsResponse
+	(*UpdateEditorStateRequest)(nil),  // 38: buckley.acp.v1.UpdateEditorStateRequest
+	(*UpdateEditorStateResponse)(nil), // 39: buckley.acp.v1.UpdateEditorStateResponse
+	nil,                               // 40: buckley.acp.v1.RegisterAgentRequest.MetadataEntry
+	nil,                               // 41: buckley.acp.v1.DiscoverAgentsRequest.TagsEntry
+	nil,                               // 42: buckley.acp.v1.CreateSessionRequest.MetadataEntry
+	nil,                               // 43: buckley.acp.v1.ContextDelta.MetadataEntry
+	nil,                               // 44: buckley.acp.v1.ToolExecutionRequest.ParametersEntry
+	nil,                               // 45: buckley.acp.v1.DocumentSnapshot.MetadataEntry
+	nil,                               // 46: buckley.acp.v1.EditorContext.MetadataEntry
+	(*AgentInfo)(nil),                 // 47: buckley.acp.v1.AgentInfo
+	(*GrantContext)(nil),              // 48: buckley.acp.v1.GrantContext
+	(*timestamppb.Timestamp)(nil),     // 49: google.protobuf.Timestamp
+	(*Range)(nil),                     // 50: buckley.acp.v1.Range
+	(*emptypb.Empty)(nil),             // 51: google.protobuf.Empty
+	(*ContextHandle)(nil),             // 52: buckley.acp.v1.ContextHandle
+	(*ServerCapabilities)(nil),        // 53: buckley.acp.v1.ServerCapabilities
+	(*CapabilityGrant)(nil),           // 54: buckley.acp.v1.CapabilityGrant
+	(*Session)(nil),                   // 55: buckley.acp.v1.Session
+	(*TaskEvent)(nil),                 // 56: buckley.acp.v1.TaskEvent
+	(*P2PEndpoint)(nil),               // 57: buckley.acp.v1.P2PEndpoint
 }
 var file_acp_proto_depIdxs = []int32{
-	36, // 0: buckley.acp.v1.RegisterAgentRequest.metadata:type_name -> buckley.acp.v1.RegisterAgentRequest.MetadataEntry
-	43, // 1: buckley.acp.v1.RegisterAgentResponse.agent:type_name -> buckley.acp.v1.AgentInfo
-	37, // 2: buckley.acp.v1.DiscoverAgentsRequest.tags:type_name -> buckley.acp.v1.DiscoverAgentsRequest.TagsEntry
-	43, // 3: buckley.acp.v1.DiscoverAgentsResponse.agents:type_name -> buckley.acp.v1.AgentInfo
-	44, // 4: buckley.acp.v1.CapabilityRequest.context:type_name -> buckley.acp.v1.GrantContext
-	38, // 5: buckley.acp.v1.CreateSessionRequest.metadata:type_name -> buckley.acp.v1.CreateSessionRequest.MetadataEntry
-	39, // 6: buckley.acp.v1.ContextDelta.metadata:type_name -> buckley.acp.v1.ContextDelta.MetadataEntry
-	25, // 7: buckley.acp.v1.TaskStreamRequest.context:type_name -> buckley.acp.v1.EditorContext
-	40, // 8: buckley.acp.v1.ToolExecutionRequest.parameters:type_name -> buckley.acp.v1.ToolExecutionRequest.ParametersEntry
-	45, // 9: buckley.acp.v1.ToolExecutionEvent.timestamp:type_name -> google.protobuf.Timestamp
+	40, // 0: buckley.acp.v1.RegisterAgentRequest.metadata:type_name -> buckley.acp.v1.RegisterAgentRequest.MetadataEntry
+	47, // 1: buckley.acp.v1.RegisterAgentResponse.agent:type_name -> buckley.acp.v1.AgentInfo
+	41, // 2: buckley.acp.v1.DiscoverAgentsRequest.tags:type_name -> buckley.acp.v1.DiscoverAgentsRequest.TagsEntry
+	47, // 3: buckley.acp.v1.DiscoverAgentsResponse.agents:type_name -> buckley.acp.v1.AgentInfo
+	48, // 4: buckley.acp.v1.CapabilityRequest.context:type_name -> buckley.acp.v1.GrantContext
+	42, // 5: buckley.acp.v1.CreateSessionRequest.metadata:type_name -> buckley.acp.v1.CreateSessionRequest.MetadataEntry
+	43, // 6: buckley.acp.v1.ContextDelta.metadata:type_name -> buckley.acp.v1.ContextDelta.MetadataEntry
+	29, // 7: buckley.acp.v1.TaskStreamRequest.context:type_name -> buckley.acp.v1.EditorContext
+	44, // 8: buckley.acp.v1.ToolExecutionRequest.parameters:type_name -> buckley.acp.v1.ToolExecutionRequest.ParametersEntry
+	49, // 9: buckley.acp.v1.ToolExecutionEvent.timestamp:type_name -> google.protobuf.Timestamp
 	21, // 10: buckley.acp.v1.SendMessageRequest.message:type_name -> buckley.acp.v1.Message
-	25, // 11: buckley.acp.v1.SendMessageRequest.context:type_name -> buckley.acp.v1.EditorContext
+	29, // 11: buckley.acp.v1.SendMessageRequest.context:type_name -> buckley.acp.v1.EditorContext
 	21, // 12: buckley.acp.v1.SendMessageResponse.response:type_name -> buckley.acp.v1.Message
-	46, // 13: buckley.acp.v1.DocumentSnapshot.selection:type_name -> buckley.acp.v1.Range
-	46, // 14: buckley.acp.v1.DocumentSnapshot.visible_ranges:type_name -> buckley.acp.v1.Range
-	41, // 15: buckley.acp.v1.DocumentSnapshot.metadata:type_name -> buckley.acp.v1.DocumentSnapshot.MetadataEntry
-	24, // 16: buckley.acp.v1.EditorContext.document:type_name -> buckley.acp.v1.DocumentSnapshot
-	24, // 17: buckley.acp.v1.EditorContext.related_documents:type_name -> buckley.acp.v1.DocumentSnapshot
-	42, // 18: buckley.acp.v1.EditorContext.metadata:type_name -> buckley.acp.v1.EditorContext.MetadataEntry
-	25, // 19: buckley.acp.v1.InlineCompletionRequest.context:type_name -> buckley.acp.v1.EditorContext
-	46, // 20: buckley.acp.v1.TextEdit.range:type_name -> buckley.acp.v1.Range
-	28, // 21: buckley.acp.v1.ProposedEdit.edits:type_name -> buckley.acp.v1.TextEdit
-	25, // 22: buckley.acp.v1.ProposeEditsRequest.context:type_name -> buckley.acp.v1.EditorContext
-	29, // 23: buckley.acp.v1.ProposeEditsResponse.edits:type_name -> buckley.acp.v1.ProposedEdit
-	28, // 24: buckley.acp.v1.ApplyEditsRequest.edits:type_name -> buckley.acp.v1.TextEdit
-	25, // 25: buckley.acp.v1.UpdateEditorStateRequest.context:type_name -> buckley.acp.v1.EditorContext
-	0,  // 26: buckley.acp.v1.AgentCommunication.RegisterAgent:input_type -> buckley.acp.v1.RegisterAgentRequest
-	2,  // 27: buckley.acp.v1.AgentCommunication.UnregisterAgent:input_type -> buckley.acp.v1.UnregisterAgentRequest
-	3,  // 28: buckley.acp.v1.AgentCommunication.DiscoverAgents:input_type -> buckley.acp.v1.DiscoverAgentsRequest
-	5,  // 29: buckley.acp.v1.AgentCommunication.GetAgentInfo:input_type -> buckley.acp.v1.GetAgentInfoRequest
-	47, // 30: buckley.acp.v1.AgentCommunication.GetServerCapabilities:input_type -> google.protobuf.Empty
-	6,  // 31: buckley.acp.v1.AgentCommunication.RequestCapabilities:input_type -> buckley.acp.v1.CapabilityRequest
-	7,  // 32: buckley.acp.v1.AgentCommunication.RevokeCapabilities:input_type -> buckley.acp.v1.CapabilityRevocation
-	8,  // 33: buckley.acp.v1.AgentCommunication.CreateSession:input_type -> buckley.acp.v1.CreateSessionRequest
-	9,  // 34: buckley.acp.v1.AgentCommunication.UpdateSessionContext:input_type -> buckley.acp.v1.ContextDelta
-	10, // 35: buckley.acp.v1.AgentCommunication.CreateContextHandle:input_type -> buckley.acp.v1.ContextHandleRequest
-	48, // 36: buckley.acp.v1.AgentCommunication.ResolveContextHandle:input_type -> buckley.acp.v1.ContextHandle
-	12, // 37: buckley.acp.v1.AgentCommunication.StreamTask:input_type -> buckley.acp.v1.TaskStreamRequest
-	13, // 38: buckley.acp.v1.AgentCommunication.SubscribeTaskEvents:input_type -> buckley.acp.v1.TaskSubscription
-	14, // 39: buckley.acp.v1.AgentCommunication.GetP2PEndpoint:input_type -> buckley.acp.v1.P2PEndpointRequest
-	15, // 40: buckley.acp.v1.AgentCommunication.EstablishP2PConnection:input_type -> buckley.acp.v1.P2PHandshake
-	17, // 41: buckley.acp.v1.AgentCommunication.RequestToolExecution:input_type -> buckley.acp.v1.ToolExecutionRequest
-	19, // 42: buckley.acp.v1.AgentCommunication.ApproveToolExecution:input_type -> buckley.acp.v1.ToolApproval
-	20, // 43: buckley.acp.v1.AgentCommunication.RejectToolExecution:input_type -> buckley.acp.v1.ToolRejection
-	22, // 44: buckley.acp.v1.AgentCommunication.SendMessage:input_type -> buckley.acp.v1.SendMessageRequest
-	26, // 45: buckley.acp.v1.AgentCommunication.StreamInlineCompletions:input_type -> buckley.acp.v1.InlineCompletionRequest
-	30, // 46: buckley.acp.v1.AgentCommunication.ProposeEdits:input_type -> buckley.acp.v1.ProposeEditsRequest
-	32, // 47: buckley.acp.v1.AgentCommunication.ApplyEdits:input_type -> buckley.acp.v1.ApplyEditsRequest
-	34, // 48: buckley.acp.v1.AgentCommunication.UpdateEditorState:input_type -> buckley.acp.v1.UpdateEditorStateRequest
-	1,  // 49: buckley.acp.v1.AgentCommunication.RegisterAgent:output_type -> buckley.acp.v1.RegisterAgentResponse
-	47, // 50: buckley.acp.v1.AgentCommunication.UnregisterAgent:output_type -> google.protobuf.Empty
-	4,  // 51: buckley.acp.v1.AgentCommunication.DiscoverAgents:output_type -> buckley.acp.v1.DiscoverAgentsResponse
-	43, // 52: buckley.acp.v1.AgentCommunication.GetAgentInfo:output_type -> buckley.acp.v1.AgentInfo
-	49, // 53: buckley.acp.v1.AgentCommunication.GetServerCapabilities:output_type -> buckley.acp.v1.ServerCapabilities
-	50, // 54: buckley.acp.v1.AgentCommunication.RequestCapabilities:output_type -> buckley.acp.v1.CapabilityGrant
-	47, // 55: buckley.acp.v1.AgentCommunication.RevokeCapabilities:output_type -> google.protobuf.Empty
-	51, // 56: buckley.acp.v1.AgentCommunication.CreateSession:output_type -> buckley.acp.v1.Session
-	47, // 57: buckley.acp.v1.AgentCommunication.UpdateSessionContext:output_type -> google.protobuf.Empty
-	48, // 58: buckley.acp.v1.AgentCommunication.CreateContextHandle:output_type -> buckley.acp.v1.ContextHandle
-	11, // 59: buckley.acp.v1.AgentCommunication.ResolveContextHandle:output_type -> buckley.acp.v1.ContextData
-	52, // 60: buckley.acp.v1.AgentCommunication.StreamTask:output_type -> buckley.acp.v1.TaskEvent
-	52, // 61: buckley.acp.v1.AgentCommunication.SubscribeTaskEvents:output_type -> buckley.acp.v1.TaskEvent
-	53, // 62: buckley.acp.v1.AgentCommunication.GetP2PEndpoint:output_type -> buckley.acp.v1.P2PEndpoint
-	16, // 63: buckley.acp.v1.AgentCommunication.EstablishP2PConnection:output_type -> buckley.acp.v1.P2PConnectionInfo
-	18, // 64: buckley.acp.v1.AgentCommunication.RequestToolExecution:output_type -> buckley.acp.v1.ToolExecutionEvent
-	47, // 65: buckley.acp.v1.AgentCommunication.ApproveToolExecution:output_type -> google.protobuf.Empty
-	47, // 66: buckley.acp.v1.AgentCommunication.RejectToolExecution:output_type -> google.protobuf.Empty
-	23, // 67: buckley.acp.v1.AgentCommunication.SendMessage:output_type -> buckley.acp.v1.SendMessageResponse
-	27, // 68: buckley.acp.v1.AgentCommunication.StreamInlineCompletions:output_type -> buckley.acp.v1.InlineCompletionEvent
-	31, // 69: buckley.acp.v1.AgentCommunication.ProposeEdits:output_type -> buckley.acp.v1.ProposeEditsResponse
-	33, // 70: buckley.acp.v1.AgentCommunication.ApplyEdits:output_type -> buckley.acp.v1.ApplyEditsResponse
-	35, // 71: buckley.acp.v1.AgentCommunication.UpdateEditorState:output_type -> buckley.acp.v1.UpdateEditorStateResponse
-	49, // [49:72] is the sub-list for method output_type
-	26, // [26:49] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	21, // 13: buckley.acp.v1.PartialResult.partial_response:type_name -> buckley.acp.v1.Message
+	25, // 14: buckley.acp.v1.PartialResult.task_results:type_name -> buckley.acp.v1.PartialTaskResult
+	27, // 15: buckley.acp.v1.PartialResult.model_identities:type_name -> buckley.acp.v1.PartialModelIdentity
+	26, // 16: buckley.acp.v1.PartialTaskResult.usage:type_name -> buckley.acp.v1.PartialUsage
+	50, // 17: buckley.acp.v1.DocumentSnapshot.selection:type_name -> buckley.acp.v1.Range
+	50, // 18: buckley.acp.v1.DocumentSnapshot.visible_ranges:type_name -> buckley.acp.v1.Range
+	45, // 19: buckley.acp.v1.DocumentSnapshot.metadata:type_name -> buckley.acp.v1.DocumentSnapshot.MetadataEntry
+	28, // 20: buckley.acp.v1.EditorContext.document:type_name -> buckley.acp.v1.DocumentSnapshot
+	28, // 21: buckley.acp.v1.EditorContext.related_documents:type_name -> buckley.acp.v1.DocumentSnapshot
+	46, // 22: buckley.acp.v1.EditorContext.metadata:type_name -> buckley.acp.v1.EditorContext.MetadataEntry
+	29, // 23: buckley.acp.v1.InlineCompletionRequest.context:type_name -> buckley.acp.v1.EditorContext
+	50, // 24: buckley.acp.v1.TextEdit.range:type_name -> buckley.acp.v1.Range
+	32, // 25: buckley.acp.v1.ProposedEdit.edits:type_name -> buckley.acp.v1.TextEdit
+	29, // 26: buckley.acp.v1.ProposeEditsRequest.context:type_name -> buckley.acp.v1.EditorContext
+	33, // 27: buckley.acp.v1.ProposeEditsResponse.edits:type_name -> buckley.acp.v1.ProposedEdit
+	32, // 28: buckley.acp.v1.ApplyEditsRequest.edits:type_name -> buckley.acp.v1.TextEdit
+	29, // 29: buckley.acp.v1.UpdateEditorStateRequest.context:type_name -> buckley.acp.v1.EditorContext
+	0,  // 30: buckley.acp.v1.AgentCommunication.RegisterAgent:input_type -> buckley.acp.v1.RegisterAgentRequest
+	2,  // 31: buckley.acp.v1.AgentCommunication.UnregisterAgent:input_type -> buckley.acp.v1.UnregisterAgentRequest
+	3,  // 32: buckley.acp.v1.AgentCommunication.DiscoverAgents:input_type -> buckley.acp.v1.DiscoverAgentsRequest
+	5,  // 33: buckley.acp.v1.AgentCommunication.GetAgentInfo:input_type -> buckley.acp.v1.GetAgentInfoRequest
+	51, // 34: buckley.acp.v1.AgentCommunication.GetServerCapabilities:input_type -> google.protobuf.Empty
+	6,  // 35: buckley.acp.v1.AgentCommunication.RequestCapabilities:input_type -> buckley.acp.v1.CapabilityRequest
+	7,  // 36: buckley.acp.v1.AgentCommunication.RevokeCapabilities:input_type -> buckley.acp.v1.CapabilityRevocation
+	8,  // 37: buckley.acp.v1.AgentCommunication.CreateSession:input_type -> buckley.acp.v1.CreateSessionRequest
+	9,  // 38: buckley.acp.v1.AgentCommunication.UpdateSessionContext:input_type -> buckley.acp.v1.ContextDelta
+	10, // 39: buckley.acp.v1.AgentCommunication.CreateContextHandle:input_type -> buckley.acp.v1.ContextHandleRequest
+	52, // 40: buckley.acp.v1.AgentCommunication.ResolveContextHandle:input_type -> buckley.acp.v1.ContextHandle
+	12, // 41: buckley.acp.v1.AgentCommunication.StreamTask:input_type -> buckley.acp.v1.TaskStreamRequest
+	13, // 42: buckley.acp.v1.AgentCommunication.SubscribeTaskEvents:input_type -> buckley.acp.v1.TaskSubscription
+	14, // 43: buckley.acp.v1.AgentCommunication.GetP2PEndpoint:input_type -> buckley.acp.v1.P2PEndpointRequest
+	15, // 44: buckley.acp.v1.AgentCommunication.EstablishP2PConnection:input_type -> buckley.acp.v1.P2PHandshake
+	17, // 45: buckley.acp.v1.AgentCommunication.RequestToolExecution:input_type -> buckley.acp.v1.ToolExecutionRequest
+	19, // 46: buckley.acp.v1.AgentCommunication.ApproveToolExecution:input_type -> buckley.acp.v1.ToolApproval
+	20, // 47: buckley.acp.v1.AgentCommunication.RejectToolExecution:input_type -> buckley.acp.v1.ToolRejection
+	22, // 48: buckley.acp.v1.AgentCommunication.SendMessage:input_type -> buckley.acp.v1.SendMessageRequest
+	30, // 49: buckley.acp.v1.AgentCommunication.StreamInlineCompletions:input_type -> buckley.acp.v1.InlineCompletionRequest
+	34, // 50: buckley.acp.v1.AgentCommunication.ProposeEdits:input_type -> buckley.acp.v1.ProposeEditsRequest
+	36, // 51: buckley.acp.v1.AgentCommunication.ApplyEdits:input_type -> buckley.acp.v1.ApplyEditsRequest
+	38, // 52: buckley.acp.v1.AgentCommunication.UpdateEditorState:input_type -> buckley.acp.v1.UpdateEditorStateRequest
+	1,  // 53: buckley.acp.v1.AgentCommunication.RegisterAgent:output_type -> buckley.acp.v1.RegisterAgentResponse
+	51, // 54: buckley.acp.v1.AgentCommunication.UnregisterAgent:output_type -> google.protobuf.Empty
+	4,  // 55: buckley.acp.v1.AgentCommunication.DiscoverAgents:output_type -> buckley.acp.v1.DiscoverAgentsResponse
+	47, // 56: buckley.acp.v1.AgentCommunication.GetAgentInfo:output_type -> buckley.acp.v1.AgentInfo
+	53, // 57: buckley.acp.v1.AgentCommunication.GetServerCapabilities:output_type -> buckley.acp.v1.ServerCapabilities
+	54, // 58: buckley.acp.v1.AgentCommunication.RequestCapabilities:output_type -> buckley.acp.v1.CapabilityGrant
+	51, // 59: buckley.acp.v1.AgentCommunication.RevokeCapabilities:output_type -> google.protobuf.Empty
+	55, // 60: buckley.acp.v1.AgentCommunication.CreateSession:output_type -> buckley.acp.v1.Session
+	51, // 61: buckley.acp.v1.AgentCommunication.UpdateSessionContext:output_type -> google.protobuf.Empty
+	52, // 62: buckley.acp.v1.AgentCommunication.CreateContextHandle:output_type -> buckley.acp.v1.ContextHandle
+	11, // 63: buckley.acp.v1.AgentCommunication.ResolveContextHandle:output_type -> buckley.acp.v1.ContextData
+	56, // 64: buckley.acp.v1.AgentCommunication.StreamTask:output_type -> buckley.acp.v1.TaskEvent
+	56, // 65: buckley.acp.v1.AgentCommunication.SubscribeTaskEvents:output_type -> buckley.acp.v1.TaskEvent
+	57, // 66: buckley.acp.v1.AgentCommunication.GetP2PEndpoint:output_type -> buckley.acp.v1.P2PEndpoint
+	16, // 67: buckley.acp.v1.AgentCommunication.EstablishP2PConnection:output_type -> buckley.acp.v1.P2PConnectionInfo
+	18, // 68: buckley.acp.v1.AgentCommunication.RequestToolExecution:output_type -> buckley.acp.v1.ToolExecutionEvent
+	51, // 69: buckley.acp.v1.AgentCommunication.ApproveToolExecution:output_type -> google.protobuf.Empty
+	51, // 70: buckley.acp.v1.AgentCommunication.RejectToolExecution:output_type -> google.protobuf.Empty
+	23, // 71: buckley.acp.v1.AgentCommunication.SendMessage:output_type -> buckley.acp.v1.SendMessageResponse
+	31, // 72: buckley.acp.v1.AgentCommunication.StreamInlineCompletions:output_type -> buckley.acp.v1.InlineCompletionEvent
+	35, // 73: buckley.acp.v1.AgentCommunication.ProposeEdits:output_type -> buckley.acp.v1.ProposeEditsResponse
+	37, // 74: buckley.acp.v1.AgentCommunication.ApplyEdits:output_type -> buckley.acp.v1.ApplyEditsResponse
+	39, // 75: buckley.acp.v1.AgentCommunication.UpdateEditorState:output_type -> buckley.acp.v1.UpdateEditorStateResponse
+	53, // [53:76] is the sub-list for method output_type
+	30, // [30:53] is the sub-list for method input_type
+	30, // [30:30] is the sub-list for extension type_name
+	30, // [30:30] is the sub-list for extension extendee
+	0,  // [0:30] is the sub-list for field type_name
 }
 
 func init() { file_acp_proto_init() }
@@ -2602,13 +3121,14 @@ func file_acp_proto_init() {
 		return
 	}
 	file_types_proto_init()
+	file_acp_proto_msgTypes[26].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_acp_proto_rawDesc), len(file_acp_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   43,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

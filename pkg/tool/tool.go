@@ -3,6 +3,8 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"strings"
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/encoding/toon"
@@ -66,6 +68,31 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 	data := r.Data
 	if r.ShouldAbridge && len(r.DisplayData) > 0 {
 		data = r.DisplayData
+	}
+	if numbered, _ := data["line_numbers"].(bool); numbered {
+		content, contentOK := data["content"].(string)
+		page, _ := data["page"].(map[string]any)
+		start, startOK := page["start_line"].(int)
+		end, endOK := page["end_line"].(int)
+		if contentOK && startOK && endOK && start > 0 && end >= start && end-start < 100 {
+			lines := strings.Split(content, "\n")
+			valid := len(lines) == end-start+1
+			if valid {
+				for i, line := range lines {
+					var ok bool
+					lines[i], ok = strings.CutPrefix(line, fmt.Sprintf("%d: ", start+i))
+					if !ok {
+						valid = false
+						break
+					}
+				}
+			}
+			if valid {
+				data = maps.Clone(data)
+				data["content"] = strings.Join(lines, "\n")
+				delete(data, "line_numbers")
+			}
+		}
 	}
 	payload := map[string]any{"success": r.Success}
 	if r.Error != "" {

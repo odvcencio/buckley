@@ -382,7 +382,7 @@ func TestRunCriterionCommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			passed, details := runCriterionCommand(ctx, tmpDir, tt.command)
+			passed, details := runCriterionCommand(ctx, tmpDir, tt.command, "")
 
 			if passed != tt.wantPassed {
 				t.Errorf("runCriterionCommand() passed = %v, want %v", passed, tt.wantPassed)

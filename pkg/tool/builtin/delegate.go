@@ -3,6 +3,7 @@ package builtin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -124,7 +125,7 @@ func parseOneShotStats(lines []string) map[string]any {
 }
 
 // CodexTool invokes the codex CLI with one-shot mode for specialized tasks
-type CodexTool struct{}
+type CodexTool struct{ workDirAware }
 
 func (t *CodexTool) Name() string {
 	return "invoke_codex"
@@ -187,6 +188,9 @@ func (t *CodexTool) ExecuteWithContext(ctx context.Context, params map[string]an
 	}
 
 	command := exec.CommandContext(ctx, "codex", "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	GetDelegationGuard().ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer
@@ -236,7 +240,7 @@ func (t *CodexTool) ExecuteWithContext(ctx context.Context, params map[string]an
 }
 
 // ClaudeTool invokes the Claude CLI with one-shot mode for specialized tasks
-type ClaudeTool struct{}
+type ClaudeTool struct{ workDirAware }
 
 func (t *ClaudeTool) Name() string {
 	return "invoke_claude"
@@ -299,6 +303,9 @@ func (t *ClaudeTool) ExecuteWithContext(ctx context.Context, params map[string]a
 	}
 
 	command := exec.CommandContext(ctx, "claude", "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	GetDelegationGuard().ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer
@@ -348,7 +355,7 @@ func (t *ClaudeTool) ExecuteWithContext(ctx context.Context, params map[string]a
 }
 
 // BuckleyTool invokes Buckley itself in one-shot mode for focused tasks
-type BuckleyTool struct{}
+type BuckleyTool struct{ workDirAware }
 
 func (t *BuckleyTool) Name() string {
 	return "invoke_buckley"
@@ -431,6 +438,9 @@ func (t *BuckleyTool) ExecuteWithContext(ctx context.Context, params map[string]
 	}
 
 	command := exec.CommandContext(ctx, buckleyPath, "-p", prompt)
+	if strings.TrimSpace(t.workDir) != "" {
+		command.Dir = t.workDir
+	}
 	// Configure with incremented delegation depth
 	guard.ConfigureCommand(command)
 	var stdout, stderr bytes.Buffer
@@ -544,6 +554,22 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 				Type:        "array",
 				Description: "Optional explicit child tool allowlist; an empty array disables tools.",
 				Items:       &PropertySchema{Type: "string"},
+			},
+			"source_scope": {
+				Type:                 "object",
+				Description:          "Optional source-only child contract: literal workspace-relative files, optionally bounded by both start_line and end_line. Empty files denies all source reads. Discovery and execution are unavailable when supplied.",
+				AdditionalProperties: false,
+				Properties: map[string]PropertySchema{
+					"files": {Type: "array", Items: &PropertySchema{
+						Type: "object", AdditionalProperties: false, Required: []string{"path"},
+						Properties: map[string]PropertySchema{
+							"path":       {Type: "string"},
+							"start_line": {Type: "integer"},
+							"end_line":   {Type: "integer"},
+						},
+					}},
+				},
+				Required: []string{"files"},
 			},
 			"step_cap": {
 				Type:        "integer",
@@ -879,6 +905,20 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 	if err != nil {
 		return &Result{Success: false, Error: "max_cost_usd " + err.Error()}, nil
 	}
+	var sourceScope *agentcoord.SourceScope
+	if value, present := params["source_scope"]; present {
+		if value == nil {
+			return &Result{Success: false, Error: "source_scope must be an object, not null"}, nil
+		}
+		data, err := json.Marshal(value)
+		if err == nil {
+			sourceScope = &agentcoord.SourceScope{}
+			err = json.Unmarshal(data, sourceScope)
+		}
+		if err != nil {
+			return &Result{Success: false, Error: "source_scope: " + err.Error()}, nil
+		}
+	}
 	if err := delegationCheckWithOptions("spawn_subagent", DelegationCheckOptions{
 		SkipSameToolCooldown: userInitiated,
 	}); err != nil {
@@ -901,6 +941,7 @@ func (t *SubagentTool) spawn(ctx context.Context, coordinator agentcoord.Coordin
 		Model:           delegateStringParam(params, "model"),
 		Effort:          delegateStringParam(params, "effort"),
 		AllowedTools:    delegateStringSliceParam(params, "allowed_tools"),
+		SourceScope:     sourceScope,
 		StepCap:         parseInt(params["step_cap"], 0),
 		TimeoutSeconds:  timeout,
 		Budget: agentcoord.Budget{

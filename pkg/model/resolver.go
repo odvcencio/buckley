@@ -14,6 +14,7 @@ type ReasoningChecker interface {
 type ResolverConfig struct {
 	Planning  string
 	Execution string
+	Light     string
 	Review    string
 }
 
@@ -106,7 +107,10 @@ func (r *Resolver) resolveRouting(phase string) string {
 func (r *Resolver) cheapestModelForTier(tier string) string {
 	switch tier {
 	case "light":
-		return "claude-haiku-4-20250514"
+		if r.config.Light != "" {
+			return r.config.Light
+		}
+		return r.config.Execution
 	default:
 		return r.config.Execution
 	}

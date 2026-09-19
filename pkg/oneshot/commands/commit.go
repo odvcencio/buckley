@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/tools"
 )
 
@@ -17,14 +19,17 @@ var commitActions = commitmsg.AllowedActions
 type CommitDefinition struct{}
 
 // CommitResult is the strongly-typed result of generate_commit.
+//
+// Body and Issues reuse the PR list decoder to accept scalar model output.
+// JSON encoding remains array-shaped; validation still checks the contents.
 type CommitResult struct {
-	Action         string   `json:"action"`
-	Scope          string   `json:"scope,omitempty"`
-	Subject        string   `json:"subject"`
-	Body           []string `json:"body"`
-	Breaking       bool     `json:"breaking,omitempty"`
-	BreakingReason string   `json:"breaking_reason,omitempty"`
-	Issues         []string `json:"issues,omitempty"`
+	Action         string     `json:"action"`
+	Scope          string     `json:"scope,omitempty"`
+	Subject        string     `json:"subject"`
+	Body           StringList `json:"body"`
+	Breaking       bool       `json:"breaking,omitempty"`
+	BreakingReason string     `json:"breaking_reason,omitempty"`
+	Issues         StringList `json:"issues,omitempty"`
 }
 
 // Header formats the commit header line.
@@ -128,8 +133,7 @@ func (CommitDefinition) ContextSources() []oneshot.ContextSource {
 	}
 }
 
-func (CommitDefinition) SystemPrompt() string {
-	return `You are a git commit message generator. Analyze the staged changes and generate a clear, informative commit message.
+const commitSystemPrompt = `You are a git commit message generator. Analyze the staged changes and generate a clear, informative commit message.
 
 Use the generate_commit tool to produce your response. The tool expects:
 - action: The verb describing what this commit does (add, fix, update, refactor, etc.)
@@ -145,6 +149,9 @@ Guidelines:
 - Group related changes into single bullets
 - Use imperative mood ("Add feature" not "Added feature")
 - If breaking is true, include a useful breaking_reason instead of repeating the subject`
+
+func (CommitDefinition) SystemPrompt() string {
+	return prompts.CommitToolPrompt(commitSystemPrompt, time.Now())
 }
 
 func (CommitDefinition) BuildPrompt(ctx *oneshot.Context) string {

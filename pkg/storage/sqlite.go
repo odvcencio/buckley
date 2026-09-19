@@ -24,6 +24,11 @@ type Store struct {
 	observers  []Observer
 	observerMu sync.RWMutex
 	stmtCache  stmtCache
+
+	// sessionExecClock, when non-nil, overrides the database clock used by
+	// session execution reads and writes. Nil uses SQLite time. The hook must
+	// be installed before concurrent use of the store.
+	sessionExecClock func() int64
 }
 
 // ErrStoreClosed indicates the underlying database connection is unavailable.
@@ -180,6 +185,15 @@ var migrations = []SQLiteMigration{
 	{18, "provider_continuations", ensureProviderContinuationsSchema},
 	{19, "model_behavior_profiles", ensureModelBehaviorProfilesSchema},
 	{20, "normalize_fixed_width_timestamps", normalizeLegacyTimestamps},
+	{21, "session_command_journal", ensureSessionExecSchema},
+	{22, "session_execution_state", ensureSessionExecutionStateSchema},
+	{23, "session_effect_permits", ensureSessionEffectPermitSchema},
+	{24, "web_session_token_index", ensureWebSessionTokenIndex},
+	{25, "model_behavior_profile_promotions", ensureModelBehaviorProfilePromotionsSchema},
+	{26, "session_command_task_intent", ensureSessionCommandTaskIntentSchema},
+	{27, "experiment_run_input_manifest", ensureExperimentRunInputManifestSchema},
+	{28, "experiment_run_model_executions", ensureExperimentRunModelExecutionsSchema},
+	{29, "experiment_run_usage_evidence", ensureExperimentRunUsageEvidenceSchema},
 }
 
 // sqliteTimestampLayout keeps every fractional second at nine digits.
@@ -299,6 +313,137 @@ func ensureModelBehaviorProfilesSchema(db MigrationDB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_model_behavior_profiles_latest ON model_behavior_profiles(model_id, measured_at, profile_version)`); err != nil {
 		return fmt.Errorf("index model_behavior_profiles: %w", err)
+	}
+	return nil
+}
+
+func ensureModelBehaviorProfilePromotionsSchema(db MigrationDB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS model_behavior_profile_promotions (
+		model_id TEXT PRIMARY KEY,
+		profile_version TEXT NOT NULL,
+		promoted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (model_id, profile_version)
+			REFERENCES model_behavior_profiles(model_id, profile_version)
+			ON DELETE RESTRICT
+	)`); err != nil {
+		return fmt.Errorf("create model_behavior_profile_promotions: %w", err)
+	}
+	return nil
+}
+
+func ensureWebSessionTokenIndex(db MigrationDB) error {
+	if _, err := db.Exec(`
+		DELETE FROM web_sessions
+		WHERE COALESCE(token_id, '') <> ''
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM api_tokens source
+			WHERE source.id = web_sessions.token_id AND source.revoked = 0
+		  )
+	`); err != nil {
+		return fmt.Errorf("remove inactive-token web sessions: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_web_sessions_token_id ON web_sessions(token_id)`); err != nil {
+		return fmt.Errorf("index web sessions by token: %w", err)
+	}
+	return nil
+}
+
+func ensureExperimentRunInputManifestSchema(db MigrationDB) error {
+	if !tableExists(db, "experiment_runs") {
+		return nil
+	}
+	rows, err := db.Query(`PRAGMA table_info(experiment_runs)`)
+	if err != nil {
+		return fmt.Errorf("inspect experiment_runs columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan experiment_runs column: %w", err)
+		}
+		if name == "input_manifest_json" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE experiment_runs ADD COLUMN input_manifest_json TEXT`); err != nil {
+		return fmt.Errorf("add experiment_runs.input_manifest_json: %w", err)
+	}
+	return nil
+}
+
+func ensureExperimentRunModelExecutionsSchema(db MigrationDB) error {
+	if !tableExists(db, "experiment_runs") {
+		return nil
+	}
+	rows, err := db.Query(`PRAGMA table_info(experiment_runs)`)
+	if err != nil {
+		return fmt.Errorf("inspect experiment_runs columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan experiment_runs column: %w", err)
+		}
+		if name == "model_executions_json" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE experiment_runs ADD COLUMN model_executions_json TEXT`); err != nil {
+		return fmt.Errorf("add experiment_runs.model_executions_json: %w", err)
+	}
+	return nil
+}
+
+func ensureExperimentRunUsageEvidenceSchema(db MigrationDB) error {
+	if !tableExists(db, "experiment_runs") {
+		return nil
+	}
+	rows, err := db.Query(`PRAGMA table_info(experiment_runs)`)
+	if err != nil {
+		return fmt.Errorf("inspect experiment_runs columns: %w", err)
+	}
+	defer rows.Close()
+	columns := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan experiment_runs column: %w", err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, ok := columns["usage_json"]; !ok {
+		if _, err := db.Exec(`ALTER TABLE experiment_runs ADD COLUMN usage_json TEXT`); err != nil {
+			return fmt.Errorf("add experiment_runs.usage_json: %w", err)
+		}
+	}
+	if _, ok := columns["cost_unknown"]; !ok {
+		if _, err := db.Exec(`ALTER TABLE experiment_runs ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add experiment_runs.cost_unknown: %w", err)
+		}
 	}
 	return nil
 }

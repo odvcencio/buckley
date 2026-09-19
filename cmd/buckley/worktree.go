@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/worktree"
 )
 
@@ -42,7 +41,7 @@ func runWorktreeCreate(args []string) error {
 		return err
 	}
 
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
 	}
