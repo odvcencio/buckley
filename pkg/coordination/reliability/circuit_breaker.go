@@ -85,7 +85,7 @@ type CircuitBreakerConfig struct {
 	// SuccessThreshold is the number of consecutive successes needed to close the circuit from HalfOpen
 	SuccessThreshold int
 
-	// OnFailure is called when a failure is recorded (before state change)
+	// OnFailure is called after recording a failure and committing its state change.
 	OnFailure func(FailureEvent)
 	// OnStateChange is called when the circuit state changes
 	OnStateChange func(StateChangeEvent)
@@ -97,17 +97,19 @@ type CircuitBreakerConfig struct {
 type CircuitBreaker struct {
 	config CircuitBreakerConfig
 
-	mu           sync.RWMutex
-	state        CircuitState
-	failures     int
-	successes    int
-	lastFailTime time.Time
-	totalCalls   int
-	successCount int
-	failureCount int
-	lastError    error
-	recentErrors []error
-	openedAt     time.Time
+	mu            sync.RWMutex
+	generation    uint64
+	probeInFlight bool
+	state         CircuitState
+	failures      int
+	successes     int
+	lastFailTime  time.Time
+	totalCalls    int
+	successCount  int
+	failureCount  int
+	lastError     error
+	recentErrors  []error
+	openedAt      time.Time
 }
 
 // CircuitBreakerMetrics holds metrics about circuit breaker operation
@@ -151,155 +153,120 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 // admitted and returned to the caller but does not update success/failure
 // counters or transition circuit state.
 func (cb *CircuitBreaker) ExecuteWithResultFilter(fn func() error, shouldRecord func(error) bool) error {
-	cb.mu.Lock()
-	cb.totalCalls++
-	cb.mu.Unlock()
-
-	if openErr := cb.canExecute(); openErr != nil {
+	generation, transition, openErr := cb.canExecute()
+	if openErr != nil {
 		return openErr
 	}
 
-	err := fn()
-	if shouldRecord != nil && !shouldRecord(err) {
-		return err
-	}
-	cb.recordResult(err)
+	var err error
+	record := false
+	defer func() { cb.recordResult(generation, err, record) }()
+	cb.notifyStateChange(transition)
+	err = fn()
+	record = shouldRecord == nil || shouldRecord(err)
 	return err
 }
 
-// canExecute checks if the circuit breaker allows execution.
-// Returns nil if execution is allowed, or a detailed error if circuit is open.
-func (cb *CircuitBreaker) canExecute() error {
+func (cb *CircuitBreaker) canExecute() (uint64, *StateChangeEvent, error) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	cb.totalCalls++
 
-	switch cb.state {
-	case CircuitClosed:
-		return nil
-	case CircuitOpen:
-		// Check if timeout has elapsed
-		if time.Since(cb.lastFailTime) > cb.config.Timeout {
-			oldState := cb.state
-			cb.state = CircuitHalfOpen
-			cb.successes = 0
-			cb.notifyStateChange(oldState, CircuitHalfOpen, "timeout elapsed, testing recovery")
-			return nil
-		}
-		// Return detailed error
-		retryAfter := cb.config.Timeout - time.Since(cb.openedAt)
-		if retryAfter < 0 {
-			retryAfter = 0
-		}
-		recentErrs := make([]error, len(cb.recentErrors))
-		copy(recentErrs, cb.recentErrors)
-		return &CircuitOpenError{
+	var transition *StateChangeEvent
+	if cb.state == CircuitOpen && time.Since(cb.lastFailTime) > cb.config.Timeout {
+		transition = cb.transitionLocked(CircuitHalfOpen, "timeout elapsed, testing recovery")
+		cb.successes = 0
+	}
+	if cb.state == CircuitOpen || (cb.state == CircuitHalfOpen && cb.probeInFlight) {
+		retryAfter := max(cb.config.Timeout-time.Since(cb.openedAt), 0)
+		return 0, nil, &CircuitOpenError{
 			Failures:     cb.failures,
 			LastError:    cb.lastError,
 			OpenedAt:     cb.openedAt,
 			RetryAfter:   retryAfter,
-			RecentErrors: recentErrs,
+			RecentErrors: append([]error(nil), cb.recentErrors...),
 		}
-	case CircuitHalfOpen:
-		return nil
 	}
-	return nil
+	if cb.state == CircuitHalfOpen {
+		cb.probeInFlight = true
+	}
+	return cb.generation, transition, nil
 }
 
-// recordResult updates the circuit breaker state based on the result
-func (cb *CircuitBreaker) recordResult(err error) {
+func (cb *CircuitBreaker) recordResult(generation uint64, err error, record bool) {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
+	if record {
+		if err != nil {
+			cb.failureCount++
+		} else {
+			cb.successCount++
+		}
+	}
+	// Completed calls remain in lifetime metrics, but an earlier admission
+	// cannot change a newer recovery cycle or release its probe.
+	if generation != cb.generation {
+		cb.mu.Unlock()
+		return
+	}
+	cb.probeInFlight = false
+	if !record {
+		cb.mu.Unlock()
+		return
+	}
 
+	var failure *FailureEvent
+	var transition *StateChangeEvent
 	if err != nil {
 		cb.failures++
-		cb.failureCount++
 		cb.lastFailTime = time.Now()
 		cb.lastError = err
-
-		// Track recent errors
 		if len(cb.recentErrors) >= cb.config.MaxRecentErrors {
-			// Shift errors left, drop oldest
 			copy(cb.recentErrors, cb.recentErrors[1:])
 			cb.recentErrors = cb.recentErrors[:len(cb.recentErrors)-1]
 		}
 		cb.recentErrors = append(cb.recentErrors, err)
-
-		// Reset successes on any failure
 		cb.successes = 0
-
-		willOpen := cb.failures >= cb.config.MaxFailures
-		cb.notifyFailure(err, cb.failures, willOpen)
-
-		// Open circuit if we've exceeded max failures
+		willOpen := cb.state == CircuitHalfOpen || cb.failures >= cb.config.MaxFailures
+		failure = &FailureEvent{
+			Error: err, ConsecutiveNum: cb.failures,
+			MaxFailures: cb.config.MaxFailures, WillOpen: willOpen,
+		}
 		if willOpen {
-			oldState := cb.state
-			cb.state = CircuitOpen
-			cb.openedAt = time.Now()
-			cb.notifyStateChange(oldState, CircuitOpen, fmt.Sprintf("%d consecutive failures", cb.failures))
+			cb.openedAt = cb.lastFailTime
+			transition = cb.transitionLocked(CircuitOpen, fmt.Sprintf("%d consecutive failures", cb.failures))
 		}
 	} else {
-		cb.successCount++
 		cb.successes++
-
-		// Handle state transitions on success
-		switch cb.state {
-		case CircuitClosed:
-			// Reset failure count on success
+		if cb.state == CircuitClosed {
 			cb.failures = 0
-			cb.recentErrors = cb.recentErrors[:0] // Clear recent errors
-		case CircuitHalfOpen:
-			// Check if we should close the circuit
-			if cb.successes >= cb.config.SuccessThreshold {
-				oldState := cb.state
-				cb.state = CircuitClosed
-				cb.failures = 0
-				cb.successes = 0
-				cb.recentErrors = cb.recentErrors[:0]
-				cb.notifyStateChange(oldState, CircuitClosed, "recovered after successful requests")
-			}
-		case CircuitOpen:
-			// This shouldn't happen, but handle it gracefully
-			oldState := cb.state
-			cb.state = CircuitHalfOpen
-			cb.successes = 1
-			cb.notifyStateChange(oldState, CircuitHalfOpen, "unexpected success while open")
+			cb.recentErrors = cb.recentErrors[:0]
+		} else if cb.state == CircuitHalfOpen && cb.successes >= cb.config.SuccessThreshold {
+			cb.failures = 0
+			cb.successes = 0
+			cb.recentErrors = cb.recentErrors[:0]
+			transition = cb.transitionLocked(CircuitClosed, "recovered after successful requests")
 		}
 	}
+	cb.mu.Unlock()
+
+	if failure != nil && cb.config.OnFailure != nil {
+		cb.config.OnFailure(*failure)
+	}
+	cb.notifyStateChange(transition)
 }
 
-// notifyFailure calls the OnFailure callback if configured.
-// Must be called with mu held.
-func (cb *CircuitBreaker) notifyFailure(err error, consecutiveNum int, willOpen bool) {
-	if cb.config.OnFailure == nil {
-		return
-	}
-	// Call callback without lock to prevent deadlock
-	cb.mu.Unlock()
-	cb.config.OnFailure(FailureEvent{
-		Error:          err,
-		ConsecutiveNum: consecutiveNum,
-		MaxFailures:    cb.config.MaxFailures,
-		WillOpen:       willOpen,
-	})
-	cb.mu.Lock()
+// transitionLocked commits state before observers run and invalidates earlier admissions.
+func (cb *CircuitBreaker) transitionLocked(to CircuitState, reason string) *StateChangeEvent {
+	event := &StateChangeEvent{From: cb.state, To: to, Reason: reason, LastError: cb.lastError}
+	cb.state = to
+	cb.generation++
+	return event
 }
 
-// notifyStateChange calls the OnStateChange callback if configured.
-// Must be called with mu held.
-func (cb *CircuitBreaker) notifyStateChange(from, to CircuitState, reason string) {
-	if cb.config.OnStateChange == nil {
-		return
+func (cb *CircuitBreaker) notifyStateChange(event *StateChangeEvent) {
+	if event != nil && cb.config.OnStateChange != nil {
+		cb.config.OnStateChange(*event)
 	}
-	lastErr := cb.lastError
-	// Call callback without lock to prevent deadlock
-	cb.mu.Unlock()
-	cb.config.OnStateChange(StateChangeEvent{
-		From:      from,
-		To:        to,
-		Reason:    reason,
-		LastError: lastErr,
-	})
-	cb.mu.Lock()
 }
 
 // State returns the current state of the circuit breaker
@@ -327,6 +294,8 @@ func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	cb.generation++
+	cb.probeInFlight = false
 	cb.state = CircuitClosed
 	cb.failures = 0
 	cb.successes = 0
