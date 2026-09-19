@@ -66,6 +66,9 @@ jobs:
       - name: Check test script go-list failure handling
         run: bash ./scripts/tests/test_test_sh_go_list_failure.sh
 
+      - name: Check deadcode script output handling
+        run: bash ./scripts/tests/test_check_deadcode_output.sh
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

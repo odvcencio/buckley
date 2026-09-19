@@ -17,7 +17,7 @@ cd "$ROOT"
 BASELINE="scripts/deadcode-baseline.txt"
 DEADCODE_VERSION="v0.50.0"
 
-raw="$(go run "golang.org/x/tools/cmd/deadcode@${DEADCODE_VERSION}" ./cmd/buckley 2>&1)" || {
+raw="$(go run "golang.org/x/tools/cmd/deadcode@${DEADCODE_VERSION}" ./cmd/buckley)" || {
   echo "deadcode failed:" >&2
   echo "$raw" >&2
   exit 1
