@@ -408,7 +408,7 @@ func TestGRPCSessionObservation_RealStoresMaterializeExpiryAndOmitSecrets(t *tes
 		t.Fatal(err)
 	}
 	command, err := store.ClaimNext(context.Background(), sessionexec.ClaimRequest{
-		SessionID: sessionID, Lane: sessionexec.LaneWork, Owner: "worker-grpc-real", LeaseDuration: 50 * time.Millisecond,
+		SessionID: sessionID, Lane: sessionexec.LaneWork, Owner: "worker-grpc-real", LeaseDuration: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -422,8 +422,12 @@ func TestGRPCSessionObservation_RealStoresMaterializeExpiryAndOmitSecrets(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	for !time.Now().After(permit.ExpiresAt.Add(5 * time.Millisecond)) {
-		time.Sleep(time.Millisecond)
+	// Expire the fixture explicitly; setup must not race a short live lease.
+	if _, err := store.DB().Exec(`UPDATE session_effect_permits
+		SET created_at_ms = 0, expires_at_ms = 1
+		WHERE session_id = ? AND command_id = ? AND effect_id = ?`,
+		sessionID, command.CommandID, permit.EffectID); err != nil {
+		t.Fatal(err)
 	}
 
 	ledger, err := runledger.NewWithDB(store.DB())
@@ -440,13 +444,16 @@ func TestGRPCSessionObservation_RealStoresMaterializeExpiryAndOmitSecrets(t *tes
 	}
 	lease, err := ledger.Attach(context.Background(), agentcoord.AttachmentRequest{
 		SessionID: sessionID, RunID: "routine-grpc-real", TaskID: "task-grpc-real", TurnID: "turn-grpc-real",
-		AttemptID: "attempt-grpc-real", LeaseDuration: time.Millisecond,
+		AttemptID: "attempt-grpc-real", LeaseDuration: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for !time.Now().After(lease.LeaseExpiresAt.Add(5 * time.Millisecond)) {
-		time.Sleep(time.Millisecond)
+	if _, err := store.DB().Exec(`UPDATE agent_run_attempts
+		SET attached_at = '2000-01-01T00:00:00Z', heartbeat_at = '2000-01-01T00:00:01Z',
+			lease_expires_at = '2000-01-01T00:00:02.000000000Z'
+		WHERE session_id = ? AND attempt_id = ?`, sessionID, lease.AttemptID); err != nil {
+		t.Fatal(err)
 	}
 
 	server := NewServer(Config{BindAddress: "127.0.0.1:0", RequireToken: true, ProjectRoot: dir}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
