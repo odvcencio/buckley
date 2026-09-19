@@ -35,26 +35,6 @@ const (
 	defaultBurstSize = 10            // Allow small bursts
 )
 
-// RetryConfig configures the retry mechanism for idempotent HTTP requests.
-type RetryConfig struct {
-	MaxRetries          int
-	MaxRateLimitRetries int
-	InitialInterval     time.Duration
-	MaxInterval         time.Duration
-	Multiplier          float64
-}
-
-// DefaultRetryConfig returns the default retry configuration.
-func DefaultRetryConfig() RetryConfig {
-	return RetryConfig{
-		MaxRetries:          3,
-		MaxRateLimitRetries: 12,
-		InitialInterval:     1 * time.Second,
-		MaxInterval:         30 * time.Second,
-		Multiplier:          2.0,
-	}
-}
-
 // DefaultTransport returns an optimized http.Transport with tuned connection pool settings.
 func DefaultTransport() *http.Transport {
 	return &http.Transport{
@@ -179,37 +159,8 @@ func (c *Client) CatalogSourceURL() string {
 	return strings.TrimRight(c.baseURL, "/") + "/models"
 }
 
-// isRetryableError checks if an error is retryable based on status code.
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.Retryable
-	}
-	// Network errors are generally retryable
-	return true
-}
-
-func (c *Client) retryLimit(err error) int {
-	limit := max(c.retryConfig.MaxRetries, 0)
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.IsRateLimitError() && c.retryConfig.MaxRateLimitRetries > limit {
-		limit = c.retryConfig.MaxRateLimitRetries
-	}
-	return limit
-}
-
 func (c *Client) canRetryModelRequest(attempt int, err error, mode RequestRetryMode) bool {
-	if mode != RequestRetryDefault {
-		return false
-	}
-	return isRetryableError(err) && attempt < c.retryLimit(err)
-}
-
-func retryExhaustedError(attempt int, err error) error {
-	return fmt.Errorf("model request retries exhausted after %d attempts: %w", attempt+1, err)
+	return mode == RequestRetryDefault && c.retryConfig.canRetry(attempt, err)
 }
 
 // isIdempotentMethod checks if an HTTP method is idempotent and safe to retry.
@@ -401,7 +352,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 		for attempt := 0; ; attempt++ {
 			if attempt > 0 {
 				// Log retry attempt
-				delay := c.calculateRetryDelay(attempt, lastErr)
+				delay := c.retryConfig.retryDelay(attempt, lastErr)
 				select {
 				case <-ctx.Done():
 					return errors.Join(ctx.Err(), lastErr)
@@ -487,33 +438,6 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 	return result, nil
 }
 
-// calculateRetryDelay calculates the delay before the next retry using exponential backoff
-func (c *Client) calculateRetryDelay(attempt int, lastErr error) time.Duration {
-	// Check if error has Retry-After header
-	var apiErr *APIError
-	if errors.As(lastErr, &apiErr) && apiErr.RetryAfter > 0 {
-		// Retry-After is the provider's earliest acceptable retry time, not a
-		// backoff suggestion. The caller's context remains the upper bound.
-		return apiErr.RetryAfter
-	}
-
-	if attempt <= 0 {
-		return c.retryConfig.InitialInterval
-	}
-
-	// Exponential backoff with positive jitter avoids retrying before the
-	// calculated delay while spreading concurrent clients across the window.
-	delay := float64(c.retryConfig.InitialInterval)
-	for i := 0; i < attempt-1; i++ {
-		delay *= c.retryConfig.Multiplier
-	}
-	delay = min(delay, float64(c.retryConfig.MaxInterval))
-	if delay < float64(c.retryConfig.MaxInterval) {
-		delay += rand.Float64() * delay * 0.2
-	}
-	return min(time.Duration(delay), c.retryConfig.MaxInterval)
-}
-
 // ChatCompletionStream performs a streaming chat completion with automatic retries
 func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, <-chan error) {
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
@@ -558,7 +482,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
-			delay := c.calculateRetryDelay(attempt, lastErr)
+			delay := c.retryConfig.retryDelay(attempt, lastErr)
 			select {
 			case <-ctx.Done():
 				return errors.Join(ctx.Err(), lastErr)

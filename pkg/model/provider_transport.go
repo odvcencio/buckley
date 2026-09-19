@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -91,44 +90,6 @@ func (t *ProviderTransport) retryConfigOrDefault() RetryConfig {
 	return t.retryConfig
 }
 
-func (t *ProviderTransport) retryLimit(err error) int {
-	config := t.retryConfigOrDefault()
-	limit := max(config.MaxRetries, 0)
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.IsRateLimitError() && config.MaxRateLimitRetries > limit {
-		limit = config.MaxRateLimitRetries
-	}
-	return limit
-}
-
-func (t *ProviderTransport) canRetry(attempt int, err error) bool {
-	return isRetryableError(err) && attempt < t.retryLimit(err)
-}
-
-// calculateRetryDelay mirrors Client.calculateRetryDelay: honor a
-// provider-reported Retry-After first, then fall back to exponential backoff
-// with positive jitter.
-func (t *ProviderTransport) calculateRetryDelay(attempt int, lastErr error) time.Duration {
-	var apiErr *APIError
-	if errors.As(lastErr, &apiErr) && apiErr.RetryAfter > 0 {
-		return apiErr.RetryAfter
-	}
-
-	config := t.retryConfigOrDefault()
-	if attempt <= 0 {
-		return config.InitialInterval
-	}
-	delay := float64(config.InitialInterval)
-	for i := 0; i < attempt-1; i++ {
-		delay *= config.Multiplier
-	}
-	delay = min(delay, float64(config.MaxInterval))
-	if delay < float64(config.MaxInterval) {
-		delay += rand.Float64() * delay * 0.2
-	}
-	return min(time.Duration(delay), config.MaxInterval)
-}
-
 func (t *ProviderTransport) waitForRateLimit(ctx context.Context) error {
 	if t == nil || t.rateLimiter == nil {
 		return nil
@@ -146,7 +107,7 @@ func (t *ProviderTransport) waitBeforeProviderRetry(ctx context.Context, attempt
 	if attempt <= 0 {
 		return nil
 	}
-	delay := t.calculateRetryDelay(attempt, lastErr)
+	delay := t.retryConfigOrDefault().retryDelay(attempt, lastErr)
 	select {
 	case <-ctx.Done():
 		return errors.Join(ctx.Err(), lastErr)
@@ -212,7 +173,7 @@ func (t *ProviderTransport) Do(ctx context.Context, httpClient *http.Client, met
 			resp, err := httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
-				if t.canRetry(attempt, lastErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, lastErr) {
 					continue
 				}
 				return retryExhaustedError(attempt, lastErr)
@@ -222,7 +183,7 @@ func (t *ProviderTransport) Do(ctx context.Context, httpClient *http.Client, met
 				apiErr := parseProviderError(resp)
 				resp.Body.Close()
 				lastErr = apiErr
-				if t.canRetry(attempt, apiErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, apiErr) {
 					continue
 				}
 				if isRetryableError(apiErr) {
@@ -277,7 +238,7 @@ func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Clien
 			resp, err := httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
-				if t.canRetry(attempt, lastErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, lastErr) {
 					continue
 				}
 				return retryExhaustedError(attempt, lastErr)
@@ -287,7 +248,7 @@ func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Clien
 				apiErr := parseProviderError(resp)
 				resp.Body.Close()
 				lastErr = apiErr
-				if t.canRetry(attempt, apiErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, apiErr) {
 					continue
 				}
 				if isRetryableError(apiErr) {
@@ -334,7 +295,7 @@ func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client,
 			resp, err := httpClient.Do(httpReq)
 			if err != nil {
 				lastErr = err
-				if t.canRetry(attempt, lastErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, lastErr) {
 					continue
 				}
 				return retryExhaustedError(attempt, lastErr)
@@ -343,7 +304,7 @@ func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client,
 				apiErr := parseProviderError(resp)
 				resp.Body.Close()
 				lastErr = apiErr
-				if t.canRetry(attempt, apiErr) {
+				if t.retryConfigOrDefault().canRetry(attempt, apiErr) {
 					continue
 				}
 				if isRetryableError(apiErr) {
@@ -358,7 +319,7 @@ func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client,
 				return nil
 			}
 			lastErr = fmt.Errorf("parsing SSE stream: %w", streamErr)
-			if events == 0 && t.canRetry(attempt, lastErr) {
+			if events == 0 && t.retryConfigOrDefault().canRetry(attempt, lastErr) {
 				continue
 			}
 			if events == 0 && isRetryableError(lastErr) {
