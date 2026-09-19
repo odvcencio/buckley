@@ -123,10 +123,6 @@ pkg/coordination/events/store.go InMemoryStore.Snapshot
 pkg/coordination/events/store.go InMemoryStore.Subscribe
 pkg/coordination/events/store.go NewInMemoryStore
 pkg/coordination/events/store.go inMemorySubscription.Unsubscribe
-pkg/coordination/reliability/retry.go RetryStrategy.Execute
-pkg/coordination/reliability/retry.go isRetriable
-pkg/coordination/reliability/retry.go nextRetryDelay
-pkg/coordination/reliability/retry.go retryDelayWithJitter
 pkg/coordination/security/auth.go AuthInterceptor.Authenticate
 pkg/coordination/security/auth.go AuthInterceptor.StreamInterceptor
 pkg/coordination/security/auth.go AuthInterceptor.UnaryInterceptor
