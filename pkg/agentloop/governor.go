@@ -51,8 +51,9 @@ type Decision struct {
 type Governor struct {
 	config Config
 
-	rounds    int
-	toolCalls int
+	rounds        int
+	toolCalls     int
+	evidenceCalls int
 
 	exactCounts   map[string]int
 	outcomeCounts map[string]int
@@ -72,9 +73,24 @@ func (g *Governor) ObserveEffect(effectClass string, success bool) Decision {
 
 // ObserveProgress tracks convergence using observed workspace change when a
 // dispatcher can provide it. Effect metadata remains the conservative
-// fallback for adapters that do not yet observe workspace state.
+// fallback for adapters that do not yet observe workspace state. Call this
+// before Observe so a confirmed change starts a fresh evidence window without
+// resetting the run's hard limits.
 func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, stateChanged bool) Decision {
-	if g == nil || g.config.MaxReadOnlyCalls <= 0 {
+	if g == nil {
+		return Decision{}
+	}
+	if success && stateObserved && stateChanged {
+		clear(g.exactCounts)
+		clear(g.outcomeCounts)
+		g.actionHistory = g.actionHistory[:0]
+		g.maxExactCount = 0
+		g.maxOutcomeCount = 0
+		g.evidenceCalls = 0
+		g.readOnlyCalls = 0
+		return Decision{}
+	}
+	if g.config.MaxReadOnlyCalls <= 0 {
 		return Decision{}
 	}
 	effectClass = strings.ToLower(strings.TrimSpace(effectClass))
@@ -82,10 +98,6 @@ func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, s
 		return Decision{}
 	}
 	if stateObserved {
-		if success && stateChanged {
-			g.readOnlyCalls = 0
-			return Decision{}
-		}
 		g.readOnlyCalls++
 	} else {
 		switch effectClass {
@@ -172,6 +184,7 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	outcomeKey := digest(outcomeScope + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
 
 	g.toolCalls++
+	g.evidenceCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
 	if g.exactCounts[exactKey] > g.maxExactCount {
@@ -280,17 +293,18 @@ func (g *Governor) RepetitionPressure() float64 {
 // both "new" say nothing about stagnation yet.
 const evidenceNoveltyMinSamples = 4
 
-// EvidenceNovelty reports the fraction of observed tool outcomes that were
-// first occurrences (0 = every outcome was a repeat, 1 = all new), and
-// whether enough outcomes exist for the signal to mean anything. Outcome
+// EvidenceNovelty reports the fraction of tool outcomes since the latest
+// successful observed state change that were first occurrences (0 = every
+// outcome was a repeat, 1 = all new), and whether enough outcomes exist for
+// the signal to mean anything. Outcome
 // identity uses the same canonicalized evidence hashing the repeat
 // detectors use: a changed content hash is new evidence, a re-read is not.
 func (g *Governor) EvidenceNovelty() (float64, bool) {
-	if g == nil || g.toolCalls == 0 {
+	if g == nil || g.evidenceCalls == 0 {
 		return 0, false
 	}
-	novelty := float64(len(g.outcomeCounts)) / float64(g.toolCalls)
-	return novelty, g.toolCalls >= evidenceNoveltyMinSamples
+	novelty := float64(len(g.outcomeCounts)) / float64(g.evidenceCalls)
+	return novelty, g.evidenceCalls >= evidenceNoveltyMinSamples
 }
 
 // ActionRequired reports whether discovery has crossed the action boundary.

@@ -3026,8 +3026,9 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 			}
 		}
 		content := outcome.Content
+		progressDecision := c.cfg.Governor.ObserveProgress(outcome.EffectClass, outcome.Success, outcome.StateObserved, outcome.StateChanged)
 		decision := c.cfg.Governor.Observe(call.Function.Name, call.Function.Arguments, content, outcome.Success)
-		decision = mergeGovernorDecisions(decision, c.cfg.Governor.ObserveProgress(outcome.EffectClass, outcome.Success, outcome.StateObserved, outcome.StateChanged))
+		decision = mergeGovernorDecisions(decision, progressDecision)
 		if strings.TrimSpace(decision.Nudge) != "" {
 			content += "\n\n" + decision.Nudge
 		}
