@@ -1000,6 +1000,11 @@ func applyToolPolicy(registry *tool.Registry, policy *ToolPolicy) {
 	if registry == nil || policy == nil {
 		return
 	}
+	if policy.AllowedTools != nil {
+		// Explicit tools form the discovery working set. The filter below still
+		// removes denied tools and discovery itself unless explicitly allowed.
+		registry.EnableDynamicDiscovery(policy.AllowedTools)
+	}
 
 	allowed := make(map[string]struct{})
 	for _, name := range policy.AllowedTools {
