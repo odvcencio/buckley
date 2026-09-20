@@ -815,20 +815,9 @@ func filterOutDenied(tools []string, denied any) []string {
 
 // filterOutWriteTools removes known write-capable tools from the list.
 func filterOutWriteTools(tools []string) []string {
-	writeTools := map[string]struct{}{
-		"write_file":       {},
-		"patch_file":       {},
-		"edit_file":        {},
-		"insert_text":      {},
-		"delete_lines":     {},
-		"search_replace":   {},
-		"rename_symbol":    {},
-		"extract_function": {},
-		"mark_resolved":    {},
-	}
 	result := make([]string, 0, len(tools))
 	for _, t := range tools {
-		if _, isWrite := writeTools[t]; !isWrite {
+		if !isWriteTool(t) {
 			result = append(result, t)
 		}
 	}
