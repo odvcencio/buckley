@@ -142,7 +142,7 @@ func TestRegistryCreateSessionAppliesToolPolicyAllowList(t *testing.T) {
 	info, err := registry.CreateSession(CreateSessionRequest{
 		Project: repoDir,
 		ToolPolicy: &ToolPolicy{
-			AllowedTools: []string{"read_file"},
+			AllowedTools: []string{"read_file", "git_status"},
 		},
 	})
 	if err != nil {
@@ -162,6 +162,10 @@ func TestRegistryCreateSessionAppliesToolPolicyAllowList(t *testing.T) {
 	}
 	if _, ok := runner.tools.Get("write_file"); ok {
 		t.Fatalf("expected write_file to be filtered out")
+	}
+	req := runner.buildRawChatRequestForRoute(model.ModelRoute{RequestedModel: "future-tool-model", SelectedModel: "future-tool-model"})
+	if len(req.Tools) != 2 || req.ToolChoice != "auto" {
+		t.Fatalf("model request exposes %d tools with choice %q, want both explicitly allowed tools", len(req.Tools), req.ToolChoice)
 	}
 }
 

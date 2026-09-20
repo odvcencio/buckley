@@ -1592,7 +1592,8 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 			if r.store != nil {
 				decidedBy := "system"
 				riskScore := 0
-				if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
+				auditApprovalID, approvalDecision, score := r.approvalAuditMetadata(approvalID)
+				if approvalDecision != "" || score != 0 {
 					if approvalDecision != "" {
 						decidedBy = approvalDecision
 					}
@@ -1600,7 +1601,7 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 				}
 				if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 					SessionID:  r.sessionID,
-					ApprovalID: approvalID,
+					ApprovalID: auditApprovalID,
 					ToolName:   tc.Function.Name,
 					ToolInput:  tc.Function.Arguments,
 					RiskScore:  riskScore,
@@ -1639,7 +1640,8 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 				if r.store != nil {
 					decidedBy := "system"
 					riskScore := 0
-					if approvalDecision, score := r.approvalAuditFields(approvalID); approvalDecision != "" || score != 0 {
+					auditApprovalID, approvalDecision, score := r.approvalAuditMetadata(approvalID)
+					if approvalDecision != "" || score != 0 {
 						if approvalDecision != "" {
 							decidedBy = approvalDecision
 						}
@@ -1647,7 +1649,7 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 					}
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: approvalID,
+						ApprovalID: auditApprovalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1688,10 +1690,10 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 					},
 				})
 				if r.store != nil {
-					decidedBy, riskScore := r.approvalAuditFields(approvalID)
+					auditApprovalID, decidedBy, riskScore := r.approvalAuditMetadata(approvalID)
 					if logErr := r.store.LogToolExecution(&storage.ToolAuditEntry{
 						SessionID:  r.sessionID,
-						ApprovalID: approvalID,
+						ApprovalID: auditApprovalID,
 						ToolName:   tc.Function.Name,
 						ToolInput:  tc.Function.Arguments,
 						RiskScore:  riskScore,
@@ -1744,10 +1746,10 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 		duration := time.Since(startTime)
 
 		// Log to audit trail
-		decidedBy, riskScore := r.approvalAuditFields(approvalID)
+		auditApprovalID, decidedBy, riskScore := r.approvalAuditMetadata(approvalID)
 		auditEntry := &storage.ToolAuditEntry{
 			SessionID:  r.sessionID,
-			ApprovalID: approvalID,
+			ApprovalID: auditApprovalID,
 			ToolName:   tc.Function.Name,
 			ToolInput:  tc.Function.Arguments,
 			RiskScore:  riskScore,
@@ -1842,15 +1844,15 @@ func (r *Runner) toolOutcomeWorkDir() string {
 	return strings.TrimSpace(r.session.GitRepo)
 }
 
-func (r *Runner) approvalAuditFields(approvalID string) (string, int) {
+func (r *Runner) approvalAuditMetadata(approvalID string) (string, string, int) {
 	if r == nil || r.store == nil || strings.TrimSpace(approvalID) == "" {
-		return "", 0
+		return "", "", 0
 	}
 	approval, err := r.store.GetPendingApproval(approvalID)
 	if err != nil || approval == nil {
-		return "", 0
+		return "", "", 0
 	}
-	return approval.DecidedBy, approval.RiskScore
+	return approval.ID, approval.DecidedBy, approval.RiskScore
 }
 
 // evaluatePolicy runs the policy engine to determine if approval is needed.
