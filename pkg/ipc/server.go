@@ -229,7 +229,12 @@ func shouldPersistEvent(eventType string) bool {
 
 // Start runs the HTTP server until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	defer s.waitForViewPatches()
+	defer func() {
+		s.waitForViewPatches()
+		if s.grpcService != nil {
+			s.grpcService.Close()
+		}
+	}()
 
 	if err := s.validateStartupConfig(); err != nil {
 		return err
