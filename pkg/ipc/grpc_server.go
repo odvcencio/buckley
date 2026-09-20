@@ -58,7 +58,9 @@ type GRPCService struct {
 	broadcastDrops int64
 
 	// done is closed by Close to signal runEventForwarder to exit.
-	done chan struct{}
+	done          chan struct{}
+	forwarderDone chan struct{}
+	closeOnce     sync.Once
 }
 
 type connectedAgent struct {
@@ -134,6 +136,7 @@ func NewGRPCService(server *Server) *GRPCService {
 		sessionOwners:   make(map[string]string),
 		eventCh:         make(chan Event, 256),
 		done:            make(chan struct{}),
+		forwarderDone:   make(chan struct{}),
 
 		subscribeLimiter:           newRateLimiter(200 * time.Millisecond),
 		maxSubscribersTotal:        maxGRPCSubscribersTotal,
@@ -146,21 +149,24 @@ func NewGRPCService(server *Server) *GRPCService {
 	return svc
 }
 
-// Close signals the event forwarder goroutine to stop and waits for it to
-// drain. It is safe to call multiple times; only the first call has an effect.
+// Close stops event forwarding and waits for any active delivery to finish.
+// Queued telemetry may be discarded. It is safe to call concurrently.
 func (s *GRPCService) Close() {
-	select {
-	case <-s.done:
-		// Already closed.
-	default:
-		close(s.done)
-	}
+	s.closeOnce.Do(func() { close(s.done) })
+	<-s.forwarderDone
 }
 
 // BroadcastEvent sends an event to all gRPC subscribers.
 // Called by the hub or other parts of the system.
 func (s *GRPCService) BroadcastEvent(event Event) {
 	select {
+	case <-s.done:
+		return
+	default:
+	}
+	select {
+	case <-s.done:
+		return
 	case s.eventCh <- event:
 	default:
 		drops := atomic.AddInt64(&s.broadcastDrops, 1)
@@ -173,7 +179,13 @@ func (s *GRPCService) BroadcastEvent(event Event) {
 // runEventForwarder distributes events to subscribers.
 // It exits when s.done is closed.
 func (s *GRPCService) runEventForwarder() {
+	defer close(s.forwarderDone)
 	for {
+		select {
+		case <-s.done:
+			return
+		default:
+		}
 		select {
 		case <-s.done:
 			return

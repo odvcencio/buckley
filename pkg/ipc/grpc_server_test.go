@@ -37,6 +37,8 @@ func TestGRPCSendCommandScopeEnforced(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, gateway, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -108,6 +110,8 @@ func TestGRPCSendCommandRequiresSessionToken(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, gateway, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -162,6 +166,8 @@ func TestGRPCWorkflowActionDispatchesSlashCommand(t *testing.T) {
 	server := NewServer(Config{}, store, nil, gateway, nil, config.DefaultConfig(), nil, nil)
 	server.commandLimiter = newRateLimiter(0)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -236,6 +242,8 @@ func TestGRPCWorkflowActionRequiresSessionToken(t *testing.T) {
 	server := NewServer(Config{}, store, nil, gateway, nil, config.DefaultConfig(), nil, nil)
 	server.commandLimiter = newRateLimiter(0)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -290,6 +298,8 @@ func TestGRPCWorkflowActionExecuteResumesPlanWhenProvided(t *testing.T) {
 	server := NewServer(Config{}, store, nil, gateway, nil, config.DefaultConfig(), nil, nil)
 	server.commandLimiter = newRateLimiter(0)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -349,6 +359,8 @@ func TestGRPCCreateHeadlessSessionPassesBranchAndEnv(t *testing.T) {
 	registry := newFakeHeadlessRegistry()
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "member",
@@ -430,6 +442,8 @@ func TestGRPCCreateHeadlessSessionInvalidTaskIntentRejectedBeforeCreate(t *testi
 	registry.createErr = sessionexec.ErrValidation
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "member",
@@ -475,6 +489,8 @@ func TestGRPCDeleteHeadlessSessionHonorsCleanupWorkspace(t *testing.T) {
 	registry.sessions["s1"] = nil
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -518,6 +534,8 @@ func TestGRPCApproveToolCallDispatchesDecisionToSession(t *testing.T) {
 	registry := newFakeHeadlessRegistry()
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -611,6 +629,8 @@ func TestGRPCRejectToolCallDispatchesDecisionToSession(t *testing.T) {
 	registry := newFakeHeadlessRegistry()
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	if err := store.CreateSession(&storage.Session{
 		ID:         "s1",
@@ -712,6 +732,8 @@ func TestGRPCApproveToolCallRejectsExpiredApproval(t *testing.T) {
 	registry := newFakeHeadlessRegistry()
 	server.SetHeadlessRegistry(registry)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	now := time.Now()
 	if err := store.CreateSession(&storage.Session{
@@ -771,6 +793,8 @@ func TestGRPCListPendingApprovalsSkipsExpiredApprovals(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	now := time.Now()
 	if err := store.CreateSession(&storage.Session{
@@ -864,6 +888,8 @@ func TestGRPCListPlansRequiresAuth(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	req := connect.NewRequest(&ipcpb.ListPlansRequest{})
 
@@ -896,6 +922,8 @@ func TestGRPCGetPlanRequiresAuth(t *testing.T) {
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	server.planStore = nil // Explicitly clear to test unavailable error
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	req := connect.NewRequest(&ipcpb.GetPlanRequest{PlanId: "test-plan"})
 
@@ -923,6 +951,8 @@ func TestGRPCGetPlanRequiresPlanID(t *testing.T) {
 	// Set up a plan store
 	server.planStore = &testPlanStore{}
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	viewerCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "viewer",
@@ -944,6 +974,8 @@ func TestGRPCListProjectsRequiresAuth(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	req := connect.NewRequest(&emptypb.Empty{})
 
@@ -974,6 +1006,8 @@ func TestGRPCCreateProjectRequiresMemberScope(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	req := connect.NewRequest(&ipcpb.CreateProjectRequest{Name: "test-project"})
 
@@ -1002,6 +1036,8 @@ func TestGRPCCreateProjectRequiresProjectRoot(t *testing.T) {
 	// Explicitly clear the project root to test the error case
 	server.projectRoot = ""
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "member",
@@ -1023,6 +1059,8 @@ func TestGRPCCreateProjectCreatesDirectory(t *testing.T) {
 	projectRoot := t.TempDir()
 	server := NewServer(Config{ProjectRoot: projectRoot}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "member",
@@ -1052,6 +1090,8 @@ func TestGRPCSubscribePushValidatesRequiredFields(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	memberCtx := context.WithValue(context.Background(), principalContextKey, &requestPrincipal{
 		Name:  "alice",
@@ -1101,6 +1141,8 @@ func TestGRPCUnsubscribePushDoesNotDeleteOtherPrincipalsSubscription(t *testing.
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	aliceEndpoint := "https://example.test/push/alice"
 	if _, err := store.CreatePushSubscription("alice", aliceEndpoint, "p", "a", "ua"); err != nil {
@@ -1147,6 +1189,8 @@ func TestGRPCListPersonasRequiresOperatorScope(t *testing.T) {
 
 	server := NewServer(Config{}, store, nil, nil, nil, config.DefaultConfig(), nil, nil)
 	svc := NewGRPCService(server)
+	defer svc.Close()
+	defer server.waitForViewPatches()
 
 	req := connect.NewRequest(&emptypb.Empty{})
 
