@@ -156,6 +156,90 @@ func TestBatchDispatcherQueueWaitDoesNotConsumeTaskTimeout(t *testing.T) {
 	}
 }
 
+func TestBatchDispatcherQueueWaitDoesNotConsumeTaskTimeoutAcrossModes(t *testing.T) {
+	modes := []struct {
+		name      string
+		parallel  bool
+		taskCount int
+	}{
+		{name: "single", taskCount: 1},
+		{name: "sequential", taskCount: 2},
+		{name: "parallel", parallel: true, taskCount: 2},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, timeoutFinalResponse("mode-queued", "queued done", 2, 1))
+			}))
+			t.Cleanup(server.Close)
+
+			rt := newTimeoutRuntime(t, server, tool.NewEmptyRegistry(), func(cfg *Config) {
+				cfg.SubAgent.Timeout = 100 * time.Millisecond
+				cfg.SubAgent.MaxConcurrent = 1
+			})
+			rt.dispatcher.semaphore <- struct{}{}
+			t.Cleanup(func() {
+				select {
+				case <-rt.dispatcher.semaphore:
+				default:
+				}
+			})
+
+			ctx := &observedDoneContext{Context: context.Background(), observed: make(chan struct{})}
+			tasks := make([]SubTask, mode.taskCount)
+			for i := range tasks {
+				tasks[i] = SubTask{ID: fmt.Sprintf("fresh-timeout-%d", i), Prompt: "fast after admission"}
+			}
+			done := make(chan struct {
+				results []BatchResult
+				err     error
+			}, 1)
+			go func() {
+				results, err := rt.dispatcher.Execute(ctx, BatchRequest{Tasks: tasks, Parallel: mode.parallel})
+				done <- struct {
+					results []BatchResult
+					err     error
+				}{results: results, err: err}
+			}()
+
+			select {
+			case <-ctx.observed:
+			case <-time.After(time.Second):
+				t.Fatal("batch did not reach the admission queue")
+			}
+			time.Sleep(200 * time.Millisecond)
+			if calls.Load() != 0 {
+				t.Fatalf("model calls before admission = %d, want queued task not started", calls.Load())
+			}
+			<-rt.dispatcher.semaphore
+
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatalf("execute error = %v, want queue wait excluded from task timeout", got.err)
+				}
+				if len(got.results) != len(tasks) {
+					t.Fatalf("results = %d, want %d", len(got.results), len(tasks))
+				}
+				for i, result := range got.results {
+					if result.TaskID != tasks[i].ID || result.Summary != "queued done" || result.Error != "" {
+						t.Errorf("result %d = %+v, want successful fresh execution", i, result)
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatal("batch did not finish after releasing queue slot")
+			}
+			if len(rt.dispatcher.semaphore) != 0 {
+				t.Fatalf("held slots = %d, want no released permit leak", len(rt.dispatcher.semaphore))
+			}
+		})
+	}
+}
+
 func TestBatchDispatcherQueueParentCancelReturnsExactTaskIDWithoutStarting(t *testing.T) {
 	parentCause := fmt.Errorf("parent stopped while queued: %w", context.Canceled)
 	var calls atomic.Int32

@@ -172,15 +172,23 @@ func (d *BatchDispatcher) Execute(ctx context.Context, req BatchRequest) ([]Batc
 
 func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, 0, len(tasks))
-	var combinedErr error
+	errs := make([]error, 0, len(tasks))
 	for idx, task := range tasks {
-		res, err := d.executeTask(ctx, task, idx)
+		err := d.acquire(ctx)
+		if err != nil {
+			for ; idx < len(tasks); idx++ {
+				results = append(results, canceledQueuedBatchResult(tasks[idx], err))
+				errs = append(errs, err)
+			}
+			break
+		}
+		res, err := d.executeAdmittedTask(ctx, task, idx)
 		results = append(results, res)
 		if err != nil {
-			combinedErr = errors.Join(combinedErr, err)
+			errs = append(errs, err)
 		}
 	}
-	return results, combinedErr
+	return results, errors.Join(errs...)
 }
 
 func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
@@ -195,20 +203,13 @@ dispatch:
 			break
 		}
 		// Acquire before spawning so queued tasks do not each retain a goroutine.
-		if d.semaphore != nil {
-			select {
-			case d.semaphore <- struct{}{}:
-			case <-ctx.Done():
-				break dispatch
-			}
+		if err := d.acquire(ctx); err != nil {
+			break dispatch
 		}
 		wg.Add(1)
 		go func(idx int, task SubTask) {
 			defer wg.Done()
-			if d.semaphore != nil {
-				defer func() { <-d.semaphore }()
-			}
-			results[idx], errs[idx] = d.executeTask(ctx, task, idx)
+			results[idx], errs[idx] = d.executeAdmittedTask(ctx, task, idx)
 		}(next, tasks[next])
 	}
 
@@ -221,6 +222,32 @@ dispatch:
 	}
 	wg.Wait()
 	return results, errors.Join(errs...)
+}
+
+func (d *BatchDispatcher) acquire(ctx context.Context) error {
+	if d.semaphore == nil {
+		return nil
+	}
+	if err := contextCancellationError(ctx); err != nil {
+		return err
+	}
+	select {
+	case d.semaphore <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return contextCancellationError(ctx)
+	}
+}
+
+func (d *BatchDispatcher) release() {
+	if d.semaphore != nil {
+		<-d.semaphore
+	}
+}
+
+func (d *BatchDispatcher) executeAdmittedTask(ctx context.Context, task SubTask, taskIndex int) (BatchResult, error) {
+	defer d.release()
+	return d.executeTask(ctx, task, taskIndex)
 }
 
 func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskIndex int) (BatchResult, error) {
