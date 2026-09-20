@@ -38,30 +38,10 @@ jobs:
           if [[ -n "${BASE_SHA}" ]] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}" 2>/dev/null || true
           fi
-          if [[ -z "${BASE_SHA}" ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            echo "base commit unavailable; treating all surfaces as changed" >&2
-            echo "go=true" >> "$GITHUB_OUTPUT"
-            echo "ui=true" >> "$GITHUB_OUTPUT"
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          ./scripts/detect-affected-surfaces.sh
 
-          changed="$(git diff --diff-filter=d --name-only "${BASE_SHA}" "${GITHUB_SHA}")"
-          if grep -Eq '(^|/).+\.go$|^go\.(mod|sum)$|^scripts/(test|check-release|check-deadcode)\.sh$|^scripts/deadcode-baseline\.txt$|^\.github/workflows/ci\.yml$' <<<"${changed}"; then
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "go=false" >> "$GITHUB_OUTPUT"
-          fi
-          if grep -Eq '^pkg/ipc/gosxui/|^pkg/ipc/server\.go$|^scripts/build-ui\.sh$|^Makefile$' <<<"${changed}"; then
-            echo "ui=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ui=false" >> "$GITHUB_OUTPUT"
-          fi
-          if grep -Eq '^(\.goreleaser\.yaml|CHANGELOG\.md|pkg/version/|build/docker/|scripts/(check-release|publish-containers)\.sh|\.github/workflows/release\.yml)' <<<"${changed}"; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Check affected-surface detection
+        run: bash ./scripts/tests/test_detect_affected_surfaces.sh
 
       - name: Check test script go-list failure handling
         run: bash ./scripts/tests/test_test_sh_go_list_failure.sh
@@ -93,7 +73,7 @@ jobs:
           # when the base commit is not in the clone, check every Go file
           # rather than silently checking none.
           if [[ -n "${BASE_SHA}" ]] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            mapfile -t files < <(git diff --diff-filter=d --name-only "${BASE_SHA}" "${GITHUB_SHA}" -- '*.go')
+            mapfile -t files < <(git diff --no-renames --diff-filter=d --name-only "${BASE_SHA}" "${GITHUB_SHA}" -- '*.go')
           else
             mapfile -t files < <(git ls-files '*.go')
           fi
