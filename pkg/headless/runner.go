@@ -2289,24 +2289,11 @@ func (r *Runner) formatToolResult(result *builtin.Result) string {
 	if result == nil {
 		return "No result"
 	}
-	if !result.Success {
-		return fmt.Sprintf("Error: %s", result.Error)
+	output, err := tool.ToModelOutput(result)
+	if err != nil {
+		return fmt.Sprintf("Error: encoding tool result: %v", err)
 	}
-
-	// Try to get meaningful output from DisplayData first
-	if msg, ok := result.DisplayData["message"].(string); ok && msg != "" {
-		return msg
-	}
-
-	// Serialize Data as JSON
-	if len(result.Data) > 0 {
-		data, err := json.MarshalIndent(result.Data, "", "  ")
-		if err == nil {
-			return string(data)
-		}
-	}
-
-	return "Success"
+	return output
 }
 
 func (r *Runner) processSlashCommand(content string) error {
