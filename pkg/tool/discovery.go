@@ -20,7 +20,7 @@ var DefaultDiscoveryTools = []string{
 	"run_shell",
 	"run_code",
 	"write_file",
-	"patch_file",
+	"apply_patch",
 	"run_tests",
 	"activate_skill",
 	"compact_context",

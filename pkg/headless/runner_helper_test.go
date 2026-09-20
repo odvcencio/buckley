@@ -10,6 +10,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/storage"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
@@ -110,6 +111,8 @@ func TestGetMessageContent(t *testing.T) {
 }
 
 func TestFormatToolResult(t *testing.T) {
+	tool.SetResultEncoding(false)
+	t.Cleanup(func() { tool.SetResultEncoding(true) })
 	runner := &Runner{}
 
 	tests := []struct {
@@ -118,24 +121,31 @@ func TestFormatToolResult(t *testing.T) {
 		expected string
 	}{
 		{name: "nil result", result: nil, expected: "No result"},
-		{name: "error result", result: &builtin.Result{Success: false, Error: "something failed"}, expected: "Error: something failed"},
-		{name: "success with display message", result: &builtin.Result{
+		{name: "error result", result: &builtin.Result{Success: false, Error: "something failed"}, expected: `{"error":"something failed","success":false}`},
+		{name: "UI-only display message omitted", result: &builtin.Result{
 			Success:     true,
 			DisplayData: map[string]any{"message": "File created"},
-		}, expected: "File created"},
+		}, expected: `{"success":true}`},
+		{name: "abridged display message retained", result: &builtin.Result{
+			Success: true, ShouldAbridge: true,
+			DisplayData: map[string]any{"message": "File created"},
+		}, expected: `{"data":{"message":"File created"},"success":true}`},
 		{name: "success with data", result: &builtin.Result{
 			Success: true,
 			Data:    map[string]any{"foo": "bar"},
-		}, expected: "{\n  \"foo\": \"bar\"\n}"},
-		{name: "success with no data", result: &builtin.Result{Success: true}, expected: "Success"},
+		}, expected: `{"data":{"foo":"bar"},"success":true}`},
+		{name: "success with no data", result: &builtin.Result{Success: true}, expected: `{"success":true}`},
 		{name: "success with empty display message", result: &builtin.Result{
 			Success:     true,
 			DisplayData: map[string]any{"message": ""},
-		}, expected: "Success"},
+		}, expected: `{"success":true}`},
 		{name: "success with empty data", result: &builtin.Result{
 			Success: true,
 			Data:    map[string]any{},
-		}, expected: "Success"},
+		}, expected: `{"success":true}`},
+		{name: "encoding failure", result: &builtin.Result{
+			Success: true, Data: map[string]any{"invalid": make(chan int)},
+		}, expected: "Error: encoding tool result: json: unsupported type: chan int"},
 	}
 
 	for _, tc := range tests {

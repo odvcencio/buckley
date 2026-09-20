@@ -2,10 +2,12 @@ package tool
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/types"
 )
 
 func TestDynamicDiscovery_ExposesSmallStableWorkingSet(t *testing.T) {
@@ -58,6 +60,77 @@ func TestDynamicDiscovery_ExposesExecProgramWhenOptInToolIsRegistered(t *testing
 	names := functionNames(visible)
 	if strings.Join(names, ",") != "exec_program,discover_tools" {
 		t.Fatalf("visible code-mode tools = %v", names)
+	}
+}
+
+func TestDynamicDiscovery_DefaultCatalogIncludesRegisteredApplyPatch(t *testing.T) {
+	registry := NewRegistry()
+	registry.EnableDynamicDiscovery(nil)
+
+	visible := registry.ToOpenAIFunctionsGoverned(nil, "interactive", "coding", nil, 0)
+	names := functionNames(visible)
+	if !slices.Contains(names, "apply_patch") {
+		t.Fatalf("default visible tools = %v, want registered apply_patch", names)
+	}
+	if slices.Contains(names, "patch_file") {
+		t.Fatalf("default visible tools contain stale patch_file name: %v", names)
+	}
+
+	var patchDefinition map[string]any
+	for _, function := range visible {
+		definition, _ := function["function"].(map[string]any)
+		if definition["name"] == "apply_patch" {
+			patchDefinition = definition
+			break
+		}
+	}
+	if patchDefinition == nil {
+		t.Fatal("apply_patch schema missing from governed catalog")
+	}
+	parameters, ok := patchDefinition["parameters"].(builtin.ParameterSchema)
+	if !ok || !slices.Contains(parameters.Required, "patch") {
+		t.Fatalf("apply_patch parameters = %#v, want required patch field", patchDefinition["parameters"])
+	}
+}
+
+func TestDynamicDiscovery_GovernanceStillRestrictsApplyPatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowed   []string
+		poolMode  string
+		evaluator types.RuleEvaluator
+	}{
+		{
+			name:    "allowed tool filter",
+			allowed: []string{"read_file"},
+		},
+		{
+			name:     "read only pool",
+			poolMode: "read_only",
+		},
+		{
+			name: "arbiter exclusion",
+			evaluator: &mockEvaluator{results: map[[2]string]types.StrategyResult{
+				{"runtime/concurrency", "pool_policy"}: {
+					Params: map[string]any{"exclude_tools": "apply_patch"},
+				},
+			}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewRegistry()
+			if tc.poolMode != "" {
+				registry.SetDefaultPoolMode(tc.poolMode)
+			}
+			registry.EnableDynamicDiscovery(nil)
+
+			visible := registry.ToOpenAIFunctionsGoverned(tc.evaluator, "interactive", "coding", tc.allowed, 0)
+			if names := functionNames(visible); slices.Contains(names, "apply_patch") {
+				t.Fatalf("restricted visible tools = %v, apply_patch must remain unavailable", names)
+			}
+		})
 	}
 }
 
