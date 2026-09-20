@@ -35,7 +35,8 @@ export default defineConfig({
           items: [
             { text: 'Running Goals', link: '/goals' },
             { text: 'Code Mode', link: '/code-mode' },
-            { text: 'Troubleshooting', link: '/troubleshooting' }
+            { text: 'Troubleshooting', link: '/troubleshooting' },
+            { text: 'Release Readiness Plan', link: '/functionality-and-performance' }
           ]
         },
         {
