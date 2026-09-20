@@ -185,45 +185,48 @@ func (d *BatchDispatcher) executeSequential(ctx context.Context, tasks []SubTask
 
 func (d *BatchDispatcher) executeParallel(ctx context.Context, tasks []SubTask) ([]BatchResult, error) {
 	results := make([]BatchResult, len(tasks))
-	var mu sync.Mutex
-	var combinedErr error
-	wg := sync.WaitGroup{}
+	errs := make([]error, len(tasks))
+	var wg sync.WaitGroup
+	next := 0
 
-	for idx, task := range tasks {
-		idx := idx
-		task := task
+dispatch:
+	for ; next < len(tasks); next++ {
+		if ctx.Err() != nil {
+			break
+		}
+		// Acquire before spawning so queued tasks do not each retain a goroutine.
+		if d.semaphore != nil {
+			select {
+			case d.semaphore <- struct{}{}:
+			case <-ctx.Done():
+				break dispatch
+			}
+		}
 		wg.Add(1)
-		go func() {
+		go func(idx int, task SubTask) {
 			defer wg.Done()
 			if d.semaphore != nil {
-				select {
-				case d.semaphore <- struct{}{}:
-				case <-ctx.Done():
-					queueErr := contextCancellationError(ctx)
-					res := canceledQueuedBatchResult(task, queueErr)
-					mu.Lock()
-					results[idx] = res
-					combinedErr = errors.Join(combinedErr, queueErr)
-					mu.Unlock()
-					return
-				}
 				defer func() { <-d.semaphore }()
 			}
-			res, err := d.executeTask(ctx, task, idx)
-			mu.Lock()
-			results[idx] = res
-			if err != nil {
-				combinedErr = errors.Join(combinedErr, err)
-			}
-			mu.Unlock()
-		}()
+			results[idx], errs[idx] = d.executeTask(ctx, task, idx)
+		}(next, tasks[next])
 	}
 
+	if next < len(tasks) {
+		queueErr := contextCancellationError(ctx)
+		for idx := next; idx < len(tasks); idx++ {
+			results[idx] = canceledQueuedBatchResult(tasks[idx], queueErr)
+			errs[idx] = queueErr
+		}
+	}
 	wg.Wait()
-	return results, combinedErr
+	return results, errors.Join(errs...)
 }
 
 func (d *BatchDispatcher) executeTask(ctx context.Context, task SubTask, taskIndex int) (BatchResult, error) {
+	if err := contextCancellationError(ctx); err != nil {
+		return canceledQueuedBatchResult(task, err), err
+	}
 	res := BatchResult{TaskID: task.ID}
 	if strings.TrimSpace(task.Prompt) == "" {
 		res.Error = "task prompt required"
