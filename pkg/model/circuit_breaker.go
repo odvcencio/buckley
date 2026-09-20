@@ -60,8 +60,33 @@ type CircuitBreaker struct {
 	failureCount    uint32
 	lastFailureTime time.Time
 	halfOpenProbe   atomic.Bool
+	generation      uint64
 
 	mu sync.RWMutex
+}
+
+type circuitBreakerTransition struct {
+	oldState               CircuitState
+	newState               CircuitState
+	reason                 string
+	resetTimeout           time.Duration
+	includeResetTimeout    bool
+	consecutiveFailures    uint32
+	includeConsecutiveNums bool
+}
+
+func (t circuitBreakerTransition) log() {
+	args := []any{"old_state", t.oldState.String(), "new_state", t.newState.String()}
+	if t.includeResetTimeout {
+		args = append(args, "reset_timeout", t.resetTimeout)
+	}
+	if t.reason != "" {
+		args = append(args, "reason", t.reason)
+	}
+	if t.includeConsecutiveNums {
+		args = append(args, "consecutive_failures", t.consecutiveFailures)
+	}
+	slog.Warn("circuit breaker state transition", args...)
 }
 
 // NewCircuitBreaker creates a new circuit breaker with the given configuration
@@ -87,13 +112,13 @@ func (cb *CircuitBreaker) State() string {
 // Reset manually resets the circuit breaker to closed state
 func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
 	oldState := cb.state
+	cb.generation++
 	cb.state = CircuitClosed
 	cb.failureCount = 0
 	cb.lastFailureTime = time.Time{}
 	cb.halfOpenProbe.Store(false)
+	cb.mu.Unlock()
 
 	if oldState != CircuitClosed {
 		slog.Warn("circuit breaker manually reset", "old_state", oldState.String(), "new_state", "closed")
@@ -102,10 +127,11 @@ func (cb *CircuitBreaker) Reset() {
 
 // Call wraps a function call with circuit breaker logic
 // Returns an error if the circuit is open, otherwise executes the function
-func (cb *CircuitBreaker) Call(fn func() error) error {
+func (cb *CircuitBreaker) Call(fn func() error) (err error) {
 	cb.mu.Lock()
 
 	ownsHalfOpenProbe := false
+	var admissionTransition *circuitBreakerTransition
 
 	// Check if we should transition from open to half-open
 	if cb.state == CircuitOpen {
@@ -118,109 +144,176 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 			ownsHalfOpenProbe = true
 			cb.state = CircuitHalfOpen
 			cb.failureCount = 0
-			slog.Warn("circuit breaker state transition", "old_state", "open", "new_state", "half-open", "reset_timeout", cb.config.ResetTimeout)
+			cb.generation++
+			admissionTransition = &circuitBreakerTransition{
+				oldState:            CircuitOpen,
+				newState:            CircuitHalfOpen,
+				resetTimeout:        cb.config.ResetTimeout,
+				includeResetTimeout: true,
+			}
 		} else {
+			failureAge := time.Since(cb.lastFailureTime)
 			cb.mu.Unlock()
-			return fmt.Errorf("circuit breaker is open (last failure: %v ago)", time.Since(cb.lastFailureTime))
+			return fmt.Errorf("circuit breaker is open (last failure: %v ago)", failureAge)
 		}
 	} else if cb.state == CircuitHalfOpen {
-		// A probe is already in flight: reject every non-owner caller
-		// that observes half-open state. They never run fn.
-		cb.mu.Unlock()
-		return fmt.Errorf("circuit breaker is open (half-open probe in progress)")
+		// Admit one replacement probe after a neutral outcome releases the
+		// previous one, and reject every other caller while it is in flight.
+		if !cb.halfOpenProbe.CompareAndSwap(false, true) {
+			cb.mu.Unlock()
+			return fmt.Errorf("circuit breaker is open (half-open probe in progress)")
+		}
+		ownsHalfOpenProbe = true
 	}
 
+	generation := cb.generation
 	cb.mu.Unlock()
 
-	// Execute the function
-	err := fn()
+	completed := false
+	defer func() {
+		cb.finishCall(generation, ownsHalfOpenProbe, err, !completed)
+	}()
 
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	// Caller-initiated cancellation is neutral: it says nothing about
-	// service health. DeadlineExceeded is NOT exempt and still counts
-	// as a failure.
-	// Only the owner may act on half-open state.
-	if errors.Is(err, context.Canceled) {
-		if cb.state == CircuitHalfOpen && ownsHalfOpenProbe {
-			// Restore open state and release the probe latch so a new
-			// probe can be attempted immediately. The existing
-			// lastFailureTime is already expired, so it is preserved
-			// as-is to allow immediate reprobe.
-			cb.state = CircuitOpen
-			cb.halfOpenProbe.Store(false)
-			slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "open", "reason", "probe canceled")
-		}
-		return err
+	if admissionTransition != nil {
+		admissionTransition.log()
 	}
-
-	if cb.state == CircuitHalfOpen {
-		if !ownsHalfOpenProbe {
-			// A call admitted while closed finished after another caller became
-			// the half-open probe. Its stale outcome cannot decide that probe.
-			return err
-		}
-		if err != nil {
-			cb.recordFailure()
-		} else {
-			cb.recordSuccess()
-		}
-		return err
-	}
-
-	if ownsHalfOpenProbe {
-		// Manual Reset or another explicit state change won while this probe
-		// was in flight. Do not project the stale probe outcome onto it.
-		return err
-	}
-	if err != nil {
-		cb.recordFailure()
-	} else {
-		cb.recordSuccess()
-	}
+	err = fn()
+	completed = true
 	return err
 }
 
-// recordFailure records a failure and transitions state if needed
+func (cb *CircuitBreaker) finishCall(generation uint64, ownsHalfOpenProbe bool, err error, incomplete bool) {
+	cb.mu.Lock()
+	if generation != cb.generation {
+		cb.mu.Unlock()
+		return
+	}
+
+	// Any call path that does not return normally is neutral to breaker
+	// health, but an in-flight recovery probe must still be released so a
+	// replacement probe can run. This covers panics, runtime.Goexit, and
+	// legacy panic(nil) without intercepting the original control flow.
+	if incomplete {
+		if cb.state == CircuitHalfOpen && ownsHalfOpenProbe {
+			cb.halfOpenProbe.Store(false)
+		}
+		cb.mu.Unlock()
+		return
+	}
+
+	// Caller-initiated cancellation is neutral: it says nothing about
+	// service health. DeadlineExceeded is NOT exempt and still counts
+	// as a failure. A canceled half-open probe returns to open so it can
+	// be retried, but it does not update the failure timestamp.
+	if errors.Is(err, context.Canceled) {
+		var transition *circuitBreakerTransition
+		if cb.state == CircuitHalfOpen && ownsHalfOpenProbe {
+			transition = &circuitBreakerTransition{
+				oldState: cb.state,
+				newState: CircuitOpen,
+				reason:   "probe canceled",
+			}
+			cb.state = CircuitOpen
+			cb.generation++
+			cb.halfOpenProbe.Store(false)
+		}
+		cb.mu.Unlock()
+		if transition != nil {
+			transition.log()
+		}
+		return
+	}
+
+	var transition *circuitBreakerTransition
+	var resetFailureCount bool
+	if cb.state == CircuitHalfOpen {
+		if !ownsHalfOpenProbe {
+			// A call admitted in an earlier state cannot decide the current
+			// recovery probe. The generation check above normally handles this;
+			// retain the ownership check as a second guard.
+			cb.mu.Unlock()
+			return
+		}
+		if err != nil {
+			transition = cb.recordFailureLocked()
+		} else {
+			transition, resetFailureCount = cb.recordSuccessLocked()
+		}
+	} else if err != nil {
+		transition = cb.recordFailureLocked()
+	} else {
+		transition, resetFailureCount = cb.recordSuccessLocked()
+	}
+	cb.mu.Unlock()
+
+	if transition != nil {
+		transition.log()
+	}
+	if resetFailureCount {
+		slog.Debug("circuit breaker failure count reset", "reason", "successful call")
+	}
+}
+
+// recordFailureLocked records a failure and transitions state if needed.
 // Must be called with lock held
-func (cb *CircuitBreaker) recordFailure() {
+func (cb *CircuitBreaker) recordFailureLocked() *circuitBreakerTransition {
 	cb.failureCount++
 	cb.lastFailureTime = time.Now()
 
 	switch cb.state {
 	case CircuitHalfOpen:
 		// Failure in half-open state goes back to open
+		transition := &circuitBreakerTransition{
+			oldState: cb.state,
+			newState: CircuitOpen,
+			reason:   "failure in test request",
+		}
 		cb.state = CircuitOpen
+		cb.generation++
 		cb.halfOpenProbe.Store(false)
-		slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "open", "reason", "failure in test request")
+		return transition
 	case CircuitClosed:
 		// Check if we should open the circuit
 		if cb.failureCount >= cb.config.MaxFailures {
+			transition := &circuitBreakerTransition{
+				oldState:               cb.state,
+				newState:               CircuitOpen,
+				consecutiveFailures:    cb.config.MaxFailures,
+				includeConsecutiveNums: true,
+			}
 			cb.state = CircuitOpen
-			slog.Warn("circuit breaker state transition", "old_state", "closed", "new_state", "open", "consecutive_failures", cb.config.MaxFailures)
+			cb.generation++
+			return transition
 		}
 	}
+	return nil
 }
 
-// recordSuccess records a success and transitions state if needed
+// recordSuccessLocked records a success and transitions state if needed.
 // Must be called with lock held
-func (cb *CircuitBreaker) recordSuccess() {
+func (cb *CircuitBreaker) recordSuccessLocked() (*circuitBreakerTransition, bool) {
 	switch cb.state {
 	case CircuitHalfOpen:
 		// Success in half-open state closes the circuit
+		transition := &circuitBreakerTransition{
+			oldState: cb.state,
+			newState: CircuitClosed,
+			reason:   "service recovered",
+		}
 		cb.state = CircuitClosed
 		cb.failureCount = 0
 		cb.lastFailureTime = time.Time{}
+		cb.generation++
 		cb.halfOpenProbe.Store(false)
-		slog.Warn("circuit breaker state transition", "old_state", "half-open", "new_state", "closed", "reason", "service recovered")
+		return transition, false
 	case CircuitClosed:
 		// Reset failure count on success in closed state
 		if cb.failureCount > 0 {
 			cb.failureCount = 0
-			slog.Debug("circuit breaker failure count reset", "reason", "successful call")
+			return nil, true
 		}
 	}
+	return nil, false
 }
 
 // FailureCount returns the current failure count (for testing/monitoring)
