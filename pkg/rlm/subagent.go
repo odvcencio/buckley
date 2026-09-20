@@ -1200,7 +1200,7 @@ func (a *SubAgent) checkRolePermission(toolName string) error {
 // isWriteTool returns true if the tool is a write-capable tool.
 func isWriteTool(name string) bool {
 	switch name {
-	case "write_file", "patch_file", "edit_file", "insert_text", "delete_lines",
+	case "write_file", "apply_patch", "patch_file", "edit_file", "insert_text", "delete_lines",
 		"search_replace", "rename_symbol", "extract_function", "mark_resolved":
 		return true
 	default:
@@ -1259,13 +1259,13 @@ func toolLockMode(name string) string {
 	switch name {
 	case "read_file", "list_directory", "find_files", "file_exists", "get_file_info", "search_text":
 		return "read"
-	case "write_file", "patch_file", "edit_file", "insert_text", "delete_lines", "search_replace", "rename_symbol", "extract_function", "mark_resolved":
-		return "write"
-	case "run_shell", "run_code":
+	case "apply_patch", "run_shell", "run_code":
 		return "exclusive"
-	default:
-		return ""
 	}
+	if isWriteTool(name) {
+		return "write"
+	}
+	return ""
 }
 
 func formatToolResult(res *builtin.Result) string {
