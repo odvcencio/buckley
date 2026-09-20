@@ -971,11 +971,11 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		branch, err = exec.CommandContext(branchCtx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	}
 	if err != nil {
-		return nil // Skip push if we can't get branch
+		return fmt.Errorf("%s push failed: resolve current branch: %w", vcs, err)
 	}
 	branchName := strings.TrimSpace(string(branch))
 	if branchName == "" || branchName == "HEAD" {
-		return nil // Detached HEAD, skip push
+		return fmt.Errorf("%s push failed: current checkout is detached", vcs)
 	}
 
 	// Check if remote exists
