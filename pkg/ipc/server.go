@@ -2301,6 +2301,10 @@ func (s *Server) broadcastViewPatch(sessionID string) {
 	if sessionID == "" || s.viewAssembler == nil {
 		return
 	}
+	event := Event{Type: "view.patch", SessionID: sessionID}
+	if !s.hub.hasEventInterest(event) {
+		return
+	}
 	state, err := s.viewAssembler.BuildSessionState(context.Background(), sessionID)
 	if err != nil || state == nil {
 		if err != nil {
@@ -2308,12 +2312,9 @@ func (s *Server) broadcastViewPatch(sessionID string) {
 		}
 		return
 	}
-	s.hub.Broadcast(Event{
-		Type:      "view.patch",
-		SessionID: sessionID,
-		Payload:   viewmodel.Patch{Session: state},
-		Timestamp: time.Now(),
-	})
+	event.Payload = viewmodel.Patch{Session: state}
+	event.Timestamp = time.Now()
+	s.hub.Broadcast(event)
 }
 
 func (s *Server) issueSessionToken(sessionID string) (string, error) {

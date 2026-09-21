@@ -176,6 +176,22 @@ func (s *GRPCService) BroadcastEvent(event Event) {
 	}
 }
 
+func (s *GRPCService) wantsEvent(event Event) bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+	}
+	s.subscribersMu.RLock()
+	defer s.subscribersMu.RUnlock()
+	for _, subscriber := range s.subscribers {
+		if matchesEventFilter(event, subscriber.filter) {
+			return true
+		}
+	}
+	return false
+}
+
 // runEventForwarder distributes events to subscribers.
 // It exits when s.done is closed.
 func (s *GRPCService) runEventForwarder() {

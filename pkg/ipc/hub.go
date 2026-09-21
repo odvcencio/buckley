@@ -28,6 +28,10 @@ type EventForwarder interface {
 	BroadcastEvent(event Event)
 }
 
+type eventInterest interface {
+	wantsEvent(event Event) bool
+}
+
 // Hub fan-outs events to connected WebSocket clients and gRPC subscribers.
 type Hub struct {
 	mu         sync.RWMutex
@@ -59,6 +63,29 @@ func (h *Hub) AddForwarder(f EventForwarder) {
 	h.mu.Lock()
 	h.forwarders = append(h.forwarders, f)
 	h.mu.Unlock()
+}
+
+func (h *Hub) hasEventInterest(event Event) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for client := range h.clients {
+		if client.closed.Load() {
+			continue
+		}
+		if client.filter == nil || client.filter(event) {
+			return true
+		}
+	}
+	for _, forwarder := range h.forwarders {
+		interest, ok := forwarder.(eventInterest)
+		if !ok || interest.wantsEvent(event) {
+			return true
+		}
+	}
+	return false
 }
 
 // Broadcast sends an event to all clients, dropping slow consumers.
