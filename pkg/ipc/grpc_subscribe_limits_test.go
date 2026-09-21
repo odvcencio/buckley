@@ -28,6 +28,7 @@ func TestGRPCSubscribeEnforcesSubscriberLimit(t *testing.T) {
 	}
 
 	svc := NewGRPCService(&Server{store: store})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = nil
 	svc.maxSubscribersTotal = 1
 	svc.maxSubscribersPerPrincipal = 1
@@ -87,6 +88,7 @@ func TestGRPCSubscribeRateLimited(t *testing.T) {
 	}
 
 	svc := NewGRPCService(&Server{store: store})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = newRateLimiter(1 * time.Minute)
 	svc.maxSubscribersTotal = 10
 	svc.maxSubscribersPerPrincipal = 10

@@ -29,6 +29,7 @@ func TestGRPCSubscribeEventPayloadJSONSafe(t *testing.T) {
 	}
 
 	svc := NewGRPCService(&Server{store: store})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = nil
 	svc.maxSubscribersTotal = 10
 	svc.maxSubscribersPerPrincipal = 10
@@ -132,6 +133,7 @@ func TestGRPCSubscribeReplaysAfterLastEventID(t *testing.T) {
 	}
 
 	svc := NewGRPCService(&Server{store: store})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = nil
 	svc.maxSubscribersTotal = 10
 	svc.maxSubscribersPerPrincipal = 10

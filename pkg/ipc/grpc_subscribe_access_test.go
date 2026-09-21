@@ -31,6 +31,7 @@ func TestGRPCSubscribeAllSessionsFiltersByPrincipal(t *testing.T) {
 	}
 
 	svc := NewGRPCService(&Server{store: store})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = nil
 	svc.maxSubscribersTotal = 10
 	svc.maxSubscribersPerPrincipal = 10

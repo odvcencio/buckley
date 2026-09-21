@@ -14,6 +14,7 @@ import (
 
 func TestGRPCSubscribeUnauthenticatedUsesConnectError(t *testing.T) {
 	svc := NewGRPCService(&Server{})
+	t.Cleanup(svc.Close)
 	svc.subscribeLimiter = nil
 
 	grpcPath, grpcHandler := ipcpbconnect.NewBuckleyIPCHandler(
