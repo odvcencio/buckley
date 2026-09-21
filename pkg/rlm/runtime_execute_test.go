@@ -227,7 +227,12 @@ func TestRuntimeExecute_CompactsCoordinatorContextWithSelectedRoute(t *testing.T
 		t.Fatalf("NewRuntime: %v", err)
 	}
 
-	answer, err := rt.Execute(context.Background(), strings.Repeat("route-bound-context ", 2500))
+	const (
+		taskStart  = "ROOT SCOPE: inspect route-bound context. "
+		acceptance = "ACCEPTANCE: preserve this ending after compaction"
+	)
+	task := taskStart + strings.Repeat("route-bound-context ", 2500) + acceptance
+	answer, err := rt.Execute(context.Background(), task)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -241,8 +246,11 @@ func TestRuntimeExecute_CompactsCoordinatorContextWithSelectedRoute(t *testing.T
 	if !ok {
 		t.Fatalf("second request messages = %#v", bodies[1]["messages"])
 	}
-	if !strings.Contains(fmt.Sprint(messages), "user message compacted") {
-		t.Fatalf("second request was not compacted with selected route context: %#v", messages)
+	second := fmt.Sprint(messages)
+	for _, want := range []string{"root task middle compacted", taskStart, acceptance} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second request missing %q after selected-route compaction: %#v", want, messages)
+		}
 	}
 }
 

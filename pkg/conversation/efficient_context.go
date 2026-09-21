@@ -100,6 +100,7 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 	}
 
 	protectedReasoning := unansweredToolCallIndices(result)
+	rootTaskIndex := firstUserMessageIndex(result)
 
 	// DCP-style deduplication is keyed by the operation (tool + arguments),
 	// not by output text. Two different reads can legitimately return the same
@@ -166,7 +167,18 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 			}
 		}
 	}
-	return compactToBudget(result, opts, protectedReasoning)
+	return compactToBudget(result, opts, protectedReasoning, rootTaskIndex)
+}
+
+func firstUserMessageIndex(messages []model.Message) int {
+	// The earliest user turn carries the portable root request. Later steering
+	// remains in the recent tail, while this bounded anchor preserves scope.
+	for i, msg := range messages {
+		if msg.Role == "user" && strings.TrimSpace(GetContentAsString(msg.Content)) != "" {
+			return i
+		}
+	}
+	return -1
 }
 
 // unansweredToolCallIndices returns the indices of assistant messages that
@@ -195,7 +207,7 @@ func unansweredToolCallIndices(messages []model.Message) map[int]bool {
 	return protected
 }
 
-func compactToBudget(messages []model.Message, opts EfficientContextOptions, protectedReasoning map[int]bool) []model.Message {
+func compactToBudget(messages []model.Message, opts EfficientContextOptions, protectedReasoning map[int]bool, rootTaskIndex int) []model.Message {
 	totalBytes := modelMessagesBytes(messages)
 	if opts.MaxBytes <= 0 || totalBytes <= opts.MaxBytes {
 		return messages
@@ -236,7 +248,11 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 			}
 		case "user":
 			if content, ok := msg.Content.(string); ok {
-				msg.Content = compactHistoricalContent(content, 800, "user message")
+				if i == rootTaskIndex {
+					msg.Content = compactRootTaskContent(content, rootTaskBudget(opts.MaxBytes))
+				} else {
+					msg.Content = compactHistoricalContent(content, 800, "user message")
+				}
 			}
 		}
 		totalBytes += modelMessageBytes(*msg) - before
@@ -261,7 +277,11 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 			}
 		case "user":
 			if content, ok := msg.Content.(string); ok {
-				msg.Content = compactHistoricalContent(content, 240, "user message")
+				if i == rootTaskIndex {
+					msg.Content = compactRootTaskContent(content, rootTaskBudget(opts.MaxBytes))
+				} else {
+					msg.Content = compactHistoricalContent(content, 240, "user message")
+				}
 			}
 		}
 		totalBytes += modelMessageBytes(*msg) - before
@@ -358,9 +378,25 @@ func assistantHasToolCall(msg model.Message, id string) bool {
 func deterministicHistorySummary(messages []model.Message, limit int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%d earlier messages compacted for this model context; full history remains available in the session]", len(messages))
+	rootTaskIndex := firstUserMessageIndex(messages)
+	if rootTaskIndex >= 0 {
+		const label = "\n- root task: "
+		remaining := limit - b.Len() - len(label)
+		if remaining > 0 {
+			taskBudget := limit * 2 / 3
+			if taskBudget > 2048 {
+				taskBudget = 2048
+			}
+			if taskBudget > remaining {
+				taskBudget = remaining
+			}
+			b.WriteString(label)
+			b.WriteString(compactRootTaskContent(GetContentAsString(messages[rootTaskIndex].Content), taskBudget))
+		}
+	}
 	indices := make([]int, 0, 12)
 	for i, msg := range messages {
-		if msg.Role == "user" && len(indices) < 2 {
+		if i != rootTaskIndex && msg.Role == "user" && len(indices) < 1 {
 			indices = append(indices, i)
 		}
 	}
@@ -369,6 +405,9 @@ func deterministicHistorySummary(messages []model.Message, limit int) string {
 		start = 0
 	}
 	for i := start; i < len(messages); i++ {
+		if i == rootTaskIndex {
+			continue
+		}
 		duplicate := false
 		for _, existing := range indices {
 			if existing == i {
@@ -405,6 +444,31 @@ func deterministicHistorySummary(messages []model.Message, limit int) string {
 		}
 	}
 	return utf8Prefix(b.String(), limit)
+}
+
+func rootTaskBudget(maxBytes int) int {
+	budget := maxBytes / 6
+	if budget < 256 {
+		return 256
+	}
+	if budget > 2048 {
+		return 2048
+	}
+	return budget
+}
+
+func compactRootTaskContent(content string, limit int) string {
+	if limit <= 0 || len(content) <= limit {
+		return content
+	}
+	marker := fmt.Sprintf("\n… [root task middle compacted; %d bytes omitted] …\n", len(content)-limit)
+	available := limit - len(marker)
+	if available < 80 {
+		return utf8Prefix(content, limit)
+	}
+	head := available * 2 / 3
+	tail := available - head
+	return utf8Prefix(content, head) + marker + utf8Suffix(content, tail)
 }
 
 func compactToolCallArguments(calls []model.ToolCall, limit int) {

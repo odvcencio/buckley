@@ -561,7 +561,12 @@ func TestSubAgentExecute_CompactsWithRouteBoundContextLength(t *testing.T) {
 	}
 	agent.client = fake
 
-	result, err := agent.Execute(context.Background(), strings.Repeat("route-bound-context ", 2500))
+	const (
+		taskStart  = "ROOT SCOPE: inspect route-bound context. "
+		acceptance = "ACCEPTANCE: preserve this ending after compaction"
+	)
+	task := taskStart + strings.Repeat("route-bound-context ", 2500) + acceptance
+	result, err := agent.Execute(context.Background(), task)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -575,8 +580,10 @@ func TestSubAgentExecute_CompactsWithRouteBoundContextLength(t *testing.T) {
 		t.Fatalf("requests = %d, want 2", len(fake.requests))
 	}
 	second := fmt.Sprint(fake.requests[1].Messages)
-	if !strings.Contains(second, "user message compacted") {
-		t.Fatalf("second request was not compacted with selected route context: %s", second)
+	for _, want := range []string{"root task middle compacted", taskStart, acceptance} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second request missing %q after selected-route compaction: %s", want, second)
+		}
 	}
 }
 

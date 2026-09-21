@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -146,6 +147,42 @@ func TestCompactModelMessagesForRequest_CollapsesPrefixAndKeepsToolPair(t *testi
 	}
 	if got[len(got)-1].Content != "finish this" {
 		t.Fatal("latest user steering was not preserved")
+	}
+}
+
+func TestCompactModelMessagesForRequest_CollapseRetainsRootTaskBoundaries(t *testing.T) {
+	const acceptance = "ACCEPTANCE: close the service before the store and run the race test"
+	task := "Edit only the four gRPC subscription fixtures. " + strings.Repeat("Preserve existing behavior and avoid production changes. ", 20) + acceptance
+	messages := []model.Message{
+		{Role: "system", Content: "follow repository instructions"},
+		{Role: "user", Content: task},
+	}
+	for i := 0; i < 24; i++ {
+		callID := fmt.Sprintf("read-%d", i)
+		messages = append(messages,
+			model.Message{Role: "assistant", ToolCalls: []model.ToolCall{{
+				ID: callID, Function: model.FunctionCall{Name: "read_file", Arguments: fmt.Sprintf(`{"path":"file-%d.go"}`, i)},
+			}}},
+			model.Message{Role: "tool", Name: "read_file", ToolCallID: callID, Content: strings.Repeat("repository evidence ", 500)},
+		)
+	}
+	messages = append(messages, model.Message{Role: "user", Content: "finish the requested change"})
+
+	got := CompactModelMessagesForRequest(messages, model.ChatRequest{MaxTokens: 2048}, 8192)
+	var projected strings.Builder
+	for _, msg := range got {
+		projected.WriteString(GetContentAsString(msg.Content))
+		projected.WriteByte('\n')
+	}
+	text := projected.String()
+	if !strings.Contains(text, "root task") {
+		t.Fatalf("collapsed history omitted root-task label:\n%s", text)
+	}
+	if !strings.Contains(text, "Edit only the four gRPC subscription fixtures") {
+		t.Fatalf("collapsed history omitted task beginning:\n%s", text)
+	}
+	if !strings.Contains(text, acceptance) {
+		t.Fatalf("collapsed history omitted task acceptance criteria:\n%s", text)
 	}
 }
 
