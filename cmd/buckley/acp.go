@@ -1513,7 +1513,7 @@ func newACPLoopController(
 			return model.ChatRequest{}, err
 		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, governor.ActionRequired(), limits.TaskIntent)
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil, governor.ActionRequired(), limits.TaskIntent)
 		state.useTools = toolTurn.UseTools
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
@@ -2421,13 +2421,16 @@ func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, route mode
 	return registry != nil && (mgr == nil || mgr.OfferToolsForRoute(route))
 }
 
-func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, actionRequired bool, intent agentloop.TaskIntent) acpToolTurn {
+func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, permissionAvailable bool, actionRequired bool, intent agentloop.TaskIntent) acpToolTurn {
 	turn := acpToolTurn{UseTools: useTools}
 	if skillState != nil {
 		turn.AllowedTools = skillState.ToolFilter()
 	}
 	if actionRequired && intent != agentloop.ReadOnlyIntent && registry != nil {
 		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools)
+	}
+	if !permissionAvailable && registry != nil {
+		turn.AllowedTools = acpFallbackAllowedToolNames(registry, turn.AllowedTools)
 	}
 	if !useTools || registry == nil {
 		turn.UseTools = false
@@ -2440,6 +2443,30 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 	}
 	turn.Enabled = true
 	return turn
+}
+
+// acpFallbackAllowedToolNames keeps a noninteractive request aligned with the
+// permission decision it will receive at dispatch time. Advertising a tool
+// that the fallback always denies wastes model turns and invites denial loops.
+func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string) []string {
+	hasFilter := allowed != nil
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	names := make([]string, 0, registry.Count())
+	for _, registered := range registry.List() {
+		name := registered.Name()
+		if hasFilter {
+			if _, ok := allowedSet[name]; !ok {
+				continue
+			}
+		}
+		if acpFallbackPermissionDecision(acpRiskLabel(tool.GetMetadata(registered).Impact)) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // acpActionToolNames keeps state-changing tools plus the bounded control and

@@ -127,7 +127,7 @@ func TestBuildACPToolTurnActionBoundaryNarrowsToModifyingTools(t *testing.T) {
 	registry.Register(&acpStateTestTool{name: "run_shell", metadata: tool.ToolMetadata{Impact: tool.ImpactDestructive}})
 	registry.Register(&acpStateTestTool{name: "write_file", metadata: tool.ToolMetadata{Impact: tool.ImpactModifying}})
 
-	turn := buildACPToolTurn(registry, nil, nil, true, true, agentloop.UnknownIntent)
+	turn := buildACPToolTurn(registry, nil, nil, true, true, true, agentloop.UnknownIntent)
 	if !turn.Enabled || !turn.UseTools {
 		t.Fatalf("tool turn disabled: %+v", turn)
 	}
@@ -148,7 +148,7 @@ func TestBuildACPToolTurnActionBoundaryNarrowsToModifyingTools(t *testing.T) {
 
 func TestBuildACPToolTurnReadOnlyIntentDoesNotEnterActionWindow(t *testing.T) {
 	registry := newACPActionWindowRegistry()
-	turn := buildACPToolTurn(registry, nil, nil, true, true, agentloop.ReadOnlyIntent)
+	turn := buildACPToolTurn(registry, nil, nil, true, true, true, agentloop.ReadOnlyIntent)
 	if turn.AllowedTools != nil {
 		t.Fatalf("read-only intent narrowed tools to %v", turn.AllowedTools)
 	}
@@ -160,9 +160,28 @@ func TestBuildACPToolTurnReadOnlyIntentDoesNotEnterActionWindow(t *testing.T) {
 	}
 }
 
+func TestBuildACPToolTurnNoninteractiveOmitsDeterministicallyDeniedTools(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	registry.Register(&acpStateTestTool{name: "read_file", metadata: tool.ToolMetadata{Impact: tool.ImpactReadOnly}})
+	registry.Register(&acpStateTestTool{name: "run_shell", metadata: tool.ToolMetadata{Impact: tool.ImpactDestructive}})
+	registry.Register(&acpStateTestTool{name: "write_file", metadata: tool.ToolMetadata{Impact: tool.ImpactModifying}})
+
+	turn := buildACPToolTurn(registry, nil, nil, true, false, false, agentloop.UnknownIntent)
+	if !turn.Enabled || !turn.UseTools {
+		t.Fatalf("tool turn disabled: %+v", turn)
+	}
+	want := []string{"read_file", "write_file"}
+	if !reflect.DeepEqual(turn.AllowedTools, want) {
+		t.Fatalf("allowed tools = %v, want fallback-permitted tools %v", turn.AllowedTools, want)
+	}
+	if got := acpToolTurnFunctionNames(turn); !reflect.DeepEqual(got, want) {
+		t.Fatalf("serialized tools = %v, want %v", got, want)
+	}
+}
+
 func TestBuildACPToolTurnActionBoundaryRetainsControlAndVerificationTools(t *testing.T) {
 	registry := newACPActionWindowRegistry()
-	turn := buildACPToolTurn(registry, nil, nil, true, true, agentloop.UnknownIntent)
+	turn := buildACPToolTurn(registry, nil, nil, true, true, true, agentloop.UnknownIntent)
 	want := []string{"exec_program", "git_diff", "git_status", "run_tests", "submit_artifact", "write_file"}
 	if !reflect.DeepEqual(turn.AllowedTools, want) {
 		t.Fatalf("allowed tools = %v, want action plus completion/verification tools %v", turn.AllowedTools, want)
@@ -197,7 +216,7 @@ func TestACPActionRepairWindowKeepsActionToolsUntilObservedChange(t *testing.T) 
 		if !governor.ActionRequired() {
 			t.Fatalf("failed action repair call %d reset action boundary", call)
 		}
-		turn := buildACPToolTurn(registry, nil, nil, true, governor.ActionRequired(), agentloop.UnknownIntent)
+		turn := buildACPToolTurn(registry, nil, nil, true, true, governor.ActionRequired(), agentloop.UnknownIntent)
 		if !reflect.DeepEqual(turn.AllowedTools, wantActionTools) {
 			t.Fatalf("repair call %d allowed tools = %v, want %v", call, turn.AllowedTools, wantActionTools)
 		}
@@ -209,7 +228,7 @@ func TestACPActionRepairWindowKeepsActionToolsUntilObservedChange(t *testing.T) 
 	if governor.ActionRequired() {
 		t.Fatal("successful observed edit did not reset action boundary")
 	}
-	restored := buildACPToolTurn(registry, nil, nil, true, governor.ActionRequired(), agentloop.UnknownIntent)
+	restored := buildACPToolTurn(registry, nil, nil, true, true, governor.ActionRequired(), agentloop.UnknownIntent)
 	restoredTools := acpToolTurnFunctionNames(restored)
 	for _, want := range []string{"read_file", "write_file", "run_tests", "git_diff", "git_status"} {
 		if !strings.Contains(strings.Join(restoredTools, "\x00"), want) {
