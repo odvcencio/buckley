@@ -94,3 +94,39 @@ func TestHubBroadcastAssignsIDBeforeRecording(t *testing.T) {
 		t.Fatal("recorded timestamp is zero")
 	}
 }
+
+type selectiveEventForwarder struct {
+	typeName string
+}
+
+func (*selectiveEventForwarder) BroadcastEvent(Event) {}
+
+func (f *selectiveEventForwarder) wantsEvent(event Event) bool {
+	return event.Type == f.typeName
+}
+
+func TestHubHasEventInterest_RespectsClientAndForwarderFilters(t *testing.T) {
+	hub := NewHub()
+	event := Event{Type: "view.patch", SessionID: "session-1"}
+	if hub.hasEventInterest(event) {
+		t.Fatal("empty hub reported event interest")
+	}
+
+	missionClient := hub.register(&fakeConn{writeCount: &atomic.Int32{}, closeCount: &atomic.Int32{}}, func(event Event) bool {
+		return event.Type == "mission.update"
+	})
+	if hub.hasEventInterest(event) {
+		t.Fatal("filtered client reported interest in view.patch")
+	}
+	hub.removeClient(missionClient)
+
+	forwarder := &selectiveEventForwarder{typeName: "telemetry.tool"}
+	hub.AddForwarder(forwarder)
+	if hub.hasEventInterest(event) {
+		t.Fatal("selective forwarder reported interest in view.patch")
+	}
+	forwarder.typeName = event.Type
+	if !hub.hasEventInterest(event) {
+		t.Fatal("matching forwarder did not report event interest")
+	}
+}
