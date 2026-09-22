@@ -27,8 +27,8 @@ type ReviewBranchDef struct {
 
 func (ReviewBranchDef) Name() string { return "review" }
 
-func (ReviewBranchDef) SystemPrompt() string {
-	return prompts.ReviewBranchWithToolsPrompt(time.Now())
+func (d ReviewBranchDef) SystemPrompt() string {
+	return appendReviewDepthSections(prompts.ReviewBranchWithToolsPrompt(time.Now()), d.Depth)
 }
 
 func (ReviewBranchDef) AllowedTools() []string {
@@ -89,8 +89,8 @@ type ReviewProjectDef struct {
 
 func (ReviewProjectDef) Name() string { return "review-project" }
 
-func (ReviewProjectDef) SystemPrompt() string {
-	return prompts.ReviewProjectPrompt(time.Now())
+func (d ReviewProjectDef) SystemPrompt() string {
+	return appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
 }
 
 func (d ReviewProjectDef) AllowedTools() []string {
@@ -162,7 +162,7 @@ func (ReviewPRDef) Name() string { return "review-pr" }
 func (d ReviewPRDef) MaxAgentIterations() int { return d.MaxIterations }
 
 func (d ReviewPRDef) SystemPrompt() string {
-	prompt := prompts.ReviewPRPrompt(time.Now())
+	prompt := appendReviewDepthSections(prompts.ReviewPRPrompt(time.Now()), d.Depth)
 	if d.authoritativeRemoteCIPasses() {
 		prompt += `
 
@@ -449,6 +449,15 @@ func reviewDepthNeedsVerification(depth string) bool {
 	default:
 		return false
 	}
+}
+
+func appendReviewDepthSections(prompt, depth string) string {
+	if !reviewDepthNeedsVerification(depth) {
+		return prompt
+	}
+	return prompt + `
+
+BALANCED and IN-DEPTH output adds the literal headings ## Evidence Collected and ## Verification Ledger to the base review schema. Keep ## Coverage and Completeness: COMPLETE. Evidence Collected lists observed source, tool, and CI evidence; Verification Ledger records tested hypotheses and outcomes. Do not use Coverage as a substitute for either section. This applies to an independent approval critic's replacement review too.`
 }
 
 // validateReviewDepthOutput turns depth from a prompt hint into an observable

@@ -119,6 +119,30 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
 	assert.Contains(t, (FixFindingDef{}).AllowedTools(), "write_file")
 }
 
+func TestReviewDepthSectionsReachPrimaryAndCriticPrompts(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		prompt string
+	}{
+		{"branch", (ReviewBranchDef{Depth: "balanced"}).SystemPrompt()},
+		{"branch critic", (ReviewBranchDef{Depth: "balanced"}).ApprovalCriticSystemPrompt()},
+		{"project", (ReviewProjectDef{Depth: "balanced"}).SystemPrompt()},
+		{"PR", (ReviewPRDef{Depth: "balanced"}).SystemPrompt()},
+		{"PR critic", (ReviewPRDef{Depth: "balanced"}).ApprovalCriticSystemPrompt()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, heading := range []string{"## Evidence Collected", "## Verification Ledger", "## Coverage", "Completeness: COMPLETE"} {
+				if !strings.Contains(tt.prompt, heading) {
+					t.Fatalf("review prompt missing required %s heading", heading)
+				}
+			}
+		})
+	}
+	if strings.Contains((ReviewPRDef{Depth: "spot"}).SystemPrompt(), "BALANCED and IN-DEPTH output adds") {
+		t.Fatal("spot review inherited depth-specific sections")
+	}
+}
+
 func TestReviewDepthRequiresModelVerificationEvidence(t *testing.T) {
 	validProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
 	balanced := ReviewProjectDef{Depth: "balanced"}

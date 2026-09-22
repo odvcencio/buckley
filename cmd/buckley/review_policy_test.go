@@ -650,7 +650,9 @@ func TestReviewDepthProfilesChangePromptAndGeneratedCaps(t *testing.T) {
 	})
 	if !strings.Contains(balanced, "## Review Depth: BALANCED INVESTIGATION") ||
 		!strings.Contains(balanced, "map the relevant state and call sites") ||
-		!strings.Contains(balanced, "run_verification") {
+		!strings.Contains(balanced, "run_verification") ||
+		!strings.Contains(balanced, "literal `## Evidence Collected` and `## Verification Ledger` headings") ||
+		!strings.Contains(balanced, "`## Coverage` does not replace either section") {
 		t.Fatalf("balanced prompt omitted its evidence contract:\n%s", balanced)
 	}
 
