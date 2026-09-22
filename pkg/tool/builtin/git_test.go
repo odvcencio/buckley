@@ -1,6 +1,10 @@
 package builtin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,4 +343,123 @@ func TestGitToolsInIsolatedRepo(t *testing.T) {
 			t.Fatalf("expected diff_truncated=true, got %v", result.Data["diff_truncated"])
 		}
 	})
+}
+
+func TestGitDiffTool_PagesRecoverExactPatch(t *testing.T) {
+	repo := createTestGitRepo(t)
+	path := filepath.Join(repo, "test.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("changed line\n", 320)+strings.Repeat("🚀", 100)+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &GitDiffTool{}
+	tool.SetWorkDir(repo)
+	defaultPage, err := tool.Execute(map[string]any{})
+	if err != nil || !defaultPage.Success || defaultPage.Data["diff_truncated"] != true || len(defaultPage.Data["diff"].(string)) > defaultDiffPageBytes {
+		t.Fatalf("default page is not bounded: %+v %v", defaultPage, err)
+	}
+	for _, staged := range []bool{false, true} {
+		if staged {
+			cmd := exec.Command("git", "add", "test.txt")
+			cmd.Dir = repo
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("stage: %v: %s", err, output)
+			}
+		}
+		args := []string{"diff"}
+		if staged {
+			args = append(args, "--cached")
+		}
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		want, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := "unstaged"
+		if staged {
+			name = "staged"
+		}
+		t.Run(name, func(t *testing.T) {
+			var rebuilt strings.Builder
+			offset := int64(0)
+			expectedHash := ""
+			for page := 0; page < 100; page++ {
+				params := map[string]any{"staged": staged, "file": "test.txt", "byte_offset": offset, "max_bytes": 75}
+				if page > 0 {
+					params["expected_sha256"] = expectedHash
+				}
+				result, err := tool.Execute(params)
+				if err != nil || !result.Success {
+					t.Fatalf("page %d: %+v, %v", page, result, err)
+				}
+				data := result.Data
+				if data["byte_offset"] != offset || data["total_bytes"] != int64(len(want)) {
+					t.Fatalf("page %d metadata: %+v", page, data)
+				}
+				serialized, err := json.Marshal(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var visible map[string]any
+				if err := json.Unmarshal(serialized, &visible); err != nil {
+					t.Fatal(err)
+				}
+				part := visible["diff"].(string)
+				if len(part) == 0 || len(part) > 75 {
+					t.Fatalf("page %d length %d", page, len(part))
+				}
+				rebuilt.WriteString(part)
+				expectedHash = data["diff_sha256"].(string)
+				if next, hasMore := data["next_byte_offset"]; hasMore {
+					if data["diff_truncated"] != true || next.(int64) != offset+int64(len(part)) {
+						t.Fatalf("bad continuation on page %d: %+v", page, data)
+					}
+					offset = next.(int64)
+					continue
+				}
+				if rebuilt.String() != string(want) {
+					t.Fatalf("pages did not reconstruct exact patch: got %d bytes, want %d", rebuilt.Len(), len(want))
+				}
+				digest := sha256.Sum256(want)
+				if expectedHash != hex.EncodeToString(digest[:]) {
+					t.Fatalf("wrong diff hash: %s", expectedHash)
+				}
+				return
+			}
+			t.Fatal("pagination did not terminate")
+		})
+	}
+}
+
+func TestGitDiffTool_RejectsInvalidOrChangedPage(t *testing.T) {
+	repo := createTestGitRepo(t)
+	path := filepath.Join(repo, "test.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("line\n", 50)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &GitDiffTool{}
+	tool.SetWorkDir(repo)
+	first, err := tool.Execute(map[string]any{"max_bytes": 50})
+	if err != nil || !first.Success || first.Data["next_byte_offset"] == nil {
+		t.Fatalf("first page: %+v %v", first, err)
+	}
+	if err := os.WriteFile(path, []byte("changed again\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := tool.Execute(map[string]any{"byte_offset": first.Data["next_byte_offset"], "expected_sha256": first.Data["diff_sha256"]})
+	if err != nil || changed.Success || !strings.Contains(changed.Error, "diff changed") {
+		t.Fatalf("changed diff accepted: %+v %v", changed, err)
+	}
+	for _, params := range []map[string]any{
+		{"byte_offset": -1}, {"byte_offset": 1.5}, {"byte_offset": json.Number("9007199254740992")},
+		{"max_bytes": 0}, {"max_bytes": 3}, {"max_bytes": 8193}, {"max_bytes": "huge"},
+		{"expected_sha256": "bad"}, {"byte_offset": 999999},
+	} {
+		t.Run(fmt.Sprint(params), func(t *testing.T) {
+			result, err := tool.Execute(params)
+			if err != nil || result.Success || result.Error == "" {
+				t.Fatalf("invalid page accepted: %+v %v", result, err)
+			}
+		})
+	}
 }
