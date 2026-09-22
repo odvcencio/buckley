@@ -775,6 +775,50 @@ func TestParseStartupOptionsTaskIntentFormsAndSubcommandScope(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsOneShotTools(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"--tools", "read_file, edit_file", "--tools=run_tests,read_file", "-p", "fix a bug"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.toolsSet || !reflect.DeepEqual(opts.tools, []string{"read_file", "edit_file", "run_tests"}) {
+		t.Fatalf("tools = %v (set=%t), want deduplicated one-shot allowlist", opts.tools, opts.toolsSet)
+	}
+	if opts.prompt != "fix a bug" || len(opts.args) != 0 {
+		t.Fatalf("one-shot options = %+v", opts)
+	}
+
+	for _, raw := range [][]string{
+		{"--tools"},
+		{"--tools="},
+		{"--tools", "read_file,"},
+		{"--tools", ",read_file"},
+		{"--tools", "-p", "fix a bug"},
+		{"--tools", "read_file", "commit"},
+	} {
+		if _, err := parseStartupOptions(raw); err == nil || !strings.Contains(err.Error(), "--tools") {
+			t.Errorf("parseStartupOptions(%q) error = %v, want --tools diagnostic", raw, err)
+		}
+	}
+
+	opts, err = parseStartupOptions([]string{"commit", "--tools", "read_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.toolsSet || !reflect.DeepEqual(opts.args, []string{"commit", "--tools", "read_file"}) {
+		t.Fatalf("subcommand flags were consumed as one-shot tools: %+v", opts)
+	}
+}
+
+func TestValidateOneShotTools(t *testing.T) {
+	registry := tool.NewRegistry()
+	if err := validateOneShotTools(registry, []string{"read_file", "run_tests"}); err != nil {
+		t.Fatalf("known tools rejected: %v", err)
+	}
+	if err := validateOneShotTools(registry, []string{"read_file", "not_a_tool"}); err == nil || !strings.Contains(err.Error(), "not_a_tool") {
+		t.Fatalf("unknown tool error = %v", err)
+	}
+}
+
 func TestParseStartupOptionsPlainAndTUIFlags(t *testing.T) {
 	opts, err := parseStartupOptions([]string{"--plain", "plan", "feat", "desc"})
 	if err != nil {
