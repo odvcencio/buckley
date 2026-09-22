@@ -851,12 +851,12 @@ func providerSupportsParameter(provider Provider, selectedModel, parameter strin
 		return false
 	}
 	checker, ok := provider.(interface {
-		supportsConfiguredParameter(modelID, parameter string) bool
+		supportsParameter(modelID, parameter string) bool
 	})
 	if !ok {
 		return false
 	}
-	return checker.supportsConfiguredParameter(selectedModel, parameter)
+	return checker.supportsParameter(selectedModel, parameter)
 }
 
 func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatRequest {

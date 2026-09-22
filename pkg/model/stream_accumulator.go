@@ -139,6 +139,7 @@ func (a *StreamAccumulator) Message() Message {
 		Role:             a.role,
 		Content:          string(a.content),
 		Reasoning:        reasoning,
+		ReasoningContent: a.reasoningContent,
 		ReasoningDetails: a.reasoningDetails,
 		ToolCalls:        a.toolCalls,
 	}
