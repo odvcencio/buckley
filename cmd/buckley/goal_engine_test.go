@@ -1440,8 +1440,10 @@ func TestGoalTurnSystemPrompt_ProjectsOrientationWithoutConstrainingDesign(t *te
 func TestToolCallParams_RejectsDuplicateJSONFieldsWithRecovery(t *testing.T) {
 	t.Parallel()
 	for name, arguments := range map[string]string{
-		"plain":  `{"path":"game","path":"scene"}`,
-		"fenced": "```json\n{\"path\":\"game\",\"path\":\"scene\"}\n```",
+		"plain":   `{"path":"game","path":"scene"}`,
+		"nested":  `{"options":{"path":"game","path":"scene"}}`,
+		"fenced":  "```json\n{\"path\":\"game\",\"path\":\"scene\"}\n```",
+		"encoded": `"{\"path\":\"game\",\"path\":\"scene\"}"`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			call := model.ToolCall{Function: model.FunctionCall{

@@ -8,6 +8,7 @@ import (
 type goTestReport struct {
 	passed, failed, skipped int
 	complete                bool
+	buildOnly               bool
 	output                  string
 	failures                []string
 }
@@ -33,6 +34,7 @@ func parseGoTestOutput(raw string) goTestReport {
 	var report goTestReport
 	var output strings.Builder
 	packages := make(map[string]bool)
+	noTestFiles := make(map[string]bool)
 	selected := make(map[string]string)
 	var order []string
 	omitted := false
@@ -48,6 +50,9 @@ func parseGoTestOutput(raw string) goTestReport {
 		}
 		if event.Output != "" {
 			output.WriteString(event.Output)
+			if event.Test == "" && event.Package != "" && strings.Contains(event.Output, "[no test files]") {
+				noTestFiles[event.Package] = true
+			}
 		}
 		if event.Action == "fail" || event.Action == "build-fail" {
 			key := event.scopeKey()
@@ -83,9 +88,14 @@ func parseGoTestOutput(raw string) goTestReport {
 		}
 	}
 	report.complete = len(packages) > 0
+	report.buildOnly = report.complete
 	for _, complete := range packages {
 		report.complete = report.complete && complete
 	}
+	for pkg := range packages {
+		report.buildOnly = report.buildOnly && noTestFiles[pkg]
+	}
+	report.buildOnly = report.buildOnly && report.complete
 	report.output = output.String()
 	if len(order) > 0 {
 		for _, line := range strings.Split(raw, "\n") {

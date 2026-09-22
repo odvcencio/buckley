@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -12,7 +13,6 @@ import (
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/goalloop"
-	"m31labs.dev/buckley/pkg/launchcontract"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/rules"
@@ -20,6 +20,7 @@ import (
 	"m31labs.dev/buckley/pkg/taskstate"
 	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/tool/builtin"
+	"m31labs.dev/buckley/pkg/toolargs"
 	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
@@ -511,15 +512,11 @@ func (c goalRouteReasoningChecker) ResolveReasoningCapability(string) model.Capa
 }
 
 func toolCallParams(call model.ToolCall) (map[string]any, error) {
-	normalized, err := tool.NormalizeArgumentsJSON(call.Function.Arguments)
+	params, err := tool.DecodeArguments(call.Function.Arguments)
 	if err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	if err := launchcontract.RejectDuplicateJSONKeys(normalized); err != nil {
-		return nil, fmt.Errorf("duplicate JSON fields; issue separate parallel tool calls, or use exec_program to compose multiple reads")
-	}
-	params, err := tool.DecodeArguments(string(normalized))
-	if err != nil {
+		if errors.Is(err, toolargs.ErrDuplicateObjectKey) {
+			return nil, fmt.Errorf("duplicate JSON fields; issue separate parallel tool calls, or use exec_program to compose multiple reads")
+		}
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 	return params, nil
