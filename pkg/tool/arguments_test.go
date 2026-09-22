@@ -37,6 +37,9 @@ func TestDecodeArguments_PreservesEmptyAndNullBehavior(t *testing.T) {
 		if len(got) != 0 {
 			t.Fatalf("DecodeArguments(%q) = %#v, want empty object", raw, got)
 		}
+		if normalized, err := NormalizeArgumentsJSON(raw); err != nil || string(normalized) != "{}" {
+			t.Fatalf("NormalizeArgumentsJSON(%q) = %q, %v; want {}", raw, normalized, err)
+		}
 	}
 }
 
