@@ -1,10 +1,14 @@
 package toolargs
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+var ErrDuplicateObjectKey = errors.New("duplicate object key")
 
 // NormalizeObject removes only complete presentation wrappers around tool
 // arguments. The returned bytes are a valid JSON object; missing and null
@@ -39,7 +43,61 @@ func NormalizeObject(raw string) ([]byte, error) {
 	if params == nil {
 		return []byte("{}"), nil
 	}
+	if err := rejectDuplicateKeys([]byte(trimmed)); err != nil {
+		return nil, err
+	}
 	return []byte(trimmed), nil
+}
+
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return checkDuplicateKeys(dec)
+}
+
+func checkDuplicateKeys(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("unexpected object key token %v", keyTok)
+			}
+			if _, dup := seen[key]; dup {
+				return fmt.Errorf("%w %q", ErrDuplicateObjectKey, key)
+			}
+			seen[key] = struct{}{}
+			if err := checkDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	case '[':
+		for dec.More() {
+			if err := checkDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func unwrapFence(raw string) (string, error) {

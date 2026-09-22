@@ -150,9 +150,11 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 		}
 	}
 	var goFailures []string
+	buildOnly := false
 	if framework == "go" {
 		report := parseGoTestOutput(output)
 		passed, failed, skipped = report.passed, report.failed, report.skipped
+		buildOnly = report.buildOnly && pattern == ""
 		output = report.output
 		goFailures = report.failures
 		if exitCode == 0 && !report.complete {
@@ -163,9 +165,9 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 		switch {
 		case failed > 0:
 			verificationError = framework + " test reported failed tests"
-		case passed+skipped == 0:
+		case passed+skipped == 0 && !buildOnly:
 			verificationError = framework + " test ran no tests; check the path and pattern"
-		case passed == 0:
+		case passed == 0 && !buildOnly:
 			verificationError = framework + " test skipped every test; no passing tests verified"
 		}
 	}
@@ -177,16 +179,17 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 		Success: exitCode == 0 && verificationError == "",
 		Error:   verificationError,
 		Data: map[string]any{
-			"framework": framework,
-			"path":      testPath,
-			"pattern":   pattern,
-			"passed":    passed,
-			"failed":    failed,
-			"skipped":   skipped,
-			"duration":  duration,
-			"exit_code": exitCode,
-			"output":    output,
-			"coverage":  coverage,
+			"framework":  framework,
+			"build_only": buildOnly,
+			"path":       testPath,
+			"pattern":    pattern,
+			"passed":     passed,
+			"failed":     failed,
+			"skipped":    skipped,
+			"duration":   duration,
+			"exit_code":  exitCode,
+			"output":     output,
+			"coverage":   coverage,
 		},
 	}
 
@@ -227,6 +230,8 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 	// Check for framework indicators
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
 		switch filepath.Ext(path) {
+		case ".go":
+			return "go"
 		case ".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs":
 			return "jest"
 		case ".py":
@@ -258,6 +263,7 @@ func (t *RunTestsTool) detectTestFramework(path string) string {
 		{"*_test.go", "go"},
 		{"*.test.js", "jest"},
 		{"test_*.py", "pytest"},
+		{"*.go", "go"},
 	}
 	if entries, err := os.ReadDir(path); err == nil {
 		for _, candidate := range table {

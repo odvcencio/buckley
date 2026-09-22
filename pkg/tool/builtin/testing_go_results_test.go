@@ -53,6 +53,54 @@ func TestRunTestsGoStructuredCounts(t *testing.T) {
 	}
 }
 
+func TestRunTestsGoPackageWithoutTestFiles(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("Go is required")
+	}
+	root := t.TempDir()
+	packageDir := filepath.Join(root, "pkg", "plain")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(root, "go.mod"):         "module example.com/plain\n\ngo 1.26.0\n",
+		filepath.Join(packageDir, "plain.go"): "package plain\nfunc Value() int { return 1 }\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tool := &RunTestsTool{}
+	tool.SetWorkDir(root)
+	if got := tool.detectTestFramework(packageDir); got != "go" {
+		t.Fatalf("framework = %q, want go", got)
+	}
+	result, err := tool.Execute(map[string]any{"path": "pkg/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Data["build_only"] != true || result.Data["passed"] != 0 || result.Data["framework"] != "go" {
+		t.Fatalf("testless Go package = %+v, want successful build-only result", result)
+	}
+	filtered, err := tool.Execute(map[string]any{"path": "pkg/plain", "pattern": "^TestMissing$"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Success || filtered.Data["build_only"] != false {
+		t.Fatalf("filtered testless Go package = %+v, want no-test failure", filtered)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "plain.go"), []byte("package plain\nfunc Value() int { return missing() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	broken, err := tool.Execute(map[string]any{"path": "pkg/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken.Success || broken.Data["exit_code"] == 0 {
+		t.Fatalf("broken testless Go package = %+v, want build failure", broken)
+	}
+}
+
 func TestParseGoTestOutputRequiresPackageCompletion(t *testing.T) {
 	report := parseGoTestOutput("{\"Action\":\"start\",\"Package\":\"p\"}\n{\"Action\":\"pass\",\"Package\":\"p\",\"Test\":\"TestA\"}\n")
 	if report.complete || report.passed != 1 {
