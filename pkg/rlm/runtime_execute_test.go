@@ -17,7 +17,30 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
+	"m31labs.dev/buckley/pkg/tool"
 )
+
+func TestRuntimeExecuteCoordinatorTools_RecoversWrappersWithoutExecutingMalformedCalls(t *testing.T) {
+	registry := tool.NewEmptyRegistry()
+	readTool := &countingReadTool{fakeReadTool: fakeReadTool{name: "read_file", body: "evidence"}}
+	registry.Register(readTool)
+	runtime := &Runtime{}
+
+	results := runtime.executeCoordinatorTools(context.Background(), registry, []model.ToolCall{
+		{ID: "wrapped", Function: model.FunctionCall{Name: "read_file", Arguments: "```json\n{\"path\":\"fixture.go\"}\n```"}},
+		{ID: "malformed", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"fixture.go",}`}},
+	})
+
+	if readTool.calls != 1 {
+		t.Fatalf("tool executions = %d, want only the recovered valid call", readTool.calls)
+	}
+	if len(results) != 2 || !results[0].Success {
+		t.Fatalf("results = %+v, want recovered call followed by rejection", results)
+	}
+	if results[1].Success || !strings.Contains(results[1].Error, "invalid arguments") {
+		t.Fatalf("malformed result = %+v, want explicit rejection", results[1])
+	}
+}
 
 func newCoordinatorTestManager(t *testing.T, server *httptest.Server) *model.Manager {
 	t.Helper()

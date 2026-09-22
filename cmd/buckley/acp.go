@@ -2986,17 +2986,7 @@ func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, 
 }
 
 func parseACPToolParams(raw string) (map[string]any, error) {
-	if strings.TrimSpace(raw) == "" {
-		return map[string]any{}, nil
-	}
-	var params map[string]any
-	if err := json.Unmarshal([]byte(raw), &params); err != nil {
-		return nil, err
-	}
-	if params == nil {
-		params = make(map[string]any)
-	}
-	return params, nil
+	return tool.DecodeArguments(raw)
 }
 
 func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map[string]any, workDir string) {

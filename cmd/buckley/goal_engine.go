@@ -511,14 +511,16 @@ func (c goalRouteReasoningChecker) ResolveReasoningCapability(string) model.Capa
 }
 
 func toolCallParams(call model.ToolCall) (map[string]any, error) {
-	params := map[string]any{}
-	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
-		if err := launchcontract.RejectDuplicateJSONKeys([]byte(raw)); err != nil {
-			return nil, fmt.Errorf("duplicate JSON fields; issue separate parallel tool calls, or use exec_program to compose multiple reads")
-		}
-		if err := json.Unmarshal([]byte(raw), &params); err != nil {
-			return nil, fmt.Errorf("invalid JSON: %w", err)
-		}
+	normalized, err := tool.NormalizeArgumentsJSON(call.Function.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := launchcontract.RejectDuplicateJSONKeys(normalized); err != nil {
+		return nil, fmt.Errorf("duplicate JSON fields; issue separate parallel tool calls, or use exec_program to compose multiple reads")
+	}
+	params, err := tool.DecodeArguments(string(normalized))
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 	return params, nil
 }

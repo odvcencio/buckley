@@ -689,9 +689,12 @@ func (r *Runtime) executeCoordinatorTools(ctx context.Context, registry *tool.Re
 	for _, call := range calls {
 		name := call.Function.Name
 		result := coordinatorToolResult{ID: call.ID, Name: name}
-		args := map[string]any{}
-		if call.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+		args, err := tool.DecodeArguments(call.Function.Arguments)
+		if err != nil {
+			result.Result = fmt.Sprintf("invalid arguments: %v", err)
+			result.Error = result.Result
+			results = append(results, result)
+			continue
 		}
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID

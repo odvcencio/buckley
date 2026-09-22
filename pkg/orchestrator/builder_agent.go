@@ -588,11 +588,11 @@ func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *T
 
 func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, error) {
 	// Parse arguments
-	var params map[string]any
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
+	params, err := tool.DecodeArguments(tc.Function.Arguments)
+	if err != nil {
 		return "", fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
-	if params != nil && tc.ID != "" {
+	if tc.ID != "" {
 		params[tool.ToolCallIDParam] = tc.ID
 	}
 
