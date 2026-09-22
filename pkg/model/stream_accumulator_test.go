@@ -116,6 +116,9 @@ func TestStreamAccumulator_PreservesReasoningContentExactlyForProviderContinuity
 	if msg.Reasoning != raw {
 		t.Fatalf("Message().Reasoning changed exact reasoning_content bytes:\n got %q\nwant %q", msg.Reasoning, raw)
 	}
+	if !msg.ReasoningContent {
+		t.Fatal("Message().ReasoningContent = false, want native reasoning provenance")
+	}
 	finalized := acc.FinalizeWithTokenParsing()
 	if finalized.Reasoning != raw {
 		t.Fatalf("FinalizeWithTokenParsing().Reasoning changed exact reasoning_content bytes:\n got %q\nwant %q", finalized.Reasoning, raw)

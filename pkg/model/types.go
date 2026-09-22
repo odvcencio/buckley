@@ -26,6 +26,7 @@ type Message struct {
 	ToolCallID       string            `json:"tool_call_id,omitempty"`      // For tool response messages
 	Name             string            `json:"name,omitempty"`              // Tool name for tool messages
 	Reasoning        string            `json:"reasoning,omitempty"`         // Reasoning/thinking content for reasoning continuity
+	ReasoningContent bool              `json:"-"`                           // True when Reasoning came from provider-native reasoning_content
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"` // OpenRouter reasoning_details blocks
 }
 
@@ -71,8 +72,10 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.ToolCallID = aux.ToolCallID
 	m.Name = aux.Name
 	m.Reasoning = aux.Reasoning
+	m.ReasoningContent = false
 	if m.Reasoning == "" {
 		m.Reasoning = aux.ReasoningContent
+		m.ReasoningContent = aux.ReasoningContent != ""
 	}
 	m.ReasoningDetails = aux.ReasoningDetails
 	return nil

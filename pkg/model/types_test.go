@@ -203,6 +203,20 @@ func TestMessage_UnmarshalJSONCapturesReasoning(t *testing.T) {
 	if msg.Reasoning != "update(deps): refresh deps" {
 		t.Fatalf("reasoning = %q, want %q", msg.Reasoning, "update(deps): refresh deps")
 	}
+	if msg.ReasoningContent {
+		t.Fatal("ReasoningContent = true, want false for canonical reasoning")
+	}
+}
+
+func TestMessage_UnmarshalJSONCapturesReasoningContentAlias(t *testing.T) {
+	var msg Message
+	raw := `{"role":"assistant","reasoning_content":"private chain","content":"done"}`
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.Reasoning != "private chain" || !msg.ReasoningContent {
+		t.Fatalf("message reasoning = %q native=%v, want native alias", msg.Reasoning, msg.ReasoningContent)
+	}
 }
 
 func TestMessageDelta_UnmarshalJSONCapturesReasoningContentAlias(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,8 @@ type OpenAICompatibleProvider struct {
 	modelCache                           []ModelInfo
 	cacheTTL                             time.Duration
 	cacheTime                            time.Time
+	observedParamsMu                     sync.RWMutex
+	observedParams                       map[string]map[string]struct{}
 	staticModels                         []string
 	staticParams                         map[string][]string
 	staticContext                        map[string]int
@@ -63,6 +66,7 @@ func newOpenAICompatibleProvider(providerID string, liteLLMInfo bool, cfg config
 		httpClient:                           &http.Client{Timeout: defaultTimeout, Transport: transport},
 		transport:                            NewProviderTransport(ProviderTransportOptions{}),
 		cacheTTL:                             5 * time.Minute,
+		observedParams:                       make(map[string]map[string]struct{}),
 		staticModels:                         cfg.Models,
 		staticParams:                         cfg.SupportedParameters,
 		staticContext:                        cfg.ContextLengths,
@@ -81,9 +85,9 @@ func (p *OpenAICompatibleProvider) ID() string {
 func (p *OpenAICompatibleProvider) FetchCatalog() (*ModelCatalog, error) {
 	p.modelCacheMu.RLock()
 	if time.Since(p.cacheTime) < p.cacheTTL && len(p.modelCache) > 0 {
-		models := p.modelCache
+		models := append([]ModelInfo(nil), p.modelCache...)
 		p.modelCacheMu.RUnlock()
-		return &ModelCatalog{Data: models}, nil
+		return &ModelCatalog{Data: p.mergeObservedCatalogParameters(models)}, nil
 	}
 	p.modelCacheMu.RUnlock()
 
@@ -329,7 +333,7 @@ func (p *OpenAICompatibleProvider) normalizeFetchedModelInfo(fetched openAICompa
 	if info.Architecture.Modality == "" {
 		info.Architecture.Modality = "text"
 	}
-	info.SupportedParameters = p.mergeConfiguredParameters(info.ID, info.SupportedParameters)
+	info.SupportedParameters = p.mergeSupportedParameters(info.ID, info.SupportedParameters)
 	return info, true
 }
 
@@ -351,7 +355,7 @@ func (p *OpenAICompatibleProvider) buildStaticModels() []ModelInfo {
 			ContextLength: p.configuredContextLength(id, 8192),
 			Architecture:  Architecture{Modality: "text"},
 		}
-		info.SupportedParameters = p.mergeConfiguredParameters(info.ID, nil)
+		info.SupportedParameters = p.mergeSupportedParameters(info.ID, nil)
 		models = append(models, info)
 	}
 	return models
@@ -368,7 +372,7 @@ func (p *OpenAICompatibleProvider) configuredContextLength(modelID string, fallb
 	return fallback
 }
 
-func (p *OpenAICompatibleProvider) mergeConfiguredParameters(modelID string, discovered []string) []string {
+func (p *OpenAICompatibleProvider) mergeSupportedParameters(modelID string, discovered []string) []string {
 	parameters := append([]string(nil), discovered...)
 	configured := p.staticParams[modelID]
 	if len(configured) == 0 {
@@ -380,7 +384,62 @@ func (p *OpenAICompatibleProvider) mergeConfiguredParameters(modelID string, dis
 			parameters = append(parameters, parameter)
 		}
 	}
+	for _, parameter := range p.observedParameters(modelID) {
+		if !containsString(parameters, parameter) {
+			parameters = append(parameters, parameter)
+		}
+	}
 	return parameters
+}
+
+func (p *OpenAICompatibleProvider) canonicalModelID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" || strings.HasPrefix(modelID, p.modelPrefix) {
+		return modelID
+	}
+	return p.modelPrefix + modelID
+}
+
+func (p *OpenAICompatibleProvider) observedParameters(modelID string) []string {
+	canonical := p.canonicalModelID(modelID)
+	p.observedParamsMu.RLock()
+	observed := p.observedParams[canonical]
+	parameters := make([]string, 0, len(observed))
+	for parameter := range observed {
+		parameters = append(parameters, parameter)
+	}
+	p.observedParamsMu.RUnlock()
+	sort.Strings(parameters)
+	return parameters
+}
+
+// observeSupportedParameter records exact output-wire evidence for one model.
+// It does not infer related input controls such as reasoning_effort.
+func (p *OpenAICompatibleProvider) observeSupportedParameter(modelID, parameter string) {
+	canonical := p.canonicalModelID(modelID)
+	parameter = strings.TrimSpace(parameter)
+	if canonical == "" || parameter == "" {
+		return
+	}
+	p.observedParamsMu.Lock()
+	observed := p.observedParams[canonical]
+	if observed == nil {
+		observed = make(map[string]struct{})
+		p.observedParams[canonical] = observed
+	}
+	if _, exists := observed[parameter]; exists {
+		p.observedParamsMu.Unlock()
+		return
+	}
+	observed[parameter] = struct{}{}
+	p.observedParamsMu.Unlock()
+}
+
+func (p *OpenAICompatibleProvider) mergeObservedCatalogParameters(models []ModelInfo) []ModelInfo {
+	for i := range models {
+		models[i].SupportedParameters = p.mergeSupportedParameters(models[i].ID, models[i].SupportedParameters)
+	}
+	return models
 }
 
 func (p *OpenAICompatibleProvider) setAuthHeaders(req *http.Request) {
@@ -399,6 +458,12 @@ func (p *OpenAICompatibleProvider) invoke(ctx context.Context, req ChatRequest) 
 	if err := json.Unmarshal(data, &chatResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
+	for _, choice := range chatResp.Choices {
+		if choice.Message.ReasoningContent {
+			p.observeSupportedParameter(req.Model, "reasoning_content")
+			break
+		}
+	}
 	chatResp.AttemptEvidence = nil
 	chatResp.ExecutionIdentity = observedExecutionIdentity(chatResp.ID, chatResp.Model, nil)
 	return &chatResp, nil
@@ -406,7 +471,8 @@ func (p *OpenAICompatibleProvider) invoke(ctx context.Context, req ChatRequest) 
 
 func (p *OpenAICompatibleProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	payload := p.compatiblePayload(req)
-	if p.streamIdle <= 0 && p.streamFirstContent <= 0 && p.streamFirstContentMaxReasoningChunks <= 0 {
+	observeReasoningContent := !p.supportsParameter(req.Model, "reasoning_content")
+	if p.streamIdle <= 0 && p.streamFirstContent <= 0 && p.streamFirstContentMaxReasoningChunks <= 0 && !observeReasoningContent {
 		return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", payload, p.setAuthHeaders, chunkChan)
 	}
 
@@ -448,6 +514,10 @@ func (p *OpenAICompatibleProvider) invokeStream(ctx context.Context, req ChatReq
 			if !ok {
 				providerChunks = nil
 				continue
+			}
+			if observeReasoningContent && streamChunkHasNativeReasoningContent(chunk) {
+				p.observeSupportedParameter(req.Model, "reasoning_content")
+				observeReasoningContent = false
 			}
 			if firstContentPending {
 				if streamChunkHasUsableInitialResponse(chunk) {
@@ -528,7 +598,7 @@ type openAICompatibleWireMessage struct {
 func (p *OpenAICompatibleProvider) compatiblePayload(req ChatRequest) any {
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
 	reasoningEffort := ""
-	if req.Reasoning != nil && p.supportsConfiguredParameter(req.Model, "reasoning_effort") {
+	if req.Reasoning != nil && p.supportsParameter(req.Model, "reasoning_effort") {
 		if req.Reasoning.MaxTokens == 0 && req.Reasoning.Exclude == nil && (req.Reasoning.Enabled == nil || *req.Reasoning.Enabled) {
 			reasoningEffort = strings.ToLower(strings.TrimSpace(req.Reasoning.Effort))
 			if reasoningEffort != "" {
@@ -537,7 +607,7 @@ func (p *OpenAICompatibleProvider) compatiblePayload(req ChatRequest) any {
 		}
 	}
 
-	if p.supportsConfiguredParameter(req.Model, "reasoning_content") {
+	if p.supportsParameter(req.Model, "reasoning_content") {
 		return openAICompatibleWirePayload{
 			ChatRequest:     req,
 			Messages:        openAICompatibleWireMessages(req.Messages),
@@ -575,7 +645,7 @@ func openAICompatibleWireMessages(messages []Message) []openAICompatibleWireMess
 	return out
 }
 
-func (p *OpenAICompatibleProvider) supportsConfiguredParameter(modelID, parameter string) bool {
+func (p *OpenAICompatibleProvider) supportsParameter(modelID, parameter string) bool {
 	parameter = strings.TrimSpace(parameter)
 	if parameter == "" {
 		return false
@@ -585,7 +655,7 @@ func (p *OpenAICompatibleProvider) supportsConfiguredParameter(modelID, paramete
 	if !strings.HasPrefix(canonical, p.modelPrefix) {
 		canonical = p.modelPrefix + canonical
 	}
-	if containsString(p.mergeConfiguredParameters(canonical, nil), parameter) {
+	if containsString(p.mergeSupportedParameters(canonical, nil), parameter) {
 		return true
 	}
 	p.modelCacheMu.RLock()
@@ -622,6 +692,15 @@ func streamChunkHasReasoning(chunk StreamChunk) bool {
 	for _, choice := range chunk.Choices {
 		delta := choice.Delta
 		if delta.Reasoning != "" || len(delta.ReasoningDetails) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkHasNativeReasoningContent(chunk StreamChunk) bool {
+	for _, choice := range chunk.Choices {
+		if choice.Delta.ReasoningContent {
 			return true
 		}
 	}

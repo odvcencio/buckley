@@ -565,6 +565,80 @@ func TestOpenAICompatibleProvider_ReasoningContentNotSentWithoutCapability(t *te
 	}
 }
 
+func TestOpenAICompatibleProvider_ObservedReasoningContentEnablesScopedContinuity(t *testing.T) {
+	var captured []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"sparse-a"},{"id":"sparse-b"}]}`)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		captured = append(captured, payload)
+		if payload["model"] == "sparse-a" && len(captured) == 1 {
+			_, _ = io.WriteString(w, `{"id":"first","model":"sparse-a","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"native-private","content":"inspect"},"finish_reason":"stop"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"next","model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := newTestOpenAICompatibleProvider(server.URL)
+	provider.httpClient = server.Client()
+	if _, err := provider.FetchCatalog(); err != nil {
+		t.Fatalf("FetchCatalog() error = %v", err)
+	}
+	first, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "openai_compatible/sparse-a",
+		Messages: []Message{{Role: "user", Content: "inspect"}},
+	})
+	if err != nil {
+		t.Fatalf("first ChatCompletion() error = %v", err)
+	}
+	if !first.Choices[0].Message.ReasoningContent {
+		t.Fatal("first response lost reasoning_content provenance")
+	}
+	if provider.supportsParameter("sparse-a", "reasoning_effort") {
+		t.Fatal("observing reasoning_content must not infer reasoning_effort input support")
+	}
+	info, err := provider.GetModelInfo("openai_compatible/sparse-a")
+	if err != nil || !containsString(info.SupportedParameters, "reasoning_content") {
+		t.Fatalf("observed catalog info = %+v, err=%v", info, err)
+	}
+
+	for _, modelID := range []string{"sparse-a", "sparse-b"} {
+		_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+			Model: "openai_compatible/" + modelID,
+			Messages: []Message{{
+				Role:      "assistant",
+				Content:   "inspect",
+				Reasoning: "native-private",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("continuation ChatCompletion(%q) error = %v", modelID, err)
+		}
+	}
+
+	learned := captured[1]["messages"].([]any)[0].(map[string]any)
+	if learned["reasoning_content"] != "native-private" {
+		t.Fatalf("learned model message = %#v, want native reasoning_content", learned)
+	}
+	if _, ok := learned["reasoning"]; ok {
+		t.Fatalf("learned model retained generic reasoning field: %#v", learned)
+	}
+	unobserved := captured[2]["messages"].([]any)[0].(map[string]any)
+	if _, ok := unobserved["reasoning_content"]; ok {
+		t.Fatalf("observed capability leaked across models: %#v", unobserved)
+	}
+	if unobserved["reasoning"] != "native-private" {
+		t.Fatalf("unobserved model generic reasoning = %#v", unobserved)
+	}
+}
+
 func TestOpenAICompatibleProvider_DiscoveredReasoningCapabilitiesAffectWireRequest(t *testing.T) {
 	captured := make(map[string]map[string]any)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +999,57 @@ func TestOpenAICompatibleProvider_ChatCompletionStreamReasoningContentResetsIdle
 	}
 	if !gotReasoning || !gotContent {
 		t.Fatalf("gotReasoning=%v gotContent=%v, want both", gotReasoning, gotContent)
+	}
+}
+
+func TestOpenAICompatibleProvider_StreamObservationEnablesReasoningContinuity(t *testing.T) {
+	requests := 0
+	var continuation map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"model\":\"stream-sparse\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"private\"},\"finish_reason\":null}]}\n\n")
+			_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"model\":\"stream-sparse\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&continuation); err != nil {
+			t.Fatalf("decode continuation: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"2","model":"stream-sparse","choices":[{"index":0,"message":{"role":"assistant","content":"complete"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{BaseURL: server.URL, APIKey: "test-key"}, false)
+	provider.httpClient = server.Client()
+	chunks, errs := provider.ChatCompletionStream(context.Background(), ChatRequest{
+		Model:    "openai_compatible/stream-sparse",
+		Messages: []Message{{Role: "user", Content: "start"}},
+	})
+	for range chunks {
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("stream error = %v", err)
+		}
+	}
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model: "openai_compatible/stream-sparse",
+		Messages: []Message{{
+			Role:      "assistant",
+			Content:   "done",
+			Reasoning: "private",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("continuation ChatCompletion() error = %v", err)
+	}
+	assistant := continuation["messages"].([]any)[0].(map[string]any)
+	if assistant["reasoning_content"] != "private" {
+		t.Fatalf("continuation message = %#v, want observed reasoning_content", assistant)
 	}
 }
 
