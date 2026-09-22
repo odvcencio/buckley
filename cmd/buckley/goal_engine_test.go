@@ -1439,17 +1439,40 @@ func TestGoalTurnSystemPrompt_ProjectsOrientationWithoutConstrainingDesign(t *te
 
 func TestToolCallParams_RejectsDuplicateJSONFieldsWithRecovery(t *testing.T) {
 	t.Parallel()
-	call := model.ToolCall{Function: model.FunctionCall{
-		Name:      "list_directory",
-		Arguments: `{"path":"game","path":"scene"}`,
-	}}
-	params, err := toolCallParams(call)
-	if err == nil || params != nil {
-		t.Fatalf("toolCallParams = %#v, %v; want duplicate rejection", params, err)
+	for name, arguments := range map[string]string{
+		"plain":  `{"path":"game","path":"scene"}`,
+		"fenced": "```json\n{\"path\":\"game\",\"path\":\"scene\"}\n```",
+	} {
+		t.Run(name, func(t *testing.T) {
+			call := model.ToolCall{Function: model.FunctionCall{
+				Name:      "list_directory",
+				Arguments: arguments,
+			}}
+			params, err := toolCallParams(call)
+			if err == nil || params != nil {
+				t.Fatalf("toolCallParams = %#v, %v; want duplicate rejection", params, err)
+			}
+			for _, want := range []string{"duplicate JSON fields", "parallel tool calls", "exec_program"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q missing %q", err, want)
+				}
+			}
+		})
 	}
-	for _, want := range []string{"duplicate JSON fields", "parallel tool calls", "exec_program"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err, want)
+
+	params, err := toolCallParams(model.ToolCall{Function: model.FunctionCall{
+		Name:      "list_directory",
+		Arguments: `"{\"path\":\"game\"}"`,
+	}})
+	if err != nil || params["path"] != "game" {
+		t.Fatalf("toolCallParams encoded object = %#v, %v", params, err)
+	}
+	if len(params) != 1 {
+		t.Fatalf("toolCallParams encoded object = %#v, want one field", params)
+	}
+	for _, raw := range []string{`{"path":"game",}`, `prefix {"path":"game"}`} {
+		if params, err := toolCallParams(model.ToolCall{Function: model.FunctionCall{Arguments: raw}}); err == nil || params != nil {
+			t.Fatalf("toolCallParams(%q) = %#v, %v; want strict rejection", raw, params, err)
 		}
 	}
 }

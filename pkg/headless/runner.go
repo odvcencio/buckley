@@ -1571,10 +1571,8 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 		})
 
 		// Parse arguments
-		var args map[string]any
-		if strings.TrimSpace(tc.Function.Arguments) == "" {
-			args = map[string]any{}
-		} else if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		args, err := tool.DecodeArguments(tc.Function.Arguments)
+		if err != nil {
 			message := "Tool execution failed: invalid JSON arguments: " + err.Error()
 			decision = "rejected"
 			r.emit(RunnerEvent{
@@ -1617,7 +1615,7 @@ func (r *Runner) dispatchToolCallsForCommand(ctx context.Context, command *sessi
 			outcomes = append(outcomes, agentloop.ToolOutcome{Content: message, Success: false, EffectClass: "control"})
 			continue
 		}
-		if args != nil && providerToolCallID != "" {
+		if providerToolCallID != "" {
 			args[tool.ToolCallIDParam] = providerToolCallID
 		}
 

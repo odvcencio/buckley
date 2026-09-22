@@ -2,7 +2,6 @@ package experiment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -401,12 +400,9 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 }
 
 func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.Codec, call model.ToolCall) (toolCallExecution, error) {
-	var params map[string]any
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
+	params, err := tool.DecodeArguments(call.Function.Arguments)
+	if err != nil {
 		return toolCallExecution{}, fmt.Errorf("failed to parse tool arguments: %w", err)
-	}
-	if params == nil {
-		params = make(map[string]any)
 	}
 	if call.ID != "" {
 		params[tool.ToolCallIDParam] = call.ID

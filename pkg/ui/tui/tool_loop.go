@@ -954,8 +954,8 @@ func repairToolCallByArguments(registry *tool.Registry, call *model.ToolCall, al
 	if registry == nil || call == nil || call.Function.Name != "run_tests" {
 		return
 	}
-	var params map[string]any
-	if json.Unmarshal([]byte(call.Function.Arguments), &params) != nil {
+	params, err := tool.DecodeArguments(call.Function.Arguments)
+	if err != nil {
 		return
 	}
 	command, _ := params["command"].(string)
@@ -1368,17 +1368,7 @@ func compactStatusText(text string, maxLen int) string {
 }
 
 func parseToolParams(raw string) (map[string]any, error) {
-	if strings.TrimSpace(raw) == "" {
-		return map[string]any{}, nil
-	}
-	var params map[string]any
-	if err := json.Unmarshal([]byte(raw), &params); err != nil {
-		return nil, err
-	}
-	if params == nil {
-		params = make(map[string]any)
-	}
-	return params, nil
+	return tool.DecodeArguments(raw)
 }
 
 func formatToolResultForModel(result *builtin.Result, execErr error) string {

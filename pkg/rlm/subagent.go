@@ -1079,8 +1079,8 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 			}
 		}
 
-		var args map[string]any
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		args, err := tool.DecodeArguments(call.Function.Arguments)
+		if err != nil {
 			toolCall := SubAgentToolCall{
 				ID:        call.ID,
 				Name:      name,
@@ -1094,9 +1094,6 @@ func (a *SubAgent) executeTools(ctx context.Context, calls []model.ToolCall, reg
 			continue
 		}
 
-		if args == nil {
-			args = map[string]any{}
-		}
 		if call.ID != "" {
 			args[tool.ToolCallIDParam] = call.ID
 		}
