@@ -156,6 +156,8 @@ type startupOptions struct {
 	configPath       string
 	modelOverride    string
 	agentPath        string
+	tools            []string
+	toolsSet         bool
 	taskIntent       agentloop.TaskIntent
 	taskIntentSet    bool
 	codeMode         bool
@@ -172,6 +174,7 @@ const (
 	startupPendingConfig
 	startupPendingModel
 	startupPendingAgent
+	startupPendingTools
 	startupPendingTaskIntent
 )
 
@@ -316,7 +319,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShotWithTaskIntent(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode, opts.taskIntent)
+		exitCode := executeOneShotWithTaskIntent(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent)
 		os.Exit(exitCode)
 	}
 
@@ -332,13 +335,17 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShotWithTaskIntent(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, nil, opts.codeMode, opts.taskIntent)
+				exitCode := executeOneShotWithTaskIntent(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent)
 				os.Exit(exitCode)
 			}
 		}
 	}
 	if opts.taskIntentSet {
 		fmt.Fprintln(os.Stderr, "Error: --task-intent is only supported with -p or piped one-shot input")
+		os.Exit(2)
+	}
+	if opts.toolsSet {
+		fmt.Fprintln(os.Stderr, "Error: --tools is only supported with -p or piped one-shot input")
 		os.Exit(2)
 	}
 
@@ -593,6 +600,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	createTool := &builtin.CreateSkillTool{Registry: skills}
 	createTool.SetWorkDir(cwd)
 	registry.Register(createTool)
+	if err := validateOneShotTools(registry, allowedTools); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 2
+	}
 	toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools)
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
@@ -1545,6 +1556,8 @@ func printHelp() {
 	fmt.Println("  buckley -p \"prompt\"              One-shot mode: run prompt and exit")
 	fmt.Println("  buckley --task-intent mutation -p \"prompt\"")
 	fmt.Println("                                   Require one-shot changes and verification")
+	fmt.Println("  buckley --tools read_file,edit_file,run_tests -p \"prompt\"")
+	fmt.Println("                                   Limit one-shot model tools to a task-relevant set")
 	fmt.Println()
 	fmt.Println("COMMANDS:")
 	fmt.Println("  plan <name> <desc>               Generate feature plan")
@@ -1614,6 +1627,8 @@ func printHelp() {
 	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
 	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
 	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
+	fmt.Println("  --tools <names>                  Limit one-shot model tools (comma-separated, repeatable)")
+	fmt.Println("                                   Approval rules and required protocol tools still apply")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1937,7 +1952,7 @@ func printBashCompletion() {
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent --task-intent" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent --task-intent --tools" -- "${cur}") )
             return 0
             ;;
         batch)
@@ -2055,6 +2070,7 @@ _buckley() {
         '--config[Use custom config file]:config file:_files' \
         '--agent[Load a buckley.agent/v1 runtime profile]:agent spec:_files' \
         '--task-intent[One-shot result contract]:intent:(unknown read_only mutation)' \
+        '--tools[Offer comma-separated one-shot model tools]:tool names:' \
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
@@ -2165,6 +2181,7 @@ complete -c buckley -s p -d 'Run prompt in one-shot mode'
 complete -c buckley -s c -l config -d 'Use custom config file' -r
 complete -c buckley -l agent -d 'Load a buckley.agent/v1 runtime profile' -r
 complete -c buckley -l task-intent -d 'One-shot result contract' -xa 'unknown read_only mutation'
+complete -c buckley -l tools -d 'Offer comma-separated one-shot model tools' -r
 complete -c buckley -s q -l quiet -d 'Suppress non-essential output'
 complete -c buckley -l no-color -d 'Disable colored output'
 complete -c buckley -l tui -d 'Use rich TUI interface'
@@ -2358,11 +2375,10 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 		filtered = append(filtered, arg)
 	}
 
+	opts.args = filtered
 	if err := state.validate(opts); err != nil {
 		return nil, err
 	}
-
-	opts.args = filtered
 	return opts, nil
 }
 
@@ -2394,6 +2410,10 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (boo
 		opts.modelOverride = strings.TrimSpace(arg)
 	case startupPendingAgent:
 		opts.agentPath = strings.TrimSpace(arg)
+	case startupPendingTools:
+		if err := opts.addTools(arg); err != nil {
+			return true, err
+		}
 	case startupPendingTaskIntent:
 		if strings.TrimSpace(arg) == "" {
 			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
@@ -2462,6 +2482,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 		}
 		s.pending = startupPendingAgent
 		s.agentFlagSeen = true
+	case "--tools":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending = startupPendingTools
 	case "--task-intent":
 		if !beforeCommand {
 			return false, nil
@@ -2487,6 +2512,9 @@ func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg str
 		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
 		s.agentFlagSeen = true
 		return true, nil
+	}
+	if strings.HasPrefix(arg, "--tools=") && beforeCommand {
+		return true, opts.addTools(strings.TrimPrefix(arg, "--tools="))
 	}
 	if strings.HasPrefix(arg, "--task-intent=") && beforeCommand {
 		raw := strings.TrimPrefix(arg, "--task-intent=")
@@ -2516,6 +2544,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("--model requires a value")
 	case startupPendingAgent:
 		return fmt.Errorf("--agent requires a path")
+	case startupPendingTools:
+		return fmt.Errorf("--tools requires comma-separated tool names")
 	case startupPendingTaskIntent:
 		return fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
 	}
@@ -2525,6 +2555,22 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 	if s.agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
 		return fmt.Errorf("--agent requires a path")
 	}
+	if opts.toolsSet && len(opts.args) > 0 {
+		return fmt.Errorf("--tools is only supported with -p or piped one-shot input")
+	}
+	return nil
+}
+
+func (opts *startupOptions) addTools(raw string) error {
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.HasPrefix(name, "-") {
+			return fmt.Errorf("--tools requires comma-separated tool names")
+		}
+		opts.tools = append(opts.tools, name)
+	}
+	opts.tools = cleanToolNames(opts.tools)
+	opts.toolsSet = true
 	return nil
 }
 
@@ -2634,6 +2680,15 @@ func hyphaeProjectKnowledgeContext(cfg *config.Config, workDir string) string {
 		return ""
 	}
 	return knowledgehyphae.ProjectKnowledgeContext(context.Background(), workDir, cfg.Memory.HyphaeSpace)
+}
+
+func validateOneShotTools(registry *tool.Registry, names []string) error {
+	for _, name := range cleanToolNames(names) {
+		if _, ok := registry.Get(name); !ok {
+			return fmt.Errorf("unknown one-shot tool %q", name)
+		}
+	}
+	return nil
 }
 
 func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.Registry, explicitAllowed []string) []string {
