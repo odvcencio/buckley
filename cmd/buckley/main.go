@@ -193,7 +193,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	ensureBuckleyRuntimeIgnored()
+	// A completion hook must not initialize a workspace or edit ignore files.
+	if len(opts.args) == 0 || opts.args[0] != "completion-check" {
+		ensureBuckleyRuntimeIgnored()
+	}
 
 	encodingOverrideFlag = opts.encodingOverride
 	quietMode = opts.quiet
@@ -2252,6 +2255,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runAttachCommand, args[1:])
 	case "goal":
 		return true, runCommand(runGoalCommand, args[1:])
+	case "completion-check":
+		return true, runCommand(runCompletionCheckCommand, args[1:])
 	case "batch":
 		return true, runCommand(runBatchCommand, args[1:])
 	case "git-webhook":

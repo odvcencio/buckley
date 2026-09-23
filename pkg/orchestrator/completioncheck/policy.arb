@@ -1,0 +1,20 @@
+outcome CompletionDecision {
+    action: string
+    reason: string
+}
+
+strategy completion returns CompletionDecision {
+    when {
+        evidence.action >= 0.85
+        and evidence.unfinished >= 0.85
+        and evidence.authorized >= 0.85
+        and evidence.needs_user <= 0.20
+    } then UnfinishedAuthorizedWork {
+        action: "continue",
+        reason: "The reply appears to leave an already-requested action unfinished, with a next step available under existing authorization.",
+    }
+    else Stop {
+        action: "stop",
+        reason: "No sufficiently clear, authorized continuation was established.",
+    }
+}
