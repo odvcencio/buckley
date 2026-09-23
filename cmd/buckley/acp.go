@@ -1926,15 +1926,17 @@ func streamACPTurnAttempt(ctx context.Context, mgr *model.Manager, req model.Cha
 	return drainACPStreamTurn(streamCtx, req, chunks, errs, stream, deferDelivery)
 }
 
+// acpStreamRetryAllowed reports whether req's transcript is clean enough to
+// retry the whole turn from the request (C2). A turn's own tool
+// availability (req.Tools/ToolChoice) does not by itself make a retry
+// unsafe: acpStreamRetryCandidate independently refuses to retry once the
+// failed attempt has actually observed tool-call activity (see
+// ObservedToolDelta/ToolCalls there), which is what actually prevents a
+// tool call from being double-applied. What remains unsafe here is a
+// transcript that already carries an earlier tool transaction: that is a
+// committed, side-effect-adjacent turn from before this one, not the turn
+// that just failed, and must never be replayed.
 func acpStreamRetryAllowed(req model.ChatRequest) bool {
-	if len(req.Tools) > 0 {
-		return false
-	}
-	if choice := strings.ToLower(strings.TrimSpace(req.ToolChoice)); choice != "" && choice != "none" {
-		return false
-	}
-	// A no-tools request can still be carrying an earlier tool transaction in
-	// its transcript. Treat that as side-effect-adjacent and do not replay it.
 	for _, message := range req.Messages {
 		if strings.EqualFold(strings.TrimSpace(message.Role), "tool") || len(message.ToolCalls) > 0 {
 			return false
@@ -1950,10 +1952,27 @@ func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error)
 	if len(turn.Message.ToolCalls) > 0 || turn.ObservedToolDelta || isContextCancellationError(err) {
 		return false
 	}
-	safe := acpEveryErrorLeaf(err, func(leaf error) bool {
-		return leaf == io.ErrUnexpectedEOF || isUsageTrackingUnavailableError(leaf)
-	})
+	safe := acpEveryErrorLeaf(err, isRetryableStreamTransportErrorLeaf)
 	return safe && ctx.Err() == nil
+}
+
+// isRetryableStreamTransportErrorLeaf reports whether a leaf error (the
+// innermost cause after acpEveryErrorLeaf finishes unwrapping) names a
+// transport-level failure safe to retry the whole turn for (C2): the
+// stream ended before its logical completion (io.ErrUnexpectedEOF), the
+// connection was reset or the pipe broke mid-read/write (typed
+// syscall.ECONNRESET/EPIPE, e.g. Go's *net.OpError for "read tcp ...:
+// read: connection reset by peer" -- the real incident's exact error
+// shape), or the provider's usage trailer was unavailable. Matching is
+// type-based, not message-text based: an untyped error that merely says
+// "connection reset by peer" is not classified, since only a genuine
+// syscall-level signal proves the failure was transport, not application,
+// in origin.
+func isRetryableStreamTransportErrorLeaf(leaf error) bool {
+	return errors.Is(leaf, io.ErrUnexpectedEOF) ||
+		errors.Is(leaf, syscall.ECONNRESET) ||
+		errors.Is(leaf, syscall.EPIPE) ||
+		isUsageTrackingUnavailableError(leaf)
 }
 
 const (

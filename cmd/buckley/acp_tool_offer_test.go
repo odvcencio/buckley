@@ -564,7 +564,14 @@ func TestRunACPLoop_RouteDriftBeforeSafeRetryStopsSecondProviderIO(t *testing.T)
 	assertACPToolOfferWireOmitsTools(t, 1, captured[0])
 }
 
-func TestRunACPLoop_RouteBoundToolRiskDoesNotRetryIncompleteStream(t *testing.T) {
+// TestRunACPLoop_RouteBoundToolRiskRetriesIncompleteStreamWithoutObservedToolCall
+// covers C2: a tool-bearing request is no longer blanket-excluded from the
+// whole-turn safe retry. Every attempt here streams plain content and never
+// emits a tool-call delta, so acpStreamRetryCandidate's double-apply guard
+// (ObservedToolDelta/ToolCalls) never trips, and the retry is expected;
+// both attempts hit the exhausted-retry-budget ceiling identically, so the
+// turn still ends in a (combined) error.
+func TestRunACPLoop_RouteBoundToolRiskRetriesIncompleteStreamWithoutObservedToolCall(t *testing.T) {
 	var providerRequests atomic.Int32
 	var captured acpToolOfferWireRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -609,10 +616,10 @@ func TestRunACPLoop_RouteBoundToolRiskDoesNotRetryIncompleteStream(t *testing.T)
 
 	_, err = runACPLoop(context.Background(), cfg, mgr, conv, registry, nil, engine, "retry-capable-alias", "", "route-tool-risk", nil, func(string, ...interface{}) {}, nil)
 	if err == nil {
-		t.Fatal("tool-capable incomplete stream unexpectedly retried/succeeded")
+		t.Fatal("tool-capable incomplete stream unexpectedly succeeded")
 	}
-	if calls := providerRequests.Load(); calls != 1 {
-		t.Fatalf("provider requests = %d, want no retry for a tool-bearing request", calls)
+	if calls := providerRequests.Load(); calls != 2 {
+		t.Fatalf("provider requests = %d, want exactly one retry for a tool-bearing request with no observed tool call", calls)
 	}
 	if !captured.hasField("tools") || captured.ToolChoice != "auto" {
 		t.Fatalf("tool-risk wire request did not carry its schema offer: %+v", captured)
