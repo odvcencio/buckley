@@ -243,8 +243,9 @@ UNAVAILABLE or INCONCLUSIVE, never CONFIRMED_FAIL. This rule covers:
 
 - An unreachable remote host (for example ssh down).
 - A failed file sync (for example an rsync error).
-- Any exit code other than the two a real test run produces: 0 for pass,
-  1 for a build or test failure.
+- Any exit code other than the ones a real test run produces: 0 for pass,
+  1 for a build or test failure (`go test`, `pytest`, `npm test`), or 101
+  for a Cargo build error or test failure (Rust's default panic code).
 
 An infrastructure fault is not evidence that the reviewed change is broken.
 
@@ -262,7 +263,7 @@ Environment overrides:
 
 The remote wrapper path can report fewer PASS results than the local
 sandbox path for the same review. An investigation against a real pull
-request found two real bugs in this harness (both fixed) and one
+request found three real bugs in this harness (all fixed) and one
 unavoidable environment difference (documented, not a bug):
 
 1. **Wrong sync root for a single package (fixed).** An earlier version
@@ -286,7 +287,16 @@ unavoidable environment difference (documented, not a bug):
    needlessly) graded that package UNAVAILABLE even though it had
    actually passed. The batch output buffer is now sized for this case
    (32MiB) instead of the 1MiB that reproduced it.
-3. **Environment differences (not a bug; local and remote are not, and
+3. **A real Rust failure could grade UNAVAILABLE instead of
+   CONFIRMED_FAIL (fixed).** The trusted-exit-code check originally
+   accepted only 0 (pass) and 1 (a `go test`/`pytest`/`npm test`
+   failure) for every language. Cargo does not follow that convention:
+   `cargo build`/`cargo test` report a real compile error or test panic
+   with exit code 101, Rust's default panic code, not 1. A genuine Rust
+   failure through the wrapper was therefore classified as an untrusted
+   transport result. The trusted-exit-code check is now language-aware
+   and also accepts 101 for Rust.
+4. **Environment differences (not a bug; local and remote are not, and
    are not meant to be, identical sandboxes).** The local native-Go
    sandbox path runs with `GOTOOLCHAIN=local`, `GOPROXY=off`,
    `GOSUMDB=off`, `CI=true`, and an isolated `HOME`/`GOCACHE` (see

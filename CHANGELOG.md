@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (min(4, max(1, NumCPU/4))), even without a configured wrapper. A wrapper
   or transport failure always grades UNAVAILABLE/INCONCLUSIVE, never
   CONFIRMED_FAIL. This covers a non-test exit code, a launch failure, and a
-  timeout. See docs/CONFIGURATION.md.
+  timeout. The trusted-exit-code check is language-aware: it accepts exit
+  code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.
+  See docs/CONFIGURATION.md.
 
 ## [0.8.2] - 2026-08-17
 

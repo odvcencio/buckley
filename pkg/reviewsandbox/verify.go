@@ -257,7 +257,8 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		args := append(append([]string(nil), e.wrapper[1:]...), root)
 		args = append(args, wrapperRemoteCommand(relativePath, plan.command, plan.args)...)
 		output, runErr := e.run(ctx, commandInvocation{Name: e.wrapper[0], Args: args}, maxOutput)
-		return classifyVerificationRun(result, request, language, timeout, "remote verification wrapper", output, runErr, ctx.Err(), trustedWrapperExitCode)
+		trusted := func(code int) bool { return trustedWrapperExitCode(language, code) }
+		return classifyVerificationRun(result, request, language, timeout, "remote verification wrapper", output, runErr, ctx.Err(), trusted)
 	}
 
 	resolved, err := e.lookPath(plan.command)
@@ -626,16 +627,25 @@ func wrapperRemoteCommand(relativePath, command string, args []string) []string 
 	return remote
 }
 
-// trustedWrapperExitCode reports whether code is an exit status a real test
-// runner can plausibly produce: 0 (pass) or 1 (build/test failure, the exit
-// code go test, cargo test, pytest, and npm test all use for that case).
-// Anything else observed through a remote wrapper -- 2 (usage error), 124
-// (the wrapper's own timeout), 127 (command not found on the remote host),
-// 255 (ssh connection failure), a negative signal code, and so on -- means
-// the wrapper or its transport failed before or instead of running a real
-// test, and must never be graded as a confirmed product failure.
-func trustedWrapperExitCode(code int) bool {
-	return code == 0 || code == 1
+// trustedWrapperExitCode reports whether code is an exit status a real
+// language-specific test runner can plausibly produce. `go test`, `pytest`,
+// and `npm test` all use 0 for pass and 1 for a build or test failure.
+// `cargo build`/`cargo test` are the one exception this harness supports:
+// Rust's default panic exit code is 101, and Cargo propagates it for both a
+// compile error and a failing test, not 1. Anything else observed through a
+// remote wrapper -- 2 (usage error), 124 (the wrapper's own timeout), 127
+// (command not found on the remote host), 255 (ssh connection failure), a
+// negative signal code, and so on -- means the wrapper or its transport
+// failed before or instead of running a real test, and must never be
+// graded as a confirmed product failure.
+func trustedWrapperExitCode(language Language, code int) bool {
+	if code == 0 {
+		return true
+	}
+	if language == LanguageRust {
+		return code == 101
+	}
+	return code == 1
 }
 
 func verificationOutputShowsSandboxRestriction(output string) bool {

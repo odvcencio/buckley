@@ -135,6 +135,76 @@ func TestExecutorVerifyWrapperTrustsExitOne(t *testing.T) {
 	}
 }
 
+// TestExecutorVerifyWrapperTrustsRustExit101ForFailure is a regression test
+// for a real production finding: cargo build/cargo test report a compile
+// error or a failing test with exit code 101 (Rust's default panic code),
+// not 1. A trusted-exit-code check that only accepted 0/1 misgraded a real
+// Rust failure as an untrusted wrapper/transport result (UNAVAILABLE)
+// instead of a confirmed failure.
+func TestExecutorVerifyWrapperTrustsRustExit101ForFailure(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "Cargo.toml"), "[package]\nname = \"fake\"\nversion = \"0.1.0\"\n")
+	wrapper := writeFakeWrapper(t, "echo 'test result: FAILED'\nexit 101\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageRust,
+		Path:         ".",
+	})
+	if result.Status != StatusFail {
+		t.Fatalf("status = %s, want FAIL for a real Cargo failure exit code (error=%q)", result.Status, result.Error)
+	}
+	if result.ExitCode != 101 {
+		t.Fatalf("exit code = %d, want 101", result.ExitCode)
+	}
+}
+
+// TestExecutorVerifyWrapperRustExit1IsUntrustedNotFail guards the other
+// direction: exit 1 is not a code cargo build/cargo test use for a real
+// build or test failure, so it must still grade UNAVAILABLE for Rust, not
+// FAIL.
+func TestExecutorVerifyWrapperRustExit1IsUntrustedNotFail(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "Cargo.toml"), "[package]\nname = \"fake\"\nversion = \"0.1.0\"\n")
+	wrapper := writeFakeWrapper(t, "exit 1\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageRust,
+		Path:         ".",
+	})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE: exit 1 is not a code cargo uses for a real failure", result.Status)
+	}
+}
+
+// TestExecutorVerifyWrapperGoExit101IsUntrustedNotFail is the Go-side
+// counterpart: exit 101 is Rust's panic code, not Go's, so it must stay
+// untrusted (UNAVAILABLE) for a Go verification command.
+func TestExecutorVerifyWrapperGoExit101IsUntrustedNotFail(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	wrapper := writeFakeWrapper(t, "exit 101\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+	})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE: exit 101 is not a code go test uses for a real failure", result.Status)
+	}
+}
+
 // TestExecutorVerifyWrapperExit255GradesUnavailableNotFail is the harness
 // safety rule: ssh connection failures, rsync errors, and other
 // non-test wrapper exit codes (255 is ssh's) must never be reported as a

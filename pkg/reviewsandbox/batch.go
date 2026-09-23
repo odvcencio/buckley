@@ -205,7 +205,7 @@ func trustedWrapperBatchExitCode(timeout time.Duration, output commandOutput, ru
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			code := exitErr.ExitCode()
-			if !trustedWrapperExitCode(code) {
+			if !trustedWrapperExitCode(LanguageGo, code) {
 				return false, fmt.Sprintf(
 					"remote verification wrapper exited %d, which is not a recognized test result; treating the batch as a transport/wrapper failure rather than a confirmed failure", code)
 			}
@@ -213,7 +213,7 @@ func trustedWrapperBatchExitCode(timeout time.Duration, output commandOutput, ru
 		}
 		return false, fmt.Sprintf("remote verification wrapper failed to launch: %v", runErr)
 	}
-	if !trustedWrapperExitCode(output.ExitCode) {
+	if !trustedWrapperExitCode(LanguageGo, output.ExitCode) {
 		return false, fmt.Sprintf(
 			"remote verification wrapper exited %d, which is not a recognized test result; treating the batch as a transport/wrapper failure rather than a confirmed failure", output.ExitCode)
 	}
