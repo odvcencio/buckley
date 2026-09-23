@@ -26,8 +26,8 @@ func TestEnsureConfiguredModels_ExplicitRoleHardFailsWithCloseMatches(t *testing
 		providers:     map[string]Provider{"openai_compatible": &stubProvider{id: "openai_compatible"}},
 		providerOrder: []string{"openai_compatible"},
 		catalog: map[string]ModelInfo{
-			"openai_compatible/glm5.3flash":    {ID: "openai_compatible/glm5.3flash"},
-			"cohere/command-a-plus":            {ID: "cohere/command-a-plus"},
+			"openai_compatible/glm5.3flash":         {ID: "openai_compatible/glm5.3flash"},
+			"cohere/command-a-plus":                 {ID: "cohere/command-a-plus"},
 			"openai_compatible/deepseek-v4.1-flash": {ID: "openai_compatible/deepseek-v4.1-flash"},
 		},
 		providerModels: map[string][]string{
