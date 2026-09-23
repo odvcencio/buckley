@@ -14,13 +14,17 @@ const maxModelSuggestions = 5
 // previously registered, now-renamed alias) suggesting the live catalog's
 // "openai_compatible/glm5.3flash" -- instead of only reporting failure.
 // Matches farther than modelSuggestionMaxDistance(requested) are dropped:
-// an unrelated catalog should suggest nothing rather than noise.
+// an unrelated catalog should suggest nothing rather than noise. The
+// requested name itself is always excluded: a caller only reaches this
+// path after requested has already failed to resolve, so echoing it back
+// as a "did you mean" suggestion would only restate the failure, not
+// explain it.
 func (m *Manager) closestModelMatches(requested string, limit int) []string {
 	if m == nil || limit <= 0 {
 		return nil
 	}
-	requested = normalizeForModelSuggestion(requested)
-	if requested == "" {
+	normalizedRequested := normalizeForModelSuggestion(requested)
+	if normalizedRequested == "" {
 		return nil
 	}
 
@@ -31,12 +35,16 @@ func (m *Manager) closestModelMatches(requested string, limit int) []string {
 	}
 	candidates := make([]scored, 0, len(m.catalog))
 	for id := range m.catalog {
-		distance := levenshteinDistance(requested, normalizeForModelSuggestion(id))
+		normalizedID := normalizeForModelSuggestion(id)
+		if normalizedID == normalizedRequested {
+			continue
+		}
+		distance := levenshteinDistance(normalizedRequested, normalizedID)
 		candidates = append(candidates, scored{id: id, distance: distance})
 	}
 	m.catalogMu.RUnlock()
 
-	maxDistance := modelSuggestionMaxDistance(requested)
+	maxDistance := modelSuggestionMaxDistance(normalizedRequested)
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].distance != candidates[j].distance {
 			return candidates[i].distance < candidates[j].distance
