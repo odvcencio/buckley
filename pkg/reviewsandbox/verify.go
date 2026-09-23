@@ -254,10 +254,9 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		result.Argv = append([]string{plan.command}, plan.args...)
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
-		output, runErr := e.run(ctx, commandInvocation{
-			Name: e.wrapper[0],
-			Args: append(append(append([]string(nil), e.wrapper[1:]...), workDir), result.Argv...),
-		}, maxOutput)
+		args := append(append([]string(nil), e.wrapper[1:]...), root)
+		args = append(args, wrapperRemoteCommand(relativePath, plan.command, plan.args)...)
+		output, runErr := e.run(ctx, commandInvocation{Name: e.wrapper[0], Args: args}, maxOutput)
 		return classifyVerificationRun(result, request, language, timeout, "remote verification wrapper", output, runErr, ctx.Err(), trustedWrapperExitCode)
 	}
 
@@ -603,6 +602,28 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 	}
 	result.Status = StatusPass
 	return result
+}
+
+// wrapperRemoteCommand builds the argv a remote wrapper executes after
+// syncing the immutable snapshot ROOT (never a single package subdirectory):
+// `sh -c 'cd "$1" && shift && exec "$@"' sh <relativePath> <command>
+// <args...>`. A wrapper such as buildbox-run syncs only the files tracked
+// under whatever directory it is given (`git ls-files -co`); syncing a
+// package subdirectory directly, as an earlier version of this code did,
+// loses every ancestor file the build needs -- go.mod for Go, Cargo.toml
+// for Rust, pyproject.toml for Python, package.json for Node -- so the
+// remote command fails immediately with an error like "go.mod file not
+// found in current directory or any parent directory", which a trusted (0
+// or 1) exit code then let through as a false CONFIRMED_FAIL. Always
+// syncing root and cd-ing into relativePath remotely instead keeps every
+// ancestor manifest present while still running the command from the
+// correct package directory, exactly as the local bwrap/Codex launchers do
+// via cmd.Dir. This works for every language plan.args here, including
+// ones with no explicit "." target token (Rust, Node), because it changes
+// the actual working directory rather than rewriting a path argument.
+func wrapperRemoteCommand(relativePath, command string, args []string) []string {
+	remote := append([]string{"sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", relativePath, command}, args...)
+	return remote
 }
 
 // trustedWrapperExitCode reports whether code is an exit status a real test

@@ -58,9 +58,59 @@ func TestExecutorVerifyWrapperRunsWrapperWithSnapshotDirThenArgv(t *testing.T) {
 		t.Fatalf("read recorded argv: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
-	want := []string{snapshotRoot, "go", "test", "-count=1", "."}
+	// The wrapper always receives the immutable snapshot ROOT (never a
+	// package subdirectory -- see wrapperRemoteCommand), plus a portable
+	// cd-then-exec shim that moves into the requested package before
+	// running the real command.
+	want := []string{snapshotRoot, "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", ".", "go", "test", "-count=1", "."}
 	if strings.Join(lines, "|") != strings.Join(want, "|") {
 		t.Fatalf("wrapper argv = %v, want %v", lines, want)
+	}
+}
+
+// TestExecutorVerifyWrapperSyncsSnapshotRootNotPackageSubdirectory is a
+// regression test for a real production bug: an earlier version of this
+// code passed the package subdirectory (not the snapshot root) as the
+// wrapper's <local-dir>. A wrapper that syncs only files tracked under
+// <local-dir> (as buildbox-run's `git ls-files -co` does) then never syncs
+// go.mod, Cargo.toml, pyproject.toml, or package.json -- all of which live
+// above the package directory -- so every remote command failed
+// immediately with an error like "go.mod file not found in current
+// directory or any parent directory", and a trusted exit code let that
+// false failure through as CONFIRMED_FAIL. This test uses a real shell
+// wrapper that mimics buildbox-run's sync-then-cd contract closely enough
+// to catch that regression: it copies only the directory it is given, then
+// runs the received command inside it.
+func TestExecutorVerifyWrapperSyncsSnapshotRootNotPackageSubdirectory(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	mustWriteFile(t, filepath.Join(snapshotRoot, "pkg", "foo", "foo.go"), "package foo\n")
+
+	// A minimal stand-in for buildbox-run: it "syncs" (copies) only the
+	// directory it receives as $1, then execs the remaining argv inside
+	// that copy. If Verify still handed it the package subdirectory
+	// instead of the snapshot root, the copy would never contain go.mod.
+	wrapper := writeFakeWrapper(t, `
+sync_dir=$(mktemp -d)
+cp -a "$1"/. "$sync_dir"/
+shift
+cd "$sync_dir"
+exec "$@"
+`)
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindCheck,
+		Language:     LanguageGo,
+		Path:         "pkg/foo",
+	})
+	if result.Status != StatusUnavailable && strings.Contains(result.Error+result.Stderr, "go.mod file not found") {
+		t.Fatalf("wrapper synced the package subdirectory instead of the snapshot root: %+v", result)
+	}
+	if result.Status != StatusPass {
+		t.Fatalf("status = %s, want PASS (error=%q stdout=%q stderr=%q)", result.Status, result.Error, result.Stdout, result.Stderr)
 	}
 }
 
@@ -241,6 +291,56 @@ func TestExecutorVerifyGoTestBatchWrapperExit255GradesAllUnavailable(t *testing.
 		if result.Status != StatusUnavailable {
 			t.Fatalf("%s status = %s, want UNAVAILABLE for a batch-wide wrapper failure", path, result.Status)
 		}
+	}
+}
+
+// TestExecutorVerifyGoTestBatchLargeEarlyPackageDoesNotTruncateLaterTerminalEvent
+// is a regression test for a real production bug: a batch's raw JSON
+// stream is one shared buffer for every package in the chunk, and a large
+// package's own verbose "output" events (one per "=== RUN"/"--- PASS"
+// line) can push a later package's terminal pass/fail/skip event past a
+// too-small buffer cap, silently grading that later package UNAVAILABLE
+// even though it passed. This synthesizes exactly that shape: over 1MiB of
+// interleaved "output" noise from an early package, followed by a later
+// package's terminal "pass" event, and asserts the later package is still
+// captured (proving batchDefaultMaxOutput is large enough for the case
+// that motivated raising it, not just for small canned fixtures).
+func TestExecutorVerifyGoTestBatchLargeEarlyPackageDoesNotTruncateLaterTerminalEvent(t *testing.T) {
+	module := "example.com/fake"
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module "+module+"\n\ngo 1.26\n")
+
+	var stream strings.Builder
+	noisyLine := strings.Repeat("x", 200)
+	// Over 1MiB of "output" events from a large early package, mimicking
+	// hundreds of verbose per-test lines from a big package like
+	// cmd/buckley -- exactly what a too-small buffer truncated in
+	// production.
+	for written := 0; written < 1_200_000; {
+		event := fmt.Sprintf(`{"Action":"output","Package":"%s/pkgbig","Output":"=== RUN TestNoise_%s\n"}`+"\n", module, noisyLine)
+		stream.WriteString(event)
+		written += len(event)
+	}
+	stream.WriteString(fmt.Sprintf(`{"Action":"pass","Package":"%s/pkgbig","Elapsed":1.0}`+"\n", module))
+	stream.WriteString(fmt.Sprintf(`{"Action":"pass","Package":"%s/pkgsmall","Elapsed":0.01}`+"\n", module))
+
+	fixture := filepath.Join(t.TempDir(), "events.jsonl")
+	mustWriteFile(t, fixture, stream.String())
+	wrapper := writeFakeWrapper(t, fmt.Sprintf("cat %s\nexit 0\n", fixture))
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	results, err := executor.VerifyGoTestBatch(context.Background(), snapshotRoot, []BatchTarget{
+		{Path: "pkgbig"}, {Path: "pkgsmall"},
+	}, 0, 0)
+	if err != nil {
+		t.Fatalf("VerifyGoTestBatch: %v", err)
+	}
+	if got := results["pkgbig"]; got.Status != StatusPass {
+		t.Fatalf("pkgbig status = %s, want PASS (error=%q)", got.Status, got.Error)
+	}
+	if got := results["pkgsmall"]; got.Status != StatusPass {
+		t.Fatalf("pkgsmall status = %s, want PASS -- a large early package's output must not truncate a later package's terminal event out of the batch buffer (error=%q)", got.Status, got.Error)
 	}
 }
 

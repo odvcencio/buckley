@@ -41,6 +41,24 @@ type BatchTarget struct {
 // scale with the batch rather than reuse the single-package defaultTimeout.
 const batchDefaultTimeout = 10 * time.Minute
 
+// batchDefaultMaxOutput is used only when the caller supplies zero.
+// `go test -json` emits one JSON "output" event per line of ordinary test
+// output (every "=== RUN"/"--- PASS", not just failures), and a batch
+// combines that for every package in the chunk into one buffer. A large
+// package's terminal pass/fail/skip event can be scheduled arbitrarily late
+// in the interleaved stream; if the buffer fills before that event arrives,
+// parseGoTestJSONStream never sees a terminal event for that package and
+// VerifyGoTestBatch correctly (but needlessly) grades it UNAVAILABLE even
+// though it actually passed. Observed in production: a chunk containing
+// this repository's largest package (cmd/buckley, hundreds of tests)
+// alongside five smaller ones filled a 1MiB buffer before cmd/buckley's
+// terminal event arrived, while its smaller batch-mates completed and
+// reported correctly. This raw internal buffer is independent of what
+// reaches the review model: BuildVerificationToolResult still abridges
+// large output down to a short tail before encoding it for the model, so
+// raising this cap only affects harness-side memory, not context budget.
+const batchDefaultMaxOutput = 32 * 1024 * 1024
+
 // VerifyGoTestBatch runs `go test -json` once against every target in the
 // same wrapper invocation, in place of one `go test` process per package.
 // It requires a configured wrapper (see SetWrapper): batching exists to
@@ -80,7 +98,7 @@ func (e *Executor) VerifyGoTestBatch(parent context.Context, snapshotRoot string
 		timeout = batchDefaultTimeout
 	}
 	if maxOutput <= 0 {
-		maxOutput = defaultMaxOutput * 4
+		maxOutput = batchDefaultMaxOutput
 	}
 
 	byImportPath := make(map[string]string, len(targets))

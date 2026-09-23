@@ -258,6 +258,61 @@ Environment overrides:
 - `BUCKLEY_VERIFY_TIMEOUT` sets `timeout`. Use a positive Go duration (for
   example `10m`). Buckley ignores zero, negative, or unparseable values.
 
+#### Local-vs-remote evidence parity
+
+The remote wrapper path can report fewer PASS results than the local
+sandbox path for the same review. An investigation against a real pull
+request found two real bugs in this harness (both fixed) and one
+unavoidable environment difference (documented, not a bug):
+
+1. **Wrong sync root for a single package (fixed).** An earlier version
+   passed the target package's subdirectory, not the snapshot root, as
+   the wrapper's `<snapshot-dir>`. A wrapper that syncs only files
+   tracked under `<snapshot-dir>` (as `buildbox-run`'s `git ls-files -co`
+   does) then never syncs go.mod, Cargo.toml, pyproject.toml, or
+   package.json, all of which live above the package directory, so the
+   remote command failed immediately with an error like "go.mod file not
+   found in current directory or any parent directory" -- and, because
+   `go` also returns exit code 1 for that failure, the harness's own
+   trusted-exit-code check let it through as a false CONFIRMED_FAIL
+   instead of grading it INCONCLUSIVE. The harness now always syncs the
+   snapshot root and changes into the target package remotely instead.
+2. **A large package's output could truncate a later package's result
+   out of a batch (fixed).** `go test -json` emits one JSON event per
+   line of ordinary test output, not only failures, and a batch shares
+   one buffer across every package in its chunk. A big package's own
+   terminal pass/fail event can be scheduled late in the interleaved
+   stream; if the buffer filled first, the harness correctly (but
+   needlessly) graded that package UNAVAILABLE even though it had
+   actually passed. The batch output buffer is now sized for this case
+   (32MiB) instead of the 1MiB that reproduced it.
+3. **Environment differences (not a bug; local and remote are not, and
+   are not meant to be, identical sandboxes).** The local native-Go
+   sandbox path runs with `GOTOOLCHAIN=local`, `GOPROXY=off`,
+   `GOSUMDB=off`, `CI=true`, and an isolated `HOME`/`GOCACHE` (see
+   `reviewsandbox.ToolEnvironment`); Codex is never invoked either way
+   for Go. The remote wrapper path instead inherits the remote host's
+   normal environment plus what the wrapper itself sets --
+   `buildbox-run` exports `GOWORK=off`, `GOFLAGS=-p=8`, and
+   `GOMAXPROCS=8`, prepends its own Go/TinyGo toolchain directories to
+   `PATH`, and runs the command under `nice -n 19 ionice -c 3` so it
+   never competes with interactive work on a shared host. In this
+   investigation, `codex CLI version` was not a relevant factor (the Go
+   wrapper path never invokes Codex), and the observed evidence gaps
+   traced fully to bugs 1 and 2 above, not to `nice`/`ionice` scheduling
+   or to a missing `.git` -- `buildbox-run`'s plain sync never includes
+   `.git` (see `--with-git` below), but no buckley package in this
+   investigation actually required one to build or test successfully.
+
+`buildbox-run --with-git` (see its `--help`) gives the remote copy a real
+`.git` for code that does need one -- `git describe`, `git rev-parse
+--show-toplevel`, a test fixture that expects to be inside a real
+repository -- at the cost of an extra shallow clone, bundle, transfer,
+and remote unpack. It is opt-in and not wired into this harness by
+default, since no package encountered here needed it; it exists for
+other callers (for example gosx, which hit exactly this class of failure
+in `cmd/gosx` and `perf/ouroboros`).
+
 ### oneshot
 
 ```yaml
