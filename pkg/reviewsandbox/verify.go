@@ -638,6 +638,15 @@ func wrapperRemoteCommand(relativePath, command string, args []string) []string 
 // negative signal code, and so on -- means the wrapper or its transport
 // failed before or instead of running a real test, and must never be
 // graded as a confirmed product failure.
+//
+// This is a contract with the configured wrapper, not something this
+// function can verify on its own: a wrapper must never let its own setup
+// or transport failures exit with one of the trusted codes. A wrapper
+// whose remote command is `cd <dir> && <real command>` and lets a failed
+// `cd` fall through bash's default exit-code propagation could exit 1 for
+// a missing directory -- indistinguishable here from a real test failure.
+// buildbox-run avoids this with `cd <dir> || exit 90` (a reserved,
+// otherwise-unused code) ahead of the wrapped command.
 func trustedWrapperExitCode(language Language, code int) bool {
 	if code == 0 {
 		return true

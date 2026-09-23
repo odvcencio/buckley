@@ -220,6 +220,16 @@ The wrapper owns three things:
 - Running `<argv...>` there.
 - Relaying the real command's exit code back to the harness.
 
+A well-behaved wrapper must reserve exit codes 0 (pass) and 1 (a Go,
+Python, or npm build/test failure) -- and 101 for Rust, see below -- for
+the wrapped command's own outcome. It must never let its own setup or
+transport failures exit with one of those codes; `buildbox-run` follows
+this rule with a dedicated reserved exit code (90) for its own
+pre-command setup failures, so bash's default `&&`-chain propagation can
+never make one of those look like a real test failure. The harness trusts
+this contract; it cannot distinguish a wrapper that violates it from a
+real result.
+
 The harness batches verification requests for the same language and kind
 across changed packages. It groups them into as few remote `go test -json`
 invocations as `parallelism` allows, instead of one invocation per package,
@@ -238,8 +248,9 @@ invocation that covers several packages. Zero keeps the existing per-call
 default locally. With `wrapper` set, zero instead scales up to 10 minutes,
 since one remote invocation can cover many packages.
 
-A wrapper or transport failure always grades the affected evidence
-UNAVAILABLE or INCONCLUSIVE, never CONFIRMED_FAIL. This rule covers:
+A wrapper or transport failure grades the affected evidence UNAVAILABLE or
+INCONCLUSIVE, never CONFIRMED_FAIL, provided the wrapper honors the exit
+code contract above. This rule covers:
 
 - An unreachable remote host (for example ssh down).
 - A failed file sync (for example an rsync error).

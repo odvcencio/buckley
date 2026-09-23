@@ -19,9 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turned millisecond test packages into fixed-timeout INCONCLUSIVE
   evidence. Local verification now also caps concurrency by default
   (min(4, max(1, NumCPU/4))), even without a configured wrapper. A wrapper
-  or transport failure always grades UNAVAILABLE/INCONCLUSIVE, never
-  CONFIRMED_FAIL. This covers a non-test exit code, a launch failure, and a
-  timeout. The trusted-exit-code check is language-aware: it accepts exit
+  or transport failure grades UNAVAILABLE/INCONCLUSIVE, never
+  CONFIRMED_FAIL, as long as the configured wrapper reserves the
+  trusted exit codes (0, 1, and 101 for Rust) for the wrapped command's own
+  outcome. `buildbox-run` follows this contract: it now uses a dedicated
+  reserved exit code (90) for its own remote setup failures, so a failed
+  `cd` into the synced directory can never be mistaken for a real test
+  failure. The trusted-exit-code check is language-aware: it accepts exit
   code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.
   See docs/CONFIGURATION.md.
 
