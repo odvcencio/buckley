@@ -140,6 +140,70 @@ func TestEnsureConfiguredModels_ConfigRoleAcrossMultipleProvidersHardFails(t *te
 	}
 }
 
+// TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves
+// covers the codex-mode regression: with codex and openrouter both
+// configured, a config role (planning/review) pinned to a real
+// OpenRouter-catalog model must resolve even though "codex" sorts before
+// "openrouter" and would be guessed as the default provider. Gating
+// availability on that guessed provider (instead of the catalog's actual,
+// already-provider-scoped entry) wrongly hard-failed a model that a
+// genuinely configured provider owns.
+func TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves(t *testing.T) {
+	mgr := &Manager{
+		config: &config.Config{
+			Models: config.ModelConfig{
+				Planning:  "openai/gpt-6-luna-pro", // owned by openrouter, not codex
+				Execution: "codex/gpt-6-astra",
+				Review:    "openai/gpt-6-luna-pro",
+			},
+		},
+		providers: map[string]Provider{
+			"codex":      &stubProvider{id: "codex"},
+			"openrouter": &stubProvider{id: "openrouter"},
+		},
+		// Sorted alphabetically, as NewManager builds providerOrder: codex
+		// comes before openrouter, so a resolver that "guesses" a default
+		// provider when no prefix/routing decisively picks one would guess
+		// codex here -- the exact shape of the regression.
+		providerOrder: []string{"codex", "openrouter"},
+		catalog: map[string]ModelInfo{
+			"openai/gpt-6-luna-pro":   {ID: "openai/gpt-6-luna-pro"},
+			"openai/gpt-5.6-luna-pro": {ID: "openai/gpt-5.6-luna-pro"},
+			"codex/gpt-6-astra":       {ID: "codex/gpt-6-astra"},
+		},
+		providerModels: map[string][]string{
+			"openrouter": {"openai/gpt-6-luna-pro", "openai/gpt-5.6-luna-pro"},
+			"codex":      {"codex/gpt-6-astra"},
+		},
+		modelProviders: map[string]string{
+			"openai/gpt-6-luna-pro":   "openrouter",
+			"openai/gpt-5.6-luna-pro": "openrouter",
+			"codex/gpt-6-astra":       "codex",
+		},
+	}
+
+	if err := mgr.ensureConfiguredModels(); err != nil {
+		t.Fatalf("ensureConfiguredModels() = %v, want the openrouter-owned planning/review model to resolve", err)
+	}
+	if mgr.config.Models.Planning != "openai/gpt-6-luna-pro" {
+		t.Fatalf("planning model = %q, want it left untouched", mgr.config.Models.Planning)
+	}
+	if mgr.config.Models.Review != "openai/gpt-6-luna-pro" {
+		t.Fatalf("review model = %q, want it left untouched", mgr.config.Models.Review)
+	}
+
+	// Startup acceptance alone is not the fix: dispatch must also select the
+	// model's actual owning provider (openrouter), not fall back to codex
+	// just because it sorts first in providerOrder.
+	route, err := mgr.ResolveModelRoute("openai/gpt-6-luna-pro")
+	if err != nil {
+		t.Fatalf("ResolveModelRoute() = %v, want the openrouter-owned model to resolve", err)
+	}
+	if route.ProviderID != "openrouter" {
+		t.Fatalf("ResolveModelRoute().ProviderID = %q, want %q (the model's actual catalog owner, not the alphabetically-first provider)", route.ProviderID, "openrouter")
+	}
+}
+
 // TestEnsureConfiguredModels_BuiltInDefaultStillFallsBackLoudly is the
 // control case: a role left at its compiled-in default (never explicitly
 // configured) may still fall back automatically when unavailable, as long
@@ -275,6 +339,32 @@ func TestClosestModelMatches(t *testing.T) {
 
 	if got := mgr.closestModelMatches("", 3); got != nil {
 		t.Fatalf("matches = %v, want nil for an empty request", got)
+	}
+}
+
+// TestClosestModelMatches_ExcludesTheExactRequestedName covers the
+// suggestion half of the codex-mode regression: unresolvedModelError must
+// never suggest the exact name that just failed to resolve, even when that
+// name happens to be present in the catalog (e.g. under a provider the
+// availability check did not credit -- see
+// TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves).
+// A "did you mean X" list that repeats X is not a suggestion.
+func TestClosestModelMatches_ExcludesTheExactRequestedName(t *testing.T) {
+	mgr := &Manager{
+		catalog: map[string]ModelInfo{
+			"openai/gpt-6-luna-pro":   {ID: "openai/gpt-6-luna-pro"},
+			"openai/gpt-5.6-luna-pro": {ID: "openai/gpt-5.6-luna-pro"},
+		},
+	}
+
+	matches := mgr.closestModelMatches("openai/gpt-6-luna-pro", 5)
+	for _, m := range matches {
+		if m == "openai/gpt-6-luna-pro" {
+			t.Fatalf("matches = %v, want the exact requested name excluded", matches)
+		}
+	}
+	if len(matches) == 0 || matches[0] != "openai/gpt-5.6-luna-pro" {
+		t.Fatalf("matches = %v, want openai/gpt-5.6-luna-pro suggested", matches)
 	}
 }
 

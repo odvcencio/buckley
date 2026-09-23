@@ -954,7 +954,7 @@ func (m *Manager) resolveModel(modelID string) (string, Provider) {
 		providerID, _ = m.providerIDFromRouting(selected)
 	}
 
-	return selected, m.providerFromIDOrFallback(providerID)
+	return selected, m.providerFromIDOrFallback(providerID, selected)
 }
 
 func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
@@ -970,6 +970,28 @@ func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// catalogOwnerForModel returns the provider ID the aggregated catalog
+// recorded as modelID's source (see Initialize/RefreshProviderCatalog), or
+// "" if modelID is not literally known to the catalog. Unlike
+// providerFromIDOrFallback's last-resort guess (the alphabetically-first
+// configured provider when nothing else decides), this is ground truth: it
+// names the provider that actually advertised this exact model ID.
+// providerFromIDOrFallback prefers it over that guess -- but only after an
+// explicit provider prefix, a configured routing rule, and
+// config.Models.DefaultProvider have all had a chance to apply, so a
+// deliberately configured default still wins a same-ID catalog collision
+// across providers (see
+// TestCanonicalMetadataLookupRejectsCrossProviderCatalogCollision). This is
+// the root cause of a codex-mode regression where a config-role model
+// genuinely owned by, e.g., openrouter both hard-failed startup validation
+// and, had it passed, would have dispatched through whichever other
+// configured provider happened to sort first.
+func (m *Manager) catalogOwnerForModel(modelID string) string {
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
+	return m.modelProviders[modelID]
 }
 
 func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, upstreamModelID string, ok bool) {
@@ -988,7 +1010,16 @@ func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, up
 	return providerID, upstreamModelID, true
 }
 
-func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
+// providerFromIDOrFallback resolves a provider in priority order: an
+// already-decided providerID (explicit prefix or routing rule), then
+// config.Models.DefaultProvider, then -- new -- the provider the
+// aggregated catalog actually recorded as modelID's owner (see
+// catalogOwnerForModel), and only then an arbitrary configured provider.
+// Ground truth beats a guess: without the catalog-owner tier, a model
+// belonging to a non-default provider fell through to whichever provider
+// happened to sort first in providerOrder, silently dispatching to a
+// provider that never advertised it.
+func (m *Manager) providerFromIDOrFallback(providerID, modelID string) Provider {
 	if providerID != "" {
 		if provider, ok := m.providers[providerID]; ok {
 			return provider
@@ -997,6 +1028,12 @@ func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
 
 	if providerID := m.config.Models.DefaultProvider; providerID != "" {
 		if provider, ok := m.providers[providerID]; ok {
+			return provider
+		}
+	}
+
+	if ownerID := m.catalogOwnerForModel(modelID); ownerID != "" {
+		if provider, ok := m.providers[ownerID]; ok {
 			return provider
 		}
 	}
@@ -1198,21 +1235,28 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 }
 
 // modelAvailable reports whether modelID resolves to a model any configured
-// provider's catalog actually advertises. A routing hook can resolve
-// modelID (an alias, e.g. a role-neutral name a caller pins before a
-// provider is known) to a different, real catalog model ID at dispatch
-// time; when that hook-resolved model is known, modelID is genuinely
-// dispatchable even though it never appears in the catalog literally, so it
-// is checked too before reporting modelID unavailable (H1: an alias with a
-// working route must not be confused with a model that cannot resolve at
-// all).
+// provider's catalog actually advertises. The aggregated catalog
+// (m.catalog) is built only from the catalogs of providers in m.providers
+// (see Initialize), so a literal hit there is, by construction, already
+// known to a configured provider; no further per-provider ownership check
+// is needed or safe to add. A codex-mode regression did add one: it gated
+// this literal-catalog check on providerForModel's guess of a default
+// provider (e.g. the alphabetically-first configured provider when no
+// prefix or routing rule decisively named one), which wrongly reported a
+// role model unavailable when it was genuinely owned by a *different*
+// configured provider (e.g. planning pinned to an OpenRouter model while
+// codex sorted first). modelKnownToCatalog below intentionally does not
+// take a providerID.
+//
+// A routing hook can also resolve modelID (an alias, e.g. a role-neutral
+// name a caller pins before a provider is known) to a different, real
+// catalog model ID at dispatch time; when that hook-resolved model is
+// known, modelID is genuinely dispatchable even though it never appears in
+// the catalog literally, so it is checked too before reporting modelID
+// unavailable (H1: an alias with a working route must not be confused with
+// a model that cannot resolve at all).
 func (m *Manager) modelAvailable(modelID string) bool {
-	provider := m.providerForModel(modelID)
-	providerID := ""
-	if provider != nil {
-		providerID = provider.ID()
-	}
-	if m.modelKnownToProvider(modelID, providerID) {
+	if m.modelKnownToCatalog(modelID) {
 		return true
 	}
 
@@ -1220,21 +1264,17 @@ func (m *Manager) modelAvailable(modelID string) bool {
 	if selected == "" || selected == modelID || selectedProvider == nil {
 		return false
 	}
-	return m.modelKnownToProvider(selected, selectedProvider.ID())
+	return m.modelKnownToCatalog(selected)
 }
 
-// modelKnownToProvider reports whether modelID (or one of its normalized
-// candidates, see modelInfoCandidates) appears in the aggregated catalog
-// owned by no provider or by providerID, or is directly advertised by
-// providerID's own model list.
-func (m *Manager) modelKnownToProvider(modelID, providerID string) bool {
+// modelKnownToCatalog reports whether modelID (or one of its normalized
+// candidates, see modelInfoCandidates) appears in the aggregated catalog.
+func (m *Manager) modelKnownToCatalog(modelID string) bool {
 	for _, candidate := range m.modelInfoCandidates(modelID) {
 		m.catalogMu.RLock()
 		_, found := m.catalog[candidate]
-		owner := m.modelProviders[candidate]
-		providerAdvertisesCandidate := providerID != "" && containsString(m.providerModels[providerID], candidate)
 		m.catalogMu.RUnlock()
-		if (found && (owner == "" || owner == providerID)) || providerAdvertisesCandidate {
+		if found {
 			return true
 		}
 	}
