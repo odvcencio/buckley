@@ -38,6 +38,7 @@ var configValidators = []func(*Config) error{
 	validateAgentCostLimits,
 	validateBuckbotPrivacyFallback,
 	validateOneshotDataPolicy,
+	validateDecisions,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -367,6 +368,36 @@ func validateOneshotDataPolicy(c *Config) error {
 	default:
 		return fmt.Errorf("oneshot.data_policy has unsupported value %q (valid: none, zdr, deny)", c.Oneshot.DataPolicy)
 	}
+}
+
+// validateDecisions only enforces bounds relevant when a gate could
+// actually fire: an operator may leave decisions.model/endpoint blank
+// while everything stays disabled, but turning on a gate with an
+// incomplete decisions section, a negative timeout, out-of-range
+// pricing, or an out-of-range threshold is rejected up front instead of
+// failing on the first gated call.
+func validateDecisions(c *Config) error {
+	d := c.Decisions
+	gated := d.Gates.ReviewDepth.Enabled || d.Gates.ReasoningChoice.Enabled
+	if !d.Enabled && !gated {
+		return nil
+	}
+	if strings.TrimSpace(d.Model) == "" {
+		return fmt.Errorf("decisions.model is required when decisions or a decisions gate is enabled")
+	}
+	if d.Timeout < 0 {
+		return fmt.Errorf("decisions.timeout must be >= 0")
+	}
+	if d.Pricing.InputPerMillion < 0 || d.Pricing.OutputPerMillion < 0 {
+		return fmt.Errorf("decisions.pricing values must be >= 0")
+	}
+	if d.Gates.ReviewDepth.Enabled {
+		p := d.Gates.ReviewDepth.TrivialProbability
+		if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+			return fmt.Errorf("decisions.gates.review_depth.trivial_probability must be in [0, 1]")
+		}
+	}
+	return nil
 }
 
 // ValidationWarnings returns non-fatal warnings about the configuration.

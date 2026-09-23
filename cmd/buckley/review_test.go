@@ -262,9 +262,10 @@ func TestResolveReviewCriticRuntimeSeparatesExplicitReasoningFromEnvPrimary(t *t
 			cfg := config.DefaultConfig()
 			cfg.Buckbot.CriticModel = tt.critic
 			primaryModel := resolveReviewModel(cfg)
-			primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+			primaryReasoning := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
 
 			criticModel, criticReasoning, dedicated := resolveReviewCriticRuntime(
+				context.Background(),
 				cfg,
 				reviewReasoningChecker{supported: true},
 				primaryModel,
@@ -291,9 +292,9 @@ func TestResolveReviewCriticRuntimeSeparatesPinnedCriticFromAdaptivePrimary(t *t
 		cfg := config.DefaultConfig()
 		cfg.Buckbot.CriticModel = codexReviewModelStandard
 		primaryModel := resolveReviewModel(cfg)
-		primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+		primaryReasoning := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
 
-		criticModel, _, dedicated := resolveReviewCriticRuntime(cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
+		criticModel, _, dedicated := resolveReviewCriticRuntime(context.Background(), cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
 		if primaryModel != codexReviewModelStandard || criticModel != codexReviewModelStandard || !dedicated {
 			t.Fatalf("adaptive model selection = primary:%q critic:%q separate:%t, want pinned Terra critic",
 				primaryModel, criticModel, dedicated)
@@ -307,9 +308,9 @@ func TestResolveReviewCriticRuntimeSeparatesPinnedCriticFromAdaptivePrimary(t *t
 		cfg.Buckbot.CriticModel = "qwen/qwen3.7-plus-xhigh"
 		cfg.Buckbot.Reasoning = "auto"
 		primaryModel := resolveReviewModel(cfg)
-		primaryReasoning := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
+		primaryReasoning := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, primaryModel, reviewReasoningOverride())
 
-		criticModel, criticReasoning, dedicated := resolveReviewCriticRuntime(cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
+		criticModel, criticReasoning, dedicated := resolveReviewCriticRuntime(context.Background(), cfg, reviewReasoningChecker{supported: true}, primaryModel, primaryReasoning)
 		if criticModel != primaryModel || criticReasoning != "xhigh" || !dedicated {
 			t.Fatalf("adaptive reasoning selection = primary:%q/%q critic:%q/%q separate:%t, want dedicated xhigh critic",
 				primaryModel, primaryReasoning, criticModel, criticReasoning, dedicated)

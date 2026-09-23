@@ -19,21 +19,26 @@ const (
 	legacyOpenRouterCommitModel   = "qwen/qwen3.7-plus"
 	defaultBuckbotModel           = "deepseek/deepseek-v4-pro-0813"
 	defaultBuckbotCriticModel     = "qwen/qwen3.8-max"
-	defaultOpenRouterKimiCode     = "moonshotai/kimi-k2.7-code"
-	defaultOpenRouterQwenMax      = "qwen/qwen3.7-max"
-	legacyOpenRouterChatModel     = "qwen/qwen3.6-max-preview"
-	legacyOpenRouterModel         = "moonshotai/kimi-k2.5"
-	defaultOpenAIPlanningModel    = "openai/gpt-5.5"
-	defaultOpenAIExecutionModel   = "openai/gpt-5.4"
-	defaultOpenAIReviewModel      = "openai/gpt-5.5"
-	defaultOpenAIUtilityModel     = "openai/gpt-5.4-mini"
-	defaultOpenAIReasoning        = "xhigh"
-	defaultAnthropicModel         = "anthropic/claude-sonnet-4-5"
-	defaultGoogleModel            = "google/gemini-3-pro"
-	defaultCodexPlanningModel     = "codex/gpt-5.5"
-	defaultCodexExecutionModel    = "codex/gpt-5.4"
-	defaultCodexReviewModel       = "codex/gpt-5.5"
-	defaultCodexModel             = "codex/gpt-5.4-mini"
+	// defaultDecisionsModel pins the OpenRouter Decisions API model. Only
+	// exact matches, or a dated served variant such as
+	// "typesafe/jev-1.13-20260917", are accepted from a response.
+	defaultDecisionsModel       = "typesafe/jev-1.13"
+	defaultDecisionsEndpoint    = "https://openrouter.ai/api/alpha/decisions"
+	defaultOpenRouterKimiCode   = "moonshotai/kimi-k2.7-code"
+	defaultOpenRouterQwenMax    = "qwen/qwen3.7-max"
+	legacyOpenRouterChatModel   = "qwen/qwen3.6-max-preview"
+	legacyOpenRouterModel       = "moonshotai/kimi-k2.5"
+	defaultOpenAIPlanningModel  = "openai/gpt-5.5"
+	defaultOpenAIExecutionModel = "openai/gpt-5.4"
+	defaultOpenAIReviewModel    = "openai/gpt-5.5"
+	defaultOpenAIUtilityModel   = "openai/gpt-5.4-mini"
+	defaultOpenAIReasoning      = "xhigh"
+	defaultAnthropicModel       = "anthropic/claude-sonnet-4-5"
+	defaultGoogleModel          = "google/gemini-3-pro"
+	defaultCodexPlanningModel   = "codex/gpt-5.5"
+	defaultCodexExecutionModel  = "codex/gpt-5.4"
+	defaultCodexReviewModel     = "codex/gpt-5.5"
+	defaultCodexModel           = "codex/gpt-5.4-mini"
 
 	// MinTokenLength is the minimum recommended length for IPC authentication tokens
 	MinTokenLength = 32
@@ -166,6 +171,7 @@ type Config struct {
 	GitEvents      GitEventsConfig    `yaml:"git_events"`
 	Buckbot        BuckbotConfig      `yaml:"buckbot"`
 	Review         ReviewConfig       `yaml:"review"`
+	Decisions      DecisionsConfig    `yaml:"decisions"`
 	Input          InputConfig        `yaml:"input"`
 	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
 	Notify         NotifyConfig       `yaml:"notify"`
@@ -1177,4 +1183,76 @@ type ReviewVerificationRunnerConfig struct {
 	// set, since one remote invocation may cover many packages.
 	// BUCKLEY_VERIFY_TIMEOUT (positive only).
 	Timeout time.Duration `yaml:"timeout"`
+}
+
+// DecisionsConfig configures Buckley's general OpenRouter Decisions API
+// client (pkg/model/decisions) and the optional gates built on it. The
+// client itself answers typed noul/choice/score questions from
+// typesafe/jev-1.13 (served as typesafe/jev-1.13-20260917); it is not a
+// chat model and answers a Decisions call are used only to gate or route
+// otherwise-expensive work, never as proof of correctness. Every gate
+// below defaults off: setting decisions.enabled alone changes no
+// behavior until a gate is also enabled.
+type DecisionsConfig struct {
+	// Enabled is the top-level switch for Decisions-gated behavior. Off by
+	// default: nothing calls the Decisions API unless this is true and the
+	// specific gate below is also true.
+	Enabled bool `yaml:"enabled" env:"BUCKLEY_DECISIONS_ENABLED"`
+	// Model pins the exact Decisions model. A gate refuses to use a
+	// response reporting a different model family.
+	Model string `yaml:"model" env:"BUCKLEY_DECISIONS_MODEL"`
+	// Endpoint is the Decisions API URL. Empty uses
+	// decisions.DefaultEndpoint; overriding it is for tests and
+	// self-hosted proxies.
+	Endpoint string `yaml:"endpoint" env:"BUCKLEY_DECISIONS_ENDPOINT"`
+	// Timeout bounds one Decisions call. A gate falls back to its
+	// non-gated default behavior when a call does not finish in time.
+	Timeout time.Duration `yaml:"timeout" env:"BUCKLEY_DECISIONS_TIMEOUT"`
+	// Pricing is the operator-asserted per-million-token USD cost used
+	// only when a Decisions response omits its own usage.cost, so a
+	// budget check never treats a Decisions call as having unknown
+	// pricing (see pkg/model/cost_bounded.go's PricingKnown discipline).
+	Pricing DecisionsPricingConfig `yaml:"pricing"`
+	// LogPath is the JSONL file every gate decision is appended to, for
+	// calibration review. Empty uses ~/.buckley/decisions.jsonl.
+	LogPath string               `yaml:"log_path" env:"BUCKLEY_DECISIONS_LOG_PATH"`
+	Gates   DecisionsGatesConfig `yaml:"gates"`
+}
+
+// DecisionsPricingConfig is operator-asserted per-million-token USD
+// pricing for the Decisions model. See DecisionsConfig.Pricing.
+type DecisionsPricingConfig struct {
+	InputPerMillion  float64 `yaml:"input_per_million" env:"BUCKLEY_DECISIONS_PRICING_INPUT_PER_MILLION"`
+	OutputPerMillion float64 `yaml:"output_per_million" env:"BUCKLEY_DECISIONS_PRICING_OUTPUT_PER_MILLION"`
+}
+
+// DecisionsGatesConfig lists the individual Decisions-gated behaviors.
+// Each is independently off by default.
+type DecisionsGatesConfig struct {
+	// ReviewDepth asks a score question (trivial/light/standard/deep) for
+	// the review depth a change needs, before buckbot/review-pr runs the
+	// expensive reviewer model. On a "trivial" answer at or above
+	// TrivialProbability, the reviewer runs with lower reasoning effort.
+	// The reviewer remains the only judge of pass/fail: this gate never
+	// skips a review verdict, only its reasoning effort.
+	ReviewDepth DecisionsReviewDepthGateConfig `yaml:"review_depth"`
+	// ReasoningChoice asks a choice question (low/medium/high) to pick a
+	// role's reasoning effort whenever that role is configured with
+	// reasoning: auto, instead of Buckley's fixed "medium" default.
+	ReasoningChoice DecisionsReasoningChoiceGateConfig `yaml:"reasoning_choice"`
+}
+
+// DecisionsReviewDepthGateConfig configures the review-depth gate. See
+// DecisionsGatesConfig.ReviewDepth.
+type DecisionsReviewDepthGateConfig struct {
+	Enabled bool `yaml:"enabled" env:"BUCKLEY_DECISIONS_GATE_REVIEW_DEPTH_ENABLED"`
+	// TrivialProbability is the minimum trivial-label probability required
+	// to lower reasoning effort. Zero uses 0.85.
+	TrivialProbability float64 `yaml:"trivial_probability" env:"BUCKLEY_DECISIONS_GATE_REVIEW_DEPTH_TRIVIAL_PROBABILITY"`
+}
+
+// DecisionsReasoningChoiceGateConfig configures the reasoning-choice gate.
+// See DecisionsGatesConfig.ReasoningChoice.
+type DecisionsReasoningChoiceGateConfig struct {
+	Enabled bool `yaml:"enabled" env:"BUCKLEY_DECISIONS_GATE_REASONING_CHOICE_ENABLED"`
 }

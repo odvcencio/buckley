@@ -1,0 +1,9 @@
+{
+  "description": "Buckley/Jev/Arbiter: one bounded completion nudge for Astra",
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "buckley completion-check --hook", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "buckley completion-check --hook", "timeout": 15, "statusMessage": "Checking for unfinished authorized work"}]}],
+    "Interrupt": [{"hooks": [{"type": "command", "command": "buckley completion-check --hook", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "buckley completion-check --hook", "timeout": 3}]}]
+  }
+}

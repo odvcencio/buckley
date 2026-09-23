@@ -153,6 +153,12 @@ func applyTaggedEnvValue(field reflect.StructField, v reflect.Value) {
 				v.SetInt(n)
 			}
 		}
+	case v.Kind() == reflect.Float64:
+		if raw := strings.TrimSpace(os.Getenv(tag)); raw != "" {
+			if n, err := strconv.ParseFloat(raw, 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
+				v.SetFloat(n)
+			}
+		}
 	}
 }
 
