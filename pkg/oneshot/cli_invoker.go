@@ -163,9 +163,11 @@ func (inv *CLIInvoker) Invoke(ctx context.Context, systemPrompt, userPrompt stri
 	builder.WithContent(strings.TrimSpace(string(output.Stdout)))
 
 	tokens := transparency.TokenUsage{
-		Input:  estimateTokens(systemPrompt) + estimateTokens(userPrompt),
-		Output: estimateTokens(string(output.Stdout)),
+		Input:     estimateTokens(systemPrompt) + estimateTokens(userPrompt),
+		Output:    estimateTokens(string(output.Stdout)),
+		Estimated: true,
 	}
+	builder.WithCostUnknown(true)
 	trace := builder.Complete(tokens, 0)
 
 	return &Result{ToolCall: &toolCall}, trace, nil
