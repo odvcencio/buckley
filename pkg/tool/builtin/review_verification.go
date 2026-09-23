@@ -334,10 +334,34 @@ func verificationEvidenceClass(verification reviewsandbox.Result) string {
 		if verification.Stdout == "" && verification.Stderr == "" && verification.Error == "" {
 			return "INCONCLUSIVE"
 		}
+		// A GOTOOLCHAIN=local module-version mismatch ("go.mod requires go
+		// >= X ... GOTOOLCHAIN=local") means the sandbox's pinned Go
+		// toolchain cannot satisfy a module's declared `go` directive. That
+		// is an environment fault of this verification run, not evidence
+		// the change under review is broken; grading it CONFIRMED_FAIL
+		// produced a false PASS-vs-FAIL parity mismatch against a harness
+		// that separately ran a satisfying toolchain.
+		if isGoToolchainMismatchFailure(verification) {
+			return "INCONCLUSIVE"
+		}
 		return "CONFIRMED_FAIL"
 	default:
 		return "INCONCLUSIVE"
 	}
+}
+
+// isGoToolchainMismatchFailure reports whether a failed Go verification
+// failed only because GOTOOLCHAIN=local pinned a sandbox Go toolchain older
+// than the module's declared `go` directive, matching Go's own diagnostic
+// text: "go.mod requires go >= X (running go Y; GOTOOLCHAIN=local)".
+func isGoToolchainMismatchFailure(verification reviewsandbox.Result) bool {
+	if verification.Language != reviewsandbox.LanguageGo {
+		return false
+	}
+	combined := verification.Stdout + verification.Stderr + verification.Error
+	return strings.Contains(combined, "GOTOOLCHAIN=local") &&
+		strings.Contains(combined, "requires go") &&
+		strings.Contains(combined, "running go")
 }
 
 func unavailableVerificationResult(kind, language, reason string) *Result {
