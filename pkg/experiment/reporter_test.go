@@ -1,6 +1,7 @@
 package experiment
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,8 +60,8 @@ func TestMarkdownTable(t *testing.T) {
 			wantEmpty: false,
 			wantContain: []string{
 				"# Experiment: test-exp",
-				"| Model | Success | Duration | Tokens | Files |",
-				"| gpt-4 | no | - | - | - |",
+				"| Model | Success | Duration | Tokens | Files | Error |",
+				"| gpt-4 | no | - | - | - | - |",
 			},
 		},
 		{
@@ -85,7 +86,7 @@ func TestMarkdownTable(t *testing.T) {
 			},
 			wantEmpty: false,
 			wantContain: []string{
-				"| gpt-4 | yes | 5s | 300 | 2 |",
+				"| gpt-4 | yes | 5s | 300 | 2 | - |",
 			},
 		},
 		{
@@ -105,7 +106,49 @@ func TestMarkdownTable(t *testing.T) {
 			},
 			wantEmpty: false,
 			wantContain: []string{
-				"| claude-3 | no | 2s | - | 0 |",
+				"| claude-3 | no | 2s | - | 0 | - |",
+			},
+		},
+		{
+			name: "experiment with failed result surfaces error text",
+			exp: &Experiment{
+				Name: "test-exp",
+				Variants: []Variant{
+					{ID: "v1", Name: "variant-1", ModelID: "claude-3"},
+				},
+			},
+			results: []*parallel.AgentResult{
+				{
+					TaskID:   "v1",
+					Success:  false,
+					Duration: 2 * time.Second,
+					Error:    fmt.Errorf("model not found: openai_compatible/glm-5.3-flash"),
+				},
+			},
+			wantEmpty: false,
+			wantContain: []string{
+				"| claude-3 | no | 2s | - | 0 | model not found: openai_compatible/glm-5.3-flash |",
+			},
+		},
+		{
+			name: "error text with pipe characters is escaped so the table stays parseable",
+			exp: &Experiment{
+				Name: "test-exp",
+				Variants: []Variant{
+					{ID: "v1", Name: "variant-1", ModelID: "claude-3"},
+				},
+			},
+			results: []*parallel.AgentResult{
+				{
+					TaskID:   "v1",
+					Success:  false,
+					Duration: 2 * time.Second,
+					Error:    fmt.Errorf("a | b"),
+				},
+			},
+			wantEmpty: false,
+			wantContain: []string{
+				"| claude-3 | no | 2s | - | 0 | a \\| b |",
 			},
 		},
 		{
@@ -118,7 +161,7 @@ func TestMarkdownTable(t *testing.T) {
 			},
 			results: []*parallel.AgentResult{nil},
 			wantContain: []string{
-				"| gpt-4 | no | - | - | - |",
+				"| gpt-4 | no | - | - | - | - |",
 			},
 		},
 		{

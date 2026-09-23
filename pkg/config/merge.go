@@ -405,6 +405,7 @@ func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, p
 	streamFirstContentMaxReasoningChunksSet := boolFieldSet(ctx.raw, sub(path, "stream_first_content_max_reasoning_chunks")...)
 	fallbacksSet := boolFieldSet(ctx.raw, sub(path, "fallbacks")...)
 	routerSet := boolFieldSet(ctx.raw, sub(path, "router")...)
+	pricingSet := boolFieldSet(ctx.raw, sub(path, "pricing")...)
 	enabledSet := boolFieldSet(ctx.raw, sub(path, "enabled")...)
 
 	if baseURLSet {
@@ -449,11 +450,25 @@ func mergeOpenAICompatibleProvider(ctx mergeCtx, base, override reflect.Value, p
 	if routerSet {
 		b.Router = o.Router
 	}
+	if pricingSet {
+		b.Pricing = clonePricingMap(o.Pricing)
+	}
 	if enabledSet {
 		b.Enabled = o.Enabled
-	} else if apiKeySet || baseURLSet || modelsSet || supportedParametersSet || contextLengthsSet || fallbacksSet || routerSet {
+	} else if apiKeySet || baseURLSet || modelsSet || supportedParametersSet || contextLengthsSet || fallbacksSet || routerSet || pricingSet {
 		b.Enabled = true
 	}
+}
+
+func clonePricingMap(source map[string]ModelPricingOverride) map[string]ModelPricingOverride {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]ModelPricingOverride, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func cloneStringIntMap(source map[string]int) map[string]int {

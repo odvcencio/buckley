@@ -367,3 +367,36 @@ func TestPostedReviewBudgetsStayBelowFiveMinutes(t *testing.T) {
 			defaultReviewTimeout, completedBuckbotPostBudget, completedBuckbotPostAttemptLimit)
 	}
 }
+
+func TestResolvePostedReviewTimeoutWarnsWhenClamped(t *testing.T) {
+	effective, warning := resolvePostedReviewTimeout(20*time.Minute, true)
+	if effective != defaultReviewTimeout {
+		t.Fatalf("effective = %s, want %s", effective, defaultReviewTimeout)
+	}
+	if warning == "" {
+		t.Fatal("warning = \"\", want a message explaining the requested timeout was reduced")
+	}
+	if !strings.Contains(warning, "20m0s") || !strings.Contains(warning, defaultReviewTimeout.String()) {
+		t.Fatalf("warning = %q, want it to mention both the requested and effective timeouts", warning)
+	}
+}
+
+func TestResolvePostedReviewTimeoutNoWarningWhenNotClamped(t *testing.T) {
+	effective, warning := resolvePostedReviewTimeout(2*time.Minute, true)
+	if effective != 2*time.Minute {
+		t.Fatalf("effective = %s, want 2m0s", effective)
+	}
+	if warning != "" {
+		t.Fatalf("warning = %q, want none", warning)
+	}
+}
+
+func TestResolvePostedReviewTimeoutNoClampWithoutPost(t *testing.T) {
+	effective, warning := resolvePostedReviewTimeout(20*time.Minute, false)
+	if effective != 20*time.Minute {
+		t.Fatalf("effective = %s, want 20m0s", effective)
+	}
+	if warning != "" {
+		t.Fatalf("warning = %q, want none", warning)
+	}
+}
