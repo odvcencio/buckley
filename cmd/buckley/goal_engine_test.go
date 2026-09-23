@@ -937,15 +937,20 @@ func TestGoalTurnEngine_UnknownRouteMetadataKeepsGoalToolsEligible(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if err := mgr.Initialize(); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	// Register the alias's routing hook before Initialize(): "alias/future"
+	// is deliberately absent from the static catalog (that is what makes its
+	// route metadata "unknown" below), but it resolves to a real catalog
+	// model at dispatch time, so it must not trip H1's hard-fail-on-explicit-
+	// unresolved-model guard.
 	mgr.RoutingHooks().Register(func(decision *model.RoutingDecision) *model.RoutingDecision {
 		if decision != nil && decision.RequestedModel == "alias/future" {
 			decision.SelectedModel = "openai_compatible/future-model"
 		}
 		return decision
 	})
+	if err := mgr.Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
 
 	dir := t.TempDir()
 	license := readBuckleyLicenseForTest(t)

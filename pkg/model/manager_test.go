@@ -394,7 +394,13 @@ func TestRefreshProviderCatalogDoesNotDeleteCollisionOwnedByAnotherProvider(t *t
 	}
 }
 
-func TestInitializeReplacesMissingConfiguredModel(t *testing.T) {
+// TestInitializeHardFailsOnMissingExplicitlyConfiguredModel covers H1: an
+// explicitly configured role (Planning here, set to something other than
+// its compiled-in default) that is absent from every configured provider's
+// catalog must fail Initialize() outright, naming the requested model and
+// its closest catalog match, instead of silently substituting an unrelated
+// model (the pre-H1 behavior this test used to assert).
+func TestInitializeHardFailsOnMissingExplicitlyConfiguredModel(t *testing.T) {
 	cfg := &config.Config{
 		Models: config.ModelConfig{
 			Planning:        "p1/missing",
@@ -426,12 +432,18 @@ func TestInitializeReplacesMissingConfiguredModel(t *testing.T) {
 		modelProviders: make(map[string]string),
 	}
 
-	if err := mgr.Initialize(); err != nil {
-		t.Fatalf("Initialize() error = %v", err)
+	err := mgr.Initialize()
+	if err == nil {
+		t.Fatal("Initialize() succeeded, want a hard failure for an unresolved explicit planning model")
 	}
-
-	if cfg.Models.Planning != "p1/model-b" {
-		t.Fatalf("expected planning model to fall back to p1/model-b, got %q", cfg.Models.Planning)
+	if !strings.Contains(err.Error(), "p1/missing") {
+		t.Fatalf("Initialize() error = %v, want it to name the requested model", err)
+	}
+	if !strings.Contains(err.Error(), "p1/existing") {
+		t.Fatalf("Initialize() error = %v, want it to suggest the closest catalog match", err)
+	}
+	if cfg.Models.Planning != "p1/missing" {
+		t.Fatalf("planning model = %q, want it left untouched (no silent substitution)", cfg.Models.Planning)
 	}
 }
 
