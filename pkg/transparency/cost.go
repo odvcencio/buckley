@@ -57,6 +57,28 @@ type TokenUsage struct {
 	// did not carry provider usage evidence. Counts remain as reported/absent;
 	// cost inference must not treat the response as a known free invocation.
 	UsageEvidenceMissing bool `json:"usage_evidence_missing,omitempty"`
+
+	// ProviderCostUSD is the provider's own authoritative cost for this
+	// invocation in USD (C7), already summing any BYOK upstream charge (see
+	// ProviderCostIsBYOK). Meaningful only when ProviderCostKnown is true;
+	// callers must fall back to catalog-pricing estimation otherwise. When
+	// known, this takes precedence over catalog pricing -- it is a real
+	// invoice line, not an estimate. Aggregation (AddTokenUsage) sums
+	// whatever segments reported a known cost, the same permissive
+	// convention as ReportedReasoning/ReportedCachedInput: a segment with no
+	// cost evidence contributes 0 rather than invalidating the whole total.
+	ProviderCostUSD float64 `json:"provider_cost_usd,omitempty"`
+
+	// ProviderCostKnown marks ProviderCostUSD as a real provider-reported
+	// value rather than an unset zero.
+	ProviderCostKnown bool `json:"provider_cost_known,omitempty"`
+
+	// ProviderCostIsBYOK marks ProviderCostUSD as including a bring-your-
+	// own-key upstream charge the caller pays directly to the upstream
+	// provider, not OpenRouter. Surfaced so cost output can attribute it
+	// correctly instead of implying OpenRouter itself charged the full
+	// amount.
+	ProviderCostIsBYOK bool `json:"provider_cost_is_byok,omitempty"`
 }
 
 // Total returns the total token count.
@@ -93,6 +115,11 @@ func AddTokenUsage(total, next TokenUsage) TokenUsage {
 	total.Estimated = total.Estimated || next.Estimated
 	total.UsageEvidencePresent = total.UsageEvidencePresent || next.UsageEvidencePresent
 	total.UsageEvidenceMissing = total.UsageEvidenceMissing || next.UsageEvidenceMissing
+	if next.ProviderCostKnown {
+		total.ProviderCostUSD += next.ProviderCostUSD
+		total.ProviderCostKnown = true
+	}
+	total.ProviderCostIsBYOK = total.ProviderCostIsBYOK || next.ProviderCostIsBYOK
 	if next.ReportedReasoning != nil {
 		if total.ReportedReasoning == nil {
 			total.ReportedReasoning = new(int)
@@ -134,7 +161,13 @@ func CostUnknownForUsage(tokens TokenUsage, pricing ModelPricing) bool {
 		if *tokens.ReportedCachedInput < 0 || *tokens.ReportedCachedInput > tokens.Input {
 			return true
 		}
-		if *tokens.ReportedCachedInput > 0 {
+		// Mirrors the ReportedReasoning rule above: only mark unknown when a
+		// distinct cached rate exists that Calculate cannot apply (it prices
+		// off the additive CachedInput field, not ReportedCachedInput). When
+		// no cached rate is configured for the model, Calculate already
+		// prices every input token at the uniform input rate, which is a
+		// safe (if imprecise, never negative) known cost.
+		if *tokens.ReportedCachedInput > 0 && pricing.CachedInputPerMillion > 0 {
 			return true
 		}
 	}

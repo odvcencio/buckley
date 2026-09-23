@@ -431,3 +431,69 @@ func TestRunVerificationToolSilentFailureIsInconclusive(t *testing.T) {
 		t.Fatalf("evidence = %v, want INCONCLUSIVE for a failure with no captured output", result.Data["evidence"])
 	}
 }
+
+// TestRunVerificationToolGoToolchainMismatchIsInconclusive covers a real
+// harness incident: GOTOOLCHAIN=local pins the sandbox's own Go toolchain,
+// and a generated module can legitimately declare a `go` directive newer
+// than that pinned version. The resulting failure ("go.mod requires go >=
+// 1.26.4 (running go 1.26.0; GOTOOLCHAIN=local)") is an environment fault,
+// not evidence the change is broken, and must not be graded CONFIRMED_FAIL
+// -- that produced a false PASS-vs-FAIL parity mismatch downstream.
+func TestRunVerificationToolGoToolchainMismatchIsInconclusive(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     ".",
+		Command:  "go",
+		ExitCode: 1,
+		Status:   reviewsandbox.StatusFail,
+		Stderr:   "go: go.mod requires go >= 1.26.4 (running go 1.26.0; GOTOOLCHAIN=local)\n",
+	}}
+	tool.verifier = fake
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     ".",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("evidence = %v, want INCONCLUSIVE for a GOTOOLCHAIN=local module-version mismatch", result.Data["evidence"])
+	}
+}
+
+// TestRunVerificationToolRealBuildFailureStaysConfirmed guards against the
+// toolchain-mismatch carve-out swallowing genuine failures: an ordinary
+// compile error with real output must still grade CONFIRMED_FAIL.
+func TestRunVerificationToolRealBuildFailureStaysConfirmed(t *testing.T) {
+	tool, err := NewRunVerificationTool(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeReviewVerifier{result: reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     "cmd/buckley",
+		Command:  "go",
+		ExitCode: 2,
+		Status:   reviewsandbox.StatusFail,
+		Stderr:   "cmd/buckley/main.go:10:2: undefined: someUndefinedFunc\n",
+	}}
+	tool.verifier = fake
+	result, err := tool.Execute(map[string]any{
+		"kind":     "test",
+		"language": "go",
+		"path":     "cmd/buckley",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Data["evidence"] != "CONFIRMED_FAIL" {
+		t.Fatalf("evidence = %v, want CONFIRMED_FAIL for a real compile failure", result.Data["evidence"])
+	}
+}

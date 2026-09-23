@@ -137,6 +137,21 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// UsageRequestOptions requests OpenRouter's inline usage/cost accounting
+// (the request-level "usage": {"include": true} field, distinct from the
+// OpenAI-standard StreamOptions.IncludeUsage). Set Include to receive
+// Usage.Cost/IsBYOK/CostDetails in the response (see C7): live-verified
+// wire shape (openai/gpt-6-luna-pro, a BYOK route) --
+//
+//	"usage": {
+//	  "prompt_tokens": 1396, "completion_tokens": 41, "total_tokens": 1437,
+//	  "cost": 0, "is_byok": true,
+//	  "cost_details": {"upstream_inference_cost": 0.0001601, ...}
+//	}
+type UsageRequestOptions struct {
+	Include bool `json:"include"`
+}
+
 // ChatRequest represents a chat completion request to an LLM provider.
 type ChatRequest struct {
 	Model                string            `json:"model"`
@@ -164,6 +179,10 @@ type ChatRequest struct {
 	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`       // OpenAI prompt caching key
 	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"` // OpenAI prompt cache retention
 	PromptCache          *PromptCache      `json:"-"`
+	// Usage requests OpenRouter's inline cost accounting (C7). The
+	// OpenRouter client sets this by default when nil; callers may still
+	// override it explicitly.
+	Usage *UsageRequestOptions `json:"usage,omitempty"`
 	// Route is the authoritative provider/model decision used when this
 	// request was built. It lets dispatch fail closed if routing hooks drift
 	// before provider invocation, and it never enters provider JSON.
@@ -536,6 +555,43 @@ type Usage struct {
 	// provider did not return usage. Estimated usage is useful for context and
 	// telemetry, but must not be treated as an authoritative provider invoice.
 	Estimated bool `json:"estimated,omitempty"`
+	// Cost is OpenRouter's own inline-reported charge for this generation in
+	// USD, present only when the request set Usage.Include=true (C7). On a
+	// BYOK (bring-your-own-key) call this is OpenRouter's fee alone -- often
+	// 0 -- not the full spend; add CostDetails.UpstreamInferenceCost for the
+	// total. Nil means the provider did not report cost inline.
+	Cost *float64 `json:"cost,omitempty"`
+	// IsBYOK reports OpenRouter routed this call through the caller's own
+	// upstream provider API key rather than OpenRouter's pooled credits.
+	IsBYOK bool `json:"is_byok,omitempty"`
+	// CostDetails breaks Cost down further. UpstreamInferenceCost is the
+	// amount the upstream provider actually charged on a BYOK call.
+	CostDetails *UsageCostDetails `json:"cost_details,omitempty"`
+}
+
+// UsageCostDetails is OpenRouter's inline cost breakdown (see Usage.Cost).
+type UsageCostDetails struct {
+	// UpstreamInferenceCost is the upstream provider's own charge for a BYOK
+	// call, in USD. It is the field a BYOK caller must add to Usage.Cost to
+	// get the true total spend (C7); Usage.Cost alone is OpenRouter's fee,
+	// typically 0 for BYOK.
+	UpstreamInferenceCost float64 `json:"upstream_inference_cost,omitempty"`
+}
+
+// TotalCostUSD returns u's best-known total cost and whether it is known.
+// For a BYOK call, the real spend is OpenRouter's own fee (Cost, often 0)
+// plus what the upstream provider charged (CostDetails.UpstreamInferenceCost);
+// summing only Cost silently drops that upstream charge (C7). A nil Cost
+// means the provider did not report inline cost at all.
+func (u Usage) TotalCostUSD() (float64, bool) {
+	if u.Cost == nil {
+		return 0, false
+	}
+	total := *u.Cost
+	if u.IsBYOK && u.CostDetails != nil {
+		total += u.CostDetails.UpstreamInferenceCost
+	}
+	return total, true
 }
 
 type PromptTokensDetails struct {

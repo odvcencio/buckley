@@ -19,6 +19,13 @@ func TestCostProvenance_Display(t *testing.T) {
 		{"mixed", transparency.Trace{Cost: 2, CostUnknown: true}, transparency.CostSummary{SessionCost: 5, SessionCostUnknown: true}, "Cost: unknown ($2.0000 known subtotal) · Session known subtotal: $5.0000 + unknown", false},
 		{"known-zero", transparency.Trace{}, transparency.CostSummary{}, "Cost: $0.0000 · Session: $0.0000", true},
 		{"known", transparency.Trace{Cost: 2}, transparency.CostSummary{SessionCost: 5}, "Cost: $2.0000 · Session: $5.0000", true},
+		{
+			"known-byok",
+			transparency.Trace{Cost: 0.0001601, Tokens: transparency.TokenUsage{ProviderCostKnown: true, ProviderCostIsBYOK: true}},
+			transparency.CostSummary{SessionCost: 0.0001601},
+			"Cost: $0.0002 (BYOK) · Session: $0.0002",
+			true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := formatTraceCostLine(&tc.trace, tc.summary); got != tc.want {

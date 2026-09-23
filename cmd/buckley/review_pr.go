@@ -180,6 +180,23 @@ func reviewPRFlagTakesValue(name string) bool {
 	}
 }
 
+// resolvePostedReviewTimeout applies the posted-review timeout ceiling and
+// reports whether the caller's requested timeout was silently reduced.
+// Posted reviews (opts.post) must stay inside defaultReviewTimeout so the
+// review plus its post-back attempts finish under external caller deadlines
+// (see TestPostedReviewBudgetsStayBelowFiveMinutes). A caller that asks for a
+// longer -timeout while posting gets a non-fatal warning explaining the
+// effective timeout instead of an unexplained deadline-exceeded failure.
+func resolvePostedReviewTimeout(requested time.Duration, post bool) (effective time.Duration, warning string) {
+	if !post || requested <= defaultReviewTimeout {
+		return requested, ""
+	}
+	return defaultReviewTimeout, fmt.Sprintf(
+		"Warning: --timeout %s exceeds the posted-review ceiling; using %s because --post is set (posted reviews must leave room for the post-back attempt budget)",
+		requested, defaultReviewTimeout,
+	)
+}
+
 func reviewPRUsageError() error {
 	return fmt.Errorf("usage: buckley review-pr <pr-number-or-url> [flags]\n\nExamples:\n  buckley review-pr 123\n  buckley review-pr 123 -model codex/auto\n  buckley review-pr 123 -model codex/gpt-5.6-terra-high\n  buckley review-pr https://github.com/owner/repo/pull/123")
 }
@@ -192,9 +209,9 @@ func runReviewPRCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	reviewTimeout := opts.timeout
-	if opts.post && reviewTimeout > defaultReviewTimeout {
-		reviewTimeout = defaultReviewTimeout
+	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post)
+	if timeoutWarning != "" {
+		fmt.Fprintln(os.Stderr, timeoutWarning)
 	}
 	ctx, cancel := newReviewCommandContext(time.Now(), reviewTimeout)
 	defer cancel()

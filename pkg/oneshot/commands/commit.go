@@ -151,7 +151,10 @@ Guidelines:
 - If breaking is true, include a useful breaking_reason instead of repeating the subject`
 
 func (CommitDefinition) SystemPrompt() string {
-	return prompts.CommitToolPrompt(commitSystemPrompt, time.Now())
+	return prompts.CommitToolPrompt(
+		commitSystemPrompt+"\n\n"+prompts.UntrustedDiffBlock()+"\n\n"+prompts.STE100ProseBlock(),
+		time.Now(),
+	)
 }
 
 func (CommitDefinition) BuildPrompt(ctx *oneshot.Context) string {

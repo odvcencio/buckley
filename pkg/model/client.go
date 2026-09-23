@@ -340,6 +340,9 @@ func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
 func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if req.Usage == nil {
+		req.Usage = &UsageRequestOptions{Include: true}
+	}
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return nil, err
 	}
@@ -412,13 +415,29 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				if message == "" {
 					message = "provider returned an error response"
 				}
-				return &APIError{
+				apiErr := &APIError{
 					StatusCode: resp.StatusCode,
 					Message:    message,
 					Type:       chatResp.Error.Type,
 					Code:       chatResp.Error.Code,
 					Retryable:  false,
 				}
+				if looksLikeTransientProviderError(chatResp.Error) {
+					// The provider committed an HTTP 200 status line and
+					// still reported a transient (usually rate-limit)
+					// failure in the body (C8). Treat it like a 429: the
+					// same exponential backoff and extended retry budget.
+					apiErr.StatusCode = http.StatusTooManyRequests
+					apiErr.Retryable = true
+				}
+				lastErr = apiErr
+				if c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
+					continue
+				}
+				if isRetryableError(lastErr) {
+					return retryExhaustedError(attempt, lastErr)
+				}
+				return apiErr
 			}
 			if len(chatResp.Choices) == 0 {
 				return NoResponseChoicesError(req, &chatResp)
@@ -469,6 +488,9 @@ func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	req.Stream = true
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if req.Usage == nil {
+		req.Usage = &UsageRequestOptions{Include: true}
+	}
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return err
 	}

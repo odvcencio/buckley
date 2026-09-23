@@ -383,6 +383,66 @@ func TestPrintStagedIndexOnErrorPrintsToStderr(t *testing.T) {
 	}
 }
 
+// TestPrepareCommitIndexStagesPathsWithoutPositionalArgs covers H9: `-paths`
+// alone (no positional `-- <files>` arguments) must stage the named files
+// itself, matching the positional-argument behavior, instead of failing
+// with "no staged changes" and forcing a separate `git add` first.
+func TestPrepareCommitIndexStagesPathsWithoutPositionalArgs(t *testing.T) {
+	repo := setupTwoAreaRepo(t)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	// Unstage everything, then modify a/file.go without staging it: exactly
+	// the repro shape (a modified, unstaged file named only via -paths).
+	runGit(t, repo, "reset")
+	if err := os.WriteFile(filepath.Join(repo, "a", "file.go"), []byte("package a\n\n// modified, unstaged\n"), 0o644); err != nil {
+		t.Fatalf("modify a/file.go: %v", err)
+	}
+	if staged := gitOutputInDir(t, repo, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("expected nothing staged before prepareCommitIndex, got: %q", staged)
+	}
+
+	opts := commitCommandOptions{paths: []string{"a/file.go"}}
+	if err := prepareCommitIndex(opts); err != nil {
+		t.Fatalf("prepareCommitIndex: %v", err)
+	}
+
+	staged := gitOutputInDir(t, repo, "diff", "--cached", "--name-only")
+	if !strings.Contains(staged, "a/file.go") {
+		t.Fatalf("expected a/file.go staged by -paths, got: %q", staged)
+	}
+}
+
+// TestPrepareCommitIndexPositionalArgsStillWin covers the pre-existing
+// behavior: when positional files were already given, -paths continues to
+// scope/validate rather than re-staging a different file set.
+func TestPrepareCommitIndexPositionalArgsStillWin(t *testing.T) {
+	repo := setupTwoAreaRepo(t)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	runGit(t, repo, "reset")
+	if err := os.WriteFile(filepath.Join(repo, "a", "file.go"), []byte("package a\n\n// modified, unstaged\n"), 0o644); err != nil {
+		t.Fatalf("modify a/file.go: %v", err)
+	}
+
+	opts := commitCommandOptions{paths: []string{"a"}, filesToStage: []string{"a/file.go"}}
+	if err := prepareCommitIndex(opts); err != nil {
+		t.Fatalf("prepareCommitIndex: %v", err)
+	}
+
+	staged := gitOutputInDir(t, repo, "diff", "--cached", "--name-only")
+	if !strings.Contains(staged, "a/file.go") {
+		t.Fatalf("expected a/file.go staged via positional args, got: %q", staged)
+	}
+}
+
 // TestStagedNoticeAfterScopedCommit checks the stderr notice about remaining files.
 func TestStagedNoticeAfterScopedCommit(t *testing.T) {
 	repo := setupTwoAreaRepo(t)

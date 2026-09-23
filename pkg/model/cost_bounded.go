@@ -108,7 +108,14 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		return 0, fmt.Errorf("cost-bounded pricing invalid for %s", modelID)
 	}
 	if pricing.Prompt == 0 || pricing.Completion == 0 {
-		if (providerID != "openrouter" && providerID != "ollama") || !info.PricingKnown {
+		// PricingKnown distinguishes an authoritatively free model (the
+		// provider's catalog explicitly confirmed $0, or an operator
+		// configured a pricing override for an endpoint that does not
+		// publish catalog pricing at all, e.g. providers.openai_compatible.
+		// pricing) from a zero-value ModelPricing whose price is simply
+		// unavailable. It is provider-agnostic: any provider whose pricing
+		// semantics are understood by the switch above may assert it.
+		if !info.PricingKnown {
 			return 0, fmt.Errorf("cost-bounded pricing unavailable for %s: zero price is not authoritative", modelID)
 		}
 	}

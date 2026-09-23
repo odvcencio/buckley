@@ -17,6 +17,12 @@ import (
 
 const defaultMaxRetries = 3
 
+// validationRepairArgumentsMaxLen bounds how much of a rejected tool call's
+// previous arguments the repair prompt echoes back to the model. Bullet
+// lists in commands like PR generation are usually well within this, but a
+// large diff could otherwise inflate every repair attempt's token cost.
+const validationRepairArgumentsMaxLen = 4000
+
 const (
 	evidenceRepairMaxIterations      = 8
 	evidenceRepairMaxToolCalls       = 8
@@ -248,7 +254,15 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 			}
-			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) + ". Fix and call " + tool.Name + " again."
+			// A validation failure that only restates the English error is a
+			// blind retry: the model has to guess what it actually sent.
+			// Echoing its own previous tool call arguments turns this into a
+			// targeted repair -- fix exactly this field in exactly this
+			// payload -- instead of a fresh, possibly-repeated guess.
+			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
+				".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
+				truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
+				"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
 			continue
 		}
 

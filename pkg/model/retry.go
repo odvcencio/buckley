@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,47 @@ func (c RetryConfig) canRetry(attempt int, err error) bool {
 
 func retryExhaustedError(attempt int, err error) error {
 	return fmt.Errorf("model request retries exhausted after %d attempts: %w", attempt+1, err)
+}
+
+// transientProviderErrorMarkers are substrings (matched case-insensitively
+// against an error's type, code, and message) that name a transient
+// upstream condition -- most commonly a rate limit -- rather than a
+// permanent request failure.
+var transientProviderErrorMarkers = []string{
+	"rate limit",
+	"rate-limited",
+	"rate_limit",
+	"ratelimit",
+	"retry shortly",
+	"try again",
+	"temporarily unavailable",
+	"temporarily rate",
+	"overloaded",
+	"too many requests",
+}
+
+// looksLikeTransientProviderError reports whether an error payload
+// delivered alongside an HTTP 200 status -- a non-streaming response body's
+// top-level "error" object, or an SSE chunk's in-band "error" field arriving
+// before any content -- names a transient upstream condition safe to retry
+// with the same backoff Buckley already applies to a genuine 429 (C8).
+// OpenRouter (and compatible gateways) can commit the 200 status line
+// before learning the upstream call failed, so the status code alone
+// cannot be trusted here; the message/type text is the only signal
+// available. A non-matching error (e.g. an invalid-request or
+// authentication failure delivered the same way) stays non-retryable so a
+// permanent failure is not needlessly retried.
+func looksLikeTransientProviderError(detail *ErrorDetail) bool {
+	if detail == nil {
+		return false
+	}
+	haystack := strings.ToLower(detail.Type + " " + detail.Code + " " + detail.Message)
+	for _, marker := range transientProviderErrorMarkers {
+		if strings.Contains(haystack, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c RetryConfig) retryDelay(attempt int, lastErr error) time.Duration {

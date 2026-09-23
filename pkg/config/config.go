@@ -344,6 +344,22 @@ type OpenAICompatibleConfig struct {
 	StreamFirstContentMaxReasoningChunks int                           `yaml:"stream_first_content_max_reasoning_chunks"`
 	Fallbacks                            map[string][]string           `yaml:"fallbacks"`
 	Router                               *OpenAICompatibleRouterConfig `yaml:"router"`
+	// Pricing declares operator-asserted per-million-token USD pricing for
+	// models on this endpoint, keyed by the same bare model name used in
+	// Models. It exists for endpoints (self-hosted, free-tier, design
+	// partner) that do not publish authoritative catalog pricing. Buckley
+	// treats a configured entry as authoritative, including an explicit
+	// $0 entry: without it, cost-bounded requests and --budget/repair logic
+	// refuse to admit a model whose catalog pricing is zero or missing,
+	// because zero pricing is normally indistinguishable from "unknown".
+	Pricing map[string]ModelPricingOverride `yaml:"pricing"`
+}
+
+// ModelPricingOverride is one operator-declared per-million-token USD price
+// pair. See OpenAICompatibleConfig.Pricing.
+type ModelPricingOverride struct {
+	InputPerMillion  float64 `yaml:"input_per_million"`
+	OutputPerMillion float64 `yaml:"output_per_million"`
 }
 
 // LiteLLMConfig is the deprecated name for OpenAICompatibleConfig.

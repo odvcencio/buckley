@@ -73,6 +73,23 @@ func formatTraceCostLine(trace *transparency.Trace, summary transparency.CostSum
 	return fmt.Sprintf("%s · %s", formatTraceCost(trace), formatSessionCost(summary))
 }
 
+// traceCostAmount formats trace's known cost figure with any provenance
+// tag (currently just BYOK, C7), without the "Cost: " prefix or the
+// unknown-cost framing formatTraceCost adds around it. Both the ordinary
+// success-path cost line and the error-path "still charged" line build on
+// this shared fragment so provenance shows up consistently everywhere a
+// known cost is printed.
+func traceCostAmount(trace *transparency.Trace) string {
+	amount := fmt.Sprintf("$%.4f", trace.Cost)
+	if trace.Tokens.ProviderCostKnown && trace.Tokens.ProviderCostIsBYOK {
+		// The caller is billed directly by the upstream provider for part
+		// of this figure, not only by OpenRouter -- worth naming, since it
+		// can otherwise read as a suspiciously small charge for a real call.
+		amount += " (BYOK)"
+	}
+	return amount
+}
+
 func formatTraceCost(trace *transparency.Trace) string {
 	if trace.CostUnknown {
 		if trace.Cost > 0 {
@@ -80,7 +97,7 @@ func formatTraceCost(trace *transparency.Trace) string {
 		}
 		return "Cost: unknown"
 	}
-	return fmt.Sprintf("Cost: $%.4f", trace.Cost)
+	return "Cost: " + traceCostAmount(trace)
 }
 
 func formatSessionCost(summary transparency.CostSummary) string {
@@ -105,7 +122,7 @@ func formatTraceErrorUsageLine(trace *transparency.Trace) string {
 		return fmt.Sprintf("%s · %s", tokensLabel, formatTraceCost(trace))
 	}
 	if trace.Tokens.Estimated {
-		return fmt.Sprintf("%s · Cost: $%.4f", tokensLabel, trace.Cost)
+		return fmt.Sprintf("%s · Cost: %s", tokensLabel, traceCostAmount(trace))
 	}
-	return fmt.Sprintf("%s · Cost: $%.4f (still charged)", tokensLabel, trace.Cost)
+	return fmt.Sprintf("%s · Cost: %s (still charged)", tokensLabel, traceCostAmount(trace))
 }

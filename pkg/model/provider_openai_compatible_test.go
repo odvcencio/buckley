@@ -1475,3 +1475,143 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
+
+// TestOpenAICompatibleProvider_ReasoningDroppedWhenModelDoesNotSupportEffort
+// reproduces a real Particle production failure: deepseek-v4.1-flash's
+// supported_parameters list "tools" and "reasoning_content" but not
+// "reasoning_effort", yet compatiblePayload used to forward the raw
+// OpenRouter-style nested `reasoning` object (e.g. reasoning.max_tokens) on
+// that path. Particle's strict OpenAI-compatible gateway rejects it with
+// HTTP 400 "Unsupported nested reasoning field 'max_tokens'" (buckbot pr on
+// openai_compatible/deepseek-v4.1-flash, 2026-09-23).
+func TestOpenAICompatibleProvider_ReasoningDroppedWhenModelDoesNotSupportEffort(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"model":"deepseek-v4.1-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		SupportedParameters: map[string][]string{
+			"deepseek-v4.1-flash": {"tools", "reasoning_content"},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model:     "openai_compatible/deepseek-v4.1-flash",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Reasoning: &ReasoningConfig{MaxTokens: 8192},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if _, ok := captured["reasoning"]; ok {
+		t.Fatalf("request should drop nested reasoning when reasoning_effort is unsupported: %#v", captured["reasoning"])
+	}
+	if _, ok := captured["reasoning_effort"]; ok {
+		t.Fatalf("request should not synthesize reasoning_effort when unsupported: %#v", captured["reasoning_effort"])
+	}
+}
+
+// TestOpenAICompatibleProvider_PricingOverrideMarksZeroPriceAuthoritative
+// covers a design-partner free tier (Particle): the live catalog reports no
+// pricing at all for a model, so ModelInfo.Pricing is the zero value and
+// PricingKnown stays false. Cost-bounded requests and --budget repair logic
+// then refuse to admit the model because a zero-value price is normally
+// indistinguishable from "the provider never told us." An explicit
+// providers.openai_compatible.pricing override must mark that zero price as
+// authoritative (PricingKnown=true) instead.
+func TestOpenAICompatibleProvider_PricingOverrideMarksZeroPriceAuthoritative(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"deepseek-v4.1-flash","supported_parameters":["tools","reasoning_content"]}]}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Pricing: map[string]config.ModelPricingOverride{
+			"deepseek-v4.1-flash": {InputPerMillion: 0, OutputPerMillion: 0},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	info, err := provider.GetModelInfo("openai_compatible/deepseek-v4.1-flash")
+	if err != nil {
+		t.Fatalf("GetModelInfo() error = %v", err)
+	}
+	if !info.PricingKnown {
+		t.Fatal("PricingKnown = false, want true for a configured pricing override")
+	}
+	if info.Pricing.Prompt != 0 || info.Pricing.Completion != 0 {
+		t.Fatalf("Pricing = %+v, want zero", info.Pricing)
+	}
+}
+
+// TestOpenAICompatibleProvider_PricingOverrideAppliesToStaticCatalog covers
+// the fallback path when the live /models endpoint is unreachable and
+// Buckley falls back to the statically configured model list.
+func TestOpenAICompatibleProvider_PricingOverrideAppliesToStaticCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "catalog unavailable", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Models:  []string{"deepseek-v4.1-flash"},
+		Pricing: map[string]config.ModelPricingOverride{
+			"deepseek-v4.1-flash": {InputPerMillion: 0, OutputPerMillion: 0},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	info, err := provider.GetModelInfo("openai_compatible/deepseek-v4.1-flash")
+	if err != nil {
+		t.Fatalf("GetModelInfo() error = %v", err)
+	}
+	if !info.PricingKnown {
+		t.Fatal("PricingKnown = false, want true for a configured pricing override on the static catalog")
+	}
+}
+
+// TestOpenAICompatibleProvider_UnmatchedModelKeepsPricingUnknown ensures the
+// override only applies to models it names, leaving other models' pricing
+// state untouched.
+func TestOpenAICompatibleProvider_UnmatchedModelKeepsPricingUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"glm5.3flash"}]}`)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAICompatibleProvider(config.OpenAICompatibleConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Pricing: map[string]config.ModelPricingOverride{
+			"deepseek-v4.1-flash": {InputPerMillion: 0, OutputPerMillion: 0},
+		},
+	}, false)
+	provider.httpClient = server.Client()
+
+	info, err := provider.GetModelInfo("openai_compatible/glm5.3flash")
+	if err != nil {
+		t.Fatalf("GetModelInfo() error = %v", err)
+	}
+	if info.PricingKnown {
+		t.Fatal("PricingKnown = true, want false for a model with no configured override")
+	}
+}

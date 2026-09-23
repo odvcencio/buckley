@@ -1926,15 +1926,17 @@ func streamACPTurnAttempt(ctx context.Context, mgr *model.Manager, req model.Cha
 	return drainACPStreamTurn(streamCtx, req, chunks, errs, stream, deferDelivery)
 }
 
+// acpStreamRetryAllowed reports whether req's transcript is clean enough to
+// retry the whole turn from the request (C2). A turn's own tool
+// availability (req.Tools/ToolChoice) does not by itself make a retry
+// unsafe: acpStreamRetryCandidate independently refuses to retry once the
+// failed attempt has actually observed tool-call activity (see
+// ObservedToolDelta/ToolCalls there), which is what actually prevents a
+// tool call from being double-applied. What remains unsafe here is a
+// transcript that already carries an earlier tool transaction: that is a
+// committed, side-effect-adjacent turn from before this one, not the turn
+// that just failed, and must never be replayed.
 func acpStreamRetryAllowed(req model.ChatRequest) bool {
-	if len(req.Tools) > 0 {
-		return false
-	}
-	if choice := strings.ToLower(strings.TrimSpace(req.ToolChoice)); choice != "" && choice != "none" {
-		return false
-	}
-	// A no-tools request can still be carrying an earlier tool transaction in
-	// its transcript. Treat that as side-effect-adjacent and do not replay it.
 	for _, message := range req.Messages {
 		if strings.EqualFold(strings.TrimSpace(message.Role), "tool") || len(message.ToolCalls) > 0 {
 			return false
@@ -1950,10 +1952,27 @@ func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error)
 	if len(turn.Message.ToolCalls) > 0 || turn.ObservedToolDelta || isContextCancellationError(err) {
 		return false
 	}
-	safe := acpEveryErrorLeaf(err, func(leaf error) bool {
-		return leaf == io.ErrUnexpectedEOF || isUsageTrackingUnavailableError(leaf)
-	})
+	safe := acpEveryErrorLeaf(err, isRetryableStreamTransportErrorLeaf)
 	return safe && ctx.Err() == nil
+}
+
+// isRetryableStreamTransportErrorLeaf reports whether a leaf error (the
+// innermost cause after acpEveryErrorLeaf finishes unwrapping) names a
+// transport-level failure safe to retry the whole turn for (C2): the
+// stream ended before its logical completion (io.ErrUnexpectedEOF), the
+// connection was reset or the pipe broke mid-read/write (typed
+// syscall.ECONNRESET/EPIPE, e.g. Go's *net.OpError for "read tcp ...:
+// read: connection reset by peer" -- the real incident's exact error
+// shape), or the provider's usage trailer was unavailable. Matching is
+// type-based, not message-text based: an untyped error that merely says
+// "connection reset by peer" is not classified, since only a genuine
+// syscall-level signal proves the failure was transport, not application,
+// in origin.
+func isRetryableStreamTransportErrorLeaf(leaf error) bool {
+	return errors.Is(leaf, io.ErrUnexpectedEOF) ||
+		errors.Is(leaf, syscall.ECONNRESET) ||
+		errors.Is(leaf, syscall.EPIPE) ||
+		isUsageTrackingUnavailableError(leaf)
 }
 
 const (
@@ -2785,7 +2804,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		return agentloop.ToolOutcome{Content: toolText, Error: err.Error(), EffectClass: "control"}
 	}
 
-	effectClass := string(acpToolRiskImpact(registry, tc.Function.Name))
+	effectClass := string(acpToolRiskImpact(registry, tc.Function.Name, params))
 	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), index, total))
 	sendACPToolCallStart(stream, tc, params, workDir)
 
@@ -2883,8 +2902,16 @@ var acpPermissionOptions = []acp.PermissionOption{
 // acpToolRiskImpact classifies a tool call using the registry's existing
 // danger/approval classification (tool.GetMetadata's Impact: read-only,
 // modifying, destructive) -- the same classification Buckley already uses
-// elsewhere for approval gating, not a new ACP-specific notion.
-func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
+// elsewhere for approval gating, not a new ACP-specific notion. run_shell's
+// static metadata tags every command destructive ("shell commands can do
+// anything"), which is correct for arbitrary commands but wrongly caught
+// routine build/vet/test/lint verification too (H10); params lets the
+// caller's actual command downgrade that classification when it matches a
+// known workspace verification command (see isWorkspaceVerificationCommand).
+// The downgrade stops at ImpactModifying, not ImpactReadOnly: go test, make,
+// and npm scripts run repository-controlled code, so a live client must still
+// approve them; only the no-client fallback auto-approves the medium risk.
+func acpToolRiskImpact(registry *tool.Registry, name string, params map[string]any) tool.Impact {
 	if registry == nil {
 		return tool.ImpactDestructive
 	}
@@ -2892,7 +2919,135 @@ func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
 	if !ok {
 		return tool.ImpactDestructive
 	}
-	return tool.GetMetadata(t).Impact
+	impact := tool.GetMetadata(t).Impact
+	if impact == tool.ImpactDestructive && isWorkspaceVerificationToolCall(name, params) {
+		return tool.ImpactModifying
+	}
+	return impact
+}
+
+// verificationShellCommandPrefixes lists build/vet/test/lint commands that
+// check the workspace without mutating it. Buckley's default risk policy
+// (used when no live ACP client is attached -- e.g. the headless oneshot
+// CLI path) treats a run_shell command matching one of these prefixes as
+// non-destructive, so a correct edit is not stranded "incomplete" for want
+// of its own post-change verification (H10).
+var verificationShellCommandPrefixes = []string{
+	"go build",
+	"go vet",
+	"go test",
+	"gofmt -l",
+	"golangci-lint",
+	"staticcheck",
+	"go lint",
+	"npm test",
+	"npm run test",
+	"npm run build",
+	"npm run lint",
+	"cargo build",
+	"cargo test",
+	"cargo check",
+	"cargo clippy",
+	"pytest",
+	"make test",
+	"make build",
+	"make vet",
+	"make lint",
+}
+
+// isWorkspaceVerificationToolCall reports whether a tool call is a
+// build/vet/test/lint check of the workspace. Only run_shell is eligible:
+// run_code executes arbitrary caller-supplied code, not a fixed command, so
+// it keeps its destructive classification.
+func isWorkspaceVerificationToolCall(name string, params map[string]any) bool {
+	if name != "run_shell" {
+		return false
+	}
+	command, _ := params["command"].(string)
+	return isWorkspaceVerificationCommand(command)
+}
+
+// verificationCommandExecFlags are flags that make a build/test tool run an
+// arbitrary program or write outside the workspace, so a "verification"
+// command carrying one is no longer read-only.
+var verificationCommandExecFlags = []string{
+	"-exec", "-toolexec", "-vettool", "-overlay", "-modfile", "-o",
+	"--config", "--target-dir", "--manifest-path",
+	// Flags that load build rules or code from another file or directory:
+	// make -f/-C/-I, npm --prefix, pytest -c/--rootdir.
+	"-f", "--file", "--makefile", "-c", "--directory", "-i", "--include-dir",
+	"--prefix", "--rootdir",
+}
+
+// isWorkspaceRelativeArg reports whether arg names only paths inside the
+// workspace: no absolute or home-relative path and no parent traversal.
+func isWorkspaceRelativeArg(arg string) bool {
+	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "~") {
+		return false
+	}
+	// Compare whole segments: "./..." is Go's package wildcard, not traversal.
+	for _, segment := range strings.Split(arg, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// isVerificationCommandByte reports whether b may appear in a verification
+// command. It is an allowlist: bash -lc treats newline, carriage return,
+// backslash, quotes, and every control operator as syntax, so anything
+// outside plain words, spaces, and path/flag punctuation is rejected.
+func isVerificationCommandByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte(" -_./=:,@+%*", b) >= 0
+}
+
+// isWorkspaceVerificationCommand reports whether command is a known
+// build/vet/test/lint prefix with nothing chained after it. The command may
+// hold only allowlisted bytes (see isVerificationCommandByte), so no shell
+// separator, escape, quote, or substitution can smuggle a second command
+// past the prefix, and it may not carry a flag that executes another
+// program (see verificationCommandExecFlags).
+func isWorkspaceVerificationCommand(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return false
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if !isVerificationCommandByte(trimmed[i]) {
+			return false
+		}
+	}
+	for _, field := range strings.Fields(trimmed) {
+		name, value, hasValue := strings.Cut(strings.ToLower(field), "=")
+		for _, flag := range verificationCommandExecFlags {
+			if name == flag || name == "-"+flag {
+				return false
+			}
+		}
+		if !strings.HasPrefix(field, "-") {
+			if !isWorkspaceRelativeArg(field) {
+				return false
+			}
+			continue
+		}
+		// A flag may carry a path only as a relative "=value": an attached
+		// short-flag value such as make's -f/tmp/x would dodge the name check.
+		if strings.Contains(name, "/") || (hasValue && !isWorkspaceRelativeArg(value)) {
+			return false
+		}
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range verificationShellCommandPrefixes {
+		if lower == prefix || strings.HasPrefix(lower, prefix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // acpRiskLabel maps a tool.Impact to the risk vocabulary Buckley's local
@@ -2944,7 +3099,7 @@ func requestACPToolPermission(ctx context.Context, agent *acp.Agent, registry *t
 // The timeout parameter exists mainly so tests don't have to wait out
 // acpPermissionRequestTimeout to exercise the fallback path.
 func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{}), timeout time.Duration) (allowed bool, reason string) {
-	impact := acpToolRiskImpact(registry, tc.Function.Name)
+	impact := acpToolRiskImpact(registry, tc.Function.Name, params)
 	if impact == tool.ImpactReadOnly {
 		return true, ""
 	}

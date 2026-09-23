@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -896,6 +899,116 @@ func TestStreamACPTurnWithDelivery_DoesNotRetryObservedToolDelta(t *testing.T) {
 	}
 }
 
+// acpResetConnectionAfterPartialContent writes a valid partial SSE chunk,
+// flushes it, then forcibly resets the underlying TCP connection (SetLinger
+// 0 followed by Close) so the client observes a genuine, typed connection
+// reset -- Go's standard *net.OpError wrapping syscall.ECONNRESET -- instead
+// of a synthetic error. This reproduces the exact transport failure shape
+// from the C2 incident ("read tcp ...: read: connection reset by peer").
+func acpResetConnectionAfterPartialContent(t *testing.T, w http.ResponseWriter, content string) {
+	t.Helper()
+	acpSSEChunk(t, w, content, "", "")
+	acpHijackAndReset(t, w)
+}
+
+func acpHijackAndReset(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("response writer does not support hijacking")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatalf("hijack connection: %v", err)
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
+// TestStreamACPTurnWithDelivery_RetriesToolBearingRequestAfterConnectionReset
+// covers C2's real incident: a tool-bearing request (buckbot review always
+// offers tools) that streamed some content (events > 0) before the
+// connection was reset must still recover by retrying the whole turn from
+// the request, discarding the reset attempt's partial output.
+func TestStreamACPTurnWithDelivery_RetriesToolBearingRequestAfterConnectionReset(t *testing.T) {
+	mgr, requests, _ := newACPHTTPStreamManager(t, func(w http.ResponseWriter, r *http.Request, ordinal int32) {
+		if ordinal == 1 {
+			acpResetConnectionAfterPartialContent(t, w, "partial before reset")
+			return
+		}
+		acpSSEChunk(t, w, "recovered after retry", "", "stop")
+		writeACPDone(w)
+	})
+	collector := &collectingStream{}
+	turn, err := streamACPTurnWithDelivery(context.Background(), mgr, model.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []model.Message{{Role: "user", Content: "review this branch"}},
+		Tools:    []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}},
+	}, collector.fn, false)
+	if err != nil {
+		t.Fatalf("streamACPTurnWithDelivery: %v, want recovery after connection reset", err)
+	}
+	if got := atomic.LoadInt32(requests); got != 2 {
+		t.Fatalf("provider requests = %d, want exactly one retry", got)
+	}
+	if got := model.ExtractTextContentOrEmpty(turn.Message.Content); got != "recovered after retry" {
+		t.Fatalf("content = %q, want recovered after retry", got)
+	}
+	if got := strings.Join(collector.messageChunks(), ""); got != "recovered after retry" {
+		t.Fatalf("delivered content = %q, want only the retried attempt (reset attempt discarded)", got)
+	}
+}
+
+// TestStreamACPTurnWithDelivery_DoesNotRetryToolBearingRequestAfterObservedToolCallThenReset
+// guards against double-applying a tool call (C2): once the failed attempt
+// has already emitted a tool-call delta, a connection reset must not
+// trigger a retry, even though the request offers tools and the transport
+// error is otherwise retryable.
+func TestStreamACPTurnWithDelivery_DoesNotRetryToolBearingRequestAfterObservedToolCallThenReset(t *testing.T) {
+	mgr, requests, _ := newACPHTTPStreamManager(t, func(w http.ResponseWriter, r *http.Request, ordinal int32) {
+		if ordinal != 1 {
+			acpSSEChunk(t, w, "unsafe replay", "", "stop")
+			writeACPDone(w)
+			return
+		}
+		acpSSEJSON(t, w, map[string]any{
+			"id": "chatcmpl-tool",
+			"choices": []any{map[string]any{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []any{map[string]any{
+						"index": 0,
+						"id":    "call-1",
+						"type":  "function",
+						"function": map[string]any{
+							"name":      "read_file",
+							"arguments": `{"path":"x"}`,
+						},
+					}},
+				},
+				"finish_reason": nil,
+			}},
+		})
+		acpHijackAndReset(t, w)
+	})
+	turn, err := streamACPTurnWithDelivery(context.Background(), mgr, model.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []model.Message{{Role: "user", Content: "review this branch"}},
+		Tools:    []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}},
+	}, nil, false)
+	if err == nil {
+		t.Fatal("observed tool delta before a connection reset unexpectedly retried/succeeded")
+	}
+	if got := atomic.LoadInt32(requests); got != 1 {
+		t.Fatalf("provider requests = %d, want no retry (would double-apply the tool call)", got)
+	}
+	if len(turn.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want preserved observed tool call", turn.Message.ToolCalls)
+	}
+}
+
 func TestDrainACPStreamTurn_UnrelatedTerminalErrorRemainsAnError(t *testing.T) {
 	finish := "stop"
 	providerErr := errors.New("unrelated trailer failure")
@@ -957,6 +1070,29 @@ func TestACPStreamRetryCandidate_PartialRequiresSafeCause(t *testing.T) {
 		{name: "joined eof and usage error", cause: errors.Join(io.ErrUnexpectedEOF, usageErr), want: true},
 		{name: "joined eof and unrelated error", cause: errors.Join(io.ErrUnexpectedEOF, errors.New("provider failed")), want: false},
 		{name: "joined usage and unrelated error", cause: errors.Join(usageErr, errors.New("provider failed")), want: false},
+		// C2: the real incident's error text ("read tcp ...: read: connection
+		// reset by peer") is Go's standard *net.OpError-wrapped
+		// syscall.ECONNRESET, not a bare string -- exercise that exact typed
+		// shape rather than pattern-matching the message text.
+		{
+			name: "typed connection reset mid-stream",
+			cause: fmt.Errorf("parsing SSE stream: %w", fmt.Errorf("reading stream: %w", &net.OpError{
+				Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET),
+			})),
+			want: true,
+		},
+		{
+			name: "typed broken pipe mid-stream",
+			cause: &net.OpError{
+				Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.EPIPE),
+			},
+			want: true,
+		},
+		{
+			name:  "joined connection reset and unrelated error",
+			cause: errors.Join(&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, errors.New("provider failed")),
+			want:  false,
+		},
 	}
 	for _, tt := range tests {
 		for _, wrapped := range []bool{false, true} {
@@ -1035,20 +1171,42 @@ func TestDrainACPStreamTurn_ObservedToolDeltaInAnyChoiceForbidsRetry(t *testing.
 	}
 }
 
-func TestACPStreamRetryAllowed_RejectsToolBearingRequests(t *testing.T) {
+// TestACPStreamRetryAllowed_RejectsPriorToolTransactionInTranscript covers
+// the safety boundary acpStreamRetryAllowed still enforces (C2): a
+// transcript that already carries an earlier tool transaction is a
+// committed, side-effect-adjacent turn and must never be replayed,
+// regardless of whether the failed turn itself offered tools.
+func TestACPStreamRetryAllowed_RejectsPriorToolTransactionInTranscript(t *testing.T) {
 	tests := []model.ChatRequest{
-		{Tools: []map[string]any{{"type": "function"}}},
-		{ToolChoice: "required"},
 		{Messages: []model.Message{{Role: "tool", Content: "result"}}},
 		{Messages: []model.Message{{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "call-1"}}}}},
 	}
 	for i, req := range tests {
 		if acpStreamRetryAllowed(req) {
-			t.Fatalf("request %d was retryable despite tool risk: %+v", i, req)
+			t.Fatalf("request %d was retryable despite a committed prior tool transaction: %+v", i, req)
 		}
 	}
-	if !acpStreamRetryAllowed(model.ChatRequest{ToolChoice: "none"}) {
-		t.Fatal("tool_choice=none should remain a no-tools request")
+}
+
+// TestACPStreamRetryAllowed_AllowsToolOfferingRequestsWithCleanTranscript
+// covers C2: a turn that merely offers tools (or forces one) for itself is
+// not, by that fact alone, unsafe to retry. acpStreamRetryCandidate
+// separately refuses to retry once the failed attempt actually observed
+// tool-call activity (see ObservedToolDelta/ToolCalls there); that
+// per-attempt check is what prevents a tool call from being double-applied,
+// not blanket exclusion of every tool-capable request. Before this fix, a
+// tool-bearing request (the common case: buckbot review, oneshot mutation)
+// could never recover from a mid-stream transport failure at all.
+func TestACPStreamRetryAllowed_AllowsToolOfferingRequestsWithCleanTranscript(t *testing.T) {
+	tests := []model.ChatRequest{
+		{Tools: []map[string]any{{"type": "function"}}},
+		{ToolChoice: "required"},
+		{ToolChoice: "none"},
+	}
+	for i, req := range tests {
+		if !acpStreamRetryAllowed(req) {
+			t.Fatalf("request %d with a clean transcript was not retryable: %+v", i, req)
+		}
 	}
 }
 

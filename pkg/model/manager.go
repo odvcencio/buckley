@@ -1077,6 +1077,25 @@ func (m *Manager) ensureConfiguredModels() error {
 	return nil
 }
 
+// roleBuiltInDefaultModel returns the compiled-in default model ID for role,
+// used by ensureModel to tell an implicit default (never explicitly
+// configured, or still sitting at the value config.DefaultConfig() baked in)
+// from an explicit request. This is the same "value equals the built-in
+// default" idiom applyStartupModelOverride already uses to detect whether
+// -m has overridden a role.
+func roleBuiltInDefaultModel(role string) string {
+	switch role {
+	case "planning":
+		return config.DefaultPlanningModel
+	case "execution":
+		return config.DefaultExecutionModel
+	case "review":
+		return config.DefaultReviewModel
+	default:
+		return ""
+	}
+}
+
 func (m *Manager) ensureModel(role string) (string, error) {
 	var field *string
 	switch role {
@@ -1094,21 +1113,44 @@ func (m *Manager) ensureModel(role string) (string, error) {
 		return "", nil
 	}
 
+	requested := *field
+	// An explicitly requested model -- via -m/--model (which sets the
+	// execution role) or a config role set to anything other than its
+	// compiled-in default -- must never be silently replaced with a
+	// different model or provider (H1). Only an implicit default (unset, or
+	// still at its built-in value) may fall back automatically, and it must
+	// say so loudly via the returned warning.
+	if requested != "" && requested != roleBuiltInDefaultModel(role) {
+		return "", m.unresolvedModelError(role, requested)
+	}
+
 	fallback, ok := m.selectFallbackModel()
 	if !ok {
-		if *field == "" {
+		if requested == "" {
 			return "", fmt.Errorf("no available models to configure %s role", role)
 		}
-		return "", fmt.Errorf("%s model %q not found and no fallback models available", role, *field)
+		return "", fmt.Errorf("%s model %q not found and no fallback models available", role, requested)
 	}
 
-	previous := *field
 	*field = fallback
 
-	if previous == "" {
+	if requested == "" {
 		return fmt.Sprintf("%s model not configured; defaulting to %s", role, fallback), nil
 	}
-	return fmt.Sprintf("%s model %q not found; defaulting to %s", role, previous, fallback), nil
+	return fmt.Sprintf("%s model %q (built-in default) not found; defaulting to %s", role, requested, fallback), nil
+}
+
+// unresolvedModelError reports that an explicitly requested model could not
+// be resolved against any configured provider's catalog (H1). It names
+// close matches from the aggregated catalog when any are within a
+// reasonable edit distance, so the caller has something actionable instead
+// of only a failure.
+func (m *Manager) unresolvedModelError(role, requested string) error {
+	matches := m.closestModelMatches(requested, maxModelSuggestions)
+	if len(matches) == 0 {
+		return fmt.Errorf("%s model %q not found in any configured provider's catalog; no similar model IDs were found -- check the model ID and configured providers (see `buckley models list`)", role, requested)
+	}
+	return fmt.Errorf("%s model %q not found in any configured provider's catalog; did you mean one of: %s", role, requested, strings.Join(matches, ", "))
 }
 
 func (m *Manager) selectFallbackModel() (string, bool) {
@@ -1155,21 +1197,46 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
 	return models[0], true
 }
 
+// modelAvailable reports whether modelID resolves to a model any configured
+// provider's catalog actually advertises. A routing hook can resolve
+// modelID (an alias, e.g. a role-neutral name a caller pins before a
+// provider is known) to a different, real catalog model ID at dispatch
+// time; when that hook-resolved model is known, modelID is genuinely
+// dispatchable even though it never appears in the catalog literally, so it
+// is checked too before reporting modelID unavailable (H1: an alias with a
+// working route must not be confused with a model that cannot resolve at
+// all).
 func (m *Manager) modelAvailable(modelID string) bool {
+	provider := m.providerForModel(modelID)
 	providerID := ""
-	if provider := m.providerForModel(modelID); provider != nil {
+	if provider != nil {
 		providerID = provider.ID()
 	}
+	if m.modelKnownToProvider(modelID, providerID) {
+		return true
+	}
+
+	selected, selectedProvider := m.resolveModel(modelID)
+	if selected == "" || selected == modelID || selectedProvider == nil {
+		return false
+	}
+	return m.modelKnownToProvider(selected, selectedProvider.ID())
+}
+
+// modelKnownToProvider reports whether modelID (or one of its normalized
+// candidates, see modelInfoCandidates) appears in the aggregated catalog
+// owned by no provider or by providerID, or is directly advertised by
+// providerID's own model list.
+func (m *Manager) modelKnownToProvider(modelID, providerID string) bool {
 	for _, candidate := range m.modelInfoCandidates(modelID) {
 		m.catalogMu.RLock()
 		_, found := m.catalog[candidate]
 		owner := m.modelProviders[candidate]
 		providerAdvertisesCandidate := providerID != "" && containsString(m.providerModels[providerID], candidate)
+		m.catalogMu.RUnlock()
 		if (found && (owner == "" || owner == providerID)) || providerAdvertisesCandidate {
-			m.catalogMu.RUnlock()
 			return true
 		}
-		m.catalogMu.RUnlock()
 	}
 	return false
 }

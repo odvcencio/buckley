@@ -24,6 +24,11 @@ func FromUsage(usage model.Usage) transparency.TokenUsage {
 		value := usage.PromptTokensDetails.CachedTokens
 		tokens.ReportedCachedInput = &value
 	}
+	if total, known := usage.TotalCostUSD(); known {
+		tokens.ProviderCostUSD = total
+		tokens.ProviderCostKnown = true
+		tokens.ProviderCostIsBYOK = usage.IsBYOK
+	}
 	if usage.TotalTokens > 0 {
 		split := usage.PromptTokens + usage.CompletionTokens
 		if extra := usage.TotalTokens - split; extra > 0 {

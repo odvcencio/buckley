@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/mock/gomock"
@@ -457,6 +458,10 @@ func TestManagerInitialize_ProviderError(t *testing.T) {
 	}
 }
 
+// TestManagerInitialize_InvalidConfiguredModel covers H1: an explicitly
+// configured model absent from the catalog must fail Initialize() by name
+// instead of silently falling back to a different, unrelated model (the
+// pre-H1 behavior this test used to assert).
 func TestManagerInitialize_InvalidConfiguredModel(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -484,11 +489,13 @@ func TestManagerInitialize_InvalidConfiguredModel(t *testing.T) {
 	}
 
 	err := manager.Initialize()
-	if err != nil {
-		t.Fatalf("Initialize returned unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("Initialize() succeeded, want a hard failure for an unresolved explicit execution model")
 	}
-
-	if manager.config.Models.Execution != "provider/valid-model" {
-		t.Fatalf("expected execution model to fallback to provider/valid-model, got %s", manager.config.Models.Execution)
+	if !strings.Contains(err.Error(), "provider/invalid-model") {
+		t.Fatalf("Initialize() error = %v, want it to name the requested model", err)
+	}
+	if manager.config.Models.Execution != "provider/invalid-model" {
+		t.Fatalf("execution model = %q, want it left untouched (no silent substitution)", manager.config.Models.Execution)
 	}
 }

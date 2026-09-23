@@ -82,6 +82,57 @@ func TestCostProvenance_InvokerPaths(t *testing.T) {
 	}
 }
 
+// TestCostProvenance_OpenRouterBYOKCostOverridesUnknownPricing covers C7:
+// an OpenRouter BYOK call (openai/gpt-6-luna-pro, live-verified payload
+// shape) with no catalog pricing (PricingUnknown: true, matching a
+// provider whose per-token rate Buckley cannot know) must still report a
+// known cost, taken from the provider's own inline usage.cost +
+// usage.cost_details.upstream_inference_cost, instead of "cost unknown".
+// This is what makes --budget and repair work for a BYOK model like Luna.
+func TestCostProvenance_OpenRouterBYOKCostOverridesUnknownPricing(t *testing.T) {
+	byokFee := 0.0
+	response := &model.ChatResponse{
+		Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "done"}, FinishReason: "stop"}},
+		Usage: model.Usage{
+			PromptTokens:     1396,
+			CompletionTokens: 41,
+			TotalTokens:      1437,
+			Cost:             &byokFee,
+			IsBYOK:           true,
+			CostDetails:      &model.UsageCostDetails{UpstreamInferenceCost: 0.0001601},
+		},
+	}
+	for _, method := range []string{"invoke", "text", "stream", "tools"} {
+		t.Run(method, func(t *testing.T) {
+			var client ModelClient = costProvenanceClient{response: response}
+			if method == "stream" {
+				client = &mockStreamClient{responses: []*model.ChatResponse{response}}
+			}
+			ledger := transparency.NewCostLedger()
+			inv := NewInvoker(InvokerConfig{
+				Client:         client,
+				Model:          "openai/gpt-6-luna-pro",
+				PricingUnknown: true,
+				Ledger:         ledger,
+			})
+			trace, err := invokeCostProvenanceMethod(inv, method)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if trace == nil || trace.CostUnknown {
+				t.Fatalf("trace = %+v, want a known BYOK cost", trace)
+			}
+			if trace.Cost != 0.0001601 {
+				t.Fatalf("trace.Cost = %v, want 0.0001601 (fee 0 + upstream 0.0001601)", trace.Cost)
+			}
+			summary := ledger.Summary()
+			if summary.SessionCostUnknown || summary.SessionCost != 0.0001601 {
+				t.Fatalf("summary = %+v, want a known session cost of 0.0001601", summary)
+			}
+		})
+	}
+}
+
 func TestCostProvenance_PartialAndNoResponse(t *testing.T) {
 	for _, method := range []string{"invoke", "text", "stream", "stream-fallback", "tools"} {
 		for _, observed := range []bool{false, true} {

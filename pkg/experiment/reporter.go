@@ -40,8 +40,8 @@ func (r *Reporter) MarkdownTable(exp *Experiment, results []*parallel.AgentResul
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Experiment: %s\n\n", exp.Name)
-	b.WriteString("| Model | Success | Duration | Tokens | Files |\n")
-	b.WriteString("|-------|---------|----------|--------|-------|\n")
+	b.WriteString("| Model | Success | Duration | Tokens | Files | Error |\n")
+	b.WriteString("|-------|---------|----------|--------|-------|-------|\n")
 
 	for _, variant := range exp.Variants {
 		result := resultsByID[variant.ID]
@@ -55,6 +55,7 @@ func (r *Reporter) MarkdownTable(exp *Experiment, results []*parallel.AgentResul
 		duration := "-"
 		tokens := "-"
 		files := "-"
+		errText := "-"
 		if result != nil {
 			if result.Success {
 				success = "yes"
@@ -66,12 +67,24 @@ func (r *Reporter) MarkdownTable(exp *Experiment, results []*parallel.AgentResul
 				tokens = fmt.Sprintf("%d", promptTokens+completionTokens)
 			}
 			files = fmt.Sprintf("%d", len(result.Files))
+			if result.Error != nil {
+				errText = markdownTableCellEscape(result.Error.Error())
+			}
 		}
 
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", modelID, success, duration, tokens, files)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", modelID, success, duration, tokens, files, errText)
 	}
 
 	return b.String()
+}
+
+// markdownTableCellEscape neutralizes characters that would otherwise break
+// out of a markdown table cell or run the visible text onto another line.
+func markdownTableCellEscape(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return s
 }
 
 // ComparisonMarkdown renders a markdown report from persisted experiment runs.

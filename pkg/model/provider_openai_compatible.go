@@ -32,6 +32,7 @@ type OpenAICompatibleProvider struct {
 	staticModels                         []string
 	staticParams                         map[string][]string
 	staticContext                        map[string]int
+	staticPricing                        map[string]config.ModelPricingOverride
 	streamIdle                           time.Duration
 	streamFirstContent                   time.Duration
 	streamFirstContentMaxReasoningChunks int
@@ -70,6 +71,7 @@ func newOpenAICompatibleProvider(providerID string, liteLLMInfo bool, cfg config
 		staticModels:                         cfg.Models,
 		staticParams:                         cfg.SupportedParameters,
 		staticContext:                        cfg.ContextLengths,
+		staticPricing:                        cfg.Pricing,
 		streamIdle:                           cfg.StreamIdleTimeout,
 		streamFirstContent:                   cfg.StreamFirstContentTimeout,
 		streamFirstContentMaxReasoningChunks: cfg.StreamFirstContentMaxReasoningChunks,
@@ -113,6 +115,8 @@ func (p *OpenAICompatibleProvider) FetchCatalog() (*ModelCatalog, error) {
 	if len(models) == 0 && len(p.staticModels) > 0 {
 		models = p.buildStaticModels()
 	}
+
+	models = p.applyPricingOverrides(models)
 
 	p.modelCacheMu.Lock()
 	p.modelCache = models
@@ -357,6 +361,32 @@ func (p *OpenAICompatibleProvider) buildStaticModels() []ModelInfo {
 		}
 		info.SupportedParameters = p.mergeSupportedParameters(info.ID, nil)
 		models = append(models, info)
+	}
+	return models
+}
+
+// applyPricingOverrides marks operator-configured model prices as
+// authoritative. Without an override, a model whose catalog entry has zero
+// or missing pricing (common for self-hosted and design-partner free-tier
+// endpoints) is treated as "pricing unknown": CalculateBoundedCost refuses
+// to admit it, so cost-bounded requests, --budget, and repair/retry logic
+// that depend on a known cost all fail closed. An override lets the
+// operator assert the real price, including an explicit and authoritative
+// $0, by name (see config.OpenAICompatibleConfig.Pricing).
+func (p *OpenAICompatibleProvider) applyPricingOverrides(models []ModelInfo) []ModelInfo {
+	if len(p.staticPricing) == 0 {
+		return models
+	}
+	for i := range models {
+		override, ok := p.staticPricing[strings.TrimPrefix(models[i].ID, p.modelPrefix)]
+		if !ok {
+			continue
+		}
+		models[i].Pricing = ModelPricing{
+			Prompt:     override.InputPerMillion,
+			Completion: override.OutputPerMillion,
+		}
+		models[i].PricingKnown = true
 	}
 	return models
 }
@@ -608,6 +638,20 @@ func (p *OpenAICompatibleProvider) compatiblePayload(req ChatRequest) any {
 	}
 
 	if p.supportsParameter(req.Model, "reasoning_content") {
+		if reasoningEffort == "" {
+			// The model declares structured reasoning_content support (it has
+			// an opinion about the reasoning wire shape) but not
+			// reasoning_effort, and effort conversion above did not apply.
+			// Forwarding the raw OpenRouter-style nested `reasoning` object
+			// anyway makes strict OpenAI-compatible gateways reject the whole
+			// request (observed: Particle's deepseek-v4.1-flash, HTTP 400
+			// "Unsupported nested reasoning field 'max_tokens'", whose
+			// supported_parameters are only tools and reasoning_content).
+			// Drop it instead of guessing at wire compatibility. Models with
+			// no declared reasoning_content/reasoning_effort capability at
+			// all keep the legacy best-effort pass-through below.
+			req.Reasoning = nil
+		}
 		return openAICompatibleWirePayload{
 			ChatRequest:     req,
 			Messages:        openAICompatibleWireMessages(req.Messages),

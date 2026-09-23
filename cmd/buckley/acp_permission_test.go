@@ -122,6 +122,128 @@ func TestRequestACPToolPermission_NoAgentUsesFallbackPolicy(t *testing.T) {
 	}
 }
 
+// TestRequestACPToolPermission_NoAgentAllowsWorkspaceVerificationCommands
+// covers H10: without a live client, run_shell was uniformly classified
+// destructive and denied, so a correct edit's own go build/go vet
+// verification could never run, stranding the turn as "incomplete". A
+// build/vet/test/lint command that only reads and checks the workspace
+// must be auto-approved by the default fallback policy like any other
+// non-destructive tool.
+func TestRequestACPToolPermission_NoAgentAllowsWorkspaceVerificationCommands(t *testing.T) {
+	t.Parallel()
+
+	registry := tool.NewRegistry()
+	verificationCommands := []string{
+		"go build ./...",
+		"go vet ./...",
+		"go test ./...",
+		"golangci-lint run ./...",
+		"staticcheck ./...",
+		"npm test",
+		"cargo test",
+		"make lint",
+	}
+	for _, command := range verificationCommands {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			allowed, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": command}, "", nil)
+			if !allowed {
+				t.Fatalf("expected fallback to allow verification command %q, reason=%q", command, reason)
+			}
+		})
+	}
+
+	// A destructive command tacked onto a verification prefix via a shell
+	// control operator must still be denied: the prefix match must not
+	// smuggle an unrelated command past the fallback policy.
+	chained, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go build ./... && rm -rf /"}, "", nil)
+	if chained {
+		t.Fatal("expected fallback to deny a verification prefix chained with a destructive command")
+	}
+	if reason == "" {
+		t.Fatal("expected a denial reason for the chained command")
+	}
+}
+
+// TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands pins the
+// classifier against every way bash -lc could run a second program behind a
+// verification prefix: command separators the operator denylist missed
+// (newline, carriage return), escapes and quoting, and tool flags that
+// execute an arbitrary program as part of the "verification".
+func TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands(t *testing.T) {
+	t.Parallel()
+
+	smuggled := []string{
+		"go test ./...\nrm -rf /",
+		"go test ./...\rrm -rf /",
+		"go test ./...\\\nrm -rf /",
+		"go vet ./...\trm",
+		"go test -exec 'rm -rf /' ./...",
+		"go test -exec=/bin/sh ./...",
+		"go test -toolexec=/tmp/x ./...",
+		"go vet -vettool=/tmp/x ./...",
+		"go build -o /etc/passwd ./...",
+		"go build -overlay=/tmp/o.json ./...",
+		"go test -modfile=/tmp/go.mod ./...",
+		"cargo test --config target.x.runner=sh",
+		"go test \"./...\"",
+		"go test ./...#\nrm",
+		"make test -f /tmp/evil",
+		"make test -f/tmp/evil",
+		"make -C /tmp/evil test",
+		"make test --file=evil.mk",
+		"make test -I include",
+		"go test /tmp/evil/...",
+		"go test ../outside/...",
+		"go test ~/evil/...",
+		"npm test --prefix=/tmp/evil",
+		"pytest -c /tmp/evil.ini",
+		"go test -coverprofile=/tmp/x.out ./...",
+	}
+	for _, command := range smuggled {
+		if isWorkspaceVerificationCommand(command) {
+			t.Errorf("classified %q as a read-only verification command", command)
+		}
+	}
+
+	allowed := []string{
+		"go test -run TestFoo -count=1 ./pkg/...",
+		"go test -race -timeout 10m ./...",
+		"go vet ./cmd/buckley",
+		"npm run lint",
+		"cargo clippy --all-targets",
+		"go test -run TestFoo/sub_case ./...",
+		"go test -failfast -coverprofile=cover.out ./...",
+		"make test",
+	}
+	for _, command := range allowed {
+		if !isWorkspaceVerificationCommand(command) {
+			t.Errorf("rejected plain verification command %q", command)
+		}
+	}
+}
+
+// TestRequestACPToolPermission_ClientDecidesVerificationCommands pins that a
+// recognized verification command still goes to a live client for approval.
+// go test, make, and npm scripts run repository-controlled code, so the H10
+// downgrade may relax only the no-client fallback, never skip the client.
+func TestRequestACPToolPermission_ClientDecidesVerificationCommands(t *testing.T) {
+	t.Parallel()
+
+	agent, client := startFakeACPAgentForPermissionTests(t)
+	respondToNextPermissionRequestWith(client, "deny")
+
+	registry := tool.NewRegistry()
+	allowed, _ := requestACPToolPermission(context.Background(), agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go test ./..."}, "", nil)
+	if allowed {
+		t.Fatal("verification command ran without the client's approval; the client denied it")
+	}
+	if got := acpToolRiskImpact(registry, "run_shell", map[string]any{"command": "go test ./..."}); got == tool.ImpactReadOnly {
+		t.Fatalf("verification command classified %q; it executes repository code and must not be read-only", got)
+	}
+}
+
 func TestRequestACPToolPermission_ClientAllows(t *testing.T) {
 	t.Parallel()
 

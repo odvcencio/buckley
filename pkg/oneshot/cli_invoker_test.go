@@ -420,6 +420,34 @@ func TestMarshalCLISchemaRequiresNullableOptionalProperties(t *testing.T) {
 	}
 }
 
+func TestCLIInvokerMarksEstimatedUsageAndUnknownCost(t *testing.T) {
+	for _, backend := range []string{CLIBackendCodex, CLIBackendClaude} {
+		t.Run(backend, func(t *testing.T) {
+			inv, err := NewCLIInvoker(CLIInvokerConfig{
+				Backend: backend,
+				TempDir: t.TempDir(),
+				Runner: func(ctx context.Context, cmd CLICommand) (CLICommandResult, error) {
+					return CLICommandResult{Stdout: []byte(`{"action":"add","subject":"CLI provenance"}`)}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewCLIInvoker: %v", err)
+			}
+
+			_, trace, err := inv.Invoke(context.Background(), "system", "user evidence", testCLITool(), nil)
+			if err != nil {
+				t.Fatalf("Invoke: %v", err)
+			}
+			if !trace.Tokens.Estimated {
+				t.Fatalf("trace tokens = %+v, want estimated local counts", trace.Tokens)
+			}
+			if !trace.CostUnknown || trace.Cost != 0 {
+				t.Fatalf("trace cost = %v unknown=%v, want unknown zero cost because CLI backends report no pricing", trace.Cost, trace.CostUnknown)
+			}
+		})
+	}
+}
+
 func testCLITool() tools.Definition {
 	return tools.Definition{
 		Name:        "generate_commit",

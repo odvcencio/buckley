@@ -251,6 +251,14 @@ func (inv *DefaultInvoker) buildTrace(builder *transparency.TraceBuilder) *trans
 }
 
 func (inv *DefaultInvoker) invocationCost(tokens transparency.TokenUsage) (float64, bool) {
+	// A provider-reported cost (C7: e.g. OpenRouter's inline usage.cost plus
+	// usage.cost_details.upstream_inference_cost on a BYOK call) is a real
+	// invoice line, not an estimate. It takes precedence over catalog
+	// pricing -- including when catalog pricing is altogether unknown for
+	// this model/provider, which is exactly the case a BYOK route hits.
+	if tokens.ProviderCostKnown {
+		return tokens.ProviderCostUSD, false
+	}
 	if inv.pricingUnknown || tokenUsageCostUnknown(tokens, inv.pricing) {
 		return 0, true
 	}
