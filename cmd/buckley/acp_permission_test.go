@@ -122,6 +122,50 @@ func TestRequestACPToolPermission_NoAgentUsesFallbackPolicy(t *testing.T) {
 	}
 }
 
+// TestRequestACPToolPermission_NoAgentAllowsWorkspaceVerificationCommands
+// covers H10: without a live client, run_shell was uniformly classified
+// destructive and denied, so a correct edit's own go build/go vet
+// verification could never run, stranding the turn as "incomplete". A
+// build/vet/test/lint command that only reads and checks the workspace
+// must be auto-approved by the default fallback policy like any other
+// non-destructive tool.
+func TestRequestACPToolPermission_NoAgentAllowsWorkspaceVerificationCommands(t *testing.T) {
+	t.Parallel()
+
+	registry := tool.NewRegistry()
+	verificationCommands := []string{
+		"go build ./...",
+		"go vet ./...",
+		"go test ./...",
+		"golangci-lint run ./...",
+		"staticcheck ./...",
+		"npm test",
+		"cargo test",
+		"make lint",
+	}
+	for _, command := range verificationCommands {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			allowed, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": command}, "", nil)
+			if !allowed {
+				t.Fatalf("expected fallback to allow verification command %q, reason=%q", command, reason)
+			}
+		})
+	}
+
+	// A destructive command tacked onto a verification prefix via a shell
+	// control operator must still be denied: the prefix match must not
+	// smuggle an unrelated command past the fallback policy.
+	chained, reason := requestACPToolPermission(context.Background(), nil, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go build ./... && rm -rf /"}, "", nil)
+	if chained {
+		t.Fatal("expected fallback to deny a verification prefix chained with a destructive command")
+	}
+	if reason == "" {
+		t.Fatal("expected a denial reason for the chained command")
+	}
+}
+
 func TestRequestACPToolPermission_ClientAllows(t *testing.T) {
 	t.Parallel()
 

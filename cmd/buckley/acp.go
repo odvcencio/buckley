@@ -2785,7 +2785,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		return agentloop.ToolOutcome{Content: toolText, Error: err.Error(), EffectClass: "control"}
 	}
 
-	effectClass := string(acpToolRiskImpact(registry, tc.Function.Name))
+	effectClass := string(acpToolRiskImpact(registry, tc.Function.Name, params))
 	state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, fmt.Sprintf("Running %s (%d/%d)…", toolCallTitle(tc.Function.Name, params), index, total))
 	sendACPToolCallStart(stream, tc, params, workDir)
 
@@ -2883,8 +2883,13 @@ var acpPermissionOptions = []acp.PermissionOption{
 // acpToolRiskImpact classifies a tool call using the registry's existing
 // danger/approval classification (tool.GetMetadata's Impact: read-only,
 // modifying, destructive) -- the same classification Buckley already uses
-// elsewhere for approval gating, not a new ACP-specific notion.
-func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
+// elsewhere for approval gating, not a new ACP-specific notion. run_shell's
+// static metadata tags every command destructive ("shell commands can do
+// anything"), which is correct for arbitrary commands but wrongly caught
+// routine build/vet/test/lint verification too (H10); params lets the
+// caller's actual command downgrade that classification when it matches a
+// known workspace verification command (see isWorkspaceVerificationCommand).
+func acpToolRiskImpact(registry *tool.Registry, name string, params map[string]any) tool.Impact {
 	if registry == nil {
 		return tool.ImpactDestructive
 	}
@@ -2892,7 +2897,74 @@ func acpToolRiskImpact(registry *tool.Registry, name string) tool.Impact {
 	if !ok {
 		return tool.ImpactDestructive
 	}
-	return tool.GetMetadata(t).Impact
+	impact := tool.GetMetadata(t).Impact
+	if impact == tool.ImpactDestructive && isWorkspaceVerificationToolCall(name, params) {
+		return tool.ImpactReadOnly
+	}
+	return impact
+}
+
+// verificationShellCommandPrefixes lists build/vet/test/lint commands that
+// check the workspace without mutating it. Buckley's default risk policy
+// (used when no live ACP client is attached -- e.g. the headless oneshot
+// CLI path) treats a run_shell command matching one of these prefixes as
+// non-destructive, so a correct edit is not stranded "incomplete" for want
+// of its own post-change verification (H10).
+var verificationShellCommandPrefixes = []string{
+	"go build",
+	"go vet",
+	"go test",
+	"gofmt -l",
+	"golangci-lint",
+	"staticcheck",
+	"go lint",
+	"npm test",
+	"npm run test",
+	"npm run build",
+	"npm run lint",
+	"cargo build",
+	"cargo test",
+	"cargo check",
+	"cargo clippy",
+	"pytest",
+	"make test",
+	"make build",
+	"make vet",
+	"make lint",
+}
+
+// isWorkspaceVerificationToolCall reports whether a tool call is a
+// build/vet/test/lint check of the workspace. Only run_shell is eligible:
+// run_code executes arbitrary caller-supplied code, not a fixed command, so
+// it keeps its destructive classification.
+func isWorkspaceVerificationToolCall(name string, params map[string]any) bool {
+	if name != "run_shell" {
+		return false
+	}
+	command, _ := params["command"].(string)
+	return isWorkspaceVerificationCommand(command)
+}
+
+// isWorkspaceVerificationCommand reports whether command is a known
+// build/vet/test/lint prefix with nothing chained after it. Any shell
+// control operator (&&, ||, ;, |, redirection, command substitution)
+// disqualifies the match, since that could smuggle a destructive command
+// alongside a safe-looking prefix.
+func isWorkspaceVerificationCommand(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return false
+	}
+	if strings.ContainsAny(trimmed, "&|;><`$(){}") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range verificationShellCommandPrefixes {
+		if lower == prefix || strings.HasPrefix(lower, prefix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // acpRiskLabel maps a tool.Impact to the risk vocabulary Buckley's local
@@ -2944,7 +3016,7 @@ func requestACPToolPermission(ctx context.Context, agent *acp.Agent, registry *t
 // The timeout parameter exists mainly so tests don't have to wait out
 // acpPermissionRequestTimeout to exercise the fallback path.
 func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, registry *tool.Registry, sessionID string, tc model.ToolCall, params map[string]any, workDir string, logf func(string, ...interface{}), timeout time.Duration) (allowed bool, reason string) {
-	impact := acpToolRiskImpact(registry, tc.Function.Name)
+	impact := acpToolRiskImpact(registry, tc.Function.Name, params)
 	if impact == tool.ImpactReadOnly {
 		return true, ""
 	}

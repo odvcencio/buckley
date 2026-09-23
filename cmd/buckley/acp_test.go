@@ -395,10 +395,10 @@ func TestDispatchACPToolCallFallsBackToEffectWhenGitObservationUnavailable(t *te
 }
 
 func TestACPToolRiskImpactUnknownFailsClosed(t *testing.T) {
-	if got := acpToolRiskImpact(nil, "missing"); got != tool.ImpactDestructive {
+	if got := acpToolRiskImpact(nil, "missing", nil); got != tool.ImpactDestructive {
 		t.Fatalf("nil-registry impact = %q, want destructive", got)
 	}
-	if got := acpToolRiskImpact(tool.NewEmptyRegistry(), "missing"); got != tool.ImpactDestructive {
+	if got := acpToolRiskImpact(tool.NewEmptyRegistry(), "missing", nil); got != tool.ImpactDestructive {
 		t.Fatalf("unknown-tool impact = %q, want destructive", got)
 	}
 }
