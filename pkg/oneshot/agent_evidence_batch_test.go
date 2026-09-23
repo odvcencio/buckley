@@ -22,8 +22,13 @@ func writeFakeWrapperScript(t *testing.T, invocationsFile, fixture string, exitC
 	// Record exactly one line per invocation (tab-joined argv), not one line
 	// per argument: `printf '%s\n' "$@"` repeats the format across every
 	// positional argument, which would make a single invocation covering
-	// several packages look like several invocations.
-	script := fmt.Sprintf("#!/bin/sh\n{ printf '%%s\\t' \"$@\"; printf '\\n'; } >> %s\ncat %s\nexit %d\n", invocationsFile, fixture, exitCode)
+	// several packages look like several invocations. flock serializes the
+	// two-write append (argv, then the trailing newline) across concurrent
+	// wrapper invocations; without it, two invocations racing on the same
+	// fd can interleave and glom two lines into one.
+	script := fmt.Sprintf(
+		"#!/bin/sh\nexec 9>>%s\nflock 9\nprintf '%%s\\t' \"$@\" >&9\nprintf '\\n' >&9\nflock -u 9\ncat %s\nexit %d\n",
+		invocationsFile, fixture, exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake wrapper: %v", err)
 	}
@@ -83,7 +88,7 @@ func TestCollectAgentEvidenceBatchesGoTestRequestsThroughWrapper(t *testing.T) {
 	invocations := filepath.Join(t.TempDir(), "invocations.log")
 	gitCheckFile := filepath.Join(t.TempDir(), "git-check.log")
 	wrapperBody := fmt.Sprintf(
-		"#!/bin/sh\n{ printf '%%s\\t' \"$@\"; printf '\\n'; } >> %s\ngit -C \"$1\" rev-parse --is-inside-work-tree > %s 2>&1\ncat %s\nexit 1\n",
+		"#!/bin/sh\nexec 9>>%s\nflock 9\nprintf '%%s\\t' \"$@\" >&9\nprintf '\\n' >&9\nflock -u 9\ngit -C \"$1\" rev-parse --is-inside-work-tree > %s 2>&1\ncat %s\nexit 1\n",
 		invocations, gitCheckFile, fixture)
 	wrapperPath := filepath.Join(t.TempDir(), "fake-wrapper.sh")
 	if err := os.WriteFile(wrapperPath, []byte(wrapperBody), 0o755); err != nil {
