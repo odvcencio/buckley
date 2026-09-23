@@ -1,0 +1,306 @@
+package reviewsandbox
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+// writeFakeWrapper writes an executable shell script standing in for a
+// remote verification wrapper (for example buildbox-run) satisfying the
+// `<wrapper...> <snapshot-dir> <argv...>` contract, and returns its path.
+func writeFakeWrapper(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-wrapper.sh")
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake wrapper: %v", err)
+	}
+	return path
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestExecutorVerifyWrapperRunsWrapperWithSnapshotDirThenArgv(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	wrapper := writeFakeWrapper(t, fmt.Sprintf("printf '%%s\\n' \"$@\" > %s\nexit 0\n", argvFile))
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+	})
+	if result.Status != StatusPass {
+		t.Fatalf("status = %s, want PASS (error=%q stdout=%q stderr=%q)", result.Status, result.Error, result.Stdout, result.Stderr)
+	}
+
+	recorded, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
+	want := []string{snapshotRoot, "go", "test", "-count=1", "."}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("wrapper argv = %v, want %v", lines, want)
+	}
+}
+
+func TestExecutorVerifyWrapperTrustsExitOne(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	wrapper := writeFakeWrapper(t, "echo '--- FAIL: TestBad (0.00s)'\nexit 1\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+	})
+	if result.Status != StatusFail {
+		t.Fatalf("status = %s, want FAIL for a real test failure exit code", result.Status)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", result.ExitCode)
+	}
+}
+
+// TestExecutorVerifyWrapperExit255GradesUnavailableNotFail is the harness
+// safety rule: ssh connection failures, rsync errors, and other
+// non-test wrapper exit codes (255 is ssh's) must never be reported as a
+// confirmed product failure.
+func TestExecutorVerifyWrapperExit255GradesUnavailableNotFail(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	wrapper := writeFakeWrapper(t, "echo 'ssh: connect to host buildbox port 22: Connection refused' >&2\nexit 255\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+	})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE for wrapper exit 255", result.Status)
+	}
+	if result.Status == StatusFail {
+		t.Fatal("a transport failure must never grade CONFIRMED_FAIL")
+	}
+	if !strings.Contains(result.Error, "not a recognized test result") {
+		t.Fatalf("error = %q, want it to explain the exit code is untrusted", result.Error)
+	}
+}
+
+func TestExecutorVerifyWrapperTimeoutGradesUnavailable(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	wrapper := writeFakeWrapper(t, "sleep 5\nexit 0\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+		Timeout:      50 * time.Millisecond,
+	})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE for a wrapper timeout", result.Status)
+	}
+	if !strings.Contains(result.Error, "timed out") {
+		t.Fatalf("error = %q, want a timeout message", result.Error)
+	}
+}
+
+func TestExecutorVerifyWrapperLaunchFailureGradesUnavailable(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{missing})
+	result := executor.Verify(context.Background(), Request{
+		SnapshotRoot: snapshotRoot,
+		Kind:         KindTest,
+		Language:     LanguageGo,
+		Path:         ".",
+	})
+	if result.Status != StatusUnavailable {
+		t.Fatalf("status = %s, want UNAVAILABLE when the wrapper itself cannot launch", result.Status)
+	}
+	if !strings.Contains(result.Error, "failed to launch") {
+		t.Fatalf("error = %q, want a launch-failure message", result.Error)
+	}
+}
+
+const cannedGoTestJSONStream = `{"Action":"run","Package":"example.com/fake/pkgpass","Test":"TestOK"}
+{"Action":"output","Package":"example.com/fake/pkgpass","Test":"TestOK","Output":"=== RUN   TestOK\n"}
+{"Action":"pass","Package":"example.com/fake/pkgpass","Test":"TestOK","Elapsed":0}
+{"Action":"output","Package":"example.com/fake/pkgpass","Output":"PASS\n"}
+{"Action":"output","Package":"example.com/fake/pkgpass","Output":"ok  \texample.com/fake/pkgpass\t0.010s\n"}
+{"Action":"pass","Package":"example.com/fake/pkgpass","Elapsed":0.01}
+{"Action":"run","Package":"example.com/fake/pkgfail","Test":"TestBad"}
+{"Action":"output","Package":"example.com/fake/pkgfail","Test":"TestBad","Output":"=== RUN   TestBad\n"}
+{"Action":"output","Package":"example.com/fake/pkgfail","Test":"TestBad","Output":"    fake_test.go:10: boom\n"}
+{"Action":"fail","Package":"example.com/fake/pkgfail","Test":"TestBad","Elapsed":0}
+{"Action":"output","Package":"example.com/fake/pkgfail","Output":"FAIL\n"}
+{"Action":"output","Package":"example.com/fake/pkgfail","Output":"FAIL\texample.com/fake/pkgfail\t0.005s\n"}
+{"Action":"fail","Package":"example.com/fake/pkgfail","Elapsed":0.005}
+{"Action":"output","Package":"example.com/fake/pkgskip","Output":"?   \texample.com/fake/pkgskip\t[no test files]\n"}
+{"Action":"skip","Package":"example.com/fake/pkgskip","Elapsed":0}
+`
+
+// TestExecutorVerifyGoTestBatchParsesPerPackagePassFail is the harness's
+// primary TDD contract: a fake wrapper script records the argv it received
+// and replays canned `go test -json` output, and VerifyGoTestBatch parses
+// per-package PASS/FAIL (and no-test-files skip) from the event stream
+// correctly, in one wrapper invocation covering every requested package.
+func TestExecutorVerifyGoTestBatchParsesPerPackagePassFail(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+
+	fixture := filepath.Join(t.TempDir(), "events.jsonl")
+	mustWriteFile(t, fixture, cannedGoTestJSONStream)
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	wrapper := writeFakeWrapper(t, fmt.Sprintf(
+		"printf '%%s\\n' \"$@\" > %s\ncat %s\nexit 1\n", argvFile, fixture))
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	results, err := executor.VerifyGoTestBatch(context.Background(), snapshotRoot, []BatchTarget{
+		{Path: "pkgpass"}, {Path: "pkgfail"}, {Path: "pkgskip"},
+	}, 0, 0)
+	if err != nil {
+		t.Fatalf("VerifyGoTestBatch: %v", err)
+	}
+
+	if got := results["pkgpass"]; got.Status != StatusPass {
+		t.Fatalf("pkgpass status = %s, want PASS (error=%q)", got.Status, got.Error)
+	}
+	if got := results["pkgfail"]; got.Status != StatusFail {
+		t.Fatalf("pkgfail status = %s, want FAIL (stdout=%q)", got.Status, got.Stdout)
+	} else if !strings.Contains(got.Stdout, "boom") {
+		t.Fatalf("pkgfail stdout = %q, want captured failure output", got.Stdout)
+	}
+	if got := results["pkgskip"]; got.Status != StatusPass || !got.NoTestFiles {
+		t.Fatalf("pkgskip = %+v, want PASS with NoTestFiles", got)
+	}
+
+	recorded, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	argv := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
+	want := []string{snapshotRoot, "go", "test", "-json", "-count=1", "./pkgpass", "./pkgfail", "./pkgskip"}
+	if strings.Join(argv, "|") != strings.Join(want, "|") {
+		t.Fatalf("batch wrapper argv = %v, want %v", argv, want)
+	}
+}
+
+// TestExecutorVerifyGoTestBatchWrapperExit255GradesAllUnavailable is the
+// batch analogue of the single-call transport-failure rule: an ssh/rsync
+// style failure grades every package in the batch UNAVAILABLE, never
+// CONFIRMED_FAIL for any of them.
+func TestExecutorVerifyGoTestBatchWrapperExit255GradesAllUnavailable(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	wrapper := writeFakeWrapper(t, "exit 255\n")
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	results, err := executor.VerifyGoTestBatch(context.Background(), snapshotRoot, []BatchTarget{
+		{Path: "pkgpass"}, {Path: "pkgfail"},
+	}, 0, 0)
+	if err != nil {
+		t.Fatalf("VerifyGoTestBatch: %v", err)
+	}
+	for path, result := range results {
+		if result.Status != StatusUnavailable {
+			t.Fatalf("%s status = %s, want UNAVAILABLE for a batch-wide wrapper failure", path, result.Status)
+		}
+	}
+}
+
+// TestExecutorVerifyGoTestBatchPartialStreamGradesMissingPackageUnavailable
+// covers a mid-run connection drop: some packages completed and reported a
+// terminal pass/fail/skip event before the stream cut off, but a requested
+// package never did. That package must grade UNAVAILABLE individually
+// rather than being silently reported as passing.
+func TestExecutorVerifyGoTestBatchPartialStreamGradesMissingPackageUnavailable(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	partial := `{"Action":"run","Package":"example.com/fake/pkgpass","Test":"TestOK"}
+{"Action":"pass","Package":"example.com/fake/pkgpass","Test":"TestOK","Elapsed":0}
+{"Action":"pass","Package":"example.com/fake/pkgpass","Elapsed":0.01}
+`
+	fixture := filepath.Join(t.TempDir(), "partial.jsonl")
+	mustWriteFile(t, fixture, partial)
+	wrapper := writeFakeWrapper(t, fmt.Sprintf("cat %s\nexit 0\n", fixture))
+
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{wrapper})
+	results, err := executor.VerifyGoTestBatch(context.Background(), snapshotRoot, []BatchTarget{
+		{Path: "pkgpass"}, {Path: "pkgnever"},
+	}, 0, 0)
+	if err != nil {
+		t.Fatalf("VerifyGoTestBatch: %v", err)
+	}
+	if got := results["pkgpass"]; got.Status != StatusPass {
+		t.Fatalf("pkgpass status = %s, want PASS", got.Status)
+	}
+	if got := results["pkgnever"]; got.Status != StatusUnavailable {
+		t.Fatalf("pkgnever status = %s, want UNAVAILABLE for a package missing from the stream", got.Status)
+	}
+}
+
+func TestVerifyGoTestBatchRequiresConfiguredWrapper(t *testing.T) {
+	snapshotRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
+	executor := NewExecutorWithCodexCommand("")
+	if _, err := executor.VerifyGoTestBatch(context.Background(), snapshotRoot, []BatchTarget{{Path: "."}}, 0, 0); err == nil {
+		t.Fatal("expected an error when batching without a configured wrapper")
+	}
+}
+
+// TestDefaultLocalParallelismStaysWithinBounds is the parallelism-cap
+// contract: even with no wrapper configured, local verification never
+// exceeds 4 concurrent commands, and never drops below 1.
+func TestDefaultLocalParallelismStaysWithinBounds(t *testing.T) {
+	got := DefaultLocalParallelism()
+	if got < 1 || got > 4 {
+		t.Fatalf("DefaultLocalParallelism() = %d, want a value in [1,4]", got)
+	}
+	want := runtime.NumCPU() / 4
+	if want < 1 {
+		want = 1
+	}
+	if want > 4 {
+		want = 4
+	}
+	if got != want {
+		t.Fatalf("DefaultLocalParallelism() = %d, want min(4, max(1, NumCPU/4)) = %d", got, want)
+	}
+}

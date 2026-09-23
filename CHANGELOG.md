@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Review verification evidence can run through a remote wrapper (for
+  example buildbox-run) instead of the local sandbox. Set
+  `review.verification.runner.wrapper` (or `BUCKLEY_VERIFY_WRAPPER`) to a
+  shell-style argv prefix; the harness batches each changed Go package's
+  test evidence into as few remote `go test -json` invocations as
+  `review.verification.runner.parallelism` (or `BUCKLEY_VERIFY_PARALLELISM`)
+  allows, instead of one invocation per package. This targets crowded local
+  hosts, where compile queueing alone turned millisecond test packages into
+  fixed-timeout INCONCLUSIVE evidence. Local verification now also caps
+  concurrency by default (min(4, max(1, NumCPU/4))) even without a
+  configured wrapper. A wrapper or transport failure (a non-test exit code,
+  a launch failure, a timeout) always grades UNAVAILABLE/INCONCLUSIVE, never
+  CONFIRMED_FAIL. See docs/CONFIGURATION.md.
+
 ## [0.8.2] - 2026-08-17
 
 ### Fixed

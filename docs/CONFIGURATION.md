@@ -189,6 +189,62 @@ Guardrails for ZDR, data-collection, provider, and model allowlists. A model
 with no ZDR-compatible endpoint cannot run while the account enforces ZDR;
 choose a compatible model or change that account policy deliberately.
 
+### review.verification.runner
+
+```yaml
+review:
+  verification:
+    runner:
+      wrapper: ["buildbox-run"]
+      parallelism: 2
+      timeout: 10m
+```
+
+The review harness runs build/test verification against an immutable
+snapshot of the reviewed change. On a crowded, shared local host, a `go
+test` that takes milliseconds in isolation can spend minutes queued for CPU
+time behind unrelated compiles, producing a fixed timeout and INCONCLUSIVE
+evidence instead of a real answer.
+
+`wrapper` is a shell-style argv prefix. When set, the harness runs
+`<wrapper...> <snapshot-dir> <argv...>` in place of executing `<argv...>`
+directly: the wrapper owns getting the immutable snapshot directory to
+wherever it actually builds and tests (for example rsync to a remote build
+host over ssh, as `buildbox-run` does) and is trusted to relay the real
+command's exit code. Verification requests for the same language and kind
+across several changed packages are batched into as few remote `go test
+-json` invocations as `parallelism` allows, instead of one invocation per
+package; the harness parses each package's PASS/FAIL from the JSON event
+stream. Leaving `wrapper` empty (the default) keeps verification local.
+
+`parallelism` caps concurrent verification commands: batched remote
+invocations when `wrapper` is set, or individual local commands otherwise.
+Zero (the default) uses `min(4, max(1, NumCPU/4))`, applied even without a
+configured wrapper, so local verification never tries to run more
+concurrent build/test processes than the host can actually schedule at
+once.
+
+`timeout` caps each verification command, or each batched wrapper
+invocation covering several packages. Zero keeps the existing per-call
+default locally, or scales up to 10 minutes when `wrapper` is set, since one
+remote invocation may cover many packages.
+
+A wrapper or transport failure -- ssh down, an rsync error, or any exit code
+other than the ones a real test run produces (0 for pass, 1 for a build or
+test failure) -- grades the affected evidence UNAVAILABLE/INCONCLUSIVE. It
+never reports CONFIRMED_FAIL: an infrastructure fault is not evidence the
+reviewed change is broken.
+
+Environment overrides:
+
+- `BUCKLEY_VERIFY_WRAPPER` -- shell-split into `wrapper`'s argv (for example
+  `"buildbox-run --node-modules"`). Empty leaves a configured wrapper
+  untouched.
+- `BUCKLEY_VERIFY_PARALLELISM` -- positive integers only; zero or negative
+  values are ignored.
+- `BUCKLEY_VERIFY_TIMEOUT` -- a positive Go duration (for example `10m`);
+  zero, negative, or unparseable values are ignored.
+
 ### oneshot
 
 ```yaml

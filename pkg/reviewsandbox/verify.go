@@ -117,6 +117,7 @@ type Executor struct {
 	reuseRuntime bool
 	runtimeMu    sync.Mutex
 	runtimeDir   string
+	wrapper      []string
 }
 
 func NewExecutor() *Executor {
@@ -141,6 +142,20 @@ func NewSessionExecutorWithCodexCommand(command string) *Executor {
 	executor := NewExecutorWithCodexCommand(command)
 	executor.reuseRuntime = true
 	return executor
+}
+
+// SetWrapper configures a remote verification wrapper. When argv is
+// non-empty, Verify runs `<argv...> <snapshot-dir> <command> <args...>`
+// through the wrapper instead of the local bwrap/Codex sandbox: the wrapper
+// owns getting the snapshot directory to wherever it actually executes (for
+// example rsync-ing it to a remote build host) and is trusted to return the
+// real command's exit code. An empty argv (the default) keeps verification
+// local.
+func (e *Executor) SetWrapper(argv []string) {
+	if e == nil {
+		return
+	}
+	e.wrapper = append([]string(nil), argv...)
 }
 
 // Close removes a session executor's private build runtime.
@@ -210,6 +225,42 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		result.Error = err.Error()
 		return result
 	}
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	if timeout > maximumTimeout {
+		result.Error = fmt.Sprintf("verification timeout exceeds %s", maximumTimeout)
+		return result
+	}
+	maxOutput := request.MaxOutputBytes
+	if maxOutput <= 0 {
+		maxOutput = defaultMaxOutput
+	}
+	if maxOutput > maximumMaxOutput {
+		result.Error = fmt.Sprintf("verification output limit exceeds %d bytes", maximumMaxOutput)
+		return result
+	}
+
+	// A configured remote wrapper replaces the local bwrap/Codex sandbox
+	// entirely: it runs `<wrapper...> <snapshot-dir> <command> <args...>` and
+	// is trusted to relay the real command's stdout/stderr/exit code. The
+	// wrapper receives the immutable snapshot directory directly (never a
+	// local writable copy); getting a writable execution location for the
+	// command is the wrapper's job (for example rsync to a remote build
+	// host), so no local go/cargo/etc. binary needs to be resolvable here.
+	if len(e.wrapper) > 0 {
+		result.Command = plan.command
+		result.Argv = append([]string{plan.command}, plan.args...)
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		defer cancel()
+		output, runErr := e.run(ctx, commandInvocation{
+			Name: e.wrapper[0],
+			Args: append(append(append([]string(nil), e.wrapper[1:]...), workDir), result.Argv...),
+		}, maxOutput)
+		return classifyVerificationRun(result, request, language, timeout, "remote verification wrapper", output, runErr, ctx.Err(), trustedWrapperExitCode)
+	}
+
 	resolved, err := e.lookPath(plan.command)
 	if err != nil {
 		result.Command = plan.command
@@ -261,23 +312,6 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		return result
 	}
 	defer cleanupRuntime()
-
-	timeout := request.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	if timeout > maximumTimeout {
-		result.Error = fmt.Sprintf("verification timeout exceeds %s", maximumTimeout)
-		return result
-	}
-	maxOutput := request.MaxOutputBytes
-	if maxOutput <= 0 {
-		maxOutput = defaultMaxOutput
-	}
-	if maxOutput > maximumMaxOutput {
-		result.Error = fmt.Sprintf("verification output limit exceeds %d bytes", maximumMaxOutput)
-		return result
-	}
 
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -478,8 +512,20 @@ func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params laun
 
 // classifyVerificationRun applies the shared PASS/FAIL/UNAVAILABLE
 // classification to a completed sandbox launch, independent of which
-// launcher produced it.
-func classifyVerificationRun(result Result, request Request, language Language, timeout time.Duration, launcherLabel string, output commandOutput, runErr, contextErr error) Result {
+// launcher produced it. An optional trustedExitCode predicate (variadic so
+// existing local-sandbox callers are unaffected) distinguishes a real
+// command exit code from a transport/wrapper failure: when supplied and the
+// observed exit code fails the predicate, the run grades UNAVAILABLE instead
+// of FAIL. The local bwrap/Codex sandbox already ran the command directly,
+// so any ExitError it returns is trustworthy; a remote wrapper's exit code
+// can also mean ssh dropped, rsync failed, or the wrapper script itself
+// errored before the real command ran, none of which prove the change under
+// review is broken.
+func classifyVerificationRun(result Result, request Request, language Language, timeout time.Duration, launcherLabel string, output commandOutput, runErr, contextErr error, trustedExitCode ...func(int) bool) Result {
+	trusted := func(int) bool { return true }
+	if len(trustedExitCode) > 0 && trustedExitCode[0] != nil {
+		trusted = trustedExitCode[0]
+	}
 	result.Stdout = output.Stdout
 	result.Stderr = output.Stderr
 	result.ExitCode = output.ExitCode
@@ -508,9 +554,16 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 				result.Error = "verification requires a capability denied by the review sandbox"
 				return result
 			}
+			code := exitErr.ExitCode()
+			if !trusted(code) {
+				result.Status = StatusUnavailable
+				result.ExitCode = -1
+				result.Error = fmt.Sprintf("%s exited %d, which is not a recognized test result; treating it as a transport/wrapper failure rather than a confirmed failure", launcherLabel, code)
+				return result
+			}
 			result.Status = StatusFail
 			if result.ExitCode < 0 {
-				result.ExitCode = exitErr.ExitCode()
+				result.ExitCode = code
 			}
 			result.Error = "verification command failed"
 			return result
@@ -525,6 +578,12 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 			result.Status = StatusUnavailable
 			result.ExitCode = -1
 			result.Error = "verification requires a capability denied by the review sandbox"
+			return result
+		}
+		if !trusted(output.ExitCode) {
+			result.Status = StatusUnavailable
+			result.ExitCode = -1
+			result.Error = fmt.Sprintf("%s exited %d, which is not a recognized test result; treating it as a transport/wrapper failure rather than a confirmed failure", launcherLabel, output.ExitCode)
 			return result
 		}
 		result.Status = StatusFail
@@ -544,6 +603,18 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 	}
 	result.Status = StatusPass
 	return result
+}
+
+// trustedWrapperExitCode reports whether code is an exit status a real test
+// runner can plausibly produce: 0 (pass) or 1 (build/test failure, the exit
+// code go test, cargo test, pytest, and npm test all use for that case).
+// Anything else observed through a remote wrapper -- 2 (usage error), 124
+// (the wrapper's own timeout), 127 (command not found on the remote host),
+// 255 (ssh connection failure), a negative signal code, and so on -- means
+// the wrapper or its transport failed before or instead of running a real
+// test, and must never be graded as a confirmed product failure.
+func trustedWrapperExitCode(code int) bool {
+	return code == 0 || code == 1
 }
 
 func verificationOutputShowsSandboxRestriction(output string) bool {
