@@ -170,6 +170,89 @@ func TestNewCIAdmissionReceipt_RecognizedTestFileRequiresUnavailableAdapterFindi
 	}
 }
 
+func TestNewCIAdmissionReceipt_GoTestPackageEvidenceAuthorizesExactHead(t *testing.T) {
+	expectation := testCIAdmissionExpectation()
+	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/tool/builtin/git_test.go", "pkg/reviewpolicy/ci_admission_test.go"}
+	evidence := &CIReachabilityEvidence{
+		Source: "github_actions_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
+		Packages: []string{"m31labs.dev/buckley/pkg/tool/builtin", "m31labs.dev/buckley/pkg/reviewpolicy"},
+	}
+	input := CIAdmissionInput{
+		Expectation: expectation, RequiredContextsAvailable: true,
+		RequiredContexts:         []CIRequiredContext{{Name: "Test", State: "SUCCESS"}},
+		TestReachabilityEvidence: evidence,
+	}
+	receipt, err := NewCIAdmissionReceipt(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Decision != CIAdmissionAllow || receipt.TestReachabilityStatus != CIReachabilityCovered {
+		t.Fatalf("admission = %s/%s reachability=%s", receipt.Decision, receipt.Reason, receipt.TestReachabilityStatus)
+	}
+	if err := receipt.Authorize(expectation); err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+
+	changed := expectation
+	changed.Identity.HeadSHA = "new-head"
+	if err := receipt.Authorize(changed); !errors.Is(err, ErrCIAdmissionStale) {
+		t.Fatalf("changed head authorization = %v", err)
+	}
+	tampered := receipt
+	copy := *receipt.TestReachabilityEvidence
+	copy.Packages = []string{"m31labs.dev/buckley/pkg/tool/builtin"}
+	tampered.TestReachabilityEvidence = &copy
+	if err := tampered.Authorize(expectation); !errors.Is(err, ErrCIAdmissionInvalid) {
+		t.Fatalf("tampered packages authorization = %v", err)
+	}
+
+	input.TestReachabilityEvidence = &copy
+	missing, err := NewCIAdmissionReceipt(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.Decision != CIAdmissionDeny || missing.Reason != CIAdmissionReasonTestNotCovered ||
+		missing.TestReachabilityStatus != CIReachabilityNotCovered {
+		t.Fatalf("uncovered test admission = %s/%s reachability=%s", missing.Decision, missing.Reason, missing.TestReachabilityStatus)
+	}
+	if err := missing.Authorize(expectation); !errors.Is(err, ErrCIAdmissionDenied) {
+		t.Fatalf("uncovered test authorization = %v", err)
+	}
+}
+
+func TestNewCIAdmissionReceipt_RejectsUnboundGoTestEvidence(t *testing.T) {
+	expectation := testCIAdmissionExpectation()
+	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/git_test.go"}
+	evidence := &CIReachabilityEvidence{
+		Source: "github_actions_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
+		Packages: []string{"m31labs.dev/buckley/pkg"},
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*CIReachabilityEvidence)
+	}{
+		{"wrong head", func(e *CIReachabilityEvidence) { e.HeadSHA = "other-head" }},
+		{"unrequired check", func(e *CIReachabilityEvidence) { e.Check = "Other" }},
+		{"missing run", func(e *CIReachabilityEvidence) { e.RunID = 0 }},
+		{"outside module", func(e *CIReachabilityEvidence) { e.Packages = []string{"other/pkg"} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			copy := *evidence
+			test.edit(&copy)
+			_, err := NewCIAdmissionReceipt(CIAdmissionInput{
+				Expectation: expectation, RequiredContextsAvailable: true,
+				RequiredContexts:         []CIRequiredContext{{Name: "Test", State: "SUCCESS"}},
+				TestReachabilityEvidence: &copy,
+			})
+			if !errors.Is(err, ErrCIAdmissionInvalid) {
+				t.Fatalf("NewCIAdmissionReceipt error = %v", err)
+			}
+		})
+	}
+}
+
 func testCIAdmissionExpectation() CIAdmissionExpectation {
 	return CIAdmissionExpectation{Identity: CIAdmissionIdentity{
 		Host:       "github.com",

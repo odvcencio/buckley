@@ -919,7 +919,7 @@ func revalidatePRContext(ctx *PRContext, run prCommandRunner) (string, error) {
 		return changed, nil
 	}
 
-	current, err := fetchPRReviewEvidence(run, target, currentMetadata, captured.CIProvenance, admissionExpectation.TestReachability)
+	current, err := fetchPRReviewEvidence(run, target, currentMetadata, captured.CIProvenance, admissionExpectation.TestReachability, ctx.Files)
 	if err != nil {
 		return "", fmt.Errorf("re-fetch PR review evidence: %w", err)
 	}
@@ -1011,16 +1011,26 @@ func fetchPRReviewEvidence(
 	metadata prMetadataSnapshot,
 	capturedCISource string,
 	reachability reviewpolicy.CIReachabilityRequest,
+	changedFiles []string,
 ) (prEvidenceSnapshot, error) {
 	checks, ciSource, ciRevision, err := refetchPRCIEvidence(run, target, metadata, capturedCISource)
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("CI checks: %w", err)
 	}
 	requiredContexts, requiredErr := getPRRequiredContexts(run, target)
+	var reachabilityEvidence *reviewpolicy.CIReachabilityEvidence
+	if requiredErr == nil && passingRequiredContexts(requiredContexts) && reachability.Requested {
+		reachabilityEvidence, _ = capturePRGoTestReachability(run, target, &PRInfo{
+			Number: metadata.Number, Host: metadata.Host, Repository: metadata.Repository,
+			BaseBranch: metadata.BaseBranch, BaseSHA: metadata.BaseSHA,
+			HeadBranch: metadata.HeadBranch, HeadSHA: metadata.HeadSHA,
+		}, changedFiles)
+	}
 	admission, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
 		Expectation:               prCIAdmissionExpectationForMetadata(metadata, reachability),
 		RequiredContextsAvailable: requiredErr == nil,
 		RequiredContexts:          requiredContexts,
+		TestReachabilityEvidence:  reachabilityEvidence,
 	})
 	if err != nil {
 		return prEvidenceSnapshot{}, fmt.Errorf("CI admission: %w", err)

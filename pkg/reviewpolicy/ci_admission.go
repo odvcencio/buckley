@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CIAdmissionSchema = "buckley.ci-admission.v1"
+	CIAdmissionSchema = "buckley.ci-admission.v2"
 
 	CIAdmissionAllow       CIAdmissionDecision = "allow"
 	CIAdmissionDeny        CIAdmissionDecision = "deny"
@@ -23,12 +23,15 @@ const (
 	CIAdmissionReasonRequiredContextsUnavailable CIAdmissionReason = "required_contexts_unavailable"
 	CIAdmissionReasonRequiredContextsNotPassing  CIAdmissionReason = "required_contexts_not_passing"
 	CIAdmissionReasonTestReachabilityUnavailable CIAdmissionReason = "test_reachability_unavailable"
+	CIAdmissionReasonTestNotCovered              CIAdmissionReason = "test_not_covered"
 
 	CIReachabilityNotApplicable CIReachabilityStatus = "not_applicable"
 	CIReachabilityUnavailable   CIReachabilityStatus = "unavailable"
+	CIReachabilityCovered       CIReachabilityStatus = "covered"
+	CIReachabilityNotCovered    CIReachabilityStatus = "not_covered"
 )
 
-const ciAdmissionPolicyV1 = "required contexts must be available, non-empty, and passing; requested test reachability must be deterministically available"
+const ciAdmissionPolicyV2 = "required contexts must be available, non-empty, and passing; changed Go tests must have head-bound passing required-CI package evidence"
 
 var (
 	ErrCIAdmissionMissing     = errors.New("ci admission receipt is missing")
@@ -44,10 +47,7 @@ type CIAdmissionDecision string
 // CIAdmissionReason is a stable machine-readable explanation for a decision.
 type CIAdmissionReason string
 
-// CIReachabilityStatus records whether a structural test-reachability finding
-// was required for this receipt. Slice 1 deliberately has no reachability
-// adapter, so any requested finding is unavailable rather than implicitly
-// passing.
+// CIReachabilityStatus records whether changed tests were reached by CI.
 type CIReachabilityStatus string
 
 // CIAdmissionIdentity binds a receipt to one exact pull-request snapshot.
@@ -75,6 +75,18 @@ type CIReachabilityRequest struct {
 	RecognizedChangedTestFiles []string `json:"recognized_changed_test_files,omitempty"`
 }
 
+// CIReachabilityEvidence records successful Go package results from one
+// required GitHub Actions check for the exact PR head.
+type CIReachabilityEvidence struct {
+	Source   string   `json:"source"`
+	HeadSHA  string   `json:"head_sha"`
+	RunID    int64    `json:"run_id"`
+	JobID    int64    `json:"job_id"`
+	Check    string   `json:"check"`
+	Module   string   `json:"module"`
+	Packages []string `json:"packages"`
+}
+
 // CIAdmissionExpectation is recomputed by each authority boundary instead of
 // being accepted from model output or serialized tool parameters.
 type CIAdmissionExpectation struct {
@@ -87,23 +99,25 @@ type CIAdmissionInput struct {
 	Expectation               CIAdmissionExpectation
 	RequiredContextsAvailable bool
 	RequiredContexts          []CIRequiredContext
+	TestReachabilityEvidence  *CIReachabilityEvidence
 }
 
 // CIAdmissionReceipt is a canonical, tamper-evident admission decision. Digest
 // covers every preceding field in declaration order after all slices have been
 // normalized and sorted.
 type CIAdmissionReceipt struct {
-	Schema                      string                `json:"schema"`
-	Identity                    CIAdmissionIdentity   `json:"identity"`
-	PolicySHA256                string                `json:"policy_sha256"`
-	RequiredContextsAvailable   bool                  `json:"required_contexts_available"`
-	RequiredContexts            []CIRequiredContext   `json:"required_contexts"`
-	RequiredContextsFingerprint string                `json:"required_contexts_fingerprint"`
-	TestReachability            CIReachabilityRequest `json:"test_reachability"`
-	TestReachabilityStatus      CIReachabilityStatus  `json:"test_reachability_status"`
-	Decision                    CIAdmissionDecision   `json:"decision"`
-	Reason                      CIAdmissionReason     `json:"reason"`
-	Digest                      string                `json:"digest"`
+	Schema                      string                  `json:"schema"`
+	Identity                    CIAdmissionIdentity     `json:"identity"`
+	PolicySHA256                string                  `json:"policy_sha256"`
+	RequiredContextsAvailable   bool                    `json:"required_contexts_available"`
+	RequiredContexts            []CIRequiredContext     `json:"required_contexts"`
+	RequiredContextsFingerprint string                  `json:"required_contexts_fingerprint"`
+	TestReachability            CIReachabilityRequest   `json:"test_reachability"`
+	TestReachabilityEvidence    *CIReachabilityEvidence `json:"test_reachability_evidence,omitempty"`
+	TestReachabilityStatus      CIReachabilityStatus    `json:"test_reachability_status"`
+	Decision                    CIAdmissionDecision     `json:"decision"`
+	Reason                      CIAdmissionReason       `json:"reason"`
+	Digest                      string                  `json:"digest"`
 }
 
 // NewCIAdmissionReceipt normalizes observations, derives the policy outcome,
@@ -120,6 +134,10 @@ func NewCIAdmissionReceipt(input CIAdmissionInput) (CIAdmissionReceipt, error) {
 	if !input.RequiredContextsAvailable && len(contexts) > 0 {
 		return CIAdmissionReceipt{}, fmt.Errorf("%w: unavailable required contexts cannot contain observations", ErrCIAdmissionInvalid)
 	}
+	evidence, err := normalizeCIReachabilityEvidence(input.TestReachabilityEvidence, expectation, contexts)
+	if err != nil {
+		return CIAdmissionReceipt{}, err
+	}
 
 	receipt := CIAdmissionReceipt{
 		Schema:                    CIAdmissionSchema,
@@ -128,7 +146,8 @@ func NewCIAdmissionReceipt(input CIAdmissionInput) (CIAdmissionReceipt, error) {
 		RequiredContextsAvailable: input.RequiredContextsAvailable,
 		RequiredContexts:          contexts,
 		TestReachability:          expectation.TestReachability,
-		TestReachabilityStatus:    expectedCIReachabilityStatus(expectation.TestReachability),
+		TestReachabilityEvidence:  evidence,
+		TestReachabilityStatus:    expectedCIReachabilityStatus(expectation.TestReachability, evidence),
 	}
 	receipt.RequiredContextsFingerprint = requiredContextsFingerprint(receipt.RequiredContextsAvailable, receipt.RequiredContexts)
 	receipt.Decision, receipt.Reason = deriveCIAdmissionDecision(receipt)
@@ -166,7 +185,11 @@ func (r CIAdmissionReceipt) Validate() error {
 	if want := requiredContextsFingerprint(r.RequiredContextsAvailable, r.RequiredContexts); r.RequiredContextsFingerprint != want {
 		return fmt.Errorf("%w: required-context fingerprint mismatch", ErrCIAdmissionInvalid)
 	}
-	if want := expectedCIReachabilityStatus(r.TestReachability); r.TestReachabilityStatus != want {
+	evidence, err := normalizeCIReachabilityEvidence(r.TestReachabilityEvidence, expectation, r.RequiredContexts)
+	if err != nil || !equalCIReachabilityEvidence(evidence, r.TestReachabilityEvidence) {
+		return fmt.Errorf("%w: non-canonical test-reachability evidence", ErrCIAdmissionInvalid)
+	}
+	if want := expectedCIReachabilityStatus(r.TestReachability, evidence); r.TestReachabilityStatus != want {
 		return fmt.Errorf("%w: test-reachability status mismatch", ErrCIAdmissionInvalid)
 	}
 	decision, reason := deriveCIAdmissionDecision(r)
@@ -223,8 +246,10 @@ func deriveCIAdmissionDecision(r CIAdmissionReceipt) (CIAdmissionDecision, CIAdm
 		return CIAdmissionDeny, CIAdmissionReasonNoRequiredContexts
 	case !allCIRequiredContextsPass(r.RequiredContexts):
 		return CIAdmissionDeny, CIAdmissionReasonRequiredContextsNotPassing
-	case r.TestReachabilityStatus != CIReachabilityNotApplicable:
+	case r.TestReachabilityStatus == CIReachabilityUnavailable:
 		return CIAdmissionUnavailable, CIAdmissionReasonTestReachabilityUnavailable
+	case r.TestReachabilityStatus == CIReachabilityNotCovered:
+		return CIAdmissionDeny, CIAdmissionReasonTestNotCovered
 	default:
 		return CIAdmissionAllow, CIAdmissionReasonRequiredContextsPassed
 	}
@@ -241,11 +266,96 @@ func allCIRequiredContextsPass(contexts []CIRequiredContext) bool {
 	return len(contexts) > 0
 }
 
-func expectedCIReachabilityStatus(request CIReachabilityRequest) CIReachabilityStatus {
-	if request.Requested || len(request.RecognizedChangedTestFiles) > 0 {
+func expectedCIReachabilityStatus(request CIReachabilityRequest, evidence *CIReachabilityEvidence) CIReachabilityStatus {
+	if !request.Requested && len(request.RecognizedChangedTestFiles) == 0 {
+		return CIReachabilityNotApplicable
+	}
+	if evidence == nil || len(request.RecognizedChangedTestFiles) == 0 {
 		return CIReachabilityUnavailable
 	}
-	return CIReachabilityNotApplicable
+	packages := make(map[string]bool, len(evidence.Packages))
+	for _, pkg := range evidence.Packages {
+		packages[pkg] = true
+	}
+	for _, file := range request.RecognizedChangedTestFiles {
+		if !strings.HasSuffix(file, "_test.go") {
+			return CIReachabilityUnavailable
+		}
+		pkg := evidence.Module
+		if dir := path.Dir(file); dir != "." {
+			pkg += "/" + dir
+		}
+		if !packages[pkg] {
+			return CIReachabilityNotCovered
+		}
+	}
+	return CIReachabilityCovered
+}
+
+func normalizeCIReachabilityEvidence(value *CIReachabilityEvidence, expectation CIAdmissionExpectation, contexts []CIRequiredContext) (*CIReachabilityEvidence, error) {
+	if value == nil {
+		return nil, nil
+	}
+	copy := *value
+	copy.Source = strings.TrimSpace(copy.Source)
+	copy.HeadSHA = strings.TrimSpace(copy.HeadSHA)
+	copy.Check = strings.TrimSpace(copy.Check)
+	copy.Module = strings.Trim(strings.TrimSpace(copy.Module), "/")
+	if copy.Source != "github_actions_go_test_v1" || copy.HeadSHA != expectation.Identity.HeadSHA ||
+		copy.RunID <= 0 || copy.JobID <= 0 || copy.Check == "" || copy.Module == "" ||
+		len(expectation.TestReachability.RecognizedChangedTestFiles) == 0 {
+		return nil, fmt.Errorf("%w: incomplete or stale test-reachability evidence", ErrCIAdmissionInvalid)
+	}
+	for _, file := range expectation.TestReachability.RecognizedChangedTestFiles {
+		if !strings.HasSuffix(file, "_test.go") {
+			return nil, fmt.Errorf("%w: Go package evidence cannot cover %s", ErrCIAdmissionInvalid, file)
+		}
+	}
+	checkPassed := false
+	for _, context := range contexts {
+		if context.Name == copy.Check && (context.State == "PASS" || context.State == "SUCCESS") {
+			checkPassed = true
+		}
+	}
+	if !checkPassed {
+		return nil, fmt.Errorf("%w: reachability evidence is not from a passing required check", ErrCIAdmissionInvalid)
+	}
+	copy.Packages = append([]string(nil), copy.Packages...)
+	for index, pkg := range copy.Packages {
+		copy.Packages[index] = strings.TrimSpace(pkg)
+		if copy.Packages[index] == "" || (copy.Packages[index] != copy.Module && !strings.HasPrefix(copy.Packages[index], copy.Module+"/")) {
+			return nil, fmt.Errorf("%w: test package is outside the module", ErrCIAdmissionInvalid)
+		}
+	}
+	sort.Strings(copy.Packages)
+	copy.Packages = compactSortedStrings(copy.Packages)
+	return &copy, nil
+}
+
+func compactSortedStrings(values []string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func equalCIReachabilityEvidence(left, right *CIReachabilityEvidence) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.Source != right.Source || left.HeadSHA != right.HeadSHA || left.RunID != right.RunID ||
+		left.JobID != right.JobID || left.Check != right.Check || left.Module != right.Module || len(left.Packages) != len(right.Packages) {
+		return false
+	}
+	for index := range left.Packages {
+		if left.Packages[index] != right.Packages[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeCIAdmissionExpectation(value CIAdmissionExpectation) (CIAdmissionExpectation, error) {
@@ -345,7 +455,7 @@ func receiptDigest(receipt CIAdmissionReceipt) (string, error) {
 }
 
 func ciAdmissionPolicyDigest() string {
-	return sha256Hex([]byte(CIAdmissionSchema + "\n" + ciAdmissionPolicyV1))
+	return sha256Hex([]byte(CIAdmissionSchema + "\n" + ciAdmissionPolicyV2))
 }
 
 func sha256Hex(value []byte) string {

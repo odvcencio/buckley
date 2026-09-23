@@ -12,22 +12,41 @@ import (
 )
 
 type prCIAdmissionCapture struct {
-	Receipt  reviewpolicy.CIAdmissionReceipt
-	FetchErr error
+	Receipt         reviewpolicy.CIAdmissionReceipt
+	FetchErr        error
+	ReachabilityErr error
 }
 
 func capturePRCIAdmission(run prCommandRunner, target prReference, pr *PRInfo, files []string) (prCIAdmissionCapture, error) {
 	expectation := prCIAdmissionExpectation(pr, files)
 	contexts, fetchErr := getPRRequiredContexts(run, target)
+	var reachability *reviewpolicy.CIReachabilityEvidence
+	var reachabilityErr error
+	if fetchErr == nil && passingRequiredContexts(contexts) && expectation.TestReachability.Requested {
+		reachability, reachabilityErr = capturePRGoTestReachability(run, target, pr, files)
+	}
 	receipt, err := reviewpolicy.NewCIAdmissionReceipt(reviewpolicy.CIAdmissionInput{
 		Expectation:               expectation,
 		RequiredContextsAvailable: fetchErr == nil,
 		RequiredContexts:          contexts,
+		TestReachabilityEvidence:  reachability,
 	})
 	if err != nil {
 		return prCIAdmissionCapture{}, fmt.Errorf("create CI admission receipt: %w", err)
 	}
-	return prCIAdmissionCapture{Receipt: receipt, FetchErr: fetchErr}, nil
+	return prCIAdmissionCapture{Receipt: receipt, FetchErr: fetchErr, ReachabilityErr: reachabilityErr}, nil
+}
+
+func passingRequiredContexts(contexts []reviewpolicy.CIRequiredContext) bool {
+	if len(contexts) == 0 {
+		return false
+	}
+	for _, context := range contexts {
+		if context.State != "PASS" && context.State != "SUCCESS" {
+			return false
+		}
+	}
+	return true
 }
 
 func getPRRequiredContexts(run prCommandRunner, target prReference) ([]reviewpolicy.CIRequiredContext, error) {
@@ -162,6 +181,13 @@ func addPRCIAdmissionStatus(ctx *PRContext, capture prCIAdmissionCapture) {
 	detail := fmt.Sprintf("%s (%d required contexts; receipt %s)", receipt.Reason, len(receipt.RequiredContexts), displayPRAdmissionDigest(receipt.Digest))
 	if capture.FetchErr != nil {
 		detail += "; " + compactPRContextErrorText(capture.FetchErr.Error())
+	}
+	if capture.ReachabilityErr != nil {
+		detail += "; " + compactPRContextErrorText(capture.ReachabilityErr.Error())
+	}
+	if receipt.TestReachabilityStatus == reviewpolicy.CIReachabilityCovered && receipt.TestReachabilityEvidence != nil {
+		detail += fmt.Sprintf("; %d changed Go test files reached in required run %d",
+			len(receipt.TestReachability.RecognizedChangedTestFiles), receipt.TestReachabilityEvidence.RunID)
 	}
 	switch receipt.Decision {
 	case reviewpolicy.CIAdmissionAllow:
