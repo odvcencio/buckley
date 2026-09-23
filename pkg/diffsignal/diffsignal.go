@@ -41,6 +41,18 @@ const (
 	// Shared by the CLI oneshot path and the TUI /commit command.
 	CommitDiffBudget = 80_000
 
+	// PRDiffBudget is the default total output budget for `buckley pr` diff
+	// context. A PR habitually spans many more files than a single commit;
+	// reusing CommitDiffBudget starved everything past the first handful of
+	// alphabetically-early files. `buckley pr --diff-budget` overrides this.
+	PRDiffBudget = 300_000
+
+	// PRFileDiffCap is PrioritizeForPR's per-file cap, in place of
+	// MaxFileDiffBytes. It is smaller so the PR budget spreads representative
+	// (if truncated) hunks across many files instead of a few large files in
+	// the same category consuming the whole budget.
+	PRFileDiffCap = 12_000
+
 	// ReviewDiffBudget is the output budget for code-review paths.
 	// Reviews must retain complete medium-sized PRs so the approval gate does
 	// not depend on Git history that is intentionally absent from an isolated
@@ -146,6 +158,37 @@ func Split(raw string) []FileDiff {
 // is the total output budget; values <= 0 mean no total budget (per-file
 // caps and low-signal summarization still apply).
 func Prioritize(raw string, maxBytes int) Result {
+	return prioritizeCore(raw, maxBytes, MaxFileDiffBytes, nil)
+}
+
+// PrioritizeForPR is Prioritize with two adjustments the `buckley pr` path
+// needs that other callers (commit, review) do not:
+//
+//  1. Ranking: within the high-signal set, files are reordered by category
+//     (source first, tests next, docs/config after, dotdirs/scratch/handoff
+//     notes last) before the budget is spent, rather than git's alphabetical
+//     emission order. Git's order otherwise lets ".github/", "CHANGELOG.md",
+//     or "Makefile" consume a PR-scale budget before any hand-written source
+//     change is even considered, purely because '.' and upper-case letters
+//     sort ahead of lower-case package paths.
+//  2. Spreading: the per-file cap is PRFileDiffCap (smaller than
+//     MaxFileDiffBytes) so a handful of large same-category files cannot
+//     consume the entire budget and demote every later file in that
+//     category to a bare, hunk-free summary line.
+//
+// Low-signal classification (binary/generated/minified) and the
+// MaxParseBytes raw-input ceiling behave identically to Prioritize.
+func PrioritizeForPR(raw string, maxBytes int) Result {
+	return prioritizeCore(raw, maxBytes, PRFileDiffCap, rankFilesForPR)
+}
+
+// prioritizeCore is the shared assembly engine behind Prioritize and
+// PrioritizeForPR. perFileCap bounds how much of any single file's segment
+// is kept at full fidelity before it is cut with a truncation note. rank, if
+// non-nil, reorders the high-signal (normal) file-processing order before
+// the budget is spent; low-signal files are unaffected (they never consume
+// budget beyond their one summary line, in original emission order).
+func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []FileDiff, normal []int) []int) Result {
 	truncated := false
 
 	// Important-1b: before cutting at MaxParseBytes, scan the FULL input for
@@ -186,6 +229,9 @@ func Prioritize(raw string, maxBytes int) Result {
 			normal = append(normal, i)
 		}
 	}
+	if rank != nil {
+		normal = rank(files, normal)
+	}
 
 	// Compute exact summary line sizes upfront so budget accounting is precise.
 	// summaryLineSize[i] is the byte length of summaryLine(files[i])+"\n".
@@ -222,9 +268,9 @@ func Prioritize(raw string, maxBytes int) Result {
 	for _, idx := range normal {
 		f := files[idx]
 		seg := f.Segment
-		if len(seg) > MaxFileDiffBytes {
-			seg = cutAtLineBoundary(seg, MaxFileDiffBytes) +
-				fmt.Sprintf("\n[... %s: diff truncated at %d bytes ...]\n", f.Path, MaxFileDiffBytes)
+		if len(seg) > perFileCap {
+			seg = cutAtLineBoundary(seg, perFileCap) +
+				fmt.Sprintf("\n[... %s: diff truncated at %d bytes ...]\n", f.Path, perFileCap)
 			truncated = true
 		}
 		if maxBytes > 0 {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/terminal"
@@ -23,15 +24,19 @@ const (
 )
 
 type prCommandOptions struct {
-	dryRun   bool
-	yes      bool
-	push     bool
-	verbose  bool
-	showCost bool
-	base     string
-	model    string
-	backend  string
-	timeout  time.Duration
+	dryRun       bool
+	yes          bool
+	push         bool
+	verbose      bool
+	showCost     bool
+	base         string
+	model        string
+	backend      string
+	timeout      time.Duration
+	diffBudget   int
+	contextFiles []string
+	noUpdate     bool
+	draft        bool
 }
 
 type prCommandRuntime struct {
@@ -59,6 +64,11 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or models.utility.pr for API backend)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_PR_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	diffBudget := fs.Int("diff-budget", diffsignal.PRDiffBudget, "total byte budget for gathered diff context (default: PR-scale budget, larger than the commit-message default)")
+	var contextFileFlag stringSliceFlag
+	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable); content is treated as data, not instructions")
+	noUpdate := fs.Bool("no-update", false, "fail instead of silently overwriting an existing open PR's title/body")
+	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
 
 	if err := fs.Parse(args); err != nil {
 		return prCommandOptions{}, err
@@ -68,16 +78,75 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		return prCommandOptions{}, err
 	}
 	return prCommandOptions{
-		dryRun:   *dryRun,
-		yes:      *yes,
-		push:     *pushFlag,
-		verbose:  *verbose,
-		showCost: *showCost,
-		base:     *baseFlag,
-		model:    *modelFlag,
-		backend:  backend,
-		timeout:  *timeout,
+		dryRun:       *dryRun,
+		yes:          *yes,
+		push:         *pushFlag,
+		verbose:      *verbose,
+		showCost:     *showCost,
+		base:         *baseFlag,
+		model:        *modelFlag,
+		backend:      backend,
+		timeout:      *timeout,
+		diffBudget:   *diffBudget,
+		contextFiles: append([]string(nil), contextFileFlag...),
+		noUpdate:     *noUpdate,
+		draft:        *draft,
 	}, nil
+}
+
+// prContextNotesMaxBytes bounds the total size of author-supplied
+// --context-file content that reaches the prompt: enough for a slice
+// breakdown and verification notes, not an unbounded attachment.
+const prContextNotesMaxBytes = 16_000
+
+// loadPRContextNotes reads and concatenates the given --context-file paths,
+// each labeled by its path, bounded to prContextNotesMaxBytes total. A
+// missing or unreadable file is an error (an explicitly-requested file
+// vanishing silently would defeat the point of asking for it); the size
+// bound truncates rather than errors, since a legitimate note that merely
+// ran long is still useful context.
+func loadPRContextNotes(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", nil
+	}
+
+	var b strings.Builder
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read --context-file %s: %w", path, err)
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "### %s\n\n%s", path, content)
+	}
+
+	out := b.String()
+	if len(out) > prContextNotesMaxBytes {
+		out = out[:prContextNotesMaxBytes] + "\n... (truncated)"
+	}
+	return out, nil
+}
+
+// prContextOpts derives the git-diff gathering options for a PR run: a
+// PR-scale byte budget (diffsignal.PRDiffBudget by default, overridable via
+// --diff-budget) and PR-specific ranking (source first, tests next,
+// docs/config after, dotdirs/scratch/handoff notes last) rather than the
+// 80KB commit-message default and git's alphabetical file order that
+// RunOpts{} previously left BuildContext to fall back to.
+func prContextOpts(diffBudget int) oneshot.ContextOpts {
+	if diffBudget <= 0 {
+		diffBudget = diffsignal.PRDiffBudget
+	}
+	return oneshot.ContextOpts{
+		MaxDiffBytes:  diffBudget,
+		RankDiffForPR: true,
+	}
 }
 
 // runPRCommand generates a structured PR via tool-use.
@@ -93,6 +162,11 @@ func runPRCommand(args []string) error {
 		return err
 	}
 
+	contextNotes, err := loadPRContextNotes(opts.contextFiles)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
@@ -100,7 +174,7 @@ func runPRCommand(args []string) error {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
-	result, err := runPRGeneration(ctx, runtime.framework, resolveEvidenceBase(opts.base))
+	result, err := runPRGeneration(ctx, runtime.framework, resolveEvidenceBase(opts.base), opts.diffBudget, contextNotes)
 	if err != nil {
 		return err
 	}
@@ -123,7 +197,7 @@ func runPRCommand(args []string) error {
 		}
 	}
 
-	if err := createPR(pr, baseBranch); err != nil {
+	if err := createPR(pr, baseBranch, opts.noUpdate, opts.draft); err != nil {
 		return err
 	}
 
@@ -163,11 +237,13 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 	}, cleanup, nil
 }
 
-func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBranch string) (*prRunResult, error) {
+func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBranch string, diffBudget int, contextNotes string) (*prRunResult, error) {
 	spinner := terminal.NewSpinner("Generating PR...")
 	spinner.Start()
 
-	fwResult, err := framework.Run(ctx, commands.PRDefinition{BaseBranch: baseBranch}, oneshot.RunOpts{})
+	fwResult, err := framework.Run(ctx, commands.PRDefinition{BaseBranch: baseBranch, ContextNotes: contextNotes}, oneshot.RunOpts{
+		ContextOpts: prContextOpts(diffBudget),
+	})
 	result := prRunResultFromFramework(fwResult)
 	if err != nil {
 		result.Error = err
@@ -353,15 +429,20 @@ func pushCurrentBranch() error {
 	return nil
 }
 
-func createPR(pr *commands.PRResult, baseBranch string) error {
+func createPR(pr *commands.PRResult, baseBranch string, noUpdate, draft bool) error {
 	// Check for gh CLI
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh CLI not found (install from https://cli.github.com)")
 	}
 
 	body := pr.FormatBody()
-	if url, ok := openPRForBranch(); ok {
-		return updatePR(url, pr.Header(), body)
+	existingURL, existingFound := openPRForBranch()
+	update, err := resolvePRUpdatePolicy(existingURL, existingFound, noUpdate)
+	if err != nil {
+		return err
+	}
+	if update {
+		return updatePR(existingURL, pr.Header(), body)
 	}
 
 	spinner := terminal.NewSpinner("Creating PR...")
@@ -370,11 +451,7 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
-		"--title", pr.Header(),
-		"--body", body,
-		"--base", baseBranch,
-	)
+	cmd := exec.CommandContext(ctx, "gh", buildGhPRCreateArgs(pr.Header(), body, baseBranch, draft)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		spinner.StopWithError(fmt.Sprintf("failed: %s", strings.TrimSpace(string(output))))
@@ -385,6 +462,38 @@ func createPR(pr *commands.PRResult, baseBranch string) error {
 	prURL := strings.TrimSpace(string(output))
 	spinner.StopWithSuccess(fmt.Sprintf("PR created: %s", prURL))
 	return nil
+}
+
+// resolvePRUpdatePolicy decides whether createPR should update an existing
+// open PR in place, create a new one, or refuse. Kept pure (no gh
+// invocation) so the --no-update guard is unit-testable directly.
+//
+// Default (noUpdate=false) preserves the pre-existing behavior: re-running
+// `buckley pr` after new commits refreshes the open PR instead of failing
+// with "already exists". --no-update opts into the stricter, less
+// surprising behavior of refusing to touch a PR this run did not create.
+func resolvePRUpdatePolicy(existingURL string, existingFound bool, noUpdate bool) (update bool, err error) {
+	if !existingFound {
+		return false, nil
+	}
+	if noUpdate {
+		return false, fmt.Errorf("an open PR already exists at %s; refusing to overwrite its title/body (--no-update)", existingURL)
+	}
+	return true, nil
+}
+
+// buildGhPRCreateArgs assembles the `gh pr create` argument list, optionally
+// passing --draft through.
+func buildGhPRCreateArgs(title, body, baseBranch string, draft bool) []string {
+	args := []string{"pr", "create",
+		"--title", title,
+		"--body", body,
+		"--base", baseBranch,
+	}
+	if draft {
+		args = append(args, "--draft")
+	}
+	return args
 }
 
 // openPRForBranch reports the current branch's open PR, if one exists.

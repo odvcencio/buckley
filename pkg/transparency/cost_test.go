@@ -353,6 +353,44 @@ func TestModelPricingWithCached(t *testing.T) {
 	}
 }
 
+// TestCostUnknownForUsageCachedInputMirrorsReasoningPattern reproduces
+// Important-8: a run with provider-reported cached input tokens (observed
+// with qwen/qwen3.8-flash via OpenRouter, 31,488/31,704 input tokens
+// cached) reported cost as "unknown" even though no distinct cached-input
+// rate was configured for the model — the cached-input branch marked
+// CostUnknown unconditionally on any nonzero ReportedCachedInput, unlike
+// the ReportedReasoning branch two lines above it, which only flags unknown
+// when a distinct rate (pricing.ReasoningPerMillion > 0) exists that would
+// otherwise be silently ignored. The cached-input branch must follow the
+// same rule: only unknown when pricing.CachedInputPerMillion > 0.
+func TestCostUnknownForUsageCachedInputMirrorsReasoningPattern(t *testing.T) {
+	cached := 31_488
+	tokens := TokenUsage{Input: 31_704, ReportedCachedInput: &cached}
+
+	t.Run("no distinct cached rate configured: known (priced at full input rate)", func(t *testing.T) {
+		pricing := ModelPricing{InputPerMillion: 0.06, OutputPerMillion: 0.24}
+		if CostUnknownForUsage(tokens, pricing) {
+			t.Fatalf("CostUnknownForUsage = true, want false: no cached-input rate is configured, so pricing all input at the full rate is a safe (if imprecise) known cost, not an unknown one")
+		}
+	})
+
+	t.Run("distinct cached rate configured: unknown (rate would be silently ignored)", func(t *testing.T) {
+		pricing := ModelPricing{InputPerMillion: 0.06, OutputPerMillion: 0.24, CachedInputPerMillion: 0.015}
+		if !CostUnknownForUsage(tokens, pricing) {
+			t.Fatalf("CostUnknownForUsage = false, want true: a distinct cached rate exists that Calculate cannot apply from ReportedCachedInput alone")
+		}
+	})
+
+	t.Run("zero reported cached tokens: always known", func(t *testing.T) {
+		zero := 0
+		zeroTokens := TokenUsage{Input: 31_704, ReportedCachedInput: &zero}
+		pricing := ModelPricing{InputPerMillion: 0.06, OutputPerMillion: 0.24, CachedInputPerMillion: 0.015}
+		if CostUnknownForUsage(zeroTokens, pricing) {
+			t.Fatalf("CostUnknownForUsage = true, want false for zero reported cached tokens")
+		}
+	})
+}
+
 func TestModelPricingDoesNotGuessUnclassifiedSplit(t *testing.T) {
 	pricing := ModelPricing{
 		InputPerMillion:     3.00,

@@ -43,6 +43,15 @@ func CommitToolPrompt(defaultPrompt string, now time.Time) string {
 	return resolvePrompt("commit", defaultPrompt, now)
 }
 
+// PRToolPrompt applies the configured PR override to a caller-provided,
+// tool-compatible default prompt. This is the entry point the CLI's
+// generate_pull_request tool call uses (pkg/oneshot/commands.PRDefinition),
+// as distinct from PRPrompt, which serves the free-text JSON-output prompt
+// template.
+func PRToolPrompt(defaultPrompt string, now time.Time) string {
+	return resolvePrompt("pr", defaultPrompt, now)
+}
+
 func resolveOverride(kind string) string {
 	kind = strings.TrimSpace(kind)
 	if kind == "" {

@@ -134,7 +134,13 @@ func CostUnknownForUsage(tokens TokenUsage, pricing ModelPricing) bool {
 		if *tokens.ReportedCachedInput < 0 || *tokens.ReportedCachedInput > tokens.Input {
 			return true
 		}
-		if *tokens.ReportedCachedInput > 0 {
+		// Mirrors the ReportedReasoning rule above: only mark unknown when a
+		// distinct cached rate exists that Calculate cannot apply (it prices
+		// off the additive CachedInput field, not ReportedCachedInput). When
+		// no cached rate is configured for the model, Calculate already
+		// prices every input token at the uniform input rate, which is a
+		// safe (if imprecise, never negative) known cost.
+		if *tokens.ReportedCachedInput > 0 && pricing.CachedInputPerMillion > 0 {
 			return true
 		}
 	}
