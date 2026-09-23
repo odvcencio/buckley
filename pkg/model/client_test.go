@@ -1254,6 +1254,182 @@ func TestClient_ChatCompletion_SharedPoolRateLimitIsClassified(t *testing.T) {
 	}
 }
 
+// TestLooksLikeTransientProviderError covers C8's detection heuristic: an
+// error payload embedded in an HTTP 200 response names a transient upstream
+// condition (most commonly a rate limit) purely by its message/type text,
+// since the status code cannot be trusted once the provider has already
+// committed a 200 status line.
+func TestLooksLikeTransientProviderError(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail *ErrorDetail
+		want   bool
+	}{
+		{
+			name:   "nil detail",
+			detail: nil,
+			want:   false,
+		},
+		{
+			name:   "openrouter upstream rate limit phrasing",
+			detail: &ErrorDetail{Message: "openai/gpt-6-luna-pro is temporarily rate-limited upstream. Please retry shortly..."},
+			want:   true,
+		},
+		{
+			name:   "rate_limit_exceeded type",
+			detail: &ErrorDetail{Type: "rate_limit_exceeded", Message: "quota exceeded"},
+			want:   true,
+		},
+		{
+			name:   "too many requests phrasing",
+			detail: &ErrorDetail{Message: "Too many requests, please slow down"},
+			want:   true,
+		},
+		{
+			name:   "overloaded phrasing",
+			detail: &ErrorDetail{Message: "The model is currently overloaded with other requests"},
+			want:   true,
+		},
+		{
+			name:   "invalid request stays non-transient",
+			detail: &ErrorDetail{Type: "invalid_request", Message: "invalid tool schema"},
+			want:   false,
+		},
+		{
+			name:   "authentication error stays non-transient",
+			detail: &ErrorDetail{Type: "authentication_error", Message: "invalid API key"},
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := looksLikeTransientProviderError(tt.detail); got != tt.want {
+				t.Fatalf("looksLikeTransientProviderError(%+v) = %v, want %v", tt.detail, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClient_ChatCompletion_RetriesRateLimitErrorInsideHTTP200Body covers
+// C8: OpenRouter can deliver a rate-limit error inside a body with an HTTP
+// 200 status line, e.g. {"error":{"message":"openai/gpt-6-luna-pro is
+// temporarily rate-limited upstream. Please retry shortly..."}}. Buckley
+// must detect that in-band error and retry with the same backoff as a
+// genuine 429, instead of treating the 200 status as success and failing
+// the turn outright.
+func TestClient_ChatCompletion_RetriesRateLimitErrorInsideHTTP200Body(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusOK)
+		if attempts < 3 {
+			_, _ = w.Write([]byte(`{"error":{"message":"openai/gpt-6-luna-pro is temporarily rate-limited upstream. Please retry shortly...","type":"rate_limit_error"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"test","model":"test/model",
+			"choices":[{"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 4,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+	resp, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err != nil {
+		t.Fatalf("expected success after retrying the in-band 200 rate limit, got %v", err)
+	}
+	if resp.ID != "test" || attempts != 3 {
+		t.Fatalf("response=%q attempts=%d want test and 3", resp.ID, attempts)
+	}
+}
+
+// TestClient_ChatCompletion_NonTransientHTTP200BodyErrorFailsFast ensures
+// the C8 fix does not widen retries to every in-band error: a 200-status
+// body naming a permanent condition (e.g. an invalid request) must still
+// fail on the first attempt.
+func TestClient_ChatCompletion_NonTransientHTTP200BodyErrorFailsFast(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid tool schema","type":"invalid_request"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          2,
+		MaxRateLimitRetries: 4,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+	_, err := client.ChatCompletion(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	if err == nil {
+		t.Fatal("expected the non-transient in-band error to fail")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (no retry for a non-transient in-band error)", attempts)
+	}
+}
+
+// TestClient_ChatCompletionStream_RetriesRateLimitErrorInsideHTTP200SSEChunk
+// covers C8's SSE shape: the rate-limit error arrives as the first `data:`
+// chunk of an HTTP 200 stream, with no numeric status in its "code" field.
+// Buckley must retry the whole request rather than surfacing it as fatal.
+func TestClient_ChatCompletionStream_RetriesRateLimitErrorInsideHTTP200SSEChunk(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if attempts < 3 {
+			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"openai/gpt-6-luna-pro is temporarily rate-limited upstream. Please retry shortly...\",\"type\":\"rate_limit_error\"}}\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries:          1,
+		MaxRateLimitRetries: 4,
+		InitialInterval:     time.Millisecond,
+		MaxInterval:         2 * time.Millisecond,
+		Multiplier:          2,
+	})
+	chunks, errs := client.ChatCompletionStream(context.Background(), ChatRequest{
+		Model: "test/model", Messages: []Message{{Role: "user", Content: "test"}},
+	})
+	var received int
+	for range chunks {
+		received++
+	}
+	var streamErr error
+	for err := range errs {
+		streamErr = err
+	}
+	if streamErr != nil {
+		t.Fatalf("stream failed after retrying the in-band 200 rate limit: %v", streamErr)
+	}
+	if attempts != 3 || received != 1 {
+		t.Fatalf("attempts=%d chunks=%d want 3 and 1", attempts, received)
+	}
+}
+
 // TestDefaultRetryConfig tests the default retry configuration
 func TestDefaultRetryConfig(t *testing.T) {
 	config := DefaultRetryConfig()

@@ -412,13 +412,29 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				if message == "" {
 					message = "provider returned an error response"
 				}
-				return &APIError{
+				apiErr := &APIError{
 					StatusCode: resp.StatusCode,
 					Message:    message,
 					Type:       chatResp.Error.Type,
 					Code:       chatResp.Error.Code,
 					Retryable:  false,
 				}
+				if looksLikeTransientProviderError(chatResp.Error) {
+					// The provider committed an HTTP 200 status line and
+					// still reported a transient (usually rate-limit)
+					// failure in the body (C8). Treat it like a 429: the
+					// same exponential backoff and extended retry budget.
+					apiErr.StatusCode = http.StatusTooManyRequests
+					apiErr.Retryable = true
+				}
+				lastErr = apiErr
+				if c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
+					continue
+				}
+				if isRetryableError(lastErr) {
+					return retryExhaustedError(attempt, lastErr)
+				}
+				return apiErr
 			}
 			if len(chatResp.Choices) == 0 {
 				return NoResponseChoicesError(req, &chatResp)

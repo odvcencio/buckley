@@ -453,6 +453,15 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 				message = "provider returned a streaming error"
 			}
 			provider, details := providerErrorMetadata(chunk.Error.Metadata)
+			retryable := statusCode == http.StatusTooManyRequests || statusCode >= 500
+			if !retryable && looksLikeTransientProviderError(chunk.Error) {
+				// The SSE data: chunk carries an in-band transient
+				// (usually rate-limit) error before any content, with no
+				// numeric status in its "code" field (C8). Treat it like a
+				// 429: retryable, with the same backoff.
+				statusCode = http.StatusTooManyRequests
+				retryable = true
+			}
 			return events, &APIError{
 				StatusCode: statusCode,
 				Message:    message,
@@ -460,7 +469,7 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 				Code:       chunk.Error.Code,
 				Provider:   provider,
 				Details:    details,
-				Retryable:  statusCode == http.StatusTooManyRequests || statusCode >= 500,
+				Retryable:  retryable,
 			}
 		}
 		if err := validateStreamingToolCallIndices(chunk); err != nil {
