@@ -245,6 +245,51 @@ func TestMergeConfigsOpenAICompatibleSupportedParameters(t *testing.T) {
 	}
 }
 
+// TestMergeConfigsOpenAICompatiblePricing covers the same silent-drop bug
+// class as SupportedParameters/ContextLengths above: mergeOpenAICompatibleProvider
+// copies OpenAICompatibleConfig field by field, so a field added to the
+// struct without a matching merge case here never reaches the effective
+// config, even though config.Load() reports no error (observed live: a
+// providers.openai_compatible.pricing override was silently dropped,
+// leaving CalculateBoundedCost rejecting the model exactly as before).
+func TestMergeConfigsOpenAICompatiblePricing(t *testing.T) {
+	base := DefaultConfig()
+	override := &Config{Providers: ProviderConfig{OpenAICompatible: OpenAICompatibleConfig{
+		Pricing: map[string]ModelPricingOverride{
+			"deepseek-v4.1-flash": {InputPerMillion: 0, OutputPerMillion: 0},
+		},
+	}}}
+	raw := map[string]any{
+		"providers": map[string]any{
+			"openai_compatible": map[string]any{
+				"pricing": map[string]any{
+					"deepseek-v4.1-flash": map[string]any{
+						"input_per_million":  0,
+						"output_per_million": 0,
+					},
+				},
+			},
+		},
+	}
+
+	mergeConfigs(base, override, raw, false)
+
+	got, ok := base.Providers.OpenAICompatible.Pricing["deepseek-v4.1-flash"]
+	if !ok {
+		t.Fatal("pricing override was dropped by merge")
+	}
+	if got.InputPerMillion != 0 || got.OutputPerMillion != 0 {
+		t.Fatalf("pricing override = %+v, want zero", got)
+	}
+	if !base.Providers.OpenAICompatible.Enabled {
+		t.Fatal("an explicit OpenAI-compatible pricing map should enable the provider")
+	}
+	override.Providers.OpenAICompatible.Pricing["deepseek-v4.1-flash"] = ModelPricingOverride{InputPerMillion: 9}
+	if base.Providers.OpenAICompatible.Pricing["deepseek-v4.1-flash"].InputPerMillion != 0 {
+		t.Fatal("merged pricing aliases the override")
+	}
+}
+
 func TestMergeConfigsOpenAICompatibleStreamTimeouts(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
