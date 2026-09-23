@@ -36,7 +36,8 @@ func TestCapturePRCIAdmission_GoTestEvidenceCoversChangedTest(t *testing.T) {
 	if err := capture.Receipt.Authorize(prCIAdmissionExpectation(pr, files)); err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
-	if capture.Receipt.TestReachabilityEvidence.RunID != 123 || capture.Receipt.TestReachabilityEvidence.JobID != 456 {
+	if capture.Receipt.TestReachabilityEvidence.RunID != 123 || capture.Receipt.TestReachabilityEvidence.JobID != 456 ||
+		capture.Receipt.TestReachabilityEvidence.MergeSHA != "merge-sha" {
 		t.Fatalf("reachability provenance = %#v", capture.Receipt.TestReachabilityEvidence)
 	}
 	if logCalls != 0 {
@@ -55,6 +56,8 @@ func TestCapturePRCIAdmission_GoTestEvidenceFailsClosed(t *testing.T) {
 		{"package source ignored by Go", "ignored-source", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"package source is build constrained", "source-build-tag", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"CI contract drift", "contract-drift", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"merge commit parent drift", "merge-parent-drift", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"required run base drift", "run-base-drift", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"stale run head", "stale-head", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"unrelated required job link", "wrong-link", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"build-constrained test", "build-tag", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
@@ -113,7 +116,7 @@ func TestVerifyPRGoTestFile_PlatformSuffixRemainsUnavailable(t *testing.T) {
 	if err := verifyPRGoTestFile(func(string, ...string) ([]byte, error) {
 		t.Fatal("platform-specific test should fail before file fetch")
 		return nil, nil
-	}, pr, "pkg/parser_linux_test.go"); err == nil {
+	}, pr, "merge-sha", "pkg/parser_linux_test.go"); err == nil {
 		t.Fatal("platform-specific test accepted")
 	}
 }
@@ -123,7 +126,7 @@ func TestVerifyPRGoTestFile_IgnoredFilenameRemainsUnavailable(t *testing.T) {
 	if err := verifyPRGoTestFile(func(string, ...string) ([]byte, error) {
 		t.Fatal("ignored test should fail before file fetch")
 		return nil, nil
-	}, pr, "pkg/_hidden_test.go"); err == nil {
+	}, pr, "merge-sha", "pkg/_hidden_test.go"); err == nil {
 		t.Fatal("ignored test filename accepted")
 	}
 }
@@ -185,7 +188,9 @@ func TestRevalidatePRContext_GoTestEvidenceChangeInvalidatesReview(t *testing.T)
 				case name == "gh" && len(args) > 0 && args[0] == "run":
 					return adapter(name, args...)
 				case name == "gh" && len(args) > 1 && args[0] == "api" &&
-					(strings.Contains(args[1], "/git/trees/") || strings.Contains(args[1], "/contents/") || strings.Contains(args[1], "/actions/runs/")):
+					(strings.Contains(args[1], "/git/trees/") || strings.Contains(args[1], "/git/commits/") ||
+						strings.Contains(args[1], "/pulls/") || strings.Contains(args[1], "/contents/") ||
+						strings.Contains(args[1], "/actions/runs/")):
 					return adapter(name, args...)
 				default:
 					return base(name, args...)
@@ -225,7 +230,15 @@ func reachabilityTestRunner(pr *PRInfo, mode string) prCommandRunner {
 				link = "https://github.com/other/repo/actions/runs/123/job/456"
 			}
 			return []byte(fmt.Sprintf(`[{"name":"Test","state":"SUCCESS","link":%q}]`, link)), nil
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/git/trees/"):
+		case len(args) > 1 && args[0] == "api" && strings.HasSuffix(args[1], "/pulls/208"):
+			return []byte(`{"merge_commit_sha":"merge-sha"}`), nil
+		case len(args) > 1 && args[0] == "api" && strings.HasSuffix(args[1], "/git/commits/merge-sha"):
+			base := pr.BaseSHA
+			if mode == "merge-parent-drift" {
+				base = "other-base"
+			}
+			return []byte(fmt.Sprintf(`{"parents":[{"sha":%q},{"sha":%q}]}`, base, pr.HeadSHA)), nil
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/git/trees/merge-sha?"):
 			modeValue := "100644"
 			if mode == "symlink-test" {
 				modeValue = "120000"
@@ -247,22 +260,22 @@ func reachabilityTestRunner(pr *PRInfo, mode string) prCommandRunner {
 			}
 			return []byte(fmt.Sprintf(`{"truncated":%s,"tree":[{"path":"go.mod","mode":"100644","type":"blob"},{"path":"pkg/tool/builtin/git_test.go","mode":%q,"type":"blob"}%s%s]}`,
 				truncated, modeValue, source, nested)), nil
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/scripts/test.sh?"):
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/scripts/test.sh?ref=merge-sha"):
 			content, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "test.sh"))
 			if mode == "contract-drift" {
 				content = append(content, '#')
 			}
 			return content, err
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/.github/workflows/ci.yml?"):
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/.github/workflows/ci.yml?ref=merge-sha"):
 			return os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml"))
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/go.mod?"):
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/go.mod?ref=merge-sha"):
 			return []byte("module m31labs.dev/buckley\n\ngo 1.26.0\n"), nil
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git.go?"):
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git.go?ref=merge-sha"):
 			if mode == "source-build-tag" {
 				return []byte("//go:build integration\n\npackage builtin\n"), nil
 			}
 			return []byte("package builtin\n"), nil
-		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git_test.go?"):
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git_test.go?ref=merge-sha"):
 			if mode == "missing-file" {
 				return nil, errors.New("not found")
 			}
@@ -272,10 +285,15 @@ func reachabilityTestRunner(pr *PRInfo, mode string) prCommandRunner {
 			return []byte("package builtin\n"), nil
 		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/actions/runs/123"):
 			workflow := ".github/workflows/ci.yml"
+			base := pr.BaseSHA
+			if mode == "run-base-drift" {
+				base = "other-base"
+			}
 			if mode == "other-workflow" {
 				workflow = ".github/workflows/other.yml"
 			}
-			return []byte(fmt.Sprintf(`{"path":%q,"head_sha":%q,"event":"pull_request"}`, workflow, pr.HeadSHA)), nil
+			return []byte(fmt.Sprintf(`{"path":%q,"head_sha":%q,"event":"pull_request","pull_requests":[{"number":%d,"base":{"sha":%q},"head":{"sha":%q}}]}`,
+				workflow, pr.HeadSHA, pr.Number, base, pr.HeadSHA)), nil
 		case len(args) > 2 && args[0] == "run" && args[1] == "view" && args[2] == "123":
 			head := pr.HeadSHA
 			conclusion := "success"

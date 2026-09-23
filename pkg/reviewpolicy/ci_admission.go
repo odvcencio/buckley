@@ -31,7 +31,7 @@ const (
 	CIReachabilityNotCovered    CIReachabilityStatus = "not_covered"
 )
 
-const ciAdmissionPolicyV2 = "required contexts must be available, non-empty, and passing; changed Go tests must be structurally reachable by a pinned CI test command on the exact head"
+const ciAdmissionPolicyV2 = "required contexts must be available, non-empty, and passing; changed Go tests must be structurally reachable by a pinned CI test command on the exact base-head merge"
 
 var (
 	ErrCIAdmissionMissing     = errors.New("ci admission receipt is missing")
@@ -76,10 +76,11 @@ type CIReachabilityRequest struct {
 }
 
 // CIReachabilityEvidence records Go packages proven reachable by the pinned
-// CI test command in one required GitHub Actions check for the exact PR head.
+// CI test command on the PR merge snapshot in one required GitHub Actions check.
 type CIReachabilityEvidence struct {
 	Source   string   `json:"source"`
 	HeadSHA  string   `json:"head_sha"`
+	MergeSHA string   `json:"merge_sha"`
 	RunID    int64    `json:"run_id"`
 	JobID    int64    `json:"job_id"`
 	Check    string   `json:"check"`
@@ -299,10 +300,11 @@ func normalizeCIReachabilityEvidence(value *CIReachabilityEvidence, expectation 
 	copy := *value
 	copy.Source = strings.TrimSpace(copy.Source)
 	copy.HeadSHA = strings.TrimSpace(copy.HeadSHA)
+	copy.MergeSHA = strings.TrimSpace(copy.MergeSHA)
 	copy.Check = strings.TrimSpace(copy.Check)
 	copy.Module = strings.Trim(strings.TrimSpace(copy.Module), "/")
 	if copy.Source != "buckley_ci_go_test_v1" || copy.HeadSHA != expectation.Identity.HeadSHA ||
-		copy.RunID <= 0 || copy.JobID <= 0 || copy.Check == "" || copy.Module == "" ||
+		copy.MergeSHA == "" || copy.RunID <= 0 || copy.JobID <= 0 || copy.Check == "" || copy.Module == "" ||
 		len(expectation.TestReachability.RecognizedChangedTestFiles) == 0 {
 		return nil, fmt.Errorf("%w: incomplete or stale test-reachability evidence", ErrCIAdmissionInvalid)
 	}
@@ -346,7 +348,7 @@ func equalCIReachabilityEvidence(left, right *CIReachabilityEvidence) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	if left.Source != right.Source || left.HeadSHA != right.HeadSHA || left.RunID != right.RunID ||
+	if left.Source != right.Source || left.HeadSHA != right.HeadSHA || left.MergeSHA != right.MergeSHA || left.RunID != right.RunID ||
 		left.JobID != right.JobID || left.Check != right.Check || left.Module != right.Module || len(left.Packages) != len(right.Packages) {
 		return false
 	}

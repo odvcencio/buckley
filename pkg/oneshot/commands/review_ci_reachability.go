@@ -74,18 +74,22 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 	if err := json.Unmarshal(output, &links); err != nil {
 		return nil, fmt.Errorf("decode required check links: %w", err)
 	}
-	if err := verifyPRCIContract(run, pr); err != nil {
-		return nil, err
-	}
-	treeFiles, err := verifyPRGoTestTree(run, pr, files)
+	mergeSHA, err := readPRCIMergeCommit(run, pr)
 	if err != nil {
 		return nil, err
 	}
-	module, err := readPRGoModule(run, pr)
+	if err := verifyPRCIContract(run, pr, mergeSHA); err != nil {
+		return nil, err
+	}
+	treeFiles, err := verifyPRGoTestTree(run, pr, mergeSHA, files)
 	if err != nil {
 		return nil, err
 	}
-	packages, err := provePRGoTestPackages(run, pr, module, files, treeFiles)
+	module, err := readPRGoModule(run, pr, mergeSHA)
+	if err != nil {
+		return nil, err
+	}
+	packages, err := provePRGoTestPackages(run, pr, mergeSHA, module, files, treeFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +118,7 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 					continue
 				}
 				return &reviewpolicy.CIReachabilityEvidence{
-					Source: "buckley_ci_go_test_v1", HeadSHA: pr.HeadSHA,
+					Source: "buckley_ci_go_test_v1", HeadSHA: pr.HeadSHA, MergeSHA: mergeSHA,
 					RunID: runID, JobID: jobID, Check: check.Name,
 					Module: module, Packages: packages,
 				}, nil
@@ -124,7 +128,36 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 	return nil, fmt.Errorf("no completed required Go test job for PR head %s", pr.HeadSHA)
 }
 
-func verifyPRCIContract(run prCommandRunner, pr *PRInfo) error {
+func readPRCIMergeCommit(run prCommandRunner, pr *PRInfo) (string, error) {
+	endpoint := "repos/" + pr.Repository + "/pulls/" + strconv.Itoa(pr.Number)
+	output, err := run("gh", withPRAPIHostname([]string{"api", endpoint}, pr.Host)...)
+	if err != nil {
+		return "", fmt.Errorf("read PR merge commit: %w", err)
+	}
+	var pull struct {
+		MergeCommitSHA string `json:"merge_commit_sha"`
+	}
+	if err := json.Unmarshal(output, &pull); err != nil || pull.MergeCommitSHA == "" {
+		return "", fmt.Errorf("PR merge commit is unavailable")
+	}
+	endpoint = "repos/" + pr.Repository + "/git/commits/" + url.PathEscape(pull.MergeCommitSHA)
+	output, err = run("gh", withPRAPIHostname([]string{"api", endpoint}, pr.Host)...)
+	if err != nil {
+		return "", fmt.Errorf("read PR merge commit parents: %w", err)
+	}
+	var commit struct {
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+	}
+	if err := json.Unmarshal(output, &commit); err != nil || len(commit.Parents) != 2 ||
+		commit.Parents[0].SHA != pr.BaseSHA || commit.Parents[1].SHA != pr.HeadSHA {
+		return "", fmt.Errorf("PR merge commit is not from the current base and head")
+	}
+	return pull.MergeCommitSHA, nil
+}
+
+func verifyPRCIContract(run prCommandRunner, pr *PRInfo, mergeSHA string) error {
 	for _, item := range []struct {
 		path string
 		sha  string
@@ -132,7 +165,7 @@ func verifyPRCIContract(run prCommandRunner, pr *PRInfo) error {
 		{"scripts/test.sh", buckleyCITestScriptSHA256},
 		{".github/workflows/ci.yml", buckleyCIWorkflowSHA256},
 	} {
-		content, err := readPRHeadRawFile(run, pr, item.path)
+		content, err := readPRSnapshotRawFile(run, pr, mergeSHA, item.path)
 		if err != nil {
 			return fmt.Errorf("read CI contract %s: %w", item.path, err)
 		}
@@ -150,9 +183,18 @@ func verifyPRTestWorkflow(run prCommandRunner, pr *PRInfo, runID int64) error {
 		return err
 	}
 	var data struct {
-		Path    string `json:"path"`
-		HeadSHA string `json:"head_sha"`
-		Event   string `json:"event"`
+		Path         string `json:"path"`
+		HeadSHA      string `json:"head_sha"`
+		Event        string `json:"event"`
+		PullRequests []struct {
+			Number int `json:"number"`
+			Base   struct {
+				SHA string `json:"sha"`
+			} `json:"base"`
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+		} `json:"pull_requests"`
 	}
 	if err := json.Unmarshal(output, &data); err != nil {
 		return err
@@ -160,17 +202,22 @@ func verifyPRTestWorkflow(run prCommandRunner, pr *PRInfo, runID int64) error {
 	if data.Path != ".github/workflows/ci.yml" || data.HeadSHA != pr.HeadSHA || data.Event != "pull_request" {
 		return fmt.Errorf("required check is not from the expected CI workflow and PR head")
 	}
-	return nil
+	for _, pull := range data.PullRequests {
+		if pull.Number == pr.Number && pull.Base.SHA == pr.BaseSHA && pull.Head.SHA == pr.HeadSHA {
+			return nil
+		}
+	}
+	return fmt.Errorf("required check is not from the current PR base and head")
 }
 
-func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) (map[string]bool, error) {
-	endpoint := "repos/" + pr.Repository + "/git/trees/" + url.PathEscape(pr.HeadSHA) + "?recursive=1"
+func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, mergeSHA string, files []string) (map[string]bool, error) {
+	endpoint := "repos/" + pr.Repository + "/git/trees/" + url.PathEscape(mergeSHA) + "?recursive=1"
 	output, err := run("gh", withPRAPIHostname([]string{"api", endpoint}, pr.Host)...)
 	if err != nil {
-		return nil, fmt.Errorf("read head tree: %w", err)
+		return nil, fmt.Errorf("read PR merge tree: %w", err)
 	}
 	if len(output) > 16<<20 {
-		return nil, fmt.Errorf("head tree exceeds reachability evidence limit")
+		return nil, fmt.Errorf("PR merge tree exceeds reachability evidence limit")
 	}
 	var tree struct {
 		Truncated bool `json:"truncated"`
@@ -181,7 +228,7 @@ func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) (map[st
 		} `json:"tree"`
 	}
 	if err := json.Unmarshal(output, &tree); err != nil || tree.Truncated {
-		return nil, fmt.Errorf("head tree is unavailable or truncated")
+		return nil, fmt.Errorf("PR merge tree is unavailable or truncated")
 	}
 	entries := make(map[string]bool, len(tree.Entries))
 	for _, entry := range tree.Entries {
@@ -190,11 +237,11 @@ func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) (map[st
 		}
 	}
 	if !entries["go.mod"] {
-		return nil, fmt.Errorf("head go.mod is not a regular file")
+		return nil, fmt.Errorf("PR merge go.mod is not a regular file")
 	}
 	for _, file := range files {
 		if !entries[file] {
-			return nil, fmt.Errorf("changed Go test %s is not a regular head file", file)
+			return nil, fmt.Errorf("changed Go test %s is not a regular PR merge file", file)
 		}
 		for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
 			if entries[dir+"/go.mod"] {
@@ -239,10 +286,10 @@ func readPRTestRun(run prCommandRunner, target prReference, runID int64) (prTest
 	return data, nil
 }
 
-func provePRGoTestPackages(run prCommandRunner, pr *PRInfo, module string, files []string, treeFiles map[string]bool) ([]string, error) {
+func provePRGoTestPackages(run prCommandRunner, pr *PRInfo, mergeSHA, module string, files []string, treeFiles map[string]bool) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, file := range files {
-		if err := verifyPRGoTestFile(run, pr, file); err != nil {
+		if err := verifyPRGoTestFile(run, pr, mergeSHA, file); err != nil {
 			return nil, err
 		}
 		dir := path.Dir(file)
@@ -266,7 +313,7 @@ func provePRGoTestPackages(run prCommandRunner, pr *PRInfo, module string, files
 			if index == 16 {
 				break
 			}
-			content, err := readPRHeadRawFile(run, pr, candidate)
+			content, err := readPRSnapshotRawFile(run, pr, mergeSHA, candidate)
 			if err == nil && plainPRGoSource(content) {
 				buildable = true
 				break
@@ -316,20 +363,20 @@ func plainPRGoSource(content string) bool {
 	return true
 }
 
-func readPRGoModule(run prCommandRunner, pr *PRInfo) (string, error) {
-	content, err := readPRHeadRawFile(run, pr, "go.mod")
+func readPRGoModule(run prCommandRunner, pr *PRInfo, mergeSHA string) (string, error) {
+	content, err := readPRSnapshotRawFile(run, pr, mergeSHA, "go.mod")
 	if err != nil {
-		return "", fmt.Errorf("read head go.mod: %w", err)
+		return "", fmt.Errorf("read PR merge go.mod: %w", err)
 	}
 	for _, line := range strings.Split(content, "\n") {
 		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "module" {
 			return fields[1], nil
 		}
 	}
-	return "", fmt.Errorf("head go.mod has no module directive")
+	return "", fmt.Errorf("PR merge go.mod has no module directive")
 }
 
-func verifyPRGoTestFile(run prCommandRunner, pr *PRInfo, file string) error {
+func verifyPRGoTestFile(run prCommandRunner, pr *PRInfo, mergeSHA, file string) error {
 	if strings.Contains(file, "\\") || path.IsAbs(file) || path.Clean(file) != file || strings.HasPrefix(file, "../") {
 		return fmt.Errorf("invalid changed test path %s", file)
 	}
@@ -339,9 +386,9 @@ func verifyPRGoTestFile(run prCommandRunner, pr *PRInfo, file string) error {
 	if platformSpecificGoFile(file) {
 		return fmt.Errorf("platform-specific Go test %s needs explicit CI file evidence", file)
 	}
-	content, err := readPRHeadRawFile(run, pr, file)
+	content, err := readPRSnapshotRawFile(run, pr, mergeSHA, file)
 	if err != nil {
-		return fmt.Errorf("read head test file %s: %w", file, err)
+		return fmt.Errorf("read PR merge test file %s: %w", file, err)
 	}
 	if hasGoBuildConstraint(content) {
 		return fmt.Errorf("build-constrained Go test %s needs explicit CI file evidence", file)
@@ -378,19 +425,19 @@ var goPlatformSuffixes = map[string]bool{
 	"ppc64": true, "ppc64le": true, "riscv64": true, "s390x": true, "wasm": true,
 }
 
-func readPRHeadRawFile(run prCommandRunner, pr *PRInfo, file string) (string, error) {
+func readPRSnapshotRawFile(run prCommandRunner, pr *PRInfo, ref, file string) (string, error) {
 	segments := strings.Split(file, "/")
 	for index := range segments {
 		segments[index] = url.PathEscape(segments[index])
 	}
-	endpoint := "repos/" + pr.Repository + "/contents/" + strings.Join(segments, "/") + "?ref=" + url.QueryEscape(pr.HeadSHA)
+	endpoint := "repos/" + pr.Repository + "/contents/" + strings.Join(segments, "/") + "?ref=" + url.QueryEscape(ref)
 	args := withPRAPIHostname([]string{"api", endpoint, "-H", "Accept: application/vnd.github.raw+json"}, pr.Host)
 	output, err := run("gh", args...)
 	if err != nil {
 		return "", err
 	}
 	if len(output) > 1<<20 {
-		return "", fmt.Errorf("head file %s exceeds reachability evidence limit", file)
+		return "", fmt.Errorf("PR snapshot file %s exceeds reachability evidence limit", file)
 	}
 	return string(output), nil
 }

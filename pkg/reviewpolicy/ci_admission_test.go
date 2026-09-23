@@ -174,7 +174,7 @@ func TestNewCIAdmissionReceipt_GoTestPackageEvidenceAuthorizesExactHead(t *testi
 	expectation := testCIAdmissionExpectation()
 	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/tool/builtin/git_test.go", "pkg/reviewpolicy/ci_admission_test.go"}
 	evidence := &CIReachabilityEvidence{
-		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA, MergeSHA: "merge-sha",
 		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
 		Packages: []string{"m31labs.dev/buckley/pkg/tool/builtin", "m31labs.dev/buckley/pkg/reviewpolicy"},
 	}
@@ -206,6 +206,13 @@ func TestNewCIAdmissionReceipt_GoTestPackageEvidenceAuthorizesExactHead(t *testi
 	if err := tampered.Authorize(expectation); !errors.Is(err, ErrCIAdmissionInvalid) {
 		t.Fatalf("tampered packages authorization = %v", err)
 	}
+	tampered = receipt
+	changedMerge := *receipt.TestReachabilityEvidence
+	changedMerge.MergeSHA = "other-merge"
+	tampered.TestReachabilityEvidence = &changedMerge
+	if err := tampered.Authorize(expectation); !errors.Is(err, ErrCIAdmissionInvalid) {
+		t.Fatalf("tampered merge authorization = %v", err)
+	}
 
 	input.TestReachabilityEvidence = &copy
 	missing, err := NewCIAdmissionReceipt(input)
@@ -225,7 +232,7 @@ func TestNewCIAdmissionReceipt_RejectsUnboundGoTestEvidence(t *testing.T) {
 	expectation := testCIAdmissionExpectation()
 	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/git_test.go"}
 	evidence := &CIReachabilityEvidence{
-		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA, MergeSHA: "merge-sha",
 		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
 		Packages: []string{"m31labs.dev/buckley/pkg"},
 	}
@@ -234,6 +241,7 @@ func TestNewCIAdmissionReceipt_RejectsUnboundGoTestEvidence(t *testing.T) {
 		edit func(*CIReachabilityEvidence)
 	}{
 		{"wrong head", func(e *CIReachabilityEvidence) { e.HeadSHA = "other-head" }},
+		{"missing merge", func(e *CIReachabilityEvidence) { e.MergeSHA = "" }},
 		{"unrequired check", func(e *CIReachabilityEvidence) { e.Check = "Other" }},
 		{"missing run", func(e *CIReachabilityEvidence) { e.RunID = 0 }},
 		{"outside module", func(e *CIReachabilityEvidence) { e.Packages = []string{"other/pkg"} }},
