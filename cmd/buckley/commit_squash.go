@@ -122,23 +122,39 @@ func prepareSquashReset(opts commitCommandOptions) (squashResetOutcome, error) {
 
 	// git reset --soft records origHead in the branch reflog (HEAD@{1})
 	// before moving the ref; printing it here is the undo instructions,
-	// not a separate bookkeeping step.
+	// not a separate bookkeeping step. --dry-run still performs the reset
+	// (the generated preview needs the real range diff as context) but
+	// runSquashCommand restores origHead before returning, so a preview
+	// never leaves the branch changed.
 	if err := gitRun("reset", "--soft", mergeBase); err != nil {
 		return squashResetOutcome{}, fmt.Errorf("soft reset to merge-base %s: %w", mergeBase, err)
 	}
-	fmt.Printf("buckley: squashed %d commit(s) on %s; pre-squash HEAD was %s (recorded in the reflog)\n", len(subjects), branch, origHead)
-	fmt.Printf("buckley: undo with: git reset --hard %s\n", origHead)
+	if opts.dryRun {
+		fmt.Printf("buckley: --dry-run: previewing a squash of %d commit(s) on %s; the branch will be restored to %s after the preview\n", len(subjects), branch, origHead)
+	} else {
+		fmt.Printf("buckley: squashed %d commit(s) on %s; pre-squash HEAD was %s (recorded in the reflog)\n", len(subjects), branch, origHead)
+		fmt.Printf("buckley: undo with: git reset --hard %s\n", origHead)
+	}
 
 	return squashResetOutcome{Branch: branch, Subjects: subjects, OrigHead: origHead}, nil
 }
 
 // runSquashCommand implements `buckley commit --squash <base>`: soft-reset
 // the current branch to its merge-base with base, then create one commit
-// with a generated message summarizing the whole range.
+// with a generated message summarizing the whole range. --dry-run restores
+// the branch to its pre-squash state before returning: a preview must
+// never leave lasting changes (FINDING-001, buckbot review of PR #216).
 func runSquashCommand(opts commitCommandOptions) error {
 	outcome, err := prepareSquashReset(opts)
 	if err != nil {
 		return err
+	}
+	if opts.dryRun {
+		defer func() {
+			if restoreErr := gitRun("reset", "--soft", outcome.OrigHead); restoreErr != nil {
+				fmt.Fprintf(os.Stderr, "buckley: failed to restore pre-squash HEAD %s after --dry-run: %v\n", outcome.OrigHead, restoreErr)
+			}
+		}()
 	}
 	subjects, branch := outcome.Subjects, outcome.Branch
 

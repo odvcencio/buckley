@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // squashRepo builds a repo with a "main" branch and a "topic" branch three
@@ -236,6 +240,43 @@ func TestCompleteSquashWithRunner_PushesWithForceWithLease(t *testing.T) {
 	remoteHead := runGitIn(t, repo, "ls-remote", "origin", "refs/heads/topic")
 	if !strings.Contains(remoteHead, localHead) {
 		t.Fatalf("remote ref = %q, want to contain pushed head %s", remoteHead, localHead)
+	}
+}
+
+// TestRunSquashCommand_DryRunRestoresBranchEvenOnLateError guards against
+// FINDING-001 from the buckbot review of PR #216: prepareSquashReset's
+// `git reset --soft` ran unconditionally, and completeSquashWithRunner
+// only checked --dry-run after that reset (to skip creating the commit),
+// so a preview left HEAD moved and the range diff staged. runSquashCommand
+// now restores origHead in a defer that fires on every return path,
+// including an error after the reset. This test forces dependency init to
+// fail (a real, deterministic, network-free error) so the model-generation
+// step never happens, and confirms HEAD is still restored.
+func TestRunSquashCommand_DryRunRestoresBranchEvenOnLateError(t *testing.T) {
+	repo := squashRepo(t)
+	origHead := runGitIn(t, repo, "rev-parse", "HEAD")
+	chdirTemp(t, repo)
+
+	previousInit := initDependenciesFn
+	t.Cleanup(func() { initDependenciesFn = previousInit })
+	sentinel := errors.New("dependency init reached (should not commit)")
+	initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+		return nil, nil, nil, sentinel
+	}
+
+	opts := commitCommandOptions{squashBase: "main", dryRun: true, yes: true, compactOutput: true, backend: oneshotBackendAPI}
+	err := runSquashCommand(opts)
+	if err == nil || !strings.Contains(err.Error(), sentinel.Error()) {
+		t.Fatalf("runSquashCommand() error = %v, want the sentinel dependency-init error", err)
+	}
+
+	head := runGitIn(t, repo, "rev-parse", "HEAD")
+	if head != origHead {
+		t.Fatalf("HEAD after --dry-run (with a late error) = %s, want restored to %s", head, origHead)
+	}
+	staged := runGitIn(t, repo, "diff", "--cached", "--name-only")
+	if staged != "" {
+		t.Fatalf("staged files after --dry-run restore = %q, want none", staged)
 	}
 }
 
