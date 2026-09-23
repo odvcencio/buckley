@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/model"
@@ -74,7 +76,7 @@ type reviewCommandResult struct {
 }
 
 // reviewProgress keeps model-review output machine-readable when the caller
-// requests quiet mode, while preserving the interactive spinner otherwise.
+// requests quiet mode or redirects stdout, while preserving the interactive spinner.
 type reviewProgress interface {
 	Start()
 	SetMessage(string)
@@ -84,13 +86,15 @@ type reviewProgress interface {
 
 type silentReviewProgress struct{}
 
+var reviewOutputIsTerminalFn = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
+
 func (silentReviewProgress) Start()                 {}
 func (silentReviewProgress) SetMessage(string)      {}
 func (silentReviewProgress) StopWithSuccess(string) {}
 func (silentReviewProgress) StopWithError(string)   {}
 
 func newReviewProgress(message string) reviewProgress {
-	if quietMode {
+	if quietMode || !reviewOutputIsTerminalFn() {
 		return silentReviewProgress{}
 	}
 	return terminal.NewSpinner(message)
