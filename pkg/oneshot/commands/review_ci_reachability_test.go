@@ -3,6 +3,8 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,16 @@ import (
 func TestCapturePRCIAdmission_GoTestEvidenceCoversChangedTest(t *testing.T) {
 	pr := reachabilityTestPR()
 	files := []string{"pkg/tool/builtin/git_test.go"}
-	capture, err := capturePRCIAdmission(reachabilityTestRunner(pr, ""),
+	base := reachabilityTestRunner(pr, "")
+	logCalls := 0
+	run := func(name string, args ...string) ([]byte, error) {
+		if name == "gh" && hasPRArgPrefix(args, "run", "view", "--job") && hasPRArg(args, "--log") {
+			logCalls++
+			return []byte("Test\tUNKNOWN STEP\t2026-09-22T22:50:00Z ok  m31labs.dev/buckley/pkg/tool/builtin 0.01s\n"), nil
+		}
+		return base(name, args...)
+	}
+	capture, err := capturePRCIAdmission(run,
 		prReference{Number: pr.Number, Host: pr.Host, Repository: pr.Repository}, pr, files)
 	if err != nil {
 		t.Fatal(err)
@@ -28,6 +39,9 @@ func TestCapturePRCIAdmission_GoTestEvidenceCoversChangedTest(t *testing.T) {
 	if capture.Receipt.TestReachabilityEvidence.RunID != 123 || capture.Receipt.TestReachabilityEvidence.JobID != 456 {
 		t.Fatalf("reachability provenance = %#v", capture.Receipt.TestReachabilityEvidence)
 	}
+	if logCalls != 0 {
+		t.Fatalf("CI log lines influenced structural reachability: %d calls", logCalls)
+	}
 }
 
 func TestCapturePRCIAdmission_GoTestEvidenceFailsClosed(t *testing.T) {
@@ -37,12 +51,15 @@ func TestCapturePRCIAdmission_GoTestEvidenceFailsClosed(t *testing.T) {
 		wantDecision reviewpolicy.CIAdmissionDecision
 		wantReason   reviewpolicy.CIAdmissionReason
 	}{
-		{"package absent from complete log", "other-package", reviewpolicy.CIAdmissionDeny, reviewpolicy.CIAdmissionReasonTestNotCovered},
+		{"package has no buildable source", "no-source", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"package source ignored by Go", "ignored-source", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"package source is build constrained", "source-build-tag", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"CI contract drift", "contract-drift", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"stale run head", "stale-head", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"unrelated required job link", "wrong-link", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"build-constrained test", "build-tag", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"missing test file", "missing-file", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
-		{"missing step result", "outside-step", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"skipped Go test step", "skipped-step", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"changed test entrypoint", "changed-entrypoint", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"changed earlier CI script", "changed-pretest-script", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"changed workflow", "changed-workflow", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
@@ -101,6 +118,16 @@ func TestVerifyPRGoTestFile_PlatformSuffixRemainsUnavailable(t *testing.T) {
 	}
 }
 
+func TestVerifyPRGoTestFile_IgnoredFilenameRemainsUnavailable(t *testing.T) {
+	pr := reachabilityTestPR()
+	if err := verifyPRGoTestFile(func(string, ...string) ([]byte, error) {
+		t.Fatal("ignored test should fail before file fetch")
+		return nil, nil
+	}, pr, "pkg/_hidden_test.go"); err == nil {
+		t.Fatal("ignored test filename accepted")
+	}
+}
+
 func TestParsePRRequiredJobLink_EnterpriseHostPort(t *testing.T) {
 	pr := reachabilityTestPR()
 	pr.Host = "github.corp.example:8443"
@@ -108,6 +135,25 @@ func TestParsePRRequiredJobLink_EnterpriseHostPort(t *testing.T) {
 		"https://github.corp.example:8443/odvcencio/buckley/actions/runs/123/job/456", pr)
 	if err != nil || runID != 123 || jobID != 456 {
 		t.Fatalf("required job link = %d/%d, error = %v", runID, jobID, err)
+	}
+}
+
+func TestGoTestScriptIncludesDir_SkipsIgnoredDirectories(t *testing.T) {
+	for _, test := range []struct {
+		dir  string
+		want bool
+	}{
+		{"pkg/tool/builtin", true},
+		{"cmd/buckley", true},
+		{"pkg/testdata/fixture", false},
+		{"pkg/_hidden", false},
+		{"pkg/.hidden", false},
+		{"pkg/vendor/example", false},
+		{"cmd/other", false},
+	} {
+		if got := goTestScriptIncludesDir(test.dir); got != test.want {
+			t.Errorf("goTestScriptIncludesDir(%q) = %v, want %v", test.dir, got, test.want)
+		}
 	}
 }
 
@@ -126,7 +172,7 @@ func TestRevalidatePRContext_GoTestEvidenceChangeInvalidatesReview(t *testing.T)
 		wantChanged bool
 	}{
 		{"stable", "", false},
-		{"package result disappeared", "other-package", true},
+		{"package source disappeared", "no-source", true},
 		{"required run head changed", "stale-head", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -192,10 +238,30 @@ func reachabilityTestRunner(pr *PRInfo, mode string) prCommandRunner {
 			if mode == "truncated-tree" {
 				truncated = "true"
 			}
-			return []byte(fmt.Sprintf(`{"truncated":%s,"tree":[{"path":"go.mod","mode":"100644","type":"blob"},{"path":"pkg/tool/builtin/git_test.go","mode":%q,"type":"blob"}%s]}`,
-				truncated, modeValue, nested)), nil
+			source := `,{"path":"pkg/tool/builtin/git.go","mode":"100644","type":"blob"}`
+			if mode == "no-source" {
+				source = ""
+			}
+			if mode == "ignored-source" {
+				source = `,{"path":"pkg/tool/builtin/_git.go","mode":"100644","type":"blob"}`
+			}
+			return []byte(fmt.Sprintf(`{"truncated":%s,"tree":[{"path":"go.mod","mode":"100644","type":"blob"},{"path":"pkg/tool/builtin/git_test.go","mode":%q,"type":"blob"}%s%s]}`,
+				truncated, modeValue, source, nested)), nil
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/scripts/test.sh?"):
+			content, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "test.sh"))
+			if mode == "contract-drift" {
+				content = append(content, '#')
+			}
+			return content, err
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/.github/workflows/ci.yml?"):
+			return os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml"))
 		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/go.mod?"):
 			return []byte("module m31labs.dev/buckley\n\ngo 1.26.0\n"), nil
+		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git.go?"):
+			if mode == "source-build-tag" {
+				return []byte("//go:build integration\n\npackage builtin\n"), nil
+			}
+			return []byte("package builtin\n"), nil
 		case len(args) > 1 && args[0] == "api" && strings.Contains(args[1], "/contents/pkg/tool/builtin/git_test.go?"):
 			if mode == "missing-file" {
 				return nil, errors.New("not found")
@@ -212,21 +278,15 @@ func reachabilityTestRunner(pr *PRInfo, mode string) prCommandRunner {
 			return []byte(fmt.Sprintf(`{"path":%q,"head_sha":%q,"event":"pull_request"}`, workflow, pr.HeadSHA)), nil
 		case len(args) > 2 && args[0] == "run" && args[1] == "view" && args[2] == "123":
 			head := pr.HeadSHA
+			conclusion := "success"
 			if mode == "stale-head" {
 				head = "other-head"
 			}
-			return []byte(fmt.Sprintf(`{"headSha":%q,"event":"pull_request","status":"completed","conclusion":"success","jobs":[{"databaseId":456,"name":"Test","conclusion":"success","steps":[{"name":"Run Go tests","conclusion":"success","startedAt":%q,"completedAt":%q}]}]}`,
-				head, start.Format(time.RFC3339), end.Format(time.RFC3339))), nil
-		case len(args) > 3 && args[0] == "run" && args[1] == "view" && args[2] == "--job" && args[3] == "456":
-			pkg := "m31labs.dev/buckley/pkg/tool/builtin"
-			if mode == "other-package" {
-				pkg = "m31labs.dev/buckley/pkg/other"
+			if mode == "skipped-step" {
+				conclusion = "skipped"
 			}
-			stamp := start.Add(time.Minute)
-			if mode == "outside-step" {
-				stamp = start.Add(-time.Minute)
-			}
-			return []byte(fmt.Sprintf("Test\tUNKNOWN STEP\t%s ok  \t%s\t0.010s\n", stamp.Format(time.RFC3339Nano), pkg)), nil
+			return []byte(fmt.Sprintf(`{"headSha":%q,"event":"pull_request","status":"completed","conclusion":"success","jobs":[{"databaseId":456,"name":"Test","conclusion":"success","steps":[{"name":"Run Go tests","conclusion":%q,"startedAt":%q,"completedAt":%q}]}]}`,
+				head, conclusion, start.Format(time.RFC3339), end.Format(time.RFC3339))), nil
 		default:
 			return nil, fmt.Errorf("unexpected gh args: %s", strings.Join(args, " "))
 		}

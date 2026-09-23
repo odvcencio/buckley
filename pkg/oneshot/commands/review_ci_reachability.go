@@ -1,9 +1,11 @@
 package commands
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math"
+	"go/parser"
+	"go/token"
 	"net/url"
 	"path"
 	"sort"
@@ -14,8 +16,12 @@ import (
 	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
 
-const maxPRTestLogBytes = 8 << 20
 const maxPRGoTestFiles = 32
+
+const (
+	buckleyCITestScriptSHA256 = "689e4d66670f6091f441e9f31095219f602a81c99d79c2662a3f7d76c54a5d74"
+	buckleyCIWorkflowSHA256   = "e1556b2688783110439606468f2f7ecf2149292d39040dc3c0ffd4b2916e7859"
+)
 
 type requiredCheckLink struct {
 	Name  string `json:"name"`
@@ -68,17 +74,20 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 	if err := json.Unmarshal(output, &links); err != nil {
 		return nil, fmt.Errorf("decode required check links: %w", err)
 	}
-	if err := verifyPRGoTestTree(run, pr, files); err != nil {
+	if err := verifyPRCIContract(run, pr); err != nil {
+		return nil, err
+	}
+	treeFiles, err := verifyPRGoTestTree(run, pr, files)
+	if err != nil {
 		return nil, err
 	}
 	module, err := readPRGoModule(run, pr)
 	if err != nil {
 		return nil, err
 	}
-	for _, file := range files {
-		if err := verifyPRGoTestFile(run, pr, file); err != nil {
-			return nil, err
-		}
+	packages, err := provePRGoTestPackages(run, pr, module, files, treeFiles)
+	if err != nil {
+		return nil, err
 	}
 	for _, check := range links {
 		if check.State != "SUCCESS" && check.State != "PASS" {
@@ -104,12 +113,8 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 				if step.Name != "Run Go tests" || step.Conclusion != "success" || !step.CompletedAt.After(step.StartedAt) {
 					continue
 				}
-				packages, err := readPRGoTestPackages(run, target, jobID, step.StartedAt, step.CompletedAt)
-				if err != nil {
-					continue
-				}
 				return &reviewpolicy.CIReachabilityEvidence{
-					Source: "github_actions_go_test_v1", HeadSHA: pr.HeadSHA,
+					Source: "buckley_ci_go_test_v1", HeadSHA: pr.HeadSHA,
 					RunID: runID, JobID: jobID, Check: check.Name,
 					Module: module, Packages: packages,
 				}, nil
@@ -117,6 +122,25 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 		}
 	}
 	return nil, fmt.Errorf("no completed required Go test job for PR head %s", pr.HeadSHA)
+}
+
+func verifyPRCIContract(run prCommandRunner, pr *PRInfo) error {
+	for _, item := range []struct {
+		path string
+		sha  string
+	}{
+		{"scripts/test.sh", buckleyCITestScriptSHA256},
+		{".github/workflows/ci.yml", buckleyCIWorkflowSHA256},
+	} {
+		content, err := readPRHeadRawFile(run, pr, item.path)
+		if err != nil {
+			return fmt.Errorf("read CI contract %s: %w", item.path, err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256([]byte(content))); got != item.sha {
+			return fmt.Errorf("CI contract %s differs from the verified Go test command", item.path)
+		}
+	}
+	return nil
 }
 
 func verifyPRTestWorkflow(run prCommandRunner, pr *PRInfo, runID int64) error {
@@ -139,14 +163,14 @@ func verifyPRTestWorkflow(run prCommandRunner, pr *PRInfo, runID int64) error {
 	return nil
 }
 
-func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) error {
+func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) (map[string]bool, error) {
 	endpoint := "repos/" + pr.Repository + "/git/trees/" + url.PathEscape(pr.HeadSHA) + "?recursive=1"
 	output, err := run("gh", withPRAPIHostname([]string{"api", endpoint}, pr.Host)...)
 	if err != nil {
-		return fmt.Errorf("read head tree: %w", err)
+		return nil, fmt.Errorf("read head tree: %w", err)
 	}
 	if len(output) > 16<<20 {
-		return fmt.Errorf("head tree exceeds reachability evidence limit")
+		return nil, fmt.Errorf("head tree exceeds reachability evidence limit")
 	}
 	var tree struct {
 		Truncated bool `json:"truncated"`
@@ -157,7 +181,7 @@ func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) error {
 		} `json:"tree"`
 	}
 	if err := json.Unmarshal(output, &tree); err != nil || tree.Truncated {
-		return fmt.Errorf("head tree is unavailable or truncated")
+		return nil, fmt.Errorf("head tree is unavailable or truncated")
 	}
 	entries := make(map[string]bool, len(tree.Entries))
 	for _, entry := range tree.Entries {
@@ -166,19 +190,19 @@ func verifyPRGoTestTree(run prCommandRunner, pr *PRInfo, files []string) error {
 		}
 	}
 	if !entries["go.mod"] {
-		return fmt.Errorf("head go.mod is not a regular file")
+		return nil, fmt.Errorf("head go.mod is not a regular file")
 	}
 	for _, file := range files {
 		if !entries[file] {
-			return fmt.Errorf("changed Go test %s is not a regular head file", file)
+			return nil, fmt.Errorf("changed Go test %s is not a regular head file", file)
 		}
 		for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
 			if entries[dir+"/go.mod"] {
-				return fmt.Errorf("Go test %s is in a nested module", file)
+				return nil, fmt.Errorf("Go test %s is in a nested module", file)
 			}
 		}
 	}
-	return nil
+	return entries, nil
 }
 
 func parsePRRequiredJobLink(raw string, pr *PRInfo) (int64, int64, error) {
@@ -215,50 +239,81 @@ func readPRTestRun(run prCommandRunner, target prReference, runID int64) (prTest
 	return data, nil
 }
 
-func readPRGoTestPackages(run prCommandRunner, target prReference, jobID int64, start, end time.Time) ([]string, error) {
-	args := withPRTarget([]string{"run", "view", "--job", strconv.FormatInt(jobID, 10), "--log"}, target)
-	output, err := run("gh", args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(output) > maxPRTestLogBytes {
-		return nil, fmt.Errorf("Go test log exceeds %d bytes", maxPRTestLogBytes)
-	}
+func provePRGoTestPackages(run prCommandRunner, pr *PRInfo, module string, files []string, treeFiles map[string]bool) ([]string, error) {
 	seen := make(map[string]bool)
-	for _, line := range strings.Split(string(output), "\n") {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 {
+	for _, file := range files {
+		if err := verifyPRGoTestFile(run, pr, file); err != nil {
+			return nil, err
+		}
+		dir := path.Dir(file)
+		if !goTestScriptIncludesDir(dir) {
+			return nil, fmt.Errorf("Go test %s is outside scripts/test.sh package targets", file)
+		}
+		if seen[dir] {
 			continue
 		}
-		fields := strings.Fields(parts[2])
-		if len(fields) != 4 || fields[1] != "ok" {
-			continue
+		candidates := make([]string, 0)
+		for candidate := range treeFiles {
+			base := path.Base(candidate)
+			if path.Dir(candidate) == dir && strings.HasSuffix(candidate, ".go") && !strings.HasSuffix(candidate, "_test.go") &&
+				!strings.HasPrefix(base, ".") && !strings.HasPrefix(base, "_") && !platformSpecificGoFile(candidate) {
+				candidates = append(candidates, candidate)
+			}
 		}
-		stamp, err := time.Parse(time.RFC3339Nano, fields[0])
-		if err != nil || stamp.Before(start) || stamp.After(end) {
-			continue
+		sort.Strings(candidates)
+		buildable := false
+		for index, candidate := range candidates {
+			if index == 16 {
+				break
+			}
+			content, err := readPRHeadRawFile(run, pr, candidate)
+			if err == nil && plainPRGoSource(content) {
+				buildable = true
+				break
+			}
 		}
-		if fields[3] == "(cached)" || validGoTestDuration(fields[3]) {
-			seen[fields[2]] = true
+		if !buildable {
+			return nil, fmt.Errorf("no plain Go source proves package %s is selected by scripts/test.sh", dir)
 		}
-	}
-	if len(seen) == 0 {
-		return nil, fmt.Errorf("Go test step has no package results")
+		seen[dir] = true
 	}
 	packages := make([]string, 0, len(seen))
-	for pkg := range seen {
-		packages = append(packages, pkg)
+	for dir := range seen {
+		packages = append(packages, module+"/"+dir)
 	}
 	sort.Strings(packages)
 	return packages, nil
 }
 
-func validGoTestDuration(value string) bool {
-	if !strings.HasSuffix(value, "s") {
+func goTestScriptIncludesDir(dir string) bool {
+	if dir == "cmd/buckley" {
+		return true
+	}
+	if dir != "pkg" && !strings.HasPrefix(dir, "pkg/") {
 		return false
 	}
-	seconds, err := strconv.ParseFloat(strings.TrimSuffix(value, "s"), 64)
-	return err == nil && seconds >= 0 && !math.IsInf(seconds, 0)
+	for _, part := range strings.Split(dir, "/") {
+		if strings.HasPrefix(part, ".") || strings.HasPrefix(part, "_") || part == "testdata" || part == "vendor" {
+			return false
+		}
+	}
+	return true
+}
+
+func plainPRGoSource(content string) bool {
+	if hasGoBuildConstraint(content) {
+		return false
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "", content, parser.ImportsOnly)
+	if err != nil {
+		return false
+	}
+	for _, imported := range file.Imports {
+		if imported.Path.Value == `"C"` {
+			return false
+		}
+	}
+	return true
 }
 
 func readPRGoModule(run prCommandRunner, pr *PRInfo) (string, error) {
@@ -278,23 +333,40 @@ func verifyPRGoTestFile(run prCommandRunner, pr *PRInfo, file string) error {
 	if strings.Contains(file, "\\") || path.IsAbs(file) || path.Clean(file) != file || strings.HasPrefix(file, "../") {
 		return fmt.Errorf("invalid changed test path %s", file)
 	}
-	base := strings.TrimSuffix(path.Base(file), "_test.go")
-	for _, suffix := range strings.Split(base, "_") {
-		if goPlatformSuffixes[suffix] {
-			return fmt.Errorf("platform-specific Go test %s needs explicit CI file evidence", file)
-		}
+	if base := path.Base(file); strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_") {
+		return fmt.Errorf("Go ignores changed test file %s", file)
+	}
+	if platformSpecificGoFile(file) {
+		return fmt.Errorf("platform-specific Go test %s needs explicit CI file evidence", file)
 	}
 	content, err := readPRHeadRawFile(run, pr, file)
 	if err != nil {
 		return fmt.Errorf("read head test file %s: %w", file, err)
 	}
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//go:build") || strings.HasPrefix(trimmed, "// +build") {
-			return fmt.Errorf("build-constrained Go test %s needs explicit CI file evidence", file)
-		}
+	if hasGoBuildConstraint(content) {
+		return fmt.Errorf("build-constrained Go test %s needs explicit CI file evidence", file)
 	}
 	return nil
+}
+
+func platformSpecificGoFile(file string) bool {
+	base := strings.TrimSuffix(path.Base(file), ".go")
+	for _, suffix := range strings.Split(base, "_") {
+		if goPlatformSuffixes[suffix] {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGoBuildConstraint(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "\uFEFF")
+		if strings.HasPrefix(trimmed, "//go:build") || strings.HasPrefix(trimmed, "// +build") {
+			return true
+		}
+	}
+	return false
 }
 
 var goPlatformSuffixes = map[string]bool{

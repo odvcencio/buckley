@@ -31,7 +31,7 @@ const (
 	CIReachabilityNotCovered    CIReachabilityStatus = "not_covered"
 )
 
-const ciAdmissionPolicyV2 = "required contexts must be available, non-empty, and passing; changed Go tests must have head-bound passing required-CI package evidence"
+const ciAdmissionPolicyV2 = "required contexts must be available, non-empty, and passing; changed Go tests must be structurally reachable by a pinned CI test command on the exact head"
 
 var (
 	ErrCIAdmissionMissing     = errors.New("ci admission receipt is missing")
@@ -75,8 +75,8 @@ type CIReachabilityRequest struct {
 	RecognizedChangedTestFiles []string `json:"recognized_changed_test_files,omitempty"`
 }
 
-// CIReachabilityEvidence records successful Go package results from one
-// required GitHub Actions check for the exact PR head.
+// CIReachabilityEvidence records Go packages proven reachable by the pinned
+// CI test command in one required GitHub Actions check for the exact PR head.
 type CIReachabilityEvidence struct {
 	Source   string   `json:"source"`
 	HeadSHA  string   `json:"head_sha"`
@@ -301,7 +301,7 @@ func normalizeCIReachabilityEvidence(value *CIReachabilityEvidence, expectation 
 	copy.HeadSHA = strings.TrimSpace(copy.HeadSHA)
 	copy.Check = strings.TrimSpace(copy.Check)
 	copy.Module = strings.Trim(strings.TrimSpace(copy.Module), "/")
-	if copy.Source != "github_actions_go_test_v1" || copy.HeadSHA != expectation.Identity.HeadSHA ||
+	if copy.Source != "buckley_ci_go_test_v1" || copy.HeadSHA != expectation.Identity.HeadSHA ||
 		copy.RunID <= 0 || copy.JobID <= 0 || copy.Check == "" || copy.Module == "" ||
 		len(expectation.TestReachability.RecognizedChangedTestFiles) == 0 {
 		return nil, fmt.Errorf("%w: incomplete or stale test-reachability evidence", ErrCIAdmissionInvalid)

@@ -174,7 +174,7 @@ func TestNewCIAdmissionReceipt_GoTestPackageEvidenceAuthorizesExactHead(t *testi
 	expectation := testCIAdmissionExpectation()
 	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/tool/builtin/git_test.go", "pkg/reviewpolicy/ci_admission_test.go"}
 	evidence := &CIReachabilityEvidence{
-		Source: "github_actions_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
 		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
 		Packages: []string{"m31labs.dev/buckley/pkg/tool/builtin", "m31labs.dev/buckley/pkg/reviewpolicy"},
 	}
@@ -225,7 +225,7 @@ func TestNewCIAdmissionReceipt_RejectsUnboundGoTestEvidence(t *testing.T) {
 	expectation := testCIAdmissionExpectation()
 	expectation.TestReachability.RecognizedChangedTestFiles = []string{"pkg/git_test.go"}
 	evidence := &CIReachabilityEvidence{
-		Source: "github_actions_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
+		Source: "buckley_ci_go_test_v1", HeadSHA: expectation.Identity.HeadSHA,
 		RunID: 123, JobID: 456, Check: "Test", Module: "m31labs.dev/buckley",
 		Packages: []string{"m31labs.dev/buckley/pkg"},
 	}
