@@ -19,7 +19,9 @@ import (
 
 // testConfigWithDecisions builds a DefaultConfig with an OpenRouter API
 // key set and decisions.gates.reasoning_choice configured for
-// reasoningChoiceGate's tests.
+// reasoningChoiceGate's tests. LogPath always points at a t.TempDir(), so
+// a test that reaches logDecisionGate never writes to the real
+// ~/.buckley/decisions.jsonl.
 func testConfigWithDecisions(t *testing.T, endpoint string, enabled, gateEnabled bool) *config.Config {
 	t.Helper()
 	cfg := config.DefaultConfig()
@@ -28,6 +30,7 @@ func testConfigWithDecisions(t *testing.T, endpoint string, enabled, gateEnabled
 	cfg.Decisions.Endpoint = endpoint
 	cfg.Decisions.Timeout = 5 * time.Second
 	cfg.Decisions.Gates.ReasoningChoice.Enabled = gateEnabled
+	cfg.Decisions.LogPath = filepath.Join(t.TempDir(), "decisions.jsonl")
 	return cfg
 }
 
@@ -206,6 +209,7 @@ func TestApplyReviewDepthGate_TruncatesLargeDiffs(t *testing.T) {
 		decisionsGate: reviewDepthGateConfig{
 			enabled: true, apiKey: "k", model: "typesafe/jev-1.13", endpoint: srv.URL,
 			timeout: 5 * time.Second, trivialProbability: 0.85,
+			logPath: filepath.Join(t.TempDir(), "decisions.jsonl"),
 		},
 	}
 	bigDiff := make([]byte, maxReviewDepthGateDiffBytes*3)
