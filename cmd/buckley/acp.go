@@ -2973,6 +2973,25 @@ func isWorkspaceVerificationToolCall(name string, params map[string]any) bool {
 var verificationCommandExecFlags = []string{
 	"-exec", "-toolexec", "-vettool", "-overlay", "-modfile", "-o",
 	"--config", "--target-dir", "--manifest-path",
+	// Flags that load build rules or code from another file or directory:
+	// make -f/-C/-I, npm --prefix, pytest -c/--rootdir.
+	"-f", "--file", "--makefile", "-c", "--directory", "-i", "--include-dir",
+	"--prefix", "--rootdir",
+}
+
+// isWorkspaceRelativeArg reports whether arg names only paths inside the
+// workspace: no absolute or home-relative path and no parent traversal.
+func isWorkspaceRelativeArg(arg string) bool {
+	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "~") {
+		return false
+	}
+	// Compare whole segments: "./..." is Go's package wildcard, not traversal.
+	for _, segment := range strings.Split(arg, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // isVerificationCommandByte reports whether b may appear in a verification
@@ -3004,11 +3023,22 @@ func isWorkspaceVerificationCommand(command string) bool {
 		}
 	}
 	for _, field := range strings.Fields(trimmed) {
-		name, _, _ := strings.Cut(strings.ToLower(field), "=")
+		name, value, hasValue := strings.Cut(strings.ToLower(field), "=")
 		for _, flag := range verificationCommandExecFlags {
 			if name == flag || name == "-"+flag {
 				return false
 			}
+		}
+		if !strings.HasPrefix(field, "-") {
+			if !isWorkspaceRelativeArg(field) {
+				return false
+			}
+			continue
+		}
+		// A flag may carry a path only as a relative "=value": an attached
+		// short-flag value such as make's -f/tmp/x would dodge the name check.
+		if strings.Contains(name, "/") || (hasValue && !isWorkspaceRelativeArg(value)) {
+			return false
 		}
 	}
 	lower := strings.ToLower(trimmed)

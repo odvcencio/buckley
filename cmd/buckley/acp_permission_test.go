@@ -189,6 +189,17 @@ func TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands(t *testing.T) {
 		"cargo test --config target.x.runner=sh",
 		"go test \"./...\"",
 		"go test ./...#\nrm",
+		"make test -f /tmp/evil",
+		"make test -f/tmp/evil",
+		"make -C /tmp/evil test",
+		"make test --file=evil.mk",
+		"make test -I include",
+		"go test /tmp/evil/...",
+		"go test ../outside/...",
+		"go test ~/evil/...",
+		"npm test --prefix=/tmp/evil",
+		"pytest -c /tmp/evil.ini",
+		"go test -coverprofile=/tmp/x.out ./...",
 	}
 	for _, command := range smuggled {
 		if isWorkspaceVerificationCommand(command) {
@@ -202,6 +213,9 @@ func TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands(t *testing.T) {
 		"go vet ./cmd/buckley",
 		"npm run lint",
 		"cargo clippy --all-targets",
+		"go test -run TestFoo/sub_case ./...",
+		"go test -failfast -coverprofile=cover.out ./...",
+		"make test",
 	}
 	for _, command := range allowed {
 		if !isWorkspaceVerificationCommand(command) {
