@@ -131,6 +131,26 @@ func TestVerifyPRGoTestFile_IgnoredFilenameRemainsUnavailable(t *testing.T) {
 	}
 }
 
+func TestHasGoBuildConstraint_UsesGoConstraintSyntax(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"modern", "//go:build integration\n\npackage test\n", true},
+		{"legacy spaced", "// +build integration\n\npackage test\n", true},
+		{"legacy unspaced", "//+build integration\n\npackage test\n", true},
+		{"legacy tab", "//\t+build integration\n\npackage test\n", true},
+		{"ordinary comment", "// +builder detail\n\npackage test\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasGoBuildConstraint(test.content); got != test.want {
+				t.Fatalf("hasGoBuildConstraint() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParsePRRequiredJobLink_EnterpriseHostPort(t *testing.T) {
 	pr := reachabilityTestPR()
 	pr.Host = "github.corp.example:8443"

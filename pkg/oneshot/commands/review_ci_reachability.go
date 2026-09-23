@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"net/url"
@@ -409,7 +410,7 @@ func platformSpecificGoFile(file string) bool {
 func hasGoBuildConstraint(content string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "\uFEFF")
-		if strings.HasPrefix(trimmed, "//go:build") || strings.HasPrefix(trimmed, "// +build") {
+		if constraint.IsGoBuild(trimmed) || constraint.IsPlusBuild(trimmed) {
 			return true
 		}
 	}
