@@ -497,3 +497,54 @@ func TestRunVerificationToolRealBuildFailureStaysConfirmed(t *testing.T) {
 		t.Fatalf("evidence = %v, want CONFIRMED_FAIL for a real compile failure", result.Data["evidence"])
 	}
 }
+
+// TestBuildVerificationToolResultMatchesDirectExecution guards the shared
+// grading path a batched remote evidence collector uses: a
+// reviewsandbox.Result built outside a direct run_verification tool call
+// (for example one package's outcome parsed from a batched `go test -json`
+// stream, which lands in Stdout rather than Stderr) must grade identically
+// to the same Result surfacing through ExecuteWithContext, including the
+// GOTOOLCHAIN=local inconclusive carve-out.
+func TestBuildVerificationToolResultMatchesDirectExecution(t *testing.T) {
+	verification := reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     "pkg/example",
+		Command:  "go",
+		ExitCode: 1,
+		Status:   reviewsandbox.StatusFail,
+		// A batched go test -json stream captures build/test output as
+		// "output" events, which VerifyGoTestBatch concatenates into Stdout
+		// (not Stderr, unlike the single-command sandbox launchers).
+		Stdout: "go: go.mod requires go >= 1.26.4 (running go 1.26.0; GOTOOLCHAIN=local)\n",
+	}
+	result := BuildVerificationToolResult(verification)
+	if result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("evidence = %v, want INCONCLUSIVE for a batched GOTOOLCHAIN=local mismatch", result.Data["evidence"])
+	}
+	if result.Success {
+		t.Fatal("a failed batched verification must not report Success")
+	}
+}
+
+// TestBuildVerificationToolResultWrapperFailureIsInconclusiveNotFail proves a
+// remote wrapper/transport failure (reviewsandbox already downgrades this to
+// StatusUnavailable; see trustedWrapperExitCode) never reaches this shared
+// builder as CONFIRMED_FAIL.
+func TestBuildVerificationToolResultWrapperFailureIsInconclusiveNotFail(t *testing.T) {
+	verification := reviewsandbox.Result{
+		Kind:     reviewsandbox.KindTest,
+		Language: reviewsandbox.LanguageGo,
+		Path:     "pkg/example",
+		ExitCode: -1,
+		Status:   reviewsandbox.StatusUnavailable,
+		Error:    "remote verification wrapper exited 255, which is not a recognized test result",
+	}
+	result := BuildVerificationToolResult(verification)
+	if result.Data["evidence"] != "INCONCLUSIVE" {
+		t.Fatalf("evidence = %v, want INCONCLUSIVE for a wrapper transport failure", result.Data["evidence"])
+	}
+	if result.Success {
+		t.Fatal("a wrapper transport failure must not report Success")
+	}
+}

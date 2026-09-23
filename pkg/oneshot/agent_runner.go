@@ -171,6 +171,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 				opts.ReviewSnapshot.RepositoryRoot(),
 				allowedTools,
 				opts.VerificationTimeout,
+				opts.VerificationWrapper,
 				r.models.ReviewSandboxCommand(),
 			)
 			if err != nil {
@@ -445,15 +446,40 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 	if r != nil && r.models != nil {
 		codexCommand = r.models.ReviewSandboxCommand()
 	}
-	registry, err := newReviewSnapshotRegistryWithLimits(root, opts.ReviewSnapshot.RepositoryRoot(), allowedTools, opts.VerificationTimeout, codexCommand)
+	registry, err := newReviewSnapshotRegistryWithLimits(root, opts.ReviewSnapshot.RepositoryRoot(), allowedTools, opts.VerificationTimeout, opts.VerificationWrapper, codexCommand)
 	if err != nil {
 		return nil, fmt.Errorf("create agent evidence registry: %w", err)
 	}
 	defer func() { _ = registry.Close() }()
 
+	// A crowded host serializes far more than it parallelizes: capping
+	// local/batch parallelism applies even without a configured wrapper
+	// (see reviewsandbox.DefaultLocalParallelism).
+	parallelism := effectiveVerificationParallelism(opts.VerificationParallelism)
+
 	calls := make([]AgentToolCall, len(requests))
+	remaining := make([]int, 0, len(requests))
+	if len(opts.VerificationWrapper) > 0 {
+		var batchable []int
+		for index, request := range requests {
+			if _, ok := batchableGoTestEvidenceRequest(request); ok {
+				batchable = append(batchable, index)
+				continue
+			}
+			remaining = append(remaining, index)
+		}
+		// Batch every eligible Go test request into as few remote `go test
+		// -json` invocations as parallelism allows, in place of one
+		// invocation per package.
+		collectBatchedGoTestEvidence(ctx, root, opts.VerificationWrapper, opts.VerificationTimeout, parallelism, requests, batchable, calls)
+	} else {
+		for index := range requests {
+			remaining = append(remaining, index)
+		}
+	}
+
 	jobs := make(chan int)
-	workers := min(len(requests), 4)
+	workers := min(len(remaining), parallelism)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for range workers {
@@ -464,7 +490,7 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 			}
 		}()
 	}
-	for index := range requests {
+	for _, index := range remaining {
 		jobs <- index
 	}
 	close(jobs)
@@ -693,10 +719,16 @@ func salvageText(value string, limit int) string {
 }
 
 func newReviewSnapshotRegistry(root string, allowedTools []string, codexCommand ...string) (*tool.Registry, error) {
-	return newReviewSnapshotRegistryWithLimits(root, "", allowedTools, 0, codexCommand...)
+	return newReviewSnapshotRegistryWithLimits(root, "", allowedTools, 0, nil, codexCommand...)
 }
 
-func newReviewSnapshotRegistryWithLimits(root, sourceRoot string, allowedTools []string, verificationTimeout time.Duration, codexCommand ...string) (*tool.Registry, error) {
+// newReviewSnapshotRegistryWithLimits builds the snapshot-bound registry
+// shared by the live review agent (Run) and the harness's deterministic
+// evidence collector (CollectAgentEvidence). wrapper, when non-empty,
+// configures the review verification tool to run each command through a
+// remote wrapper (see reviewsandbox.Executor.SetWrapper) instead of the
+// local sandbox.
+func newReviewSnapshotRegistryWithLimits(root, sourceRoot string, allowedTools []string, verificationTimeout time.Duration, wrapper []string, codexCommand ...string) (*tool.Registry, error) {
 	allowed := make(map[string]struct{}, len(allowedTools))
 	for _, name := range allowedTools {
 		name = strings.TrimSpace(name)
@@ -724,6 +756,7 @@ func newReviewSnapshotRegistryWithLimits(root, sourceRoot string, allowedTools [
 		if verificationTimeout > 0 {
 			verification.SetTimeoutLimit(verificationTimeout)
 		}
+		verification.SetWrapper(wrapper)
 		registry.Register(verification)
 		registry.SetToolKind(verification.Name(), "execute")
 	}

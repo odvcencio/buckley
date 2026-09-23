@@ -3,6 +3,7 @@ package config
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 // TestApplyEnvOverridesOneDirectionalToggles asserts BUCKLEY_DISABLE_TOON
@@ -208,5 +209,60 @@ func TestApplyEnvOverridesOpenRouterHasNoEnabledVar(t *testing.T) {
 	}
 	if cfg.Providers.OpenRouter.Enabled {
 		t.Errorf("expected OPENROUTER_API_KEY to leave Enabled untouched")
+	}
+}
+
+// TestApplyEnvOverridesReviewVerificationRunner asserts
+// BUCKLEY_VERIFY_WRAPPER shell-splits into an argv, and
+// BUCKLEY_VERIFY_PARALLELISM/BUCKLEY_VERIFY_TIMEOUT apply only when
+// positive, matching envReviewVerificationRunner.
+func TestApplyEnvOverridesReviewVerificationRunner(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("BUCKLEY_VERIFY_WRAPPER", "buildbox-run --node-modules")
+	t.Setenv("BUCKLEY_VERIFY_PARALLELISM", "2")
+	t.Setenv("BUCKLEY_VERIFY_TIMEOUT", "10m")
+	ApplyEnvOverridesForTest(cfg)
+
+	runner := cfg.Review.Verification.Runner
+	wantWrapper := []string{"buildbox-run", "--node-modules"}
+	if len(runner.Wrapper) != len(wantWrapper) {
+		t.Fatalf("wrapper = %v, want %v", runner.Wrapper, wantWrapper)
+	}
+	for i, want := range wantWrapper {
+		if runner.Wrapper[i] != want {
+			t.Errorf("wrapper[%d] = %q, want %q", i, runner.Wrapper[i], want)
+		}
+	}
+	if runner.Parallelism != 2 {
+		t.Errorf("parallelism = %d, want 2", runner.Parallelism)
+	}
+	if runner.Timeout != 10*time.Minute {
+		t.Errorf("timeout = %v, want 10m", runner.Timeout)
+	}
+}
+
+// TestApplyEnvOverridesReviewVerificationRunnerPositiveOnlyGuards asserts a
+// zero or negative BUCKLEY_VERIFY_PARALLELISM/BUCKLEY_VERIFY_TIMEOUT is a
+// no-op, and an empty BUCKLEY_VERIFY_WRAPPER leaves a configured wrapper
+// untouched, matching the experiment env vars' positive-only convention.
+func TestApplyEnvOverridesReviewVerificationRunnerPositiveOnlyGuards(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Review.Verification.Runner.Wrapper = []string{"buildbox-run"}
+	wantTimeout := cfg.Review.Verification.Runner.Timeout
+
+	t.Setenv("BUCKLEY_VERIFY_WRAPPER", "")
+	t.Setenv("BUCKLEY_VERIFY_PARALLELISM", "0")
+	t.Setenv("BUCKLEY_VERIFY_TIMEOUT", "-5m")
+	ApplyEnvOverridesForTest(cfg)
+
+	runner := cfg.Review.Verification.Runner
+	if len(runner.Wrapper) != 1 || runner.Wrapper[0] != "buildbox-run" {
+		t.Errorf("expected empty BUCKLEY_VERIFY_WRAPPER to be a no-op, got %v", runner.Wrapper)
+	}
+	if runner.Parallelism != 0 {
+		t.Errorf("expected BUCKLEY_VERIFY_PARALLELISM=0 to be a no-op, got %d", runner.Parallelism)
+	}
+	if runner.Timeout != wantTimeout {
+		t.Errorf("expected negative BUCKLEY_VERIFY_TIMEOUT to be a no-op, got %v", runner.Timeout)
 	}
 }

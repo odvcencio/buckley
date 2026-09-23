@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anmitsu/go-shlex"
+
 	"m31labs.dev/buckley/pkg/giturl"
 )
 
@@ -76,6 +78,8 @@ var envStrategies = map[string]envStrategy{
 	"experiment.default_timeout":    envExperimentDefaultTimeout,
 	"experiment.max_cost_per_run":   envExperimentMaxCostPerRun,
 	"experiment.max_tokens_per_run": envExperimentMaxTokensPerRun,
+
+	"review.verification.runner": envReviewVerificationRunner,
 
 	"notify.telegram": envTelegram,
 	"notify.slack":    envSlack,
@@ -409,6 +413,29 @@ func envExperimentMaxTokensPerRun(ctx envCtx, field reflect.Value, path []string
 	if v := strings.TrimSpace(os.Getenv("BUCKLEY_EXPERIMENT_MAX_TOKENS_PER_RUN")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			field.SetInt(int64(n))
+		}
+	}
+}
+
+// envReviewVerificationRunner applies BUCKLEY_VERIFY_WRAPPER (shell-split
+// into an argv, for example "buildbox-run --node-modules"),
+// BUCKLEY_VERIFY_PARALLELISM (positive int only), and BUCKLEY_VERIFY_TIMEOUT
+// (positive duration only) to ReviewVerificationRunnerConfig.
+func envReviewVerificationRunner(ctx envCtx, field reflect.Value, path []string) {
+	p := field.Addr().Interface().(*ReviewVerificationRunnerConfig)
+	if v := os.Getenv("BUCKLEY_VERIFY_WRAPPER"); strings.TrimSpace(v) != "" {
+		if argv, err := shlex.Split(v, true); err == nil && len(argv) > 0 {
+			p.Wrapper = argv
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_VERIFY_PARALLELISM")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.Parallelism = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("BUCKLEY_VERIFY_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.Timeout = d
 		}
 	}
 }

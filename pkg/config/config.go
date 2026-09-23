@@ -165,6 +165,7 @@ type Config struct {
 	Commenting     CommentingConfig   `yaml:"commenting"`
 	GitEvents      GitEventsConfig    `yaml:"git_events"`
 	Buckbot        BuckbotConfig      `yaml:"buckbot"`
+	Review         ReviewConfig       `yaml:"review"`
 	Input          InputConfig        `yaml:"input"`
 	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
 	Notify         NotifyConfig       `yaml:"notify"`
@@ -1128,4 +1129,52 @@ type BuckbotConfig struct {
 	// pkg/oneshot/commands.PostingGateConfig.HighSignalByteThreshold). 0
 	// uses diffsignal.ReviewShardBudget.
 	PostingSizeThresholdBytes int `yaml:"posting_size_threshold_bytes"`
+}
+
+// ReviewConfig controls host-collected review verification evidence,
+// independent of the Buckbot model/budget settings above.
+type ReviewConfig struct {
+	Verification ReviewVerificationConfig `yaml:"verification"`
+}
+
+// ReviewVerificationConfig controls how the review harness runs build/test
+// verification commands against an immutable review snapshot.
+type ReviewVerificationConfig struct {
+	Runner ReviewVerificationRunnerConfig `yaml:"runner"`
+}
+
+// ReviewVerificationRunnerConfig configures the review verification harness:
+// a crowded, shared local host can turn a `go test` that takes milliseconds
+// in isolation into minutes of compile queueing, producing fixed timeouts
+// and INCONCLUSIVE evidence instead of a real answer. Wrapper redirects
+// verification to a remote host instead of fighting local contention.
+//
+//	review:
+//	  verification:
+//	    runner:
+//	      wrapper: ["buildbox-run"]
+//	      parallelism: 2
+//	      timeout: 10m
+type ReviewVerificationRunnerConfig struct {
+	// Wrapper is a shell-style argv prefix. When non-empty, the harness runs
+	// `<wrapper...> <snapshot-dir> <argv...>` in place of executing
+	// <argv...> directly: the wrapper owns getting the immutable snapshot
+	// directory to wherever it actually builds/tests (for example rsync to
+	// a remote build host over ssh) and is trusted to relay the real
+	// command's exit code. Empty keeps verification local.
+	// BUCKLEY_VERIFY_WRAPPER (shell-split, for example
+	// "buildbox-run --node-modules").
+	Wrapper []string `yaml:"wrapper"`
+	// Parallelism caps concurrent verification commands (batched remote
+	// invocations when Wrapper is set, or individual local commands
+	// otherwise). Zero uses the default: min(4, max(1, NumCPU/4)) locally,
+	// or the same formula applied to the batching fan-out remotely.
+	// BUCKLEY_VERIFY_PARALLELISM (positive only).
+	Parallelism int `yaml:"parallelism"`
+	// Timeout caps each verification command, or each batched wrapper
+	// invocation covering several packages. Zero keeps the existing
+	// per-call default locally, or scales up to 10 minutes when Wrapper is
+	// set, since one remote invocation may cover many packages.
+	// BUCKLEY_VERIFY_TIMEOUT (positive only).
+	Timeout time.Duration `yaml:"timeout"`
 }

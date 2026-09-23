@@ -238,6 +238,13 @@ func (opts automatedReviewOptions) withExecutionPlan(plan reviewExecutionPlan) a
 	opts.maxVerificationCalls = plan.maxVerificationCalls
 	opts.reasoningMaxTokens = plan.reasoningMaxTokens
 	opts.verificationTimeout = plan.verificationTimeout
+	// A configured/derived remote verification timeout (see
+	// review.verification.runner.timeout and remoteVerificationDefaultTimeout)
+	// is a floor, not a suggestion: the plan's generated default must not
+	// shrink it back down to a budget sized for a single local package.
+	if opts.verificationTimeoutFloor > 0 && opts.verificationTimeout < opts.verificationTimeoutFloor {
+		opts.verificationTimeout = opts.verificationTimeoutFloor
+	}
 	opts.explorationTimeout = plan.explorationTimeout
 	opts.synthesisLead = plan.synthesisLead
 	opts.criticReserve = plan.criticReserve

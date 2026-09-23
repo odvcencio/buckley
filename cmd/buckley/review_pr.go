@@ -381,24 +381,34 @@ type automatedReviewOptions struct {
 	criticReserveUSD           float64
 	approvalCritic             bool
 	verificationTimeout        time.Duration
-	explorationTimeout         time.Duration
-	synthesisLead              time.Duration
-	criticReserve              time.Duration
-	criticMaxIterations        int
-	criticMaxToolCalls         int
-	criticExploration          time.Duration
-	criticSynthesisLead        time.Duration
-	sizeClass                  string
-	modelID                    string
-	reasoningEffort            string
-	reasoningMaxTokens         int
-	maxOutputTokens            int
-	reviewBehavior             *modelprofile.ReviewBehavior
-	depth                      reviewDepth
-	adaptiveCodexModel         bool
-	adaptiveReasoning          bool
-	engine                     *rules.Engine
-	contextReady               func(context.Context, *commands.PRInfo, automatedReviewOptions) error
+	// verificationTimeoutFloor keeps a configured/derived verification
+	// timeout (see review.verification.runner in config) from being
+	// shrunk back down by withExecutionPlan's rules-engine-derived default.
+	// Zero applies no floor.
+	verificationTimeoutFloor time.Duration
+	// verificationWrapper and verificationParallelism mirror
+	// config.ReviewVerificationRunnerConfig: see
+	// oneshot.AgentRunOpts.VerificationWrapper/VerificationParallelism.
+	verificationWrapper     []string
+	verificationParallelism int
+	explorationTimeout      time.Duration
+	synthesisLead           time.Duration
+	criticReserve           time.Duration
+	criticMaxIterations     int
+	criticMaxToolCalls      int
+	criticExploration       time.Duration
+	criticSynthesisLead     time.Duration
+	sizeClass               string
+	modelID                 string
+	reasoningEffort         string
+	reasoningMaxTokens      int
+	maxOutputTokens         int
+	reviewBehavior          *modelprofile.ReviewBehavior
+	depth                   reviewDepth
+	adaptiveCodexModel      bool
+	adaptiveReasoning       bool
+	engine                  *rules.Engine
+	contextReady            func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 
 	// forceSinglePass and forceShards are CLI testing knobs (see -single-pass
 	// and -shards on review-pr). forceShards > 0 targets that many shards by
@@ -481,8 +491,35 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
 		opts.approvalCritic = true
 	}
+
+	runner := cfg.Review.Verification.Runner
+	if len(runner.Wrapper) > 0 {
+		opts.verificationWrapper = append([]string(nil), runner.Wrapper...)
+	}
+	opts.verificationParallelism = runner.Parallelism
+	switch {
+	case runner.Timeout > 0:
+		// An explicitly configured timeout always wins, whether or not a
+		// wrapper is set.
+		opts.verificationTimeoutFloor = runner.Timeout
+	case len(runner.Wrapper) > 0:
+		// A batched remote invocation can cover many packages; the fixed
+		// local default (90s-2m, see resolveReviewExecutionPlan) would
+		// produce the same fixed-timeout/INCONCLUSIVE failure mode this
+		// feature exists to fix. remoteVerificationDefaultTimeout scales
+		// that up without requiring explicit configuration.
+		opts.verificationTimeoutFloor = remoteVerificationDefaultTimeout
+	}
 	return opts
 }
+
+// remoteVerificationDefaultTimeout is the floor applied to each
+// verification command (or each batched wrapper invocation) when a remote
+// verification wrapper is configured but review.verification.runner.timeout
+// is not set explicitly. See reviewsandbox's own batchDefaultTimeout, which
+// this matches: both exist so one remote invocation covering several
+// packages gets a budget proportional to a batch, not a single package.
+const remoteVerificationDefaultTimeout = 10 * time.Minute
 
 func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOptions) automatedReviewOptions {
 	if overrides.maxIterations > 0 {
@@ -652,6 +689,8 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
+		VerificationWrapper:      opts.verificationWrapper,
+		VerificationParallelism:  opts.verificationParallelism,
 		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
 		ReasoningMaxTokens:       opts.reasoningMaxTokens,
@@ -792,19 +831,21 @@ func runPRReviewSharded(
 			reviewDef.RequiredFeedbackIDs = prCtx.RequiredFeedbackIDs()
 		}
 		fwResult, runErr := framework.RunAgent(shardCtx, reviewDef, oneshot.AgentRunOpts{
-			UserPrompt:           prompt,
-			MaxRetries:           opts.maxRetries,
-			MaxIterations:        shardOpts.maxIterations,
-			MaxToolCalls:         shardOpts.maxToolCalls,
-			MaxVerificationCalls: shardOpts.maxVerificationCalls,
-			MaxCostUSD:           shardOpts.maxCostUSD,
-			ExplorationTimeout:   shardOpts.explorationTimeout,
-			SynthesisLead:        shardOpts.synthesisLead,
-			VerificationTimeout:  shardOpts.verificationTimeout,
-			ModelID:              shardOpts.modelID,
-			ReasoningEffort:      shardOpts.reasoningEffort,
-			ReasoningMaxTokens:   shardOpts.reasoningMaxTokens,
-			MaxOutputTokens:      shardOpts.maxOutputTokens,
+			UserPrompt:              prompt,
+			MaxRetries:              opts.maxRetries,
+			MaxIterations:           shardOpts.maxIterations,
+			MaxToolCalls:            shardOpts.maxToolCalls,
+			MaxVerificationCalls:    shardOpts.maxVerificationCalls,
+			MaxCostUSD:              shardOpts.maxCostUSD,
+			ExplorationTimeout:      shardOpts.explorationTimeout,
+			SynthesisLead:           shardOpts.synthesisLead,
+			VerificationTimeout:     shardOpts.verificationTimeout,
+			VerificationWrapper:     shardOpts.verificationWrapper,
+			VerificationParallelism: shardOpts.verificationParallelism,
+			ModelID:                 shardOpts.modelID,
+			ReasoningEffort:         shardOpts.reasoningEffort,
+			ReasoningMaxTokens:      shardOpts.reasoningMaxTokens,
+			MaxOutputTokens:         shardOpts.maxOutputTokens,
 			SnapshotPolicy: model.ReviewSnapshotPolicy{
 				Mode:           model.ReviewSnapshotHead,
 				ExpectedCommit: prCtx.PR.HeadSHA,

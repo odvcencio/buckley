@@ -105,6 +105,21 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 	t.timeoutLimit = limit
 }
 
+// SetWrapper configures a remote verification wrapper (for example
+// buildbox-run) that runs each verification command on a remote host instead
+// of the local sandbox: `<wrapper...> <snapshot-dir> <argv...>`. An empty
+// argv keeps verification local. Wrapper mode applies only to the underlying
+// *reviewsandbox.Executor this tool owns; a caller-supplied Verifier is left
+// unchanged.
+func (t *RunVerificationTool) SetWrapper(argv []string) {
+	if t == nil || len(argv) == 0 {
+		return
+	}
+	if executor, ok := t.verifier.(*reviewsandbox.Executor); ok {
+		executor.SetWrapper(argv)
+	}
+}
+
 func (t *RunVerificationTool) Name() string { return "run_verification" }
 
 func (t *RunVerificationTool) TrustedVerification() bool { return true }
@@ -224,7 +239,18 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 		Timeout:        time.Duration(timeout) * time.Second,
 		MaxOutputBytes: t.maxOutputBytes,
 	})
+	return BuildVerificationToolResult(verification), nil
+}
 
+// BuildVerificationToolResult converts a completed reviewsandbox.Result into
+// the same tool Result shape ExecuteWithContext returns: evidence class,
+// proof kinds, abridging, and the GOTOOLCHAIN=local inconclusive rule all
+// apply identically here. A harness that collects verification evidence by a
+// path other than a direct run_verification tool call (for example a batched
+// remote `go test -json` run across several packages) must build its
+// per-package reviewsandbox.Result and pass it through this function so its
+// grading never diverges from a direct tool call.
+func BuildVerificationToolResult(verification reviewsandbox.Result) *Result {
 	data := map[string]any{
 		"kind":           string(verification.Kind),
 		"language":       string(verification.Language),
@@ -276,7 +302,7 @@ func (t *RunVerificationTool) ExecuteWithContext(ctx context.Context, params map
 			"no_test_script": verification.NoTestScript,
 		}
 	}
-	return result, nil
+	return result
 }
 
 func verificationProofKinds(verification reviewsandbox.Result) []string {

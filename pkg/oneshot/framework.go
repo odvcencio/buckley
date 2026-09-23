@@ -73,9 +73,20 @@ type AgentExecutionOpts struct {
 	ExplorationTimeout  time.Duration
 	SynthesisLead       time.Duration
 	VerificationTimeout time.Duration
-	ModelID             string
-	ReasoningEffort     string
-	ReasoningMaxTokens  int
+	// VerificationWrapper is a shell-style argv prefix (see
+	// config.ReviewVerificationRunnerConfig.Wrapper). When non-empty, the
+	// review verification tool and the harness's evidence collector run
+	// each build/test command through this wrapper against a remote host
+	// instead of the local sandbox.
+	VerificationWrapper []string
+	// VerificationParallelism caps concurrent verification commands
+	// (batched remote invocations when VerificationWrapper is set, or
+	// individual local commands otherwise). Zero uses
+	// reviewsandbox.DefaultLocalParallelism().
+	VerificationParallelism int
+	ModelID                 string
+	ReasoningEffort         string
+	ReasoningMaxTokens      int
 }
 
 // ToolInvoker runs a single tool-shaped one-shot model invocation.
@@ -397,6 +408,15 @@ type AgentRunOpts struct {
 	// VerificationTimeout caps each snapshot verification command.
 	VerificationTimeout time.Duration
 
+	// VerificationWrapper is a shell-style argv prefix that routes each
+	// snapshot verification command through a remote wrapper instead of the
+	// local sandbox. Empty keeps verification local.
+	VerificationWrapper []string
+
+	// VerificationParallelism caps concurrent verification commands. Zero
+	// uses reviewsandbox.DefaultLocalParallelism().
+	VerificationParallelism int
+
 	// ReasoningEffort overrides the runner default for this review plan.
 	ReasoningEffort string
 
@@ -473,16 +493,18 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 		}
 	}
 	executionOpts := AgentExecutionOpts{
-		ReviewSnapshot:       snapshot,
-		MaxToolCalls:         opts.MaxToolCalls,
-		MaxVerificationCalls: opts.MaxVerificationCalls,
-		MaxOutputTokens:      opts.MaxOutputTokens,
-		ExplorationTimeout:   opts.ExplorationTimeout,
-		SynthesisLead:        opts.SynthesisLead,
-		VerificationTimeout:  opts.VerificationTimeout,
-		ModelID:              opts.ModelID,
-		ReasoningEffort:      opts.ReasoningEffort,
-		ReasoningMaxTokens:   opts.ReasoningMaxTokens,
+		ReviewSnapshot:          snapshot,
+		MaxToolCalls:            opts.MaxToolCalls,
+		MaxVerificationCalls:    opts.MaxVerificationCalls,
+		MaxOutputTokens:         opts.MaxOutputTokens,
+		ExplorationTimeout:      opts.ExplorationTimeout,
+		SynthesisLead:           opts.SynthesisLead,
+		VerificationTimeout:     opts.VerificationTimeout,
+		VerificationWrapper:     opts.VerificationWrapper,
+		VerificationParallelism: opts.VerificationParallelism,
+		ModelID:                 opts.ModelID,
+		ReasoningEffort:         opts.ReasoningEffort,
+		ReasoningMaxTokens:      opts.ReasoningMaxTokens,
 	}
 	if opts.MaxIterations > 0 {
 		executionOpts.MaxIterations = opts.MaxIterations

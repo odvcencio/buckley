@@ -189,6 +189,151 @@ Guardrails for ZDR, data-collection, provider, and model allowlists. A model
 with no ZDR-compatible endpoint cannot run while the account enforces ZDR;
 choose a compatible model or change that account policy deliberately.
 
+### review.verification.runner
+
+```yaml
+review:
+  verification:
+    runner:
+      wrapper: ["buildbox-run"]
+      parallelism: 2
+      timeout: 10m
+```
+
+The review harness runs build and test verification against an immutable
+snapshot of the reviewed change. On a crowded, shared host, a fast `go
+test` can queue for minutes behind unrelated compiles. The harness then
+reports a fixed timeout and INCONCLUSIVE evidence, not a real result.
+
+`wrapper` is a shell-style argv prefix. Set it to route verification to a
+remote host instead of the local sandbox. With `wrapper` set, the harness
+runs this command:
+
+```text
+<wrapper...> <snapshot-dir> <argv...>
+```
+
+The wrapper owns three things:
+
+- Moving the immutable snapshot directory to wherever it builds and tests.
+  For example, `buildbox-run` syncs it to a remote host over ssh.
+- Running `<argv...>` there.
+- Relaying the real command's exit code back to the harness.
+
+A well-behaved wrapper must reserve exit codes 0 (pass) and 1 (a Go,
+Python, or npm build/test failure) -- and 101 for Rust, see below -- for
+the wrapped command's own outcome. It must never let its own setup or
+transport failures exit with one of those codes; `buildbox-run` follows
+this rule with a dedicated reserved exit code (90) for its own
+pre-command setup failures, so bash's default `&&`-chain propagation can
+never make one of those look like a real test failure. The harness trusts
+this contract; it cannot distinguish a wrapper that violates it from a
+real result.
+
+The harness batches verification requests for the same language and kind
+across changed packages. It groups them into as few remote `go test -json`
+invocations as `parallelism` allows, instead of one invocation per package,
+and parses each package's PASS or FAIL from the JSON event stream. An
+empty `wrapper` (the default) keeps verification local.
+
+`parallelism` caps concurrent verification commands. This applies to
+batched remote invocations when `wrapper` is set, and to individual local
+commands otherwise. Zero (the default) uses `min(4, max(1, NumCPU/4))`.
+This default applies even without a configured wrapper, so local
+verification never runs more concurrent build or test processes than the
+host can schedule at once.
+
+`timeout` caps each verification command, or each batched wrapper
+invocation that covers several packages. Zero keeps the existing per-call
+default locally. With `wrapper` set, zero instead scales up to 10 minutes,
+since one remote invocation can cover many packages.
+
+A wrapper or transport failure grades the affected evidence UNAVAILABLE or
+INCONCLUSIVE, never CONFIRMED_FAIL, provided the wrapper honors the exit
+code contract above. This rule covers:
+
+- An unreachable remote host (for example ssh down).
+- A failed file sync (for example an rsync error).
+- Any exit code other than the ones a real test run produces: 0 for pass,
+  1 for a build or test failure (`go test`, `pytest`, `npm test`), or 101
+  for a Cargo build error or test failure (Rust's default panic code).
+
+An infrastructure fault is not evidence that the reviewed change is broken.
+
+Environment overrides:
+
+- `BUCKLEY_VERIFY_WRAPPER` sets `wrapper`. Shell-split the value into an
+  argv (for example `"buildbox-run --node-modules"`). An empty value
+  leaves a configured wrapper unchanged.
+- `BUCKLEY_VERIFY_PARALLELISM` sets `parallelism`. Use a positive integer.
+  Buckley ignores zero or negative values.
+- `BUCKLEY_VERIFY_TIMEOUT` sets `timeout`. Use a positive Go duration (for
+  example `10m`). Buckley ignores zero, negative, or unparseable values.
+
+#### Local-vs-remote evidence parity
+
+The remote wrapper path can report fewer PASS results than the local
+sandbox path for the same review. An investigation against a real pull
+request found three real bugs in this harness (all fixed) and one
+unavoidable environment difference (documented, not a bug):
+
+1. **Wrong sync root for a single package (fixed).** An earlier version
+   passed the target package's subdirectory, not the snapshot root, as
+   the wrapper's `<snapshot-dir>`. A wrapper that syncs only files
+   tracked under `<snapshot-dir>` (as `buildbox-run`'s `git ls-files -co`
+   does) then never syncs go.mod, Cargo.toml, pyproject.toml, or
+   package.json, all of which live above the package directory, so the
+   remote command failed immediately with an error like "go.mod file not
+   found in current directory or any parent directory" -- and, because
+   `go` also returns exit code 1 for that failure, the harness's own
+   trusted-exit-code check let it through as a false CONFIRMED_FAIL
+   instead of grading it INCONCLUSIVE. The harness now always syncs the
+   snapshot root and changes into the target package remotely instead.
+2. **A large package's output could truncate a later package's result
+   out of a batch (fixed).** `go test -json` emits one JSON event per
+   line of ordinary test output, not only failures, and a batch shares
+   one buffer across every package in its chunk. A big package's own
+   terminal pass/fail event can be scheduled late in the interleaved
+   stream; if the buffer filled first, the harness correctly (but
+   needlessly) graded that package UNAVAILABLE even though it had
+   actually passed. The batch output buffer is now sized for this case
+   (32MiB) instead of the 1MiB that reproduced it.
+3. **A real Rust failure could grade UNAVAILABLE instead of
+   CONFIRMED_FAIL (fixed).** The trusted-exit-code check originally
+   accepted only 0 (pass) and 1 (a `go test`/`pytest`/`npm test`
+   failure) for every language. Cargo does not follow that convention:
+   `cargo build`/`cargo test` report a real compile error or test panic
+   with exit code 101, Rust's default panic code, not 1. A genuine Rust
+   failure through the wrapper was therefore classified as an untrusted
+   transport result. The trusted-exit-code check is now language-aware
+   and also accepts 101 for Rust.
+4. **Environment differences (not a bug; local and remote are not, and
+   are not meant to be, identical sandboxes).** The local native-Go
+   sandbox path runs with `GOTOOLCHAIN=local`, `GOPROXY=off`,
+   `GOSUMDB=off`, `CI=true`, and an isolated `HOME`/`GOCACHE` (see
+   `reviewsandbox.ToolEnvironment`); Codex is never invoked either way
+   for Go. The remote wrapper path instead inherits the remote host's
+   normal environment plus what the wrapper itself sets --
+   `buildbox-run` exports `GOWORK=off`, `GOFLAGS=-p=8`, and
+   `GOMAXPROCS=8`, prepends its own Go/TinyGo toolchain directories to
+   `PATH`, and runs the command under `nice -n 19 ionice -c 3` so it
+   never competes with interactive work on a shared host. In this
+   investigation, `codex CLI version` was not a relevant factor (the Go
+   wrapper path never invokes Codex), and the observed evidence gaps
+   traced fully to bugs 1 and 2 above, not to `nice`/`ionice` scheduling
+   or to a missing `.git` -- `buildbox-run`'s plain sync never includes
+   `.git` (see `--with-git` below), but no buckley package in this
+   investigation actually required one to build or test successfully.
+
+`buildbox-run --with-git` (see its `--help`) gives the remote copy a real
+`.git` for code that does need one -- `git describe`, `git rev-parse
+--show-toplevel`, a test fixture that expects to be inside a real
+repository -- at the cost of an extra shallow clone, bundle, transfer,
+and remote unpack. It is opt-in and not wired into this harness by
+default, since no package encountered here needed it; it exists for
+other callers (for example gosx, which hit exactly this class of failure
+in `cmd/gosx` and `perf/ouroboros`).
+
 ### oneshot
 
 ```yaml
