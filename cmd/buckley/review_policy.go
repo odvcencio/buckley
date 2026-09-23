@@ -476,6 +476,7 @@ func appendReviewDepthInstructions(prompt string, opts automatedReviewOptions) s
 - For every proposed finding, trace the changed behavior through its definition, callers, configuration, failure path, and the nearest relevant test or executable check.
 - Make the focused run_verification attempts required by the captured repository gate. If a required gate is unavailable, retry or let the harness fail closed; never emit a caveated completion.
 - Keep a compact verification ledger in the final review. Every finding must point to a ledger entry marked ` + "`SUPPORTED`" + `, ` + "`DISPROVED`" + `, or ` + "`UNAVAILABLE`" + `.
+- Retain the base review schema and add the literal ` + "`## Evidence Collected`" + ` and ` + "`## Verification Ledger`" + ` headings. List actual source, tool, and CI evidence in the first and tested hypotheses in the second. ` + "`## Coverage`" + ` does not replace either section.
 - Cover the complete balanced scope: every changed file plus its direct callers, configuration gates, failure path, and nearest relevant test. Generated/vendor/build output may be excluded only when it is explicitly outside that scope.
 - End with ` + "`Completeness: COMPLETE`" + `. If this scope cannot be completed, continue gathering evidence or let the harness fail the pass; do not emit a partial review.
 `
