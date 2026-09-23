@@ -44,6 +44,8 @@ func TestCapturePRCIAdmission_GoTestEvidenceFailsClosed(t *testing.T) {
 		{"missing test file", "missing-file", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"missing step result", "outside-step", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"changed test entrypoint", "changed-entrypoint", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"changed earlier CI script", "changed-pretest-script", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
+		{"changed workflow", "changed-workflow", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"symlinked test", "symlink-test", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"nested module", "nested-module", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
 		{"truncated head tree", "truncated-tree", reviewpolicy.CIAdmissionUnavailable, reviewpolicy.CIAdmissionReasonTestReachabilityUnavailable},
@@ -54,6 +56,12 @@ func TestCapturePRCIAdmission_GoTestEvidenceFailsClosed(t *testing.T) {
 			files := []string{"pkg/tool/builtin/git_test.go"}
 			if test.mode == "changed-entrypoint" {
 				files = append(files, "scripts/test.sh")
+			}
+			if test.mode == "changed-pretest-script" {
+				files = append(files, "scripts/tests/test_detect_affected_surfaces.sh")
+			}
+			if test.mode == "changed-workflow" {
+				files = append(files, ".github/workflows/ci.yml")
 			}
 			capture, err := capturePRCIAdmission(reachabilityTestRunner(pr, test.mode),
 				prReference{Number: pr.Number, Host: pr.Host, Repository: pr.Repository}, pr, files)

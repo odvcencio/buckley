@@ -50,8 +50,8 @@ func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PR
 		return nil, fmt.Errorf("%d changed tests exceed Go reachability evidence limit", len(files))
 	}
 	for _, file := range changedFiles {
-		if file == "scripts/test.sh" || file == ".github/workflows/ci.yml" {
-			return nil, fmt.Errorf("Go test CI entrypoint changed in this PR")
+		if strings.HasPrefix(file, "scripts/") || strings.HasPrefix(file, ".github/workflows/") {
+			return nil, fmt.Errorf("Go test CI workflow or script changed in this PR")
 		}
 	}
 	for _, file := range files {
