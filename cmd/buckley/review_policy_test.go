@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestResolveReviewReasoningEffortUsesBuckbotOverride(t *testing.T) {
 	cfg.Buckbot.Reasoning = "medium"
 	cfg.Models.Reasoning = "xhigh"
 
-	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "")
+	got := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "")
 	if got != "medium" {
 		t.Fatalf("reasoning effort = %q, want medium", got)
 	}
@@ -41,7 +42,7 @@ func TestResolveReviewReasoningEffortCanInheritGlobalSetting(t *testing.T) {
 	cfg.Buckbot.Reasoning = "auto"
 	cfg.Models.Reasoning = "xhigh"
 
-	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "")
+	got := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "")
 	if got != "xhigh" {
 		t.Fatalf("reasoning effort = %q, want xhigh", got)
 	}
@@ -49,7 +50,7 @@ func TestResolveReviewReasoningEffortCanInheritGlobalSetting(t *testing.T) {
 
 func TestResolveReviewReasoningEffortRequiresModelSupport(t *testing.T) {
 	cfg := config.DefaultConfig()
-	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{}, "plain-model", "")
+	got := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{}, "plain-model", "")
 	if got != "" {
 		t.Fatalf("reasoning effort = %q, want empty", got)
 	}
@@ -57,7 +58,7 @@ func TestResolveReviewReasoningEffortRequiresModelSupport(t *testing.T) {
 
 func TestResolveReviewReasoningEffortUsesExplicitSuffix(t *testing.T) {
 	cfg := config.DefaultConfig()
-	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "medium")
+	got := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, "qwen/qwen3.7-plus", "medium")
 	if got != "medium" {
 		t.Fatalf("reasoning effort = %q, want medium", got)
 	}
@@ -68,7 +69,7 @@ func TestCriticModelReasoningSuffixStaysIndependent(t *testing.T) {
 	cfg.Models.Reasoning = "low"
 	modelID, explicit := config.SplitReasoningSuffix("qwen/qwen3.7-plus-xhigh")
 
-	got := resolveReviewReasoningEffort(cfg, reviewReasoningChecker{supported: true}, modelID, explicit)
+	got := resolveReviewReasoningEffort(context.Background(), cfg, reviewReasoningChecker{supported: true}, modelID, explicit)
 	if modelID != "qwen/qwen3.7-plus" || got != "xhigh" {
 		t.Fatalf("critic selection = %q/%q, want qwen/qwen3.7-plus/xhigh", modelID, got)
 	}

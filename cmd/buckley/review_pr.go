@@ -50,6 +50,7 @@ type reviewPRCommandOptions struct {
 	forceShards          int
 	concurrency          int
 	depth                reviewDepth
+	fullDepth            bool
 }
 
 func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) {
@@ -73,6 +74,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
 	shards := fs.Int("shards", 0, "force fan-out into exactly this many shards, for testing (0 = derive from content)")
 	concurrency := fs.Int("concurrency", defaultShardConcurrency, "maximum number of shards reviewed at once")
+	fullDepth := fs.Bool("full-depth", false, "disable the review-depth Decisions gate and always run at full configured reasoning")
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
 		return reviewPRCommandOptions{}, err
@@ -129,6 +131,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		forceShards:          *shards,
 		concurrency:          *concurrency,
 		depth:                depth,
+		fullDepth:            *fullDepth,
 	}, nil
 }
 
@@ -230,7 +233,7 @@ func runReviewPRCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(cfg, mgr, store)
+	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -265,6 +268,7 @@ func runReviewPRCommand(args []string) error {
 		forceShards:                opts.forceShards,
 		concurrency:                opts.concurrency,
 		depth:                      opts.depth,
+		decisionsGate:              reviewDepthGateConfig{forceFullDepth: opts.fullDepth},
 	})
 	if opts.post {
 		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
@@ -410,6 +414,11 @@ type automatedReviewOptions struct {
 	engine                  *rules.Engine
 	contextReady            func(context.Context, *commands.PRInfo, automatedReviewOptions) error
 
+	// decisionsGate configures Gate 1 (see applyReviewDepthGate). Off
+	// unless decisions.enabled and decisions.gates.review_depth.enabled
+	// are both set.
+	decisionsGate reviewDepthGateConfig
+
 	// forceSinglePass and forceShards are CLI testing knobs (see -single-pass
 	// and -shards on review-pr). forceShards > 0 targets that many shards by
 	// computing an effective per-shard budget; forceSinglePass overrides it
@@ -486,6 +495,7 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 		depth:                      reviewDepthSpot,
 		postingGate:                buckbotPostingGateConfig(cfg.Buckbot),
+		decisionsGate:              reviewDepthGateConfigFromConfig(cfg),
 	}
 	if strings.TrimSpace(cfg.Buckbot.CriticModel) != "" {
 		opts.criticReserveUSD = cfg.Buckbot.PerReviewBudgetUSD * 0.12
@@ -569,6 +579,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	if overrides.costPerMillionTokens > 0 {
 		defaults.costPerMillionTokens = overrides.costPerMillionTokens
 	}
+	if overrides.decisionsGate.forceFullDepth {
+		defaults.decisionsGate.forceFullDepth = true
+	}
 	return defaults
 }
 
@@ -649,6 +662,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	opts = applyReviewDepthGate(ctx, opts, prCtx)
 	opts = opts.withVerificationTargetBudget(prCtx.Files)
 	if opts.contextReady != nil {
 		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
@@ -803,6 +817,7 @@ func runPRReviewSharded(
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	opts = applyReviewDepthGate(ctx, opts, prCtx)
 	if opts.contextReady != nil {
 		if err := opts.contextReady(ctx, prCtx.PR, opts); err != nil {
 			spinner.StopWithError(err.Error())

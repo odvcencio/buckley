@@ -137,6 +137,29 @@ func DefaultConfig() *Config {
 			PostingAllowlist:           nil,
 			PostingSizeThresholdBytes:  0,
 		},
+		// Decisions is off by default: Enabled and both gates below start
+		// false. Model/Endpoint/Timeout/Pricing are still populated so an
+		// operator can turn a gate on with a one-line config change instead
+		// of restating the whole section.
+		Decisions: DecisionsConfig{
+			Enabled:  false,
+			Model:    defaultDecisionsModel,
+			Endpoint: defaultDecisionsEndpoint,
+			Timeout:  12 * time.Second,
+			Pricing: DecisionsPricingConfig{
+				InputPerMillion:  0.042,
+				OutputPerMillion: 0,
+			},
+			Gates: DecisionsGatesConfig{
+				ReviewDepth: DecisionsReviewDepthGateConfig{
+					Enabled:            false,
+					TrivialProbability: 0.85,
+				},
+				ReasoningChoice: DecisionsReasoningChoiceGateConfig{
+					Enabled: false,
+				},
+			},
+		},
 		Models: ModelConfig{
 			Planning:  defaultOpenRouterModel,
 			Execution: defaultOpenRouterModel,

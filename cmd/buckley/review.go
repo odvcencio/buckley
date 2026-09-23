@@ -221,7 +221,7 @@ func runReviewCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(cfg, mgr, store)
+	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -362,7 +362,7 @@ func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
 	cfg.Providers.Codex.Models = append(cfg.Providers.Codex.Models, normalized)
 }
 
-func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, store *storage.Store) (*reviewCommandRuntime, error) {
+func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model.Manager, store *storage.Store) (*reviewCommandRuntime, error) {
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
@@ -374,7 +374,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, store *stor
 	if err := mgr.SetOpenRouterPrivacyFallback(privacyFallback); err != nil {
 		return nil, fmt.Errorf("configure OpenRouter privacy fallback: %w", err)
 	}
-	reasoningEffort := resolveReviewReasoningEffort(cfg, mgr, modelID, reviewReasoningOverride())
+	reasoningEffort := resolveReviewReasoningEffort(ctx, cfg, mgr, modelID, reviewReasoningOverride())
 	arbEngine, err := rules.NewDefaultEngine()
 	if err != nil {
 		return nil, fmt.Errorf("initialize rules engine: %w", err)
@@ -421,7 +421,7 @@ func newReviewCommandRuntime(cfg *config.Config, mgr *model.Manager, store *stor
 	} else if found {
 		policy.reviewBehavior = behavior
 	}
-	criticModel, criticReasoning, dedicatedCritic := resolveReviewCriticRuntime(cfg, mgr, modelID, reasoningEffort)
+	criticModel, criticReasoning, dedicatedCritic := resolveReviewCriticRuntime(ctx, cfg, mgr, modelID, reasoningEffort)
 	if dedicatedCritic {
 		criticRunner := oneshot.NewAgentRunner(oneshot.AgentRunnerConfig{
 			Models:          mgr,
@@ -472,7 +472,7 @@ func reviewBehaviorProfile(cfg *config.Config, mgr *model.Manager, store *storag
 	return modelprofile.NormalizeReviewBehavior(profile.Review), true, nil
 }
 
-func resolveReviewCriticRuntime(cfg *config.Config, checker model.ReasoningChecker, primaryModel, primaryReasoning string) (string, string, bool) {
+func resolveReviewCriticRuntime(ctx context.Context, cfg *config.Config, checker model.ReasoningChecker, primaryModel, primaryReasoning string) (string, string, bool) {
 	criticModel := ""
 	if cfg != nil {
 		criticModel = strings.TrimSpace(cfg.Buckbot.CriticModel)
@@ -481,7 +481,7 @@ func resolveReviewCriticRuntime(cfg *config.Config, checker model.ReasoningCheck
 	if criticModel == "" {
 		return "", "", false
 	}
-	criticReasoning := resolveReviewReasoningEffort(cfg, checker, criticModel, explicitReasoning)
+	criticReasoning := resolveReviewReasoningEffort(ctx, cfg, checker, criticModel, explicitReasoning)
 	primaryModelAdaptive := isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
 	primaryReasoningAdaptive := reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
 	dedicated := criticModel != primaryModel || primaryModelAdaptive ||

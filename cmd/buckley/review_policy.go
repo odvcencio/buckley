@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -109,7 +110,13 @@ type reviewExecutionPlan struct {
 	criticSynthesisLead  time.Duration
 }
 
-func resolveReviewReasoningEffort(cfg *config.Config, checker model.ReasoningChecker, modelID, explicit string) string {
+// resolveReviewReasoningEffort resolves buckbot's reasoning effort. When
+// buckbot.reasoning is "auto" (or any other unrecognized value) and Gate 2
+// (decisions.gates.reasoning_choice) is enabled, it asks a Decisions
+// choice question and uses the answer instead of Buckley's fixed adaptive
+// default; on any gate failure, timeout, or disabled configuration it
+// falls back to that existing default unchanged.
+func resolveReviewReasoningEffort(ctx context.Context, cfg *config.Config, checker model.ReasoningChecker, modelID, explicit string) string {
 	if checker == nil || !checker.SupportsReasoning(modelID) {
 		return ""
 	}
@@ -129,8 +136,14 @@ func resolveReviewReasoningEffort(cfg *config.Config, checker model.ReasoningChe
 	case "minimal", "low", "medium", "high", "xhigh":
 		return configured
 	case "", "auto":
+		if effort, ok := reasoningChoiceGate(ctx, cfg); ok {
+			return effort
+		}
 		return model.ResolveReasoningEffort(cfg, checker, nil, modelID, "review")
 	default:
+		if effort, ok := reasoningChoiceGate(ctx, cfg); ok {
+			return effort
+		}
 		return model.ResolveReasoningEffort(cfg, checker, nil, modelID, "review")
 	}
 }
