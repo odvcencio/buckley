@@ -2964,18 +2964,49 @@ func isWorkspaceVerificationToolCall(name string, params map[string]any) bool {
 	return isWorkspaceVerificationCommand(command)
 }
 
+// verificationCommandExecFlags are flags that make a build/test tool run an
+// arbitrary program or write outside the workspace, so a "verification"
+// command carrying one is no longer read-only.
+var verificationCommandExecFlags = []string{
+	"-exec", "-toolexec", "-vettool", "-overlay", "-modfile", "-o",
+	"--config", "--target-dir", "--manifest-path",
+}
+
+// isVerificationCommandByte reports whether b may appear in a verification
+// command. It is an allowlist: bash -lc treats newline, carriage return,
+// backslash, quotes, and every control operator as syntax, so anything
+// outside plain words, spaces, and path/flag punctuation is rejected.
+func isVerificationCommandByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte(" -_./=:,@+%*", b) >= 0
+}
+
 // isWorkspaceVerificationCommand reports whether command is a known
-// build/vet/test/lint prefix with nothing chained after it. Any shell
-// control operator (&&, ||, ;, |, redirection, command substitution)
-// disqualifies the match, since that could smuggle a destructive command
-// alongside a safe-looking prefix.
+// build/vet/test/lint prefix with nothing chained after it. The command may
+// hold only allowlisted bytes (see isVerificationCommandByte), so no shell
+// separator, escape, quote, or substitution can smuggle a second command
+// past the prefix, and it may not carry a flag that executes another
+// program (see verificationCommandExecFlags).
 func isWorkspaceVerificationCommand(command string) bool {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "" {
 		return false
 	}
-	if strings.ContainsAny(trimmed, "&|;><`$(){}") {
-		return false
+	for i := 0; i < len(trimmed); i++ {
+		if !isVerificationCommandByte(trimmed[i]) {
+			return false
+		}
+	}
+	for _, field := range strings.Fields(trimmed) {
+		name, _, _ := strings.Cut(strings.ToLower(field), "=")
+		for _, flag := range verificationCommandExecFlags {
+			if name == flag || name == "-"+flag {
+				return false
+			}
+		}
 	}
 	lower := strings.ToLower(trimmed)
 	for _, prefix := range verificationShellCommandPrefixes {

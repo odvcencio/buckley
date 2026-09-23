@@ -166,6 +166,50 @@ func TestRequestACPToolPermission_NoAgentAllowsWorkspaceVerificationCommands(t *
 	}
 }
 
+// TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands pins the
+// classifier against every way bash -lc could run a second program behind a
+// verification prefix: command separators the operator denylist missed
+// (newline, carriage return), escapes and quoting, and tool flags that
+// execute an arbitrary program as part of the "verification".
+func TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands(t *testing.T) {
+	t.Parallel()
+
+	smuggled := []string{
+		"go test ./...\nrm -rf /",
+		"go test ./...\rrm -rf /",
+		"go test ./...\\\nrm -rf /",
+		"go vet ./...\trm",
+		"go test -exec 'rm -rf /' ./...",
+		"go test -exec=/bin/sh ./...",
+		"go test -toolexec=/tmp/x ./...",
+		"go vet -vettool=/tmp/x ./...",
+		"go build -o /etc/passwd ./...",
+		"go build -overlay=/tmp/o.json ./...",
+		"go test -modfile=/tmp/go.mod ./...",
+		"cargo test --config target.x.runner=sh",
+		"go test \"./...\"",
+		"go test ./...#\nrm",
+	}
+	for _, command := range smuggled {
+		if isWorkspaceVerificationCommand(command) {
+			t.Errorf("classified %q as a read-only verification command", command)
+		}
+	}
+
+	allowed := []string{
+		"go test -run TestFoo -count=1 ./pkg/...",
+		"go test -race -timeout 10m ./...",
+		"go vet ./cmd/buckley",
+		"npm run lint",
+		"cargo clippy --all-targets",
+	}
+	for _, command := range allowed {
+		if !isWorkspaceVerificationCommand(command) {
+			t.Errorf("rejected plain verification command %q", command)
+		}
+	}
+}
+
 func TestRequestACPToolPermission_ClientAllows(t *testing.T) {
 	t.Parallel()
 
