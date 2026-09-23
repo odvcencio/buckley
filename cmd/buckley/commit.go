@@ -122,7 +122,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 	var pathsFlag stringSliceFlag
-	fs.Var(&pathsFlag, "paths", "scope commit to these paths only (repeatable); other staged files remain staged")
+	fs.Var(&pathsFlag, "paths", "scope commit to these paths only (repeatable); stages them if not already staged, other staged files remain staged")
 	exclusive := fs.Bool("exclusive", false, "with --paths: error if any staged file falls outside the given paths")
 
 	if err := fs.Parse(args); err != nil {
@@ -223,8 +223,17 @@ func prepareCommitIndex(opts commitCommandOptions) error {
 		return fmt.Errorf("--paths is not supported with --graft (graft commit cannot scope by pathspec)")
 	}
 
-	if len(opts.filesToStage) > 0 {
-		if err := stageFiles(opts.filesToStage, opts.useGraft, opts.compactOutput); err != nil {
+	filesToStage := opts.filesToStage
+	if len(filesToStage) == 0 && len(opts.paths) > 0 {
+		// --paths names the files to scope the commit to; stage them too
+		// (H9), matching the positional `-- <files>` behavior instead of
+		// requiring a separate `git add` first. Positional args, when
+		// given, still win: --paths then only scopes/validates.
+		filesToStage = opts.paths
+	}
+
+	if len(filesToStage) > 0 {
+		if err := stageFiles(filesToStage, opts.useGraft, opts.compactOutput); err != nil {
 			return fmt.Errorf("staging failed: %w", err)
 		}
 	}
