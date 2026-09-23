@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `buckley commit` now completes an in-progress merge, cherry-pick, or
+  revert that stopped on a conflict, instead of falling back to plain
+  `git commit`. It refuses when unmerged paths remain, generates a merge
+  message (`merge(<scope>): Merge <source> into <target>`) that states how
+  each conflict was resolved, and preserves the original message plus
+  reference trailer for cherry-picks and reverts. It refuses to touch a
+  rebase in progress and prints `git rebase --continue` guidance instead.
+  `buckley commit --squash <base>` soft-resets to the merge-base and
+  creates one generated commit for the whole range, with dirty-tree and
+  protected-branch guards, a printed pre-squash `HEAD` for the reflog undo,
+  and a required `--force-with-lease` to push the rewritten branch. A
+  prepared `git merge --squash` message is used as extra context for a
+  normal generated commit. New `buckley pr merge <n>
+  [--squash|--merge|--rebase] [--admin] [--delete-branch]` generates the
+  squash/merge commit title and body from the PR, refuses when required
+  checks are failing or pending, and never passes `--admin` unless given.
 - Review verification evidence can now run through a remote wrapper (for
   example buildbox-run) instead of the local sandbox. Set
   `review.verification.runner.wrapper` (or `BUCKLEY_VERIFY_WRAPPER`) to a

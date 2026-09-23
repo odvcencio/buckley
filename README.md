@@ -107,6 +107,12 @@ opaque `Buckley-Change-Hash` and `Buckley-Change-Stats` trailers by default;
 these contain no paths or diff text. Use `--context-trailer=false` when a
 repository does not want the trailers.
 
+`buckley commit` also completes merges, cherry-picks, and reverts that
+stopped on a conflict, and squashes a branch's commits with `--squash
+<base>`. `buckley pr merge <n>` generates the squash or merge commit
+message from the PR and merges it after its required checks pass. See
+[docs/CLI.md](docs/CLI.md#commit) for the full flag reference.
+
 ## Configuration
 
 Configuration is layered:

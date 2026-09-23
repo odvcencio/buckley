@@ -68,13 +68,17 @@ type commitCommandOptions struct {
 	paths          []string
 	exclusive      bool
 	filesToStage   []string
+	squashBase     string
+	force          bool
+	forceWithLease bool
 }
 
 type commitCommandRuntime struct {
-	backend string
-	modelID string
-	ledger  *transparency.CostLedger
-	runner  commitRunner
+	backend   string
+	modelID   string
+	ledger    *transparency.CostLedger
+	runner    commitRunner
+	framework *oneshot.Framework
 }
 
 // frameworkCommitRunner adapts oneshot.Framework to the commitRunner interface.
@@ -124,6 +128,9 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	var pathsFlag stringSliceFlag
 	fs.Var(&pathsFlag, "paths", "scope commit to these paths only (repeatable); stages them if not already staged, other staged files remain staged")
 	exclusive := fs.Bool("exclusive", false, "with --paths: error if any staged file falls outside the given paths")
+	squashFlag := fs.String("squash", "", "squash all commits since the merge-base with this ref into one commit")
+	force := fs.Bool("force", false, "with --squash: allow squashing a protected branch (main/master)")
+	forceWithLease := fs.Bool("force-with-lease", false, "with --squash: push the rewritten branch (git push --force-with-lease)")
 
 	if err := fs.Parse(args); err != nil {
 		return commitCommandOptions{}, err
@@ -149,6 +156,9 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 		paths:          append([]string(nil), pathsFlag...),
 		exclusive:      *exclusive,
 		filesToStage:   fs.Args(),
+		squashBase:     strings.TrimSpace(*squashFlag),
+		force:          *force,
+		forceWithLease: *forceWithLease,
 	}
 	return opts, nil
 }
@@ -158,6 +168,25 @@ func runCommitCommand(args []string) error {
 	opts, err := parseCommitCommandOptions(args)
 	if err != nil {
 		return err
+	}
+
+	if opts.squashBase != "" {
+		return runSquashCommand(opts)
+	}
+
+	state, err := detectRepoOpState()
+	if err != nil {
+		return err
+	}
+	switch state.Kind {
+	case opMerge:
+		return runCompleteMerge(opts, state)
+	case opCherryPick:
+		return runCompleteCherryPick(opts, state)
+	case opRevert:
+		return runCompleteRevert(opts, state)
+	case opRebase:
+		return errRebaseInProgress
 	}
 
 	if err := prepareCommitIndex(opts); err != nil {
@@ -170,7 +199,12 @@ func runCommitCommand(args []string) error {
 		return fmt.Errorf("capture staged change identity: %w", err)
 	}
 
-	runtime, cleanup, err := newCommitCommandRuntime(opts)
+	def := commitDefinition(opts.paths)
+	if state.Kind == opMergeSquash {
+		def = squashMsgCommitDefinition{CommitDefinition: commands.CommitDefinition{}, squashMsg: readGitDirFile(state.GitDir, "SQUASH_MSG")}
+	}
+
+	runtime, cleanup, err := newCommitCommandRuntime(opts, def)
 	defer cleanup()
 	if err != nil {
 		return err
@@ -270,7 +304,7 @@ func prepareCommitIndex(opts commitCommandOptions) error {
 	return nil
 }
 
-func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, func(), error) {
+func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) (*commitCommandRuntime, func(), error) {
 	preflightFallbackModel, preflightFallback := selectAvailableDefaultCommitModelBeforeInit(opts)
 	restoreProviderLock := func() {}
 	if preflightFallback {
@@ -313,10 +347,11 @@ func newCommitCommandRuntime(opts commitCommandOptions) (*commitCommandRuntime, 
 
 	framework := oneshot.NewFramework(invoker, nil)
 	runtime := &commitCommandRuntime{
-		backend: opts.backend,
-		modelID: modelID,
-		ledger:  ledger,
-		runner:  &frameworkCommitRunner{framework: framework, def: commitDefinition(opts.paths)},
+		backend:   opts.backend,
+		modelID:   modelID,
+		ledger:    ledger,
+		framework: framework,
+		runner:    &frameworkCommitRunner{framework: framework, def: def},
 	}
 	return runtime, cleanup, nil
 }

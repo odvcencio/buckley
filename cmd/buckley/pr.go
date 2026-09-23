@@ -151,6 +151,10 @@ func prContextOpts(diffBudget int) oneshot.ContextOpts {
 
 // runPRCommand generates a structured PR via tool-use.
 func runPRCommand(args []string) error {
+	if len(args) > 0 && args[0] == "merge" {
+		return runPRMergeCommand(args[1:])
+	}
+
 	opts, err := parsePRCommandOptions(args)
 	if err != nil {
 		return err
