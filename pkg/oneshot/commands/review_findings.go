@@ -167,6 +167,12 @@ func ParseReview(review string) *ParsedReview {
 	parsed.BuildVerification = parseVerificationState(parsed.BuildStatus)
 	parsed.TestVerification = parseVerificationState(parsed.TestStatus)
 	parsed.Coverage = extractSection(review, "Coverage")
+	if parsed.Coverage == "" {
+		parsed.Coverage = extractSection(review, "Coverage and Completeness")
+	}
+	if parsed.Coverage == "" {
+		parsed.Coverage = extractSection(review, "Coverage and Completeness: COMPLETE")
+	}
 	parsed.CoverageEntries, parsed.FeedbackDisposition, parsed.FeedbackDispositionDetails, parsed.FeedbackEntries = parseCoverageLedger(parsed.Coverage)
 	parsed.InvariantAudit = extractSection(review, "Invariant Audit")
 	parsed.Falsification = extractSection(review, "Falsification")

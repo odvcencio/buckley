@@ -1904,6 +1904,26 @@ func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
 	assert.ErrorContains(t, err, "unexpected pkg/ratchet.go.bak")
 }
 
+func TestReviewCoverageLedgerAcceptsCoverageAndCompletenessHeading(t *testing.T) {
+	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
+	coverage := "- **File**: `pkg/ratchet.go` — reviewed the changed bound and its consumer.\n" +
+		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
+		"- **Verification**: required CI passed."
+	for _, heading := range []string{"Coverage and Completeness", "Coverage and Completeness: COMPLETE"} {
+		t.Run(heading, func(t *testing.T) {
+			review := strings.Replace(completeReviewWithCoverage(coverage), "## Coverage\n", "## "+heading+"\n", 1)
+			result, err := def.ParseResult(review)
+			assert.NoError(t, err)
+			assert.NoError(t, def.ValidateResult(result))
+
+			missing := strings.Replace(review, "- **File**: `pkg/ratchet.go` — reviewed the changed bound and its consumer.\n", "", 1)
+			result, err = def.ParseResult(missing)
+			assert.NoError(t, err)
+			assert.ErrorContains(t, def.ValidateResult(result), "missing pkg/ratchet.go")
+		})
+	}
+}
+
 func TestReviewCoverageLedgerAllowsCompleteDirectoryGroups(t *testing.T) {
 	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/feature/a.go", "pkg/feature/b.go", "README.md"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
 	review := completeReviewWithCoverage(

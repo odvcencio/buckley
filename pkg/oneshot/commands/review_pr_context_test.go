@@ -439,6 +439,30 @@ func TestBuildPRPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
 	}
 }
 
+func TestBuildPRPrompt_FinalCoverageChecklistNamesEveryChangedFile(t *testing.T) {
+	files := []string{"pkg/oneshot/commands/review_pr_context.go", "pkg/oneshot/commands/review_findings.go"}
+	prompt := BuildPRPrompt(&PRContext{
+		PR:    &PRInfo{Number: 512, Title: "Review coverage", HeadSHA: "head-sha", BaseSHA: "base-sha", ChangedFiles: len(files)},
+		Files: files,
+		Diff:  "diff --git a/pkg/oneshot/commands/review_findings.go b/pkg/oneshot/commands/review_findings.go\n",
+	})
+	checklist := strings.LastIndex(prompt, "## Final Coverage Checklist")
+	if checklist <= strings.LastIndex(prompt, "## Diff") {
+		t.Fatalf("final coverage checklist must follow the diff:\n%s", prompt)
+	}
+	tail := prompt[checklist:]
+	for _, file := range files {
+		if count := strings.Count(tail, "- `"+file+"`"); count != 1 {
+			t.Fatalf("final checklist has %d entries for %s:\n%s", count, file, tail)
+		}
+	}
+	for _, want := range []string{"one **File** entry", "no unrelated paths", "**Feedback disposition**", "**Verification**"} {
+		if !strings.Contains(tail, want) {
+			t.Fatalf("final checklist missing %q:\n%s", want, tail)
+		}
+	}
+}
+
 func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 	diff := oversizedReviewDiff() +
 		"diff --git a/pkg/oneshot/commands/review_pr_context.go b/pkg/oneshot/commands/review_pr_context.go\n" +

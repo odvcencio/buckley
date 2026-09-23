@@ -561,6 +561,15 @@ func BuildPRPrompt(ctx *PRContext) string {
 	sb.WriteString("```diff\n")
 	sb.WriteString(ctx.Diff)
 	sb.WriteString("\n```\n")
+	if len(ctx.Files) > 0 {
+		sb.WriteString("\n## Final Coverage Checklist\n\n")
+		sb.WriteString("Before returning, reconcile the final ## Coverage ledger against every exact changed path below. ")
+		sb.WriteString("Include one **File** entry with concrete evidence per path, no unrelated paths, ")
+		sb.WriteString("an explicit **Feedback disposition**, and a **Verification** line.\n\n")
+		for _, file := range ctx.Files {
+			fmt.Fprintf(&sb, "- `%s`\n", file)
+		}
+	}
 
 	return sb.String()
 }
