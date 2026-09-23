@@ -340,6 +340,9 @@ func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
 func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if req.Usage == nil {
+		req.Usage = &UsageRequestOptions{Include: true}
+	}
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return nil, err
 	}
@@ -485,6 +488,9 @@ func (c *Client) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	req.Stream = true
 	req.Reasoning = NormalizeReasoningConfig(req.Reasoning)
+	if req.Usage == nil {
+		req.Usage = &UsageRequestOptions{Include: true}
+	}
 	if err := ValidateOpenRouterFreeLaunchRequest(req); err != nil {
 		return err
 	}

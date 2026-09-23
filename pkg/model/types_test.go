@@ -584,3 +584,116 @@ func TestChatRequest_MarshalsOpenRouterFields(t *testing.T) {
 		}
 	}
 }
+
+func TestChatRequest_MarshalIncludesUsageRequestOptions(t *testing.T) {
+	req := ChatRequest{
+		Model:    "openai/gpt-6-luna-pro",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Usage:    &UsageRequestOptions{Include: true},
+	}
+	blob, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"usage":{"include":true}`) {
+		t.Fatalf("expected usage.include in %s", blob)
+	}
+}
+
+// TestUsage_UnmarshalOpenRouterBYOKCostShape covers C7 against the exact,
+// live-verified OpenRouter response shape for a BYOK
+// (bring-your-own-key) call (openai/gpt-6-luna-pro via OpenRouter, the
+// upstream key billed directly to OpenAI):
+//
+//	"usage": {
+//	  "prompt_tokens": 1396, "completion_tokens": 41, "total_tokens": 1437,
+//	  "cost": 0, "is_byok": true,
+//	  "cost_details": {
+//	    "upstream_inference_cost": 0.0001601,
+//	    "upstream_inference_prompt_cost": 0.0001396,
+//	    "upstream_inference_completions_cost": 2.05e-05
+//	  }
+//	}
+func TestUsage_UnmarshalOpenRouterBYOKCostShape(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 1396, "completion_tokens": 41, "total_tokens": 1437,
+		"cost": 0, "is_byok": true,
+		"prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+		"cost_details": {
+			"upstream_inference_cost": 0.0001601,
+			"upstream_inference_prompt_cost": 0.0001396,
+			"upstream_inference_completions_cost": 2.05e-05
+		},
+		"completion_tokens_details": {"reasoning_tokens": 14}
+	}`
+	var usage Usage
+	if err := json.Unmarshal([]byte(raw), &usage); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if usage.Cost == nil || *usage.Cost != 0 {
+		t.Fatalf("Cost = %v, want 0", usage.Cost)
+	}
+	if !usage.IsBYOK {
+		t.Fatal("IsBYOK = false, want true")
+	}
+	if usage.CostDetails == nil || usage.CostDetails.UpstreamInferenceCost != 0.0001601 {
+		t.Fatalf("CostDetails = %+v, want UpstreamInferenceCost 0.0001601", usage.CostDetails)
+	}
+
+	total, known := usage.TotalCostUSD()
+	if !known {
+		t.Fatal("TotalCostUSD() known = false, want true")
+	}
+	if total != 0.0001601 {
+		t.Fatalf("TotalCostUSD() = %v, want 0.0001601 (OpenRouter fee 0 + upstream 0.0001601)", total)
+	}
+}
+
+func TestUsage_TotalCostUSD(t *testing.T) {
+	zero := 0.0
+	fee := 0.002
+	tests := []struct {
+		name      string
+		usage     Usage
+		wantTotal float64
+		wantKnown bool
+	}{
+		{name: "no cost reported", usage: Usage{}, wantKnown: false},
+		{
+			name:      "non-BYOK cost is authoritative alone",
+			usage:     Usage{Cost: &fee},
+			wantTotal: 0.002,
+			wantKnown: true,
+		},
+		{
+			name: "BYOK adds upstream cost to the (often zero) fee",
+			usage: Usage{
+				Cost:        &zero,
+				IsBYOK:      true,
+				CostDetails: &UsageCostDetails{UpstreamInferenceCost: 0.0001601},
+			},
+			wantTotal: 0.0001601,
+			wantKnown: true,
+		},
+		{
+			name: "BYOK without cost_details falls back to the fee alone",
+			usage: Usage{
+				Cost:   &fee,
+				IsBYOK: true,
+			},
+			wantTotal: 0.002,
+			wantKnown: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			total, known := tt.usage.TotalCostUSD()
+			if known != tt.wantKnown {
+				t.Fatalf("known = %v, want %v", known, tt.wantKnown)
+			}
+			if known && total != tt.wantTotal {
+				t.Fatalf("total = %v, want %v", total, tt.wantTotal)
+			}
+		})
+	}
+}
