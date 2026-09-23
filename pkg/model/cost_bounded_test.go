@@ -435,6 +435,33 @@ func TestManagerCalculateBoundedCost_RejectsUnknownZeroCompatiblePricing(t *test
 	}
 }
 
+// TestManagerCalculateBoundedCost_AllowsPricingOverrideOnCompatibleProvider
+// covers a design-partner free tier configured through
+// providers.openai_compatible.pricing (see OpenAICompatibleProvider's
+// applyPricingOverrides). Once the operator marks a model's zero pricing as
+// authoritative, cost-bounded requests, --budget, and repair/retry logic
+// must be able to admit it like they already do for OpenRouter and Ollama.
+func TestManagerCalculateBoundedCost_AllowsPricingOverrideOnCompatibleProvider(t *testing.T) {
+	info := ModelInfo{ID: "openai_compatible/deepseek-v4.1-flash", PricingKnown: true}
+	mgr := newCostBoundedTestManager("openai_compatible", info)
+	got, err := mgr.CalculateBoundedCost(info.ID, Usage{PromptTokens: 50, CompletionTokens: 10})
+	if err != nil || got != 0 {
+		t.Fatalf("CalculateBoundedCost = %v, %v; want authoritative zero cost", got, err)
+	}
+}
+
+// TestManagerCalculateBoundedCost_AllowsPricingOverrideOnLiteLLMProvider
+// mirrors the openai_compatible case for the deprecated litellm provider
+// alias, which shares the same underlying implementation and config shape.
+func TestManagerCalculateBoundedCost_AllowsPricingOverrideOnLiteLLMProvider(t *testing.T) {
+	info := ModelInfo{ID: "litellm/local-model", PricingKnown: true}
+	mgr := newCostBoundedTestManager("litellm", info)
+	got, err := mgr.CalculateBoundedCost(info.ID, Usage{PromptTokens: 50, CompletionTokens: 10})
+	if err != nil || got != 0 {
+		t.Fatalf("CalculateBoundedCost = %v, %v; want authoritative zero cost", got, err)
+	}
+}
+
 func TestModelInfoPricingKnown_RejectsNullPricing(t *testing.T) {
 	var info ModelInfo
 	if err := json.Unmarshal([]byte(`{"id":"vendor/unknown","pricing":{"prompt":null,"completion":"0"}}`), &info); err != nil {
