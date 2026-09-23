@@ -375,18 +375,32 @@ func TestParseReviewCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
 	}
 }
 
-func TestNewReviewProgressHonorsQuietMode(t *testing.T) {
-	previous := quietMode
-	t.Cleanup(func() { quietMode = previous })
+func TestNewReviewProgressOnlyAnimatesOnInteractiveOutput(t *testing.T) {
+	previousQuiet := quietMode
+	previousTerminal := reviewOutputIsTerminalFn
+	t.Cleanup(func() {
+		quietMode = previousQuiet
+		reviewOutputIsTerminalFn = previousTerminal
+	})
 
-	quietMode = true
-	if _, ok := newReviewProgress("Reviewing").(silentReviewProgress); !ok {
-		t.Fatal("quiet review should not create a spinner")
-	}
-
-	quietMode = false
-	if _, ok := newReviewProgress("Reviewing").(*terminal.Spinner); !ok {
-		t.Fatal("interactive review should create a spinner")
+	for _, test := range []struct {
+		name        string
+		quiet       bool
+		terminal    bool
+		wantSpinner bool
+	}{
+		{name: "quiet terminal", quiet: true, terminal: true},
+		{name: "redirected output", terminal: false},
+		{name: "interactive output", terminal: true, wantSpinner: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			quietMode = test.quiet
+			reviewOutputIsTerminalFn = func() bool { return test.terminal }
+			_, spinner := newReviewProgress("Reviewing").(*terminal.Spinner)
+			if spinner != test.wantSpinner {
+				t.Fatalf("spinner = %t, want %t", spinner, test.wantSpinner)
+			}
+		})
 	}
 }
 
