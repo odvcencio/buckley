@@ -954,7 +954,7 @@ func (m *Manager) resolveModel(modelID string) (string, Provider) {
 		providerID, _ = m.providerIDFromRouting(selected)
 	}
 
-	return selected, m.providerFromIDOrFallback(providerID)
+	return selected, m.providerFromIDOrFallback(providerID, selected)
 }
 
 func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
@@ -970,6 +970,28 @@ func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// catalogOwnerForModel returns the provider ID the aggregated catalog
+// recorded as modelID's source (see Initialize/RefreshProviderCatalog), or
+// "" if modelID is not literally known to the catalog. Unlike
+// providerFromIDOrFallback's last-resort guess (the alphabetically-first
+// configured provider when nothing else decides), this is ground truth: it
+// names the provider that actually advertised this exact model ID.
+// providerFromIDOrFallback prefers it over that guess -- but only after an
+// explicit provider prefix, a configured routing rule, and
+// config.Models.DefaultProvider have all had a chance to apply, so a
+// deliberately configured default still wins a same-ID catalog collision
+// across providers (see
+// TestCanonicalMetadataLookupRejectsCrossProviderCatalogCollision). This is
+// the root cause of a codex-mode regression where a config-role model
+// genuinely owned by, e.g., openrouter both hard-failed startup validation
+// and, had it passed, would have dispatched through whichever other
+// configured provider happened to sort first.
+func (m *Manager) catalogOwnerForModel(modelID string) string {
+	m.catalogMu.RLock()
+	defer m.catalogMu.RUnlock()
+	return m.modelProviders[modelID]
 }
 
 func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, upstreamModelID string, ok bool) {
@@ -988,7 +1010,16 @@ func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, up
 	return providerID, upstreamModelID, true
 }
 
-func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
+// providerFromIDOrFallback resolves a provider in priority order: an
+// already-decided providerID (explicit prefix or routing rule), then
+// config.Models.DefaultProvider, then -- new -- the provider the
+// aggregated catalog actually recorded as modelID's owner (see
+// catalogOwnerForModel), and only then an arbitrary configured provider.
+// Ground truth beats a guess: without the catalog-owner tier, a model
+// belonging to a non-default provider fell through to whichever provider
+// happened to sort first in providerOrder, silently dispatching to a
+// provider that never advertised it.
+func (m *Manager) providerFromIDOrFallback(providerID, modelID string) Provider {
 	if providerID != "" {
 		if provider, ok := m.providers[providerID]; ok {
 			return provider
@@ -997,6 +1028,12 @@ func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
 
 	if providerID := m.config.Models.DefaultProvider; providerID != "" {
 		if provider, ok := m.providers[providerID]; ok {
+			return provider
+		}
+	}
+
+	if ownerID := m.catalogOwnerForModel(modelID); ownerID != "" {
+		if provider, ok := m.providers[ownerID]; ok {
 			return provider
 		}
 	}

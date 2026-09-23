@@ -191,6 +191,17 @@ func TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves(t *t
 	if mgr.config.Models.Review != "openai/gpt-6-luna-pro" {
 		t.Fatalf("review model = %q, want it left untouched", mgr.config.Models.Review)
 	}
+
+	// Startup acceptance alone is not the fix: dispatch must also select the
+	// model's actual owning provider (openrouter), not fall back to codex
+	// just because it sorts first in providerOrder.
+	route, err := mgr.ResolveModelRoute("openai/gpt-6-luna-pro")
+	if err != nil {
+		t.Fatalf("ResolveModelRoute() = %v, want the openrouter-owned model to resolve", err)
+	}
+	if route.ProviderID != "openrouter" {
+		t.Fatalf("ResolveModelRoute().ProviderID = %q, want %q (the model's actual catalog owner, not the alphabetically-first provider)", route.ProviderID, "openrouter")
+	}
 }
 
 // TestEnsureConfiguredModels_BuiltInDefaultStillFallsBackLoudly is the
