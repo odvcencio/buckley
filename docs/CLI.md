@@ -192,6 +192,9 @@ buckley commit [OPTIONS]
 | `--model <id>` | Override the commit-message model |
 | `--backend <api|codex|claude>` | Select the one-shot backend |
 | `--timeout <duration>` | Bound message generation (default `2m`) |
+| `--squash <base>` | Squash every commit since the merge-base with `<base>` into one commit |
+| `--force` | With `--squash`, allow squashing a protected branch (`main`/`master`) |
+| `--force-with-lease` | With `--squash`, push the rewritten branch (`git push --force-with-lease`) |
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_COMMIT` - Override model for commit generation
@@ -211,6 +214,48 @@ stats record only aggregate file and line counts. No paths, filenames, or diff
 content are stored in these trailers. Buckley rechecks the staged diff before
 committing and aborts if it changed after message generation. Disable the
 trailers with `--context-trailer=false`; the staged-diff recheck still runs.
+
+#### Merge, cherry-pick, and revert commits
+
+When `MERGE_HEAD`, `CHERRY_PICK_HEAD`, or `REVERT_HEAD` is present (a
+conflict stopped the operation mid-way), `buckley commit` completes it
+instead of creating a normal commit:
+
+- **Merge**: refuses if any path is still unmerged, then generates a
+  message with subject `merge(<scope>): Merge <source> into <target>` and a
+  body that summarizes the incoming commits and states how each conflicted
+  file was resolved (kept one side, or combined both).
+- **Cherry-pick**: completes with the original commit's message plus a
+  `(cherry picked from commit <sha>)` trailer. No model call is made — the
+  message is already known.
+- **Revert**: completes with git's default `Revert "<subject>"` / `This
+  reverts commit <sha>.` message. No model call is made.
+- **Rebase**: `buckley commit` refuses and prints guidance to run `git
+  rebase --continue` after resolving conflicts. Buckley does not drive
+  interactive rebases.
+
+A prepared `git merge --squash` message (`SQUASH_MSG`, no `MERGE_HEAD`) is
+used as extra context for a normal generated commit message.
+
+#### Squashing commits
+
+```bash
+buckley commit --squash main            # squash topic's commits onto main's merge-base
+buckley commit --squash main --push=false
+buckley commit --squash main --force-with-lease   # push the rewritten branch
+```
+
+`--squash <base>` soft-resets the current branch to its merge-base with
+`<base>`, then creates one commit with a generated message summarizing the
+whole range (subject plus a body listing the key changes). Safety:
+
+- refuses if the working tree has uncommitted tracked changes;
+- refuses to squash a protected branch (`main`/`master`) unless `--force`;
+- prints the pre-squash `HEAD`, recoverable from the reflog (`git reset
+  --hard <printed sha>`);
+- never force-pushes: squashing rewrites history, so pushing the result
+  needs the explicit `--force-with-lease` flag. Without it, the commit is
+  created locally and left unpushed.
 
 ### pr
 
@@ -236,6 +281,39 @@ buckley pr [OPTIONS]
 buckley pr                    # Create PR for current branch
 buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
+```
+
+### pr merge
+
+```bash
+buckley pr merge <number> [--squash|--merge|--rebase] [--admin] [--delete-branch]
+```
+
+Generates a squash or merge commit title and body from the PR's commits,
+diff, and description (STE100, conventional `action(scope): subject`
+grammar), then merges it with `gh pr merge --subject/--body`. A `--rebase`
+merge preserves each original commit message, so no message is generated
+and `--subject`/`--body` are not passed.
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--squash` / `--merge` / `--rebase` | Merge method (default: the repository's preferred allowed method — squash, then merge, then rebase) |
+| `--admin` | Use administrator privileges to bypass merge requirements. Never implied by any other flag. |
+| `--delete-branch` | Delete the local and remote branch after merge |
+| `--dry-run` | Print the generated title and body without merging |
+| `--yes` | Skip confirmation and merge |
+| `--model <id>` / `--backend <api|codex|claude>` / `--timeout <duration>` | Same as `buckley pr` |
+
+Before merging, buckley runs `gh pr checks <number>` and refuses, listing
+every check that is not passing, when any required check is failing or
+still pending. This check is unconditional: `--admin` bypasses GitHub's own
+merge requirements, not buckley's own check-passing gate.
+
+**Example:**
+```bash
+buckley pr merge 42 --squash --delete-branch
+buckley pr merge 42 --dry-run   # preview the generated squash message
 ```
 
 Both `commit` and `pr` use the `api` one-shot backend by default (OpenRouter, or
