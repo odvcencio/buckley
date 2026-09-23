@@ -2908,6 +2908,9 @@ var acpPermissionOptions = []acp.PermissionOption{
 // routine build/vet/test/lint verification too (H10); params lets the
 // caller's actual command downgrade that classification when it matches a
 // known workspace verification command (see isWorkspaceVerificationCommand).
+// The downgrade stops at ImpactModifying, not ImpactReadOnly: go test, make,
+// and npm scripts run repository-controlled code, so a live client must still
+// approve them; only the no-client fallback auto-approves the medium risk.
 func acpToolRiskImpact(registry *tool.Registry, name string, params map[string]any) tool.Impact {
 	if registry == nil {
 		return tool.ImpactDestructive
@@ -2918,7 +2921,7 @@ func acpToolRiskImpact(registry *tool.Registry, name string, params map[string]a
 	}
 	impact := tool.GetMetadata(t).Impact
 	if impact == tool.ImpactDestructive && isWorkspaceVerificationToolCall(name, params) {
-		return tool.ImpactReadOnly
+		return tool.ImpactModifying
 	}
 	return impact
 }

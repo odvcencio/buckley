@@ -210,6 +210,26 @@ func TestIsWorkspaceVerificationCommand_RejectsSmuggledCommands(t *testing.T) {
 	}
 }
 
+// TestRequestACPToolPermission_ClientDecidesVerificationCommands pins that a
+// recognized verification command still goes to a live client for approval.
+// go test, make, and npm scripts run repository-controlled code, so the H10
+// downgrade may relax only the no-client fallback, never skip the client.
+func TestRequestACPToolPermission_ClientDecidesVerificationCommands(t *testing.T) {
+	t.Parallel()
+
+	agent, client := startFakeACPAgentForPermissionTests(t)
+	respondToNextPermissionRequestWith(client, "deny")
+
+	registry := tool.NewRegistry()
+	allowed, _ := requestACPToolPermission(context.Background(), agent, registry, "sess-1", acpTestToolCall("run_shell"), map[string]any{"command": "go test ./..."}, "", nil)
+	if allowed {
+		t.Fatal("verification command ran without the client's approval; the client denied it")
+	}
+	if got := acpToolRiskImpact(registry, "run_shell", map[string]any{"command": "go test ./..."}); got == tool.ImpactReadOnly {
+		t.Fatalf("verification command classified %q; it executes repository code and must not be read-only", got)
+	}
+}
+
 func TestRequestACPToolPermission_ClientAllows(t *testing.T) {
 	t.Parallel()
 
