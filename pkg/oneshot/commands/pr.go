@@ -319,11 +319,8 @@ func (PRDefinition) Validate(result json.RawMessage) error {
 	if !isCommitAction(pr.Action) {
 		return fmt.Errorf("action %q is not an allowed verb (use one of: %s)", pr.Action, strings.Join(commitActions, ", "))
 	}
-	if strings.TrimSpace(pr.Title) == "" {
-		return fmt.Errorf("title is required")
-	}
-	if len(pr.Header()) > 100 {
-		return fmt.Errorf("composed title too long: %d chars (max 100)", len(pr.Header()))
+	if err := commitmsg.ValidateHeader(pr.Action, pr.Scope, pr.Title, 100); err != nil {
+		return err
 	}
 	if strings.TrimSpace(pr.Summary) == "" {
 		return fmt.Errorf("summary is required")

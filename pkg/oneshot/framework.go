@@ -3,6 +3,7 @@ package oneshot
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"strings"
@@ -40,6 +41,7 @@ const (
 //   - AgentDefinition -> one multi-turn tool agent (review)
 type Framework struct {
 	invoker              ToolInvoker
+	validationFallbacks  []func() (ToolInvoker, error)
 	agentRunner          AgentExecutor
 	approvalCriticRunner AgentExecutor
 	engine               *rules.Engine
@@ -106,6 +108,14 @@ func NewFramework(invoker ToolInvoker, engine *rules.Engine) *Framework {
 	}
 }
 
+// WithValidationFallbacks supplies models in configuration order. Each factory
+// is called only after a model retry still fails validation.
+func (f *Framework) WithValidationFallbacks(factories ...func() (ToolInvoker, error)) *Framework {
+	copy := *f
+	copy.validationFallbacks = factories
+	return &copy
+}
+
 // WithAgentRunner returns a copy of the framework with the given tool agent runner.
 // This enables execution of AgentDefinition-based commands (e.g., review).
 func (f *Framework) WithAgentRunner(runner AgentExecutor) *Framework {
@@ -114,6 +124,7 @@ func (f *Framework) WithAgentRunner(runner AgentExecutor) *Framework {
 		agentRunner:          runner,
 		approvalCriticRunner: f.approvalCriticRunner,
 		engine:               f.engine,
+		validationFallbacks:  f.validationFallbacks,
 	}
 }
 
@@ -125,6 +136,7 @@ func (f *Framework) WithApprovalCriticRunner(runner AgentExecutor) *Framework {
 		agentRunner:          f.agentRunner,
 		approvalCriticRunner: runner,
 		engine:               f.engine,
+		validationFallbacks:  f.validationFallbacks,
 	}
 }
 
@@ -222,8 +234,12 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	var lastErr error
 	var traceAttempts []transparency.TraceAttempt
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		result, trace, invokeErr := f.invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
+	invoker := f.invoker
+	fallbackIndex, modelAttempts := 0, 0
+	attemptLimit := maxRetries
+	for attempt := 0; attempt < attemptLimit; attempt++ {
+		modelAttempts++
+		result, trace, invokeErr := invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
 		if invokeErr != nil {
 			trace = traceWithErrorIfBlank(trace, invokeErr)
 		}
@@ -262,7 +278,20 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}
 
 		// 5. Validate
-		if err := def.Validate(result.ToolCall.Arguments); err != nil {
+		validationErr := def.Validate(result.ToolCall.Arguments)
+		if validationErr != nil {
+			if repairer, ok := def.(RepairableDefinition); ok {
+				repaired, repairs := repairer.Repair(result.ToolCall.Arguments)
+				if len(repairs) > 0 && def.Validate(repaired) == nil {
+					result.ToolCall.Arguments = repaired
+					validationErr = nil
+					for _, repair := range repairs {
+						slog.Info("repaired header: " + repair)
+					}
+				}
+			}
+		}
+		if err := validationErr; err != nil {
 			lastErr = fmt.Errorf("validation: %w", err)
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
@@ -276,6 +305,18 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 				".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
 				truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
 				"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
+			if modelAttempts >= min(2, maxRetries) && fallbackIndex < len(f.validationFallbacks) {
+				next, fallbackErr := f.validationFallbacks[fallbackIndex]()
+				fallbackIndex++
+				if fallbackErr != nil {
+					lastErr = fmt.Errorf("validation fallback: %w", fallbackErr)
+					attemptLimit = attempt + 1
+					break
+				}
+				invoker = next
+				modelAttempts = 0
+				attemptLimit = attempt + 1 + maxRetries
+			}
 			continue
 		}
 
@@ -311,24 +352,24 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	// guess whether the model skipped the tool call, tripped validation,
 	// or emitted malformed JSON.
 	if lastErr != nil {
-		err := fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", maxRetries, def.Name(), lastErr)
+		err := fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", attemptLimit, def.Name(), lastErr)
 		retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
 		return &RunResult{
 			Trace:            retainedTrace,
 			ContextAudit:     audit,
-			Attempts:         maxRetries,
-			PrimaryAttempts:  maxRetries,
+			Attempts:         attemptLimit,
+			PrimaryAttempts:  attemptLimit,
 			Incomplete:       true,
 			IncompleteReason: err.Error(),
 		}, err
 	}
-	err = fmt.Errorf("failed after %d attempts for command %q", maxRetries, def.Name())
+	err = fmt.Errorf("failed after %d attempts for command %q", attemptLimit, def.Name())
 	retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
 	return &RunResult{
 		Trace:            retainedTrace,
 		ContextAudit:     audit,
-		Attempts:         maxRetries,
-		PrimaryAttempts:  maxRetries,
+		Attempts:         attemptLimit,
+		PrimaryAttempts:  attemptLimit,
 		Incomplete:       true,
 		IncompleteReason: err.Error(),
 	}, err

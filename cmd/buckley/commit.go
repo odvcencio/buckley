@@ -345,7 +345,7 @@ func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) 
 		return nil, func() {}, err
 	}
 
-	framework := oneshot.NewFramework(invoker, nil)
+	framework := withUtilityValidationFallbacks(oneshot.NewFramework(invoker, nil), opts.backend, "commit", modelID, cfg, mgr, ledger)
 	runtime := &commitCommandRuntime{
 		backend:   opts.backend,
 		modelID:   modelID,
