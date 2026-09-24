@@ -214,6 +214,9 @@ type CompletionContract struct {
 	RequirePostChangeVerification bool
 	RequireObservableChange       bool
 	MaxRepairAttempts             int
+	MaxContinuations              int
+	OnContinuation                func(int, string)
+	TolerateObservationErrors     bool
 	RepairInstruction             string
 	TaskIntent                    TaskIntent
 	ValidateFinalResponse         func(string) error
@@ -289,7 +292,7 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 	normalized := c.Normalize()
 
 	stateChanged := snapshot.StateChangedCalls > 0
-	if normalized.RequirePostChangeVerification && snapshot.StateObservationFailures > 0 {
+	if normalized.RequirePostChangeVerification && !normalized.TolerateObservationErrors && snapshot.StateObservationFailures > 0 {
 		detail := "workspace state could not be observed after a tool that may affect completion evidence"
 		if snapshot.LastStateObservationError != "" {
 			detail += ": " + snapshot.LastStateObservationError
@@ -300,7 +303,11 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 		}
 	}
 	if normalized.RequirePostChangeVerification && stateChanged {
-		if snapshot.LastVerificationSequence <= snapshot.LastStateChangeSequence {
+		lastChange := snapshot.LastStateChangeSequence
+		if normalized.TolerateObservationErrors {
+			lastChange = max(lastChange, snapshot.LastStateFailureSequence)
+		}
+		if snapshot.LastVerificationSequence <= lastChange {
 			return &CompletionContractError{
 				Reason: CompletionMissingPostChangeVerification,
 				Detail: "missing successful verification after the latest workspace change",

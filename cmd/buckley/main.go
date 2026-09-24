@@ -162,6 +162,7 @@ type startupOptions struct {
 	toolsSet         bool
 	taskIntent       agentloop.TaskIntent
 	taskIntentSet    bool
+	persist          bool
 	codeMode         bool
 	plainModeSet     bool
 	plainMode        bool
@@ -324,7 +325,7 @@ func main() {
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
 		// Prompt provided via -p flag
-		exitCode := executeOneShotWithTaskIntent(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent)
+		exitCode := executeOneShotWithTaskIntent(promptFlag, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent, opts.persist)
 		os.Exit(exitCode)
 	}
 
@@ -340,13 +341,13 @@ func main() {
 			}
 			if len(lines) > 0 {
 				prompt := strings.Join(lines, "\n")
-				exitCode := executeOneShotWithTaskIntent(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent)
+				exitCode := executeOneShotWithTaskIntent(prompt, cfg, modelManager, store, projectContext, planStore, agentProfile, modelOverrideFlag, opts.tools, opts.codeMode, opts.taskIntent, opts.persist)
 				os.Exit(exitCode)
 			}
 		}
 	}
-	if opts.taskIntentSet {
-		fmt.Fprintln(os.Stderr, "Error: --task-intent is only supported with -p or piped one-shot input")
+	if opts.taskIntentSet || opts.persist {
+		fmt.Fprintln(os.Stderr, "Error: --task-intent and --persist are only supported with -p or piped one-shot input")
 		os.Exit(2)
 	}
 	if opts.toolsSet {
@@ -433,8 +434,8 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	return executeOneShotWithTaskIntent(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, agentloop.UnknownIntent)
 }
 
-func executeOneShotWithTaskIntent(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, taskIntent agentloop.TaskIntent) int {
-	limits := acpLoopLimits{TaskIntent: taskIntent}
+func executeOneShotWithTaskIntent(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, taskIntent agentloop.TaskIntent, persist ...bool) int {
+	limits := acpLoopLimits{TaskIntent: taskIntent, Persist: len(persist) > 0 && persist[0]}
 	return executeOneShotWithLimitsAndOutputSchema(prompt, cfg, mgr, store, projectContext, planStore, agentProfile, modelOverride, allowedTools, codeMode, limits, "")
 }
 
@@ -472,7 +473,7 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		return 1
 	}
 	limits.allowHostTools = oneShotHostToolsAllowed(cfg) && !limits.ChildContract && limits.SourceScope == nil
-	limits.longMutation = limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent
+	limits = applyOneShotPersistence(cfg, limits, os.Stderr)
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -527,6 +528,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if limits.TaskIntent == agentloop.MutationIntent && !limits.ChildContract && limits.SourceScope == nil {
+		registerOneShotVerification(registry)
+	}
 	if limits.allowHostTools {
 		if reader, ok := registry.Get("read_file"); ok {
 			if reader, ok := reader.(*builtin.ReadFileTool); ok {
@@ -683,6 +687,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	if instruction := sourceTextRequirementInstruction(limits.RequiredSourceText); instruction != "" {
 		systemPrompt += "\n\n" + instruction
+	}
+	if limits.MaxContinuations > 0 {
+		systemPrompt += "\n\n" + agentloop.PersistenceInstruction
 	}
 	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
@@ -1679,6 +1686,7 @@ func printHelp() {
 	fmt.Println("  --code-mode                      Offer audited exec_program for batched repository analysis (requires bubblewrap)")
 	fmt.Println("  --agent <path>                   Load a buckley.agent/v1 runtime profile for this session")
 	fmt.Println("  -m, --model <id>                 Use model for this chat session (for example codex/gpt-5.4-mini)")
+	fmt.Println("  --persist                       Continue one-shot mutation work until complete or blocked")
 	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
 	fmt.Println("  --tools <names>                  Limit one-shot model tools (comma-separated, repeatable)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
@@ -2494,6 +2502,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 	case "--tui":
 		opts.plainModeSet = true
 		opts.plainMode = false
+	case "--persist":
+		if !beforeCommand {
+			return false, nil
+		}
+		opts.persist = true
 	case "--code-mode":
 		if !beforeCommand {
 			return false, nil

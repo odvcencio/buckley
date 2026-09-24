@@ -19,6 +19,8 @@ type Observation struct {
 	beforeState string
 	beforeErr   error
 	observe     bool
+	bestEffort  bool
+	warning     string
 }
 
 // Begin records pre-execution workspace state when a non-read-only tool might
@@ -31,32 +33,45 @@ func BeginWithMetadata(ctx context.Context, workDir string, metadata tool.ToolMe
 	return begin(ctx, workDir, string(metadata.Impact), metadata.Verification)
 }
 
+func BeginBestEffortWithMetadata(ctx context.Context, workDir string, metadata tool.ToolMetadata) Observation {
+	return beginWithPolicy(ctx, workDir, string(metadata.Impact), metadata.Verification, true)
+}
+
 func begin(ctx context.Context, workDir, effectClass string, observeVerification bool) Observation {
+	return beginWithPolicy(ctx, workDir, effectClass, observeVerification, false)
+}
+
+func beginWithPolicy(ctx context.Context, workDir, effectClass string, observeVerification, bestEffort bool) Observation {
 	observation := Observation{
 		EffectClass: effectClass,
 		workDir:     strings.TrimSpace(workDir),
+		bestEffort:  bestEffort,
 	}
 	observation.observe = observation.workDir != "" &&
 		observation.EffectClass != "" &&
 		(observeVerification || observation.EffectClass != string(tool.ImpactReadOnly)) &&
 		observation.EffectClass != "control"
 	if observation.observe {
-		observation.beforeState, observation.beforeErr = workspaceevidence.GitStateFingerprint(ctx, observation.workDir)
+		observation.beforeState, observation.beforeErr = observation.fingerprint(ctx)
 	}
 	return observation
 }
 
 // Finish decorates outcome with effect, state-change, and verification facts.
-// Verification comes only from typed tool metadata and actual Result.Success.
+// Verification comes from trusted typed checks or recognized foreground shell checks.
 func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, metadata tool.ToolMetadata, result *builtin.Result, execErr error) agentloop.ToolOutcome {
 	if strings.TrimSpace(outcome.EffectClass) == "" {
 		outcome.EffectClass = o.EffectClass
 	}
 	if o.observe {
-		afterState, afterErr := workspaceevidence.GitStateFingerprint(ctx, o.workDir)
+		afterState, afterErr := o.fingerprint(ctx)
+		outcome.StateObservationError = o.warning
 		if o.beforeErr != nil || afterErr != nil {
 			outcome.StateObservationFailed = true
 			outcome.StateObservationError = errors.Join(o.beforeErr, afterErr).Error()
+		} else if o.bestEffort && strings.HasPrefix(o.beforeState, "status:") != strings.HasPrefix(afterState, "status:") {
+			outcome.StateObservationFailed = true
+			outcome.StateObservationError = "workspace observation changed between diff and status methods; run a fresh check to establish comparable state"
 		} else {
 			outcome.StateObserved = true
 			outcome.StateChanged = o.beforeState != afterState
@@ -70,4 +85,15 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 		}
 	}
 	return outcome
+}
+
+func (o *Observation) fingerprint(ctx context.Context) (string, error) {
+	if !o.bestEffort {
+		return workspaceevidence.GitStateFingerprint(ctx, o.workDir)
+	}
+	state, err := workspaceevidence.GitStateFingerprintWithFallback(ctx, o.workDir)
+	if state.Warning != "" {
+		o.warning = state.Warning
+	}
+	return state.Digest, err
 }

@@ -1,5 +1,7 @@
 package tool
 
+import "m31labs.dev/buckley/pkg/tool/builtin"
+
 // Impact represents the impact level of a tool operation
 type Impact string
 
@@ -81,6 +83,8 @@ func GetMetadata(t Tool) ToolMetadata {
 	var metadata ToolMetadata
 	if rt, ok := t.(RichTool); ok {
 		metadata = rt.Metadata()
+	} else if _, ok := t.(*builtin.WorkspaceVerificationTool); ok {
+		metadata = ToolMetadata{Category: CategoryTesting, Impact: ImpactModifying, Cost: CostFree, Intent: "Running verification", Summary: "Verification completed"}
 	} else if conservative, ok := t.(ConservativeMutationTool); ok && conservative.ConservativeMutation() {
 		metadata = ToolMetadata{
 			Category: CategoryExternal,

@@ -28,11 +28,8 @@ const (
 // HEAD and non-ignored untracked files. It emits no workspace contents and is
 // stable across repeated observations of the same state.
 func GitStateFingerprint(ctx context.Context, root string) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultFingerprintTimeout)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(ctx, fingerprintTimeout(root))
+	defer cancel()
 	topRaw, err := gitOutput(ctx, root, maxFingerprintPathBytes, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("observe workspace root: %w", err)
@@ -478,6 +475,9 @@ func runGitCommand(ctx context.Context, root string, limit int64, args ...string
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		return gitCommandResult{}, fmt.Errorf("git %s: %w", args[0], ctx.Err())
+	}
 	if stdout.exceeded {
 		return gitCommandResult{}, fmt.Errorf("git %s output exceeds observation limit", args[0])
 	}
