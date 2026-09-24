@@ -447,3 +447,18 @@ func describeOneshotBackend(backend, modelID string) string {
 	}
 	return fmt.Sprintf("backend: %s", backend)
 }
+
+// withUtilityValidationFallbacks retains the selected primary and resolves each
+// configured fallback only when validation needs it, with its own route/pricing.
+func withUtilityValidationFallbacks(framework *oneshot.Framework, backend, commandName, modelID string, cfg *config.Config, mgr *model.Manager, ledger *transparency.CostLedger) *oneshot.Framework {
+	if backend != oneshotBackendAPI {
+		return framework
+	}
+	var factories []func() (oneshot.ToolInvoker, error)
+	for _, fallback := range cfg.Models.FallbackChains[modelID] {
+		factories = append(factories, func() (oneshot.ToolInvoker, error) {
+			return newOneshotToolInvoker(backend, commandName, fallback, cfg, mgr, ledger)
+		})
+	}
+	return framework.WithValidationFallbacks(factories...)
+}
