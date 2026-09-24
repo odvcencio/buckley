@@ -30,10 +30,18 @@ type Orchestrator struct {
 	engine           *rules.Engine
 	gtsPipeline      *gts.Pipeline
 	resolver         *model.Resolver
+	reviewRecorder   ReviewRecorder
 
 	currentPlan *Plan
 	executor    *Executor
 	cancelPlan  context.CancelFunc
+}
+
+func (o *Orchestrator) SetReviewRecorder(recorder ReviewRecorder) {
+	o.reviewRecorder = recorder
+	if o.executor != nil {
+		o.executor.setReviewRecorder(recorder)
+	}
 }
 
 // GetWorkflow returns the workflow manager
@@ -254,6 +262,7 @@ func (o *Orchestrator) ExecutePlan() error {
 	ctx, cancel := context.WithCancel(ctx)
 	o.cancelPlan = cancel
 	o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
+	o.executor.setReviewRecorder(o.reviewRecorder)
 	o.executor.SetContext(ctx)
 	o.executor.SetResolver(o.resolver)
 	if o.gtsPipeline != nil && o.executor.builder != nil {
@@ -296,6 +305,7 @@ func (o *Orchestrator) ExecuteTask(taskID string) error {
 		ctx, cancel := context.WithCancel(ctx)
 		o.cancelPlan = cancel
 		o.executor = NewExecutor(o.currentPlan, o.store, o.modelClient, o.toolRegistry, o.config, o.planner, o.workflow, o.batchCoordinator, o.engine)
+		o.executor.setReviewRecorder(o.reviewRecorder)
 		o.executor.SetContext(ctx)
 		o.executor.SetResolver(o.resolver)
 		if o.gtsPipeline != nil && o.executor.builder != nil {

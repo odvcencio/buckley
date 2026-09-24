@@ -101,6 +101,12 @@ type RetryContext struct {
 	FilesBefore   map[string]bool
 }
 
+func (e *Executor) setReviewRecorder(recorder ReviewRecorder) {
+	if reviewer, ok := e.reviewer.(*ReviewAgent); ok {
+		reviewer.reviewRecorder = recorder
+	}
+}
+
 func NewExecutor(plan *Plan, store *storage.Store, mgr ModelClient, registry *tool.Registry, cfg *config.Config, planner *Planner, workflow *WorkflowManager, batchCoordinator *BatchCoordinator, engine ...*rules.Engine) *Executor {
 	phases := resolveTaskPhases(cfg)
 	ctx, cancel := context.WithCancel(context.Background())

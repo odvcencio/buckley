@@ -205,7 +205,8 @@ func reviewPRUsageError() error {
 }
 
 // runReviewPRCommand reviews a remote PR using gh CLI integration.
-func runReviewPRCommand(args []string) error {
+func runReviewPRCommand(args []string) (returnErr error) {
+	started := time.Now()
 	sweepStaleReviewWorkspaces()
 
 	opts, err := parseReviewPRCommandOptions(args)
@@ -229,6 +230,14 @@ func runReviewPRCommand(args []string) error {
 	cfg, mgr, store, err := initReviewDependenciesFn(opts.criticModel)
 	if store != nil {
 		defer store.Close()
+	}
+	archive := configuredReviewLedger(cfg)
+	retryReviewLedger(archive)
+	var result *reviewCommandResult
+	var prInfo *commands.PRInfo
+	if archive != nil {
+		record := reviewLedgerPRIdentity(started, opts.prRef, resolveReviewModel(cfg))
+		defer func() { finishReviewLedger(archive, record, result, prInfo, returnErr) }()
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
@@ -288,7 +297,8 @@ func runReviewPRCommand(args []string) error {
 			})
 		}
 	}
-	result, prInfo, reviewErr := runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy, opts.post)
+	var reviewErr error
+	result, prInfo, reviewErr = runPRReviewWithOptions(ctx, opts.prRef, runtime.framework, policy, opts.post)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)

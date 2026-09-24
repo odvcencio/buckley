@@ -129,7 +129,9 @@ var newOrchestratorFn = func(store *storage.Store, mgr *model.Manager, registry 
 			rlmrunner.WithGraftClient(graftClient),
 		)
 	}
-	return orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
+	runner := orchestrator.NewOrchestrator(store, mgr, registry, cfg, workflow, planStore, arbEngine, gtsPipeline)
+	runner.SetReviewRecorder(orchestratorReviewRecorder(cfg))
+	return runner
 }
 
 func newRulesEngine() *rules.Engine {
