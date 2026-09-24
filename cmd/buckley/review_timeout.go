@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -10,5 +13,7 @@ import (
 // initialization, so setup time cannot silently extend the advertised review
 // window.
 func newReviewCommandContext(started time.Time, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithDeadline(context.Background(), started.Add(timeout))
+	parent, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithDeadline(parent, started.Add(timeout))
+	return ctx, func() { cancel(); stop() }
 }

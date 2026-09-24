@@ -121,11 +121,9 @@ func (s *projectTrustStore) Set(projectRoot string, status projectTrustStatus) e
 	if status != projectTrustTrusted && status != projectTrustRestricted {
 		return fmt.Errorf("invalid project trust status: %s", status)
 	}
-	if s.statuses == nil {
-		s.statuses = make(map[string]projectTrustStatus)
-	}
-	s.statuses[root] = status
-	return s.save()
+	return s.update(func(statuses map[string]projectTrustStatus) {
+		statuses[root] = status
+	})
 }
 
 func (s *projectTrustStore) Reset(projectRoot string) error {
@@ -136,8 +134,39 @@ func (s *projectTrustStore) Reset(projectRoot string) error {
 	if root == "" {
 		return fmt.Errorf("project path cannot be empty")
 	}
-	delete(s.statuses, root)
-	return s.save()
+	return s.update(func(statuses map[string]projectTrustStatus) {
+		delete(statuses, root)
+	})
+}
+
+// Reload under a sibling lock: locking the data file would lock the old inode
+// after save replaces it with an atomic rename.
+func (s *projectTrustStore) update(change func(map[string]projectTrustStatus)) error {
+	if strings.TrimSpace(s.path) == "" {
+		return fmt.Errorf("project trust store path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("create project trust dir: %w", err)
+	}
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open project trust lock: %w", err)
+	}
+	defer lock.Close()
+	if err := lockProjectTrustFile(lock); err != nil {
+		return fmt.Errorf("lock project trust store: %w", err)
+	}
+	defer unlockProjectTrustFile(lock)
+	latest, err := loadProjectTrustStore(s.path)
+	if err != nil {
+		return err
+	}
+	change(latest.statuses)
+	if err := latest.save(); err != nil {
+		return err
+	}
+	s.statuses = latest.statuses
+	return nil
 }
 
 func (s *projectTrustStore) save() error {
@@ -175,15 +204,26 @@ func (s *projectTrustStore) save() error {
 	}
 	payload = append(payload, '\n')
 
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".project-trust-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create project trust temp file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("set project trust permissions: %w", err)
+	}
+	if _, err := tmp.Write(payload); err != nil {
 		return fmt.Errorf("write project trust store: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		if writeErr := os.WriteFile(s.path, payload, 0o644); writeErr != nil {
-			return fmt.Errorf("replace project trust store: %w", writeErr)
-		}
-		_ = os.Remove(tmpPath)
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync project trust store: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close project trust store: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		return fmt.Errorf("replace project trust store: %w", err)
 	}
 	return nil
 }

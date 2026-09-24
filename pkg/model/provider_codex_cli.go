@@ -148,7 +148,6 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 	sandboxOverride := ""
 	var reviewPolicyArgs []string
 	var commandEnv []string
-	cleanupWorkspace := func() {}
 	if req.ReviewSnapshot != nil {
 		// Reproduce the descriptor captured once by Framework.RunAgent. Codex may
 		// run focused verification against a read-only disposable worktree while
@@ -159,6 +158,9 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 			return nil, fmt.Errorf("codex review snapshot materializer is unavailable")
 		}
 		isolatedDir, cleanup, prepErr := p.reviewWorkspace(ctx, req.ReviewSnapshot)
+		if cleanup != nil {
+			defer cleanup()
+		}
 		if prepErr != nil {
 			return nil, fmt.Errorf("reproduce codex review snapshot %s: %w", req.ReviewSnapshot.ID(), prepErr)
 		}
@@ -178,15 +180,11 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		execDir = workspaceRoot
 		reviewPolicyArgs = reviewsandbox.PermissionArgs(p.command, runtimeDir)
 		commandEnv = reviewsandbox.InheritedCommandEnvironment(runtimeDir)
-		if cleanup != nil {
-			cleanupWorkspace = cleanup
-		}
 	} else if requestRequiresReadOnly(req) {
 		// A read-only request without a captured descriptor cannot safely gain a
 		// writable workspace. Keep Codex in its native read-only sandbox.
 		sandboxOverride = "read-only"
 	}
-	defer cleanupWorkspace()
 
 	durableChat := strings.TrimSpace(req.SessionID) != "" && req.ReviewSnapshot == nil
 	threadID := ""

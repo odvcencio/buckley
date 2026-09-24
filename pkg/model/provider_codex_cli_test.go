@@ -816,3 +816,26 @@ func (s *fakeProviderThreadStore) DeleteProviderThread(sessionID, providerID str
 	delete(s.threads, sessionID+"\x00"+providerID)
 	return nil
 }
+
+func TestCodexCLIProvider_RemovesSnapshotOnRootError(t *testing.T) {
+	provider := NewCodexCLIProvider(config.CodexConfig{Command: "codex"}, config.SandboxConfig{}, config.ApprovalConfig{})
+	root := t.TempDir()
+	snapshot, err := NewReviewSnapshot(ReviewSnapshotHead, root, root, "1111111111111111111111111111111111111111", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "buckley-codex-review-test")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	provider.reviewWorkspace = func(context.Context, *ReviewSnapshot) (string, func(), error) {
+		return workspace, func() { _ = os.RemoveAll(workspace) }, nil
+	}
+	_, err = provider.ChatCompletion(context.Background(), ChatRequest{Model: "codex/test", ReviewSnapshot: snapshot, Messages: []Message{{Role: "user", Content: "review"}}})
+	if err == nil || !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("snapshot remains after error: %v", err)
+	}
+}

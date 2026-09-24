@@ -153,3 +153,11 @@ batch:
   kubeconfig: ""
   wait_for_completion: true
   follow_logs: true
+
+review:
+  verification:
+    runner:
+      wrapper: [] # Example: ["buildbox-run"]
+      cleanup: [] # Example: ["buildbox-run", "--cleanup"]; runs once per snapshot
+      parallelism: 0
+      timeout: 0s

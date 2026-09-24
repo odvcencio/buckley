@@ -740,3 +740,16 @@ func TestReviewCommandFailureDiscardsIncompleteReview(t *testing.T) {
 		t.Fatalf("complete failure = %v, want original error", err)
 	}
 }
+
+func TestReviewResultFromAgent_LowDiskInfrastructureText(t *testing.T) {
+	call := oneshot.AgentToolCall{Name: "run_verification", Error: "remote build host low on disk (wrapper exit 91); infrastructure failure, verification unavailable", Data: map[string]any{"status": "UNAVAILABLE", "evidence": "INCONCLUSIVE"}}
+	for _, incomplete := range []bool{false, true} {
+		result := reviewResultFromAgent(&oneshot.RunResult{ToolEvidence: []oneshot.AgentToolCall{call}, Incomplete: incomplete}, nil)
+		if !strings.Contains(result.reviewText, "remote build host low on disk") || !strings.Contains(result.reviewText, "Infrastructure failure") {
+			t.Fatalf("review omits infrastructure failure: %s", result.reviewText)
+		}
+		if got := reviewEvidencePresentationStatus(call); !strings.HasPrefix(got, "INCONCLUSIVE") {
+			t.Fatalf("status: %s", got)
+		}
+	}
+}
