@@ -479,9 +479,13 @@ type ExecutionModeConfig struct {
 	DaprGRPCEndpoint string `yaml:"dapr_grpc_endpoint" env:"BUCKLEY_DAPR_GRPC_ENDPOINT"`
 }
 
+const DefaultUnattendedMaxContinuations = 200
+
 // OneshotModeConfig controls the strategy for one-shot commands.
 type OneshotModeConfig struct {
-	Mode string `yaml:"mode" env:"BUCKLEY_ONESHOT_MODE"`
+	// Nil selects 200 for unattended mutation sessions and zero otherwise.
+	MaxContinuations *int   `yaml:"max_continuations"`
+	Mode             string `yaml:"mode" env:"BUCKLEY_ONESHOT_MODE"`
 
 	// DataPolicy controls whether the one-shot OpenRouter backend (commit,
 	// PR) attaches provider privacy fields and enforces the goal-engine

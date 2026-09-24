@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -189,29 +190,38 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 	absPath, err := t.resolveReadPath(path)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   err.Error(),
-		}, nil
+		result := readFileFailure("file_access", fmt.Sprintf("%s: %v; use find_files for paths within the allowed workspace %s", path, err, t.workDir))
+		if selected != nil {
+			result.Data = nil
+		}
+		return result, nil
 	}
 
-	if t.maxFileSizeBytes > 0 {
-		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("file too large: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
-			}, nil
+	snapshotLimit := t.maxFileSizeBytes
+	if snapshotLimit <= 0 && selected == nil {
+		snapshotLimit = defaultReadFileSnapshotBytes
+	}
+	if snapshotLimit > 0 {
+		if info, err := os.Stat(absPath); err == nil && info.Size() > snapshotLimit {
+			if selected != nil {
+				return readFileFailure("file_too_large", fmt.Sprintf("%s has %d bytes (snapshot limit %d); select a smaller source file", absPath, info.Size(), t.maxFileSizeBytes)), nil
+			}
+			return t.readLargeFilePage(absPath, params, info.Size(), snapshotLimit)
 		}
 	}
 
 	content, err := os.ReadFile(absPath)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read file: %v", err),
-		}, nil
+		kind := "file_access"
+		if os.IsNotExist(err) {
+			kind = "file_not_found"
+		}
+		return readFileFailure(kind, fmt.Sprintf("cannot read %s: %v; paths are relative to %s; use find_files to locate the file", absPath, err, t.workDir)), nil
 	}
 
+	if bytes.IndexByte(content, 0) >= 0 {
+		return readFileFailure("binary_file", fmt.Sprintf("%s contains NUL bytes; use a format-specific tool or a bounded hex dump through run_shell", absPath)), nil
+	}
 	contentStr := string(content)
 	lines := fileLines(contentStr)
 	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {

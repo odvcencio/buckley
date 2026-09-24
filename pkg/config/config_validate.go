@@ -362,6 +362,9 @@ func validateBuckbotPrivacyFallback(c *Config) error {
 }
 
 func validateOneshotDataPolicy(c *Config) error {
+	if c.Oneshot.MaxContinuations != nil && *c.Oneshot.MaxContinuations < 0 {
+		return fmt.Errorf("oneshot.max_continuations must not be negative")
+	}
 	value := strings.ToLower(strings.TrimSpace(c.Oneshot.DataPolicy))
 	switch value {
 	case "", "none", "zdr", "deny":

@@ -63,7 +63,7 @@ func TestGovernorAllowsRepeatedPollingWhenEvidenceChanges(t *testing.T) {
 	}
 }
 
-func TestGovernorDetectsRepeatedOutcomeWithChangingArguments(t *testing.T) {
+func TestGovernor_AllowsFailedReadsWithDifferentArguments(t *testing.T) {
 	config := DefaultConfig()
 	config.ExactRepeatLimit = 20
 	config.CycleRepeats = 10
@@ -74,8 +74,8 @@ func TestGovernorDetectsRepeatedOutcomeWithChangingArguments(t *testing.T) {
 	for _, path := range []string{"a.go", "b.go", "c.go", "d.go"} {
 		decision = governor.Observe("read_file", `{"path":"`+path+`"}`, "not found", false)
 	}
-	if !decision.Stop || decision.Kind != "outcome_repeat" {
-		t.Fatalf("decision = %+v, want outcome-repeat stop", decision)
+	if decision.Stop || decision.Nudge != "" {
+		t.Fatalf("decision = %+v, want independent attempts", decision)
 	}
 }
 

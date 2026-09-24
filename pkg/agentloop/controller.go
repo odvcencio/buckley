@@ -90,6 +90,7 @@ type controllerTotals struct {
 	progress                 ProgressSnapshot
 	startedAt                time.Time
 	completionRepairAttempts int
+	continuations            int
 }
 
 // RequestBuilder returns the base chat request for one round. Its Messages
@@ -941,10 +942,43 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			result.Message = msg
 			result.Content = text
 			if contractEnabled {
+				if contract.MaxContinuations > 0 {
+					if blocked, ok := parseBlockedResult(text); ok {
+						result.CompletionStatus = CompletionIncomplete
+						result.Termination = Termination{Kind: "blocked", Code: "blocked", Reason: blocked.Reason + "; human input: " + blocked.RequiredInput}
+						c.recordDecision(ctx, "blocked", result.Termination.Reason)
+						if c.cfg.History != nil {
+							c.cfg.History.Append(msg)
+						}
+						return result, result.RequireConclusive()
+					}
+				}
 				if err := contract.evaluateFinalResponse(progress.Snapshot(), text); err != nil {
 					result.CompletionStatus = CompletionIncomplete
 					result.Termination = Termination{Kind: "completion_contract", Code: completionContractErrorCode(err), Reason: err.Error()}
 					c.recordDecision(ctx, "completion_contract_rejected", err.Error())
+					if contract.MaxContinuations > 0 {
+						if c.totals.continuations >= contract.MaxContinuations {
+							result.Termination = Termination{Kind: "continuation_limit", Code: "continuation_limit", Reason: fmt.Sprintf("reached the %d-continuation limit: %s", contract.MaxContinuations, err)}
+							c.recordDecision(ctx, "continuation_limit", result.Termination.Reason)
+							return result, result.RequireConclusive()
+						}
+						if !c.completionRepairBudgetAvailable(result) {
+							result.Termination = Termination{Kind: "emergency_fuse", Code: "emergency_fuse", Reason: "completion requires more work but the model, tool, or cost budget is exhausted"}
+							c.recordDecision(ctx, "emergency_fuse", result.Termination.Reason)
+							return result, result.RequireConclusive()
+						}
+						c.totals.continuations++
+						if c.cfg.History != nil {
+							c.cfg.History.Append(msg)
+							c.cfg.History.Append(model.Message{Role: "user", Content: continuationInstruction(err, text)})
+						}
+						c.recordDecision(ctx, "oneshot_continuation", err.Error())
+						if contract.OnContinuation != nil {
+							contract.OnContinuation(c.totals.continuations, err.Error())
+						}
+						continue
+					}
 					if c.totals.completionRepairAttempts < contract.MaxRepairAttempts && c.completionRepairBudgetAvailable(result) {
 						c.totals.completionRepairAttempts++
 						if c.cfg.History != nil {

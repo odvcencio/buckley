@@ -1091,10 +1091,11 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 // whether any round has executed tools yet (the finalize-nudge gate), and
 // the last phase update sent (sendACPPhaseUpdate dedupes on it).
 type acpLoopState struct {
-	allowHostTools  bool
-	useTools        bool
-	toolTurnEnabled bool
-	allowedTools    []string
+	allowHostTools        bool
+	bestEffortObservation bool
+	useTools              bool
+	toolTurnEnabled       bool
+	allowedTools          []string
 	// route is resolved once after execution-model selection. Every request
 	// built during this prompt carries it so streaming dispatch can reject a
 	// hook/routing change before an upstream provider sees the request.
@@ -1155,6 +1156,10 @@ func runACPLoop(
 type acpLoopLimits struct {
 	allowHostTools        bool
 	longMutation          bool
+	bestEffortObservation bool
+	Persist               bool
+	MaxContinuations      int
+	OnContinuation        func(int, string)
 	OnStop                func(agentloop.Termination)
 	ValidateFinalResponse func(string) error
 	SubmittedResponse     func() (string, bool)
@@ -1253,6 +1258,7 @@ func runACPLoopWithLimits(
 	}
 	state := &acpLoopState{
 		allowHostTools:                   limits.allowHostTools,
+		bestEffortObservation:            limits.bestEffortObservation,
 		useTools:                         acpModelCanUseTools(registry, mgr, route),
 		route:                            route,
 		toolsCatalogConfirmedUnavailable: mgr.ToolsCatalogConfirmedUnavailableForRoute(route),
@@ -1667,11 +1673,11 @@ func newACPToolLoopGovernor(cfg *config.Config) *agentloop.Governor {
 
 func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 	depth := strings.ToLower(strings.TrimSpace(limits.VerificationDepth))
-	if depth == "legacy" && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
+	if limits.MaxContinuations == 0 && depth == "legacy" && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
 		return nil
 	}
-	requireVerification := depth != "none" && depth != "off" && depth != "legacy"
-	requireChange := depth != "legacy" && limits.TaskIntent == agentloop.MutationIntent
+	requireVerification := limits.MaxContinuations > 0 || (depth != "none" && depth != "off" && depth != "legacy")
+	requireChange := (depth != "legacy" || limits.MaxContinuations > 0) && limits.TaskIntent == agentloop.MutationIntent
 	if !requireVerification && !requireChange && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
 		return nil
 	}
@@ -1683,6 +1689,9 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 		RequirePostChangeVerification: requireVerification,
 		RequireObservableChange:       requireChange,
 		MaxRepairAttempts:             attempts,
+		MaxContinuations:              limits.MaxContinuations,
+		OnContinuation:                limits.OnContinuation,
+		TolerateObservationErrors:     limits.bestEffortObservation,
 		TaskIntent:                    limits.TaskIntent,
 		ValidateFinalResponse:         limits.ValidateFinalResponse,
 		SubmittedResponse:             limits.SubmittedResponse,
@@ -2837,9 +2846,19 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 	if registry != nil {
 		if registered, ok := registry.Get(tc.Function.Name); ok {
 			metadata = tool.GetMetadata(registered)
+			if _, shell := registered.(*builtin.ShellCommandTool); shell {
+				command, _ := params["command"].(string)
+				interactive, _ := params["interactive"].(bool)
+				metadata.Verification = !interactive && builtin.IsVerificationCommand(command)
+			}
 		}
 	}
-	observation := tooloutcome.BeginWithMetadata(ctx, workDir, metadata)
+	var observation tooloutcome.Observation
+	if state.bestEffortObservation {
+		observation = tooloutcome.BeginBestEffortWithMetadata(ctx, workDir, metadata)
+	} else {
+		observation = tooloutcome.BeginWithMetadata(ctx, workDir, metadata)
+	}
 	result, execErr := executeACPToolCall(ctx, registry, tc.Function.Name, params, tc.ID)
 	toolText := formatACPToolResult(result, execErr)
 	toolText = tool.AppendCodeModeRecoveryGuidance(toolText, evaluator, registry, state.allowedTools, tc.Function.Name, result, execErr, state.codeModeRecovery)
@@ -2857,7 +2876,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 	} else if result != nil {
 		errorText = result.Error
 	}
-	return observation.Finish(ctx, agentloop.ToolOutcome{
+	outcome := observation.Finish(ctx, agentloop.ToolOutcome{
 		Content:       toolText,
 		Success:       execErr == nil && result != nil && result.Success,
 		EffectClass:   effectClass,
@@ -2867,6 +2886,14 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		YieldCount:    yield.Count,
 		YieldUnit:     yield.Unit,
 	}, metadata, result, execErr)
+	if state.bestEffortObservation && outcome.StateObservationError != "" {
+		fmt.Fprintf(os.Stderr, "One-shot observation: tool=%s warning=%q; continuing\n", tc.Function.Name, outcome.StateObservationError)
+	}
+	if state.bestEffortObservation && outcome.VerificationObserved {
+		command, _ := params["command"].(string)
+		fmt.Fprintf(os.Stderr, "One-shot verification: tool=%s command=%q passed=%t\n", tc.Function.Name, command, outcome.VerificationPassed)
+	}
+	return outcome
 }
 
 // rejectACPUnexpectedToolCall records a model's structured call as a visible
@@ -2933,128 +2960,16 @@ func acpToolRiskImpact(registry *tool.Registry, name string, params map[string]a
 	return impact
 }
 
-// verificationShellCommandPrefixes lists build/vet/test/lint commands that
-// check the workspace without mutating it. Buckley's default risk policy
-// (used when no live ACP client is attached -- e.g. the headless oneshot
-// CLI path) treats a run_shell command matching one of these prefixes as
-// non-destructive, so a correct edit is not stranded "incomplete" for want
-// of its own post-change verification (H10).
-var verificationShellCommandPrefixes = []string{
-	"go build",
-	"go vet",
-	"go test",
-	"gofmt -l",
-	"golangci-lint",
-	"staticcheck",
-	"go lint",
-	"npm test",
-	"npm run test",
-	"npm run build",
-	"npm run lint",
-	"cargo build",
-	"cargo test",
-	"cargo check",
-	"cargo clippy",
-	"pytest",
-	"make test",
-	"make build",
-	"make vet",
-	"make lint",
-}
-
-// isWorkspaceVerificationToolCall reports whether a tool call is a
-// build/vet/test/lint check of the workspace. Only run_shell is eligible:
-// run_code executes arbitrary caller-supplied code, not a fixed command, so
-// it keeps its destructive classification.
 func isWorkspaceVerificationToolCall(name string, params map[string]any) bool {
-	if name != "run_shell" {
+	if name != "run_shell" && name != "run_verification" {
 		return false
 	}
 	command, _ := params["command"].(string)
 	return isWorkspaceVerificationCommand(command)
 }
 
-// verificationCommandExecFlags are flags that make a build/test tool run an
-// arbitrary program or write outside the workspace, so a "verification"
-// command carrying one is no longer read-only.
-var verificationCommandExecFlags = []string{
-	"-exec", "-toolexec", "-vettool", "-overlay", "-modfile", "-o",
-	"--config", "--target-dir", "--manifest-path",
-	// Flags that load build rules or code from another file or directory:
-	// make -f/-C/-I, npm --prefix, pytest -c/--rootdir.
-	"-f", "--file", "--makefile", "-c", "--directory", "-i", "--include-dir",
-	"--prefix", "--rootdir",
-}
-
-// isWorkspaceRelativeArg reports whether arg names only paths inside the
-// workspace: no absolute or home-relative path and no parent traversal.
-func isWorkspaceRelativeArg(arg string) bool {
-	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "~") {
-		return false
-	}
-	// Compare whole segments: "./..." is Go's package wildcard, not traversal.
-	for _, segment := range strings.Split(arg, "/") {
-		if segment == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-// isVerificationCommandByte reports whether b may appear in a verification
-// command. It is an allowlist: bash -lc treats newline, carriage return,
-// backslash, quotes, and every control operator as syntax, so anything
-// outside plain words, spaces, and path/flag punctuation is rejected.
-func isVerificationCommandByte(b byte) bool {
-	switch {
-	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
-		return true
-	}
-	return strings.IndexByte(" -_./=:,@+%*", b) >= 0
-}
-
-// isWorkspaceVerificationCommand reports whether command is a known
-// build/vet/test/lint prefix with nothing chained after it. The command may
-// hold only allowlisted bytes (see isVerificationCommandByte), so no shell
-// separator, escape, quote, or substitution can smuggle a second command
-// past the prefix, and it may not carry a flag that executes another
-// program (see verificationCommandExecFlags).
 func isWorkspaceVerificationCommand(command string) bool {
-	trimmed := strings.TrimSpace(command)
-	if trimmed == "" {
-		return false
-	}
-	for i := 0; i < len(trimmed); i++ {
-		if !isVerificationCommandByte(trimmed[i]) {
-			return false
-		}
-	}
-	for _, field := range strings.Fields(trimmed) {
-		name, value, hasValue := strings.Cut(strings.ToLower(field), "=")
-		for _, flag := range verificationCommandExecFlags {
-			if name == flag || name == "-"+flag {
-				return false
-			}
-		}
-		if !strings.HasPrefix(field, "-") {
-			if !isWorkspaceRelativeArg(field) {
-				return false
-			}
-			continue
-		}
-		// A flag may carry a path only as a relative "=value": an attached
-		// short-flag value such as make's -f/tmp/x would dodge the name check.
-		if strings.Contains(name, "/") || (hasValue && !isWorkspaceRelativeArg(value)) {
-			return false
-		}
-	}
-	lower := strings.ToLower(trimmed)
-	for _, prefix := range verificationShellCommandPrefixes {
-		if lower == prefix || strings.HasPrefix(lower, prefix+" ") {
-			return true
-		}
-	}
-	return false
+	return builtin.IsVerificationCommand(command)
 }
 
 // acpRiskLabel maps a tool.Impact to the risk vocabulary Buckley's local
