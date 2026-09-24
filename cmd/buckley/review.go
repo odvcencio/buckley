@@ -59,6 +59,9 @@ type reviewCommandRuntime struct {
 }
 
 type reviewCommandResult struct {
+	snapshot          *model.ReviewSnapshot
+	baseSHA           string
+	reviewRef         string
 	reviewText        string
 	parsed            *commands.ParsedReview
 	trace             *transparency.Trace
@@ -197,7 +200,11 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 }
 
 // runReviewCommand performs code review on a branch or project.
-func runReviewCommand(args []string) error {
+func runReviewCommand(args []string) (returnErr error) {
+	started := time.Now()
+	if len(args) > 0 && args[0] == "ledger" {
+		return runReviewLedgerCommand(args[1:])
+	}
 	sweepStaleReviewWorkspaces()
 
 	opts, err := parseReviewCommandOptions(args)
@@ -217,6 +224,13 @@ func runReviewCommand(args []string) error {
 	cfg, mgr, store, err := initReviewDependenciesFn(opts.criticModel)
 	if store != nil {
 		defer store.Close()
+	}
+	archive := configuredReviewLedger(cfg)
+	retryReviewLedger(archive)
+	var result *reviewCommandResult
+	if archive != nil {
+		record := reviewLedgerIdentity(started, "", opts.baseBranch, resolveReviewModel(cfg))
+		defer func() { finishReviewLedger(archive, record, result, nil, returnErr) }()
 	}
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
@@ -252,7 +266,8 @@ func runReviewCommand(args []string) error {
 		clearCostBudget:       opts.noBudget,
 		depth:                 opts.depth,
 	})
-	result, reviewErr := runReviewWithPolicy(ctx, opts, runtime.framework, policy)
+	var reviewErr error
+	result, reviewErr = runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 
 	if opts.verbose && result != nil && result.contextAudit != nil {
 		printReviewContextAudit(result.contextAudit)
@@ -553,7 +568,7 @@ func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framewo
 	return runBranchReviewWithPolicy(ctx, opts, framework, policy)
 }
 
-func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
+func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (result *reviewCommandResult, reviewErr error) {
 	spinner := newReviewProgress("Analyzing project...")
 	spinner.Start()
 	policy := model.ReviewSnapshotPolicy{
@@ -574,6 +589,12 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		spinner.StopWithError(err.Error())
 		return nil, fmt.Errorf("assemble context: %w", err)
 	}
+	defer func() {
+		if result != nil {
+			result.snapshot = snapshot
+			result.reviewRef = projectCtx.Branch
+		}
+	}()
 	if snapshot == nil || snapshot.Commit() != projectCtx.HeadCommit {
 		err := fmt.Errorf("project review context does not match the captured immutable HEAD")
 		spinner.StopWithError(err.Error())
@@ -647,7 +668,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	return reviewResultFromAgent(fwResult, audit), nil
 }
 
-func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (*reviewCommandResult, error) {
+func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (result *reviewCommandResult, reviewErr error) {
 	reviewScope := normalizeReviewCommandScope(opts.scope)
 	spinner := newReviewProgress(fmt.Sprintf("Analyzing %s changes...", reviewScope))
 	spinner.Start()
@@ -680,6 +701,13 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		spinner.StopWithError(err.Error())
 		return nil, fmt.Errorf("assemble context: %w", err)
 	}
+	defer func() {
+		if result != nil {
+			result.snapshot = snapshot
+			result.baseSHA = branchCtx.BaseCommit
+			result.reviewRef = branchCtx.Branch
+		}
+	}()
 	if snapshot == nil || snapshot.Commit() != branchCtx.HeadCommit {
 		err := fmt.Errorf("branch review context does not match the captured immutable HEAD")
 		spinner.StopWithError(err.Error())

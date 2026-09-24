@@ -155,6 +155,10 @@ batch:
   follow_logs: true
 
 review:
+  ledger:
+    gcs:
+      bucket: "" # Empty disables uploads. Use a private bucket with public access prevention.
+      prefix: "" # Optional object prefix. Authentication: ADC or the current gcloud login.
   verification:
     runner:
       wrapper: [] # Example: ["buildbox-run"]

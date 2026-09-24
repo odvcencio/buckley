@@ -489,6 +489,12 @@ func PrepareReviewWorkspace(ctx context.Context, descriptor *ReviewSnapshot) (st
 		cleanup()
 		return "", nil, err
 	}
+	if identity := reviewMirrorIdentity(ctx, root, gitEnv); identity != "" {
+		if output, err := reviewGitCommand(ctx, gitEnv, "-C", workspace, "config", "buckley.reviewRepository", identity).CombinedOutput(); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("record review mirror identity: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+	}
 
 	patch := descriptor.Patch()
 	if len(patch) > 0 {

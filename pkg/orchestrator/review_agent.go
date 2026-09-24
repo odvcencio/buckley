@@ -34,6 +34,7 @@ type ReviewAgent struct {
 	personaProvider *personality.PersonaProvider
 	engine          *rules.Engine
 	resolver        *model.Resolver
+	reviewRecorder  ReviewRecorder
 }
 
 // SetResolver attaches a model resolver for arbiter-based model selection.
@@ -186,7 +187,7 @@ func (a *ReviewAgent) resolveReasoningEffort() string {
 }
 
 // Review runs the review loop for a single task implementation.
-func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (reviewResult *ReviewResult, reviewErr error) {
 	if a == nil {
 		return nil, fmt.Errorf("review agent not initialized")
 	}
@@ -198,6 +199,11 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 	}
 
 	reviewModel := a.resolveModel()
+	var draft string
+	if a.reviewRecorder != nil {
+		complete := a.reviewRecorder(reviewModel)
+		defer func() { complete(reviewResult, draft, reviewErr) }()
+	}
 
 	filePaths := a.combineFilePaths(task, builderResult)
 	a.sendProgress("🕵️ Review agent evaluating %q (%d file(s))", task.Title, len(filePaths))
@@ -236,6 +242,9 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 	})
 
 	resp, err := a.modelClient.ChatCompletion(reqCtx, req)
+	if resp != nil {
+		draft = publicReviewDraftFromResponse(resp)
+	}
 	if err != nil {
 		if resp != nil {
 			incomplete := NewIncompleteReviewError(publicReviewDraftFromResponse(resp), firstReviewFinishReason(resp), err)

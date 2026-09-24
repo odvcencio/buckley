@@ -83,6 +83,18 @@ func TestReviewAgentReviewApproved(t *testing.T) {
 	if agent == nil {
 		t.Fatal("expected review agent")
 	}
+	archived := false
+	agent.reviewRecorder = func(modelID string) func(*ReviewResult, string, error) {
+		if modelID != cfg.Models.Review {
+			t.Fatalf("archive model = %s", modelID)
+		}
+		return func(result *ReviewResult, draft string, err error) {
+			archived = true
+			if err != nil || result == nil || !result.Approved || draft != jsonResponse {
+				t.Fatalf("archive lost completed review: %v", err)
+			}
+		}
+	}
 
 	task := &Task{
 		ID:          "1",
@@ -99,6 +111,9 @@ func TestReviewAgentReviewApproved(t *testing.T) {
 	}
 
 	result, err := agent.Review(task, builderResult)
+	if !archived {
+		t.Fatal("completed review was not archived")
+	}
 	if err != nil {
 		t.Fatalf("review failed: %v", err)
 	}
@@ -145,7 +160,19 @@ func TestReviewAgentReview_ResponseErrorReturnsSafeIncompletePublicDraft(t *test
 	mockModel.EXPECT().ChatCompletion(gomock.Any(), gomock.Any()).Return(resp, rawProviderErr)
 
 	agent := NewReviewAgent(plan, cfg, mockModel, tool.NewRegistry(), nil)
+	archived := false
+	agent.reviewRecorder = func(string) func(*ReviewResult, string, error) {
+		return func(result *ReviewResult, draft string, err error) {
+			archived = true
+			if result != nil || err == nil || draft != publicDraft {
+				t.Fatal("archive lost failed review")
+			}
+		}
+	}
 	result, err := agent.Review(&Task{ID: "1", Title: "Review me"}, &BuilderResult{Implementation: "done"})
+	if !archived {
+		t.Fatal("failed review was not archived")
+	}
 	if result != nil {
 		t.Fatalf("Review returned result on incomplete response: %+v", result)
 	}

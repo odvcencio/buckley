@@ -1141,6 +1141,16 @@ type BuckbotConfig struct {
 // independent of the Buckbot model/budget settings above.
 type ReviewConfig struct {
 	Verification ReviewVerificationConfig `yaml:"verification"`
+	Ledger       ReviewLedgerConfig       `yaml:"ledger"`
+}
+
+type ReviewLedgerConfig struct {
+	GCS ReviewLedgerGCSConfig `yaml:"gcs"`
+}
+
+type ReviewLedgerGCSConfig struct {
+	Bucket string `yaml:"bucket"`
+	Prefix string `yaml:"prefix"`
 }
 
 // ReviewVerificationConfig controls how the review harness runs build/test
