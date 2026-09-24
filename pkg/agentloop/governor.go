@@ -54,9 +54,10 @@ type Decision struct {
 type Governor struct {
 	config Config
 
-	rounds        int
-	toolCalls     int
-	evidenceCalls int
+	rounds         int
+	toolCalls      int
+	evidenceCalls  int
+	lastFailedCall int
 
 	exactCounts   map[string]int
 	outcomeCounts map[string]int
@@ -187,6 +188,9 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	outcomeKey := digest(outcomeScope + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
 
 	g.toolCalls++
+	if !success {
+		g.lastFailedCall = g.toolCalls
+	}
 	g.evidenceCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
@@ -213,7 +217,8 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 
 	if width, ok := repeatedSuffix(g.actionHistory, g.config.CycleMaxLength, g.config.CycleRepeats); ok {
 		reason := fmt.Sprintf("tool actions and evidence entered a repeating %d-step cycle", width)
-		return g.repeatDecision("action_cycle", reason, g.config.CycleRepeats, success)
+		cycleSucceeded := g.lastFailedCall <= g.toolCalls-width*g.config.CycleRepeats
+		return g.repeatDecision("action_cycle", reason, g.config.CycleRepeats, cycleSucceeded)
 	}
 
 	outcomeCount := g.outcomeCounts[outcomeKey]

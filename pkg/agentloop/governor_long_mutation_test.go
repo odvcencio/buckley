@@ -41,3 +41,30 @@ func TestGovernor_SuccessfulRepeatWarningsRetainFailureAndBudgetStops(t *testing
 		t.Fatalf("budget decision=%+v", got)
 	}
 }
+
+func TestGovernor_MixedCycleRetainsStopAfterSuccessfulCall(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WarnOnSuccessfulRepeats = true
+	cfg.ExactRepeatLimit = 20
+	cfg.OutcomeRepeatLimit = 20
+	g := New(cfg)
+	var got Decision
+	for range cfg.CycleRepeats {
+		got = g.Observe("run_shell", `{"command":"build"}`, "build failed", false)
+		if got.Stop {
+			t.Fatalf("stopped before the full cycle: %+v", got)
+		}
+		got = g.Observe("read_file", `{"path":"source"}`, "same evidence", true)
+	}
+	if !got.Stop || got.Kind != "action_cycle" {
+		t.Fatalf("mixed cycle=%+v", got)
+	}
+	g.ObserveProgress("write", true, true, true)
+	for range cfg.CycleRepeats {
+		g.Observe("read_file", `{"path":"a"}`, "a", true)
+		got = g.Observe("read_file", `{"path":"b"}`, "b", true)
+	}
+	if got.Stop || got.Kind != "action_cycle_warning" {
+		t.Fatalf("successful cycle after change=%+v", got)
+	}
+}
