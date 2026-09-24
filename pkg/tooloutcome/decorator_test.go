@@ -145,6 +145,18 @@ func TestObservation_FingerprintFailureFailsClosed(t *testing.T) {
 	}
 }
 
+func TestObservation_FallbackMethodChangeDoesNotClaimMutation(t *testing.T) {
+	root := newToolOutcomeGitRepo(t)
+	metadata := tool.ToolMetadata{Impact: tool.ImpactModifying}
+	observation := BeginBestEffortWithMetadata(context.Background(), root, metadata)
+	// A preceding status fallback used a different digest representation.
+	observation.beforeState = "status:" + observation.beforeState
+	outcome := observation.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, metadata, &builtin.Result{Success: true}, nil)
+	if !outcome.StateObservationFailed || outcome.StateObserved || outcome.StateChanged || !strings.Contains(outcome.StateObservationError, "fresh check") {
+		t.Fatalf("incomparable fingerprints claimed a mutation: %+v", outcome)
+	}
+}
+
 func TestObservation_UnbornRepositoryMutationThenVerificationCanComplete(t *testing.T) {
 	root := t.TempDir()
 	runToolOutcomeGit(t, root, "init", "-q")

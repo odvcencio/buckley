@@ -69,6 +69,9 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 		if o.beforeErr != nil || afterErr != nil {
 			outcome.StateObservationFailed = true
 			outcome.StateObservationError = errors.Join(o.beforeErr, afterErr).Error()
+		} else if o.bestEffort && strings.HasPrefix(o.beforeState, "status:") != strings.HasPrefix(afterState, "status:") {
+			outcome.StateObservationFailed = true
+			outcome.StateObservationError = "workspace observation changed between diff and status methods; run a fresh check to establish comparable state"
 		} else {
 			outcome.StateObserved = true
 			outcome.StateChanged = o.beforeState != afterState

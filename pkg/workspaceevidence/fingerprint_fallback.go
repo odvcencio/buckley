@@ -91,7 +91,11 @@ func gitStatusFingerprint(ctx context.Context, root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !first.equal(second) || digest != again {
+	final, err := gitStatusManifest(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	if !first.equal(second) || !second.equal(final) || digest != again {
 		return "", fmt.Errorf("workspace changed during status observation")
 	}
 	return "status:" + digest, nil
