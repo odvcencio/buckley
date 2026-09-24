@@ -100,3 +100,22 @@ func TestPRDefinition_UnicodeTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHeaderRepair_PaddedType(t *testing.T) {
+	def := PRDefinition{}
+	raw, _ := json.Marshal(PRResult{Action: strings.Repeat(" ", 100) + "fix ", Title: "keep text", Summary: "Summary", Changes: []string{"Change"}})
+	repaired, repairs := def.Repair(raw)
+	if len(repairs) == 0 {
+		t.Fatal("no repair for type whitespace")
+	}
+	if err := def.Validate(repaired); err != nil {
+		t.Fatal(err)
+	}
+	value, err := def.Unmarshal(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.(*PRResult).Header() != "fix: keep text" {
+		t.Fatalf("header=%q", value.(*PRResult).Header())
+	}
+}

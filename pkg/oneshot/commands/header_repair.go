@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"strings"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 )
@@ -26,7 +27,12 @@ func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int, va
 	if value, ok := fields["scope"]; ok && json.Unmarshal(value, &scope) != nil {
 		return raw, nil
 	}
-	scope, subject, repairs := commitmsg.RepairHeader(action, scope, subject, limit)
+	trimmedAction := strings.TrimSpace(action)
+	scope, subject, repairs := commitmsg.RepairHeader(trimmedAction, scope, subject, limit)
+	if trimmedAction != action {
+		fields["action"], _ = json.Marshal(trimmedAction)
+		repairs = append(repairs, "trimmed type whitespace")
+	}
 	if len(repairs) == 0 {
 		return raw, nil
 	}
