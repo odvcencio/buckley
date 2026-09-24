@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 // HeaderLimit is the maximum visible length of a conventional commit header.
@@ -88,27 +87,8 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 	if !IsAllowedAction(action) {
 		return fmt.Errorf("action %q is not an allowed verb", action)
 	}
-	if hasCommitControl(scope) {
-		return fmt.Errorf("scope contains control characters")
-	}
-	if hasCommitControl(subject) {
-		return fmt.Errorf("subject contains control characters")
-	}
-	scope = strings.TrimSpace(scope)
-	subject = strings.TrimSpace(subject)
-	if subject == "" {
-		return fmt.Errorf("subject is required")
-	}
-	header := action + ": " + subject
-	if scope != "" {
-		header = action + "(" + scope + "): " + subject
-	}
-	if n := utf8.RuneCountInString(header); n > HeaderLimit {
-		over := n - HeaderLimit
-		if scope == "" {
-			return fmt.Errorf("header exceeds %d characters (%d): shorten the subject by at least %d characters", HeaderLimit, n, over)
-		}
-		return fmt.Errorf("header exceeds %d characters (%d): scope %q is %d characters and the subject is %d characters; use one short scope or none, and shorten the subject so the header drops by at least %d characters", HeaderLimit, n, scope, utf8.RuneCountInString(scope), utf8.RuneCountInString(subject), over)
+	if err := ValidateHeader(action, scope, subject, HeaderLimit); err != nil {
+		return err
 	}
 
 	nonEmptyBody := 0

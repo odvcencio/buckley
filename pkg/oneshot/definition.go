@@ -60,6 +60,12 @@ type Definition interface {
 	Unmarshal(result json.RawMessage) (any, error)
 }
 
+// RepairableDefinition can fix mechanical format errors without another model call.
+// The framework validates the repaired payload before it uses it.
+type RepairableDefinition interface {
+	Repair(json.RawMessage) (json.RawMessage, []string)
+}
+
 // AgentDefinition describes a oneshot command that requires one autonomous
 // tool-using agent with multi-turn access.
 //

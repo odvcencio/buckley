@@ -237,7 +237,7 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 		backend:   opts.backend,
 		modelID:   modelID,
 		ledger:    ledger,
-		framework: oneshot.NewFramework(invoker, nil),
+		framework: withUtilityValidationFallbacks(oneshot.NewFramework(invoker, nil), opts.backend, "pr", modelID, cfg, mgr, ledger),
 	}, cleanup, nil
 }
 
