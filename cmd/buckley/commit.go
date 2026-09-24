@@ -726,12 +726,18 @@ func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 			return fmt.Errorf("graft add: %w", err)
 		}
 	}
-	// Always mirror to git (buckley needs git diff for context)
-	gitArgs := append([]string{"add"}, files...)
+	// Always mirror to git (buckley needs git diff for context). The "--"
+	// makes git read every entry as a path, so a stray argument after
+	// buckley's own "--" (for example "-m") cannot reach git add as an option.
+	gitArgs := append([]string{"add", "--"}, files...)
 	gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 	gitCmd.Stdout = io.Discard
-	gitCmd.Stderr = io.Discard
+	var gitStderr bytes.Buffer
+	gitCmd.Stderr = &gitStderr
 	if err := gitCmd.Run(); err != nil {
+		if msg := strings.TrimSpace(gitStderr.String()); msg != "" {
+			return fmt.Errorf("git add: %w: %s", err, msg)
+		}
 		return fmt.Errorf("git add: %w", err)
 	}
 	return nil
