@@ -20,7 +20,7 @@ func TestIsVerificationCommand_AcceptedAndRejected(t *testing.T) {
 
 func TestWorkspaceVerificationTool_RejectsNoOpAndInteractive(t *testing.T) {
 	tool := NewWorkspaceVerificationTool(&ShellCommandTool{})
-	for _, params := range []map[string]any{{"command": "true"}, {"command": "go test ./...", "interactive": true}} {
+	for _, params := range []map[string]any{{"command": "true"}, {"command": "go test ./...", "interactive": true}, {"command": "go test ./...", "interactive": "yes"}, {"command": "go test ./...", "interactive": "1"}} {
 		result, err := tool.ExecuteWithContext(context.Background(), params)
 		if err != nil || result.Success || result.Error == "" {
 			t.Fatalf("result=%+v err=%v", result, err)

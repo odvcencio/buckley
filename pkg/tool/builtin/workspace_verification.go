@@ -26,9 +26,7 @@ func (t *WorkspaceVerificationTool) Execute(params map[string]any) (*Result, err
 	return t.ExecuteWithContext(context.Background(), params)
 }
 func (t *WorkspaceVerificationTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
-	command, _ := params["command"].(string)
-	interactive, _ := params["interactive"].(bool)
-	if interactive || !IsVerificationCommand(command) {
+	if !IsVerificationCall(params) {
 		return &Result{Error: "use one foreground test or build command, such as go test ./..., make check, npm test, cargo test, or pytest; no shell operators, no-op commands, or dry runs"}, nil
 	}
 	return t.ShellCommandTool.ExecuteWithContext(ctx, params)

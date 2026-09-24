@@ -2847,9 +2847,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		if registered, ok := registry.Get(tc.Function.Name); ok {
 			metadata = tool.GetMetadata(registered)
 			if _, shell := registered.(*builtin.ShellCommandTool); shell {
-				command, _ := params["command"].(string)
-				interactive, _ := params["interactive"].(bool)
-				metadata.Verification = !interactive && builtin.IsVerificationCommand(command)
+				metadata.Verification = builtin.IsVerificationCall(params)
 			}
 		}
 	}

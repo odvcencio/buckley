@@ -2,6 +2,13 @@ package builtin
 
 import "strings"
 
+// IsVerificationCall uses the shell's own interactive-value parser so a
+// terminal launch cannot count as a completed foreground check.
+func IsVerificationCall(params map[string]any) bool {
+	command, _ := params["command"].(string)
+	return !parseBoolParam(params["interactive"], false) && IsVerificationCommand(command)
+}
+
 var verificationShellCommandPrefixes = []string{
 	"go build", "go vet", "go test", "golangci-lint run", "staticcheck",
 	"npm test", "npm run test", "npm run build", "npm run lint",
