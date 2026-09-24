@@ -27,15 +27,22 @@ func TestReadFileTool_OutsideWorkDirOptIn(t *testing.T) {
 			t.Fatalf("content=%v", result.Data)
 		}
 	}
-	reader.SetOutsideWorkDirReads(true, []string{filepath.Dir(outside)})
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{outside, link} {
-		result, err := reader.Execute(map[string]any{"path": path})
-		if err != nil || result.Success || !strings.Contains(result.Error, "denied") {
-			t.Fatalf("denied read=%+v err=%v", result, err)
+	relativeDenied, err := filepath.Rel(root, filepath.Dir(outside))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Dir(outside))
+	for _, denied := range []string{filepath.Dir(outside), relativeDenied, "~", "~/instructions"} {
+		reader.SetOutsideWorkDirReads(true, []string{denied})
+		for _, path := range []string{outside, link} {
+			result, err := reader.Execute(map[string]any{"path": path})
+			if err != nil || result.Success || !strings.Contains(result.Error, "denied") {
+				t.Fatalf("denied=%q read=%+v err=%v", denied, result, err)
+			}
 		}
 	}
 	reader.SetOutsideWorkDirReads(true, nil)

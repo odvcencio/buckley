@@ -44,11 +44,27 @@ func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
+	resolvedTarget := evalSymlinksFallbackForTarget(abs)
 	for _, denied := range t.deniedReadPaths {
-		if strings.TrimSpace(denied) == "" {
+		denied = strings.TrimSpace(denied)
+		if denied == "" {
 			continue
 		}
-		if isWithinDir(denied, abs) || isWithinDir(evalSymlinksFallback(denied), evalSymlinksFallbackForTarget(abs)) {
+		if denied == "~" || strings.HasPrefix(denied, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("resolve denied home path: %w", err)
+			}
+			denied = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(denied, "~"), "/"))
+		}
+		if !filepath.IsAbs(denied) {
+			denied = filepath.Join(t.workDir, denied)
+		}
+		denied, err = filepath.Abs(denied)
+		if err != nil {
+			return "", fmt.Errorf("invalid denied path: %w", err)
+		}
+		if isWithinDir(denied, abs) || isWithinDir(evalSymlinksFallback(denied), resolvedTarget) {
 			return "", fmt.Errorf("path %q is denied", path)
 		}
 	}
