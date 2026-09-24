@@ -394,6 +394,7 @@ type automatedReviewOptions struct {
 	// config.ReviewVerificationRunnerConfig: see
 	// oneshot.AgentRunOpts.VerificationWrapper/VerificationParallelism.
 	verificationWrapper     []string
+	verificationCleanup     []string
 	verificationParallelism int
 	explorationTimeout      time.Duration
 	synthesisLead           time.Duration
@@ -503,6 +504,7 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 	}
 
 	runner := cfg.Review.Verification.Runner
+	opts.verificationCleanup = append([]string(nil), runner.Cleanup...)
 	if len(runner.Wrapper) > 0 {
 		opts.verificationWrapper = append([]string(nil), runner.Wrapper...)
 	}
@@ -704,6 +706,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
 		VerificationWrapper:      opts.verificationWrapper,
+		VerificationCleanup:      opts.verificationCleanup,
 		VerificationParallelism:  opts.verificationParallelism,
 		ModelID:                  opts.modelID,
 		ReasoningEffort:          opts.reasoningEffort,
@@ -856,6 +859,7 @@ func runPRReviewSharded(
 			SynthesisLead:           shardOpts.synthesisLead,
 			VerificationTimeout:     shardOpts.verificationTimeout,
 			VerificationWrapper:     shardOpts.verificationWrapper,
+			VerificationCleanup:     shardOpts.verificationCleanup,
 			VerificationParallelism: shardOpts.verificationParallelism,
 			ModelID:                 shardOpts.modelID,
 			ReasoningEffort:         shardOpts.reasoningEffort,
@@ -935,6 +939,7 @@ func (result *reviewCommandResult) withShardedReviewEvidence(shardResults []*rev
 		result.toolEvidence = append(result.toolEvidence, shardResult.toolEvidence...)
 		result.commandEvidence = append(result.commandEvidence, shardResult.commandEvidence...)
 	}
+	result.reviewText = appendReviewInfrastructureDiagnostics(result.reviewText, result.toolEvidence)
 	if result.incomplete {
 		result.reviewText = appendReviewEvidenceDiagnostics(result.reviewText, result.toolEvidence, result.commandEvidence)
 		result.reviewText = appendReviewAttemptDiagnostics(result.reviewText, result.trace)

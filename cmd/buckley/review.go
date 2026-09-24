@@ -625,6 +625,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
+		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
@@ -727,6 +728,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
+		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
 		ModelID:                  reviewPolicy.modelID,
 		ReasoningEffort:          reviewPolicy.reasoningEffort,
@@ -810,6 +812,7 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	}
 	result.toolEvidence = append([]oneshot.AgentToolCall(nil), fwResult.ToolEvidence...)
 	result.commandEvidence = append([]model.CommandExecutionEvidence(nil), fwResult.CommandEvidence...)
+	result.reviewText = appendReviewInfrastructureDiagnostics(result.reviewText, result.toolEvidence)
 	result.incomplete = fwResult.Incomplete
 	result.incompleteWhy = fwResult.IncompleteReason
 	if result.incomplete {
@@ -819,6 +822,16 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 		result.parsed = nil
 	}
 	return result
+}
+
+func appendReviewInfrastructureDiagnostics(review string, calls []oneshot.AgentToolCall) string {
+	for _, call := range calls {
+		reason, _ := call.Data["error"].(string)
+		if strings.Contains(call.Error+reason, "remote build host low on disk") {
+			return strings.TrimSpace(review) + "\n\nInfrastructure failure: remote build host low on disk. Verification is inconclusive; this does not prove a product defect."
+		}
+	}
+	return review
 }
 
 func appendReviewEvidenceDiagnostics(review string, toolCalls []oneshot.AgentToolCall, commands []model.CommandExecutionEvidence) string {
@@ -839,6 +852,9 @@ func appendReviewEvidenceDiagnostics(review string, toolCalls []oneshot.AgentToo
 		}
 		if output := reviewAttemptExcerpt(call.Result, 3000); output != "" {
 			fmt.Fprintf(&b, "\n  - Result: `%s`", strings.ReplaceAll(strings.ReplaceAll(output, "`", "'"), "\n", " "))
+		}
+		if call.Error != "" {
+			fmt.Fprintf(&b, "\n  - Error: %s", reviewAttemptExcerpt(call.Error, 1000))
 		}
 		b.WriteString("\n")
 	}
@@ -873,6 +889,9 @@ func reviewEvidencePresentationStatus(call oneshot.AgentToolCall) string {
 	}
 	if call.Success {
 		return "PASS"
+	}
+	if status == "UNAVAILABLE" {
+		return "INCONCLUSIVE (infrastructure or verification unavailable)"
 	}
 	return "FAILED_OR_UNAVAILABLE"
 }

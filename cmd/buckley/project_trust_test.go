@@ -348,3 +348,51 @@ func TestRunTrustCommandAllowStatusReset(t *testing.T) {
 		t.Fatalf("status after reset output=%q", out)
 	}
 }
+
+func TestProjectTrustStore_ConcurrentLoadedStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), projectTrustFileName)
+	roots := []string{filepath.Join(t.TempDir(), "one"), filepath.Join(t.TempDir(), "two")}
+	stores := make([]*projectTrustStore, 2)
+	for i := range stores {
+		var err error
+		stores[i], err = loadProjectTrustStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := range stores {
+		go func(i int) { <-start; results <- stores[i].Set(roots[i], projectTrustTrusted) }(i)
+	}
+	close(start)
+	for range stores {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := loadProjectTrustStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range roots {
+		if store.Status(root) != projectTrustTrusted {
+			t.Fatalf("lost trust for %s", root)
+		}
+	}
+	// Reset must also reload, so a stale store cannot erase another root.
+	if err := stores[0].Reset(roots[0]); err != nil {
+		t.Fatal(err)
+	}
+	store, err = loadProjectTrustStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Status(roots[0]) != projectTrustUnknown || store.Status(roots[1]) != projectTrustTrusted {
+		t.Fatalf("reset lost another entry: %+v", store.statuses)
+	}
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".project-trust-*.tmp"))
+	if err != nil || len(temps) != 0 {
+		t.Fatalf("temp files: %v, %v", temps, err)
+	}
+}

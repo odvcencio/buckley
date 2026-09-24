@@ -14,6 +14,7 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/modelusage"
 	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/reviewsandbox"
 	"m31labs.dev/buckley/pkg/rlm"
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/tool"
@@ -161,11 +162,12 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			if err != nil {
 				return nil, fmt.Errorf("materialize API review snapshot: %w", err)
 			}
+			defer cleanupSnapshot()
 			snapshotRoot, rootErr := model.ReviewWorkspaceRepositoryRoot(ctx, snapshotWorkDir)
 			if rootErr != nil {
-				cleanupSnapshot()
 				return nil, fmt.Errorf("resolve API review snapshot root: %w", rootErr)
 			}
+			defer reviewsandbox.CleanupSnapshot(opts.VerificationCleanup, snapshotRoot)
 			agentRegistry, err = newReviewSnapshotRegistryWithLimits(
 				snapshotRoot,
 				opts.ReviewSnapshot.RepositoryRoot(),
@@ -175,13 +177,11 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 				r.models.ReviewSandboxCommand(),
 			)
 			if err != nil {
-				cleanupSnapshot()
 				return nil, err
 			}
 			if reviewToolAllowed(allowedTools, "exec_program") && r.runLedger != nil && r.evidence != nil && execmode.DetectIsolation() == execmode.IsolationBwrap {
 				reviewCodeModeRunID, err = registerReviewCodeModeTool(ctx, agentRegistry, snapshotRoot, r.runLedger, r.evidence, traceID, modelToUse, providerID)
 				if err != nil {
-					cleanupSnapshot()
 					_ = agentRegistry.Close()
 					return nil, fmt.Errorf("enable review code mode: %w", err)
 				}
@@ -189,7 +189,6 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			closeAgentRegistry = true
 		}
 	}
-	defer cleanupSnapshot()
 	if reviewCodeModeRunID != "" {
 		defer func() {
 			_ = r.runLedger.EndRun(context.Background(), reviewCodeModeRunID, reviewCodeModeStatus, time.Now().UTC(), map[string]any{
@@ -427,6 +426,8 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 	if err != nil {
 		return nil, fmt.Errorf("resolve agent evidence snapshot root: %w", err)
 	}
+
+	defer reviewsandbox.CleanupSnapshot(opts.VerificationCleanup, root)
 
 	allowedTools := make([]string, 0, len(requests))
 	seenTools := make(map[string]struct{}, len(requests))

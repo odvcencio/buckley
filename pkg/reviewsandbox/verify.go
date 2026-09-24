@@ -558,7 +558,7 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 			if !trusted(code) {
 				result.Status = StatusUnavailable
 				result.ExitCode = -1
-				result.Error = fmt.Sprintf("%s exited %d, which is not a recognized test result; treating it as a transport/wrapper failure rather than a confirmed failure", launcherLabel, code)
+				result.Error = wrapperInfrastructureFailure(launcherLabel, code)
 				return result
 			}
 			result.Status = StatusFail
@@ -583,7 +583,7 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 		if !trusted(output.ExitCode) {
 			result.Status = StatusUnavailable
 			result.ExitCode = -1
-			result.Error = fmt.Sprintf("%s exited %d, which is not a recognized test result; treating it as a transport/wrapper failure rather than a confirmed failure", launcherLabel, output.ExitCode)
+			result.Error = wrapperInfrastructureFailure(launcherLabel, output.ExitCode)
 			return result
 		}
 		result.Status = StatusFail
@@ -1279,4 +1279,11 @@ func nodeScriptForKind(kind Kind, workDir string) (string, error) {
 		return "", fmt.Errorf("package.json has no %q script", script)
 	}
 	return script, nil
+}
+
+func wrapperInfrastructureFailure(launcher string, code int) string {
+	if code == 91 {
+		return "remote build host low on disk (wrapper exit 91); infrastructure failure, verification unavailable"
+	}
+	return fmt.Sprintf("%s exited %d, which is not a recognized test result; treating it as a transport/wrapper failure rather than a confirmed failure", launcher, code)
 }

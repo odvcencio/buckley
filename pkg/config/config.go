@@ -1159,6 +1159,7 @@ type ReviewVerificationConfig struct {
 //	  verification:
 //	    runner:
 //	      wrapper: ["buildbox-run"]
+//	      cleanup: ["buildbox-run", "--cleanup"]
 //	      parallelism: 2
 //	      timeout: 10m
 type ReviewVerificationRunnerConfig struct {
@@ -1171,6 +1172,9 @@ type ReviewVerificationRunnerConfig struct {
 	// BUCKLEY_VERIFY_WRAPPER (shell-split, for example
 	// "buildbox-run --node-modules").
 	Wrapper []string `yaml:"wrapper"`
+	// Cleanup runs `<cleanup...> <snapshot-dir>` once after all verification
+	// commands for that snapshot finish. Empty disables remote cleanup.
+	Cleanup []string `yaml:"cleanup"`
 	// Parallelism caps concurrent verification commands (batched remote
 	// invocations when Wrapper is set, or individual local commands
 	// otherwise). Zero uses the default: min(4, max(1, NumCPU/4)) locally,

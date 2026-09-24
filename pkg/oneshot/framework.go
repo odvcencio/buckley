@@ -79,6 +79,8 @@ type AgentExecutionOpts struct {
 	// each build/test command through this wrapper against a remote host
 	// instead of the local sandbox.
 	VerificationWrapper []string
+	// VerificationCleanup runs once when the materialized snapshot is released.
+	VerificationCleanup []string
 	// VerificationParallelism caps concurrent verification commands
 	// (batched remote invocations when VerificationWrapper is set, or
 	// individual local commands otherwise). Zero uses
@@ -412,6 +414,8 @@ type AgentRunOpts struct {
 	// snapshot verification command through a remote wrapper instead of the
 	// local sandbox. Empty keeps verification local.
 	VerificationWrapper []string
+	// VerificationCleanup runs once when the materialized snapshot is released.
+	VerificationCleanup []string
 
 	// VerificationParallelism caps concurrent verification commands. Zero
 	// uses reviewsandbox.DefaultLocalParallelism().
@@ -501,6 +505,7 @@ func (f *Framework) RunAgent(ctx context.Context, def AgentDefinition, opts Agen
 		SynthesisLead:           opts.SynthesisLead,
 		VerificationTimeout:     opts.VerificationTimeout,
 		VerificationWrapper:     opts.VerificationWrapper,
+		VerificationCleanup:     opts.VerificationCleanup,
 		VerificationParallelism: opts.VerificationParallelism,
 		ModelID:                 opts.ModelID,
 		ReasoningEffort:         opts.ReasoningEffort,

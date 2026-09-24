@@ -121,6 +121,9 @@ func defaultNATSURL() string {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	cfg := &Config{
+		Review: ReviewConfig{Verification: ReviewVerificationConfig{
+			Runner: ReviewVerificationRunnerConfig{Cleanup: []string{}},
+		}},
 		Buckbot: BuckbotConfig{
 			Model:                      defaultBuckbotModel,
 			CriticModel:                defaultBuckbotCriticModel,

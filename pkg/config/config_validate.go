@@ -39,6 +39,7 @@ var configValidators = []func(*Config) error{
 	validateBuckbotPrivacyFallback,
 	validateOneshotDataPolicy,
 	validateDecisions,
+	validateReviewVerificationRunner,
 }
 
 // Validate checks configuration values for correctness and returns an
@@ -469,4 +470,24 @@ func (c *Config) ValidationWarnings() []string {
 	}
 
 	return warnings
+}
+
+func validateReviewVerificationRunner(c *Config) error {
+	runner := c.Review.Verification.Runner
+	for _, command := range []struct {
+		name string
+		argv []string
+	}{
+		{"wrapper", runner.Wrapper}, {"cleanup", runner.Cleanup},
+	} {
+		for i, arg := range command.argv {
+			if strings.ContainsRune(arg, 0) || (i == 0 && strings.TrimSpace(arg) == "") {
+				return fmt.Errorf("review.verification.runner.%s[%d] must be a valid command argument", command.name, i)
+			}
+		}
+	}
+	if runner.Parallelism < 0 || runner.Timeout < 0 {
+		return fmt.Errorf("review.verification.runner parallelism and timeout must be zero or greater")
+	}
+	return nil
 }

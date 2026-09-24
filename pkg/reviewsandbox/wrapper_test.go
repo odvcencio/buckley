@@ -474,3 +474,20 @@ func TestDefaultLocalParallelismStaysWithinBounds(t *testing.T) {
 		t.Fatalf("DefaultLocalParallelism() = %d, want min(4, max(1, NumCPU/4)) = %d", got, want)
 	}
 }
+
+func TestExecutorVerify_LowDiskIsInfrastructureFailure(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "go.mod"), "module example.test/disk\n\ngo 1.26\n")
+	executor := NewExecutorWithCodexCommand("")
+	executor.SetWrapper([]string{writeFakeWrapper(t, "exit 91\n")})
+	single := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindTest, Language: LanguageGo, Path: "."})
+	batch, err := executor.VerifyGoTestBatch(context.Background(), root, []BatchTarget{{Path: "."}}, time.Second, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []Result{single, batch["."]} {
+		if result.Status != StatusUnavailable || result.ExitCode != -1 || !strings.Contains(result.Error, "remote build host low on disk") {
+			t.Fatalf("low disk classified as product check: %+v", result)
+		}
+	}
+}

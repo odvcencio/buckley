@@ -469,12 +469,21 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			requestCtx, cancelRequest = a.explorationContext(ctx, start)
 		}
 		defer cancelRequest()
-		resp, err := awaitChatCompletion(requestCtx, func() (*model.ChatResponse, error) {
+		complete := func() (*model.ChatResponse, error) {
 			if routeBound {
 				return a.client.(subAgentRoutedModelClient).ChatCompletionForRoute(requestCtx, req, route)
 			}
 			return a.client.ChatCompletion(requestCtx, req)
-		})
+		}
+		var resp *model.ChatResponse
+		var err error
+		if providerID == "codex" && req.ReviewSnapshot != nil {
+			// The native provider owns a local process and snapshot. Join its
+			// cancellation cleanup before the review command can exit.
+			resp, err = complete()
+		} else {
+			resp, err = awaitChatCompletion(requestCtx, complete)
+		}
 		if resp != nil {
 			recordSubAgentModelResponse(result, resp)
 		}
