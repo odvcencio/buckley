@@ -453,6 +453,15 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
+	stopReason := ""
+	previousOnStop := limits.OnStop
+	limits.OnStop = func(stop agentloop.Termination) {
+		stopReason = stop.StopReason()
+		fmt.Fprintf(os.Stderr, "One-shot stop: stop_reason=%q\n", stopReason)
+		if previousOnStop != nil {
+			previousOnStop(stop)
+		}
+	}
 	outputSchema = strings.TrimSpace(outputSchema)
 	var scopeErr error
 	limits, scopeErr = prepareOneShotSourceScope(limits, codeMode)
@@ -460,6 +469,8 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		fmt.Fprintf(os.Stderr, "Error: %v\n", scopeErr)
 		return 1
 	}
+	limits.allowHostTools = oneShotHostToolsAllowed(cfg) && !limits.ChildContract && limits.SourceScope == nil
+	limits.longMutation = limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -514,6 +525,14 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if limits.allowHostTools {
+		if reader, ok := registry.Get("read_file"); ok {
+			if reader, ok := reader.(*builtin.ReadFileTool); ok {
+				denied := append(append([]string(nil), cfg.Approval.DeniedPaths...), cfg.Sandbox.DeniedPaths...)
+				reader.SetOutsideWorkDirReads(true, denied)
+			}
+		}
+	}
 	if err := bindOneShotSourceScope(registry, limits.SourceScope); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -606,6 +625,11 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	if err := validateOneShotTools(registry, allowedTools); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 2
+	}
+	if limits.allowHostTools {
+		for _, name := range cfg.Approval.DeniedTools {
+			registry.Remove(strings.TrimSpace(name))
+		}
 	}
 	toolFilter := resolveOneShotToolFilter(agentProfile, registry, allowedTools)
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
@@ -701,7 +725,15 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		fmt.Println()
 	}
 	codeModeFailure = nil
+	if stopReason != "" {
+		fmt.Fprintf(os.Stderr, "One-shot status: complete (exit=0; stop_reason=%q)\n", stopReason)
+	}
 	return 0
+}
+
+func oneShotHostToolsAllowed(cfg *config.Config) bool {
+	return cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Approval.Mode), "yolo") &&
+		cfg.Sandbox.AllowUnsafe && strings.EqualFold(strings.TrimSpace(cfg.Sandbox.Mode), "disabled")
 }
 
 const (
@@ -832,7 +864,7 @@ func printOneShotFailure(responseText string, err error) int {
 			fmt.Println()
 		}
 		fmt.Println("\n[Stream interrupted — the response above is incomplete.]")
-		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; partial_output_bytes=%d)\n", len(responseText))
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; stop_reason=%q; partial_output_bytes=%d)\n", oneShotFailureStopReason(err), len(responseText))
 	case errors.As(err, &incomplete):
 		notice := agentloop.PresentIncompleteResult(err)
 		if responseText != "" {
@@ -842,8 +874,10 @@ func printOneShotFailure(responseText string, err error) int {
 			}
 		}
 		fmt.Printf("\n[%s]\n", notice.Message)
-		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; code=%s; preserved_output_bytes=%d)\n", notice.Code, len(responseText))
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; code=%s; stop_reason=%q; preserved_output_bytes=%d)\n", notice.Code, oneShotFailureStopReason(err), len(responseText))
 		return 1
+	default:
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; stop_reason=%q)\n", oneShotFailureStopReason(err))
 	}
 	fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 	return 1
@@ -872,12 +906,26 @@ func printOneShotArtifactFailure(submission *builtin.ArtifactSubmission, err err
 
 	if isIncomplete {
 		notice := agentloop.PresentIncompleteResult(err)
-		fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1; code=%s)\n", status, notice.Code)
+		fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1; code=%s; stop_reason=%q)\n", status, notice.Code, oneShotFailureStopReason(err))
 		fmt.Fprintln(os.Stderr, "Incomplete turn; captured evidence preserved in recovery artifact.")
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1)\nError: %v\n", status, err)
+	fmt.Fprintf(os.Stderr, "One-shot status: %s (exit=1; stop_reason=%q)\nError: %v\n", status, oneShotFailureStopReason(err), err)
 	return 1
+}
+
+func oneShotFailureStopReason(err error) string {
+	var incomplete *agentloop.IncompleteTurnError
+	if errors.As(err, &incomplete) && incomplete.StopReason != "" {
+		return incomplete.StopReason
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return "error"
 }
 
 func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequired bool) []string {
@@ -918,7 +966,7 @@ func applyOneShotProtocolLimits(limits acpLoopLimits, compiled *protocol.Protoco
 	}
 	stage := adaptiveProtocolExecutionStage(*compiled)
 	if stage.MaxTurns > 0 && (limits.StepCap == 0 || stage.MaxTurns < limits.StepCap) {
-		if !limits.ChildContract || limits.StepCap > 0 {
+		if (!limits.ChildContract && !limits.longMutation) || limits.StepCap > 0 {
 			limits.StepCap = stage.MaxTurns
 		}
 	}
@@ -929,7 +977,7 @@ func applyOneShotProtocolLimits(limits acpLoopLimits, compiled *protocol.Protoco
 		}
 	}
 	limits.MaxOutputTokens = minPositiveLimit(limits.MaxOutputTokens, stage.Request.MaxOutputTokens, modelMaxOutputTokens)
-	if stage.MaxReadOnlyCalls > 0 {
+	if stage.MaxReadOnlyCalls > 0 && !limits.longMutation {
 		limits.ReadOnlyWarningAt = stage.ReadOnlyWarningAt
 		limits.ReadOnlyActionAt = stage.ReadOnlyActionAt
 		limits.MaxReadOnlyCalls = stage.MaxReadOnlyCalls

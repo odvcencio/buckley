@@ -23,6 +23,9 @@ type Config struct {
 	OutcomeRepeatLimit int
 	CycleMaxLength     int
 	CycleRepeats       int
+	// WarnOnSuccessfulRepeats lets unattended mutation work recheck stable
+	// evidence. Failed repeats and explicit execution budgets still stop it.
+	WarnOnSuccessfulRepeats bool
 }
 
 // DefaultConfig is deliberately generous for productive agent work while
@@ -51,9 +54,10 @@ type Decision struct {
 type Governor struct {
 	config Config
 
-	rounds        int
-	toolCalls     int
-	evidenceCalls int
+	rounds         int
+	toolCalls      int
+	evidenceCalls  int
+	lastFailedCall int
 
 	exactCounts   map[string]int
 	outcomeCounts map[string]int
@@ -184,6 +188,9 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	outcomeKey := digest(outcomeScope + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
 
 	g.toolCalls++
+	if !success {
+		g.lastFailedCall = g.toolCalls
+	}
 	g.evidenceCalls++
 	g.exactCounts[exactKey]++
 	g.outcomeCounts[outcomeKey]++
@@ -205,18 +212,19 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	exactCount := g.exactCounts[exactKey]
 	if exactCount >= g.config.ExactRepeatLimit {
 		reason := fmt.Sprintf("%s repeated the same action and received the same result %d times", name, exactCount)
-		return stopDecision("exact_repeat", reason, exactCount)
+		return g.repeatDecision("exact_repeat", reason, exactCount, success)
 	}
 
 	if width, ok := repeatedSuffix(g.actionHistory, g.config.CycleMaxLength, g.config.CycleRepeats); ok {
 		reason := fmt.Sprintf("tool actions and evidence entered a repeating %d-step cycle", width)
-		return stopDecision("action_cycle", reason, g.config.CycleRepeats)
+		cycleSucceeded := g.lastFailedCall <= g.toolCalls-width*g.config.CycleRepeats
+		return g.repeatDecision("action_cycle", reason, g.config.CycleRepeats, cycleSucceeded)
 	}
 
 	outcomeCount := g.outcomeCounts[outcomeKey]
 	if outcomeCount >= g.config.OutcomeRepeatLimit {
 		reason := fmt.Sprintf("%s produced the same outcome %d times despite repeated attempts", name, outcomeCount)
-		return stopDecision("outcome_repeat", reason, outcomeCount)
+		return g.repeatDecision("outcome_repeat", reason, outcomeCount, success)
 	}
 
 	if exactCount == g.config.ExactRepeatLimit-1 {
@@ -359,6 +367,14 @@ func stopDecision(kind, reason string, count int) Decision {
 		Count:  count,
 		Nudge:  "Harness stopped further tool execution because no new progress was being made.",
 	}
+}
+
+func (g *Governor) repeatDecision(kind, reason string, count int, success bool) Decision {
+	if success && g.config.WarnOnSuccessfulRepeats {
+		return Decision{Kind: kind + "_warning", Reason: reason, Count: count,
+			Nudge: "Harness notice: " + reason + ". Change strategy if this check is not needed to complete the task."}
+	}
+	return stopDecision(kind, reason, count)
 }
 
 func (g *Governor) appendAction(action string) {
