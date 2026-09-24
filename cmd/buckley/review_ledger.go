@@ -188,6 +188,17 @@ func finishReviewLedger(ledger orchestrator.ReviewLedger, record orchestrator.Re
 				continue
 			}
 			status, _ := call.Data["status"].(string)
+			var argv []string
+			switch args := call.Data["argv"].(type) {
+			case []string:
+				argv = append([]string(nil), args...)
+			case []any:
+				for _, arg := range args {
+					if text, ok := arg.(string); ok {
+						argv = append(argv, text)
+					}
+				}
+			}
 			var exit *int
 			switch code := call.Data["exit_code"].(type) {
 			case int:
@@ -200,7 +211,7 @@ func finishReviewLedger(ledger orchestrator.ReviewLedger, record orchestrator.Re
 					exit = &value
 				}
 			}
-			record.Verification = append(record.Verification, orchestrator.ReviewVerification{Command: command, ExitCode: exit, Status: status, LogHash: hash})
+			record.Verification = append(record.Verification, orchestrator.ReviewVerification{Command: command, Argv: argv, ExitCode: exit, Status: status, LogHash: hash})
 		}
 		for _, command := range result.commandEvidence {
 			data, _ := json.Marshal(command)

@@ -48,7 +48,7 @@ func TestReviewLedger_CommandsAndFailedReview(t *testing.T) {
 	ledger := reviewledger.New(objects, "bucket", "prefix", t.TempDir())
 	record := orchestrator.ReviewRecord{SchemaVersion: 1, ReviewID: "failed-review", Repository: "owner/repo", Ref: "topic", Model: "model", StartedAt: time.Now().Add(-time.Second), Findings: json.RawMessage("[]")}
 	exit := 3
-	result := &reviewCommandResult{reviewText: "partial review", incomplete: true, toolEvidence: []oneshot.AgentToolCall{{Name: "run_verification", Data: map[string]any{"command": "go test ./pkg", "exit_code": 2, "status": "FAIL", "stdout": "failed test output"}}}, commandEvidence: []model.CommandExecutionEvidence{{Command: "go vet ./pkg", ExitCode: &exit, AggregatedOutput: "native log", Status: "completed"}}}
+	result := &reviewCommandResult{reviewText: "partial review", incomplete: true, toolEvidence: []oneshot.AgentToolCall{{Name: "run_verification", Data: map[string]any{"command": "go test ./pkg", "argv": []any{"go", "test", "./pkg with spaces"}, "exit_code": 2, "status": "FAIL", "stdout": "failed test output"}}}, commandEvidence: []model.CommandExecutionEvidence{{Command: "go vet ./pkg", ExitCode: &exit, AggregatedOutput: "native log", Status: "completed"}}}
 	pr := &commands.PRInfo{Repository: "owner/repo", Number: 17, BaseSHA: strings.Repeat("b", 40), HeadSHA: strings.Repeat("a", 40), HeadBranch: "topic"}
 	finishReviewLedger(ledger, record, result, pr, errors.New("provider stopped"))
 	var output bytes.Buffer
@@ -61,6 +61,9 @@ func TestReviewLedger_CommandsAndFailedReview(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Verdict != "INCOMPLETE" || records[0].Error != "provider stopped" || len(records[0].Verification) != 2 {
 		t.Fatalf("records=%+v", records)
+	}
+	if got := records[0].Verification[0].Argv; len(got) != 3 || got[2] != "./pkg with spaces" {
+		t.Fatalf("lost command arguments: %v", got)
 	}
 	if *records[0].Verification[0].ExitCode != 2 || *records[0].Verification[1].ExitCode != 3 {
 		t.Fatal("lost exit codes")
@@ -82,6 +85,27 @@ func TestReviewLedger_Disabled(t *testing.T) {
 		t.Fatal("empty bucket enabled ledger")
 	}
 	finishReviewLedger(nil, orchestrator.ReviewRecord{}, nil, nil, errors.New("failed"))
+}
+
+func TestReviewLedger_CapturedSnapshotRevisions(t *testing.T) {
+	objects := &ledgerCommandObjects{data: map[string][]byte{}}
+	ledger := reviewledger.New(objects, "bucket", "", t.TempDir())
+	root := t.TempDir()
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	snapshot, err := model.NewReviewSnapshot(model.ReviewSnapshotHead, root, root, head, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := orchestrator.ReviewRecord{SchemaVersion: 1, ReviewID: "captured", Repository: "owner/repo", Ref: "stale-ref", HeadSHA: strings.Repeat("c", 40), StartedAt: time.Now(), Findings: json.RawMessage("[]")}
+	result := &reviewCommandResult{snapshot: snapshot, baseSHA: base, reviewRef: "captured-ref", reviewText: "review", parsed: &commands.ParsedReview{Verdict: "APPROVE"}}
+	finishReviewLedger(ledger, record, result, nil, nil)
+	stored, err := ledger.Show(context.Background(), "captured")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.HeadSHA != head || stored.BaseSHA != base || stored.Ref != "captured-ref" {
+		t.Fatalf("record used a live revision: %+v", stored)
+	}
 }
 
 func TestReviewRepositoryName_Credentials(t *testing.T) {

@@ -27,10 +27,11 @@ type ReviewRecord struct {
 }
 
 type ReviewVerification struct {
-	Command  string `json:"command"`
-	ExitCode *int   `json:"exit_code"`
-	Status   string `json:"status"`
-	LogHash  string `json:"log_blob_hash"`
+	Command  string   `json:"command"`
+	Argv     []string `json:"argv,omitempty"`
+	ExitCode *int     `json:"exit_code"`
+	Status   string   `json:"status"`
+	LogHash  string   `json:"log_blob_hash"`
 }
 
 // ReviewLedger stores records and content addressed evidence. Upload errors
