@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +78,10 @@ func reviewLedgerIdentity(start time.Time, ref, base, modelID string) orchestrat
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	git := func(args ...string) string {
-		out, _ := exec.CommandContext(ctx, "git", args...).Output()
+		out, err := exec.CommandContext(ctx, "git", args...).Output()
+		if err != nil {
+			return ""
+		}
 		return strings.TrimSpace(string(out))
 	}
 	repo := reviewRepositoryName(git("config", "--get", "remote.origin.url"))
@@ -97,6 +101,25 @@ func reviewLedgerIdentity(start time.Time, ref, base, modelID string) orchestrat
 		ref = git("symbolic-ref", "--short", "HEAD")
 	}
 	return orchestrator.ReviewRecord{SchemaVersion: 1, ReviewID: id, Repository: repo, Ref: ref, BaseSHA: baseSHA, HeadSHA: head, Model: modelID, StartedAt: start.UTC(), Findings: json.RawMessage("[]"), Verification: []orchestrator.ReviewVerification{}, Evidence: []string{}}
+}
+
+func reviewLedgerPRIdentity(start time.Time, ref, modelID string) orchestrator.ReviewRecord {
+	record := reviewLedgerIdentity(start, ref, "", modelID)
+	record.BaseSHA, record.HeadSHA = "", ""
+	if number, err := strconv.Atoi(ref); err == nil && number > 0 {
+		record.PRNumber = number
+	}
+	if target, err := url.Parse(ref); err == nil && target.Host != "" {
+		parts := strings.Split(strings.Trim(target.Path, "/"), "/")
+		if len(parts) == 4 && parts[2] == "pull" {
+			if number, err := strconv.Atoi(parts[3]); err == nil && number > 0 {
+				record.Repository = parts[0] + "/" + parts[1]
+				record.PRNumber = number
+				record.Ref = parts[3]
+			}
+		}
+	}
+	return record
 }
 
 func reviewRepositoryName(remote string) string {

@@ -115,3 +115,21 @@ func TestReviewRepositoryName_Credentials(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewLedgerIdentity_MetadataFailure(t *testing.T) {
+	repo := t.TempDir()
+	runGitIn(t, repo, "init", "-q")
+	t.Chdir(repo)
+	record := reviewLedgerIdentity(time.Now(), "", "", "model")
+	if record.HeadSHA != "" || record.BaseSHA != "" {
+		t.Fatalf("Git error became a revision: %+v", record)
+	}
+	pr := reviewLedgerPRIdentity(time.Now(), "https://github.com/other/repo/pull/71", "model")
+	if pr.Repository != "other/repo" || pr.PRNumber != 71 || pr.HeadSHA != "" {
+		t.Fatalf("failed remote review lost identity: %+v", pr)
+	}
+	localPR := reviewLedgerPRIdentity(time.Now(), "72", "model")
+	if localPR.PRNumber != 72 {
+		t.Fatal("lost requested PR number")
+	}
+}

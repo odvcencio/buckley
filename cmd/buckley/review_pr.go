@@ -236,7 +236,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	var result *reviewCommandResult
 	var prInfo *commands.PRInfo
 	if archive != nil {
-		record := reviewLedgerIdentity(started, opts.prRef, "", resolveReviewModel(cfg))
+		record := reviewLedgerPRIdentity(started, opts.prRef, resolveReviewModel(cfg))
 		defer func() { finishReviewLedger(archive, record, result, prInfo, returnErr) }()
 	}
 	if err != nil {

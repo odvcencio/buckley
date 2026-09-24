@@ -230,6 +230,9 @@ func runReviewCommand(args []string) (returnErr error) {
 	var result *reviewCommandResult
 	if archive != nil {
 		record := reviewLedgerIdentity(started, "", opts.baseBranch, resolveReviewModel(cfg))
+		if opts.projectMode {
+			record.BaseSHA = ""
+		}
 		defer func() { finishReviewLedger(archive, record, result, nil, returnErr) }()
 	}
 	if err != nil {
