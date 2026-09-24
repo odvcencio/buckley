@@ -50,6 +50,23 @@ with tempfile.TemporaryDirectory(prefix="buildbox-mirror-test-") as fixture:
     assert not list((remote/'work').glob('*/.git'))
     mirror=next((remote/'mirrors').glob('*.git'))
     assert len(git('--git-dir',mirror,'worktree','list','--porcelain').split('worktree '))==2
+    # A new shallow head must not store another copy of unchanged packed assets.
+    (repo/'asset').write_bytes(os.urandom(2*1024*1024))
+    for n in range(150): (repo/('entry-'+str(n))).write_text(str(n))
+    git('-C',repo,'add','.');git('-C',repo,'commit','-qm','large snapshot')
+    run([script,'--sync-only',repo]);run([script,'--cleanup',repo])
+    git('--git-dir',mirror,'repack','-a','-d','-k','--window=0')
+    def object_bytes(): return sum(p.stat().st_size for p in (mirror/'objects').rglob('*') if p.is_file())
+    before=object_bytes()
+    (repo/'next').write_text('next commit')
+    git('-C',repo,'add','next');git('-C',repo,'commit','-qm','next snapshot')
+    shallow=root/'shallow';git('clone','-q','--depth=1','file://'+str(repo),shallow)
+    git('-C',shallow,'config','buckley.reviewRepository','github.com/fixture/repo')
+    run([script,'--sync-only',shallow])
+    assert object_bytes()-before<128*1024, 'shallow push duplicated existing packed objects'
+    head=git('-C',shallow,'rev-parse','HEAD')
+    assert git('--git-dir',mirror,'show',head+':next')=='next commit'
+    run([script,'--cleanup',shallow])
     plain=root/'plain';plain.mkdir();(plain/'a').write_text('plain');(plain/'link').symlink_to('a')
     run([script,'--with-git',plain,'test','-L','link']);run([script,'--sync-only',plain]);run([script,'--cleanup',plain])
     # A plain copy at the same path must not be replaced without cleanup.
@@ -59,5 +76,5 @@ with tempfile.TemporaryDirectory(prefix="buildbox-mirror-test-") as fixture:
     run([script,'--sync-only',plain],90);run([script,'--cleanup',plain])
     df.write_text('#!/bin/sh\nprintf "Avail\\n60000000000\\n"\n')
     run([script,'--sync-only',repo],91)
-    print('PASS: mirror reuse, overlays, NUL names, options, exits 37/90/91, cleanup, and plain directories')
+    print('PASS: mirror reuse, shallow object deduplication, overlays, NUL names, options, exits 37/90/91, cleanup, and plain directories')
 PY
