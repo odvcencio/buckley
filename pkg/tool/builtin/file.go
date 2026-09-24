@@ -18,7 +18,41 @@ import (
 // ReadFileTool reads a file from disk
 type ReadFileTool struct {
 	workDirAware
-	sourceScope *agentcoord.SourceScope
+	sourceScope         *agentcoord.SourceScope
+	outsideWorkDirReads bool
+	deniedReadPaths     []string
+}
+
+// SetOutsideWorkDirReads enables host reads for an explicitly unrestricted
+// session. Source scopes and denied paths still apply.
+func (t *ReadFileTool) SetOutsideWorkDirReads(allowed bool, deniedPaths []string) {
+	t.outsideWorkDirReads = allowed
+	t.deniedReadPaths = append([]string(nil), deniedPaths...)
+}
+
+func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
+	if !t.outsideWorkDirReads || t.sourceScope != nil {
+		return resolvePath(t.workDir, path)
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(t.workDir, path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	for _, denied := range t.deniedReadPaths {
+		if strings.TrimSpace(denied) == "" {
+			continue
+		}
+		if isWithinDir(denied, abs) || isWithinDir(evalSymlinksFallback(denied), evalSymlinksFallbackForTarget(abs)) {
+			return "", fmt.Errorf("path %q is denied", path)
+		}
+	}
+	return abs, nil
 }
 
 // SetSourceScope validates and installs a deep copy of the scope. A nil scope
@@ -137,7 +171,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
-	absPath, err := resolvePath(t.workDir, path)
+	absPath, err := t.resolveReadPath(path)
 	if err != nil {
 		return &Result{
 			Success: false,

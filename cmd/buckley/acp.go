@@ -1091,6 +1091,7 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 // whether any round has executed tools yet (the finalize-nudge gate), and
 // the last phase update sent (sendACPPhaseUpdate dedupes on it).
 type acpLoopState struct {
+	allowHostTools  bool
 	useTools        bool
 	toolTurnEnabled bool
 	allowedTools    []string
@@ -1152,6 +1153,9 @@ func runACPLoop(
 }
 
 type acpLoopLimits struct {
+	allowHostTools        bool
+	longMutation          bool
+	OnStop                func(agentloop.Termination)
 	ValidateFinalResponse func(string) error
 	SubmittedResponse     func() (string, bool)
 	RequiredSourceText    []string
@@ -1248,6 +1252,7 @@ func runACPLoopWithLimits(
 		defer childMailbox.Close()
 	}
 	state := &acpLoopState{
+		allowHostTools:                   limits.allowHostTools,
 		useTools:                         acpModelCanUseTools(registry, mgr, route),
 		route:                            route,
 		toolsCatalogConfirmedUnavailable: mgr.ToolsCatalogConfirmedUnavailableForRoute(route),
@@ -1513,7 +1518,7 @@ func newACPLoopController(
 			return model.ChatRequest{}, err
 		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil, governor.ActionRequired(), limits.TaskIntent)
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil || limits.allowHostTools, governor.ActionRequired(), limits.TaskIntent)
 		state.useTools = toolTurn.UseTools
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
@@ -1619,6 +1624,7 @@ func newACPLoopController(
 		lifecycleSessionID = strings.TrimSpace(sessionID)
 	}
 	controllerConfig := agentloop.ControllerConfig{
+		OnStop:                  limits.OnStop,
 		Governor:                governor,
 		StepCap:                 limits.StepCap,
 		FinalizeOnStop:          true,
@@ -1686,13 +1692,14 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 
 func newACPToolLoopGovernorWithLimits(cfg *config.Config, limits acpLoopLimits) *agentloop.Governor {
 	governorConfig := agentloop.DefaultConfig()
-	if limits.ChildContract {
+	if limits.ChildContract || limits.longMutation {
 		// Remove the legacy 32/96 per-turn defaults. Explicitly configured
 		// operator emergency fuses below remain global runaway protection; they
 		// are distinct from the optional child task budget.
 		governorConfig.MaxRounds = math.MaxInt
 		governorConfig.MaxToolCalls = math.MaxInt
 	}
+	governorConfig.WarnOnSuccessfulRepeats = limits.longMutation
 	if cfg != nil {
 		if limit := cfg.AgentController.EmergencyFuse.ModelRequests; limit > 0 {
 			governorConfig.MaxRounds = limit
@@ -2816,7 +2823,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		return agentloop.ToolOutcome{Content: toolText, Error: toolText, EffectClass: effectClass}
 	}
 
-	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed {
+	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed && !(agent == nil && state.allowHostTools && ctx.Err() == nil) {
 		toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
 		result := &builtin.Result{Success: false, Error: toolText}
 		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{

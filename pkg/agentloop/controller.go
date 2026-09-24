@@ -367,10 +367,23 @@ type Termination struct {
 	ProviderError         string
 }
 
+// StopReason exposes harness-generated detail without disclosing provider
+// errors or rejected output carried by other termination reasons.
+func (t Termination) StopReason() string {
+	switch t.Kind {
+	case "exact_repeat", "outcome_repeat", "action_cycle", "read_only_budget", "round_limit", "tool_call_limit", "step_cap", "model_request_limit", "emergency_fuse":
+		if t.Reason != "" {
+			return t.Kind + ": " + t.Reason
+		}
+	}
+	return t.Kind
+}
+
 // IncompleteTurnError reports that Buckley preserved the turn's evidence but
 // could not produce a conclusive terminal answer from it.
 type IncompleteTurnError struct {
 	FinishReason      string
+	StopReason        string
 	Code              string
 	Reason            string
 	FinalizationError string
@@ -472,6 +485,7 @@ func (r *Result) RequireConclusive() error {
 	}
 	return &IncompleteTurnError{
 		FinishReason:      r.FinishReason,
+		StopReason:        r.Termination.StopReason(),
 		Code:              r.Termination.Code,
 		Reason:            r.Termination.Reason,
 		FinalizationError: r.Termination.FinalizationError,
@@ -488,6 +502,8 @@ type DurableStepJournal interface {
 
 // ControllerConfig wires one Controller instance.
 type ControllerConfig struct {
+	// OnStop reports the original intervention before final synthesis starts.
+	OnStop func(Termination)
 	// Governor is consulted at the start of every round (BeginRound) and
 	// after every dispatched tool call (Observe). Optional; when nil,
 	// Controller uses New(DefaultConfig()).
@@ -696,6 +712,9 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 	progress := progressTracker{snapshot: c.totals.progress}
 	contract, contractEnabled := c.completionContract()
 	defer func() {
+		if result.Termination.Kind != "" && !result.Termination.FinalizationAttempted && c.cfg.OnStop != nil {
+			c.cfg.OnStop(result.Termination)
+		}
 		result.Progress = progress.Snapshot()
 		c.totals.usage = cloneControllerUsage(result.Usage)
 		c.totals.costUSD = result.CostUSD
@@ -1202,6 +1221,9 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 		return result, nil
 	}
 	result.Termination.FinalizationAttempted = true
+	if c.cfg.OnStop != nil {
+		c.cfg.OnStop(result.Termination)
+	}
 	c.recordDecision(ctx, "finalization_started", result.Termination.Reason)
 	if c.cfg.MaxModelRequests > 0 && result.ModelRequests >= c.cfg.MaxModelRequests {
 		return c.failFinalization(ctx, result, fmt.Errorf("explicit %d-request child limit left no request for final synthesis", c.cfg.MaxModelRequests))
