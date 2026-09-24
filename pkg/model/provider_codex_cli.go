@@ -1295,6 +1295,8 @@ func (w *codexLineWriter) Flush() {
 
 func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLICommandResult, error) {
 	execCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
+	// Descendants must not hold output pipes open after cancellation.
+	execCmd.WaitDelay = 5 * time.Second
 	if strings.TrimSpace(cmd.Dir) != "" {
 		execCmd.Dir = cmd.Dir
 	}

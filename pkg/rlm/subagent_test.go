@@ -552,3 +552,64 @@ func containsStringHelper(s, substr string) bool {
 	}
 	return false
 }
+
+type cleanupReviewModelClient struct {
+	scriptedSubAgentModelClient
+	started chan struct{}
+	release chan struct{}
+	cleaned chan struct{}
+}
+
+func (c *cleanupReviewModelClient) ProviderIDForModel(string) string { return "codex" }
+func (c *cleanupReviewModelClient) ChatCompletion(ctx context.Context, _ model.ChatRequest) (*model.ChatResponse, error) {
+	close(c.started)
+	<-ctx.Done()
+	<-c.release
+	close(c.cleaned)
+	return nil, ctx.Err()
+}
+
+func TestSubAgentExecute_NativeReviewWaitsForCleanup(t *testing.T) {
+	root := t.TempDir()
+	snapshot, err := model.NewReviewSnapshot(model.ReviewSnapshotHead, root, root, "1111111111111111111111111111111111111111", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := NewSubAgent(SubAgentConfig{ID: "review-cleanup", Model: "codex/test", ReviewSnapshot: snapshot}, SubAgentDeps{Models: &model.Manager{}, Registry: tool.NewEmptyRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &cleanupReviewModelClient{started: make(chan struct{}), release: make(chan struct{}), cleaned: make(chan struct{})}
+	agent.client = client
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := agent.Execute(ctx, "review"); done <- err }()
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		close(client.release)
+		t.Fatal("provider did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		close(client.release)
+		t.Fatalf("returned before provider cleanup: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(client.release)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("missing cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("review did not return after cleanup")
+	}
+	select {
+	case <-client.cleaned:
+	default:
+		t.Fatal("provider cleanup was skipped")
+	}
+}
