@@ -31,7 +31,7 @@ func toolchainInstallHint(language Language, workDir string) string {
 		return hint + "; then " + nodeInstallHint(workDir)
 	case LanguagePython:
 		const python = `"$HOME/.local/share/buckley/review-python/bin/python3"`
-		hint := `python3 -m venv "$HOME/.local/share/buckley/review-python" && ` + python + " -m pip install pytest"
+		hint := `python3 -m venv --without-pip "$HOME/.local/share/buckley/review-python" && python3 -m pip --python ` + python + " install pip pytest"
 		hasRequirements := false
 		for _, name := range []string{"requirements.txt", "requirements-dev.txt", "requirements-test.txt"} {
 			if _, err := os.Stat(filepath.Join(workDir, name)); err == nil {
