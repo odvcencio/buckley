@@ -98,6 +98,7 @@ func TestClassifyVerificationRun_MissingToolchain(t *testing.T) {
 		{"pytest missing", LanguagePython, 1, "/usr/bin/python3: No module named pytest\n", StatusUnavailable, "-r requirements.txt"},
 		{"python assertion", LanguagePython, 1, "FAILED test_bird.py::test_flight - AssertionError", StatusFail, ""},
 		{"pnpm missing", LanguageNode, 127, "sh: 1: exec: pnpm: not found", StatusUnavailable, "npm ci"},
+		{"node missing UTF-8", LanguageNode, 127, "/usr/bin/env: ‘node’: No such file or directory", StatusUnavailable, "nvm install --lts"},
 		{"node assertion", LanguageNode, 1, "AssertionError: expected bird", StatusFail, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

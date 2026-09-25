@@ -58,6 +58,7 @@ func verificationToolchainMissing(language Language, output commandOutput) bool 
 	}
 	for _, line := range strings.Split(output.Stderr, "\n") {
 		line = strings.TrimSpace(line)
+		line = strings.NewReplacer("‘", "'", "’", "'").Replace(line)
 		if language == LanguagePython && output.ExitCode == 1 && strings.HasSuffix(line, ": No module named pytest") {
 			return true
 		}
