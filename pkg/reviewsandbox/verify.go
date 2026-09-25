@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Kind string
@@ -265,7 +267,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	if err != nil {
 		result.Command = plan.command
 		result.Argv = append([]string{plan.command}, plan.args...)
-		result.Error = fmt.Sprintf("verification executable %q is unavailable: %v", plan.command, err)
+		result.Error = fmt.Sprintf("environment limit: verification executable %q is unavailable: %v; install: %s", plan.command, err, toolchainInstallHint(language, workDir))
 		return result
 	}
 	resolved, err = filepath.Abs(resolved)
@@ -326,7 +328,7 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	if language == LanguageNode {
 		nodeModulesRoot, projectionErr := projectNodeDependencies(root, request.SourceRoot, relativePath, writableWorkDir)
 		if projectionErr != nil {
-			result.Error = projectionErr.Error()
+			result.Error = fmt.Sprintf("environment limit: %v; install in a separate checkout of this revision: %s", projectionErr, nodeInstallHint(workDir))
 			return result
 		}
 		additionalReadRoots = append(additionalReadRoots, nodeModulesRoot)
@@ -531,6 +533,11 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 	result.ExitCode = output.ExitCode
 	result.Duration = output.Duration
 	result.Truncated = output.Truncated
+	if contextErr == nil && output.ExitCode != 0 && verificationToolchainMissing(language, output) {
+		result.Status = StatusUnavailable
+		result.Error = "environment limit: verification toolchain is missing; install: " + toolchainInstallHint(language, filepath.Join(request.SnapshotRoot, request.Path))
+		return result
+	}
 	if runErr != nil {
 		if errors.Is(contextErr, context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
 			result.ExitCode = 124
@@ -623,7 +630,11 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 // ones with no explicit "." target token (Rust, Node), because it changes
 // the actual working directory rather than rewriting a path argument.
 func wrapperRemoteCommand(relativePath, command string, args []string) []string {
-	remote := append([]string{"sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", relativePath, command}, args...)
+	script := `cd "$1" && shift && exec "$@"`
+	if command == "python3" || command == "npm" || command == "pnpm" {
+		script = `PATH="$HOME/.local/share/buckley/review-python/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"; export PATH; ` + script
+	}
+	remote := append([]string{"sh", "-c", script, "sh", relativePath, command}, args...)
 	return remote
 }
 
@@ -867,7 +878,8 @@ func projectNodeDependencies(snapshotRoot, sourceRoot, packagePath, writablePack
 		return "", fmt.Errorf("Node verification dependencies are unavailable: source package escapes repository root")
 	}
 
-	for _, name := range []string{"package.json", "package-lock.json"} {
+	_, lockfile := nodePackageManager(filepath.Join(snapshotRoot, filepath.FromSlash(packagePath)))
+	for _, name := range []string{"package.json", lockfile} {
 		snapshotContent, readSnapshotErr := readRegularFileWithin(snapshotRoot, filepath.Join(snapshotRoot, filepath.FromSlash(packagePath), name))
 		sourceContent, readSourceErr := readRegularFileWithin(canonicalSource, filepath.Join(resolvedPackage, name))
 		if readSnapshotErr != nil || readSourceErr != nil {
@@ -878,20 +890,33 @@ func projectNodeDependencies(snapshotRoot, sourceRoot, packagePath, writablePack
 		}
 	}
 
-	rootLockPath := filepath.Join(resolvedPackage, "package-lock.json")
+	rootLockPath := filepath.Join(resolvedPackage, lockfile)
 	installedLockPath := filepath.Join(resolvedPackage, "node_modules", ".package-lock.json")
+	if lockfile == "pnpm-lock.yaml" {
+		installedLockPath = filepath.Join(resolvedPackage, "node_modules", ".pnpm", "lock.yaml")
+	}
 	rootLockContent, rootErr := readRegularFileWithin(canonicalSource, rootLockPath)
 	installedLockContent, installedErr := readRegularFileWithin(canonicalSource, installedLockPath)
 	if rootErr != nil || installedErr != nil {
 		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules lock identity is missing or unsafe")
 	}
-	var expected, installed nodePackageLock
-	if json.Unmarshal(rootLockContent, &expected) != nil || json.Unmarshal(installedLockContent, &installed) != nil || expected.Packages == nil || installed.Packages == nil {
-		return "", fmt.Errorf("Node verification dependencies are unavailable: package lock identity is invalid")
-	}
-	delete(expected.Packages, "")
-	if !reflect.DeepEqual(expected.Packages, installed.Packages) {
-		return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules does not exactly match package-lock.json")
+	if lockfile == "pnpm-lock.yaml" {
+		var expected, installed map[string]any
+		if yaml.Unmarshal(rootLockContent, &expected) != nil || yaml.Unmarshal(installedLockContent, &installed) != nil || expected["lockfileVersion"] == nil || installed["lockfileVersion"] == nil {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: pnpm lock identity is invalid")
+		}
+		if !reflect.DeepEqual(expected, installed) {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules does not exactly match pnpm-lock.yaml")
+		}
+	} else {
+		var expected, installed nodePackageLock
+		if json.Unmarshal(rootLockContent, &expected) != nil || json.Unmarshal(installedLockContent, &installed) != nil || expected.Packages == nil || installed.Packages == nil {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: package lock identity is invalid")
+		}
+		delete(expected.Packages, "")
+		if !reflect.DeepEqual(expected.Packages, installed.Packages) {
+			return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules does not exactly match package-lock.json")
+		}
 	}
 
 	nodeModules := filepath.Join(resolvedPackage, "node_modules")
@@ -1039,10 +1064,17 @@ func verificationPlan(kind Kind, language Language, pattern, workDir string) (pl
 			return plan{}, err
 		}
 		args := []string{"--offline", "run", script}
-		if kind == KindTest && pattern != "" {
-			args = append(args, "--", "--testNamePattern", pattern)
+		manager, _ := nodePackageManager(workDir)
+		if manager == "pnpm" {
+			args = []string{"run", script}
 		}
-		return plan{"npm", args}, nil
+		if kind == KindTest && pattern != "" {
+			if manager == "npm" {
+				args = append(args, "--")
+			}
+			args = append(args, "--testNamePattern", pattern)
+		}
+		return plan{manager, args}, nil
 	}
 	return plan{}, fmt.Errorf("verification language %q is unsupported", language)
 }

@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"golang.org/x/mod/semver"
 )
 
 // trustedExecutableDirectories is deliberately independent of ambient PATH.
@@ -28,6 +30,22 @@ func trustedExecutableDirectories() []string {
 	// the runner image's older system Go and modules with a raised go
 	// directive fail verification inside an otherwise-correct sandbox.
 	candidates = appendGlobDirectoriesDescending(candidates, "/opt/hostedtoolcache/go/*/x64/bin")
+	if strings.TrimSpace(home) != "" {
+		candidates = append(candidates, filepath.Join(home, ".local", "share", "buckley", "review-python", "bin"))
+		for _, rel := range []string{".local/bin", ".local/share/pnpm"} {
+			candidates = append(candidates, filepath.Join(home, filepath.FromSlash(rel)))
+		}
+		matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
+		sort.SliceStable(matches, func(i, j int) bool {
+			return semver.Compare(filepath.Base(filepath.Dir(matches[i])), filepath.Base(filepath.Dir(matches[j]))) > 0
+		})
+		candidates = append(candidates, matches...)
+		for _, rel := range []string{"miniconda3/bin", "anaconda3/bin"} {
+			candidates = append(candidates, filepath.Join(home, filepath.FromSlash(rel)))
+		}
+	}
+	candidates = appendGlobDirectories(candidates, "/opt/hostedtoolcache/node/*/x64/bin")
+	candidates = appendGlobDirectories(candidates, "/opt/hostedtoolcache/Python/*/x64/bin")
 	candidates = append(candidates,
 		"/usr/local/go/bin",
 		"/usr/local/bin",
@@ -39,7 +57,6 @@ func trustedExecutableDirectories() []string {
 	if strings.TrimSpace(home) != "" {
 		candidates = append(candidates, filepath.Join(home, ".cargo", "bin"))
 		candidates = appendGlobDirectories(candidates, filepath.Join(home, ".rustup", "toolchains", "*", "bin"))
-		candidates = appendGlobDirectories(candidates, filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
 		candidates = appendGlobDirectories(candidates, filepath.Join(home, ".codex", "bin", "wsl", "*"))
 	}
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {

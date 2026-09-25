@@ -72,6 +72,7 @@ func ToolEnvironment(runtimeDir string) map[string]string {
 		"CARGO_NET_OFFLINE":             "true",
 		"CARGO_TARGET_DIR":              filepath.Join(runtimeDir, "cargo-target"),
 		"CI":                            "true",
+		"COREPACK_ENABLE_NETWORK":       "0",
 		"GOCACHE":                       filepath.Join(runtimeDir, "go-build"),
 		"GOENV":                         "off",
 		"GOPROXY":                       "off",
@@ -145,11 +146,20 @@ func reviewReadRoots(command string) []string {
 	} else if resolved, err := trustedLookPath(strings.TrimSpace(command)); err == nil {
 		candidates = appendExecutableReadRoots(candidates, resolved)
 	}
-	for _, executable := range []string{"go", "cargo", "rustc", "python3", "node", "npm"} {
+	for _, executable := range []string{"go", "cargo", "rustc", "python3", "node", "npm", "pnpm"} {
 		if resolved, err := trustedLookPath(executable); err == nil {
 			candidates = appendExecutableReadRoots(candidates, resolved)
 			if executable == "go" {
 				candidates = appendGoSDKReadRoot(candidates, resolved)
+			}
+			if executable == "python3" {
+				prefix := filepath.Dir(filepath.Dir(resolved))
+				candidates = append(candidates, filepath.Join(prefix, "lib"))
+				// Keep the logical venv root: resolving python3's symlink
+				// loses pyvenv.cfg and selects the base interpreter's packages.
+				if _, err := os.Stat(filepath.Join(prefix, "pyvenv.cfg")); err == nil {
+					candidates = append(candidates, prefix)
+				}
 			}
 		}
 	}
