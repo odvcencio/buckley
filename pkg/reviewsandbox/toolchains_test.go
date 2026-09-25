@@ -135,6 +135,38 @@ func TestWrapperRemoteCommand_UserPython(t *testing.T) {
 	}
 }
 
+func TestWrapperRemoteCommand_UserNode(t *testing.T) {
+	for _, manager := range []string{"npm", "pnpm"} {
+		t.Run(manager, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for _, version := range []string{"v22.9.0", "v22.10.0"} {
+				bin := filepath.Join(home, ".nvm/versions/node", version, "bin")
+				for name, script := range map[string]string{
+					"node": "#!/bin/sh\nprintf '%s:%s' '" + version + "' \"$1\"\n",
+					"npm":  "#!/bin/sh\nexec node \"$@\"\n",
+				} {
+					path := filepath.Join(bin, name)
+					writeToolchainFixture(t, path, script)
+					if err := os.Chmod(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			pnpm := filepath.Join(home, ".local/bin/pnpm")
+			writeToolchainFixture(t, pnpm, "#!/bin/sh\nexec node \"$@\"\n")
+			if err := os.Chmod(pnpm, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			argv := wrapperRemoteCommand(".", manager, []string{"run"})
+			output, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+			if err != nil || string(output) != "v22.10.0:run" {
+				t.Fatalf("output = %s, error = %v", output, err)
+			}
+		})
+	}
+}
+
 func TestCodexSandbox_CommonToolchains(t *testing.T) {
 	if os.Getenv("BUCKLEY_TEST_CODEX_SANDBOX") != "1" {
 		t.Skip("set BUCKLEY_TEST_CODEX_SANDBOX=1 to exercise installed toolchains")

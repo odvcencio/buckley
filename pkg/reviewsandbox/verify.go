@@ -634,6 +634,19 @@ func wrapperRemoteCommand(relativePath, command string, args []string) []string 
 	if command == "python3" || command == "npm" || command == "pnpm" {
 		script = `PATH="$HOME/.local/share/buckley/review-python/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"; export PATH; ` + script
 	}
+	if command == "npm" || command == "pnpm" {
+		script = `node_version=$(
+  for node_bin in "$HOME"/.nvm/versions/node/*/bin; do
+    test -x "$node_bin/node" || continue
+    node_version=${node_bin%/bin}
+    printf '%s\n' "${node_version##*/}"
+  done | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n 1
+)
+if test -n "$node_version"; then
+  PATH="$HOME/.nvm/versions/node/$node_version/bin:$PATH"
+fi
+` + script
+	}
 	remote := append([]string{"sh", "-c", script, "sh", relativePath, command}, args...)
 	return remote
 }
