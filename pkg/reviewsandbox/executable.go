@@ -1,15 +1,15 @@
 package reviewsandbox
 
 import (
+	"cmp"
 	"fmt"
 	goversion "go/version"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
-
-	"golang.org/x/mod/semver"
 )
 
 // trustedExecutableDirectories is deliberately independent of ambient PATH.
@@ -37,7 +37,19 @@ func trustedExecutableDirectories() []string {
 		}
 		matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
 		sort.SliceStable(matches, func(i, j int) bool {
-			return semver.Compare(filepath.Base(filepath.Dir(matches[i])), filepath.Base(filepath.Dir(matches[j]))) > 0
+			left := strings.Split(strings.TrimPrefix(filepath.Base(filepath.Dir(matches[i])), "v"), ".")
+			right := strings.Split(strings.TrimPrefix(filepath.Base(filepath.Dir(matches[j])), "v"), ".")
+			for part := 0; part < min(len(left), len(right)); part++ {
+				a, aErr := strconv.Atoi(left[part])
+				b, bErr := strconv.Atoi(right[part])
+				if aErr != nil || bErr != nil {
+					break
+				}
+				if order := cmp.Compare(a, b); order != 0 {
+					return order > 0
+				}
+			}
+			return matches[i] > matches[j]
 		})
 		candidates = append(candidates, matches...)
 		for _, rel := range []string{"miniconda3/bin", "anaconda3/bin"} {

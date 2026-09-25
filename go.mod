@@ -26,7 +26,6 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/xuri/excelize/v2 v2.10.0
 	go.uber.org/mock v0.6.0
-	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.55.0
 	golang.org/x/term v0.43.0
 	golang.org/x/text v0.37.0
