@@ -71,6 +71,7 @@ type reviewCommandResult struct {
 	criticAttempts    int
 	hostEvidence      int
 	hostPasses        int
+	hostFailures      int
 	hostNotApplicable int
 	toolEvidence      []oneshot.AgentToolCall
 	commandEvidence   []model.CommandExecutionEvidence
@@ -834,6 +835,9 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	result.criticAttempts = fwResult.CriticAttempts
 	result.hostEvidence = len(fwResult.HostEvidence)
 	for _, call := range fwResult.HostEvidence {
+		if status, _ := call.Data["status"].(string); !call.Success && strings.EqualFold(status, "FAIL") {
+			result.hostFailures++
+		}
 		switch reviewEvidencePresentationStatus(call) {
 		case "PASS":
 			result.hostPasses++
@@ -1041,15 +1045,13 @@ func reviewHostEvidenceSummary(result *reviewCommandResult) string {
 	if result == nil || result.hostEvidence <= 0 {
 		return ""
 	}
-	failedOrUnavailable := result.hostEvidence - result.hostPasses - result.hostNotApplicable
-	if failedOrUnavailable < 0 {
-		failedOrUnavailable = 0
-	}
+	unavailable := max(0, result.hostEvidence-result.hostPasses-result.hostNotApplicable-result.hostFailures)
 	return fmt.Sprintf(
-		"Harness verification: %d passed · %d not applicable · %d failed or unavailable · %d total",
+		"Harness verification: %d passed · %d not applicable · %d failed · %d unavailable · %d total",
 		result.hostPasses,
 		result.hostNotApplicable,
-		failedOrUnavailable,
+		result.hostFailures,
+		unavailable,
 		result.hostEvidence,
 	)
 }

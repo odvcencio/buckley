@@ -575,7 +575,7 @@ func TestReviewResultFromAgentExposesPrimaryAndCriticAttempts(t *testing.T) {
 		t.Fatalf("host evidence = %d total/%d passed/%d not applicable, want 3/1/1",
 			got.hostEvidence, got.hostPasses, got.hostNotApplicable)
 	}
-	if summary := reviewHostEvidenceSummary(got); summary != "Harness verification: 1 passed · 1 not applicable · 1 failed or unavailable · 3 total" {
+	if summary := reviewHostEvidenceSummary(got); summary != "Harness verification: 1 passed · 1 not applicable · 0 failed · 1 unavailable · 3 total" {
 		t.Fatalf("host evidence summary = %q", summary)
 	}
 }
