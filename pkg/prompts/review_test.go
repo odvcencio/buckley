@@ -169,7 +169,7 @@ func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 		t.Fatal("PR prompt still classifies style as a general MINOR finding")
 	}
 	for _, want := range []string{
-		"Style, wording, naming, and speculative future concerns belong in Remarks or are omitted",
+		"Style-only preferences, naming, and speculative future concerns belong in Remarks or are omitted",
 		"Only PROVED supports a Finding",
 		"REQUEST CHANGES requires a proved defect and at least one blocker",
 		"Partial or truncated required evidence blocks approval",
@@ -212,7 +212,7 @@ func TestBranchReviewPromptStaysCompact(t *testing.T) {
 	if len(prompt) > maxBytes {
 		t.Fatalf("branch review system prompt grew to %d bytes; budget is %d", len(prompt), maxBytes)
 	}
-	const maxWords = 950
+	maxWords := 950 + promptWordCount(ReviewProseBlock())
 	if words > maxWords {
 		t.Fatalf("branch review system prompt grew to %d words; budget is %d", words, maxWords)
 	}
@@ -222,11 +222,11 @@ func TestProjectReviewPromptStaysCompactAndExhaustive(t *testing.T) {
 	prompt := reviewProjectDefault(time.Unix(0, 0))
 	words := promptWordCount(prompt)
 	t.Logf("project review prompt footprint: %d bytes, %d words", len(prompt), words)
-	const maxBytes = 2_500
+	maxBytes := 2_500 + len(ReviewProseBlock())
 	if len(prompt) > maxBytes {
 		t.Fatalf("project review system prompt grew to %d bytes; budget is %d", len(prompt), maxBytes)
 	}
-	const maxWords = 350
+	maxWords := 350 + promptWordCount(ReviewProseBlock())
 	if words > maxWords {
 		t.Fatalf("project review system prompt grew to %d words; budget is %d", words, maxWords)
 	}

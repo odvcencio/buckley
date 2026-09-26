@@ -53,5 +53,5 @@ BODY RULES:
 %s
 
 Current date/time: %s
-`, ste100ProseBlock, now.Format(time.RFC3339))
+`, PRProseBlock(), now.Format(time.RFC3339))
 }

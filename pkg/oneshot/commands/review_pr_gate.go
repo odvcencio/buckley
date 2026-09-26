@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"m31labs.dev/buckley/pkg/diffsignal"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 // PostingGateConfig controls whether a review that will be posted back to a
@@ -117,23 +118,9 @@ func EvaluatePostingGate(cfg PostingGateConfig, willPost bool, shards diffsignal
 	return decision
 }
 
-// BuildDeclineComment renders the courteous, ASD-STE100 decline comment
-// posted when the gate blocks a review. It states the measured size and
-// threshold, the reason the limit exists, concrete guidance for splitting
-// the PR, and the maintainer override.
+// BuildDeclineComment states why automated review declined and what to do next.
 func BuildDeclineComment(decision PostingGateDecision, threshold int) string {
-	var sb strings.Builder
-	sb.WriteString("## Automated review declined\n\n")
-	fmt.Fprintf(&sb, "This pull request has %d high-signal bytes across %d files. ", decision.HighSignalBytes, decision.HighSignalFiles)
-	fmt.Fprintf(&sb, "That is over the %d-byte review threshold for automated posting.\n\n", threshold)
-	sb.WriteString("Review cost scales with the size of the change. ")
-	sb.WriteString("The threshold protects the project's review budget from an unbounded cost on a single pull request.\n\n")
-	sb.WriteString("Please split this pull request. Two options help most:\n\n")
-	sb.WriteString("- Split the change by directory or package. Submit each part as its own pull request.\n")
-	sb.WriteString("- Move generated or bundled artifacts to their own commit or pull request. Automated review cannot review generated content.\n\n")
-	sb.WriteString("A core maintainer can run the full review locally with `buckley review-pr`, with no size limit. ")
-	sb.WriteString("A core maintainer can also re-trigger this review if the current size is intentional.\n")
-	return sb.String()
+	return fmt.Sprintf(prompts.DeclineCommentTemplate, decision.HighSignalBytes, decision.HighSignalFiles, threshold)
 }
 
 // DeclineTracker records which pull request head commits already received a

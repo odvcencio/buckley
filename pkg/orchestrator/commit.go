@@ -64,7 +64,7 @@ Rules:
   "Fixes #N", or "Resolves #N", and do not list an issue number just because it
   appears in the diff text (e.g. a changelog "(roadmap: #123)" attribution).
 
-` + prompts.STE100ProseBlock() + `
+` + prompts.CommitProseBlock() + `
 
 Output JSON:
 {

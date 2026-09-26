@@ -152,7 +152,7 @@ Guidelines:
 
 func (CommitDefinition) SystemPrompt() string {
 	return prompts.CommitToolPrompt(
-		commitSystemPrompt+"\n\n"+prompts.UntrustedDiffBlock()+"\n\n"+prompts.STE100ProseBlock(),
+		commitSystemPrompt+"\n\n"+prompts.UntrustedDiffBlock()+"\n\n"+prompts.CommitProseBlock(),
 		time.Now(),
 	)
 }

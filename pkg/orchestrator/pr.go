@@ -45,7 +45,7 @@ Generate a comprehensive PR description with:
 
 Format in markdown. Be specific and detailed.
 
-` + prompts.STE100ProseBlock()
+` + prompts.PRProseBlock()
 
 func (pc *PRCreator) GeneratePR(plan *Plan) (*PRInfo, error) {
 	if plan == nil {

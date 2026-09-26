@@ -11,6 +11,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 // fakeCommitRunner is an injectable commitRunner for tests: it never
@@ -648,5 +649,21 @@ func TestCommitSubjectsBetween_CondensesLongRanges(t *testing.T) {
 	last := subjects[len(subjects)-1]
 	if !strings.Contains(last, "and 5 more") {
 		t.Fatalf("last subject = %q, want mention of 5 more commits", last)
+	}
+}
+
+func TestMergeCommitDefinition_RegisterGuidance(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_COMMIT", "")
+	t.Setenv("BUCKLEY_PROMPT_COMMIT_FILE", "")
+	def := mergeCommitDefinition{source: "topic", target: "main", resolutions: []string{"Keep main's timeout and topic's retry limit."}}
+	prompt := def.SystemPrompt() + "\n" + def.BuildPrompt(&oneshot.Context{Sources: map[string]string{}})
+	for _, want := range []string{prompts.CommitProseBlock(), prompts.MergeNoteProseBlock(), def.resolutions[0]} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "ASD-STE100") {
+		t.Fatal("merge prompt contains superseded standard")
 	}
 }

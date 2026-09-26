@@ -146,14 +146,14 @@ func TestEvaluatePostingGate_AssociationLookupFailureFailsClosed(t *testing.T) {
 
 // TestBuildDeclineComment_ContainsRequiredContent checks the decline comment
 // states size, threshold, rationale, splitting guidance, and the maintainer
-// override, in ASD-STE100-plain prose.
+// override, in plain language.
 func TestBuildDeclineComment_ContainsRequiredContent(t *testing.T) {
 	decision := PostingGateDecision{Blocked: true, HighSignalBytes: 5_000_000, HighSignalFiles: 400}
 	comment := BuildDeclineComment(decision, 1_000_000)
 
 	for _, want := range []string{
 		strconv.Itoa(decision.HighSignalBytes), strconv.Itoa(decision.HighSignalFiles), "1000000",
-		"directory or package",
+		"directory or package", "reviewable diff", "automated review budget",
 		"generated or bundled artifacts",
 		"maintainer can run the full review locally",
 		"re-trigger",

@@ -1653,7 +1653,7 @@ func TestReviewValidationRejectsNonDemonstratedFindings(t *testing.T) {
 	}{
 		{
 			name: "style",
-			finding: `### FINDING-001: [MINOR] ASD-STE100 prose violation
+			finding: `### FINDING-001: [MINOR] Documentation style preference
 - **File**: ratchet.go:1
 - **Evidence**: The sentence contains a three-word noun cluster.
 - **Business Impact**: The wording could slow future maintenance.
@@ -1794,7 +1794,7 @@ func TestReviewValidationReportsIndependentRepairProblemsTogether(t *testing.T) 
 	review := strings.Replace(completeReviewWithCoverage(coverage), "## Grade: A", "## Grade: B", 1)
 	review = strings.Replace(review, "**Conclusion**: DISPROVED", "**Conclusion**: CLEAN", 1)
 	review = strings.Replace(review, "## Findings\nNone.", `## Findings
-### FINDING-001: [MINOR] ASD-STE100 prose violation
+### FINDING-001: [MINOR] Documentation style preference
 - **File**: ratchet.go:1
 - **Evidence**: The sentence contains a noun cluster.
 - **Business Impact**: The wording could slow future maintenance.

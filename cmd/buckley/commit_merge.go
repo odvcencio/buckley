@@ -11,6 +11,7 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/prompts"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -139,6 +140,7 @@ type mergeCommitDefinition struct {
 
 func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 	var b strings.Builder
+	b.WriteString(prompts.MergeNoteProseBlock() + "\n\n")
 	fmt.Fprintf(&b, "## Merge\n\nMerging %s into %s.\n\n", d.source, d.target)
 	if len(d.subjects) > 0 {
 		b.WriteString("## Incoming commits\n\n")
@@ -148,7 +150,7 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 		b.WriteString("\n")
 	}
 	if len(d.resolutions) > 0 {
-		b.WriteString("## Conflict resolutions\n\nState each of these in the body, in your own ASD-STE100 prose:\n\n")
+		b.WriteString("## Conflict resolutions\n\nState each of these in the body, in plain language:\n\n")
 		for _, r := range d.resolutions {
 			b.WriteString("- " + r + "\n")
 		}

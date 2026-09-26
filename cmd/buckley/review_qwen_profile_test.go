@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/modelprofile"
+	"m31labs.dev/buckley/pkg/prompts"
 )
 
 func TestAppendReviewExecutionPlanUsesCompactQwenProfile(t *testing.T) {
@@ -42,7 +43,7 @@ func TestAppendReviewExecutionPlanUsesCompactQwenProfile(t *testing.T) {
 		}
 	}
 	if strings.Contains(prompt, "ASD-STE100") {
-		t.Fatalf("Qwen profile inherited verbose generic policy:\n%s", prompt)
+		t.Fatalf("Qwen profile contains superseded standard:\n%s", prompt)
 	}
 	if strings.Contains(strings.ToLower(prompt), "put every required verification target") {
 		t.Fatalf("Qwen profile asks the model to duplicate host verification:\n%s", prompt)
@@ -159,5 +160,19 @@ func TestQwenFlashUsesInDepthOutputChecklist(t *testing.T) {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("Qwen project review inherited merge-gate instruction %q:\n%s", forbidden, prompt)
 		}
+	}
+}
+
+func TestReviewExecutionPlan_PreservesRegister(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BUCKLEY_PROMPT_REVIEW_PR", "")
+	t.Setenv("BUCKLEY_PROMPT_REVIEW_PR_FILE", "")
+	for _, modelID := range []string{"qwen/qwen3.7-plus", "openai/gpt-6-luna-pro", deepSeekV4ProReviewModel} {
+		t.Run(modelID, func(t *testing.T) {
+			prompt := appendReviewExecutionPlan(prompts.ReviewPRPrompt(time.Unix(0, 0)), automatedReviewOptions{modelID: modelID, sizeClass: "focused"})
+			if strings.Count(prompt, prompts.ReviewProseBlock()) != 1 || strings.Contains(prompt, "ASD-STE100") {
+				t.Fatal("review register missing, duplicated, or superseded standard present")
+			}
+		})
 	}
 }

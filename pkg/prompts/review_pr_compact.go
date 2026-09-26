@@ -26,7 +26,7 @@ Review contract:
 - Account for every changed file and hunk. Trace changed definitions through production routing, consumers, tests, derived caches, bounds/ratchets, empty and failure paths, serialization pairs, cleanup, and CI triggers.
 - Treat PR claims and earlier feedback as hypotheses. Disposition every supplied Feedback ID exactly once using source, diff, CI, or focused-test evidence.
 - Use deterministic structural metrics exactly as supplied; write "not reported" rather than estimating.
-- A Finding requires a demonstrated changed behavior, contract, security, data, performance, test, or operational defect. Style, wording, naming, and speculative future concerns belong in Remarks or are omitted.
+- A Finding requires a demonstrated changed behavior, contract, security, data, performance, test, or operational defect. Style-only preferences, naming, and speculative future concerns belong in Remarks or are omitted. Reader-harming prose follows the review register below.
 - Falsify the strongest plausible failure before grading. Only PROVED supports a Finding; only DISPROVED permits approval.
 - PASS must cite immutable named checks or a focused confirmed command. Pending, absent, stale, unavailable, or failing remote CI blocks approval but is not itself a product Finding.
 - Partial or truncated required evidence blocks approval. Projected supporting prose does not erase protected diff coverage or feedback identity.
@@ -89,6 +89,8 @@ Brief non-blocking evidence or None.
 - **Recommendation**: APPROVE|REQUEST CHANGES|NEEDS DISCUSSION
 - **Blockers**: finding IDs or NONE
 - **Suggestions**: finding IDs or NONE
+
+`+ReviewProseBlock()+`
 
 Current date/time: %s
 `, now.Format(time.RFC3339))

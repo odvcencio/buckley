@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
@@ -56,6 +57,7 @@ const (
 // Finding represents a single issue found during review.
 type Finding struct {
 	ID           string   // e.g., "FINDING-001"
+	Category     string   `json:",omitempty"` // prose for reader-harming text
 	Severity     Severity // CRITICAL, MAJOR, MINOR
 	Title        string   // Brief description
 	File         string   // File path
@@ -63,7 +65,29 @@ type Finding struct {
 	Evidence     string   // Proof of the issue
 	Impact       string   // Business/technical impact
 	Fix          string   // Description of fix
-	SuggestedFix string   // Code block with suggested fix
+	SuggestedFix string   // Suggested rewrite or code block with suggested fix
+}
+
+// normalizeFindingCategory preserves names used by older review ledgers.
+func normalizeFindingCategory(category string) string {
+	switch category = strings.ToLower(strings.TrimSpace(category)); category {
+	case "asd-ste100", "ste100", "prose":
+		return "prose"
+	default:
+		return category
+	}
+}
+
+// UnmarshalJSON normalizes historical categories without rewriting ledger data.
+func (f *Finding) UnmarshalJSON(data []byte) error {
+	type plainFinding Finding
+	var decoded plainFinding
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	decoded.Category = normalizeFindingCategory(decoded.Category)
+	*f = Finding(decoded)
+	return nil
 }
 
 // CoverageEntry is one machine-parseable changed-file entry from the review's
@@ -544,8 +568,6 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 
 func validateDemonstratedFindings(findings []Finding) error {
 	styleMarkers := []string{
-		"asd-ste100",
-		"ste100",
 		"noun cluster",
 		"passive voice",
 		"prose violation",
@@ -585,8 +607,14 @@ func validateDemonstratedFindings(findings []Finding) error {
 			finding.Impact,
 			finding.Fix,
 		}, "\n"))
+		isProse := normalizeFindingCategory(finding.Category) == "prose"
+		if isProse {
+			if strings.TrimSpace(finding.Evidence) == "" || strings.TrimSpace(finding.Impact) == "" || strings.TrimSpace(finding.SuggestedFix) == "" {
+				return fmt.Errorf("finding %s reports prose or style without cited text, reader impact, and a suggested rewrite", finding.ID)
+			}
+		}
 		for _, marker := range styleMarkers {
-			if strings.Contains(text, marker) {
+			if strings.Contains(text, marker) && !isProse {
 				return fmt.Errorf(
 					"finding %s reports prose or style (%q), not a demonstrated current defect; move it to Remarks or omit it",
 					finding.ID,
@@ -1115,13 +1143,17 @@ func extractFindings(review string) []Finding {
 		content := review[start:end]
 
 		finding.File, finding.Line = extractFileLine(content)
+		finding.Category = normalizeFindingCategory(extractField(content, "Category"))
 		finding.Evidence = extractField(content, "Evidence")
 		finding.Impact = extractField(content, "Impact")
 		if finding.Impact == "" {
 			finding.Impact = extractField(content, "Business Impact")
 		}
 		finding.Fix = extractField(content, "Fix")
-		finding.SuggestedFix = extractCodeBlock(content, "suggested")
+		finding.SuggestedFix = extractField(content, "Rewrite")
+		if finding.SuggestedFix == "" {
+			finding.SuggestedFix = extractCodeBlock(content, "suggested")
+		}
 
 		findings = append(findings, finding)
 	}

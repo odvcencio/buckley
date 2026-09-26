@@ -68,11 +68,11 @@ func TestCompactPRReviewPrompt_StaysWithinFootprintBudget(t *testing.T) {
 	prompt := reviewPRCompactDefault(time.Unix(0, 0))
 	words := promptWordCount(prompt)
 	t.Logf("compact PR review prompt footprint: %d bytes, %d words", len(prompt), words)
-	const maxBytes = 4_700
+	maxBytes := 4_700 + len(ReviewProseBlock())
 	if len(prompt) > maxBytes {
 		t.Fatalf("compact PR review prompt grew to %d bytes; budget is %d", len(prompt), maxBytes)
 	}
-	const maxWords = 650
+	maxWords := 650 + promptWordCount(ReviewProseBlock())
 	if words > maxWords {
 		t.Fatalf("compact PR review prompt grew to %d words; budget is %d", words, maxWords)
 	}
