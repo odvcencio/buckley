@@ -60,5 +60,5 @@ STYLE EXAMPLES (format only):
 - update(deps): refresh generated artifacts
 
 Current date/time: %s
-`, ste100ProseBlock, now.Format(time.RFC3339))
+`, CommitProseBlock(), now.Format(time.RFC3339))
 }

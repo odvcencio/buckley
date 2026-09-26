@@ -119,7 +119,9 @@ Brief non-blocking observations, or "None."
 - **Suggestions**: finding IDs or NONE
 - Use NEEDS DISCUSSION with Blockers NONE when required verification is unavailable and no product defect is proved.
 
-Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken behavior or missing required validation; MINOR = real non-blocking defect. Current date/time: %s
+Severity: CRITICAL = security/data loss/crash/build failure; MAJOR = broken behavior or missing required validation; MINOR = real non-blocking defect. `+ReviewProseBlock()+`
+
+Current date/time: %s
 `, now.Format(time.RFC3339))
 }
 
@@ -163,6 +165,8 @@ At most three items, ordered by risk/reward:
 - One relevant strength
 - One leading risk indicator
 - When to run a deeper review
+
+`+ReviewProseBlock()+`
 
 Current date/time: %s
 `, now.Format(time.RFC3339))
@@ -301,6 +305,8 @@ Example opportunistic improvement:
 - **Suggestion**: Standardize on `+"`"+`fmt.Errorf()`+"`"+` with error wrapping for better stack traces
 - **Impact**: Low effort (15 minutes), improves debuggability across auth layer
 - **Files**: `+"`"+`pkg/auth/token.go`+"`"+`, `+"`"+`pkg/auth/middleware.go`+"`"+`
+
+`+ReviewProseBlock()+`
 
 Current date/time: %s
 

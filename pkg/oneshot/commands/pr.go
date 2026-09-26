@@ -257,7 +257,7 @@ Guidelines:
 
 func (PRDefinition) SystemPrompt() string {
 	return prompts.PRToolPrompt(
-		prSystemPrompt+"\n\n"+prompts.UntrustedDiffBlock()+"\n\n"+prompts.STE100ProseBlock(),
+		prSystemPrompt+"\n\n"+prompts.UntrustedDiffBlock()+"\n\n"+prompts.PRProseBlock(),
 		time.Now(),
 	)
 }

@@ -290,7 +290,7 @@ buckley pr merge <number> [--squash|--merge|--rebase] [--admin] [--delete-branch
 ```
 
 Generates a squash or merge commit title and body from the PR's commits,
-diff, and description (STE100, conventional `action(scope): subject`
+diff, and description (plain language, conventional `action(scope): subject`
 grammar), then merges it with `gh pr merge --subject/--body`. A `--rebase`
 merge preserves each original commit message, so no message is generated
 and `--subject`/`--body` are not passed.
@@ -439,25 +439,14 @@ an eyes reaction, an intake comment, and the final review.
 Buckbot binds review evidence to one PR head and its CI state. Re-run a review
 when the head or CI checks change during a long-running pass.
 
-### Prose style (ASD-STE100)
+### Prose style (plain language)
 
-Buckley writes commit messages, PR titles, and PR bodies in ASD-STE100
-(Simplified Technical English). ASD-STE100 is a controlled-language
-writing standard.
-
-Follow these rules for generated and hand-written prose:
-- Use active voice. Use the imperative mood for instructions.
-- Keep procedural sentences at or below 20 words. Keep descriptive sentences at or below 25 words.
-- Give each word one meaning. Use it the same way every time.
-- Do not write noun clusters of more than three nouns.
-- Define an abbreviation at first use.
-
-`buckley review` checks this rule too. It flags ASD-STE100 violations in
-commit messages, PR descriptions, and added doc or comment text. Each
-flag includes a suggested rewrite.
-
-These rules govern prose only. The commit header format, the
-72-character limit, and the JSON output contract for PRs stay unchanged.
+Buckley follows [decision 0012](hypha://m31labs/hyphae/decisions/0012-plain-language-writing-standard)
+and the [writing-plainly skill](hypha://m31labs/hyphae/skills/writing-plainly).
+Commit messages, PR titles and bodies, reviews, merge notes, and decline comments
+use guidance for their reader's task; prose findings require reader harm and a
+suggested rewrite, while commit headers, the 72-character limit, header repair,
+body bullet rules, and PR JSON output stay unchanged.
 
 ### serve
 

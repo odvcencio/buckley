@@ -612,6 +612,9 @@ func renderMergedPRReview(r *ParsedReview) string {
 			}
 			sb.WriteString("\n")
 		}
+		if f.Category != "" {
+			fmt.Fprintf(&sb, "- **Category**: %s\n", normalizeFindingCategory(f.Category))
+		}
 		if f.Evidence != "" {
 			fmt.Fprintf(&sb, "- **Evidence**: %s\n", f.Evidence)
 		}
@@ -620,6 +623,9 @@ func renderMergedPRReview(r *ParsedReview) string {
 		}
 		if f.Fix != "" {
 			fmt.Fprintf(&sb, "- **Fix**: %s\n", f.Fix)
+		}
+		if normalizeFindingCategory(f.Category) == "prose" && f.SuggestedFix != "" {
+			fmt.Fprintf(&sb, "- **Rewrite**: %s\n", f.SuggestedFix)
 		}
 		sb.WriteString("\n")
 	}

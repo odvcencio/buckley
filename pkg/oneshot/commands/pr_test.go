@@ -16,17 +16,15 @@ func isolatePRPrompt(t *testing.T) {
 	t.Setenv("BUCKLEY_PROMPT_PR_FILE", "")
 }
 
-// TestPRDefinitionSystemPromptIncludesSTE100Marker asserts the system prompt
-// the CLI actually sends for `buckley pr` (PRDefinition.SystemPrompt, wired
-// through cmd/buckley/pr.go's runPRGeneration) carries the ASD-STE100 prose
-// block. pkg/prompts.PRPrompt carries the marker too, but nothing in the CLI
-// path calls it; this test guards the prompt that is actually dispatched.
-func TestPRDefinitionSystemPromptIncludesSTE100Marker(t *testing.T) {
+func TestPRDefinitionSystemPrompt_IncludesRegister(t *testing.T) {
 	isolatePRPrompt(t)
 
 	got := (PRDefinition{}).SystemPrompt()
-	if !strings.Contains(got, "ASD-STE100 profile:") {
-		t.Fatalf("SystemPrompt() missing ASD-STE100 marker:\n%s", got)
+	if strings.Contains(got, "ASD-STE100") {
+		t.Fatal("prompt contains superseded standard")
+	}
+	if !strings.Contains(got, prompts.PRProseBlock()) {
+		t.Fatalf("SystemPrompt() missing register guidance:\n%s", got)
 	}
 	if !strings.Contains(got, "generate_pull_request tool") {
 		t.Fatalf("SystemPrompt() lost the generate_pull_request contract:\n%s", got)
