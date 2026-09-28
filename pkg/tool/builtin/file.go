@@ -184,6 +184,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	if t.sourceScope == nil {
+		// Source-scoped reads stay strict; ordinary reads tolerate placeholders.
+		params = normalizeReadFileParams(params)
+	}
 	selected, err := t.sourceFileForPath(path)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
@@ -224,12 +228,22 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 	contentStr := string(content)
 	lines := fileLines(contentStr)
-	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {
+	if _, hasAnchor := params["anchor"]; hasAnchor {
 		_, hasStart := params["start_line"]
 		_, hasEnd := params["end_line"]
 		if hasStart || hasEnd {
-			return &Result{Success: false, Error: "anchor is mutually exclusive with start_line/end_line; omit anchor for an explicit start_line/end_line range, or omit both line selectors for an anchor read"}, nil
+			if t.sourceScope != nil {
+				return &Result{Success: false, Error: "anchor is mutually exclusive with start_line/end_line; omit anchor for an explicit start_line/end_line range, or omit both line selectors for an anchor read"}, nil
+			}
 		}
+		if (hasStart || hasEnd) && t.sourceScope == nil {
+			// Models often send both selectors. An explicit line range is
+			// unambiguous, so honor it and ignore the anchor instead of failing.
+			params = maps.Clone(params)
+			delete(params, "anchor")
+		}
+	}
+	if anchorValue, hasAnchor := params["anchor"]; hasAnchor {
 		anchor, ok := anchorValue.(string)
 		if !ok {
 			return &Result{Success: false, Error: "anchor parameter must be a string"}, nil
@@ -353,6 +367,43 @@ func fileLines(content string) []string {
 		return lines[:len(lines)-1]
 	}
 	return lines
+}
+
+// normalizeReadFileParams drops placeholder values that models send for unused
+// optional arguments: an empty anchor, zero or negative line numbers, and null
+// values. It returns a copy and never mutates the caller's map.
+func normalizeReadFileParams(params map[string]any) map[string]any {
+	out := maps.Clone(params)
+	if out == nil {
+		return params
+	}
+	for _, key := range []string{"anchor", "start_line", "end_line"} {
+		value, ok := out[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case nil:
+			delete(out, key)
+		case string:
+			if key == "anchor" && strings.TrimSpace(typed) == "" {
+				delete(out, key)
+			}
+		case float64:
+			if typed == 0 {
+				delete(out, key)
+			}
+		case int:
+			if typed == 0 {
+				delete(out, key)
+			}
+		case int64:
+			if typed == 0 {
+				delete(out, key)
+			}
+		}
+	}
+	return out
 }
 
 func readFilePage(params map[string]any, totalLines int) (startLine, endLine int, explicitPage bool, err error) {

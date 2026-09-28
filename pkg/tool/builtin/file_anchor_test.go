@@ -122,16 +122,10 @@ func TestReadFileAnchorRejectsInvalidAndAmbiguousSelectors(t *testing.T) {
 	}{
 		{"missing", "source\n", map[string]any{"anchor": "absent"}, "anchor"},
 		{"empty file", "", map[string]any{"anchor": "absent"}, "anchor"},
-		{"empty", "source", map[string]any{"anchor": ""}, "anchor"},
-		{"blank", "source", map[string]any{"anchor": " \t"}, "anchor"},
-		{"null", "source", map[string]any{"anchor": nil}, "anchor"},
 		{"number", "source", map[string]any{"anchor": 1}, "anchor"},
 		{"too long", "source", map[string]any{"anchor": strings.Repeat("x", 257)}, "anchor"},
 		{"multiline", "one\ntwo", map[string]any{"anchor": "one\ntwo"}, "anchor"},
 		{"CR", "source\r\n", map[string]any{"anchor": "source\r"}, "anchor"},
-		{"start conflict", "source", map[string]any{"anchor": "source", "start_line": 1}, "start_line"},
-		{"null start conflict", "source", map[string]any{"anchor": "source", "start_line": nil}, "start_line"},
-		{"end conflict", "source", map[string]any{"anchor": "source", "end_line": 1}, "end_line"},
 		{"ambiguous", "needle\nother\nneedle\n", map[string]any{"anchor": "needle"}, "anchor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,11 +167,9 @@ func TestReadFileAnchorRecoversAfterSelectorHints(t *testing.T) {
 		name   string
 		params map[string]any
 	}{
-		{"bad start", map[string]any{"anchor": "needle", "start_line": 2}},
-		{"bad end", map[string]any{"anchor": "needle", "end_line": 3}},
-		{"both selectors", map[string]any{"anchor": "needle", "start_line": 1, "end_line": 2}},
 		{"null start", map[string]any{"anchor": "needle", "start_line": nil}},
 		{"null end", map[string]any{"anchor": "needle", "end_line": nil}},
+		{"zero selectors", map[string]any{"anchor": "needle", "start_line": 0, "end_line": 0}},
 		{"ambiguous anchor", map[string]any{"anchor": "needle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,12 +183,7 @@ func TestReadFileAnchorRecoversAfterSelectorHints(t *testing.T) {
 			if err != nil || result.Success {
 				t.Fatalf("expected failure: %+v err=%v", result, err)
 			}
-			hints := []string{"omit anchor", "start_line/end_line"}
-			if tc.name == "ambiguous anchor" {
-				hints = append(hints, "matched 2 lines ([2 3])", "use a unique anchor")
-			} else {
-				hints = append(hints, "omit both line selectors")
-			}
+			hints := []string{"omit anchor", "start_line/end_line", "matched 2 lines ([2 3])", "use a unique anchor"}
 			for _, hint := range hints {
 				if !strings.Contains(result.Error, hint) {
 					t.Fatalf("hint %q missing: %q", hint, result.Error)
@@ -271,5 +258,31 @@ func TestReadFileAnchorDoesNotChangeUnanchoredReads(t *testing.T) {
 	anchored, _ := tool.Execute(map[string]any{"path": path, "anchor": "two"})
 	if !reflect.DeepEqual(ordinary, anchored) {
 		t.Fatalf("anchor diverged from existing page: ordinary=%+v anchored=%+v", ordinary, anchored)
+	}
+}
+
+func TestReadFileToleratesAnchorWithLineSelectors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.WriteFile(path, []byte("first\nneedle\nneedle\nlast\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, params := range map[string]map[string]any{
+		"anchor with range":  {"path": path, "anchor": "needle", "start_line": 1, "end_line": 2},
+		"empty anchor range": {"path": path, "anchor": "", "start_line": 1, "end_line": 2},
+		"placeholder range":  {"path": path, "anchor": "", "start_line": 0, "end_line": 0, "line_numbers": false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := (&ReadFileTool{}).Execute(params)
+			if err != nil || !result.Success {
+				t.Fatalf("expected success: %+v err=%v", result, err)
+			}
+			if name == "placeholder range" {
+				return
+			}
+			page := result.DisplayData["page"].(map[string]any)
+			if page["start_line"] != 1 || page["end_line"] != 2 {
+				t.Fatalf("page=%v", page)
+			}
+		})
 	}
 }

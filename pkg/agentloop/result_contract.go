@@ -215,11 +215,14 @@ type CompletionContract struct {
 	RequireObservableChange       bool
 	MaxRepairAttempts             int
 	MaxContinuations              int
-	OnContinuation                func(int, string)
-	TolerateObservationErrors     bool
-	RepairInstruction             string
-	TaskIntent                    TaskIntent
-	ValidateFinalResponse         func(string) error
+	// MaxNoChangeContinuations caps continuations rejected only because no
+	// workspace change was recorded. Zero means no separate cap.
+	MaxNoChangeContinuations  int
+	OnContinuation            func(int, string)
+	TolerateObservationErrors bool
+	RepairInstruction         string
+	TaskIntent                TaskIntent
+	ValidateFinalResponse     func(string) error
 
 	// SubmittedResponse optionally supplies a caller-owned result accepted by a
 	// tool. Returning ready=false retains normal model completion. Returning

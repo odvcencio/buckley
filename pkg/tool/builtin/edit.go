@@ -643,6 +643,10 @@ func mergeTopLevelEdit(params map[string]any, raw any) ([]any, *Result) {
 		}
 		return nil, &Result{Success: false, Error: "edits cannot be combined with incomplete top-level replacement fields (old_string and new_string must both be strings). " + editsRetryHint}
 	}
+	if oldS == "" && newS == "" {
+		// Empty placeholders for unused optional fields; the batch is the edit.
+		return edits, nil
+	}
 	replaceAll, _ := params["replace_all"].(bool)
 	for _, e := range edits {
 		m, isMap := e.(map[string]any)
