@@ -72,14 +72,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 
 	edits := []any{params}
 	if raw, batch := params["edits"]; batch {
-		for _, key := range []string{"old_string", "new_string", "replace_all"} {
-			if _, mixed := params[key]; mixed {
-				return &Result{Success: false, Error: "edits cannot be combined with top-level replacement fields"}, nil
-			}
-		}
-		edits, ok = raw.([]any)
-		if !ok || len(edits) == 0 {
-			return &Result{Success: false, Error: "edits must be a non-empty array of replacement objects"}, nil
+		var err *Result
+		edits, err = mergeTopLevelEdit(params, raw)
+		if err != nil {
+			return err, nil
 		}
 	}
 
@@ -611,4 +607,60 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 			"diff":    diffPreview.Preview,
 		},
 	}, nil
+}
+
+const editsRetryHint = "Send either `edits` or old_string/new_string, not both; retry with only `edits`."
+
+// mergeTopLevelEdit resolves a call that carries an edits array. Top-level
+// replacement fields that repeat an entry of edits are ignored. A complete,
+// different top-level replacement is appended as the last edit: the batch is
+// atomic, so a conflict with earlier edits fails without writing. Incomplete
+// top-level fields cannot be applied safely and get a corrective error.
+func mergeTopLevelEdit(params map[string]any, raw any) ([]any, *Result) {
+	edits, ok := raw.([]any)
+	if !ok || len(edits) == 0 {
+		// An empty edits array with a complete top-level edit is a plain single edit.
+		if list, isList := raw.([]any); isList && len(list) == 0 && hasTopLevelString(params) {
+			return []any{params}, nil
+		}
+		return nil, &Result{Success: false, Error: "edits must be a non-empty array of replacement objects. " + editsRetryHint}
+	}
+	_, hasOld := params["old_string"]
+	_, hasNew := params["new_string"]
+	_, hasAll := params["replace_all"]
+	if !hasOld && !hasNew && !hasAll {
+		return edits, nil
+	}
+	oldS, oldOK := params["old_string"].(string)
+	newS, newOK := params["new_string"].(string)
+	if !oldOK || !newOK {
+		if !hasOld && !hasNew {
+			// Only replace_all at top level: it has nothing to apply to; ignore it.
+			return edits, nil
+		}
+		return nil, &Result{Success: false, Error: "edits cannot be combined with incomplete top-level replacement fields (old_string and new_string must both be strings). " + editsRetryHint}
+	}
+	replaceAll, _ := params["replace_all"].(bool)
+	for _, e := range edits {
+		m, isMap := e.(map[string]any)
+		if !isMap {
+			continue
+		}
+		eo, _ := m["old_string"].(string)
+		en, _ := m["new_string"].(string)
+		er, _ := m["replace_all"].(bool)
+		if eo == oldS && en == newS && er == replaceAll {
+			return edits, nil
+		}
+	}
+	merged := make([]any, 0, len(edits)+1)
+	merged = append(merged, edits...)
+	merged = append(merged, map[string]any{"old_string": oldS, "new_string": newS, "replace_all": replaceAll})
+	return merged, nil
+}
+
+func hasTopLevelString(params map[string]any) bool {
+	_, o := params["old_string"].(string)
+	_, n := params["new_string"].(string)
+	return o && n
 }
