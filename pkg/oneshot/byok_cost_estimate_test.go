@@ -140,3 +140,13 @@ func TestRunAgentBYOKUnknownPriceStillStopsRetry(t *testing.T) {
 		t.Fatalf("RunAgent() error = %v, want unknown-cost stop", err)
 	}
 }
+
+func TestAgentRunnerInvocationCostBYOKReportedZeroFallsBackToEstimate(t *testing.T) {
+	mgr := newAgentRunnerPricingCatalogManager(t, tieredCatalog)
+	tokens := transparency.TokenUsage{Input: 100000, Output: 0, UsageEvidencePresent: true,
+		ProviderCostKnown: true, ProviderCostIsBYOK: true, ProviderCostUSD: 0}
+	cost, unknown, estimated := agentRunnerInvocationCostDetail(mgr, "openrouter", "vendor/tiered", tokens)
+	if unknown || !estimated || !approxEqual(cost, 0.2) {
+		t.Fatalf("got %v unknown=%v estimated=%v, want $0.20 estimated", cost, unknown, estimated)
+	}
+}

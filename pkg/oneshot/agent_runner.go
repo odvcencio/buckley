@@ -618,11 +618,6 @@ func effectiveAgentInvocationCost(providerID string, pricing transparency.ModelP
 	return pricing.Calculate(tokens)
 }
 
-func agentRunnerInvocationCost(models *model.Manager, providerID, modelID string, tokens transparency.TokenUsage) (float64, bool) {
-	cost, unknown, _ := agentRunnerInvocationCostDetail(models, providerID, modelID, tokens)
-	return cost, unknown
-}
-
 // agentRunnerInvocationCostDetail prices one agent invocation. The third result
 // reports that the cost is an estimate from token counts and catalog prices,
 // used when the provider reports no cost (for example a BYOK route) and the
@@ -638,6 +633,9 @@ func agentRunnerInvocationCostDetail(models *model.Manager, providerID, modelID 
 	if err != nil || info == nil {
 		return 0, true, false
 	}
+	// A BYOK response that reports $0 has not reported the upstream charge, so
+	// only a positive provider figure counts as reported; zero falls through to
+	// the catalog estimate.
 	if tokens.ProviderCostKnown && tokens.ProviderCostIsBYOK && tokens.ProviderCostUSD > 0 {
 		return tokens.ProviderCostUSD, false, false
 	}
