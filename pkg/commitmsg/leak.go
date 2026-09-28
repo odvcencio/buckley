@@ -349,21 +349,6 @@ func (p Policy) Check(message, diff string) []Finding {
 	return out
 }
 
-// Facts summarizes findings for the arbiter policy: counts only, no text.
-func Facts(findings []Finding) (denyHits, removedEcho, sensitive int) {
-	for _, f := range findings {
-		switch f.Rule {
-		case RuleDenyList:
-			denyHits += f.Count
-		case RuleRemovedEcho:
-			removedEcho += f.Count
-		default:
-			sensitive += f.Count
-		}
-	}
-	return
-}
-
 // LoadPolicy reads the private deny-lists and the host pattern. repoDir may be
 // empty. Missing files are not errors. Terms are never logged.
 func LoadPolicy(repoDir string) Policy {
