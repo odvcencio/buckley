@@ -73,6 +73,22 @@ func TestEditFileMixedEditsAndTopLevel(t *testing.T) {
 			t.Fatalf("%+v %q", res, got)
 		}
 	})
+	t.Run("lone replace_all false is ignored", func(t *testing.T) {
+		res, got := runMixedEdit(t, "a", func(p string) map[string]any {
+			return map[string]any{"path": p, "replace_all": false, "edits": []any{edit("a", "A")}}
+		})
+		if !res.Success || got != "A" {
+			t.Fatalf("%+v %q", res, got)
+		}
+	})
+	t.Run("lone replace_all true is rejected", func(t *testing.T) {
+		res, got := runMixedEdit(t, "a", func(p string) map[string]any {
+			return map[string]any{"path": p, "replace_all": true, "edits": []any{edit("a", "A")}}
+		})
+		if res.Success || !strings.Contains(res.Error, "retry with only `edits`") || got != "a" {
+			t.Fatalf("%+v %q", res, got)
+		}
+	})
 	t.Run("empty edits error text", func(t *testing.T) {
 		res, _ := runMixedEdit(t, "a", func(p string) map[string]any {
 			return map[string]any{"path": p, "edits": []any{}}

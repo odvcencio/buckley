@@ -635,8 +635,11 @@ func mergeTopLevelEdit(params map[string]any, raw any) ([]any, *Result) {
 	newS, newOK := params["new_string"].(string)
 	if !oldOK || !newOK {
 		if !hasOld && !hasNew {
-			// Only replace_all at top level: it has nothing to apply to; ignore it.
-			return edits, nil
+			// A lone replace_all:false is the default and changes nothing; ignore it.
+			// replace_all:true would silently under-apply, so it gets an error.
+			if all, _ := params["replace_all"].(bool); !all {
+				return edits, nil
+			}
 		}
 		return nil, &Result{Success: false, Error: "edits cannot be combined with incomplete top-level replacement fields (old_string and new_string must both be strings). " + editsRetryHint}
 	}
