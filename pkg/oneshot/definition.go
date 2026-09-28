@@ -60,6 +60,20 @@ type Definition interface {
 	Unmarshal(result json.RawMessage) (any, error)
 }
 
+// ContextValidator is an optional Definition extension. The framework calls it
+// after Validate succeeds, with the gathered context, so a command can check its
+// result against the material the model saw (for example the staged diff).
+type ContextValidator interface {
+	ValidateWithContext(ctx *Context, result json.RawMessage) error
+}
+
+// sensitiveValidation reports whether a validation error asks the framework
+// not to echo the rejected arguments back to the model.
+func sensitiveValidation(err error) bool {
+	var s interface{ SensitiveValidation() bool }
+	return errors.As(err, &s) && s.SensitiveValidation()
+}
+
 // RepairableDefinition can fix mechanical format errors without another model call.
 // The framework validates the repaired payload before it uses it.
 type RepairableDefinition interface {

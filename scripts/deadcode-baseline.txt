@@ -4,7 +4,6 @@ cmd/buckley/acp.go runACPLoop
 cmd/buckley/acp.go runACPLoopWithStepCap
 cmd/buckley/acp.go streamACPTurn
 cmd/buckley/agent_server.go debugJSON
-cmd/buckley/commit.go createCommit
 cmd/buckley/doctor.go printDoctorChatRunDetail
 cmd/buckley/doctor.go printDoctorChatRunsInventory
 cmd/buckley/doctor.go printDoctorChatScenarioInventory

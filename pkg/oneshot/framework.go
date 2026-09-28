@@ -2,6 +2,7 @@ package oneshot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -278,11 +279,20 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}
 
 		// 5. Validate
-		validationErr := def.Validate(result.ToolCall.Arguments)
+		validate := func(args json.RawMessage) error {
+			if err := def.Validate(args); err != nil {
+				return err
+			}
+			if cv, ok := def.(ContextValidator); ok {
+				return cv.ValidateWithContext(gathered, args)
+			}
+			return nil
+		}
+		validationErr := validate(result.ToolCall.Arguments)
 		if validationErr != nil {
 			if repairer, ok := def.(RepairableDefinition); ok {
 				repaired, repairs := repairer.Repair(result.ToolCall.Arguments)
-				if len(repairs) > 0 && def.Validate(repaired) == nil {
+				if len(repairs) > 0 && validate(repaired) == nil {
 					result.ToolCall.Arguments = repaired
 					validationErr = nil
 					for _, repair := range repairs {
@@ -301,10 +311,16 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			// Echoing its own previous tool call arguments turns this into a
 			// targeted repair -- fix exactly this field in exactly this
 			// payload -- instead of a fresh, possibly-repeated guess.
-			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
-				".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
-				truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
-				"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
+			if sensitiveValidation(err) {
+				// The rejected arguments may hold private text; do not echo them.
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
+					".\n\nCall " + tool.Name + " again with corrected arguments."
+			} else {
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
+					".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
+					truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
+					"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
+			}
 			if modelAttempts >= min(2, maxRetries) && fallbackIndex < len(f.validationFallbacks) {
 				next, fallbackErr := f.validationFallbacks[fallbackIndex]()
 				fallbackIndex++

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -220,6 +221,10 @@ func runCommitCommand(args []string) error {
 	result, err := runCommitGeneration(ctx, runtime.runner)
 	if err != nil {
 		printStagedIndexOnError()
+		var leak *commitmsg.LeakError
+		if errors.As(err, &leak) {
+			return fmt.Errorf("commit blocked: no message passed the safety check, so nothing was committed or pushed: %w", err)
+		}
 		return err
 	}
 

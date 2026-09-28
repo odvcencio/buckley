@@ -2,9 +2,12 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
 )
 
@@ -159,5 +162,47 @@ func TestCommitResultFormatUsesBreakingReasonAndNormalizesBullets(t *testing.T) 
 	}
 	if !strings.Contains(formatted, "Refs #12") || strings.Contains(formatted, "Closes #99") {
 		t.Fatalf("unsafe issue footer escaped:\n%s", formatted)
+	}
+}
+
+func TestCommitValidateWithContextBlocksRemovedNames(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{DenyTerms: []string{"quuxcorp"}} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+
+	diff := "diff --git a/a.yaml b/a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@\n-owner: zorblax-prod\n+owner: example-prod\n"
+	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:staged": diff}}
+	def := CommitDefinition{}
+
+	check := func(subject, bullet string) error {
+		raw, _ := json.Marshal(map[string]any{"action": "update", "subject": subject, "body": []string{bullet}})
+		return def.ValidateWithContext(ctx, raw)
+	}
+	if err := check("rename the owner label", "Use the new name; the old name is gone."); err != nil {
+		t.Fatalf("clean message rejected: %v", err)
+	}
+	for _, bad := range []struct{ subject, bullet string }{
+		{"rename zorblax-prod to example-prod", "Replace the label."},
+		{"rename the owner label", "Stop naming QuuxCorp in manifests."},
+	} {
+		err := check(bad.subject, bad.bullet)
+		var leak *commitmsg.LeakError
+		if !errors.As(err, &leak) {
+			t.Fatalf("message %q not blocked: %v", bad.subject, err)
+		}
+		if msg := strings.ToLower(err.Error()); strings.Contains(msg, "zorblax") || strings.Contains(msg, "quuxcorp") {
+			t.Fatalf("error echoes private text: %v", err)
+		}
+	}
+}
+
+func TestCommitSystemPromptForbidsNamingRemovedIdentifiers(t *testing.T) {
+	isolateCommitPrompt(t)
+	p := CommitDefinition{}.SystemPrompt()
+	if !strings.Contains(p, "Never name removed or renamed identifiers, people, or organizations") {
+		t.Fatal("system prompt lacks the removed-name rule")
+	}
+	if strings.Contains(strings.ToLower(p), "caller migration") {
+		t.Fatal("system prompt asks for the caller migration")
 	}
 }
