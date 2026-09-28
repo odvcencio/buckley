@@ -1,6 +1,9 @@
 package commitmsg
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateCommitFields(t *testing.T) {
 	tests := []struct {
@@ -59,6 +62,44 @@ func TestValidateCommitFieldsToolMarkup(t *testing.T) {
 			}
 			if body[0] != tc.bullet || NormalizeBullet(tc.bullet) != before {
 				t.Fatal("validation rewrote body text")
+			}
+		})
+	}
+}
+
+func TestValidateCommitFieldsStyle(t *testing.T) {
+	words := func(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
+	five := []string{"one", "two", "three", "four", "five"}
+	tests := []struct {
+		name    string
+		action  string
+		subject string
+		body    []string
+		wantErr string
+	}{
+		{name: "ok", action: "fix", subject: "stale cache on reload", body: []string{"Reload no longer serves stale data."}},
+		{name: "repeated verb", action: "fix", subject: "fix stale cache", body: []string{"ok"}, wantErr: "repeats the action"},
+		{name: "repeated inflection", action: "add", subject: "adds a flag", body: []string{"ok"}, wantErr: "repeats the action"},
+		{name: "repeated past form", action: "fix", subject: "fixed stale cache", body: []string{"ok"}, wantErr: "repeats the action"},
+		{name: "similar word allowed", action: "add", subject: "address list parsing", body: []string{"ok"}},
+		{name: "capital subject", action: "fix", subject: "Stale cache", body: []string{"ok"}, wantErr: "lowercase"},
+		{name: "20 words allowed", action: "fix", subject: "cache", body: []string{words(20)}},
+		{name: "21 words rejected", action: "fix", subject: "cache", body: []string{words(21)}, wantErr: "21 words"},
+		{name: "5 bullets allowed", action: "fix", subject: "cache", body: five},
+		{name: "6 bullets rejected", action: "fix", subject: "cache", body: append(append([]string{}, five...), "six"), wantErr: "6 bullets"},
+		{name: "empty bullets not counted", action: "fix", subject: "cache", body: append(append([]string{}, five...), " - ")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateCommitFields(tc.action, "", tc.subject, tc.body, nil)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}

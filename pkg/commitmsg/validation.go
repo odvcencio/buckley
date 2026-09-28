@@ -4,10 +4,17 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // HeaderLimit is the maximum visible length of a conventional commit header.
 const HeaderLimit = 72
+
+// Style limits enforced by ValidateCommitFields.
+const (
+	MaxBulletWords = 20
+	MaxBullets     = 5
+)
 
 // AllowedActions is the shared action vocabulary used by commit and PR
 // generation. Keeping it here prevents one structured path from accepting a
@@ -91,6 +98,10 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		return err
 	}
 
+	if err := validateSubjectStyle(action, subject); err != nil {
+		return err
+	}
+
 	nonEmptyBody := 0
 	for _, bullet := range body {
 		if hasCommitControl(bullet) {
@@ -102,10 +113,16 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		}
 		if normalized != "" {
 			nonEmptyBody++
+			if n := len(strings.Fields(normalized)); n > MaxBulletWords {
+				return fmt.Errorf("bullet %d has %d words; keep each bullet to at most %d words", nonEmptyBody, n, MaxBulletWords)
+			}
 		}
 	}
 	if nonEmptyBody == 0 {
 		return fmt.Errorf("body requires at least one bullet")
+	}
+	if nonEmptyBody > MaxBullets {
+		return fmt.Errorf("body has %d bullets; merge related points into at most %d", nonEmptyBody, MaxBullets)
 	}
 	for _, issue := range issues {
 		if strings.TrimSpace(issue) != "" && NormalizeIssueRef(issue) == "" {
@@ -122,4 +139,24 @@ func hasCommitControl(value string) bool {
 		}
 	}
 	return false
+}
+
+// validateSubjectStyle rejects a subject that starts with a capital letter or
+// repeats the action verb ("fix(x): fix ..."). Identifiers such as HTTP or
+// GetUser are allowed only when the subject does not start with them.
+func validateSubjectStyle(action, subject string) error {
+	subject = strings.TrimSpace(subject)
+	first, _ := utf8.DecodeRuneInString(subject)
+	if unicode.IsUpper(first) {
+		return fmt.Errorf("subject must start with a lowercase word after the colon")
+	}
+	word := strings.ToLower(strings.TrimFunc(strings.Fields(subject + " ")[0], func(r rune) bool {
+		return !unicode.IsLetter(r)
+	}))
+	for _, form := range []string{action, action + "s", action + "es", action + "ed", action + "d", action + "ing"} {
+		if word == form {
+			return fmt.Errorf("subject repeats the action %q; drop the repeated verb and name what changed", action)
+		}
+	}
+	return nil
 }
