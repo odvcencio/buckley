@@ -144,6 +144,8 @@ Use the generate_commit tool to produce your response. The tool expects:
 
 Guidelines:
 - Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name"
+- Start the subject with a lowercase word; do not repeat the action verb in it ("fix(x): fix ..." is rejected)
+- Write at most 5 bullets, each at most 20 words
 - Focus on the "what" and "why", not the "how"
 - Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
 - Match body detail to change size
