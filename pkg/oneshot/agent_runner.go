@@ -626,18 +626,18 @@ func agentRunnerInvocationCostDetail(models *model.Manager, providerID, modelID 
 	if providerID == "codex" {
 		return 0, false, false
 	}
+	// A BYOK response that reports $0 has not reported the upstream charge, so
+	// only a positive provider figure counts as reported; zero falls through to
+	// the catalog estimate.
+	if tokens.ProviderCostKnown && tokens.ProviderCostIsBYOK && tokens.ProviderCostUSD > 0 {
+		return tokens.ProviderCostUSD, false, false
+	}
 	if models == nil {
 		return 0, true, false
 	}
 	info, err := models.GetModelInfo(modelID)
 	if err != nil || info == nil {
 		return 0, true, false
-	}
-	// A BYOK response that reports $0 has not reported the upstream charge, so
-	// only a positive provider figure counts as reported; zero falls through to
-	// the catalog estimate.
-	if tokens.ProviderCostKnown && tokens.ProviderCostIsBYOK && tokens.ProviderCostUSD > 0 {
-		return tokens.ProviderCostUSD, false, false
 	}
 	if info.PricingKnown {
 		pricing := transparency.ModelPricing{

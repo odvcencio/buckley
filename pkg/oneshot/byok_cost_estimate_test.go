@@ -150,3 +150,17 @@ func TestAgentRunnerInvocationCostBYOKReportedZeroFallsBackToEstimate(t *testing
 		t.Fatalf("got %v unknown=%v estimated=%v, want $0.20 estimated", cost, unknown, estimated)
 	}
 }
+
+func TestAgentRunnerInvocationCostBYOKProviderCostNeedsNoCatalog(t *testing.T) {
+	tokens := transparency.TokenUsage{Input: 10, Output: 10, UsageEvidencePresent: true,
+		ProviderCostKnown: true, ProviderCostIsBYOK: true, ProviderCostUSD: 0.25}
+	for name, mgr := range map[string]*model.Manager{
+		"nil manager":   nil,
+		"unknown model": newAgentRunnerPricingCatalogManager(t, tieredCatalog),
+	} {
+		cost, unknown, estimated := agentRunnerInvocationCostDetail(mgr, "openrouter", "vendor/missing", tokens)
+		if cost != 0.25 || unknown || estimated {
+			t.Fatalf("%s: got %v unknown=%v estimated=%v, want provider cost known", name, cost, unknown, estimated)
+		}
+	}
+}
