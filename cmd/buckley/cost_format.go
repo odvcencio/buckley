@@ -80,6 +80,15 @@ func formatTraceCostLine(trace *transparency.Trace, summary transparency.CostSum
 // this shared fragment so provenance shows up consistently everywhere a
 // known cost is printed.
 func traceCostAmount(trace *transparency.Trace) string {
+	if trace.CostEstimated {
+		// An estimate from token counts and catalog prices, not a provider
+		// invoice line; say so, and name BYOK when the provider flagged it.
+		label := "estimated from catalog"
+		if trace.Tokens.ProviderCostIsBYOK {
+			label = "BYOK, " + label
+		}
+		return fmt.Sprintf("~$%.4f (%s)", trace.Cost, label)
+	}
 	amount := fmt.Sprintf("$%.4f", trace.Cost)
 	if trace.Tokens.ProviderCostKnown && trace.Tokens.ProviderCostIsBYOK {
 		// The caller is billed directly by the upstream provider for part

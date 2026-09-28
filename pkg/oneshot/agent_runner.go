@@ -313,21 +313,23 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 
 	// Calculate API cost only when the provider publishes token pricing.
 	// Native Codex runs through the user's CLI subscription.
-	cost, costUnknown := agentRunnerInvocationCost(r.models, providerID, modelToUse, tokens)
+	cost, costUnknown, costEstimated := agentRunnerInvocationCostDetail(r.models, providerID, modelToUse, tokens)
 
 	result.Trace = builder.Complete(tokens, cost)
 	result.Trace.CostUnknown = costUnknown
+	result.Trace.CostEstimated = costEstimated
 	result.Trace.Duration = duration
 
 	// Record in ledger
 	if r.ledger != nil {
 		r.ledger.Record(transparency.CostEntry{
-			Model:        modelToUse,
-			Tokens:       tokens,
-			Cost:         cost,
-			CostUnknown:  costUnknown,
-			Latency:      duration,
-			InvocationID: traceID,
+			Model:         modelToUse,
+			Tokens:        tokens,
+			Cost:          cost,
+			CostUnknown:   costUnknown,
+			CostEstimated: costEstimated,
+			Latency:       duration,
+			InvocationID:  traceID,
 		})
 	}
 
@@ -617,21 +619,78 @@ func effectiveAgentInvocationCost(providerID string, pricing transparency.ModelP
 }
 
 func agentRunnerInvocationCost(models *model.Manager, providerID, modelID string, tokens transparency.TokenUsage) (float64, bool) {
+	cost, unknown, _ := agentRunnerInvocationCostDetail(models, providerID, modelID, tokens)
+	return cost, unknown
+}
+
+// agentRunnerInvocationCostDetail prices one agent invocation. The third result
+// reports that the cost is an estimate from token counts and catalog prices,
+// used when the provider reports no cost (for example a BYOK route) and the
+// strict catalog price check cannot vouch for the price.
+func agentRunnerInvocationCostDetail(models *model.Manager, providerID, modelID string, tokens transparency.TokenUsage) (float64, bool, bool) {
 	if providerID == "codex" {
-		return 0, false
+		return 0, false, false
 	}
 	if models == nil {
-		return 0, true
+		return 0, true, false
 	}
 	info, err := models.GetModelInfo(modelID)
-	if err != nil || info == nil || !info.PricingKnown {
-		return 0, true
+	if err != nil || info == nil {
+		return 0, true, false
 	}
-	pricing := transparency.ModelPricing{
-		InputPerMillion:  info.Pricing.Prompt,
-		OutputPerMillion: info.Pricing.Completion,
+	if tokens.ProviderCostKnown && tokens.ProviderCostIsBYOK && tokens.ProviderCostUSD > 0 {
+		return tokens.ProviderCostUSD, false, false
 	}
-	return effectiveAgentInvocationCost(providerID, pricing, tokens), transparency.CostUnknownForUsage(tokens, pricing)
+	if info.PricingKnown {
+		pricing := transparency.ModelPricing{
+			InputPerMillion:  info.Pricing.Prompt,
+			OutputPerMillion: info.Pricing.Completion,
+		}
+		if !transparency.CostUnknownForUsage(tokens, pricing) {
+			return effectiveAgentInvocationCost(providerID, pricing, tokens), false, false
+		}
+	}
+	if cost, ok := estimateAgentInvocationCost(*info, tokens); ok {
+		return cost, false, true
+	}
+	return 0, true, false
+}
+
+// estimateAgentInvocationCost prices tokens from catalog rates. It refuses
+// usage records whose counts are themselves unreliable.
+func estimateAgentInvocationCost(info model.ModelInfo, tokens transparency.TokenUsage) (float64, bool) {
+	if tokens.Estimated || tokens.Unclassified > 0 || tokens.ReportedUsageInconsistent || tokens.UsageEvidenceMissing {
+		return 0, false
+	}
+	if tokens.Input < 0 || tokens.Output < 0 || tokens.Reasoning < 0 || tokens.CachedInput < 0 || tokens.ReportedCacheWrite < 0 {
+		return 0, false
+	}
+	rates, ok := info.EstimateRates(tokens.Input)
+	if !ok {
+		return 0, false
+	}
+	cached := tokens.CachedInput
+	if tokens.ReportedCachedInput != nil {
+		cached = *tokens.ReportedCachedInput
+	}
+	if cached < 0 || cached > tokens.Input {
+		return 0, false
+	}
+	write := tokens.ReportedCacheWrite
+	if cached+write > tokens.Input {
+		write = tokens.Input - cached
+	}
+	cacheReadRate, cacheWriteRate := rates.CacheRead, rates.CacheWrite
+	if cacheReadRate == 0 {
+		cacheReadRate = rates.Prompt
+	}
+	if cacheWriteRate == 0 {
+		cacheWriteRate = rates.Prompt
+	}
+	fresh := tokens.Input - cached - write
+	total := float64(fresh)*rates.Prompt + float64(cached)*cacheReadRate + float64(write)*cacheWriteRate +
+		float64(tokens.Output+tokens.Reasoning)*rates.Completion
+	return total / 1_000_000, true
 }
 
 func agentResultTokenUsage(result *AgentResult) transparency.TokenUsage {
