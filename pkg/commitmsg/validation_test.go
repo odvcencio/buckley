@@ -104,3 +104,22 @@ func TestValidateCommitFieldsStyle(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateStyleAllowsMissingBody(t *testing.T) {
+	if err := ValidateStyle("update", "a", "tune cache", nil); err != nil {
+		t.Fatalf("a message without bullets must pass the style check: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		action, subject string
+		bullets         []string
+	}{
+		"unknown action": {"ship", "tune cache", nil},
+		"repeated verb":  {"update", "update cache", nil},
+		"capital":        {"update", "Tune cache", nil},
+		"long bullet":    {"update", "tune cache", []string{"- " + strings.Repeat("word ", 21)}},
+	} {
+		if err := ValidateStyle(tc.action, "", tc.subject, tc.bullets); err == nil {
+			t.Errorf("%s: not rejected", name)
+		}
+	}
+}

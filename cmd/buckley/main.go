@@ -1634,6 +1634,8 @@ func printHelp() {
 	fmt.Println("  execute-task --plan <id> --task <id>")
 	fmt.Println("                                   Execute single task (CI/batch friendly)")
 	fmt.Println("  commit [--dry-run]               Generate structured commit via tool-use (transparent)")
+	fmt.Println("  commit-check [--file msg] [--strict]  Check a commit message with the same safety and style rules as commit")
+	fmt.Println("  hook install|uninstall|status    Manage the commit-msg hook that runs commit-check")
 	fmt.Println("  pr [--dry-run]                   Generate structured PR via tool-use (transparent)")
 	fmt.Println("  review [--scope worktree|branch|changes]")
 	fmt.Println("                                   Review local changes with repository context")
@@ -2353,6 +2355,10 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runExecuteTaskCommand, args[1:])
 	case "commit":
 		return true, runCommand(runCommitCommand, args[1:])
+	case "commit-check":
+		return true, runCommand(runCommitCheckCommand, args[1:])
+	case "hook":
+		return true, runCommand(runHookCommand, args[1:])
 	case "pr":
 		return true, runCommand(runPRCommand, args[1:])
 	case "review":

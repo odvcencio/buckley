@@ -160,3 +160,34 @@ func validateSubjectStyle(action, subject string) error {
 	}
 	return nil
 }
+
+// ValidateStyle applies the style rules to a message that may be hand-written:
+// header shape, lowercase subject without a repeated verb, and the bullet
+// limits. Unlike ValidateCommitFields it does not require a body.
+func ValidateStyle(action, scope, subject string, bullets []string) error {
+	action = NormalizeAction(action)
+	if !IsAllowedAction(action) {
+		return fmt.Errorf("action %q is not an allowed verb", action)
+	}
+	if err := ValidateHeader(action, scope, subject, HeaderLimit); err != nil {
+		return err
+	}
+	if err := validateSubjectStyle(action, subject); err != nil {
+		return err
+	}
+	count := 0
+	for _, bullet := range bullets {
+		normalized := NormalizeBullet(bullet)
+		if normalized == "" {
+			continue
+		}
+		count++
+		if n := len(strings.Fields(normalized)); n > MaxBulletWords {
+			return fmt.Errorf("bullet %d has %d words; keep each bullet to at most %d words", count, n, MaxBulletWords)
+		}
+	}
+	if count > MaxBullets {
+		return fmt.Errorf("body has %d bullets; merge related points into at most %d", count, MaxBullets)
+	}
+	return nil
+}
