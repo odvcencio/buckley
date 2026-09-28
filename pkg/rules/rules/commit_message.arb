@@ -1,0 +1,63 @@
+// Commit message policy. Go code computes the facts (counts and ratios only)
+// from the staged diff and the generated message. Private terms never appear
+// here: they live in ~/.buckley/private-terms and .git/info/buckley-private.
+//
+// Outcomes: allow accepts the message, repair sends the reason back to the
+// model for another attempt, block stops the commit and skips the push.
+// Copy this file to ~/.buckley/rules/commit_message.arb to tighten a threshold.
+
+outcome CommitMessagePolicy {
+    action: string
+    reason: string
+}
+
+strategy commit_message_policy returns CommitMessagePolicy {
+    when {
+        deny_hits >= 3
+        or sensitive_hits >= 3
+    } then BlockSevere {
+        action: "block",
+        reason: "repeated_private_content",
+    }
+
+    when {
+        deny_hits > 0
+    } then RepairDenyList {
+        action: "repair",
+        reason: "deny_list",
+    }
+
+    when {
+        sensitive_hits > 0
+    } then RepairSensitive {
+        action: "repair",
+        reason: "sensitive_pattern",
+    }
+
+    when {
+        removed_echo > 0
+        and generated_ratio < 0.8
+    } then RepairRemovedEcho {
+        action: "repair",
+        reason: "removed_echo",
+    }
+
+    when {
+        max_bullet_words > 20
+    } then RepairBulletLength {
+        action: "repair",
+        reason: "bullet_too_long",
+    }
+
+    when {
+        bullet_count > 5
+    } then RepairBulletCount {
+        action: "repair",
+        reason: "too_many_bullets",
+    }
+
+    else Allow {
+        action: "allow",
+        reason: "ok",
+    }
+}

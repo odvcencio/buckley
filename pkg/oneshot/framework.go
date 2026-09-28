@@ -283,6 +283,12 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			if err := def.Validate(args); err != nil {
 				return err
 			}
+			if pd, ok := def.(PolicyDefinition); ok && f.engine != nil {
+				handled, err := f.evalPolicy(pd, gathered, args)
+				if handled {
+					return err
+				}
+			}
 			if cv, ok := def.(ContextValidator); ok {
 				return cv.ValidateWithContext(gathered, args)
 			}
@@ -303,6 +309,13 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}
 		if err := validationErr; err != nil {
 			lastErr = fmt.Errorf("validation: %w", err)
+			if isTerminalValidation(err) {
+				if traceIndex >= 0 {
+					traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
+				}
+				attemptLimit = attempt + 1
+				break
+			}
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 			}
@@ -1175,4 +1188,28 @@ func (f *Framework) resolveMaxRetries(cmdName string, optsRetries int) int {
 	}
 
 	return defaultMaxRetries
+}
+
+// evalPolicy runs the definition's policy strategy. It reports handled=false
+// when the engine cannot evaluate it, so the caller falls back to its own check.
+func (f *Framework) evalPolicy(pd PolicyDefinition, gathered *Context, args json.RawMessage) (bool, error) {
+	req, err := pd.PolicyFacts(gathered, args)
+	if err != nil || req == nil {
+		return false, nil
+	}
+	res, err := f.engine.EvalStrategy(req.Domain, req.Strategy, req.Facts)
+	if err != nil {
+		return false, nil
+	}
+	action, _ := res.Params["action"].(string)
+	reason, _ := res.Params["reason"].(string)
+	switch action {
+	case "allow":
+		return true, nil
+	case "repair":
+		return true, req.Fail(action, reason)
+	case "block":
+		return true, terminalValidationError{req.Fail(action, reason)}
+	}
+	return false, nil
 }

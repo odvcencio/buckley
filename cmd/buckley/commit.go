@@ -17,6 +17,7 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -350,7 +351,16 @@ func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) 
 		return nil, func() {}, err
 	}
 
-	framework := withUtilityValidationFallbacks(oneshot.NewFramework(invoker, nil), opts.backend, "commit", modelID, cfg, mgr, ledger)
+	// A rules engine that fails to load must not disable the commit checks:
+	// the framework falls back to the built-in Go policy when the engine is nil.
+	policyEngine, engineErr := rules.NewDefaultEngine()
+	if engineErr != nil {
+		policyEngine = nil
+		if !quietMode {
+			termOut.Warn("commit policy rules unavailable (%v); using built-in defaults", engineErr)
+		}
+	}
+	framework := withUtilityValidationFallbacks(oneshot.NewFramework(invoker, policyEngine), opts.backend, "commit", modelID, cfg, mgr, ledger)
 	runtime := &commitCommandRuntime{
 		backend:   opts.backend,
 		modelID:   modelID,
