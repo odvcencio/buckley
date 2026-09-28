@@ -41,3 +41,17 @@ func TestCostProvenance_Display(t *testing.T) {
 		t.Fatal("nil trace should be empty")
 	}
 }
+
+func TestCostProvenance_DisplayEstimated(t *testing.T) {
+	byok := transparency.Trace{Cost: 0.01234, CostEstimated: true, Tokens: transparency.TokenUsage{ProviderCostIsBYOK: true}}
+	if got, want := formatTraceCost(&byok), "Cost: ~$0.0123 (BYOK, estimated from catalog)"; got != want {
+		t.Fatalf("byok estimated = %q, want %q", got, want)
+	}
+	plain := transparency.Trace{Cost: 0.5, CostEstimated: true}
+	if got, want := formatTraceCost(&plain), "Cost: ~$0.5000 (estimated from catalog)"; got != want {
+		t.Fatalf("estimated = %q, want %q", got, want)
+	}
+	if got := formatTraceErrorUsageLine(&plain); !strings.Contains(got, "~$0.5000 (estimated from catalog)") {
+		t.Fatalf("error line = %q", got)
+	}
+}

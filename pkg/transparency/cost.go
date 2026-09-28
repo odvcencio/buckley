@@ -195,6 +195,10 @@ type CostEntry struct {
 	// invocation had usage without authoritative pricing.
 	CostUnknown bool `json:"cost_unknown,omitempty"`
 
+	// CostEstimated reports that Cost was estimated from token counts and
+	// catalog prices rather than reported by the provider.
+	CostEstimated bool `json:"cost_estimated,omitempty"`
+
 	// Latency of the request
 	Latency time.Duration `json:"latency"`
 

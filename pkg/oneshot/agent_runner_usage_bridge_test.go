@@ -96,14 +96,14 @@ func TestAgentRunnerPreservesRichRLMUsageInTraceAndLedger(t *testing.T) {
 func TestAgentRunnerRichUsageCostClassificationPreservesKnownFreeAndCodexZero(t *testing.T) {
 	missing := transparency.TokenUsage{UsageEvidenceMissing: true}
 	paid := newAgentRunnerPricingCatalogManager(t, `{"data":[{"id":"vendor/paid","pricing":{"prompt":"0.000003","completion":"0.000015"}}]}`)
-	if cost, unknown := agentRunnerInvocationCost(paid, "openrouter", "vendor/paid", missing); cost != 0 || !unknown {
+	if cost, unknown, _ := agentRunnerInvocationCostDetail(paid, "openrouter", "vendor/paid", missing); cost != 0 || !unknown {
 		t.Fatalf("paid missing usage cost = %v unknown=%v, want unknown subtotal", cost, unknown)
 	}
 	free := newAgentRunnerPricingCatalogManager(t, `{"data":[{"id":"vendor/free","pricing":{"prompt":"0","completion":"0"}}]}`)
-	if cost, unknown := agentRunnerInvocationCost(free, "openrouter", "vendor/free", missing); cost != 0 || unknown {
+	if cost, unknown, _ := agentRunnerInvocationCostDetail(free, "openrouter", "vendor/free", missing); cost != 0 || unknown {
 		t.Fatalf("known-free missing usage cost = %v unknown=%v, want known zero", cost, unknown)
 	}
-	if cost, unknown := agentRunnerInvocationCost(paid, "codex", "vendor/paid", missing); cost != 0 || unknown {
+	if cost, unknown, _ := agentRunnerInvocationCostDetail(paid, "codex", "vendor/paid", missing); cost != 0 || unknown {
 		t.Fatalf("codex subscription cost = %v unknown=%v, want known zero", cost, unknown)
 	}
 }
