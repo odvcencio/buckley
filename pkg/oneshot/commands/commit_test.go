@@ -206,3 +206,55 @@ func TestCommitSystemPromptForbidsNamingRemovedIdentifiers(t *testing.T) {
 		t.Fatal("system prompt asks for the caller migration")
 	}
 }
+
+func TestCommitPolicyFactsAreCountsOnly(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{DenyTerms: []string{"quuxcorp"}} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+
+	diff := "diff --git a/a.yaml b/a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@\n-owner: zorblax-prod\n+owner: example-prod\n"
+	ctx := &oneshot.Context{
+		Sources: map[string]string{"git_diff:staged": diff},
+		Diff:    oneshot.DiffStats{Files: 4, LowSignal: 1},
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"action": "update", "subject": "rename label", "body": []string{"Rename zorblax-prod for QuuxCorp.", "Two words"},
+	})
+	req, err := CommitDefinition{}.PolicyFacts(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"deny_hits": 1, "removed_echo": 1, "sensitive_hits": 0,
+		"max_bullet_words": 4, "bullet_count": 2, "generated_ratio": 0.25, "diff_files": 4,
+	}
+	for k, v := range want {
+		if req.Facts[k] != v {
+			t.Errorf("fact %s = %v, want %v", k, req.Facts[k], v)
+		}
+	}
+	for _, v := range req.Facts {
+		if s, ok := v.(string); ok {
+			t.Errorf("fact carries text: %q", s)
+		}
+	}
+	if err := req.Fail("repair", "deny_list"); strings.Contains(strings.ToLower(err.Error()), "quuxcorp") {
+		t.Fatalf("failure text echoes a private term: %v", err)
+	}
+}
+
+func TestValidateWithContextSkipsRemovedEchoForGeneratedDiffs(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+	diff := "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@\n-var zorblax=1\n+var q=1\n"
+	raw, _ := json.Marshal(map[string]any{"action": "update", "subject": "regenerate zorblax bundle", "body": []string{"Rebuild output."}})
+	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:staged": diff}, Diff: oneshot.DiffStats{Files: 1, LowSignal: 1}}
+	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err != nil {
+		t.Fatalf("generated-only diff should skip the removed-line check: %v", err)
+	}
+	ctx.Diff = oneshot.DiffStats{Files: 1}
+	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err == nil {
+		t.Fatal("source diff should flag the removed name")
+	}
+}

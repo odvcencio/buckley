@@ -47,9 +47,12 @@ func BuildContext(sources []ContextSource, opts ContextOpts) (*Context, error) {
 	}
 
 	for _, src := range sources {
-		content, err := gatherSource(src, opts)
+		content, stats, err := gatherSourceWithStats(src, opts)
 		if err != nil {
 			return nil, fmt.Errorf("gathering %s: %w", src.Type, err)
+		}
+		if src.Type == "git_diff" {
+			ctx.Diff = stats
 		}
 		if content == "" {
 			continue
@@ -99,7 +102,15 @@ func sourceLabel(src ContextSource) string {
 }
 
 // gatherSource fetches content for a single ContextSource.
-func gatherSource(src ContextSource, opts ContextOpts) (string, error) {
+func gatherSourceWithStats(src ContextSource, opts ContextOpts) (string, DiffStats, error) {
+	if src.Type == "git_diff" {
+		return gatherGitDiffStats(src.Params, opts)
+	}
+	out, err := gatherSourceText(src, opts)
+	return out, DiffStats{}, err
+}
+
+func gatherSourceText(src ContextSource, opts ContextOpts) (string, error) {
 	switch src.Type {
 	case "git_diff":
 		return gatherGitDiff(src.Params, opts)
@@ -137,6 +148,12 @@ func diffSafetyArgs() []string {
 // low-signal bulk (binary, generated, minified files) is reduced to summary
 // lines so it cannot starve hand-written changes out of the byte budget.
 func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
+	out, _, err := gatherGitDiffStats(params, opts)
+	return out, err
+}
+
+func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, DiffStats, error) {
+	var stats DiffStats
 	args := append([]string{"diff"}, diffSafetyArgs()...)
 
 	if params["staged"] == "true" {
@@ -179,7 +196,7 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 			output, _, err = contextGitOutputLimited(0, args...)
 		}
 		if err != nil {
-			return "", err
+			return "", stats, err
 		}
 	}
 
@@ -189,6 +206,12 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 	budget := opts.MaxDiffBytes
 	if budget > len(truncMarker) {
 		budget -= len(truncMarker)
+	}
+	for _, fd := range diffsignal.Split(output) {
+		stats.Files++
+		if fd.LowSignal() {
+			stats.LowSignal++
+		}
 	}
 	var res diffsignal.Result
 	if opts.RankDiffForPR {
@@ -200,7 +223,7 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 	if res.Truncated {
 		output += truncMarker
 	}
-	return output, nil
+	return output, stats, nil
 }
 
 // gitLogBodyMaxLinesPerCommit bounds how many body lines gatherGitLog keeps
