@@ -676,12 +676,12 @@ func TestParseStartupOptionsFlagsAndFiltering(t *testing.T) {
 }
 
 func TestLoadConfiguredConfigUsesStartupConfigPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "particle.yaml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`
 providers:
   openai_compatible:
     enabled: true
-    base_url: https://particle.example/v1
+    base_url: https://llm.example.test/v1
     api_key: test-key
     models:
       - glm-5.3-flash

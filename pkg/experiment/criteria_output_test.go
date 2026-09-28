@@ -83,7 +83,7 @@ func TestSourceOutputCommandCriteriaGateVerifiedWinner(t *testing.T) {
 		pass         bool
 	}{
 		{"complete evidence", string(gold), true},
-		{"retained Particle GLM output", string(live), true},
+		{"retained live GLM output", string(live), true},
 		{"different row order", mutate(func(r []map[string]any) []map[string]any { r[0], r[3] = r[3], r[0]; return r }), true},
 		{"wrong citation", mutate(func(r []map[string]any) []map[string]any { r[0]["start_line"] = 52; return r }), false},
 		{"altered literal", mutate(func(r []map[string]any) []map[string]any { r[2]["quote"] = "a paraphrase"; return r }), false},

@@ -147,8 +147,8 @@ func TestApplyAgentProviderLock_NoLockPreservesLegacyConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Providers.OpenRouter.APIKey = "ambient-openrouter"
 	cfg.Providers.OpenAICompatible.Enabled = true
-	cfg.Providers.OpenAICompatible.BaseURL = "https://particle.example/v1"
-	cfg.Providers.OpenAICompatible.APIKey = "particle-key"
+	cfg.Providers.OpenAICompatible.BaseURL = "https://llm.example.test/v1"
+	cfg.Providers.OpenAICompatible.APIKey = "test-key"
 	providersBefore := cfg.Providers
 	routingBefore := map[string]string{}
 	for key, value := range cfg.Providers.ModelRouting {

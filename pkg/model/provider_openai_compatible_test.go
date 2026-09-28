@@ -1477,13 +1477,12 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // TestOpenAICompatibleProvider_ReasoningDroppedWhenModelDoesNotSupportEffort
-// reproduces a real Particle production failure: deepseek-v4.1-flash's
+// reproduces a strict OpenAI-compatible gateway rejection: deepseek-v4.1-flash's
 // supported_parameters list "tools" and "reasoning_content" but not
 // "reasoning_effort", yet compatiblePayload used to forward the raw
 // OpenRouter-style nested `reasoning` object (e.g. reasoning.max_tokens) on
-// that path. Particle's strict OpenAI-compatible gateway rejects it with
-// HTTP 400 "Unsupported nested reasoning field 'max_tokens'" (buckbot pr on
-// openai_compatible/deepseek-v4.1-flash, 2026-09-23).
+// that path. Such gateways reject it with HTTP 400
+// "Unsupported nested reasoning field 'max_tokens'".
 func TestOpenAICompatibleProvider_ReasoningDroppedWhenModelDoesNotSupportEffort(t *testing.T) {
 	var captured map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1525,11 +1524,10 @@ func TestOpenAICompatibleProvider_ReasoningDroppedWhenModelDoesNotSupportEffort(
 }
 
 // TestOpenAICompatibleProvider_PricingOverrideMarksZeroPriceAuthoritative
-// covers a design-partner free tier (Particle): the live catalog reports no
-// pricing at all for a model, so ModelInfo.Pricing is the zero value and
-// PricingKnown stays false. Cost-bounded requests and --budget repair logic
-// then refuse to admit the model because a zero-value price is normally
-// indistinguishable from "the provider never told us." An explicit
+// covers a model whose live catalog reports no pricing, so ModelInfo.Pricing
+// is the zero value and PricingKnown stays false. Cost-bounded requests and
+// --budget repair logic then refuse to admit the model because a zero-value
+// price is normally indistinguishable from "the provider never told us." An explicit
 // providers.openai_compatible.pricing override must mark that zero price as
 // authoritative (PricingKnown=true) instead.
 func TestOpenAICompatibleProvider_PricingOverrideMarksZeroPriceAuthoritative(t *testing.T) {

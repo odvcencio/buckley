@@ -21,7 +21,7 @@ func TestLoadFromPathOpenAICompatibleStreamTimeouts(t *testing.T) {
 providers:
   openai_compatible:
     enabled: true
-    base_url: https://particle.example/v1
+    base_url: https://llm.example.test/v1
     models:
       - glm-5.3-flash
     stream_idle_timeout: 45s
