@@ -111,7 +111,7 @@ func (CommitDefinition) Tool() tools.Definition {
 					"Whether this commit introduces a breaking change",
 				),
 				"breaking_reason": tools.StringProperty(
-					"If breaking is true, briefly describe the compatibility impact",
+					"If breaking is true, briefly describe the compatibility impact without naming removed or renamed identifiers",
 				),
 				"issues": tools.ArrayProperty(
 					"Issue numbers this change RELATES TO, without # prefix. Rendered as "+
@@ -143,6 +143,7 @@ Use the generate_commit tool to produce your response. The tool expects:
 - breaking_reason: If breaking is true, briefly explain the compatibility impact
 
 Guidelines:
+- Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name"
 - Focus on the "what" and "why", not the "how"
 - Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
 - Match body detail to change size
@@ -187,6 +188,28 @@ func (CommitDefinition) Validate(result json.RawMessage) error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 	return commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues)
+}
+
+// commitPolicyLoader loads the leak-check policy. Tests replace it.
+var commitPolicyLoader = func() commitmsg.Policy { return commitmsg.LoadPolicy("") }
+
+// ValidateWithContext checks the message against the staged diff the model saw:
+// no identifiers that exist only on removed lines, no private deny-list terms,
+// and no emails, IP addresses, internal hosts, or key patterns. Findings never
+// echo the offending text.
+func (CommitDefinition) ValidateWithContext(ctx *oneshot.Context, result json.RawMessage) error {
+	var cr CommitResult
+	if err := json.Unmarshal(result, &cr); err != nil {
+		return fmt.Errorf("unmarshal: %w", err)
+	}
+	diff := ""
+	if ctx != nil {
+		diff = ctx.Sources["git_diff:staged"]
+	}
+	if findings := commitPolicyLoader().Check(cr.Format(), diff); len(findings) > 0 {
+		return &commitmsg.LeakError{Findings: findings}
+	}
+	return nil
 }
 
 func (CommitDefinition) Unmarshal(result json.RawMessage) (any, error) {
