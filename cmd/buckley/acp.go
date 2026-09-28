@@ -1159,6 +1159,9 @@ type acpLoopLimits struct {
 	bestEffortObservation bool
 	Persist               bool
 	MaxContinuations      int
+	// noChangeExpected marks a brief that forbids file changes; the run ends
+	// with a report instead of an observable workspace change.
+	noChangeExpected      bool
 	OnContinuation        func(int, string)
 	OnStop                func(agentloop.Termination)
 	ValidateFinalResponse func(string) error
@@ -1524,7 +1527,7 @@ func newACPLoopController(
 			return model.ChatRequest{}, err
 		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil || limits.allowHostTools, governor.ActionRequired(), limits.TaskIntent)
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil || limits.allowHostTools, governor.ActionRequired(), limits.TaskIntent, limits.allowHostTools)
 		state.useTools = toolTurn.UseTools
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
@@ -1677,7 +1680,7 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 		return nil
 	}
 	requireVerification := limits.MaxContinuations > 0 || (depth != "none" && depth != "off" && depth != "legacy")
-	requireChange := (depth != "legacy" || limits.MaxContinuations > 0) && limits.TaskIntent == agentloop.MutationIntent
+	requireChange := (depth != "legacy" || limits.MaxContinuations > 0) && limits.TaskIntent == agentloop.MutationIntent && !limits.noChangeExpected
 	if !requireVerification && !requireChange && limits.ValidateFinalResponse == nil && limits.SubmittedResponse == nil {
 		return nil
 	}
@@ -1690,6 +1693,7 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 		RequireObservableChange:       requireChange,
 		MaxRepairAttempts:             attempts,
 		MaxContinuations:              limits.MaxContinuations,
+		MaxNoChangeContinuations:      maxNoChangeContinuations(limits),
 		OnContinuation:                limits.OnContinuation,
 		TolerateObservationErrors:     limits.bestEffortObservation,
 		TaskIntent:                    limits.TaskIntent,
@@ -2456,13 +2460,13 @@ func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, route mode
 	return registry != nil && (mgr == nil || mgr.OfferToolsForRoute(route))
 }
 
-func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, permissionAvailable bool, actionRequired bool, intent agentloop.TaskIntent) acpToolTurn {
+func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, permissionAvailable bool, actionRequired bool, intent agentloop.TaskIntent, hostTools ...bool) acpToolTurn {
 	turn := acpToolTurn{UseTools: useTools}
 	if skillState != nil {
 		turn.AllowedTools = skillState.ToolFilter()
 	}
 	if actionRequired && intent != agentloop.ReadOnlyIntent && registry != nil {
-		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools)
+		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools, len(hostTools) > 0 && hostTools[0])
 	}
 	if !permissionAvailable && registry != nil {
 		turn.AllowedTools = acpFallbackAllowedToolNames(registry, turn.AllowedTools)
@@ -2507,7 +2511,7 @@ func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string) []st
 // acpActionToolNames keeps state-changing tools plus the bounded control and
 // verification surfaces needed to finish honestly after discovery is parked.
 // It deliberately excludes general read/search and destructive escape hatches.
-func acpActionToolNames(registry *tool.Registry, allowed []string) []string {
+func acpActionToolNames(registry *tool.Registry, allowed []string, hostTools bool) []string {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
 		allowedSet[name] = struct{}{}
@@ -2522,7 +2526,7 @@ func acpActionToolNames(registry *tool.Registry, allowed []string) []string {
 		}
 		metadata := tool.GetMetadata(registered)
 		verificationOrControl := metadata.Impact == tool.ImpactReadOnly && (metadata.Verification || isACPActionSupportTool(name))
-		if metadata.Impact == tool.ImpactModifying || verificationOrControl {
+		if metadata.Impact == tool.ImpactModifying || verificationOrControl || (hostTools && isHostActionTool(name)) {
 			names = append(names, name)
 		}
 	}

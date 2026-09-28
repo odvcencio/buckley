@@ -91,6 +91,7 @@ type controllerTotals struct {
 	startedAt                time.Time
 	completionRepairAttempts int
 	continuations            int
+	noChangeContinuations    int
 }
 
 // RequestBuilder returns the base chat request for one round. Its Messages
@@ -967,6 +968,14 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 							result.Termination = Termination{Kind: "emergency_fuse", Code: "emergency_fuse", Reason: "completion requires more work but the model, tool, or cost budget is exhausted"}
 							c.recordDecision(ctx, "emergency_fuse", result.Termination.Reason)
 							return result, result.RequireConclusive()
+						}
+						if contract.MaxNoChangeContinuations > 0 && completionContractErrorCode(err) == string(CompletionMissingObservableChange) {
+							if c.totals.noChangeContinuations >= contract.MaxNoChangeContinuations {
+								result.Termination = Termination{Kind: "no_observable_change", Code: "no_observable_change", Reason: fmt.Sprintf("the model answered %d times without changing the workspace; if the task needs no file changes, say so in the brief: %s", c.totals.noChangeContinuations+1, err)}
+								c.recordDecision(ctx, "no_observable_change", result.Termination.Reason)
+								return result, result.RequireConclusive()
+							}
+							c.totals.noChangeContinuations++
 						}
 						c.totals.continuations++
 						if c.cfg.History != nil {

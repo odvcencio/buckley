@@ -473,6 +473,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		return 1
 	}
 	limits.allowHostTools = oneShotHostToolsAllowed(cfg) && !limits.ChildContract && limits.SourceScope == nil
+	if limits.TaskIntent == agentloop.MutationIntent && briefForbidsChanges(prompt) {
+		limits.noChangeExpected = true
+	}
 	limits = applyOneShotPersistence(cfg, limits, os.Stderr)
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -528,6 +531,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
+		removeImplicitSubagentDelegation(registry, agentProfile, allowedTools)
+	}
 	if limits.TaskIntent == agentloop.MutationIntent && !limits.ChildContract && limits.SourceScope == nil {
 		registerOneShotVerification(registry)
 	}
@@ -642,6 +648,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
 	}
 	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
+	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
+		toolFilter = ensureHostMutationTools(toolFilter, registry)
+	}
 	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
 	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)

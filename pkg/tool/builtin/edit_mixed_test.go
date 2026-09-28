@@ -48,6 +48,14 @@ func TestEditFileMixedEditsAndTopLevel(t *testing.T) {
 			t.Fatalf("%+v %q", res, got)
 		}
 	})
+	t.Run("empty placeholder top level is ignored", func(t *testing.T) {
+		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
+			return map[string]any{"path": p, "old_string": "", "new_string": "", "replace_all": false, "edits": []any{edit("a", "A")}}
+		})
+		if !res.Success || got != "A b" {
+			t.Fatalf("%+v %q", res, got)
+		}
+	})
 	t.Run("both different appends", func(t *testing.T) {
 		res, got := runMixedEdit(t, "a b c", func(p string) map[string]any {
 			return map[string]any{"path": p, "old_string": "c", "new_string": "C", "edits": []any{edit("a", "A"), edit("b", "B")}}
