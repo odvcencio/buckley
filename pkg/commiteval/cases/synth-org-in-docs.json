@@ -1,0 +1,21 @@
+{
+  "name": "synth-org-in-docs",
+  "kind": "docs",
+  "source": "synthetic",
+  "diff": "synth-org-in-docs.diff",
+  "planted": [
+    "zorblax",
+    "quuxwell"
+  ],
+  "golden": "update(docs): remove maintainer attribution from the README\n\n- Keep the README about the toolkit, not about who runs it.\n",
+  "leaky": [
+    {
+      "message": "update(docs): remove Zorblax Industries from the README\n\n- Drop the attribution line.\n",
+      "rule": "deny_list"
+    },
+    {
+      "message": "update(docs): drop the maintainer line\n\n- Quuxwell Fenn no longer appears as contact.\n",
+      "rule": "deny_list"
+    }
+  ]
+}

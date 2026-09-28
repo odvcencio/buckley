@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-07",
+  "kind": "update",
+  "source": "odvcencio/buckley@e2034ca6",
+  "diff": "buckley-small-07.diff",
+  "original": "update(templates): raise source-extractor max_tool_calls default to 12\n\n- Raise source-extractor max_tool_calls from 8 to 12 so extraction runs less often hit the cap mid-task\n- Extend the template test to cover limits below, at, and above the default (0, 3, 8, 12, 20)\n- Simplify test expectation logic to clamp any positive limit against the default instead of special-casing values\n"
+}

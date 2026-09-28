@@ -1,0 +1,16 @@
+{
+  "name": "synth-bundle-only",
+  "kind": "bundle",
+  "source": "synthetic",
+  "diff": "synth-bundle-only.diff",
+  "planted": [
+    "zorblax"
+  ],
+  "attr_globs": [
+    "web/dist-app.js"
+  ],
+  "expect": {
+    "generated_only": true,
+    "template": "update(web): regenerate dist-app.js"
+  }
+}

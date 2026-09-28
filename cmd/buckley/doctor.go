@@ -181,6 +181,8 @@ func runEvalCommand(args []string) error {
 	switch strings.TrimSpace(args[0]) {
 	case "init":
 		return runEvalInitCommand(args[1:])
+	case "commit":
+		return runEvalCommitCommand(args[1:])
 	case "list":
 		return runDoctorChatCommandWithOptions(evalDoctorChatArgs(append([]string{"-list"}, args[1:]...)), findProjectEvalScenarioDir, evalDisplayLabels)
 	case "run":

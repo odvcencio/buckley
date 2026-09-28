@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-03",
+  "kind": "improve",
+  "source": "odvcencio/buckley@1e1c2ef3",
+  "diff": "buckley-small-03.diff",
+  "original": "improve(commitmsg): Report excess length in header validation error\n\n- Include actual header length and how many characters to trim\n- Helps callers fix over-long subjects without guessing\n"
+}

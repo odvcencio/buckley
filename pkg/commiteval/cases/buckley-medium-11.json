@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-11",
+  "kind": "add",
+  "source": "odvcencio/buckley@a9494a1d",
+  "diff": "buckley-medium-11.diff",
+  "original": "add(review): add evidence and ledger sections to review depth prompts\n\n- Require BALANCED and IN-DEPTH review prompts to include literal `## Evidence Collected` and `## Verification Ledger` headings so reviews carry observed evidence and tested hypotheses.\n- Apply the sections to branch, project, and PR review prompts and their approval critics, while leaving spot reviews unchanged.\n- Extend policy and prompt tests to assert the headings reach primary and critic prompts.\n"
+}

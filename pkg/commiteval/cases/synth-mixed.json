@@ -1,0 +1,14 @@
+{
+  "name": "synth-mixed",
+  "kind": "feature",
+  "source": "synthetic",
+  "diff": "synth-mixed.diff",
+  "attr_globs": [
+    "web/dist-app.js"
+  ],
+  "expect": {
+    "mixed": true,
+    "generated_only": false
+  },
+  "golden": "add(web): expose a second flag on the app root\n\n- Set root.b at init so pages can read it; rebuild the bundle to match.\n"
+}

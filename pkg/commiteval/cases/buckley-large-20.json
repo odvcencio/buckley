@@ -1,0 +1,7 @@
+{
+  "name": "buckley-large-20",
+  "kind": "add",
+  "source": "odvcencio/buckley@fea299d2",
+  "diff": "buckley-large-20.diff",
+  "original": "add(tool): add byte-offset pagination to git diff tool\n\n- Return bounded diff pages with byte_offset, total_bytes, next_byte_offset, and a SHA-256 of the full patch so large diffs can be read incrementally\n- Accept byte_offset, max_bytes, and expected_sha256 parameters; reject mismatched hashes and invalid offsets instead of mixing revisions\n- End pages at line boundaries or valid UTF-8 so reconstructed output matches the exact patch\n"
+}

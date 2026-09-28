@@ -1,0 +1,7 @@
+{
+  "name": "buckley-large-18",
+  "kind": "fix",
+  "source": "odvcencio/buckley@c3d9f6bb",
+  "diff": "buckley-large-18.diff",
+  "original": "fix(tool): handle mixed batch and top-level edits (#229)\n\nfix(tool): handle mixed batch and top-level edits\nfix(tool): reject incomplete top-level replace-all edits\n- Allow mixed batch and top-level edits when the top-level replacement duplicates or extends the batch.\n- Return actionable retry guidance for incomplete mixed edit arguments and empty batches.\n- Cover mixed-edit behavior and changed-argument retries to prevent false repeat detection.\n\n- Ignore a lone `replace_all:false` in mixed edits because it is the default and has no effect.\n- Reject `replace_all:true` without top-level replacement strings to prevent silently incomplete edits.\n"
+}

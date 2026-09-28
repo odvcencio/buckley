@@ -1,0 +1,389 @@
+diff --git a/docs/CONFIGURATION.md b/docs/CONFIGURATION.md
+index 5e91faeb..31cdd60c 100644
+--- a/docs/CONFIGURATION.md
++++ b/docs/CONFIGURATION.md
+@@ -474,6 +474,9 @@ providers:
+     enabled: true
+     api_key: ""  # Use env var instead: OPENROUTER_API_KEY
+     base_url: https://openrouter.ai/api/v1
++    # Keep these models on the provider that holds your own key (BYOK).
++    byok_providers:
++      openai/: openai
+ 
+   openai:
+     enabled: false
+@@ -500,6 +503,26 @@ providers:
+     gemini-: google
+ ```
+ 
++`providers.openrouter.byok_providers` maps a model-ID prefix (or an exact model
++ID) to an OpenRouter provider slug. If you added your own provider key to
++OpenRouter ("bring your own key", BYOK), OpenRouter can still send a request to
++another endpoint for the same model, and that endpoint bills OpenRouter credits
++instead of your key. A matching request is sent with `provider.only` set to the
++slug, so it stays on your key. The longest matching prefix wins. Buckley skips
++the pin when the request already sets `provider.only` or `provider.order`, or
++when a fallback chain mixes models with different pins.
++
++This matters most with `buckbot.openrouter_privacy_fallback`. For `openai/*`
++models, OpenRouter's zero-data-retention endpoints are Azure only, so a ZDR
++request never reaches an OpenAI BYOK key. With the pin, the ZDR attempt gets
++OpenRouter's policy 404 and the fallback retries with
++`provider.data_collection: deny` on the pinned provider. If you need strict
++ZDR instead, leave the model unpinned and fund OpenRouter credits.
++
++When OpenRouter rejects a request with HTTP 402 and its routing metadata says
++`is_byok: false`, Buckley's error names the credit-billed route and this
++setting.
++
+ **Security Note:** Never commit API keys in config files. Use environment variables or `~/.buckley/config.env`.
+ 
+ ### prompt_cache
+diff --git a/pkg/config/config.go b/pkg/config/config.go
+index 4c890638..e2de9a1c 100644
+--- a/pkg/config/config.go
++++ b/pkg/config/config.go
+@@ -336,6 +336,14 @@ type ProviderSettings struct {
+ 	Enabled bool   `yaml:"enabled"`
+ 	APIKey  string `yaml:"api_key"`  // Can be set here or via env var
+ 	BaseURL string `yaml:"base_url"` // Optional custom base URL
++	// BYOKProviders pins OpenRouter requests to the upstream provider that
++	// holds the operator's own key (OpenRouter "bring your own key").
++	// Keys are model-ID prefixes or exact model IDs (for example "openai/");
++	// values are OpenRouter provider slugs (for example "openai"). A matching
++	// request is sent with provider.only set to that slug, so OpenRouter
++	// cannot route it to an endpoint that bills OpenRouter credits instead of
++	// the operator's key. Only providers.openrouter reads this field.
++	BYOKProviders map[string]string `yaml:"byok_providers,omitempty"`
+ }
+ 
+ // OpenAICompatibleConfig configures an OpenAI-compatible API provider.
+diff --git a/pkg/config/config_validate.go b/pkg/config/config_validate.go
+index 60e65062..cc35a354 100644
+--- a/pkg/config/config_validate.go
++++ b/pkg/config/config_validate.go
+@@ -37,6 +37,7 @@ var configValidators = []func(*Config) error{
+ 	validateMemoryLimits,
+ 	validateAgentCostLimits,
+ 	validateBuckbotPrivacyFallback,
++	validateOpenRouterBYOKProviders,
+ 	validateOneshotDataPolicy,
+ 	validateDecisions,
+ 	validateReviewVerificationRunner,
+@@ -351,6 +352,46 @@ func validateAgentCostLimits(c *Config) error {
+ 	return nil
+ }
+ 
++// validateOpenRouterBYOKProviders rejects empty pins and a pin placed on a
++// provider section that never reads it, so a misplaced setting fails loudly
++// instead of silently leaving requests on credit-billed routes.
++func validateOpenRouterBYOKProviders(c *Config) error {
++	for prefix, slug := range c.Providers.OpenRouter.BYOKProviders {
++		if strings.TrimSpace(prefix) == "" {
++			return fmt.Errorf("providers.openrouter.byok_providers has an empty model prefix")
++		}
++		if !validOpenRouterProviderSlug(strings.TrimSpace(slug)) {
++			return fmt.Errorf("providers.openrouter.byok_providers[%q] has invalid provider slug %q", prefix, slug)
++		}
++	}
++	others := map[string]ProviderSettings{
++		"openai":    c.Providers.OpenAI,
++		"anthropic": c.Providers.Anthropic,
++		"google":    c.Providers.Google,
++		"ollama":    c.Providers.Ollama,
++	}
++	for name, settings := range others {
++		if len(settings.BYOKProviders) > 0 {
++			return fmt.Errorf("providers.%s.byok_providers is not supported; set providers.openrouter.byok_providers", name)
++		}
++	}
++	return nil
++}
++
++func validOpenRouterProviderSlug(slug string) bool {
++	if slug == "" {
++		return false
++	}
++	for _, r := range slug {
++		switch {
++		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.', r == '/':
++		default:
++			return false
++		}
++	}
++	return true
++}
++
+ func validateBuckbotPrivacyFallback(c *Config) error {
+ 	value := strings.ToLower(strings.TrimSpace(c.Buckbot.OpenRouterPrivacyFallback))
+ 	switch value {
+diff --git a/pkg/model/manager.go b/pkg/model/manager.go
+index 06c1b9fc..d33cb0f6 100644
+--- a/pkg/model/manager.go
++++ b/pkg/model/manager.go
+@@ -28,6 +28,7 @@ type Manager struct {
+ 	modelProviders     map[string]string
+ 	routingHooks       *RoutingHooks
+ 	privacyFallback    OpenRouterPrivacyFallback
++	openRouterBYOK     map[string]string
+ 	launchAdmissionNow func() time.Time
+ }
+ 
+@@ -86,6 +87,11 @@ func NewManager(cfg *config.Config) (*Manager, error) {
+ 	}
+ 	sort.Strings(order)
+ 
++	var byokPins map[string]string
++	if cfg != nil {
++		byokPins = normalizeOpenRouterBYOKPins(cfg.Providers.OpenRouter.BYOKProviders)
++	}
++
+ 	return &Manager{
+ 		config:         cfg,
+ 		providers:      providers,
+@@ -94,6 +100,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
+ 		providerModels: make(map[string][]string),
+ 		modelProviders: make(map[string]string),
+ 		routingHooks:   NewRoutingHooks(),
++		openRouterBYOK: byokPins,
+ 	}, nil
+ }
+ 
+@@ -449,6 +456,7 @@ func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, r
+ 	privacyRetry := false
+ 	if provider.ID() == "openrouter" {
+ 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
++		req = openRouterBYOKRequest(req, m.openRouterBYOK)
+ 	}
+ 	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
+ 		return nil, err
+@@ -570,6 +578,7 @@ func (m *Manager) chatCompletionWithContinuationResolved(ctx context.Context, co
+ 	privacyRetry := false
+ 	if provider.ID() == "openrouter" {
+ 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
++		req = openRouterBYOKRequest(req, m.openRouterBYOK)
+ 	}
+ 	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
+ 		return nil, err
+@@ -680,6 +689,7 @@ func (m *Manager) chatCompletionStreamResolved(ctx context.Context, req ChatRequ
+ 	privacyRetry := false
+ 	if provider.ID() == "openrouter" {
+ 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
++		req = openRouterBYOKRequest(req, m.openRouterBYOK)
+ 	}
+ 	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req, privacyRetry, requestedModel, selectedModel)
+ }
+diff --git a/pkg/model/openrouter_byok.go b/pkg/model/openrouter_byok.go
+new file mode 100644
+index 00000000..6075706e
+--- /dev/null
++++ b/pkg/model/openrouter_byok.go
+@@ -0,0 +1,90 @@
++package model
++
++import (
++	"strings"
++)
++
++// normalizeOpenRouterBYOKPins lowercases and trims configured pins and drops
++// empty entries. Config validation already rejects empty entries; this keeps
++// the Manager safe when it is built from an unvalidated config.
++func normalizeOpenRouterBYOKPins(pins map[string]string) map[string]string {
++	if len(pins) == 0 {
++		return nil
++	}
++	out := make(map[string]string, len(pins))
++	for prefix, slug := range pins {
++		prefix = strings.ToLower(strings.TrimSpace(prefix))
++		slug = strings.ToLower(strings.TrimSpace(slug))
++		if prefix == "" || slug == "" {
++			continue
++		}
++		out[prefix] = slug
++	}
++	if len(out) == 0 {
++		return nil
++	}
++	return out
++}
++
++// openRouterBYOKSlug returns the provider slug pinned for modelID, choosing
++// the longest matching prefix so an exact model entry beats a vendor prefix.
++func openRouterBYOKSlug(modelID string, pins map[string]string) string {
++	modelID = strings.ToLower(strings.TrimSpace(normalizeModelForProvider(modelID, "openrouter")))
++	if modelID == "" {
++		return ""
++	}
++	best, bestLen := "", -1
++	for prefix, slug := range pins {
++		if strings.HasPrefix(modelID, prefix) && len(prefix) > bestLen {
++			best, bestLen = slug, len(prefix)
++		}
++	}
++	return best
++}
++
++// openRouterBYOKRequest restricts an OpenRouter request to the provider that
++// holds the operator's own key.
++//
++// Without the pin, OpenRouter may pick any endpoint for the model. A request
++// that carries provider.zdr=true is the worst case: for openai/* models the
++// zero-data-retention endpoints are Azure only, so the operator's OpenAI key is
++// never used and every token bills OpenRouter credits (is_byok=false). When
++// credits run low OpenRouter then rejects large prompts with HTTP 402 even
++// though the operator's own key is funded, and at a zero balance it rejects
++// any request whose candidate endpoints include a credit-billed one.
++//
++// The pin is skipped when:
++//   - no pin matches the model, or the fallback chain mixes models that
++//     resolve to different pins (provider.only applies to every model);
++//   - the caller already chose providers with only or order;
++//   - the request is a single-attempt launch request, whose provider
++//     contract must stay exact.
++//
++// Pinning narrows routing; it never relaxes a privacy field. When a pinned
++// provider has no ZDR endpoint, OpenRouter answers 404 "no endpoints matching
++// your data policy" and the opt-in zdr_then_data_collection_deny fallback
++// retries with data_collection=deny, keeping the pin.
++func openRouterBYOKRequest(req ChatRequest, pins map[string]string) ChatRequest {
++	if len(pins) == 0 || req.RetryMode == RequestRetrySingleAttempt {
++		return req
++	}
++	if _, ok := req.Provider["only"]; ok {
++		return req
++	}
++	if _, ok := req.Provider["order"]; ok {
++		return req
++	}
++	slug := openRouterBYOKSlug(req.Model, pins)
++	if slug == "" {
++		return req
++	}
++	for _, modelID := range req.Models {
++		if openRouterBYOKSlug(modelID, pins) != slug {
++			return req
++		}
++	}
++	provider := cloneAnyMap(req.Provider)
++	provider["only"] = []string{slug}
++	req.Provider = provider
++	return req
++}
+diff --git a/pkg/model/openrouter_byok_test.go b/pkg/model/openrouter_byok_test.go
+new file mode 100644
+index 00000000..d3dd5645
+--- /dev/null
++++ b/pkg/model/openrouter_byok_test.go
+@@ -0,0 +1,160 @@
++package model
++
++import (
++	"context"
++	"reflect"
++	"strings"
++	"testing"
++
++	"m31labs.dev/buckley/pkg/config"
++)
++
++func TestOpenRouterBYOKRequest(t *testing.T) {
++	pins := normalizeOpenRouterBYOKPins(map[string]string{
++		" OpenAI/ ":                     " OpenAI ",
++		"openai/gpt-6-luna-pro-special": "azure",
++		"":                              "ignored",
++	})
++	tests := []struct {
++		name string
++		req  ChatRequest
++		want any // expected provider["only"]; nil means no pin
++	}{
++		{name: "vendor prefix", req: ChatRequest{Model: "openai/gpt-6-luna-pro"}, want: []string{"openai"}},
++		{name: "unqualified openai model", req: ChatRequest{Model: "gpt-6-luna-pro"}, want: []string{"openai"}},
++		{name: "longest prefix wins", req: ChatRequest{Model: "openai/gpt-6-luna-pro-special"}, want: []string{"azure"}},
++		{name: "keeps privacy fields", req: ChatRequest{Model: "openai/gpt-6-luna-pro", Provider: map[string]any{"zdr": true}}, want: []string{"openai"}},
++		{name: "no matching pin", req: ChatRequest{Model: "anthropic/claude-sonnet-4.5"}},
++		{name: "caller only wins", req: ChatRequest{Model: "openai/gpt-6-luna-pro", Provider: map[string]any{"only": []string{"azure"}}}, want: []string{"azure"}},
++		{name: "caller order wins", req: ChatRequest{Model: "openai/gpt-6-luna-pro", Provider: map[string]any{"order": []string{"azure"}}}},
++		{name: "mixed fallback chain", req: ChatRequest{Model: "openai/gpt-6-luna-pro", Models: []string{"openai/gpt-6-luna-pro", "anthropic/claude-sonnet-4.5"}}},
++		{name: "same-pin fallback chain", req: ChatRequest{Model: "openai/gpt-6-luna-pro", Models: []string{"openai/gpt-6-luna-pro", "openai/gpt-6-luna"}}, want: []string{"openai"}},
++		{name: "launch request stays exact", req: ChatRequest{Model: "openai/gpt-6-luna-pro", RetryMode: RequestRetrySingleAttempt}},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			before := cloneAnyMap(tt.req.Provider)
++			got := openRouterBYOKRequest(tt.req, pins)
++			if !reflect.DeepEqual(got.Provider["only"], tt.want) && !(tt.want == nil && got.Provider["only"] == nil) {
++				t.Fatalf("provider.only = %#v, want %#v (provider %#v)", got.Provider["only"], tt.want, got.Provider)
++			}
++			if tt.req.Provider != nil && !reflect.DeepEqual(tt.req.Provider, before) {
++				t.Fatalf("caller provider map mutated: %#v", tt.req.Provider)
++			}
++			if tt.name == "keeps privacy fields" && got.Provider["zdr"] != true {
++				t.Fatalf("pin dropped zdr: %#v", got.Provider)
++			}
++		})
++	}
++	if got := openRouterBYOKRequest(ChatRequest{Model: "openai/gpt-6-luna-pro"}, nil); got.Provider != nil {
++		t.Fatalf("no pins configured: provider = %#v, want nil", got.Provider)
++	}
++}
++
++func newBYOKTestManager(provider *stubProvider, modelID string) *Manager {
++	return &Manager{
++		config:         &config.Config{},
++		providers:      map[string]Provider{"openrouter": provider},
++		providerOrder:  []string{"openrouter"},
++		catalog:        map[string]ModelInfo{modelID: {ID: modelID}},
++		providerModels: map[string][]string{"openrouter": {modelID}},
++		modelProviders: map[string]string{modelID: "openrouter"},
++		openRouterBYOK: normalizeOpenRouterBYOKPins(map[string]string{"openai/": "openai"}),
++	}
++}
++
++// A pinned BYOK provider with no ZDR endpoint makes OpenRouter answer 404; the
++// opt-in fallback must retry with data_collection=deny and keep the pin, so the
++// request never lands on a credit-billed endpoint.
++func TestChatCompletionBYOKPinSurvivesZDRFallback(t *testing.T) {
++	modelID := "openai/gpt-6-luna-pro"
++	provider := &stubProvider{
++		id:      "openrouter",
++		catalog: ModelCatalog{Data: []ModelInfo{{ID: modelID}}},
++		errors: []error{&APIError{
++			StatusCode: 404,
++			Message:    "No endpoints found matching your data policy (Zero data retention).",
++		}},
++	}
++	mgr := newBYOKTestManager(provider, modelID)
++	if err := mgr.SetOpenRouterPrivacyFallback(OpenRouterPrivacyFallbackZDRThenDataCollection); err != nil {
++		t.Fatal(err)
++	}
+... (fixture truncated)
+diff --git a/pkg/model/types.go b/pkg/model/types.go
+index d68a57cd..41816122 100644
+--- a/pkg/model/types.go
++++ b/pkg/model/types.go
+@@ -1621,9 +1621,24 @@ func (e *APIError) Error() string {
+ 	if openRouterPolicyBlocked(e) {
+ 		message += "; OpenRouter filtered every eligible endpoint; check Settings > Privacy and Guardrails for ZDR, data-collection, provider, and model restrictions"
+ 	}
++	if openRouterCreditBilledRoute(e) {
++		message += "; OpenRouter routed this request to an endpoint that does not use your own provider key (is_byok=false), so it bills OpenRouter credits; a ZDR requirement can exclude the provider that holds your key; pin that provider with providers.openrouter.byok_providers or add OpenRouter credits"
++	}
+ 	return message
+ }
+ 
++// openRouterCreditBilledRoute reports an OpenRouter credit rejection (HTTP
++// 402) whose routing metadata says the request was not on the caller's own
++// key. Without this hint the error reads as "add credits" even when the
++// caller's BYOK key is funded and the real cause is the route choice.
++func openRouterCreditBilledRoute(e *APIError) bool {
++	if e == nil || e.StatusCode != 402 {
++		return false
++	}
++	text := strings.ReplaceAll(e.Message+" "+e.Details, " ", "")
++	return strings.Contains(text, `"is_byok":false`)
++}
++
+ func openRouterPolicyBlocked(e *APIError) bool {
+ 	if e == nil || e.StatusCode != 404 {
+ 		return false

@@ -1,0 +1,87 @@
+diff --git a/cmd/buckley/review.go b/cmd/buckley/review.go
+index 53cc3060..fa01fdbe 100644
+--- a/cmd/buckley/review.go
++++ b/cmd/buckley/review.go
+@@ -9,6 +9,8 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"golang.org/x/term"
++
+ 	"m31labs.dev/buckley/pkg/config"
+ 	"m31labs.dev/buckley/pkg/execmode"
+ 	"m31labs.dev/buckley/pkg/model"
+@@ -74,7 +76,7 @@ type reviewCommandResult struct {
+ }
+ 
+ // reviewProgress keeps model-review output machine-readable when the caller
+-// requests quiet mode, while preserving the interactive spinner otherwise.
++// requests quiet mode or redirects stdout, while preserving the interactive spinner.
+ type reviewProgress interface {
+ 	Start()
+ 	SetMessage(string)
+@@ -84,13 +86,15 @@ type reviewProgress interface {
+ 
+ type silentReviewProgress struct{}
+ 
++var reviewOutputIsTerminalFn = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
++
+ func (silentReviewProgress) Start()                 {}
+ func (silentReviewProgress) SetMessage(string)      {}
+ func (silentReviewProgress) StopWithSuccess(string) {}
+ func (silentReviewProgress) StopWithError(string)   {}
+ 
+ func newReviewProgress(message string) reviewProgress {
+-	if quietMode {
++	if quietMode || !reviewOutputIsTerminalFn() {
+ 		return silentReviewProgress{}
+ 	}
+ 	return terminal.NewSpinner(message)
+diff --git a/cmd/buckley/review_test.go b/cmd/buckley/review_test.go
+index 4e0a6fcb..5857d60b 100644
+--- a/cmd/buckley/review_test.go
++++ b/cmd/buckley/review_test.go
+@@ -375,18 +375,32 @@ func TestParseReviewCommandOptionsRejectsConflictingBudgetModes(t *testing.T) {
+ 	}
+ }
+ 
+-func TestNewReviewProgressHonorsQuietMode(t *testing.T) {
+-	previous := quietMode
+-	t.Cleanup(func() { quietMode = previous })
+-
+-	quietMode = true
+-	if _, ok := newReviewProgress("Reviewing").(silentReviewProgress); !ok {
+-		t.Fatal("quiet review should not create a spinner")
+-	}
++func TestNewReviewProgressOnlyAnimatesOnInteractiveOutput(t *testing.T) {
++	previousQuiet := quietMode
++	previousTerminal := reviewOutputIsTerminalFn
++	t.Cleanup(func() {
++		quietMode = previousQuiet
++		reviewOutputIsTerminalFn = previousTerminal
++	})
+ 
+-	quietMode = false
+-	if _, ok := newReviewProgress("Reviewing").(*terminal.Spinner); !ok {
+-		t.Fatal("interactive review should create a spinner")
++	for _, test := range []struct {
++		name        string
++		quiet       bool
++		terminal    bool
++		wantSpinner bool
++	}{
++		{name: "quiet terminal", quiet: true, terminal: true},
++		{name: "redirected output", terminal: false},
++		{name: "interactive output", terminal: true, wantSpinner: true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			quietMode = test.quiet
++			reviewOutputIsTerminalFn = func() bool { return test.terminal }
++			_, spinner := newReviewProgress("Reviewing").(*terminal.Spinner)
++			if spinner != test.wantSpinner {
++				t.Fatalf("spinner = %t, want %t", spinner, test.wantSpinner)
++			}
++		})
+ 	}
+ }
+ 

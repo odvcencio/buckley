@@ -1,0 +1,11 @@
+{
+  "name": "synth-release",
+  "kind": "release",
+  "source": "synthetic",
+  "diff": "synth-release.diff",
+  "golden": "release: v1.4.3\n\n- Set the version to 1.4.3 and record the retry-timeout fix in the changelog.\n",
+  "style_bad": [
+    "release: release v1.4.3\n\n- Set the version.\n",
+    "Release: v1.4.3\n\n- Set the version.\n"
+  ]
+}

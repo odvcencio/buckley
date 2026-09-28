@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-01",
+  "kind": "test",
+  "source": "odvcencio/buckley@477e707f",
+  "diff": "buckley-small-01.diff",
+  "original": "test(decisions): write decision gate logs to temp dirs (#218)\n\n- Point Decisions.LogPath at a t.TempDir() path in the shared test config.\n- Add logPath to the review depth gate case so the truncation test stays isolated.\n- Prevent tests that reach logDecisionGate from writing to the real decisions log.\n"
+}

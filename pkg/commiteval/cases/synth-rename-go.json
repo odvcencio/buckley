@@ -1,0 +1,20 @@
+{
+  "name": "synth-rename-go",
+  "kind": "rename",
+  "source": "synthetic",
+  "diff": "synth-rename-go.diff",
+  "planted": [
+    "zorblax"
+  ],
+  "golden": "refactor(client): shorten the client type and constructor names\n\n- Drop the vendor prefix so callers write client.New and use client.Client.\n",
+  "leaky": [
+    {
+      "message": "refactor(client): rename ZorblaxClient to Client\n\n- Callers must migrate from NewZorblaxClient to New.\n",
+      "rule": "removed_echo"
+    },
+    {
+      "message": "refactor(client): rename the zorblax_client type\n\n- Shorter names.\n",
+      "rule": "removed_echo"
+    }
+  ]
+}

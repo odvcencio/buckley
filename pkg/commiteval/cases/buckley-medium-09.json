@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-09",
+  "kind": "other",
+  "source": "odvcencio/buckley@c1590b0b",
+  "diff": "buckley-medium-09.diff",
+  "original": "Keep redirected review output readable\n\nRedirected `review` and `review-pr` runs currently write animated spinner frames into logs, making scripted output hard to read and needlessly large. Review progress now animates only when stdout is a terminal and quiet mode is off. A focused test covers interactive, redirected, and quiet behavior.\n\nValidation: `go test ./cmd/buckley -run TestNewReviewProgressOnlyAnimatesOnInteractiveOutput -count=1` and `./scripts/test.sh`.\n"
+}

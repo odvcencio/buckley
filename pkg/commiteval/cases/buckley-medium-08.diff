@@ -1,0 +1,146 @@
+diff --git a/pkg/commitmsg/validation.go b/pkg/commitmsg/validation.go
+index 0b26d0d6..7a1c223e 100644
+--- a/pkg/commitmsg/validation.go
++++ b/pkg/commitmsg/validation.go
+@@ -4,11 +4,18 @@ import (
+ 	"fmt"
+ 	"strings"
+ 	"unicode"
++	"unicode/utf8"
+ )
+ 
+ // HeaderLimit is the maximum visible length of a conventional commit header.
+ const HeaderLimit = 72
+ 
++// Style limits enforced by ValidateCommitFields.
++const (
++	MaxBulletWords = 20
++	MaxBullets     = 5
++)
++
+ // AllowedActions is the shared action vocabulary used by commit and PR
+ // generation. Keeping it here prevents one structured path from accepting a
+ // verb that another path silently rewrites.
+@@ -91,6 +98,10 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string)
+ 		return err
+ 	}
+ 
++	if err := validateSubjectStyle(action, subject); err != nil {
++		return err
++	}
++
+ 	nonEmptyBody := 0
+ 	for _, bullet := range body {
+ 		if hasCommitControl(bullet) {
+@@ -102,11 +113,17 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string)
+ 		}
+ 		if normalized != "" {
+ 			nonEmptyBody++
++			if n := len(strings.Fields(normalized)); n > MaxBulletWords {
++				return fmt.Errorf("bullet %d has %d words; keep each bullet to at most %d words", nonEmptyBody, n, MaxBulletWords)
++			}
+ 		}
+ 	}
+ 	if nonEmptyBody == 0 {
+ 		return fmt.Errorf("body requires at least one bullet")
+ 	}
++	if nonEmptyBody > MaxBullets {
++		return fmt.Errorf("body has %d bullets; merge related points into at most %d", nonEmptyBody, MaxBullets)
++	}
+ 	for _, issue := range issues {
+ 		if strings.TrimSpace(issue) != "" && NormalizeIssueRef(issue) == "" {
+ 			return fmt.Errorf("issue reference %q is not numeric", issue)
+@@ -123,3 +140,23 @@ func hasCommitControl(value string) bool {
+ 	}
+ 	return false
+ }
++
++// validateSubjectStyle rejects a subject that starts with a capital letter or
++// repeats the action verb ("fix(x): fix ..."). Identifiers such as HTTP or
++// GetUser are allowed only when the subject does not start with them.
++func validateSubjectStyle(action, subject string) error {
++	subject = strings.TrimSpace(subject)
++	first, _ := utf8.DecodeRuneInString(subject)
++	if unicode.IsUpper(first) {
++		return fmt.Errorf("subject must start with a lowercase word after the colon")
++	}
++	word := strings.ToLower(strings.TrimFunc(strings.Fields(subject + " ")[0], func(r rune) bool {
++		return !unicode.IsLetter(r)
++	}))
++	for _, form := range []string{action, action + "s", action + "es", action + "ed", action + "d", action + "ing"} {
++		if word == form {
++			return fmt.Errorf("subject repeats the action %q; drop the repeated verb and name what changed", action)
++		}
++	}
++	return nil
++}
+diff --git a/pkg/commitmsg/validation_test.go b/pkg/commitmsg/validation_test.go
+index 7e481bf8..6ac5d497 100644
+--- a/pkg/commitmsg/validation_test.go
++++ b/pkg/commitmsg/validation_test.go
+@@ -1,6 +1,9 @@
+ package commitmsg
+ 
+-import "testing"
++import (
++	"strings"
++	"testing"
++)
+ 
+ func TestValidateCommitFields(t *testing.T) {
+ 	tests := []struct {
+@@ -63,3 +66,41 @@ func TestValidateCommitFieldsToolMarkup(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestValidateCommitFieldsStyle(t *testing.T) {
++	words := func(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
++	five := []string{"one", "two", "three", "four", "five"}
++	tests := []struct {
++		name    string
++		action  string
++		subject string
++		body    []string
++		wantErr string
++	}{
++		{name: "ok", action: "fix", subject: "stale cache on reload", body: []string{"Reload no longer serves stale data."}},
++		{name: "repeated verb", action: "fix", subject: "fix stale cache", body: []string{"ok"}, wantErr: "repeats the action"},
++		{name: "repeated inflection", action: "add", subject: "adds a flag", body: []string{"ok"}, wantErr: "repeats the action"},
++		{name: "repeated past form", action: "fix", subject: "fixed stale cache", body: []string{"ok"}, wantErr: "repeats the action"},
++		{name: "similar word allowed", action: "add", subject: "address list parsing", body: []string{"ok"}},
++		{name: "capital subject", action: "fix", subject: "Stale cache", body: []string{"ok"}, wantErr: "lowercase"},
++		{name: "20 words allowed", action: "fix", subject: "cache", body: []string{words(20)}},
++		{name: "21 words rejected", action: "fix", subject: "cache", body: []string{words(21)}, wantErr: "21 words"},
++		{name: "5 bullets allowed", action: "fix", subject: "cache", body: five},
++		{name: "6 bullets rejected", action: "fix", subject: "cache", body: append(append([]string{}, five...), "six"), wantErr: "6 bullets"},
++		{name: "empty bullets not counted", action: "fix", subject: "cache", body: append(append([]string{}, five...), " - ")},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			err := ValidateCommitFields(tc.action, "", tc.subject, tc.body, nil)
++			if tc.wantErr == "" {
++				if err != nil {
++					t.Fatalf("unexpected error: %v", err)
++				}
++				return
++			}
++			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
++				t.Fatalf("error = %v, want %q", err, tc.wantErr)
++			}
++		})
++	}
++}
+diff --git a/pkg/oneshot/commands/commit.go b/pkg/oneshot/commands/commit.go
+index 6c0a3154..76669d48 100644
+--- a/pkg/oneshot/commands/commit.go
++++ b/pkg/oneshot/commands/commit.go
+@@ -144,6 +144,8 @@ Use the generate_commit tool to produce your response. The tool expects:
+ 
+ Guidelines:
+ - Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name"
++- Start the subject with a lowercase word; do not repeat the action verb in it ("fix(x): fix ..." is rejected)
++- Write at most 5 bullets, each at most 20 words
+ - Focus on the "what" and "why", not the "how"
+ - Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
+ - Match body detail to change size

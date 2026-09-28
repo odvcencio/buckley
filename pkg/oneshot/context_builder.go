@@ -212,17 +212,7 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 		paths = append(paths, fd.Path)
 	}
 	isGenerated := generatedByAttrs(paths, params["staged"] == "true")
-	for _, fd := range diffsignal.SplitWith(output, isGenerated) {
-		stats.Files++
-		if fd.LowSignal() {
-			stats.LowSignal++
-		}
-		if fd.Generated() {
-			stats.GeneratedPaths = append(stats.GeneratedPaths, fd.Path)
-		} else {
-			stats.SourcePaths = append(stats.SourcePaths, fd.Path)
-		}
-	}
+	stats = StatsForDiff(output, isGenerated)
 	res := diffsignal.PrioritizeWith(output, budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
 	output = res.Context
 	if res.Truncated {
@@ -477,4 +467,22 @@ func contextEstimateTokens(s string) int {
 		return 0
 	}
 	return (len(s) + 3) / 4
+}
+
+// StatsForDiff classifies every file in a unified diff. generated marks paths
+// that gitattributes call generated; nil means path and content rules only.
+func StatsForDiff(raw string, generated func(path string) bool) DiffStats {
+	var stats DiffStats
+	for _, fd := range diffsignal.SplitWith(raw, generated) {
+		stats.Files++
+		if fd.LowSignal() {
+			stats.LowSignal++
+		}
+		if fd.Generated() {
+			stats.GeneratedPaths = append(stats.GeneratedPaths, fd.Path)
+		} else {
+			stats.SourcePaths = append(stats.SourcePaths, fd.Path)
+		}
+	}
+	return stats
 }

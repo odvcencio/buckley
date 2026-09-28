@@ -1,0 +1,64 @@
+diff --git a/pkg/ipc/grpc_subscribe_access_test.go b/pkg/ipc/grpc_subscribe_access_test.go
+index 29aa6858..b0c4bf48 100644
+--- a/pkg/ipc/grpc_subscribe_access_test.go
++++ b/pkg/ipc/grpc_subscribe_access_test.go
+@@ -31,6 +31,7 @@ func TestGRPCSubscribeAllSessionsFiltersByPrincipal(t *testing.T) {
+ 	}
+ 
+ 	svc := NewGRPCService(&Server{store: store})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = nil
+ 	svc.maxSubscribersTotal = 10
+ 	svc.maxSubscribersPerPrincipal = 10
+diff --git a/pkg/ipc/grpc_subscribe_auth_test.go b/pkg/ipc/grpc_subscribe_auth_test.go
+index b7bc112e..336249cd 100644
+--- a/pkg/ipc/grpc_subscribe_auth_test.go
++++ b/pkg/ipc/grpc_subscribe_auth_test.go
+@@ -14,6 +14,7 @@ import (
+ 
+ func TestGRPCSubscribeUnauthenticatedUsesConnectError(t *testing.T) {
+ 	svc := NewGRPCService(&Server{})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = nil
+ 
+ 	grpcPath, grpcHandler := ipcpbconnect.NewBuckleyIPCHandler(
+diff --git a/pkg/ipc/grpc_subscribe_limits_test.go b/pkg/ipc/grpc_subscribe_limits_test.go
+index a5b3d44f..c494ebfd 100644
+--- a/pkg/ipc/grpc_subscribe_limits_test.go
++++ b/pkg/ipc/grpc_subscribe_limits_test.go
+@@ -28,6 +28,7 @@ func TestGRPCSubscribeEnforcesSubscriberLimit(t *testing.T) {
+ 	}
+ 
+ 	svc := NewGRPCService(&Server{store: store})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = nil
+ 	svc.maxSubscribersTotal = 1
+ 	svc.maxSubscribersPerPrincipal = 1
+@@ -87,6 +88,7 @@ func TestGRPCSubscribeRateLimited(t *testing.T) {
+ 	}
+ 
+ 	svc := NewGRPCService(&Server{store: store})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = newRateLimiter(1 * time.Minute)
+ 	svc.maxSubscribersTotal = 10
+ 	svc.maxSubscribersPerPrincipal = 10
+diff --git a/pkg/ipc/grpc_subscribe_payload_test.go b/pkg/ipc/grpc_subscribe_payload_test.go
+index 08de9707..d31f7842 100644
+--- a/pkg/ipc/grpc_subscribe_payload_test.go
++++ b/pkg/ipc/grpc_subscribe_payload_test.go
+@@ -29,6 +29,7 @@ func TestGRPCSubscribeEventPayloadJSONSafe(t *testing.T) {
+ 	}
+ 
+ 	svc := NewGRPCService(&Server{store: store})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = nil
+ 	svc.maxSubscribersTotal = 10
+ 	svc.maxSubscribersPerPrincipal = 10
+@@ -132,6 +133,7 @@ func TestGRPCSubscribeReplaysAfterLastEventID(t *testing.T) {
+ 	}
+ 
+ 	svc := NewGRPCService(&Server{store: store})
++	t.Cleanup(svc.Close)
+ 	svc.subscribeLimiter = nil
+ 	svc.maxSubscribersTotal = 10
+ 	svc.maxSubscribersPerPrincipal = 10

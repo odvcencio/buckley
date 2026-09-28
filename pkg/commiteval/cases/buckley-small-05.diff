@@ -1,0 +1,13 @@
+diff --git a/pkg/headless/sessionexec_test.go b/pkg/headless/sessionexec_test.go
+index db781b02..e42be62b 100644
+--- a/pkg/headless/sessionexec_test.go
++++ b/pkg/headless/sessionexec_test.go
+@@ -208,7 +208,7 @@ func TestDurableRunner_ReplaysCompletedStepsAndCommitsTranscriptOnce(t *testing.
+ 		CommandJournal: journal, RunLedger: ledger, EvidenceStore: evidenceStore,
+ 		StepJournal: stepJournal, LeaseOwner: "durable-replay-owner",
+ 		DurableTiming: &DurableTiming{
+-			LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 50 * time.Millisecond,
++			LeaseDuration: 5 * time.Second, HeartbeatInterval: 50 * time.Millisecond,
+ 			ScanInterval: 10 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
+ 			OperationTimeout: time.Second,
+ 		},

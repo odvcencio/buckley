@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-16",
+  "kind": "update",
+  "source": "odvcencio/buckley@d0c27acb",
+  "diff": "buckley-medium-16.diff",
+  "original": "update(agents): tighten source-extractor prompt wording\n\n- Replace page-bound citation wording with host-owned evidence guidance: summaries give name, observed behavior, and filename only, while captured path/range/bytes stay with the host\n- Drop ambiguous 'observed file/range' phrasing and simplify search/read flow instructions\n- Require 'not found in observed source' wording and incomplete_reasons for missing items, unread ranges, unavailable references, or exhausted budgets\n- Extend template test with contract assertions for each required phrase and banned page-bound wording\n"
+}
