@@ -1,6 +1,7 @@
 package agentloop
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -234,5 +235,16 @@ func TestGovernorEscalatesFromCreativeCheckpointToActionBoundary(t *testing.T) {
 	}
 	if got := governor.ObserveProgress("readonly", true, false, false); !got.Stop || got.Kind != "read_only_budget" {
 		t.Fatalf("limit = %+v, want deterministic stop", got)
+	}
+}
+
+func TestGovernorChangedArgumentsAfterValidationErrorAreNotExactRepeat(t *testing.T) {
+	g := New(Config{})
+	msg := "error: retry with only `edits`"
+	for i := 0; i < 5; i++ {
+		args := fmt.Sprintf(`{"path":"f","edits":[{"old_string":"a%d","new_string":"b"}]}`, i)
+		if d := g.Observe("edit_file", args, msg, false); d.Kind == "exact_repeat" {
+			t.Fatalf("call %d stopped: %+v", i, d)
+		}
 	}
 }

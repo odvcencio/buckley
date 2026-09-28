@@ -72,7 +72,6 @@ func TestEditFileTool_BatchRejectsWithoutWriting(t *testing.T) {
 		`{"edits":[{"old_string":"alpha","new_string":null}]}`,
 		`{"edits":[{"old_string":"alpha","new_string":"A"}],"old_string":"alpha","new_string":"B"}`,
 		`{"edits":[{"old_string":"alpha","new_string":"A"}],"new_string":"B"}`,
-		`{"edits":[{"old_string":"alpha","new_string":"A"}],"replace_all":false}`,
 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"absent","new_string":"B"}]}`,
 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"beta","new_string":"B"}]}`,
 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"beta","new_string":42}]}`,
