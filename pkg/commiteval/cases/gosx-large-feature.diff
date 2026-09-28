@@ -1,0 +1,764 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4d2e73a4..02c9ea83 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,15 @@
+ 
+ ## Unreleased
+ 
++### Added: live binds that need no fetch, attributes and classes, and regions that grow
++- `data-gosx-live-bind-attr` sets a named attribute from a bind key; `data-gosx-live-bind-class` toggles a named class from a boolean. An attribute bind passes a POSITIVE allowlist: never an `on*` handler, `style`, `srcdoc`, a script or data URL, or a runtime `data-gosx-*` attribute other than `data-gosx-countdown` (refused on a node that also declares `data-gosx-countdown-then`). `hidden` and `disabled` toggle by attribute presence, not by writing the text `"true"`/`"false"`.
++- `data-gosx-live-mode="event"` applies a hub event's object payload to `data-gosx-live-bind` keys without a fetch; `data-gosx-live-src` is optional in that mode.
++- `data-gosx-region-mode="append|prepend"` inserts a fetched fragment beside existing children; `data-gosx-region-key` drops duplicates; `data-gosx-region-cursor` fills `{cursor}` in the URL.
++- A countdown re-reads a changed `data-gosx-countdown`; `window.__gosx.countdown.retarget(root)` restarts the shared timer after an expiry.
++
++### Changed: hub reconnect uses exponential backoff
++- 500 ms to 15 s with 25 percent jitter, reset on a successful open.
++
+ ## v0.53.9 (2026-08-29)
+ 
+ ### Fixed: countdowns, watchers, and filters keep working after a region swap
+diff --git a/client/js/32-region-append-mode.test.mjs b/client/js/32-region-append-mode.test.mjs
+new file mode 100644
+index 00000000..a116a73b
+--- /dev/null
++++ b/client/js/32-region-append-mode.test.mjs
+@@ -0,0 +1,184 @@
++// Unit tests for runtime/host/regions.ts's append/prepend region modes
++// (gosx#217): data-gosx-region-mode="append|prepend" inserts a fetched
++// fragment beside a region's existing children instead of replacing them,
++// data-gosx-region-key dedupes an overlapping fragment, and
++// data-gosx-region-cursor fills a "{cursor}" token in the URL from an
++// already-present child. Copies makeRegion/runModule from
++// 30-region-after-event.test.mjs (see that file's own doc comment) and
++// extends the document double with a template-parsing createElement, since
++// insertRegionFragment parses a fetched fragment through
++// document.createElement("template").
++import test from "node:test";
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import path from "node:path";
++import vm from "node:vm";
++import { fileURLToPath } from "node:url";
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const moduleSrc = [
++  fs.readFileSync(path.join(__dirname, "..", "runtime", "host", "compatibility.ts"), "utf8"),
++  fs.readFileSync(path.join(__dirname, "..", "runtime", "host", "regions.ts"), "utf8"),
++].join("\n");
++// regions.ts calls applySceneCommandScripts(el) unconditionally after every
++// swap (the "P6" declarative scene commands pass) — command-bridge.ts is
++// where that function lives, so it must load first, exactly as
++// 07-declarative-regions.test.mjs's own moduleSrc does.
++const scene3dBridgeSrc = fs.readFileSync(
++  path.join(__dirname, "..", "runtime", "scene3d", "command-bridge.ts"),
++  "utf8"
++);
++
++function attrOf(tag, name) {
++  const m = new RegExp("\\b" + name + "=\"([^\"]*)\"").exec(tag);
++  return m ? m[1] : null;
++}
++// parseTopLevel splits html into top-level element records: {tagName,
++// outerHTML, getAttribute}. A child with the same tag name stays inside its
++// parent because the depth counter only closes at depth zero.
++function parseTopLevel(html) {
++  const nodes = [];
++  const re = /<\/?([a-zA-Z][\w-]*)[^>]*>/g;
++  let depth = 0, start = -1, m;
++  while ((m = re.exec(html))) {
++    const closing = m[0][1] === "/";
++    const selfClosing = m[0].endsWith("/>");
++    if (!closing) { if (depth === 0) start = m.index; if (!selfClosing) depth += 1; }
++    else depth -= 1;
++    if (depth === 0 && start >= 0) {
++      const outer = html.slice(start, m.index + m[0].length);
++      const open = /<[^>]+>/.exec(outer)[0];
++      nodes.push({ tagName: m[1].toUpperCase(), outerHTML: outer, nodeType: 1, getAttribute: (n) => attrOf(open, n) });
++      start = -1;
++    }
++  }
++  return nodes;
++}
++
++// makeRegion is a trimmed copy of 07-declarative-regions.test.mjs's own
++// helper of the same name — just enough element shape (getAttribute/
++// setAttribute/hasAttribute/innerHTML/querySelectorAll) for regions.ts's
++// bindRegion + fetchRegion to run against, extended with seed/inserted/
++// insertAdjacentHTML/childNodes for the append/prepend assertions below.
++function makeRegion(attrs) {
++  const region = {
++    _attrs: attrs, innerHTML: "", children: [], inserted: [],
++    getAttribute(n) { return n in this._attrs ? this._attrs[n] : null; },
++    setAttribute(n, v) { this._attrs[n] = String(v); },
++    removeAttribute(n) { delete this._attrs[n]; },
++    hasAttribute(n) { return n in this._attrs; },
++    seed(html) { this.children = parseTopLevel(html); },
++    // Answers "[data-tape-key]" and "[data-pick-number]" alike: any
++    // attribute selector returns the children that carry that attribute.
++    querySelectorAll(selector) { const name = /^\[([^\]]+)\]$/.exec(selector); return name ? this.children.filter((c) => c.getAttribute(name[1]) != null) : []; },
++    get childNodes() { return this.children; },
++    insertAdjacentHTML(position, html) {
++      this.inserted.push({ position, html });
++      const fresh = parseTopLevel(html);
++      this.children = position === "afterbegin" ? fresh.concat(this.children) : this.children.concat(fresh);
++    },
++  };
+... (fixture truncated)
+diff --git a/client/js/bootstrap-feature-hubs.js b/client/js/bootstrap-feature-hubs.js
+index ac1ce871..095d63aa 100644
+Binary files a/client/js/bootstrap-feature-hubs.js and b/client/js/bootstrap-feature-hubs.js differ
+diff --git a/client/js/bootstrap-feature-hubs.js.br b/client/js/bootstrap-feature-hubs.js.br
+index 816ec19c..9f70fff5 100644
+Binary files a/client/js/bootstrap-feature-hubs.js.br and b/client/js/bootstrap-feature-hubs.js.br differ
+diff --git a/client/js/bootstrap-feature-hubs.js.gz b/client/js/bootstrap-feature-hubs.js.gz
+index fe0fbac2..267834b0 100644
+Binary files a/client/js/bootstrap-feature-hubs.js.gz and b/client/js/bootstrap-feature-hubs.js.gz differ
+diff --git a/client/js/bootstrap-feature-hubs.js.map b/client/js/bootstrap-feature-hubs.js.map
+index 57f41456..47629089 100644
+Binary files a/client/js/bootstrap-feature-hubs.js.map and b/client/js/bootstrap-feature-hubs.js.map differ
+diff --git a/client/js/bootstrap-lite.js b/client/js/bootstrap-lite.js
+index fa66669b..d8126c81 100644
+Binary files a/client/js/bootstrap-lite.js and b/client/js/bootstrap-lite.js differ
+diff --git a/client/js/bootstrap-lite.js.br b/client/js/bootstrap-lite.js.br
+index af94eab6..00c8650b 100644
+Binary files a/client/js/bootstrap-lite.js.br and b/client/js/bootstrap-lite.js.br differ
+diff --git a/client/js/bootstrap-lite.js.gz b/client/js/bootstrap-lite.js.gz
+index 7ce65c4c..25e943f9 100644
+Binary files a/client/js/bootstrap-lite.js.gz and b/client/js/bootstrap-lite.js.gz differ
+diff --git a/client/js/bootstrap-lite.js.map b/client/js/bootstrap-lite.js.map
+index 30eb1619..cd885861 100644
+Binary files a/client/js/bootstrap-lite.js.map and b/client/js/bootstrap-lite.js.map differ
+diff --git a/client/js/bootstrap-runtime.js b/client/js/bootstrap-runtime.js
+index b2c27078..69538d5d 100644
+Binary files a/client/js/bootstrap-runtime.js and b/client/js/bootstrap-runtime.js differ
+diff --git a/client/js/bootstrap-runtime.js.br b/client/js/bootstrap-runtime.js.br
+index 5812b3df..164f3f3a 100644
+Binary files a/client/js/bootstrap-runtime.js.br and b/client/js/bootstrap-runtime.js.br differ
+diff --git a/client/js/bootstrap-runtime.js.gz b/client/js/bootstrap-runtime.js.gz
+index aad85cf4..10baffa6 100644
+Binary files a/client/js/bootstrap-runtime.js.gz and b/client/js/bootstrap-runtime.js.gz differ
+diff --git a/client/js/bootstrap-runtime.js.map b/client/js/bootstrap-runtime.js.map
+index 2cd2b6ff..81ca3aa2 100644
+Binary files a/client/js/bootstrap-runtime.js.map and b/client/js/bootstrap-runtime.js.map differ
+diff --git a/client/js/bootstrap-size.test.mjs b/client/js/bootstrap-size.test.mjs
+index 8b30b82f..13f86d04 100644
+--- a/client/js/bootstrap-size.test.mjs
++++ b/client/js/bootstrap-size.test.mjs
+@@ -570,7 +570,13 @@ const budgets = [
+   // 1_578_296 / 428_783 / 344_121 raw/gzip/brotli. Keep the loader's approved
+   // raw allocation at 1_578_550; gzip moves 428_500 -> 428_900 and Brotli
+   // 344_050 -> 344_250 for narrow measured headroom.
+-  { file: "bootstrap.js", raw: 1_578_550, gzip: 428_900, brotli: 344_250 },
++  // gosx#217: event-mode live binds (data-gosx-live-mode="event"), region
++  // append/prepend growth modes, hub reconnect backoff, and the earlier
++  // boolean-attribute live bind (data-gosx-live-bind-attr targeting
++  // hidden/disabled) plus its Object.create(null) target-map hardening, all
++  // carried by navigation.ts/regions.ts/hubs.ts in the monolith. Measured:
++  // 1_580_179 / 429_352 / 344_765. Caps raised with narrow rounding headroom.
++  { file: "bootstrap.js", raw: 1_580_500, gzip: 429_600, brotli: 345_000 },
+   // Bumped raw 124_000 -> 126_000, gzip 34_000 -> 35_000, brotli 29_000 ->
+   // 30_000 for the same generic region/action/stream contracts. Bumped raw
+   // 126_000 -> 129_000 for the core request transport bridge. Bumped raw
+@@ -637,7 +643,11 @@ const budgets = [
+   // 144_189 / 39_212 / 34_215, plus rounding headroom.
+   // v0.52.0 disclosure authority. Measured: 148_060 / 40_423 / 35_255,
+   // plus narrow rounding headroom.
+-  { file: "bootstrap-runtime.js", raw: 149_000, gzip: 41_000, brotli: 35_800 },
++  // gosx#217: event-mode live binds, region append/prepend, and hub
++  // reconnect backoff (navigation.ts/regions.ts/hubs.ts, all carried by the
++  // runtime chunk). Measured raw 149_876; gzip and brotli stayed under
++  // their existing caps. Raw cap raised with narrow rounding headroom.
++  { file: "bootstrap-runtime.js", raw: 150_000, gzip: 41_000, brotli: 35_800 },
+   // Bumped raw 102_000 -> 105_000 for the same transport bridge. Bumped raw
+   // 105_000 -> 107_000 for latest-request coordination. Bumped raw
+   // 107_000 -> 110_000 for the shared runtime DOM replacement lifecycle.
+@@ -686,7 +696,11 @@ const budgets = [
+   // ride in the lite bundle. Measured: 107_874 / 28_741 / 25_605.
+   // v0.52.0 disclosure authority. Measured: 111_565 / 29_882 / 26_549,
+   // plus narrow rounding headroom.
+-  { file: "bootstrap-lite.js", raw: 112_500, gzip: 30_500, brotli: 27_100 },
++  // gosx#217: same navigation.ts/regions.ts growth as bootstrap-runtime.js
++  // above, carried by the lite chunk. Measured raw 113_378; gzip and brotli
++  // stayed under their existing caps. Raw cap raised with narrow rounding
++  // headroom.
++  { file: "bootstrap-lite.js", raw: 113_500, gzip: 30_500, brotli: 27_100 },
+   // Bumped raw 510_000 -> 512_000 for the WebGL Selena executor. Bumped gzip
+   // 140_000 -> 140_500 for static GLB live model records and transform
+   // reprojection used by baked computed meshes.
+@@ -1430,9 +1444,14 @@ const routeBudgets = [
+     // metadata and nonce propagation. Measured: 254_644 / 72_004 / 63_239.
+     // v0.52.0 disclosure authority is part of bootstrap-runtime.js. Measured
+     // selective total: 257_866 / 72_950 / 64_082, plus narrow headroom.
+-    raw: 259_000,
+-    gzip: 73_500,
+-    brotli: 64_700,
++    // Bumped raw 259_000 -> 260_000 for event-mode live binds, region
++    // append/prepend, and hub reconnect backoff (gosx#217 extension).
++    // Measured selective total: 259_682 / 73_492 / 64_547, plus narrow
++    // headroom on gzip/brotli too (both were within single-digit percent of
++    // their prior caps already).
++    raw: 260_000,
++    gzip: 73_700,
++    brotli: 64_800,
+     maxMonolithFraction: 0.25,
+   },
+   // Scene3D had no route budget until now, so the four-chunk Scene3D surface
+@@ -1679,9 +1698,13 @@ const routeBudgets = [
+     // this five-chunk route: 1_068_638 / 295_977 / 250_761 raw/gzip/brotli.
+     // Raw remains within the existing ceiling; gzip 295_750 -> 296_000 and
+     // brotli 250_500 -> 250_950.
+-    raw: 1_069_000,
+-    gzip: 296_000,
+-    brotli: 250_950,
+... (fixture truncated)
+diff --git a/client/js/bootstrap.js b/client/js/bootstrap.js
+index 04f1fa2d..53e0fa3e 100644
+Binary files a/client/js/bootstrap.js and b/client/js/bootstrap.js differ
+diff --git a/client/js/bootstrap.js.br b/client/js/bootstrap.js.br
+index 9f1e3eee..0dc5abb6 100644
+Binary files a/client/js/bootstrap.js.br and b/client/js/bootstrap.js.br differ
+diff --git a/client/js/bootstrap.js.gz b/client/js/bootstrap.js.gz
+index c5ec08a2..2050d5d9 100644
+Binary files a/client/js/bootstrap.js.gz and b/client/js/bootstrap.js.gz differ
+diff --git a/client/js/bootstrap.js.map b/client/js/bootstrap.js.map
+index b3fc328a..c687eee4 100644
+Binary files a/client/js/bootstrap.js.map and b/client/js/bootstrap.js.map differ
+diff --git a/client/js/runtime-33-live-bind-attr-class.test.js b/client/js/runtime-33-live-bind-attr-class.test.js
+index b0cf5af2..be5b22ae 100644
+--- a/client/js/runtime-33-live-bind-attr-class.test.js
++++ b/client/js/runtime-33-live-bind-attr-class.test.js
+@@ -96,6 +96,11 @@ for (const [target, value] of [
+   // csrfTokenFromElement reads both for CSRF token resolution, so a bind
+   // must never be able to rewrite either one.
+   ["data-csrf-token", "evil-token"], ["data-csrf", "evil-token"],
++  // Every target map liveBindAttrTargetAllowed reads is built with
++  // Object.create(null): a plain object literal answers a lookup for any
++  // one of these three names truthy through Object.prototype alone, with
++  // no entry for the name ever having been added.
++  ["constructor", "x"], ["__proto__", "x"], ["hasOwnProperty", "x"],
+ ]) {
+   test("an attribute bind refuses " + target + "=" + JSON.stringify(value), async () => {
+     const { root, node } = liveRoot(target + ":v");
+diff --git a/client/js/runtime-34-live-event-mode.test.js b/client/js/runtime-34-live-event-mode.test.js
+new file mode 100644
+index 00000000..02e4633c
+--- /dev/null
++++ b/client/js/runtime-34-live-event-mode.test.js
+@@ -0,0 +1,52 @@
++"use strict";
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const { navigationSource, FakeElement, createContext, runScript, installManualTimers, flushAsyncWork } = require("./runtime-test-harness.js");
++
++const url = "http://localhost:3000/draft/live.json";
++function eventRoot(withSrc) {
++  const root = new FakeElement("div", null);
++  root.setAttribute("data-gosx-live-on", "draft:pick draft:clock");
++  root.setAttribute("data-gosx-live-mode", "event");
++  if (withSrc) root.setAttribute("data-gosx-live-src", url);
++  const name = new FakeElement("span", null);
++  name.setAttribute("data-gosx-live-bind", "cell.3.4");
++  name.textContent = "3.04";
++  root.appendChild(name);
++  return { root, name };
++}
++const hubEvent = (env, event, data) => env.document.dispatchEvent({ type: "gosx:hub:event", detail: { hubID: "h", hubName: "draft-live", event, data } });
++async function boot(root, routes) {
++  const env = createContext({ elements: [root], fetchRoutes: routes || {} });
++  installManualTimers(env.context);
++  runScript(navigationSource, env.context, "navigation_runtime.js");
++  await flushAsyncWork();
++  return env;
++}
++
++test("event mode applies the hub payload to binds with no fetch and needs no data-gosx-live-src", async () => {
++  const { root, name } = eventRoot(false);
++  const env = await boot(root);
++  hubEvent(env, "draft:pick", { cell: { "3": { "4": "Tee Higgins" } } });
++  await flushAsyncWork();
++  assert.equal(name.textContent, "Tee Higgins");
++  assert.equal(env.fetchCalls.length, 0, "event mode must never fetch on an event");
++});
++
++test("event mode ignores an unmatched event and a non-object payload", async () => {
++  const { root, name } = eventRoot(false);
++  const env = await boot(root);
++  hubEvent(env, "draft:seat", { cell: { "3": { "4": "Wrong" } } });
++  hubEvent(env, "draft:pick", "not an object");
++  await flushAsyncWork();
++  assert.equal(name.textContent, "3.04");
++});
++
++test("event mode with a src still fetches on window.__gosx.live.refresh", async () => {
++  const { root, name } = eventRoot(true);
++  const env = await boot(root, { [url]: { text: JSON.stringify({ cell: { "3": { "4": "Repaired" } } }) } });
++  assert.equal(env.fetchCalls.length, 0, "no fetch at setup without an interval");
++  await env.context.__gosx.live.refresh(root);
++  assert.equal(name.textContent, "Repaired");
++  assert.equal(env.fetchCalls.filter((call) => call.url === url).length, 1);
++});
+diff --git a/client/js/runtime-35-hub-reconnect-backoff.test.js b/client/js/runtime-35-hub-reconnect-backoff.test.js
+new file mode 100644
+index 00000000..c1ddc9c4
+--- /dev/null
++++ b/client/js/runtime-35-hub-reconnect-backoff.test.js
+@@ -0,0 +1,32 @@
++"use strict";
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const { bootstrapSource, createContext, runScript, flushAsyncWork, installManualTimers } = require("./runtime-test-harness.js");
++
++const makeSocket = (url) => ({ url, readyState: 1, onmessage: null, onclose: null, onopen: null, onerror: null, close() { this.readyState = 3; } });
++
++test("reconnect delay grows from 500 ms to a 15 s cap with bounded jitter and resets on open", async () => {
++  const env = createContext({ createWebSocket: makeSocket, fetchRoutes: { "/runtime.wasm": { bytes: [0, 97, 115, 109] } }, manifest: { hubs: [{ id: "gosx-hub-0", name: "draft-live", path: "/draft/live", bindings: [] }] } });
++  const timers = installManualTimers(env.context);
++  runScript(bootstrapSource, env.context, "bootstrap.js");
++  await flushAsyncWork();
++  const hubs = env.context.__gosx.host.hubs;
++  assert.equal(hubs.reconnectDelayMs(0, 0), 500);
++  assert.equal(hubs.reconnectDelayMs(1, 0), 1000);
++  assert.equal(hubs.reconnectDelayMs(5, 0), 15000, "the cap holds");
++  assert.equal(hubs.reconnectDelayMs(2, 1), 2500, "jitter adds at most 25 percent");
++  const record = () => env.context.__gosx.hubs.get("gosx-hub-0");
++  env.sockets[0].onclose();
++  env.sockets[0].onclose(); // a second close of the same socket schedules nothing new
++  assert.equal(record().reconnectAttempt, 1);
++  assert.equal(timers.count(), 1);
++  timers.runDelay(record().reconnectDelay);
++  await flushAsyncWork();
++  assert.equal(env.sockets.length, 2);
++  env.sockets[1].onclose();
++  assert.equal(record().reconnectAttempt, 2);
++  timers.runDelay(record().reconnectDelay);
++  await flushAsyncWork();
++  env.sockets[2].onopen();
++  assert.equal(record().reconnectAttempt, 0, "a successful open resets the backoff");
++});
+diff --git a/client/runtime/host/hubs.ts b/client/runtime/host/hubs.ts
+index 69366e83..69118f10 100644
+--- a/client/runtime/host/hubs.ts
++++ b/client/runtime/host/hubs.ts
+@@ -299,13 +299,20 @@
+       || key === " ";
+   }
+ 
+-  function connectHub(entry) {
++  // connectHub's optional attempt parameter is the reconnect attempt
++  // number this connection is retrying (0 for a fresh, first-ever
++  // connection): scheduleHubReconnect below passes its own
++  // current.reconnectAttempt through so the NEW record it creates keeps
++  // counting up the same exponential-backoff sequence instead of
++  // resetting to attempt 0 on every retry, which would otherwise pin
++  // every reconnect delay back to reconnectDelayMs(0) forever.
++  function connectHub(entry, attempt) {
+     if (!canConnectHub(entry)) return;
+ 
+     if (gosxHost.hubs && typeof gosxHost.hubs.disconnect === "function") {
+       gosxHost.hubs.disconnect(entry.id);
+     }
+-    const record = createHubRecord(entry);
++    const record = createHubRecord(entry, attempt);
+     window.__gosx.hubs.set(entry.id, record);
+     attachHubSocketHandlers(record);
+   }
+@@ -314,11 +321,12 @@
+     return Boolean(entry && entry.id && entry.path && typeof WebSocket === "function");
+   }
+ 
+-  function createHubRecord(entry) {
++  function createHubRecord(entry, attempt) {
+     return {
+       entry: entry,
+       socket: new WebSocket(hubURL(entry.path)),
+       reconnectTimer: null,
++      reconnectAttempt: attempt || 0,
+     };
+   }
+ 
+@@ -372,6 +380,11 @@
+       // Some test doubles and embedded runtimes expose binaryType as read-only.
+     }
+     socket.onopen = function() {
++      // A successful open proves the connection is healthy again, so the
++      // exponential backoff resets: the NEXT unexpected close starts back
++      // at reconnectDelayMs(0), not wherever this connection's own retry
++      // count left off.
++      record.reconnectAttempt = 0;
+       if (record.inputController && typeof record.inputController.flush === "function") {
+         record.inputController.flush();
+       }
+@@ -456,14 +469,35 @@
+     }));
+   }
+ 
++  // reconnectDelayMs computes a hub's next reconnect delay: exponential
++  // backoff from a 500ms base, doubling per attempt (0-indexed: attempt 0
++  // is the first retry after the original connection), capped at 15s, plus
++  // up to 25 percent random jitter on top of whichever of those two is
++  // smaller — the jitter spreads out a thundering-herd reconnect storm
++  // (every hub client on a restarted server retrying at the exact same
++  // moment) without ever pushing a delay past the 15s cap itself. random
++  // is an injection point for a deterministic test; production callers
++  // omit it and get Math.random().
++  function reconnectDelayMs(attempt, random) {
++    var base = Math.min(15000, 500 * Math.pow(2, Math.max(0, attempt)));
++    var jitter = typeof random === "number" ? random : Math.random();
++    return Math.round(Math.min(15000, base + base * 0.25 * jitter));
++  }
++
+   function scheduleHubReconnect(record) {
+     const entry = record.entry;
+-    const socket = record.socket;
+     const current = window.__gosx.hubs.get(entry.id);
+-    if (!current || current.socket !== socket) return;
++    // current.reconnectTimer != null means a reconnect is already
++    // scheduled for this hub id — a second close of the same (already
++    // closing) socket, or a close racing an in-flight reconnect, must
++    // never schedule a second, overlapping retry on top of the first.
++    if (!current || current.socket !== record.socket || current.reconnectTimer != null) return;
++    current.reconnectAttempt = (current.reconnectAttempt || 0) + 1;
++    current.reconnectDelay = reconnectDelayMs(current.reconnectAttempt - 1);
+     current.reconnectTimer = setTimeout(function() {
+-      connectHub(entry);
+-    }, 1000);
++      current.reconnectTimer = null;
++      connectHub(entry, current.reconnectAttempt);
++    }, current.reconnectDelay);
+   }
+ 
+   async function connectAllHubs(manifest) {
+@@ -515,4 +549,5 @@
+     connect: connectHub,
+     connectAll: connectAllHubs,
+     revalidate: revalidateHubConnections,
+... (fixture truncated)
+diff --git a/client/runtime/host/navigation-runtime.min.js b/client/runtime/host/navigation-runtime.min.js
+index bc6561c0..1424994f 100644
+--- a/client/runtime/host/navigation-runtime.min.js
++++ b/client/runtime/host/navigation-runtime.min.js
+@@ -1,2 +1,2 @@
+... (fixture truncated)
+diff --git a/client/runtime/host/navigation.ts b/client/runtime/host/navigation.ts
+index 011c3154..7dda7619 100644
+--- a/client/runtime/host/navigation.ts
++++ b/client/runtime/host/navigation.ts
+@@ -103,6 +103,12 @@
+   // region manual refresh" comment ahead of setupLiveRegions below.
+   const LIVE_SIGNAL_ATTR = "data-gosx-live-signal";
+   const LIVE_ON_ATTR = "data-gosx-live-on";
++  // LIVE_MODE_ATTR (gosx#217 extension) selects event mode:
++  // data-gosx-live-mode="event" applies a matching gosx:hub:event's own
++  // object payload directly to the binds under root, with no fetch at
++  // all — data-gosx-live-src becomes optional in that mode, serving only
++  // the public window.__gosx.live.refresh(element) manual-refresh path.
++  const LIVE_MODE_ATTR = "data-gosx-live-mode";
+   // Declarative list filter (data-gosx-filter, gosx#215). See "Declarative
+   // list filter" below for the full contract; these are the attribute,
+   // class-hook, and timing constants it reads and writes.
+@@ -5734,6 +5740,7 @@
+           || node.hasAttribute(LIVE_INTERVAL_ATTR)
+           || node.hasAttribute(LIVE_SIGNAL_ATTR)
+           || node.hasAttribute(LIVE_ON_ATTR)
++          || node.hasAttribute(LIVE_MODE_ATTR)
+         )
+       ) {
+         found.push(node);
+@@ -5854,19 +5861,42 @@
+   // submission later trusts. Every other data-* and aria-* name is read
+   // only by the consumer's own code; the runtime reads none of them.
+   const LIVE_BIND_ATTR_NAME_PATTERN = /^[A-Za-z_][-A-Za-z0-9_.]*$/;
+-  const LIVE_BIND_PLAIN_TARGETS = { title: true, value: true, datetime: true, disabled: true, hidden: true };
+-  const LIVE_BIND_BOOLEAN_TARGETS = { disabled: true, hidden: true };
+-  const LIVE_BIND_URL_TARGETS = { href: true };
+-  const LIVE_BIND_REFUSED_DATA_TARGETS = { "data-csrf-token": true, "data-csrf": true };
++  // Every one of these four target maps is built with Object.create(null)
++  // and checked through liveBindTargetMapHas rather than a bracket lookup
++  // or bare truthiness test — the same pattern findCountdownSegments
++  // documents in full above (gosx#178 review finding B2): a bind target
++  // is untrusted, author-controlled attribute data, and a plain object
++  // literal answers a lookup like map["constructor"], map["__proto__"],
++  // or map["hasOwnProperty"] truthy without that name ever having been
++  // added to the map. Every one of those three is refused TODAY only by
++  // the accident of which check in liveBindAttrTargetAllowed happens to
++  // run first (LIVE_BIND_REFUSED_DATA_TARGETS's own inherited-property
++  // lookup returns a truthy function/object for each of them, which this
++  // function's "if refused, return false" branch happens to treat as a
++  // refusal) — not because any of these maps was designed to reject them.
++  // A null-prototype object removes the whole class of accident: it has
++  // no inherited properties for an untrusted key to ever collide with.
++  function liveBindTargetMap(names) {
++    const map = Object.create(null);
++    for (const name of names) map[name] = true;
++    return map;
++  }
++  function liveBindTargetMapHas(map, name) {
++    return Object.prototype.hasOwnProperty.call(map, name);
++  }
++  const LIVE_BIND_PLAIN_TARGETS = liveBindTargetMap(["title", "value", "datetime", "disabled", "hidden"]);
++  const LIVE_BIND_BOOLEAN_TARGETS = liveBindTargetMap(["disabled", "hidden"]);
++  const LIVE_BIND_URL_TARGETS = liveBindTargetMap(["href"]);
++  const LIVE_BIND_REFUSED_DATA_TARGETS = liveBindTargetMap(["data-csrf-token", "data-csrf"]);
+ 
+   function liveBindAttrTargetAllowed(node, target, value) {
+     const name = String(target || "").toLowerCase();
+     if (!name || !LIVE_BIND_ATTR_NAME_PATTERN.test(name)) return false;
+     if (name === COUNTDOWN_ATTR) return !(node && node.hasAttribute && node.hasAttribute(COUNTDOWN_THEN_ATTR));
+     if (name.indexOf("data-gosx-") === 0) return false;
+-    if (LIVE_BIND_REFUSED_DATA_TARGETS[name]) return false;
+-    if (name.indexOf("data-") === 0 || name.indexOf("aria-") === 0 || LIVE_BIND_PLAIN_TARGETS[name]) return true;
+-    if (LIVE_BIND_URL_TARGETS[name]) {
+... (fixture truncated)
+diff --git a/client/runtime/host/regions.ts b/client/runtime/host/regions.ts
+index 3d08bf2d..dd3c1f47 100644
+--- a/client/runtime/host/regions.ts
++++ b/client/runtime/host/regions.ts
+@@ -252,6 +252,53 @@
+     return record.requestController;
+   }
+ 
++  // regionCursorValue reads {cursor}'s fill value off el's own current
++  // children — never off the fetched fragment, which does not exist yet
++  // at the point record.refresh builds the request URL: the FIRST
++  // cursorAttr-carrying child in prepend mode (a prepend inserts ABOVE
++  // it, so "since my current newest row" is the first one on the page
++  // today), the LAST one otherwise (append or replace mode; "since my
++  // current last row" for a feed that grows downward). Resolves "" when
++  // cursorAttr names nothing, or el has no matching child yet (the first
++  // fetch of a region that starts empty).
++  function regionCursorValue(record, el) {
++    if (!record.cursorAttr || !el || typeof el.querySelectorAll !== "function") return "";
++    var matches = Array.from(el.querySelectorAll("[" + record.cursorAttr + "]") || []);
++    if (!matches.length) return "";
++    var node = record.mode === "prepend" ? matches[0] : matches[matches.length - 1];
++    return node && typeof node.getAttribute === "function" ? (node.getAttribute(record.cursorAttr) || "") : "";
++  }
++
++  // insertRegionFragment keeps every existing child. A keyed node whose key
++  // attribute matches a child already present is dropped, so an overlapping
++  // fragment never duplicates a row. Only the inserted nodes mount; the
++  // container and its older children are never re-mounted. Returns whether
++  // anything was inserted.
++  function insertRegionFragment(record, el, html) {
++    var position = record.mode === "prepend" ? "afterbegin" : "beforeend";
++    var scratch = document.createElement("template");
++    scratch.innerHTML = html;
++    var content = scratch.content || scratch;
++    var nodes = Array.from(content.childNodes || []).filter(function (node) { return node.nodeType === 1; });
++    if (record.keyAttr) {
++      var present = {};
++      for (var existing of Array.from(el.querySelectorAll("[" + record.keyAttr + "]"))) present[existing.getAttribute(record.keyAttr)] = true;
++      nodes = nodes.filter(function (node) { var key = node.getAttribute(record.keyAttr); return key == null || !present[key]; });
++    }
++    if (!nodes.length) return false;
++    var before = (el.childNodes || []).length;
++    el.insertAdjacentHTML(position, nodes.map(function (node) { return node.outerHTML; }).join(""));
++    var all = Array.from(el.childNodes || []);
++    var added = all.length - before;
++    var fresh = position === "afterbegin" ? all.slice(0, added) : all.slice(all.length - added);
++    for (var node of fresh) {
++      if (!node || node.nodeType !== 1) continue;
++      if (gosxHost.surfaces && typeof gosxHost.surfaces.mount === "function") gosxHost.surfaces.mount(node);
++      applySceneCommandScripts(node);
++    }
++    return true;
++  }
++
+   // fetchRegion is shared by every trigger kind — signal, hub event, manual
+   // refresh(), and the periodic poll bindRegion below starts for
+   // data-gosx-region-interval (gosx#217). If-None-Match/ETag support lives
+@@ -319,18 +366,28 @@
+         // does not scroll on its own axis.
+         var scrollTop = typeof el.scrollTop === "number" ? el.scrollTop : null;
+         var scrollLeft = typeof el.scrollLeft === "number" ? el.scrollLeft : null;
+-        // gosxHost.dom.replace is a forwarding shim compatibility.ts installs
+-        // unconditionally, so it is always a function; probe the ambient
+-        // name it forwards to instead of the shim to tell "dom.ts never
+-        // loaded" (run the unmanaged fallback below, as before) apart from
+-        // "dom.ts loaded and replaceRuntimeContent failed" (see dom.ts:
+-        // on failure it already disposed the old subtree and may have
+-        // partially written the new one, so re-running the unmanaged
+-        // dispose/innerHTML/mount fallback would double-apply on top of
+-        // that). The latter throws instead, so the catch below reports the
+... (fixture truncated)
+diff --git a/examples/gosx-docs/app/docs/hubs/page.gsx b/examples/gosx-docs/app/docs/hubs/page.gsx
+index 78861a9e..ec81e513 100644
+--- a/examples/gosx-docs/app/docs/hubs/page.gsx
++++ b/examples/gosx-docs/app/docs/hubs/page.gsx
+@@ -92,6 +92,9 @@ func Page() Node {
+ 			<span class="inline-code">DropStats</span>
+ 			and client drop statistics. A dropped text event is not replayed automatically.
+ 		</p>
++		<p>
++			The browser runtime's own hub client reconnects automatically after an unexpected close: the delay grows from 500 ms, doubling per attempt with up to 25 percent jitter, up to a 15 second cap, and resets to 500 ms the moment a reconnect actually opens.
++		</p>
+ 		<h2 id="documents">CRDT documents</h2>
+ 		<CodeBlock lang="go" source={data.crdtSample} />
+ 		<p>
+diff --git a/examples/gosx-docs/app/docs/runtime/page.gsx b/examples/gosx-docs/app/docs/runtime/page.gsx
+index 8cde64fc..13d8646e 100644
+--- a/examples/gosx-docs/app/docs/runtime/page.gsx
++++ b/examples/gosx-docs/app/docs/runtime/page.gsx
+@@ -381,6 +381,15 @@ func Page() Node {
+ 				<span class="inline-code">detail.url</span>
+ 				) to run your own re-initialization. This rescan never restarts the periodic revalidation poll, the heartbeat ping, or a live region's own connection — those keep their own independent timer or connection across every swap.
+ 			</p>
++			<p>
++				A countdown follows its own
++				<span class="inline-code">data-gosx-countdown</span>
++				attribute. Change the attribute and the next tick counts from the new instant — a live-bound region can retarget an existing countdown this way instead of re-rendering it (see
++				<span class="inline-code">data-gosx-live-bind-attr</span>
++				below).
++				<span class="inline-code">window.__gosx.countdown.retarget(root)</span>
++				forces the re-read and restarts the shared timer after an expiry, for a caller that changed the attribute without triggering the runtime's own attribute observer.
++			</p>
+ 		</section>
+ 		<section id="attention-watcher">
+ 			<h2>Attention watcher</h2>
+@@ -642,6 +651,61 @@ func Page() Node {
+ 				<span class="inline-code">data-gosx-live-flash-class</span>
+ 				to a bound element to retrigger a CSS animation class whenever its resolved text actually changes — the same remove-then-re-add-after-a-reflow trick a hand-written score ticker already uses, now with zero application JavaScript.
+ 			</p>
++			<p>
++				Add
++				<span class="inline-code">data-gosx-live-bind-attr</span>
++				to set a named element attribute from a bind key instead of the element's text, and
++				<span class="inline-code">data-gosx-live-bind-class</span>
++				to toggle a named class from a boolean bind value. Each takes a comma-separated
++				<span class="inline-code">target:key[,target:key...]</span>
++				list, sharing the same polled or event-mode payload and the same key grammar
++				<span class="inline-code">data-gosx-live-bind</span>
++				uses above.
++			</p>
++			{CodeBlock("gosx", `<b data-gosx-countdown="2026-09-06T17:00:00Z"
++	    data-gosx-live-bind-attr="data-gosx-countdown:clock.effective_deadline"
++	    data-gosx-live-bind-class="pick-clock--paused:clock.paused">15:00</b>`)}
++			<p>
++				An attribute bind is a server-controlled write into the DOM, so its target passes a POSITIVE allowlist: never an
++				<span class="inline-code">on*</span>
++				handler,
++				<span class="inline-code">style</span>
++				,
++				<span class="inline-code">srcdoc</span>
++				, or a runtime
++				<span class="inline-code">data-gosx-*</span>
++				attribute other than
++				<span class="inline-code">data-gosx-countdown</span>
++				(letting a payload retarget a countdown, refused whenever the node also declares
++				<span class="inline-code">data-gosx-countdown-then</span>
++				); a URL attribute such as
++				<span class="inline-code">href</span>
++				takes a relative or http(s) URL only.
++				<span class="inline-code">hidden</span>
++				and
++				<span class="inline-code">disabled</span>
++				are boolean attributes: a bound value of
++				<span class="inline-code">true</span>
++				sets the attribute present with an empty value;
++				<span class="inline-code">false</span>
++				or a JSON
++				<span class="inline-code">null</span>
++				removes it.
++			</p>
++			<p>
++				Add
++				<span class="inline-code">data-gosx-live-on</span>
++				together with
++				<span class="inline-code">data-gosx-live-mode="event"</span>
++				to apply a matching hub event's own object payload directly to the binds under the root, with no fetch at all —
++				<span class="inline-code">data-gosx-live-src</span>
++				becomes optional in that mode, serving only the public
++				<span class="inline-code">window.__gosx.live.refresh(element)</span>
++				manual-refresh escape hatch.
++			</p>
++			{CodeBlock("gosx", `<div data-gosx-live-on="draft:pick" data-gosx-live-mode="event">
++	    <span data-gosx-live-bind="cell.3.4">3.04</span>
++	</div>`)}
+ 			<p>
+... (fixture truncated)
+diff --git a/runtime_contract.go b/runtime_contract.go
+index 959a1fbb..e8f4b258 100644
+--- a/runtime_contract.go
++++ b/runtime_contract.go
+@@ -103,6 +103,23 @@ const (
+ 	// select retains focus. See the client runtime guide's "Live-bound
+ 	// regions" section for the full contract.
+ 	RegionIntervalAttr = "data-gosx-region-interval"
++	// RegionModeAttr (gosx#217 extension) selects "replace" (the default:
++	// the existing managed-swap/innerHTML-fallback contract, unchanged),
++	// "append", or "prepend": the latter two insert a fetched fragment
++	// beside el's existing children instead of replacing them, for a tape,
++	// a board, or any other list that should only ever grow. RegionKeyAttr
++	// names the attribute a fetched fragment's own top-level elements
++	// carry for dedupe — a fragment node whose key matches a child already
++	// present is dropped, so an overlapping fetch never duplicates a row.
++	// RegionCursorAttr names the attribute read off an already-present
++	// child (the first one in prepend mode, the last one otherwise) to
++	// fill a "{cursor}" token in RegionURLAttr, the append/prepend
++	// counterpart to RegionFieldAttr's own "{value}" token; an empty
++	// cursor without RegionAllowEmptyAttr suppresses the fetch, the same
++	// as an empty "{value}".
++	RegionModeAttr   = "data-gosx-region-mode"
++	RegionKeyAttr    = "data-gosx-region-key"
++	RegionCursorAttr = "data-gosx-region-cursor"
+ )
+ 
+ // ProgressiveEnhancementOptions describes a browser enhancement while
+@@ -292,13 +309,20 @@ func Action(tag string, opts ActionOptions, args ...any) Node {
+ 
+ // RegionOptions describes a server-rendered HTML region that the bootstrap
+ // may refresh after a signal or hub event. The initial children remain the
+-// progressive-enhancement fallback.
++// progressive-enhancement fallback. Mode selects "replace" (the zero value
++// and default), "append", or "prepend" (gosx#217 extension); Key and Cursor
++// are meaningful only alongside "append"/"prepend" — see RegionModeAttr,
++// RegionKeyAttr, and RegionCursorAttr's own doc comments above for the full
++// contract.
+ type RegionOptions struct {
+ 	URL      string
+ 	Signal   string
+ 	Events   []string
+ 	Field    string
+ 	Interval string
++	Mode     string
++	Key      string
++	Cursor   string
+ 
+ 	AllowEmpty bool
+ }
+@@ -331,6 +355,15 @@ func RegionAttrs(opts RegionOptions) AttrList {
+ 	if value := strings.TrimSpace(opts.Interval); value != "" {
+ 		attrs = append(attrs, Attr(RegionIntervalAttr, value))
+ 	}
++	if value := strings.TrimSpace(opts.Mode); value != "" {
++		attrs = append(attrs, Attr(RegionModeAttr, value))
++	}
++	if value := strings.TrimSpace(opts.Key); value != "" {
++		attrs = append(attrs, Attr(RegionKeyAttr, value))
++	}
++	if value := strings.TrimSpace(opts.Cursor); value != "" {
++		attrs = append(attrs, Attr(RegionCursorAttr, value))
++	}
+ 	if opts.AllowEmpty {
+ 		attrs = append(attrs, BoolAttr(RegionAllowEmptyAttr))
+ 	}
+diff --git a/server/navigation_contract.go b/server/navigation_contract.go
+index e9ba5d19..d16c2f5a 100644
+--- a/server/navigation_contract.go
++++ b/server/navigation_contract.go
+@@ -204,6 +204,14 @@ const (
+ 	NavigationLiveFlashClassAttr = "data-gosx-live-flash-class"
+ 	NavigationLiveSignalAttr     = "data-gosx-live-signal"
+ 	NavigationLiveOnAttr         = "data-gosx-live-on"
++	// NavigationLiveModeAttr selects event mode: "event" applies a matched
++	// gosx:hub:event's own object payload directly to the binds under the
++	// same root, with no fetch at all. NavigationLiveSrcAttr becomes
++	// optional in that mode — it still serves the public
++	// window.__gosx.live.refresh(element) manual-refresh API, but nothing
++	// else, since an event-mode-only root never polls and never fetches on
++	// its own.
++	NavigationLiveModeAttr = "data-gosx-live-mode"
+ 	// NavigationLiveBindAttrAttr sets a named element attribute from a
+ 	// live-bind key, and NavigationLiveBindClassAttr toggles a named class
+ 	// from a boolean live-bind value. Both share NavigationLiveBindAttr's

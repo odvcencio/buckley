@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-05",
+  "kind": "fix",
+  "source": "odvcencio/buckley@8ae670f9",
+  "diff": "buckley-small-05.diff",
+  "original": "fix(headless): stabilize durable replay test with longer lease duration\n\n- Raise the lease duration in TestDurableRunner_ReplaysCompletedStepsAndCommitsTranscriptOnce from 500ms to 5s so slow CI runs don't lose the lease mid-replay and fail spuriously\n"
+}

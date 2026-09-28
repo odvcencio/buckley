@@ -1,0 +1,242 @@
+diff --git a/pkg/ipc/grpc_server.go b/pkg/ipc/grpc_server.go
+index 48c63652..3720fa46 100644
+--- a/pkg/ipc/grpc_server.go
++++ b/pkg/ipc/grpc_server.go
+@@ -176,6 +176,22 @@ func (s *GRPCService) BroadcastEvent(event Event) {
+ 	}
+ }
+ 
++func (s *GRPCService) wantsEvent(event Event) bool {
++	select {
++	case <-s.done:
++		return false
++	default:
++	}
++	s.subscribersMu.RLock()
++	defer s.subscribersMu.RUnlock()
++	for _, subscriber := range s.subscribers {
++		if matchesEventFilter(event, subscriber.filter) {
++			return true
++		}
++	}
++	return false
++}
++
+ // runEventForwarder distributes events to subscribers.
+ // It exits when s.done is closed.
+ func (s *GRPCService) runEventForwarder() {
+diff --git a/pkg/ipc/hub.go b/pkg/ipc/hub.go
+index 2e2d7fa6..7d47cd8f 100644
+--- a/pkg/ipc/hub.go
++++ b/pkg/ipc/hub.go
+@@ -28,6 +28,10 @@ type EventForwarder interface {
+ 	BroadcastEvent(event Event)
+ }
+ 
++type eventInterest interface {
++	wantsEvent(event Event) bool
++}
++
+ // Hub fan-outs events to connected WebSocket clients and gRPC subscribers.
+ type Hub struct {
+ 	mu         sync.RWMutex
+@@ -61,6 +65,29 @@ func (h *Hub) AddForwarder(f EventForwarder) {
+ 	h.mu.Unlock()
+ }
+ 
++func (h *Hub) hasEventInterest(event Event) bool {
++	if h == nil {
++		return false
++	}
++	h.mu.RLock()
++	defer h.mu.RUnlock()
++	for client := range h.clients {
++		if client.closed.Load() {
++			continue
++		}
++		if client.filter == nil || client.filter(event) {
++			return true
++		}
++	}
++	for _, forwarder := range h.forwarders {
++		interest, ok := forwarder.(eventInterest)
++		if !ok || interest.wantsEvent(event) {
++			return true
++		}
++	}
++	return false
++}
++
+ // Broadcast sends an event to all clients, dropping slow consumers.
+ func (h *Hub) Broadcast(event Event) {
+ 	if event.Timestamp.IsZero() {
+diff --git a/pkg/ipc/hub_test.go b/pkg/ipc/hub_test.go
+index 0efa515e..25203c55 100644
+--- a/pkg/ipc/hub_test.go
++++ b/pkg/ipc/hub_test.go
+@@ -94,3 +94,39 @@ func TestHubBroadcastAssignsIDBeforeRecording(t *testing.T) {
+ 		t.Fatal("recorded timestamp is zero")
+ 	}
+ }
++
++type selectiveEventForwarder struct {
++	typeName string
++}
++
++func (*selectiveEventForwarder) BroadcastEvent(Event) {}
++
++func (f *selectiveEventForwarder) wantsEvent(event Event) bool {
++	return event.Type == f.typeName
++}
++
++func TestHubHasEventInterest_RespectsClientAndForwarderFilters(t *testing.T) {
++	hub := NewHub()
++	event := Event{Type: "view.patch", SessionID: "session-1"}
++	if hub.hasEventInterest(event) {
++		t.Fatal("empty hub reported event interest")
++	}
++
++	missionClient := hub.register(&fakeConn{writeCount: &atomic.Int32{}, closeCount: &atomic.Int32{}}, func(event Event) bool {
++		return event.Type == "mission.update"
++	})
++	if hub.hasEventInterest(event) {
++		t.Fatal("filtered client reported interest in view.patch")
++	}
++	hub.removeClient(missionClient)
++
++	forwarder := &selectiveEventForwarder{typeName: "telemetry.tool"}
++	hub.AddForwarder(forwarder)
++	if hub.hasEventInterest(event) {
++		t.Fatal("selective forwarder reported interest in view.patch")
++	}
++	forwarder.typeName = event.Type
++	if !hub.hasEventInterest(event) {
++		t.Fatal("matching forwarder did not report event interest")
++	}
++}
+diff --git a/pkg/ipc/server.go b/pkg/ipc/server.go
+index d941a181..55a6acf3 100644
+--- a/pkg/ipc/server.go
++++ b/pkg/ipc/server.go
+@@ -2301,6 +2301,10 @@ func (s *Server) broadcastViewPatch(sessionID string) {
+ 	if sessionID == "" || s.viewAssembler == nil {
+ 		return
+ 	}
++	event := Event{Type: "view.patch", SessionID: sessionID}
++	if !s.hub.hasEventInterest(event) {
++		return
++	}
+ 	state, err := s.viewAssembler.BuildSessionState(context.Background(), sessionID)
+ 	if err != nil || state == nil {
+ 		if err != nil {
+@@ -2308,12 +2312,9 @@ func (s *Server) broadcastViewPatch(sessionID string) {
+ 		}
+ 		return
+ 	}
+-	s.hub.Broadcast(Event{
+-		Type:      "view.patch",
+-		SessionID: sessionID,
+-		Payload:   viewmodel.Patch{Session: state},
+-		Timestamp: time.Now(),
+-	})
++	event.Payload = viewmodel.Patch{Session: state}
++	event.Timestamp = time.Now()
++	s.hub.Broadcast(event)
+ }
+ 
+ func (s *Server) issueSessionToken(sessionID string) (string, error) {
+diff --git a/pkg/ipc/server_view_patch_interest_test.go b/pkg/ipc/server_view_patch_interest_test.go
+new file mode 100644
+index 00000000..fa477b59
+--- /dev/null
++++ b/pkg/ipc/server_view_patch_interest_test.go
+@@ -0,0 +1,89 @@
++package ipc
++
++import (
++	"bytes"
++	"log"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	ipcpb "m31labs.dev/buckley/pkg/ipc/proto"
++	"m31labs.dev/buckley/pkg/storage"
++	"m31labs.dev/buckley/pkg/ui/viewmodel"
++)
++
++func TestServerBroadcastViewPatch_SkipsSnapshotWithoutInterestedConsumer(t *testing.T) {
++	store, err := storage.New(filepath.Join(t.TempDir(), "buckley.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &Server{
++		hub:           NewHub(),
++		viewAssembler: viewmodel.NewAssembler(store, nil, nil),
++	}
++	service := NewGRPCService(server)
++	server.hub.AddForwarder(service)
++	t.Cleanup(service.Close)
++	service.subscribersMu.Lock()
++	service.subscribers["telemetry-only"] = &eventSubscriber{
++		filter: &ipcpb.SubscribeRequest{EventTypes: []string{"telemetry.*"}},
++	}
++	service.subscribersMu.Unlock()
++	if err := store.Close(); err != nil {
++		t.Fatal(err)
++	}
++	var output bytes.Buffer
++	server.logger = log.New(&output, "", 0)
++
++	server.broadcastViewPatch("session-1")
++
++	if strings.Contains(output.String(), "view patch failed") {
++		t.Fatalf("snapshot queried closed store without a consumer: %s", output.String())
++	}
++}
++
++func TestServerBroadcastViewPatch_DeliversToMatchingSubscriber(t *testing.T) {
++	store, err := storage.New(filepath.Join(t.TempDir(), "buckley.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = store.Close() })
++	now := time.Now()
++	if err := store.CreateSession(&storage.Session{
++		ID: "session-1", Principal: "operator", CreatedAt: now, LastActive: now,
++		Status: storage.SessionStatusActive,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	server := &Server{
++		hub:           NewHub(),
++		viewAssembler: viewmodel.NewAssembler(store, nil, nil),
++		logger:        log.New(&bytes.Buffer{}, "", 0),
++	}
++	service := NewGRPCService(server)
++	server.hub.AddForwarder(service)
++	t.Cleanup(service.Close)
++	subscriber := &eventSubscriber{
++		operator: true,
++		filter: &ipcpb.SubscribeRequest{
++			SessionId:  "session-1",
++			EventTypes: []string{"view.patch"},
++		},
++		events: make(chan *ipcpb.Event, 1),
++	}
++	service.subscribersMu.Lock()
++	service.subscribers["view"] = subscriber
++	service.subscribersMu.Unlock()
++
++	server.broadcastViewPatch("session-1")
++
++	select {
++	case event := <-subscriber.events:
++		if event.GetType() != "view.patch" || event.GetSessionId() != "session-1" {
++			t.Fatalf("event = %+v", event)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("matching subscriber did not receive view.patch")
++	}
++}

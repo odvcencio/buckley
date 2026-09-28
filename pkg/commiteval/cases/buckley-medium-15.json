@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-15",
+  "kind": "update",
+  "source": "odvcencio/buckley@1751e154",
+  "diff": "buckley-medium-15.diff",
+  "original": "update(agents): restrict source-extractor to caller-named files only\n\n- Restrict the source-extractor agent's tool allowlist to read_file, removing search_text since repository discovery is the caller's responsibility\n- Rewrite the agent prompt to forbid scope expansion: read only caller-named files, never widen caller ranges or substitute anchors, and follow next_start_line only within caller scope and budget\n- Clarify that missing paths/anchors or unread ranges mean an incomplete result, not permission to expand scope\n- Add a test asserting the resolved one-shot execution tool filter is exactly read_file and submit_artifact\n- Update prompt assertions to cover the new scope rules and ban obsolete search/pagination wording\n"
+}

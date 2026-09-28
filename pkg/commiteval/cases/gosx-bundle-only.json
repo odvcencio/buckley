@@ -1,0 +1,14 @@
+{
+  "name": "gosx-bundle-only",
+  "kind": "bundle",
+  "source": "odvcencio/gosx@1207d57e",
+  "diff": "gosx-bundle-only.diff",
+  "original": "update(client): refresh generated JavaScript assets\n\n- Refresh JavaScript bundles, compressed assets, and source maps to keep distributed client artifacts synchronized\n",
+  "attr_globs": [
+    "client/js/bootstrap.js",
+    "client/js/bootstrap-lite.js",
+    "client/js/bootstrap-runtime.js",
+    "client/js/bootstrap-feature-*.js",
+    "client/js/*.js.map"
+  ]
+}

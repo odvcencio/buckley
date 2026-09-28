@@ -1,0 +1,36 @@
+diff --git a/client/js/bootstrap-lite.js b/client/js/bootstrap-lite.js
+index e88c3969..d78184f1 100644
+Binary files a/client/js/bootstrap-lite.js and b/client/js/bootstrap-lite.js differ
+diff --git a/client/js/bootstrap-lite.js.br b/client/js/bootstrap-lite.js.br
+index 3db3eaff..2fd5f9bf 100644
+Binary files a/client/js/bootstrap-lite.js.br and b/client/js/bootstrap-lite.js.br differ
+diff --git a/client/js/bootstrap-lite.js.gz b/client/js/bootstrap-lite.js.gz
+index a94418d6..22d68b91 100644
+Binary files a/client/js/bootstrap-lite.js.gz and b/client/js/bootstrap-lite.js.gz differ
+diff --git a/client/js/bootstrap-lite.js.map b/client/js/bootstrap-lite.js.map
+index b6468b56..4a07fe00 100644
+Binary files a/client/js/bootstrap-lite.js.map and b/client/js/bootstrap-lite.js.map differ
+diff --git a/client/js/bootstrap-runtime.js b/client/js/bootstrap-runtime.js
+index 13bd322b..abb55e73 100644
+Binary files a/client/js/bootstrap-runtime.js and b/client/js/bootstrap-runtime.js differ
+diff --git a/client/js/bootstrap-runtime.js.br b/client/js/bootstrap-runtime.js.br
+index ee397ca9..7a4e12bc 100644
+Binary files a/client/js/bootstrap-runtime.js.br and b/client/js/bootstrap-runtime.js.br differ
+diff --git a/client/js/bootstrap-runtime.js.gz b/client/js/bootstrap-runtime.js.gz
+index b65e2a30..9eb11c08 100644
+Binary files a/client/js/bootstrap-runtime.js.gz and b/client/js/bootstrap-runtime.js.gz differ
+diff --git a/client/js/bootstrap-runtime.js.map b/client/js/bootstrap-runtime.js.map
+index 19878af4..bfa8f7aa 100644
+Binary files a/client/js/bootstrap-runtime.js.map and b/client/js/bootstrap-runtime.js.map differ
+diff --git a/client/js/bootstrap.js b/client/js/bootstrap.js
+index a560f13b..4d4a8d6e 100644
+Binary files a/client/js/bootstrap.js and b/client/js/bootstrap.js differ
+diff --git a/client/js/bootstrap.js.br b/client/js/bootstrap.js.br
+index e15dc5d5..43d7d8e7 100644
+Binary files a/client/js/bootstrap.js.br and b/client/js/bootstrap.js.br differ
+diff --git a/client/js/bootstrap.js.gz b/client/js/bootstrap.js.gz
+index 0315d83a..27700029 100644
+Binary files a/client/js/bootstrap.js.gz and b/client/js/bootstrap.js.gz differ
+diff --git a/client/js/bootstrap.js.map b/client/js/bootstrap.js.map
+index 8a5df605..0d1179ab 100644
+Binary files a/client/js/bootstrap.js.map and b/client/js/bootstrap.js.map differ

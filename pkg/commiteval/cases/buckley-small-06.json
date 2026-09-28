@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-06",
+  "kind": "test",
+  "source": "odvcencio/buckley@67172b19",
+  "diff": "buckley-small-06.diff",
+  "original": "test(storage): pin session exec clock in adversarial resolve test\n\n- Inject a fixed sessionExecClock in the headless-resolve adversarial test so the resolution window is deterministic instead of depending on real elapsed time\n"
+}

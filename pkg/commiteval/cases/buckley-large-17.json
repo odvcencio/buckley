@@ -1,0 +1,7 @@
+{
+  "name": "buckley-large-17",
+  "kind": "add",
+  "source": "odvcencio/buckley@df5884c6",
+  "diff": "buckley-large-17.diff",
+  "original": "add(openrouter): pin models to configured BYOK providers (#235)\n\nadd(openrouter): pin models to configured BYOK providers\n- Pin matching OpenRouter models to the operator\u2019s own provider key, avoiding unintended credit-billed routes.\n- Preserve caller routing choices and privacy policies across fallback and streaming requests.\n- Validate and document BYOK mapping, and explain HTTP 402 errors when routing metadata confirms non-BYOK billing.\n"
+}

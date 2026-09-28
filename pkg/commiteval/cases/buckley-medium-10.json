@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-10",
+  "kind": "other",
+  "source": "odvcencio/buckley@f2871cfc",
+  "diff": "buckley-medium-10.diff",
+  "original": "Improve PR review coverage reliability\n\nRequire an exact changed-file checklist at the end of single-pass review prompts and accept observed coverage heading variants while preserving exact-path evidence validation.\\n\\nValidated with ./scripts/test.sh, required CI, and a live Particle review.\n"
+}

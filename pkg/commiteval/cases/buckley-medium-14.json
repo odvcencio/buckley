@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-14",
+  "kind": "fix",
+  "source": "odvcencio/buckley@15d4a822",
+  "diff": "buckley-medium-14.diff",
+  "original": "fix(agentloop): Reset termination status after successful repair\n\n- Clear stale Termination when completion repair yields a conclusive answer\n- Add regression test covering model-response and submitted-response paths\n"
+}

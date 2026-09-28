@@ -61,3 +61,11 @@ func TestCheckMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckMessageFlagsCapitalAction(t *testing.T) {
+	withPolicy(t, commitmsg.Policy{})
+	r := CheckMessage("Fix: Tune cache\n\n- Faster.\n", checkDiff, oneshot.DiffStats{}, nil)
+	if len(r.Style) < 2 {
+		t.Fatalf("style = %v, want a capital action and a capital subject", r.Style)
+	}
+}

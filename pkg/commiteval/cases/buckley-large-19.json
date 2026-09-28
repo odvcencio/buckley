@@ -1,0 +1,7 @@
+{
+  "name": "buckley-large-19",
+  "kind": "fix",
+  "source": "odvcencio/buckley@875ff69b",
+  "diff": "buckley-large-19.diff",
+  "original": "fix(model): resolve role models owned by non-default providers (#215)\n\n* fix(model): resolve role models owned by non-default providers\n\n- Drop the per-provider ownership gate in modelAvailable; the aggregated catalog is already provider-scoped, so a guessed default provider wrongly failed valid role models.\n- Exclude the exact requested name from closestModelMatches, because a suggestion that repeats the failed name explains nothing.\n- Add regression tests for codex-first provider ordering and for suggestion exclusion.\n\n\n* fix(model): fix model provider resolution to prefer catalog owner\n\n- Add catalogOwnerForModel to read the provider that advertised a model ID from the aggregated catalog.\n- Apply the catalog-owner tier after the explicit prefix, routing rule, and default provider, so configured defaults still win.\n- Fix codex-mode regression where a config-role model owned by a non-default provider failed startup validation and dispatched to another provider.\n\n\n---------\n"
+}

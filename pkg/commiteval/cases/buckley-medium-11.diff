@@ -1,0 +1,113 @@
+diff --git a/cmd/buckley/review_policy.go b/cmd/buckley/review_policy.go
+index ad6bbf9c..c0caa092 100644
+--- a/cmd/buckley/review_policy.go
++++ b/cmd/buckley/review_policy.go
+@@ -476,6 +476,7 @@ func appendReviewDepthInstructions(prompt string, opts automatedReviewOptions) s
+ - For every proposed finding, trace the changed behavior through its definition, callers, configuration, failure path, and the nearest relevant test or executable check.
+ - Make the focused run_verification attempts required by the captured repository gate. If a required gate is unavailable, retry or let the harness fail closed; never emit a caveated completion.
+ - Keep a compact verification ledger in the final review. Every finding must point to a ledger entry marked ` + "`SUPPORTED`" + `, ` + "`DISPROVED`" + `, or ` + "`UNAVAILABLE`" + `.
++- Retain the base review schema and add the literal ` + "`## Evidence Collected`" + ` and ` + "`## Verification Ledger`" + ` headings. List actual source, tool, and CI evidence in the first and tested hypotheses in the second. ` + "`## Coverage`" + ` does not replace either section.
+ - Cover the complete balanced scope: every changed file plus its direct callers, configuration gates, failure path, and nearest relevant test. Generated/vendor/build output may be excluded only when it is explicitly outside that scope.
+ - End with ` + "`Completeness: COMPLETE`" + `. If this scope cannot be completed, continue gathering evidence or let the harness fail the pass; do not emit a partial review.
+ `
+diff --git a/cmd/buckley/review_policy_test.go b/cmd/buckley/review_policy_test.go
+index be93a452..5f62f2fc 100644
+--- a/cmd/buckley/review_policy_test.go
++++ b/cmd/buckley/review_policy_test.go
+@@ -650,7 +650,9 @@ func TestReviewDepthProfilesChangePromptAndGeneratedCaps(t *testing.T) {
+ 	})
+ 	if !strings.Contains(balanced, "## Review Depth: BALANCED INVESTIGATION") ||
+ 		!strings.Contains(balanced, "map the relevant state and call sites") ||
+-		!strings.Contains(balanced, "run_verification") {
++		!strings.Contains(balanced, "run_verification") ||
++		!strings.Contains(balanced, "literal `## Evidence Collected` and `## Verification Ledger` headings") ||
++		!strings.Contains(balanced, "`## Coverage` does not replace either section") {
+ 		t.Fatalf("balanced prompt omitted its evidence contract:\n%s", balanced)
+ 	}
+ 
+diff --git a/pkg/oneshot/commands/review.go b/pkg/oneshot/commands/review.go
+index 791b92e2..11ba3d24 100644
+--- a/pkg/oneshot/commands/review.go
++++ b/pkg/oneshot/commands/review.go
+@@ -27,8 +27,8 @@ type ReviewBranchDef struct {
+ 
+ func (ReviewBranchDef) Name() string { return "review" }
+ 
+-func (ReviewBranchDef) SystemPrompt() string {
+-	return prompts.ReviewBranchWithToolsPrompt(time.Now())
++func (d ReviewBranchDef) SystemPrompt() string {
++	return appendReviewDepthSections(prompts.ReviewBranchWithToolsPrompt(time.Now()), d.Depth)
+ }
+ 
+ func (ReviewBranchDef) AllowedTools() []string {
+@@ -89,8 +89,8 @@ type ReviewProjectDef struct {
+ 
+ func (ReviewProjectDef) Name() string { return "review-project" }
+ 
+-func (ReviewProjectDef) SystemPrompt() string {
+-	return prompts.ReviewProjectPrompt(time.Now())
++func (d ReviewProjectDef) SystemPrompt() string {
++	return appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
+ }
+ 
+ func (d ReviewProjectDef) AllowedTools() []string {
+@@ -162,7 +162,7 @@ func (ReviewPRDef) Name() string { return "review-pr" }
+ func (d ReviewPRDef) MaxAgentIterations() int { return d.MaxIterations }
+ 
+ func (d ReviewPRDef) SystemPrompt() string {
+-	prompt := prompts.ReviewPRPrompt(time.Now())
++	prompt := appendReviewDepthSections(prompts.ReviewPRPrompt(time.Now()), d.Depth)
+ 	if d.authoritativeRemoteCIPasses() {
+ 		prompt += `
+ 
+@@ -451,6 +451,15 @@ func reviewDepthNeedsVerification(depth string) bool {
+ 	}
+ }
+ 
++func appendReviewDepthSections(prompt, depth string) string {
++	if !reviewDepthNeedsVerification(depth) {
++		return prompt
++	}
++	return prompt + `
++
++BALANCED and IN-DEPTH output adds the literal headings ## Evidence Collected and ## Verification Ledger to the base review schema. Keep ## Coverage and Completeness: COMPLETE. Evidence Collected lists observed source, tool, and CI evidence; Verification Ledger records tested hypotheses and outcomes. Do not use Coverage as a substitute for either section. This applies to an independent approval critic's replacement review too.`
++}
++
+ // validateReviewDepthOutput turns depth from a prompt hint into an observable
+ // completion contract. Every depth has a complete scope; deeper modes add
+ // structural and verification ledgers, but none may return a partial report
+diff --git a/pkg/oneshot/commands/review_test.go b/pkg/oneshot/commands/review_test.go
+index 21cc875a..2247ba30 100644
+--- a/pkg/oneshot/commands/review_test.go
++++ b/pkg/oneshot/commands/review_test.go
+@@ -119,6 +119,30 @@ func TestReviewDefinitionsExposeOnlySnapshotReviewTools(t *testing.T) {
+ 	assert.Contains(t, (FixFindingDef{}).AllowedTools(), "write_file")
+ }
+ 
++func TestReviewDepthSectionsReachPrimaryAndCriticPrompts(t *testing.T) {
++	for _, tt := range []struct {
++		name   string
++		prompt string
++	}{
++		{"branch", (ReviewBranchDef{Depth: "balanced"}).SystemPrompt()},
++		{"branch critic", (ReviewBranchDef{Depth: "balanced"}).ApprovalCriticSystemPrompt()},
++		{"project", (ReviewProjectDef{Depth: "balanced"}).SystemPrompt()},
++		{"PR", (ReviewPRDef{Depth: "balanced"}).SystemPrompt()},
++		{"PR critic", (ReviewPRDef{Depth: "balanced"}).ApprovalCriticSystemPrompt()},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			for _, heading := range []string{"## Evidence Collected", "## Verification Ledger", "## Coverage", "Completeness: COMPLETE"} {
++				if !strings.Contains(tt.prompt, heading) {
++					t.Fatalf("review prompt missing required %s heading", heading)
++				}
++			}
++		})
++	}
++	if strings.Contains((ReviewPRDef{Depth: "spot"}).SystemPrompt(), "BALANCED and IN-DEPTH output adds") {
++		t.Fatal("spot review inherited depth-specific sections")
++	}
++}
++
+ func TestReviewDepthRequiresModelVerificationEvidence(t *testing.T) {
+ 	validProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
+ 	balanced := ReviewProjectDef{Depth: "balanced"}

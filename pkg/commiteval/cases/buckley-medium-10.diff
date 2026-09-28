@@ -1,0 +1,103 @@
+diff --git a/pkg/oneshot/commands/review_findings.go b/pkg/oneshot/commands/review_findings.go
+index 1d87ddaa..8d75be91 100644
+--- a/pkg/oneshot/commands/review_findings.go
++++ b/pkg/oneshot/commands/review_findings.go
+@@ -167,6 +167,12 @@ func ParseReview(review string) *ParsedReview {
+ 	parsed.BuildVerification = parseVerificationState(parsed.BuildStatus)
+ 	parsed.TestVerification = parseVerificationState(parsed.TestStatus)
+ 	parsed.Coverage = extractSection(review, "Coverage")
++	if parsed.Coverage == "" {
++		parsed.Coverage = extractSection(review, "Coverage and Completeness")
++	}
++	if parsed.Coverage == "" {
++		parsed.Coverage = extractSection(review, "Coverage and Completeness: COMPLETE")
++	}
+ 	parsed.CoverageEntries, parsed.FeedbackDisposition, parsed.FeedbackDispositionDetails, parsed.FeedbackEntries = parseCoverageLedger(parsed.Coverage)
+ 	parsed.InvariantAudit = extractSection(review, "Invariant Audit")
+ 	parsed.Falsification = extractSection(review, "Falsification")
+diff --git a/pkg/oneshot/commands/review_pr_context.go b/pkg/oneshot/commands/review_pr_context.go
+index 29ca7e1e..dd58e415 100644
+--- a/pkg/oneshot/commands/review_pr_context.go
++++ b/pkg/oneshot/commands/review_pr_context.go
+@@ -561,6 +561,15 @@ func BuildPRPrompt(ctx *PRContext) string {
+ 	sb.WriteString("```diff\n")
+ 	sb.WriteString(ctx.Diff)
+ 	sb.WriteString("\n```\n")
++	if len(ctx.Files) > 0 {
++		sb.WriteString("\n## Final Coverage Checklist\n\n")
++		sb.WriteString("Before returning, reconcile the final ## Coverage ledger against every exact changed path below. ")
++		sb.WriteString("Include one **File** entry with concrete evidence per path, no unrelated paths, ")
++		sb.WriteString("an explicit **Feedback disposition**, and a **Verification** line.\n\n")
++		for _, file := range ctx.Files {
++			fmt.Fprintf(&sb, "- `%s`\n", file)
++		}
++	}
+ 
+ 	return sb.String()
+ }
+diff --git a/pkg/oneshot/commands/review_pr_context_test.go b/pkg/oneshot/commands/review_pr_context_test.go
+index bbdabf10..3739a489 100644
+--- a/pkg/oneshot/commands/review_pr_context_test.go
++++ b/pkg/oneshot/commands/review_pr_context_test.go
+@@ -439,6 +439,30 @@ func TestBuildPRPrompt_IncludesRequiredVerificationTargets(t *testing.T) {
+ 	}
+ }
+ 
++func TestBuildPRPrompt_FinalCoverageChecklistNamesEveryChangedFile(t *testing.T) {
++	files := []string{"pkg/oneshot/commands/review_pr_context.go", "pkg/oneshot/commands/review_findings.go"}
++	prompt := BuildPRPrompt(&PRContext{
++		PR:    &PRInfo{Number: 512, Title: "Review coverage", HeadSHA: "head-sha", BaseSHA: "base-sha", ChangedFiles: len(files)},
++		Files: files,
++		Diff:  "diff --git a/pkg/oneshot/commands/review_findings.go b/pkg/oneshot/commands/review_findings.go\n",
++	})
++	checklist := strings.LastIndex(prompt, "## Final Coverage Checklist")
++	if checklist <= strings.LastIndex(prompt, "## Diff") {
++		t.Fatalf("final coverage checklist must follow the diff:\n%s", prompt)
++	}
++	tail := prompt[checklist:]
++	for _, file := range files {
++		if count := strings.Count(tail, "- `"+file+"`"); count != 1 {
++			t.Fatalf("final checklist has %d entries for %s:\n%s", count, file, tail)
++		}
++	}
++	for _, want := range []string{"one **File** entry", "no unrelated paths", "**Feedback disposition**", "**Verification**"} {
++		if !strings.Contains(tail, want) {
++			t.Fatalf("final checklist missing %q:\n%s", want, tail)
++		}
++	}
++}
++
+ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
+ 	diff := oversizedReviewDiff() +
+ 		"diff --git a/pkg/oneshot/commands/review_pr_context.go b/pkg/oneshot/commands/review_pr_context.go\n" +
+diff --git a/pkg/oneshot/commands/review_test.go b/pkg/oneshot/commands/review_test.go
+index 2247ba30..57a39422 100644
+--- a/pkg/oneshot/commands/review_test.go
++++ b/pkg/oneshot/commands/review_test.go
+@@ -1904,6 +1904,26 @@ func TestReviewCoverageLedgerUsesNormalizedExactPaths(t *testing.T) {
+ 	assert.ErrorContains(t, err, "unexpected pkg/ratchet.go.bak")
+ }
+ 
++func TestReviewCoverageLedgerAcceptsCoverageAndCompletenessHeading(t *testing.T) {
++	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/ratchet.go"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
++	coverage := "- **File**: `pkg/ratchet.go` — reviewed the changed bound and its consumer.\n" +
++		"- **Feedback disposition**: `NONE_SUPPLIED` — no prior feedback was supplied.\n" +
++		"- **Verification**: required CI passed."
++	for _, heading := range []string{"Coverage and Completeness", "Coverage and Completeness: COMPLETE"} {
++		t.Run(heading, func(t *testing.T) {
++			review := strings.Replace(completeReviewWithCoverage(coverage), "## Coverage\n", "## "+heading+"\n", 1)
++			result, err := def.ParseResult(review)
++			assert.NoError(t, err)
++			assert.NoError(t, def.ValidateResult(result))
++
++			missing := strings.Replace(review, "- **File**: `pkg/ratchet.go` — reviewed the changed bound and its consumer.\n", "", 1)
++			result, err = def.ParseResult(missing)
++			assert.NoError(t, err)
++			assert.ErrorContains(t, def.ValidateResult(result), "missing pkg/ratchet.go")
++		})
++	}
++}
++
+ func TestReviewCoverageLedgerAllowsCompleteDirectoryGroups(t *testing.T) {
+ 	def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: []string{"pkg/feature/a.go", "pkg/feature/b.go", "README.md"}, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead})
+ 	review := completeReviewWithCoverage(

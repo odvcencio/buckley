@@ -2,12 +2,14 @@ package commitmsg
 
 import (
 	"bufio"
+	_ "embed"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -28,6 +30,9 @@ const (
 // DefaultInternalHostPattern matches hostnames under common private suffixes.
 // Override it with BUCKLEY_INTERNAL_HOST_PATTERN or ~/.buckley/internal-host-pattern.
 const DefaultInternalHostPattern = `(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:internal|local|localdomain|corp|lan|intranet|home\.arpa|svc\.cluster\.local)\b`
+
+// DefaultHostRegexp returns the compiled default internal-host pattern.
+func DefaultHostRegexp() *regexp.Regexp { return regexp.MustCompile(DefaultInternalHostPattern) }
 
 // Finding is one policy violation. Detail never contains the offending text,
 // so it is safe to log and to send back to a model.
@@ -82,6 +87,42 @@ var stopwords = func() map[string]bool {
 	}
 	return m
 }()
+
+// commonWords lists ordinary English and technical words. A plain word that
+// appears only on removed lines ("mixed", "discuss") is prose, not a name, so
+// the removed-line check skips it. Names the model should never repeat belong
+// in the private deny-list, which this list never overrides.
+//
+//go:embed commonwords.txt
+var commonWordsText string
+
+var commonWords = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(commonWordsText) {
+		m[w] = true
+	}
+	return m
+}()
+
+// identifierShaped reports whether id carries structure that prose lacks:
+// a separator, a digit, or a case change inside the word.
+func identifierShaped(id string) bool {
+	if strings.ContainsAny(id, "_-") {
+		return true
+	}
+	seenLower := false
+	for i, r := range id {
+		switch {
+		case unicode.IsDigit(r):
+			return true
+		case unicode.IsLower(r):
+			seenLower = true
+		case unicode.IsUpper(r) && i > 0 && seenLower:
+			return true
+		}
+	}
+	return false
+}
 
 var identRe = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_-]*`)
 
@@ -206,8 +247,14 @@ func RemovedOnlyHits(message, diff string) int {
 			continue
 		}
 		seen[key] = true
-		for _, cand := range append([]string{key}, splitWords(id)...) {
+		shaped := identifierShaped(id)
+		for ci, cand := range append([]string{key}, splitWords(id)...) {
 			if !considerable(cand) {
+				continue
+			}
+			// A plain word, or a word part of an identifier, that is ordinary
+			// English carries no name. The whole identifier still counts.
+			if (ci > 0 || !shaped) && commonWords[cand] {
 				continue
 			}
 			whole := t.removed[cand] && !t.added[cand] && !t.header[cand]
@@ -219,6 +266,21 @@ func RemovedOnlyHits(message, diff string) int {
 		}
 	}
 	return hits
+}
+
+// RemovedOnlyTerms lists the normalized identifiers that occur only on removed
+// lines of diff. It exists for evaluation and tests; generation code must never
+// log or echo its result.
+func RemovedOnlyTerms(diff string) []string {
+	t := scanDiff(diff)
+	var terms []string
+	for id := range t.removed {
+		if !t.added[id] && !t.header[id] && !commonWords[id] {
+			terms = append(terms, id)
+		}
+	}
+	sort.Strings(terms)
+	return terms
 }
 
 // DenyHits counts private deny-list terms that appear in text, ignoring case

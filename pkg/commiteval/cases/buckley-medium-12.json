@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-12",
+  "kind": "fix",
+  "source": "odvcencio/buckley@5043ff65",
+  "diff": "buckley-medium-12.diff",
+  "original": "fix(acp): omit fallback-denied tools from acp tool turn\n\n- Filter advertised tools to those the fallback permission would allow when no permission handler is available\n- Prevents wasted model turns and denial loops from advertising tools that dispatch always denies\n"
+}

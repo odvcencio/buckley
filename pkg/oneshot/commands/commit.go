@@ -240,12 +240,16 @@ func (CommitDefinition) PolicyFacts(ctx *oneshot.Context, result json.RawMessage
 	if err := json.Unmarshal(result, &cr); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
+	return policyFactsFor(commitPolicyLoader(), ctx, cr), nil
+}
+
+func policyFactsFor(policy commitmsg.Policy, ctx *oneshot.Context, cr CommitResult) *oneshot.PolicyRequest {
 	diff, ratio, files := "", 0.0, 0
 	if ctx != nil {
 		diff = ctx.Sources["git_diff:staged"]
 		ratio, files = ctx.Diff.GeneratedRatio(), ctx.Diff.Files
 	}
-	findings := commitPolicyLoader().Check(cr.Format(), diff)
+	findings := policy.Check(cr.Format(), diff)
 	var deny, echo, sensitive int
 	for _, f := range findings {
 		switch f.Rule {
@@ -290,7 +294,7 @@ func (CommitDefinition) PolicyFacts(ctx *oneshot.Context, result json.RawMessage
 			}
 			return fmt.Errorf("commit message policy %s: %s", action, reason)
 		},
-	}, nil
+	}
 }
 
 func (CommitDefinition) Unmarshal(result json.RawMessage) (any, error) {

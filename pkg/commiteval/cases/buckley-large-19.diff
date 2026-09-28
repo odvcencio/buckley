@@ -1,0 +1,220 @@
+diff --git a/pkg/model/manager.go b/pkg/model/manager.go
+index da567535..06c1b9fc 100644
+--- a/pkg/model/manager.go
++++ b/pkg/model/manager.go
+@@ -954,7 +954,7 @@ func (m *Manager) resolveModel(modelID string) (string, Provider) {
+ 		providerID, _ = m.providerIDFromRouting(selected)
+ 	}
+ 
+-	return selected, m.providerFromIDOrFallback(providerID)
++	return selected, m.providerFromIDOrFallback(providerID, selected)
+ }
+ 
+ func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
+@@ -972,6 +972,28 @@ func (m *Manager) providerIDFromRouting(modelID string) (string, bool) {
+ 	return "", false
+ }
+ 
++// catalogOwnerForModel returns the provider ID the aggregated catalog
++// recorded as modelID's source (see Initialize/RefreshProviderCatalog), or
++// "" if modelID is not literally known to the catalog. Unlike
++// providerFromIDOrFallback's last-resort guess (the alphabetically-first
++// configured provider when nothing else decides), this is ground truth: it
++// names the provider that actually advertised this exact model ID.
++// providerFromIDOrFallback prefers it over that guess -- but only after an
++// explicit provider prefix, a configured routing rule, and
++// config.Models.DefaultProvider have all had a chance to apply, so a
++// deliberately configured default still wins a same-ID catalog collision
++// across providers (see
++// TestCanonicalMetadataLookupRejectsCrossProviderCatalogCollision). This is
++// the root cause of a codex-mode regression where a config-role model
++// genuinely owned by, e.g., openrouter both hard-failed startup validation
++// and, had it passed, would have dispatched through whichever other
++// configured provider happened to sort first.
++func (m *Manager) catalogOwnerForModel(modelID string) string {
++	m.catalogMu.RLock()
++	defer m.catalogMu.RUnlock()
++	return m.modelProviders[modelID]
++}
++
+ func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, upstreamModelID string, ok bool) {
+ 	if m == nil {
+ 		return "", "", false
+@@ -988,7 +1010,16 @@ func (m *Manager) explicitProviderQualifiedModel(modelID string) (providerID, up
+ 	return providerID, upstreamModelID, true
+ }
+ 
+-func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
++// providerFromIDOrFallback resolves a provider in priority order: an
++// already-decided providerID (explicit prefix or routing rule), then
++// config.Models.DefaultProvider, then -- new -- the provider the
++// aggregated catalog actually recorded as modelID's owner (see
++// catalogOwnerForModel), and only then an arbitrary configured provider.
++// Ground truth beats a guess: without the catalog-owner tier, a model
++// belonging to a non-default provider fell through to whichever provider
++// happened to sort first in providerOrder, silently dispatching to a
++// provider that never advertised it.
++func (m *Manager) providerFromIDOrFallback(providerID, modelID string) Provider {
+ 	if providerID != "" {
+ 		if provider, ok := m.providers[providerID]; ok {
+ 			return provider
+@@ -1001,6 +1032,12 @@ func (m *Manager) providerFromIDOrFallback(providerID string) Provider {
+ 		}
+ 	}
+ 
++	if ownerID := m.catalogOwnerForModel(modelID); ownerID != "" {
++		if provider, ok := m.providers[ownerID]; ok {
++			return provider
++		}
++	}
++
+ 	for _, providerID := range m.providerOrder {
+ 		if provider, ok := m.providers[providerID]; ok {
+ 			return provider
+@@ -1198,21 +1235,28 @@ func (m *Manager) firstModelForProvider(providerID string) (string, bool) {
+ }
+ 
+ // modelAvailable reports whether modelID resolves to a model any configured
+-// provider's catalog actually advertises. A routing hook can resolve
+-// modelID (an alias, e.g. a role-neutral name a caller pins before a
+-// provider is known) to a different, real catalog model ID at dispatch
+-// time; when that hook-resolved model is known, modelID is genuinely
+-// dispatchable even though it never appears in the catalog literally, so it
+-// is checked too before reporting modelID unavailable (H1: an alias with a
+-// working route must not be confused with a model that cannot resolve at
+-// all).
+... (fixture truncated)
+diff --git a/pkg/model/model_resolution_test.go b/pkg/model/model_resolution_test.go
+index 1ecd10b0..09d611c5 100644
+--- a/pkg/model/model_resolution_test.go
++++ b/pkg/model/model_resolution_test.go
+@@ -140,6 +140,70 @@ func TestEnsureConfiguredModels_ConfigRoleAcrossMultipleProvidersHardFails(t *te
+ 	}
+ }
+ 
++// TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves
++// covers the codex-mode regression: with codex and openrouter both
++// configured, a config role (planning/review) pinned to a real
++// OpenRouter-catalog model must resolve even though "codex" sorts before
++// "openrouter" and would be guessed as the default provider. Gating
++// availability on that guessed provider (instead of the catalog's actual,
++// already-provider-scoped entry) wrongly hard-failed a model that a
++// genuinely configured provider owns.
++func TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves(t *testing.T) {
++	mgr := &Manager{
++		config: &config.Config{
++			Models: config.ModelConfig{
++				Planning:  "openai/gpt-6-luna-pro", // owned by openrouter, not codex
++				Execution: "codex/gpt-6-astra",
++				Review:    "openai/gpt-6-luna-pro",
++			},
++		},
++		providers: map[string]Provider{
++			"codex":      &stubProvider{id: "codex"},
++			"openrouter": &stubProvider{id: "openrouter"},
++		},
++		// Sorted alphabetically, as NewManager builds providerOrder: codex
++		// comes before openrouter, so a resolver that "guesses" a default
++		// provider when no prefix/routing decisively picks one would guess
++		// codex here -- the exact shape of the regression.
++		providerOrder: []string{"codex", "openrouter"},
++		catalog: map[string]ModelInfo{
++			"openai/gpt-6-luna-pro":   {ID: "openai/gpt-6-luna-pro"},
++			"openai/gpt-5.6-luna-pro": {ID: "openai/gpt-5.6-luna-pro"},
++			"codex/gpt-6-astra":       {ID: "codex/gpt-6-astra"},
++		},
++		providerModels: map[string][]string{
++			"openrouter": {"openai/gpt-6-luna-pro", "openai/gpt-5.6-luna-pro"},
++			"codex":      {"codex/gpt-6-astra"},
++		},
++		modelProviders: map[string]string{
++			"openai/gpt-6-luna-pro":   "openrouter",
++			"openai/gpt-5.6-luna-pro": "openrouter",
++			"codex/gpt-6-astra":       "codex",
++		},
++	}
++
++	if err := mgr.ensureConfiguredModels(); err != nil {
++		t.Fatalf("ensureConfiguredModels() = %v, want the openrouter-owned planning/review model to resolve", err)
++	}
++	if mgr.config.Models.Planning != "openai/gpt-6-luna-pro" {
++		t.Fatalf("planning model = %q, want it left untouched", mgr.config.Models.Planning)
++	}
++	if mgr.config.Models.Review != "openai/gpt-6-luna-pro" {
++		t.Fatalf("review model = %q, want it left untouched", mgr.config.Models.Review)
++	}
++
++	// Startup acceptance alone is not the fix: dispatch must also select the
++	// model's actual owning provider (openrouter), not fall back to codex
++	// just because it sorts first in providerOrder.
++	route, err := mgr.ResolveModelRoute("openai/gpt-6-luna-pro")
++	if err != nil {
++		t.Fatalf("ResolveModelRoute() = %v, want the openrouter-owned model to resolve", err)
++	}
++	if route.ProviderID != "openrouter" {
++		t.Fatalf("ResolveModelRoute().ProviderID = %q, want %q (the model's actual catalog owner, not the alphabetically-first provider)", route.ProviderID, "openrouter")
++	}
++}
++
+ // TestEnsureConfiguredModels_BuiltInDefaultStillFallsBackLoudly is the
+ // control case: a role left at its compiled-in default (never explicitly
+ // configured) may still fall back automatically when unavailable, as long
+@@ -278,6 +342,32 @@ func TestClosestModelMatches(t *testing.T) {
+ 	}
+ }
+ 
++// TestClosestModelMatches_ExcludesTheExactRequestedName covers the
++// suggestion half of the codex-mode regression: unresolvedModelError must
++// never suggest the exact name that just failed to resolve, even when that
++// name happens to be present in the catalog (e.g. under a provider the
++// availability check did not credit -- see
++// TestEnsureConfiguredModels_ConfigRoleOwnedByNonDefaultProviderResolves).
++// A "did you mean X" list that repeats X is not a suggestion.
++func TestClosestModelMatches_ExcludesTheExactRequestedName(t *testing.T) {
++	mgr := &Manager{
++		catalog: map[string]ModelInfo{
+... (fixture truncated)
+diff --git a/pkg/model/model_suggestions.go b/pkg/model/model_suggestions.go
+index ae31d9e5..77f045fa 100644
+--- a/pkg/model/model_suggestions.go
++++ b/pkg/model/model_suggestions.go
+@@ -14,13 +14,17 @@ const maxModelSuggestions = 5
+ // previously registered, now-renamed alias) suggesting the live catalog's
+ // "openai_compatible/glm5.3flash" -- instead of only reporting failure.
+ // Matches farther than modelSuggestionMaxDistance(requested) are dropped:
+-// an unrelated catalog should suggest nothing rather than noise.
++// an unrelated catalog should suggest nothing rather than noise. The
++// requested name itself is always excluded: a caller only reaches this
++// path after requested has already failed to resolve, so echoing it back
++// as a "did you mean" suggestion would only restate the failure, not
++// explain it.
+ func (m *Manager) closestModelMatches(requested string, limit int) []string {
+ 	if m == nil || limit <= 0 {
+ 		return nil
+ 	}
+-	requested = normalizeForModelSuggestion(requested)
+-	if requested == "" {
++	normalizedRequested := normalizeForModelSuggestion(requested)
++	if normalizedRequested == "" {
+ 		return nil
+ 	}
+ 
+@@ -31,12 +35,16 @@ func (m *Manager) closestModelMatches(requested string, limit int) []string {
+ 	}
+ 	candidates := make([]scored, 0, len(m.catalog))
+ 	for id := range m.catalog {
+-		distance := levenshteinDistance(requested, normalizeForModelSuggestion(id))
++		normalizedID := normalizeForModelSuggestion(id)
++		if normalizedID == normalizedRequested {
++			continue
++		}
++		distance := levenshteinDistance(normalizedRequested, normalizedID)
+ 		candidates = append(candidates, scored{id: id, distance: distance})
+ 	}
+ 	m.catalogMu.RUnlock()
+ 
+-	maxDistance := modelSuggestionMaxDistance(requested)
++	maxDistance := modelSuggestionMaxDistance(normalizedRequested)
+ 	sort.Slice(candidates, func(i, j int) bool {
+ 		if candidates[i].distance != candidates[j].distance {
+ 			return candidates[i].distance < candidates[j].distance

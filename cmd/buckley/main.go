@@ -1650,6 +1650,7 @@ func printHelp() {
 	fmt.Println("  experiment promote <model-id> <profile-version>")
 	fmt.Println("                                   Promote a calibrated profile for dynamic execution")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
+	fmt.Println("  eval commit [--live] [--json]    Check commit-message safety and style on 30 fixed diffs (CI gate offline)")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
 	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
 	fmt.Println("  goal <start|run|status|report>   Record, run, and inspect durable goals (run drives the live model; list shows recent)")
