@@ -67,3 +67,8 @@ func TestGeneratedCommitRuntime(t *testing.T) {
 		}
 	})
 }
+
+func gitInCwd(args ...string) (string, error) {
+	out, err := exec.Command("git", args...).CombinedOutput()
+	return string(out), err
+}
