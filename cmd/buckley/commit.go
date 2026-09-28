@@ -206,16 +206,23 @@ func runCommitCommand(args []string) error {
 		def = squashMsgCommitDefinition{CommitDefinition: commands.CommitDefinition{}, squashMsg: readGitDirFile(state.GitDir, "SQUASH_MSG")}
 	}
 
-	runtime, cleanup, err := newCommitCommandRuntime(opts, def)
-	defer cleanup()
-	if err != nil {
-		return err
+	fixed := generatedCommitRuntime(opts, state)
+	var runtime *commitCommandRuntime
+	if fixed != nil {
+		runtime = fixed
+	} else {
+		var cleanup func()
+		runtime, cleanup, err = newCommitCommandRuntime(opts, def)
+		defer cleanup()
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
-	if !quietMode {
+	if !quietMode && fixed == nil {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
@@ -256,6 +263,39 @@ func runCommitCommand(args []string) error {
 	}
 
 	return nil
+}
+
+// fixedCommitRunner returns a message built without a model.
+type fixedCommitRunner struct{ commit *commands.CommitResult }
+
+func (r fixedCommitRunner) Run(context.Context) (*commitRunResult, error) {
+	return &commitRunResult{Commit: r.commit}, nil
+}
+
+// generatedCommitRuntime inspects the staged diff. When it holds generated files
+// only, it returns a runtime that writes the fixed regenerate message without
+// calling a model. When it mixes generated and source files, it warns. It
+// returns nil in every other case, including when the diff cannot be read.
+func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commitCommandRuntime {
+	if state.Kind != opNone {
+		return nil
+	}
+	stats, err := oneshot.StagedDiffStats(opts.paths)
+	if err != nil {
+		return nil
+	}
+	if stats.Mixed() && !quietMode {
+		termOut.Warn("commit mixes %d generated file(s) with %d source file(s); commit them separately so the message can describe the source change",
+			len(stats.GeneratedPaths), len(stats.SourcePaths))
+	}
+	cr := commands.GeneratedCommit(stats)
+	if cr == nil {
+		return nil
+	}
+	return &commitCommandRuntime{
+		ledger: transparency.NewCostLedger(),
+		runner: fixedCommitRunner{commit: cr},
+	}
 }
 
 func prepareCommitIndex(opts commitCommandOptions) error {

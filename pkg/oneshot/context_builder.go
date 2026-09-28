@@ -207,18 +207,23 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 	if budget > len(truncMarker) {
 		budget -= len(truncMarker)
 	}
+	var paths []string
 	for _, fd := range diffsignal.Split(output) {
+		paths = append(paths, fd.Path)
+	}
+	isGenerated := generatedByAttrs(paths, params["staged"] == "true")
+	for _, fd := range diffsignal.SplitWith(output, isGenerated) {
 		stats.Files++
 		if fd.LowSignal() {
 			stats.LowSignal++
 		}
+		if fd.Generated() {
+			stats.GeneratedPaths = append(stats.GeneratedPaths, fd.Path)
+		} else {
+			stats.SourcePaths = append(stats.SourcePaths, fd.Path)
+		}
 	}
-	var res diffsignal.Result
-	if opts.RankDiffForPR {
-		res = diffsignal.PrioritizeForPR(output, budget)
-	} else {
-		res = diffsignal.Prioritize(output, budget)
-	}
+	res := diffsignal.PrioritizeWith(output, budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
 	output = res.Context
 	if res.Truncated {
 		output += truncMarker

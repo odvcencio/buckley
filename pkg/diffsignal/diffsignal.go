@@ -83,6 +83,7 @@ const (
 	ReasonBinary        Reason = "binary"
 	ReasonGeneratedPath Reason = "generated path"
 	ReasonMinified      Reason = "minified"
+	ReasonGeneratedAttr Reason = "generated (gitattributes)"
 	ReasonOverBudget    Reason = "over budget"
 
 	// ReasonUnavailable marks a file whose diff content could not be
@@ -127,6 +128,17 @@ type FileDiff struct {
 	Reason      Reason
 }
 
+// Generated reports whether the file is build output: a generated or vendored
+// path, minified content, or a gitattributes marking (linguist-generated or
+// -diff). Plain binary files, such as images, are not generated.
+func (fd FileDiff) Generated() bool {
+	switch fd.Reason {
+	case ReasonGeneratedPath, ReasonMinified, ReasonGeneratedAttr:
+		return true
+	}
+	return false
+}
+
 // LowSignal reports whether the file's content was classified as noise.
 func (fd FileDiff) LowSignal() bool { return fd.Reason != ReasonNone }
 
@@ -149,8 +161,33 @@ type Result struct {
 // Concatenating the returned Segments reproduces the input from the first
 // "diff --git" boundary onward.
 func Split(raw string) []FileDiff {
-	_, files := splitWithPreamble(raw)
+	_, files := splitWithPreamble(raw, nil)
 	return files
+}
+
+// SplitWith is Split with a caller-supplied predicate for paths that
+// gitattributes mark as generated. A nil predicate matches Split.
+func SplitWith(raw string, generated func(path string) bool) []FileDiff {
+	_, files := splitWithPreamble(raw, generated)
+	return files
+}
+
+// Options adjust Prioritize.
+type Options struct {
+	// ForPR selects the PrioritizeForPR ranking and per-file cap.
+	ForPR bool
+	// Generated reports paths that gitattributes mark as generated
+	// (linguist-generated or -diff). They render as summary lines.
+	Generated func(path string) bool
+}
+
+// PrioritizeWith is Prioritize or PrioritizeForPR, per opts, with the
+// gitattributes predicate applied during classification.
+func PrioritizeWith(raw string, maxBytes int, opts Options) Result {
+	if opts.ForPR {
+		return prioritizeCore(raw, maxBytes, PRFileDiffCap, rankFilesForPR, opts.Generated)
+	}
+	return prioritizeCore(raw, maxBytes, MaxFileDiffBytes, nil, opts.Generated)
 }
 
 // Prioritize reorders a unified diff so high-signal source changes fill the
@@ -158,7 +195,7 @@ func Split(raw string) []FileDiff {
 // is the total output budget; values <= 0 mean no total budget (per-file
 // caps and low-signal summarization still apply).
 func Prioritize(raw string, maxBytes int) Result {
-	return prioritizeCore(raw, maxBytes, MaxFileDiffBytes, nil)
+	return prioritizeCore(raw, maxBytes, MaxFileDiffBytes, nil, nil)
 }
 
 // PrioritizeForPR is Prioritize with two adjustments the `buckley pr` path
@@ -179,7 +216,7 @@ func Prioritize(raw string, maxBytes int) Result {
 // Low-signal classification (binary/generated/minified) and the
 // MaxParseBytes raw-input ceiling behave identically to Prioritize.
 func PrioritizeForPR(raw string, maxBytes int) Result {
-	return prioritizeCore(raw, maxBytes, PRFileDiffCap, rankFilesForPR)
+	return prioritizeCore(raw, maxBytes, PRFileDiffCap, rankFilesForPR, nil)
 }
 
 // prioritizeCore is the shared assembly engine behind Prioritize and
@@ -188,7 +225,7 @@ func PrioritizeForPR(raw string, maxBytes int) Result {
 // non-nil, reorders the high-signal (normal) file-processing order before
 // the budget is spent; low-signal files are unaffected (they never consume
 // budget beyond their one summary line, in original emission order).
-func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []FileDiff, normal []int) []int) Result {
+func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []FileDiff, normal []int) []int, generated func(string) bool) Result {
 	truncated := false
 
 	// Important-1b: before cutting at MaxParseBytes, scan the FULL input for
@@ -206,7 +243,7 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 		return Result{}
 	}
 
-	preamble, files := splitWithPreamble(raw)
+	preamble, files := splitWithPreamble(raw, generated)
 	if len(files) == 0 {
 		// Not a recognizable per-file diff: preserve legacy behavior.
 		if maxBytes > 0 && len(raw) > maxBytes {
@@ -459,7 +496,7 @@ func splitForShardPrioritization(raw string) (preamble string, files []FileDiff,
 	if raw == "" {
 		return "", nil, truncated
 	}
-	preamble, files = splitWithPreamble(raw)
+	preamble, files = splitWithPreamble(raw, nil)
 	files = append(files, overBudgetFiles...)
 	return preamble, files, truncated
 }
@@ -686,7 +723,7 @@ func summaryLine(f FileDiff) string {
 
 // splitWithPreamble splits raw into any text before the first file boundary
 // plus the per-file segments, classified.
-func splitWithPreamble(raw string) (string, []FileDiff) {
+func splitWithPreamble(raw string, generated func(string) bool) (string, []FileDiff) {
 	if raw == "" {
 		return "", nil
 	}
@@ -713,7 +750,7 @@ func splitWithPreamble(raw string) (string, []FileDiff) {
 			end = starts[k+1]
 		}
 		fd := parseSegment(raw[s:end])
-		classify(&fd)
+		classify(&fd, generated)
 		files = append(files, fd)
 	}
 	return raw[:starts[0]], files
@@ -882,8 +919,12 @@ func unescapeGitPath(s string) string {
 // classify sets fd.Reason for low-signal files. Precedence: binary content
 // (or gitattributes -diff suppression) > generated/built path > minified
 // content heuristics.
-func classify(fd *FileDiff) {
+func classify(fd *FileDiff, generated func(string) bool) {
 	switch {
+	case generated != nil && generated(fd.Path):
+		// First: -diff makes git report "Binary files differ", and the
+		// attribute says more than that: the file is build output.
+		fd.Reason = ReasonGeneratedAttr
 	case fd.Binary:
 		fd.Reason = ReasonBinary
 	case fd.Unavailable:
