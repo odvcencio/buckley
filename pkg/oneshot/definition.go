@@ -42,6 +42,22 @@ type Context struct {
 type DiffStats struct {
 	Files     int
 	LowSignal int
+
+	// GeneratedPaths are build output: generated or vendored paths, minified
+	// content, or files that gitattributes mark linguist-generated or -diff.
+	// SourcePaths are all other changed files, including plain binaries.
+	GeneratedPaths []string
+	SourcePaths    []string
+}
+
+// GeneratedOnly reports a diff that changes generated files and nothing else.
+func (d DiffStats) GeneratedOnly() bool {
+	return d.Files > 0 && len(d.GeneratedPaths) == d.Files
+}
+
+// Mixed reports a diff that changes both generated and source files.
+func (d DiffStats) Mixed() bool {
+	return len(d.GeneratedPaths) > 0 && len(d.SourcePaths) > 0
 }
 
 // GeneratedRatio is the share of diff files classified as low signal.

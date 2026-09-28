@@ -139,6 +139,7 @@ pkg/coordination/security/auth.go authenticatedStream.Context
 pkg/coordination/security/auth.go generateTokenID
 pkg/coordination/security/auth.go shouldSkipAuth
 pkg/diffsignal/diffsignal.go HighSignalStats
+pkg/diffsignal/diffsignal.go PrioritizeForPR
 pkg/dockersandbox/args.go buildCreateArgs
 pkg/dockersandbox/sandbox.go WithCommandRunner
 pkg/dockersandbox/sandbox.go defaultRunner
