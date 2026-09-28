@@ -34,6 +34,10 @@ func TestRemovedOnlyHits(t *testing.T) {
 		{"stopword ignored", "remove config value", "-config value\n+other\n", 0},
 		{"deleted file path allowed", "remove the zorblax helper", "diff --git a/zorblax.go b/zorblax.go\n--- a/zorblax.go\n+++ /dev/null\n-package main\n", 0},
 		{"empty diff", "anything zorblax", "", 0},
+		{"plain english word only removed", "handle mixed inputs", "-// mixed inputs are rare\n+// none\n", 0},
+		{"english part of identifier ignored", "rename the handler", "-func handleRequestMixed() {}\n+func other() {}\n", 0},
+		{"whole identifier still flagged", "drop handleRequestMixed", "-func handleRequestMixed() {}\n+func other() {}\n", 1},
+		{"unknown plain word still flagged", "drop the zorblax helper", "-// zorblax helper\n+// none\n", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
