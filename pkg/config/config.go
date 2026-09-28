@@ -336,6 +336,14 @@ type ProviderSettings struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"`  // Can be set here or via env var
 	BaseURL string `yaml:"base_url"` // Optional custom base URL
+	// BYOKProviders pins OpenRouter requests to the upstream provider that
+	// holds the operator's own key (OpenRouter "bring your own key").
+	// Keys are model-ID prefixes or exact model IDs (for example "openai/");
+	// values are OpenRouter provider slugs (for example "openai"). A matching
+	// request is sent with provider.only set to that slug, so OpenRouter
+	// cannot route it to an endpoint that bills OpenRouter credits instead of
+	// the operator's key. Only providers.openrouter reads this field.
+	BYOKProviders map[string]string `yaml:"byok_providers,omitempty"`
 }
 
 // OpenAICompatibleConfig configures an OpenAI-compatible API provider.

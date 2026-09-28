@@ -474,6 +474,9 @@ providers:
     enabled: true
     api_key: ""  # Use env var instead: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
+    # Keep these models on the provider that holds your own key (BYOK).
+    byok_providers:
+      openai/: openai
 
   openai:
     enabled: false
@@ -499,6 +502,26 @@ providers:
     claude-: anthropic
     gemini-: google
 ```
+
+`providers.openrouter.byok_providers` maps a model-ID prefix (or an exact model
+ID) to an OpenRouter provider slug. If you added your own provider key to
+OpenRouter ("bring your own key", BYOK), OpenRouter can still send a request to
+another endpoint for the same model, and that endpoint bills OpenRouter credits
+instead of your key. A matching request is sent with `provider.only` set to the
+slug, so it stays on your key. The longest matching prefix wins. Buckley skips
+the pin when the request already sets `provider.only` or `provider.order`, or
+when a fallback chain mixes models with different pins.
+
+This matters most with `buckbot.openrouter_privacy_fallback`. For `openai/*`
+models, OpenRouter's zero-data-retention endpoints are Azure only, so a ZDR
+request never reaches an OpenAI BYOK key. With the pin, the ZDR attempt gets
+OpenRouter's policy 404 and the fallback retries with
+`provider.data_collection: deny` on the pinned provider. If you need strict
+ZDR instead, leave the model unpinned and fund OpenRouter credits.
+
+When OpenRouter rejects a request with HTTP 402 and its routing metadata says
+`is_byok: false`, Buckley's error names the credit-billed route and this
+setting.
 
 **Security Note:** Never commit API keys in config files. Use environment variables or `~/.buckley/config.env`.
 

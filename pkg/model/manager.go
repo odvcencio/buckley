@@ -28,6 +28,7 @@ type Manager struct {
 	modelProviders     map[string]string
 	routingHooks       *RoutingHooks
 	privacyFallback    OpenRouterPrivacyFallback
+	openRouterBYOK     map[string]string
 	launchAdmissionNow func() time.Time
 }
 
@@ -86,6 +87,11 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 	}
 	sort.Strings(order)
 
+	var byokPins map[string]string
+	if cfg != nil {
+		byokPins = normalizeOpenRouterBYOKPins(cfg.Providers.OpenRouter.BYOKProviders)
+	}
+
 	return &Manager{
 		config:         cfg,
 		providers:      providers,
@@ -94,6 +100,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		providerModels: make(map[string][]string),
 		modelProviders: make(map[string]string),
 		routingHooks:   NewRoutingHooks(),
+		openRouterBYOK: byokPins,
 	}, nil
 }
 
@@ -449,6 +456,7 @@ func (m *Manager) chatCompletionResolved(ctx context.Context, req ChatRequest, r
 	privacyRetry := false
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
+		req = openRouterBYOKRequest(req, m.openRouterBYOK)
 	}
 	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
 		return nil, err
@@ -570,6 +578,7 @@ func (m *Manager) chatCompletionWithContinuationResolved(ctx context.Context, co
 	privacyRetry := false
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
+		req = openRouterBYOKRequest(req, m.openRouterBYOK)
 	}
 	if err := validateOpenRouterLaunchDispatch(req, selectedModel, provider); err != nil {
 		return nil, err
@@ -680,6 +689,7 @@ func (m *Manager) chatCompletionStreamResolved(ctx context.Context, req ChatRequ
 	privacyRetry := false
 	if provider.ID() == "openrouter" {
 		req, privacyRetry = openRouterPrivacyRequest(req, m.privacyFallback)
+		req = openRouterBYOKRequest(req, m.openRouterBYOK)
 	}
 	return chatCompletionStreamWithAffordableOutputRetry(ctx, provider, req, privacyRetry, requestedModel, selectedModel)
 }
