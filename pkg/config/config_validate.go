@@ -37,6 +37,7 @@ var configValidators = []func(*Config) error{
 	validateMemoryLimits,
 	validateAgentCostLimits,
 	validateBuckbotPrivacyFallback,
+	validateOpenRouterBYOKProviders,
 	validateOneshotDataPolicy,
 	validateDecisions,
 	validateReviewVerificationRunner,
@@ -349,6 +350,46 @@ func validateAgentCostLimits(c *Config) error {
 		}
 	}
 	return nil
+}
+
+// validateOpenRouterBYOKProviders rejects empty pins and a pin placed on a
+// provider section that never reads it, so a misplaced setting fails loudly
+// instead of silently leaving requests on credit-billed routes.
+func validateOpenRouterBYOKProviders(c *Config) error {
+	for prefix, slug := range c.Providers.OpenRouter.BYOKProviders {
+		if strings.TrimSpace(prefix) == "" {
+			return fmt.Errorf("providers.openrouter.byok_providers has an empty model prefix")
+		}
+		if !validOpenRouterProviderSlug(strings.TrimSpace(slug)) {
+			return fmt.Errorf("providers.openrouter.byok_providers[%q] has invalid provider slug %q", prefix, slug)
+		}
+	}
+	others := map[string]ProviderSettings{
+		"openai":    c.Providers.OpenAI,
+		"anthropic": c.Providers.Anthropic,
+		"google":    c.Providers.Google,
+		"ollama":    c.Providers.Ollama,
+	}
+	for name, settings := range others {
+		if len(settings.BYOKProviders) > 0 {
+			return fmt.Errorf("providers.%s.byok_providers is not supported; set providers.openrouter.byok_providers", name)
+		}
+	}
+	return nil
+}
+
+func validOpenRouterProviderSlug(slug string) bool {
+	if slug == "" {
+		return false
+	}
+	for _, r := range slug {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.', r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateBuckbotPrivacyFallback(c *Config) error {
