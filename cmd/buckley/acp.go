@@ -40,6 +40,7 @@ import (
 	"m31labs.dev/buckley/pkg/tool/builtin"
 	"m31labs.dev/buckley/pkg/tooloutcome"
 	"m31labs.dev/buckley/pkg/types"
+	"m31labs.dev/buckley/pkg/workspaceevidence"
 )
 
 const defaultACPSystemPrompt = prompts.DefaultToolUseSystemPrompt + "\n\nUse create_skill when the user explicitly asks to create a new skill."
@@ -1273,7 +1274,7 @@ func runACPLoopWithLimits(
 		state.contextWindow, _ = mgr.GetContextLengthForRoute(route)
 	}
 
-	ctrl, err := newACPLoopController(cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state, limits)
+	ctrl, err := newACPLoopController(ctx, cfg, mgr, conv, registry, skillState, engine, modelID, workDir, sessionID, agent, logf, stream, state, limits)
 	if err != nil {
 		return "", err
 	}
@@ -1505,6 +1506,7 @@ func (e *partialStreamTurnError) Unwrap() error { return e.cause }
 //     (empty or prose-only) response is dropped from the transcript
 //     entirely, exactly as before.
 func newACPLoopController(
+	ctx context.Context,
 	cfg *config.Config,
 	mgr *model.Manager,
 	conv *conversation.Conversation,
@@ -1544,6 +1546,14 @@ func newACPLoopController(
 	}
 
 	completionContract := acpCompletionContract(limits)
+	if completionContract != nil && completionContract.RequireObservableChange && limits.bestEffortObservation && strings.TrimSpace(workDir) != "" {
+		mutations, observationErr := workspaceevidence.NewGitMutationRecorder(ctx, workDir)
+		if observationErr == nil {
+			completionContract.ObserveObservableChange = func() (bool, error) { return mutations.Observe(ctx) }
+		} else {
+			fmt.Fprintf(os.Stderr, "One-shot observation: session baseline unavailable: %v\n", observationErr)
+		}
+	}
 	if completionContract != nil && limits.MaxContinuations > 0 && strings.TrimSpace(workDir) != "" {
 		// A continuing run that lacks verification ends as completed_unverified
 		// when the workspace has no test or build command to run, instead of

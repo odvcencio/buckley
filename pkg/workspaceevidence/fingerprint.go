@@ -28,6 +28,10 @@ const (
 // HEAD and non-ignored untracked files. It emits no workspace contents and is
 // stable across repeated observations of the same state.
 func GitStateFingerprint(ctx context.Context, root string) (string, error) {
+	return gitStateFingerprint(ctx, root, false)
+}
+
+func gitStateFingerprint(ctx context.Context, root string, contentOnly bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, fingerprintTimeout(root))
 	defer cancel()
 	topRaw, err := gitOutput(ctx, root, maxFingerprintPathBytes, "rev-parse", "--show-toplevel")
@@ -44,12 +48,19 @@ func GitStateFingerprint(ctx context.Context, root string) (string, error) {
 		return "", fmt.Errorf("open workspace root: %w", err)
 	}
 	defer rootFS.Close()
+	hashManifest := func(manifest gitManifest) (string, error) {
+		if contentOnly {
+			// Staging, committing, and changing branches are not content edits.
+			manifest.head, manifest.unbornHeadRef, manifest.index = "", "", nil
+		}
+		return hashGitManifest(ctx, rootFS, manifest)
+	}
 
 	manifest, err := gitFingerprintManifest(ctx, root)
 	if err != nil {
 		return "", err
 	}
-	first, err := hashGitManifest(ctx, rootFS, manifest)
+	first, err := hashManifest(manifest)
 	if err != nil {
 		return "", err
 	}
@@ -60,7 +71,7 @@ func GitStateFingerprint(ctx context.Context, root string) (string, error) {
 	if !manifest.equal(afterManifest) {
 		return "", fmt.Errorf("workspace git manifest changed during observation")
 	}
-	second, err := hashGitManifest(ctx, rootFS, afterManifest)
+	second, err := hashManifest(afterManifest)
 	if err != nil {
 		return "", err
 	}

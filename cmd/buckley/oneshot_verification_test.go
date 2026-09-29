@@ -20,9 +20,10 @@ import (
 
 // laneStep is one scripted model reply: a tool call, or final text.
 type laneStep struct {
-	tool string
-	args map[string]any
-	text string
+	tool        string
+	args        map[string]any
+	text        string
+	beforeReply func()
 }
 
 func editStep(old, new string) laneStep {
@@ -48,7 +49,7 @@ type laneRun struct {
 
 // runScriptedLane runs one headless mutation lane against a fake model that
 // replays script. The lane runs in a fresh git repo holding files.
-func runScriptedLane(t *testing.T, files map[string]string, script []laneStep) laneRun {
+func runScriptedLane(t *testing.T, files map[string]string, script []laneStep, setup ...func(*testing.T)) laneRun {
 	t.Helper()
 	root := t.TempDir()
 	t.Chdir(root)
@@ -69,6 +70,9 @@ func runScriptedLane(t *testing.T, files map[string]string, script []laneStep) l
 		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git: %s %v", out, err)
 		}
+	}
+	for _, prepare := range setup {
+		prepare(t)
 	}
 
 	var (
@@ -105,6 +109,9 @@ func runScriptedLane(t *testing.T, files map[string]string, script []laneStep) l
 			return
 		}
 		step := script[n-1]
+		if step.beforeReply != nil {
+			step.beforeReply()
+		}
 		if step.tool == "" {
 			writeOneShotArtifactRouteSSE(t, w, map[string]any{"content": step.text}, "stop")
 			return
