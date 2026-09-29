@@ -1544,6 +1544,13 @@ func newACPLoopController(
 	}
 
 	completionContract := acpCompletionContract(limits)
+	if completionContract != nil && limits.MaxContinuations > 0 && strings.TrimSpace(workDir) != "" {
+		// A continuing run that lacks verification ends as completed_unverified
+		// when the workspace has no test or build command to run, instead of
+		// asking the model for a check that cannot exist.
+		root := workDir
+		completionContract.VerificationSurface = func() (bool, string) { return builtin.HasVerificationSurface(root) }
+	}
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 		// Controller may turn a tool-bearing round into a final synthesis
 		// request. Record this post-controller shape, not the earlier build
@@ -1695,6 +1702,9 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 		MaxRepairAttempts:             attempts,
 		MaxContinuations:              limits.MaxContinuations,
 		MaxNoChangeContinuations:      maxNoChangeContinuations(limits),
+		MaxVerificationUnavailable:    verificationLimit(limits, defaultMaxVerificationUnavailable),
+		MaxVerificationStalls:         verificationLimit(limits, defaultMaxVerificationStalls),
+		MaxVerificationContinuations:  verificationLimit(limits, defaultMaxVerificationContinuations),
 		OnContinuation:                limits.OnContinuation,
 		TolerateObservationErrors:     limits.bestEffortObservation,
 		TaskIntent:                    limits.TaskIntent,
@@ -2970,9 +2980,19 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 	if state.bestEffortObservation && outcome.StateObservationError != "" {
 		fmt.Fprintf(os.Stderr, "One-shot observation: tool=%s warning=%q; continuing\n", tc.Function.Name, outcome.StateObservationError)
 	}
-	if state.bestEffortObservation && outcome.VerificationObserved {
+	if state.bestEffortObservation && (outcome.VerificationObserved || outcome.VerificationUnavailable) {
 		command, _ := params["command"].(string)
-		fmt.Fprintf(os.Stderr, "One-shot verification: tool=%s command=%q passed=%t\n", tc.Function.Name, command, outcome.VerificationPassed)
+		command = summarizeOneShotCommand(command)
+		// run_tests takes a path, not a command; name it so the line is readable.
+		target := ""
+		if path, _ := params["path"].(string); command == "" && strings.TrimSpace(path) != "" {
+			target = fmt.Sprintf(" path=%q", summarizeOneShotCommand(path))
+		}
+		if outcome.VerificationUnavailable {
+			fmt.Fprintf(os.Stderr, "One-shot verification: tool=%s command=%q%s unavailable=%q\n", tc.Function.Name, command, target, outcome.VerificationUnavailableReason)
+		} else {
+			fmt.Fprintf(os.Stderr, "One-shot verification: tool=%s command=%q%s passed=%t\n", tc.Function.Name, command, target, outcome.VerificationPassed)
+		}
 	}
 	return outcome
 }

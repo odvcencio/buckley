@@ -1,0 +1,264 @@
+package builtin
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+// VerificationStatusKey names the Result.Data entry a verification tool sets
+// when its check could not run at all. Such a result holds no pass or fail
+// evidence about the code, so the completion contract must not count it as
+// either: a refused call is not a failed test.
+const VerificationStatusKey = "verification_status"
+
+// VerificationReasonKey holds the plain-language reason next to
+// VerificationStatusKey.
+const VerificationReasonKey = "verification_reason"
+
+const (
+	// VerificationStatusRejected marks a call refused before launch, for
+	// example a command outside the accepted list.
+	VerificationStatusRejected = "rejected"
+	// VerificationStatusUnavailable marks a check with nothing to run, for
+	// example a workspace with no test framework or a missing toolchain.
+	VerificationStatusUnavailable = "unavailable"
+)
+
+// verificationNotRun builds the Data entries that mark a result as unavailable.
+func verificationNotRun(status, reason string) map[string]any {
+	return map[string]any{
+		VerificationStatusKey: status,
+		VerificationReasonKey: reason,
+	}
+}
+
+// VerificationUnavailableReason returns a plain reason when a failed
+// verification-class result carries no evidence about the code, and "" when it
+// is a pass or a real failure. A tool marks its own result with
+// VerificationStatusKey; for the rest, well-known "nothing to run" messages and
+// exit codes from the go, cargo, npm, make, and pytest tools decide.
+func VerificationUnavailableReason(result *Result) string {
+	if result == nil || result.Success {
+		return ""
+	}
+	if status, _ := result.Data[VerificationStatusKey].(string); status == VerificationStatusRejected || status == VerificationStatusUnavailable {
+		if reason, _ := result.Data[VerificationReasonKey].(string); strings.TrimSpace(reason) != "" {
+			return reason
+		}
+		return "the check did not run"
+	}
+	exitCode, hasExit := verificationExitCode(result)
+	if hasExit && (exitCode == 126 || exitCode == 127) {
+		return "the command was not found or could not be started on this machine"
+	}
+	if strings.HasPrefix(result.Error, "sandbox blocked command") {
+		return "the sandbox blocked the command"
+	}
+	text := verificationResultText(result)
+	// Output that shows tests ran is a real result, even when a test prints
+	// one of the messages below.
+	if verificationRanTests.MatchString(text) {
+		return ""
+	}
+	for _, marker := range verificationUnavailableMarkers {
+		if marker.tool != "" && !verificationMentions(result, marker.tool) {
+			continue
+		}
+		if marker.pattern.MatchString(text) {
+			return marker.reason
+		}
+	}
+	if hasExit && exitCode == 5 && verificationMentions(result, "pytest") &&
+		(strings.Contains(text, "no tests ran") || strings.Contains(text, "collected 0 items")) {
+		return "pytest found no tests to run"
+	}
+	return ""
+}
+
+// verificationRanTests matches the lines that go, jest, and cargo print only
+// after they ran tests.
+var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL\s|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?)`)
+
+// verificationUnavailableMarkers are the messages that go, cargo, npm, and make
+// print when the workspace has nothing for them to run. A marker with a tool
+// applies only to results whose command or framework names that tool, so a test
+// that happens to print the same words is still a real failure.
+var verificationUnavailableMarkers = []struct {
+	tool    string
+	pattern *regexp.Regexp
+	reason  string
+}{
+	{"", regexp.MustCompile(`go\.mod file not found|cannot find main module`), "there is no go.mod in the workspace"},
+	{"", regexp.MustCompile(`requires go[^\n]*running go[^\n]*GOTOOLCHAIN=local`), "the installed Go toolchain is older than go.mod requires"},
+	{"", regexp.MustCompile("could not find `Cargo\\.toml`"), "there is no Cargo.toml in the workspace"},
+	{"npm", regexp.MustCompile(`(?i)could not read package\.json|no such file or directory, open '[^']*package\.json'`), "there is no package.json in the workspace"},
+	{"npm", regexp.MustCompile(`(?i)missing script`), "package.json has no script for this check"},
+	{"npm", regexp.MustCompile(`No tests found`), "jest found no tests to run"},
+	{"npm", regexp.MustCompile(`no test specified`), "package.json has no test script"},
+	{"make", regexp.MustCompile(`No targets specified and no makefile found`), "there is no Makefile in the workspace"},
+	{"make", regexp.MustCompile("No rule to make target [`'\"](test|check|build|vet|lint)['\"]"), "the Makefile has no such target"},
+}
+
+func verificationExitCode(result *Result) (int, bool) {
+	switch code := result.Data["exit_code"].(type) {
+	case int:
+		return code, true
+	case int64:
+		return int(code), true
+	case float64:
+		return int(code), true
+	}
+	return 0, false
+}
+
+func verificationResultText(result *Result) string {
+	var text strings.Builder
+	text.WriteString(result.Error)
+	for _, key := range []string{"stdout", "stderr", "output"} {
+		if value, ok := result.Data[key].(string); ok {
+			text.WriteByte('\n')
+			text.WriteString(value)
+		}
+	}
+	return text.String()
+}
+
+func verificationMentions(result *Result, word string) bool {
+	for _, key := range []string{"command", "framework"} {
+		if value, ok := result.Data[key].(string); ok && strings.Contains(value, word) {
+			return true
+		}
+	}
+	// run_tests runs jest through npm.
+	if framework, _ := result.Data["framework"].(string); word == "npm" && framework == "jest" {
+		return true
+	}
+	return false
+}
+
+const (
+	surfaceMaxDepth   = 4
+	surfaceMaxEntries = 4000
+	surfaceMaxParents = 6
+)
+
+// HasVerificationSurface reports whether the workspace at root holds anything
+// the accepted verification commands could run: a module or project file, a
+// Makefile, or a test file, within a few directory levels (parents up to the
+// repository root count too, because go, npm, and cargo look upward). When it
+// finds none it returns a plain reason. A large tree that outruns the search
+// budget counts as having a surface, so this never ends a run wrongly.
+func HasVerificationSurface(root string) (bool, string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return true, ""
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return true, ""
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		return true, ""
+	}
+	if hasProjectMarker(abs) {
+		return true, ""
+	}
+	found, exhausted := false, false
+	entries := 0
+	walkErr := filepath.WalkDir(abs, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		entries++
+		if entries > surfaceMaxEntries {
+			exhausted = true
+			return fs.SkipAll
+		}
+		if entry.IsDir() {
+			if path == abs {
+				return nil
+			}
+			if skipSurfaceDir(entry.Name()) {
+				return fs.SkipDir
+			}
+			rel, relErr := filepath.Rel(abs, path)
+			if relErr != nil || strings.Count(rel, string(filepath.Separator)) >= surfaceMaxDepth {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if isVerificationSurfaceFile(entry.Name()) {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if walkErr != nil || found || exhausted {
+		return true, ""
+	}
+	dir := abs
+	for range surfaceMaxParents {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+		if hasProjectMarker(dir) {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf("no go.mod, package.json, Cargo.toml, Python project file, Makefile, or test file was found within %d directory levels of the workspace", surfaceMaxDepth)
+}
+
+func skipSurfaceDir(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch name {
+	case "node_modules", "vendor", "__pycache__", "target", "venv":
+		return true
+	}
+	return false
+}
+
+func hasProjectMarker(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && isProjectMarkerFile(entry.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isProjectMarkerFile(name string) bool {
+	switch name {
+	case "go.mod", "package.json", "Cargo.toml", "pyproject.toml", "setup.py", "setup.cfg",
+		"pytest.ini", "tox.ini", "conftest.py", "Makefile", "makefile", "GNUmakefile":
+		return true
+	}
+	return false
+}
+
+func isVerificationSurfaceFile(name string) bool {
+	if isProjectMarkerFile(name) {
+		return true
+	}
+	return strings.HasSuffix(name, "_test.go") ||
+		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) ||
+		strings.HasSuffix(name, "_test.py") ||
+		strings.Contains(name, ".test.") || strings.Contains(name, ".spec.")
+}

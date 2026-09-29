@@ -45,6 +45,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.
   See docs/CONFIGURATION.md.
 
+### Fixed
+- Headless mutation runs (`--task-intent mutation`, `--persist`) no longer
+  loop on "missing successful verification after the latest workspace
+  change" when no check can run. Refused `run_verification` calls (for
+  example `git diff --check` or `python -m unittest`) and `run_tests` calls
+  in a workspace with no test framework used to count as failed tests and
+  replaced the last real result. They are now recorded as unavailable and
+  leave earlier results alone. Three unavailable checks in a row end the
+  run as `completed_unverified`. So does a final answer in a workspace with
+  no `go.mod`, `package.json`, `Cargo.toml`, Python project file, Makefile,
+  or test file, after one question that asks whether the work is finished.
+  That outcome exits 0, reports `stop_reason="completed_unverified: ..."`,
+  and adds a note to the final output. A real failing check that repeats
+  four times with no workspace change, or ten continuations for
+  verification reasons, end the run as `verification_stalled` (exit 1).
+  The `run_verification` description and refusal messages now list the
+  accepted commands, and `nice -n N` and `env GOWORK=off` may start one.
+  Passing checks and real failures behave as before.
+- `run_tests` with no path now tests every package (`./...`) in a Go module
+  whose root holds no package. It used to fail at once with "no Go files"
+  there, which looked like a failing test. A path you name is still used
+  exactly.
+
 ## [0.8.2] - 2026-08-17
 
 ### Fixed

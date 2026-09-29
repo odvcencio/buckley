@@ -156,6 +156,16 @@ func classifyOneShotVCS(name string, raw any) string {
 	}
 }
 
+// summarizeOneShotCommand redacts secrets from a command and shortens it for
+// a one-line progress message.
+func summarizeOneShotCommand(command string) string {
+	command = strings.Join(strings.Fields(redactOneShotSecrets(command)), " ")
+	if r := []rune(command); len(r) > oneShotSummaryLimit {
+		command = string(r[:oneShotSummaryLimit]) + "..."
+	}
+	return command
+}
+
 func summarizeOneShotToolInput(u acp.SessionUpdate) string {
 	params, _ := u.RawInput.(map[string]any)
 	str := func(k string) string {

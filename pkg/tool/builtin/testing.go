@@ -31,6 +31,9 @@ type testReport struct {
 // execCommandContext is overridden in tests to stub command execution.
 var execCommandContext = exec.CommandContext
 
+// errNoTestFramework reports that no test framework was detected at the path.
+var errNoTestFramework = errors.New("unsupported test framework")
+
 func (t *RunTestsTool) Name() string {
 	return "run_tests"
 }
@@ -82,8 +85,10 @@ func (t *RunTestsTool) Execute(params map[string]any) (*Result, error) {
 
 func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	testPath := "."
+	explicitPath := false
 	if p, ok := params["path"].(string); ok && p != "" {
 		testPath = p
+		explicitPath = true
 	}
 	absTestPath := testPath
 	if strings.TrimSpace(t.workDir) != "" {
@@ -126,14 +131,31 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 
 	// Detect test framework
 	framework := t.detectTestFramework(absTestPath)
+	// A Go module whose packages all live in subdirectories has no package at
+	// its root, so "go test ." can only fail there. When the caller named no
+	// path, test every package instead.
+	if framework == "go" && !explicitPath && testPath == "." && !dirHasGoFiles(absTestPath) {
+		testPath = "./..."
+	}
 
 	// Run tests
 	output, exitCode, duration, structuredReport, err := t.runTestsForFramework(ctx, framework, testPath, pattern, coverage, verbose)
 	if err != nil {
-		return &Result{
+		failed := &Result{
 			Success: false,
 			Error:   fmt.Sprintf("test execution failed: %v", err),
-		}, nil
+		}
+		// A workspace with no test framework, or a machine without the test
+		// toolchain, gives no evidence about the code. Mark it so the
+		// completion contract records an unavailable check, not a failed one.
+		switch {
+		case errors.Is(err, errNoTestFramework):
+			failed.Error += ". Nothing ran and this is not a test failure; this workspace has no test framework at " + testPath + ", so there is nothing to verify with run_tests"
+			failed.Data = verificationNotRun(VerificationStatusUnavailable, "no test framework was detected in the workspace")
+		case errors.Is(err, exec.ErrNotFound):
+			failed.Data = verificationNotRun(VerificationStatusUnavailable, "the test toolchain is not installed on this machine")
+		}
+		return failed, nil
 	}
 
 	// Parse results
@@ -161,12 +183,14 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 			verificationError = "go test did not produce a complete test report"
 		}
 	}
+	ranNoTests := false
 	if exitCode == 0 && verificationError == "" {
 		switch {
 		case failed > 0:
 			verificationError = framework + " test reported failed tests"
 		case passed+skipped == 0 && !buildOnly:
 			verificationError = framework + " test ran no tests; check the path and pattern"
+			ranNoTests = true
 		case passed == 0 && !buildOnly:
 			verificationError = framework + " test skipped every test; no passing tests verified"
 		}
@@ -191,6 +215,13 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 			"output":     output,
 			"coverage":   coverage,
 		},
+	}
+	// With no pattern to blame, a clean run that found no tests to run means the
+	// workspace has nothing to verify, not that a test failed.
+	if ranNoTests && pattern == "" {
+		for key, value := range verificationNotRun(VerificationStatusUnavailable, framework+" found no tests to run at "+testPath) {
+			result.Data[key] = value
+		}
 	}
 
 	// Abridge long output
@@ -224,6 +255,20 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	}
 
 	return result, nil
+}
+
+// dirHasGoFiles reports whether dir directly holds a Go source file.
+func dirHasGoFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *RunTestsTool) detectTestFramework(path string) string {
@@ -368,7 +413,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd = execCommandContext(ctx, "cargo", args...)
 
 	default:
-		return "", 1, 0, nil, fmt.Errorf("unsupported test framework: %s", framework)
+		return "", 1, 0, nil, fmt.Errorf("%w: %s", errNoTestFramework, framework)
 	}
 
 	var stdout, stderr bytes.Buffer

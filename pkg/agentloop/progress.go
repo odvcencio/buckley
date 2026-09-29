@@ -100,7 +100,20 @@ type ProgressSnapshot struct {
 	VerificationPassedCalls   int    `json:"verification_passed_calls,omitempty"`
 	LastVerificationSequence  int    `json:"last_verification_sequence,omitempty"`
 	LastVerificationPassed    bool   `json:"last_verification_passed,omitempty"`
-	sequence                  int
+	// VerificationUnavailableCalls counts verification calls that could not
+	// run. VerificationUnavailableStreak counts them in a row; any check that
+	// actually ran (pass or fail) resets it.
+	VerificationUnavailableCalls  int `json:"verification_unavailable_calls,omitempty"`
+	VerificationUnavailableStreak int `json:"verification_unavailable_streak,omitempty"`
+	// VerificationFailureStreak counts failed verifications in a row with no
+	// workspace change in between; a pass, or a change made after the last
+	// failure, restarts the count.
+	VerificationFailureStreak int `json:"verification_failure_streak,omitempty"`
+
+	sequence                       int
+	lastFailedVerificationSequence int
+	lastUnavailableSequence        int
+	lastUnavailableReason          string
 }
 
 type progressTracker struct {
@@ -130,12 +143,32 @@ func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
 		t.snapshot.LastStateFailureSequence = t.snapshot.sequence
 		t.snapshot.LastStateObservationError = strings.TrimSpace(outcome.StateObservationError)
 	}
+	if outcome.VerificationUnavailable {
+		t.snapshot.VerificationUnavailableCalls++
+		t.snapshot.VerificationUnavailableStreak++
+		t.snapshot.lastUnavailableSequence = t.snapshot.sequence
+		t.snapshot.lastUnavailableReason = strings.TrimSpace(outcome.VerificationUnavailableReason)
+	}
 	if outcome.VerificationObserved {
 		t.snapshot.VerificationObservedCalls++
 		t.snapshot.LastVerificationSequence = t.snapshot.sequence
 		t.snapshot.LastVerificationPassed = outcome.VerificationPassed
+		t.snapshot.VerificationUnavailableStreak = 0
 		if outcome.VerificationPassed {
 			t.snapshot.VerificationPassedCalls++
+			t.snapshot.VerificationFailureStreak = 0
+			t.snapshot.lastFailedVerificationSequence = 0
+		} else {
+			// A failure repeats the previous one only when nothing in the
+			// workspace changed after that failure. A change made by this
+			// call itself counts as a change.
+			previous := t.snapshot.lastFailedVerificationSequence
+			if previous > 0 && t.snapshot.LastStateChangeSequence <= previous {
+				t.snapshot.VerificationFailureStreak++
+			} else {
+				t.snapshot.VerificationFailureStreak = 1
+			}
+			t.snapshot.lastFailedVerificationSequence = t.snapshot.sequence
 		}
 	}
 	if !outcome.YieldObserved {
