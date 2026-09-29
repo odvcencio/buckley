@@ -101,8 +101,9 @@ type ProgressSnapshot struct {
 	LastVerificationSequence  int    `json:"last_verification_sequence,omitempty"`
 	LastVerificationPassed    bool   `json:"last_verification_passed,omitempty"`
 	// VerificationUnavailableCalls counts verification calls that could not
-	// run. VerificationUnavailableStreak counts them in a row; any check that
-	// actually ran (pass or fail) resets it.
+	// run. VerificationUnavailableStreak counts them in a row since the latest
+	// workspace change; any check that actually ran (pass or fail), and any
+	// change made by another tool call, resets it.
 	VerificationUnavailableCalls  int `json:"verification_unavailable_calls,omitempty"`
 	VerificationUnavailableStreak int `json:"verification_unavailable_streak,omitempty"`
 	// VerificationFailureStreak counts failed verifications in a row with no
@@ -112,7 +113,6 @@ type ProgressSnapshot struct {
 
 	sequence                       int
 	lastFailedVerificationSequence int
-	lastUnavailableSequence        int
 	lastUnavailableReason          string
 }
 
@@ -136,6 +136,12 @@ func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
 		if outcome.StateChanged {
 			t.snapshot.StateChangedCalls++
 			t.snapshot.LastStateChangeSequence = t.snapshot.sequence
+			// Attempts to verify an older state say nothing about the newest
+			// one. A call that never ran a check cannot have changed anything,
+			// so a change it reports is observation noise and resets nothing.
+			if !outcome.VerificationUnavailable {
+				t.snapshot.VerificationUnavailableStreak = 0
+			}
 		}
 	}
 	if outcome.StateObservationFailed {
@@ -146,7 +152,6 @@ func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
 	if outcome.VerificationUnavailable {
 		t.snapshot.VerificationUnavailableCalls++
 		t.snapshot.VerificationUnavailableStreak++
-		t.snapshot.lastUnavailableSequence = t.snapshot.sequence
 		t.snapshot.lastUnavailableReason = strings.TrimSpace(outcome.VerificationUnavailableReason)
 	}
 	if outcome.VerificationObserved {

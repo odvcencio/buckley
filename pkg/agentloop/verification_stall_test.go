@@ -129,6 +129,37 @@ func TestProgressTracker_UnavailableNeverReplacesTheLastVerification(t *testing.
 	}
 }
 
+func TestProgressTracker_UnavailableStreakCountsOnlyAttemptsSinceTheLatestChange(t *testing.T) {
+	var tracker progressTracker
+	streak := func() int { return tracker.Snapshot().VerificationUnavailableStreak }
+
+	tracker.Observe("edit", stallOutcome(stepEdit))
+	tracker.Observe("verify", stallOutcome(stepUnavailable))
+	tracker.Observe("verify", stallOutcome(stepUnavailable))
+	tracker.Observe("verify", stallOutcome(stepUnavailable))
+	if streak() != 3 {
+		t.Fatalf("three refused checks streak = %d, want 3", streak())
+	}
+	tracker.Observe("edit", stallOutcome(stepEdit))
+	if streak() != 0 {
+		t.Fatalf("an edit must restart the count of attempts, got %d", streak())
+	}
+	tracker.Observe("verify", stallOutcome(stepUnavailable))
+	if streak() != 1 || tracker.Snapshot().VerificationUnavailableCalls != 4 {
+		t.Fatalf("one attempt after the edit: streak=%d calls=%d", streak(), tracker.Snapshot().VerificationUnavailableCalls)
+	}
+
+	// A call that never ran a check cannot have changed the workspace, so a
+	// change it reports is noise and must not restart the count.
+	noisy := stallOutcome(stepUnavailable)
+	noisy.StateObserved, noisy.StateChanged = true, true
+	tracker.Observe("verify", noisy)
+	tracker.Observe("verify", noisy)
+	if streak() != 3 {
+		t.Fatalf("observation noise on a refused call reset the streak: %d", streak())
+	}
+}
+
 func TestProgressTracker_FailureStreakCountsOnlyRepeatsWithNoChange(t *testing.T) {
 	var tracker progressTracker
 	streak := func() int { return tracker.Snapshot().VerificationFailureStreak }
@@ -353,6 +384,29 @@ func TestController_UnverifiedStopSkippedWhenTheAnswerFailsItsOutputContract(t *
 	}
 	if run.result.Content != "OK: done" || run.requests != 4 || run.continuations != 2 {
 		t.Fatalf("content=%q requests=%d continuations=%d, want the invalid confirmed answer sent back once more", run.result.Content, run.requests, run.continuations)
+	}
+}
+
+// The reviewer's case: three refused checks, an edit, one refused check, and a
+// final answer. Only one attempt was made to verify the newest state.
+func TestController_RefusedChecksOnBothSidesOfAnEditDoNotEndTheRun(t *testing.T) {
+	run := runStallScript(t, CompletionContract{MaxVerificationUnavailable: 3},
+		script(stepEdit, stepUnavailable, stepUnavailable, stepUnavailable, stepEdit, stepUnavailable, say("Done."), stepPass, say("Done and verified.")))
+	if run.err != nil || run.result.Termination.Kind != "" {
+		t.Fatalf("err=%v termination=%+v, want the run to continue: one attempt since the edit is not three", run.err, run.result.Termination)
+	}
+	if run.continuations != 1 || run.requests != 9 {
+		t.Fatalf("continuations=%d requests=%d, want one continuation and then a real check", run.continuations, run.requests)
+	}
+
+	// Three attempts after the edit do end it.
+	run = runStallScript(t, CompletionContract{MaxVerificationUnavailable: 3},
+		script(stepEdit, stepUnavailable, stepUnavailable, stepUnavailable, stepEdit, stepUnavailable, stepUnavailable, stepUnavailable, say("Done.")))
+	if run.err != nil || run.result.Termination.Kind != TerminationCompletedUnverified {
+		t.Fatalf("err=%v termination=%+v, want completed_unverified after three attempts on the newest state", run.err, run.result.Termination)
+	}
+	if run.requests != 9 || run.continuations != 0 {
+		t.Fatalf("requests=%d continuations=%d", run.requests, run.continuations)
 	}
 }
 

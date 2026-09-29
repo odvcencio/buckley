@@ -52,11 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example `git diff --check` or `python -m unittest`) and `run_tests` calls
   in a workspace with no test framework used to count as failed tests and
   replaced the last real result. They are now recorded as unavailable and
-  leave earlier results alone. Three unavailable checks in a row end the
-  run as `completed_unverified`. So does a final answer in a workspace with
-  no `go.mod`, `package.json`, `Cargo.toml`, Python project file, Makefile,
-  or test file, after one question that asks whether the work is finished.
-  That outcome exits 0, reports `stop_reason="completed_unverified: ..."`,
+  leave earlier results alone. Three unavailable checks in a row, made
+  since the latest change, end the run as `completed_unverified`. So does a
+  final answer in a workspace with no `go.mod`, `package.json`,
+  `Cargo.toml`, Python project file, Makefile, or test file, after one
+  question that asks whether the work is finished. That outcome exits 0, reports `stop_reason="completed_unverified: ..."`,
   and adds a note to the final output. A real failing check that repeats
   four times with no workspace change, or ten continuations for
   verification reasons, end the run as `verification_stalled` (exit 1).

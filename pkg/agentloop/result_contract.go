@@ -432,11 +432,10 @@ func (c CompletionContract) verificationStop(err error, snapshot ProgressSnapsho
 				return verificationConfirm, reason
 			}
 		}
-		// Count the attempts only when the model made them after its last
-		// change. A model that kept working after three refused commands has
-		// not yet tried to verify its newest change.
-		if c.MaxVerificationUnavailable > 0 && snapshot.VerificationUnavailableStreak >= c.MaxVerificationUnavailable &&
-			snapshot.lastUnavailableSequence >= snapshot.LastStateChangeSequence {
+		// The streak counts only attempts made since the latest workspace
+		// change, so a model that kept working after refused commands has not
+		// yet tried to verify its newest change.
+		if c.MaxVerificationUnavailable > 0 && snapshot.VerificationUnavailableStreak >= c.MaxVerificationUnavailable {
 			why := snapshot.lastUnavailableReason
 			if why == "" {
 				why = "the check did not run"
