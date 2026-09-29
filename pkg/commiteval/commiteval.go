@@ -264,11 +264,12 @@ func runOfflineCase(c Case, engine *rules.Engine) Result {
 		add(fmt.Sprintf("style-bad-%d-flagged", i+1), len(rep.Style) > 0, "")
 	}
 
-	// Automatic control on every diff: a message that names a removed-only
-	// identifier must fail, and a message that says "the old name" must pass.
-	// Diffs that are mostly generated skip the removed-line rule by design.
+	// Automatic control on every diff: a message that repeats a sensitive
+	// value that exists only on removed lines must fail, and a message that
+	// says "the old name" must pass. Diffs that are mostly generated skip the
+	// removed-line rule by design.
 	if stats.GeneratedRatio() < commands.GeneratedRatioLimit {
-		terms := commitmsg.RemovedOnlyTerms(c.Diff)
+		terms := c.Policy().RemovedOnlyTerms(c.Diff)
 		if len(terms) > 0 {
 			probe := "refactor: rename " + terms[0] + " helper\n\n- Use the new one.\n"
 			rep := commands.CheckMessageWithPolicy(probe, c.Diff, stats, engine, c.Policy())

@@ -196,9 +196,10 @@ func (CommitDefinition) Validate(result json.RawMessage) error {
 var commitPolicyLoader = func() commitmsg.Policy { return commitmsg.LoadPolicy("") }
 
 // ValidateWithContext checks the message against the staged diff the model saw:
-// no identifiers that exist only on removed lines, no private deny-list terms,
-// and no emails, IP addresses, internal hosts, or key patterns. Findings never
-// echo the offending text.
+// no sensitive values that exist only on removed lines (config values, hosts,
+// paths, deny-list names), no private deny-list terms, and no emails, IP
+// addresses, internal hosts, or key patterns. Findings never echo the
+// offending text.
 func (CommitDefinition) ValidateWithContext(ctx *oneshot.Context, result json.RawMessage) error {
 	var cr CommitResult
 	if err := json.Unmarshal(result, &cr); err != nil {

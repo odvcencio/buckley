@@ -247,7 +247,7 @@ func TestValidateWithContextSkipsRemovedEchoForGeneratedDiffs(t *testing.T) {
 	prev := commitPolicyLoader
 	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{} }
 	t.Cleanup(func() { commitPolicyLoader = prev })
-	diff := "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@\n-var zorblax=1\n+var q=1\n"
+	diff := "diff --git a/bundle.json b/bundle.json\n--- a/bundle.json\n+++ b/bundle.json\n@@\n-{\"vendor\": \"zorblax\"}\n+{\"vendor\": \"q\"}\n"
 	raw, _ := json.Marshal(map[string]any{"action": "update", "subject": "regenerate zorblax bundle", "body": []string{"Rebuild output."}})
 	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:staged": diff}, Diff: oneshot.DiffStats{Files: 1, LowSignal: 1}}
 	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err != nil {

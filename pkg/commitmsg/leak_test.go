@@ -21,6 +21,7 @@ const renameDiff = `diff --git a/deploy/app.yaml b/deploy/app.yaml
 `
 
 func TestRemovedOnlyHits(t *testing.T) {
+	p := Policy{HostPattern: DefaultHostRegexp()}
 	cases := []struct {
 		name, msg, diff string
 		want            int
@@ -36,15 +37,112 @@ func TestRemovedOnlyHits(t *testing.T) {
 		{"empty diff", "anything zorblax", "", 0},
 		{"plain english word only removed", "handle mixed inputs", "-// mixed inputs are rare\n+// none\n", 0},
 		{"english part of identifier ignored", "rename the handler", "-func handleRequestMixed() {}\n+func other() {}\n", 0},
-		{"whole identifier still flagged", "drop handleRequestMixed", "-func handleRequestMixed() {}\n+func other() {}\n", 1},
-		{"unknown plain word still flagged", "drop the zorblax helper", "-// zorblax helper\n+// none\n", 1},
+		{"removed function name allowed", "drop handleRequestMixed", "-func handleRequestMixed() {}\n+func other() {}\n", 0},
+		{"comment word is not a value", "drop the zorblax helper", "-// zorblax helper\n+// none\n", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RemovedOnlyHits(tc.msg, tc.diff); got != tc.want {
+			if got := p.RemovedOnlyHits(tc.msg, tc.diff); got != tc.want {
 				t.Fatalf("RemovedOnlyHits = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+const removedValuesDiff = `diff --git a/deploy/app.yaml b/deploy/app.yaml
+--- a/deploy/app.yaml
++++ b/deploy/app.yaml
+@@ -1,5 +1,5 @@
+-host: db-primary.corp.internal
++host: db.example.test
+-contact: ops@zorblaxcorp.example
++contact: team@example.test
+-data_dir: /home/zorblax/projects/widget
++data_dir: /var/lib/widget
+-namespace: zorblax-prod
++namespace: example-prod
+-access_key: zorb_live_51HfakeTOKENvalue0000
++access_key: placeholder
+`
+
+func hasRule(findings []Finding, rule string) bool {
+	for _, f := range findings {
+		if f.Rule == rule {
+			return true
+		}
+	}
+	return false
+}
+
+// Renamed or deleted code identifiers are ordinary engineering prose: naming
+// them must not fail the removed-line check.
+func TestRemovedOnlyHitsAllowsCodeIdentifiers(t *testing.T) {
+	p := Policy{HostPattern: DefaultHostRegexp()}
+	renamed := "diff --git a/store/cache.go b/store/cache.go\n--- a/store/cache.go\n+++ b/store/cache.go\n@@ -4,7 +4,7 @@\n-func handleRequestMixed() {}\n+func processRequest() {}\n"
+	for _, msg := range []string{
+		"refactor: rename handleRequestMixed to processRequest",
+		"refactor: handleRequestMixed is now processRequest",
+	} {
+		if got := p.RemovedOnlyHits(msg, renamed); got != 0 {
+			t.Errorf("removed function named in %q: hits = %d, want 0", msg, got)
+		}
+		if f := p.Check(msg, renamed); len(f) != 0 {
+			t.Errorf("clean message rejected: %+v", f)
+		}
+	}
+	deleted := "diff --git a/store/cache.go b/store/cache.go\n--- a/store/cache.go\n+++ b/store/cache.go\n@@\n-func zorblaxStore() *Store {\n+func sharedStore() *Store {\n"
+	if got := p.RemovedOnlyHits("remove the zorblaxStore helper", deleted); got != 0 {
+		t.Errorf("deleted helper rejected: hits = %d, want 0", got)
+	}
+	// A deleted identifier that carries a deny-list name is still a leak.
+	q := Policy{HostPattern: DefaultHostRegexp(), DenyTerms: []string{"zorblax"}}
+	if got := q.RemovedOnlyHits("remove the zorblaxStore helper", deleted); got == 0 {
+		t.Error("deny-list name inside a removed identifier not flagged")
+	}
+}
+
+// Removed sensitive values must never be echoed by the message.
+func TestCheckRejectsRemovedSensitiveValues(t *testing.T) {
+	p := Policy{HostPattern: DefaultHostRegexp()}
+	cases := []struct{ name, msg, rule string }{
+		{"hostname", "update(deploy): point the app at db-primary.corp.internal", RuleRemovedEcho},
+		{"email", "update(deploy): cc ops@zorblaxcorp.example instead", RuleRemovedEcho},
+		{"home path", "update(deploy): move the config out of /home/zorblax", RuleRemovedEcho},
+		{"project id", "update(deploy): rename zorblax-prod namespace", RuleRemovedEcho},
+		{"secret value", "update(deploy): rotate zorb_live_51HfakeTOKENvalue0000", RuleRemovedEcho},
+		{"host also by pattern", "update(deploy): point the app at db-primary.corp.internal", RuleHost},
+		{"email also by pattern", "update(deploy): cc ops@zorblaxcorp.example instead", RuleEmail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := p.Check(tc.msg, removedValuesDiff)
+			if len(findings) == 0 {
+				t.Fatalf("message accepted: %q", tc.msg)
+			}
+			if !hasRule(findings, tc.rule) {
+				t.Fatalf("findings %+v lack rule %s", findings, tc.rule)
+			}
+		})
+	}
+	// A removed owner that is a deny-list name stays blocked when echoed.
+	q := Policy{HostPattern: DefaultHostRegexp(), DenyTerms: []string{"zorblaxcorp"}}
+	diff := "diff --git a/OWNERS b/OWNERS\n--- a/OWNERS\n+++ b/OWNERS\n@@\n-ZorblaxCorp\n+ExampleOrg\n"
+	if findings := q.Check("update(owners): remove the ZorblaxCorp entry\n\n- Use the new owner.\n", diff); !hasRule(findings, RuleDenyList) {
+		t.Fatalf("deny-list name not rejected: %+v", findings)
+	}
+}
+
+// Words inside removed code comments are prose, not values, unless the
+// classifier (here: the deny-list) says they are.
+func TestRemovedOnlyHitsIgnoresCommentWords(t *testing.T) {
+	diff := "diff --git a/store/cache.go b/store/cache.go\n--- a/store/cache.go\n+++ b/store/cache.go\n@@\n-// zorblax was the old vendor name\n+// none\n"
+	p := Policy{HostPattern: DefaultHostRegexp()}
+	if got := p.RemovedOnlyHits("clean up the zorblax references", diff); got != 0 {
+		t.Errorf("comment word flagged: hits = %d, want 0", got)
+	}
+	q := Policy{HostPattern: DefaultHostRegexp(), DenyTerms: []string{"zorblax"}}
+	if got := q.RemovedOnlyHits("clean up the zorblax references", diff); got == 0 {
+		t.Error("deny-list word inside a removed comment not flagged")
 	}
 }
 
@@ -78,11 +176,13 @@ func TestCheckFindingsNeverEchoPrivateText(t *testing.T) {
 func TestSensitivePatterns(t *testing.T) {
 	p := Policy{HostPattern: regexp.MustCompile(DefaultInternalHostPattern)}
 	bad := map[string]string{
-		"email":  "notify ops@corp-example.io on failure",
-		"ipv4":   "point at 10.4.7.12 now",
-		"ipv6":   "listen on fd00:1234:5678::1",
-		"host":   "call db-primary.corp.internal for data",
-		"aws":    "use AKIAABCDEFGHIJKLMNOP",
+		"email": "notify ops@corp-example.io on failure",
+		"ipv4":  "point at 10.4.7.12 now",
+		"ipv6":  "listen on fd00:1234:5678::1",
+		"host":  "call db-primary.corp.internal for data",
+		// The AWS-style key is built at runtime so the repository never
+		// contains a string that GitHub push-protection flags as a real key.
+		"aws":    "use AKIA" + strings.Repeat("AB", 8),
 		"ghp":    "token ghp_abcdefghijklmnopqrstuvwxyz0123",
 		"pem":    "-----BEGIN RSA PRIVATE KEY-----",
 		"assign": "set password=hunter2hunter2",

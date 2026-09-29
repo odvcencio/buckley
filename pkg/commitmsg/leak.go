@@ -14,7 +14,7 @@ import (
 	"unicode"
 )
 
-// MinLeakTokenLen is the shortest identifier the removed-line check considers.
+// MinLeakTokenLen is the shortest token the removed-line check considers.
 const MinLeakTokenLen = 4
 
 // Rule names reported in Finding.Rule.
@@ -187,41 +187,191 @@ func considerable(norm string) bool {
 type diffTokens struct {
 	removed, added, header map[string]bool // normalized identifiers
 	removedW, addedW       map[string]bool // normalized words
+	// sensitiveRemoved and sensitiveRemovedW hold only the removed tokens
+	// classified as sensitive values: configuration values, /home path
+	// segments, domain labels, deny-list names, and secret-shaped strings.
+	// Ordinary code identifiers never enter these sets.
+	sensitiveRemoved, sensitiveRemovedW map[string]bool
 }
 
-func scanDiff(diff string) diffTokens {
+// minSensitiveValueLen is the length at which an unstructured word in a
+// removed configuration value carries enough identity to be a name (shorter
+// words like "prod" or "api" are environment labels, not secrets).
+const minSensitiveValueLen = 7
+
+// maxDataValueLen bounds the assignment values inspected as data. A longer
+// value is prose (documentation text folded into a config field), whose words
+// are not identifiers.
+const maxDataValueLen = 80
+
+var (
+	dataValueRe = regexp.MustCompile(`^\s*[^:=\n]{1,120}?\s*[:=]\s*(\S.*)$`)
+	homePathRe  = regexp.MustCompile(`/home/[A-Za-z0-9._-]+(?:/[^\s,;:'"()\]{}]*)*`)
+	domainRe    = regexp.MustCompile(`(?i)\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.(?:com|net|org|io|dev|app|co|us|uk|eu|cn|jp|ai|sh|me|info|biz|cloud|tech|xyz|internal|local|localdomain|corp|lan|intranet)(?:\.[a-z]{2,3})?\b`)
+)
+
+// dataFileExts are the extensions whose lines hold configuration data. Values
+// assigned there (namespaces, deployment names, hosts) are data the repository
+// carried, not code the author named, so removed values are sensitive.
+var dataFileExts = map[string]bool{
+	".yaml": true, ".yml": true, ".json": true, ".toml": true,
+	".ini": true, ".env": true, ".cfg": true, ".conf": true,
+	".properties": true, ".tf": true, ".tfvars": true, ".csv": true,
+	".xml": true,
+}
+
+func isDataFilePath(path string) bool {
+	return dataFileExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// diffPathLine extracts the file path from a --- or +++ line.
+func diffPathLine(line string) string {
+	path := strings.TrimSpace(line[3:])
+	if path == "/dev/null" {
+		return ""
+	}
+	if p, ok := strings.CutPrefix(path, "a/"); ok {
+		return p
+	}
+	if p, ok := strings.CutPrefix(path, "b/"); ok {
+		return p
+	}
+	return path
+}
+
+// diffGitHeaderPath extracts the b-side path from a `diff --git a/x b/y` line.
+func diffGitHeaderPath(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return ""
+	}
+	if p, ok := strings.CutPrefix(fields[len(fields)-1], "b/"); ok {
+		return p
+	}
+	return ""
+}
+
+// secretShaped reports whether a raw identifier looks like a random key
+// rather than a human-written name: long, with mixed case and digits, and
+// using '_' or '-' separators.
+func secretShaped(id string) bool {
+	return len(normalizeToken(id)) >= 20 && mixedCase(id) && strings.ContainsAny(id, "_-")
+}
+
+// matchesDenyTerm reports whether any private deny-list term occurs inside
+// the identifier, ignoring case and separators.
+func (p Policy) matchesDenyTerm(id string) bool {
+	n := normalizeAlnum(id)
+	for _, term := range p.DenyTerms {
+		if t := normalizeAlnum(term); len(t) >= 3 && strings.Contains(n, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// sensitiveInRemovedLine classifies the identifiers on one removed line
+// (without its leading '-') that are sensitive values:
+//   - scalars assigned in data files (config values, namespaces, ids)
+//   - segments of /home paths (usernames, private workspace directories)
+//   - labels of dot-separated domains and internal hosts
+//   - deny-list matches, which count even inside code identifiers
+//   - secret-shaped strings (long, mixed case, with separators)
+//
+// Ordinary code identifiers and the words of code comments are never
+// sensitive on their own.
+func (p Policy) sensitiveInRemovedLine(line string, inDataFile bool) map[string]bool {
+	out := map[string]bool{}
+	add := func(text string) {
+		for _, id := range identRe.FindAllString(text, -1) {
+			if n := normalizeToken(id); considerable(n) && !commonWords[n] {
+				out[n] = true
+			}
+		}
+	}
+	if inDataFile {
+		if m := dataValueRe.FindStringSubmatch(line); m != nil && len(m[1]) <= maxDataValueLen {
+			for _, id := range identRe.FindAllString(m[1], -1) {
+				n := normalizeToken(id)
+				if considerable(n) && !commonWords[n] && (identifierShaped(id) || len(n) >= minSensitiveValueLen) {
+					out[n] = true
+				}
+			}
+		}
+	}
+	for _, m := range homePathRe.FindAllString(line, -1) {
+		add(m)
+	}
+	for _, m := range domainRe.FindAllString(line, -1) {
+		add(m)
+	}
+	for _, id := range identRe.FindAllString(line, -1) {
+		if secretShaped(id) || p.matchesDenyTerm(id) {
+			if n := normalizeToken(id); considerable(n) && !commonWords[n] {
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+func (p Policy) scanDiff(diff string) diffTokens {
 	t := diffTokens{
 		removed: map[string]bool{}, added: map[string]bool{}, header: map[string]bool{},
 		removedW: map[string]bool{}, addedW: map[string]bool{},
+		sensitiveRemoved: map[string]bool{}, sensitiveRemovedW: map[string]bool{},
 	}
 	sc := bufio.NewScanner(strings.NewReader(diff))
 	sc.Buffer(make([]byte, 1<<20), 16<<20)
+	inDataFile := false
 	for sc.Scan() {
 		line := sc.Text()
 		var ids, words map[string]bool
+		var removedLine bool
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
 			ids = t.header
+			if path := diffPathLine(line); path != "" {
+				inDataFile = isDataFilePath(path)
+			}
 		case strings.HasPrefix(line, "diff --git") || strings.HasPrefix(line, "rename ") ||
 			strings.HasPrefix(line, "similarity ") || strings.HasPrefix(line, "index "):
 			ids = t.header
+			if path := diffGitHeaderPath(line); path != "" {
+				inDataFile = isDataFilePath(path)
+			}
 		case strings.HasPrefix(line, "+"):
 			ids, words = t.added, t.addedW
 			line = line[1:]
 		case strings.HasPrefix(line, "-"):
 			ids, words = t.removed, t.removedW
 			line = line[1:]
+			removedLine = true
 		default:
 			continue
 		}
+		var sens map[string]bool
+		if removedLine {
+			sens = p.sensitiveInRemovedLine(line, inDataFile)
+		}
 		for _, id := range identRe.FindAllString(line, -1) {
-			if n := normalizeToken(id); considerable(n) {
-				ids[n] = true
+			n := normalizeToken(id)
+			if !considerable(n) {
+				continue
 			}
+			ids[n] = true
 			if words != nil {
 				for _, w := range splitWords(id) {
 					if considerable(w) {
 						words[w] = true
+					}
+				}
+			}
+			if sens[n] {
+				t.sensitiveRemoved[n] = true
+				for _, w := range splitWords(id) {
+					if considerable(w) {
+						t.sensitiveRemovedW[w] = true
 					}
 				}
 			}
@@ -230,15 +380,19 @@ func scanDiff(diff string) diffTokens {
 	return t
 }
 
-// RemovedOnlyHits counts message tokens (4+ characters) that occur only on
-// removed diff lines. Identifiers and their camelCase or snake_case words are
-// compared case- and separator-insensitively. Paths in diff headers count as
-// present, so naming a deleted file is allowed.
-func RemovedOnlyHits(message, diff string) int {
+// RemovedOnlyHits counts message tokens (4+ characters) that repeat a
+// sensitive value occurring only on removed diff lines: configuration values,
+// /home paths, domains, secret-shaped strings, and deny-list names. Ordinary
+// identifiers that merely disappeared from the code (a renamed function, a
+// deleted helper) and the words inside removed comments are not sensitive,
+// so naming them is allowed. Identifiers and their camelCase or snake_case
+// words are compared case- and separator-insensitively. Paths in diff headers
+// count as present, so naming a deleted file is allowed.
+func (p Policy) RemovedOnlyHits(message, diff string) int {
 	if strings.TrimSpace(diff) == "" {
 		return 0
 	}
-	t := scanDiff(diff)
+	t := p.scanDiff(diff)
 	seen := map[string]bool{}
 	hits := 0
 	for _, id := range identRe.FindAllString(message, -1) {
@@ -257,8 +411,8 @@ func RemovedOnlyHits(message, diff string) int {
 			if (ci > 0 || !shaped) && commonWords[cand] {
 				continue
 			}
-			whole := t.removed[cand] && !t.added[cand] && !t.header[cand]
-			word := t.removedW[cand] && !t.addedW[cand] && !t.added[cand] && !t.header[cand]
+			whole := t.sensitiveRemoved[cand] && !t.added[cand] && !t.header[cand]
+			word := t.sensitiveRemovedW[cand] && !t.addedW[cand] && !t.added[cand] && !t.header[cand]
 			if whole || word {
 				hits++
 				break
@@ -268,13 +422,13 @@ func RemovedOnlyHits(message, diff string) int {
 	return hits
 }
 
-// RemovedOnlyTerms lists the normalized identifiers that occur only on removed
-// lines of diff. It exists for evaluation and tests; generation code must never
-// log or echo its result.
-func RemovedOnlyTerms(diff string) []string {
-	t := scanDiff(diff)
+// RemovedOnlyTerms lists the normalized identifiers that occur only on
+// removed lines of diff and classify as sensitive values. It exists for
+// evaluation and tests; generation code must never log or echo its result.
+func (p Policy) RemovedOnlyTerms(diff string) []string {
+	t := p.scanDiff(diff)
 	var terms []string
-	for id := range t.removed {
+	for id := range t.sensitiveRemoved {
 		if !t.added[id] && !t.header[id] && !commonWords[id] {
 			terms = append(terms, id)
 		}
@@ -404,8 +558,8 @@ func (p Policy) Check(message, diff string) []Finding {
 	if n := p.DenyHits(message); n > 0 {
 		out = append(out, Finding{RuleDenyList, "the message contains a term from the private deny-list", n})
 	}
-	if n := RemovedOnlyHits(message, diff); n > 0 {
-		out = append(out, Finding{RuleRemovedEcho, fmt.Sprintf("the message names %d identifier(s) that exist only on removed lines of the diff", n), n})
+	if n := p.RemovedOnlyHits(message, diff); n > 0 {
+		out = append(out, Finding{RuleRemovedEcho, fmt.Sprintf("the message repeats %d sensitive value(s) that appear only on removed lines of the diff", n), n})
 	}
 	out = append(out, p.sensitivePatterns(message)...)
 	return out
