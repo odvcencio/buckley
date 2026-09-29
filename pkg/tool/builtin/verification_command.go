@@ -89,16 +89,21 @@ func isNiceLevel(field string) bool {
 
 // stripVerificationWrappers drops the leading words that only shape the
 // environment or the scheduling priority of the check that follows them:
-// allowed env assignments, an env word that carries them, and nice -n N.
+// allowed env assignments, an env word that carries them, and nice -n N. It
+// follows shell grammar: a bare assignment is valid first, or right after env,
+// but not after nice, where the shell would run it as a program name.
 func stripVerificationWrappers(fields []string) []string {
+	bareAssignment := true
 	for len(fields) > 0 {
 		switch {
-		case isVerificationEnvAssignment(fields[0]):
+		case bareAssignment && isVerificationEnvAssignment(fields[0]):
 			fields = fields[1:]
 		case fields[0] == "env" && len(fields) > 1 && isVerificationEnvAssignment(fields[1]):
 			fields = fields[1:]
+			bareAssignment = true
 		case fields[0] == "nice" && len(fields) > 2 && fields[1] == "-n" && isNiceLevel(fields[2]):
 			fields = fields[3:]
+			bareAssignment = false
 		default:
 			return fields
 		}
@@ -198,7 +203,7 @@ func VerificationCommandRejection(command string) string {
 func unacceptedVerificationCommand(fields []string) string {
 	head := fields[0]
 	if name, _, hasValue := strings.Cut(head, "="); hasValue {
-		return fmt.Sprintf("%s=... is not an accepted check; only GOWORK=off and CGO_ENABLED=0 or 1 may start a verification command", name)
+		return fmt.Sprintf("%s=... is not accepted here; only GOWORK=off and CGO_ENABLED=0 or 1 are allowed, first or after env, for example GOWORK=off nice -n 10 go test ./...", name)
 	}
 	switch head {
 	case "make":

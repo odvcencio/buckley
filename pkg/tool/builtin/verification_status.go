@@ -58,6 +58,10 @@ func VerificationUnavailableReason(result *Result) string {
 	if strings.HasPrefix(result.Error, "sandbox blocked command") {
 		return "the sandbox blocked the command"
 	}
+	family := verificationFamily(result)
+	if family == "" {
+		return ""
+	}
 	text := verificationResultText(result)
 	// Output that shows tests ran is a real result, even when a test prints
 	// one of the messages below.
@@ -65,42 +69,83 @@ func VerificationUnavailableReason(result *Result) string {
 		return ""
 	}
 	for _, marker := range verificationUnavailableMarkers {
-		if marker.tool != "" && !verificationMentions(result, marker.tool) {
-			continue
-		}
-		if marker.pattern.MatchString(text) {
+		if marker.family == family && marker.pattern.MatchString(text) {
 			return marker.reason
 		}
 	}
-	if hasExit && exitCode == 5 && verificationMentions(result, "pytest") &&
+	if hasExit && exitCode == 5 && family == familyPytest &&
 		(strings.Contains(text, "no tests ran") || strings.Contains(text, "collected 0 items")) {
 		return "pytest found no tests to run"
 	}
 	return ""
 }
 
-// verificationRanTests matches the lines that go, jest, and cargo print only
-// after they ran tests.
-var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL\s|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?)`)
+// verificationRanTests matches the lines that go, jest, cargo, and pytest print
+// only after they ran tests.
+var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL\s|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?|collected [1-9][0-9]* items?|=*\s*[0-9]+ (failed|passed|errors?)\b)`)
 
-// verificationUnavailableMarkers are the messages that go, cargo, npm, and make
-// print when the workspace has nothing for them to run. A marker with a tool
-// applies only to results whose command or framework names that tool, so a test
-// that happens to print the same words is still a real failure.
+// Tool families a verification command belongs to. A marker below applies only
+// to its own family, so a pytest test that prints a go message is still a real
+// failure.
+const (
+	familyGo     = "go"
+	familyCargo  = "cargo"
+	familyNpm    = "npm"
+	familyMake   = "make"
+	familyPytest = "pytest"
+)
+
+// verificationUnavailableMarkers are the messages that go, cargo, npm, make,
+// and pytest print when the workspace has nothing for them to run.
 var verificationUnavailableMarkers = []struct {
-	tool    string
+	family  string
 	pattern *regexp.Regexp
 	reason  string
 }{
-	{"", regexp.MustCompile(`go\.mod file not found|cannot find main module`), "there is no go.mod in the workspace"},
-	{"", regexp.MustCompile(`requires go[^\n]*running go[^\n]*GOTOOLCHAIN=local`), "the installed Go toolchain is older than go.mod requires"},
-	{"", regexp.MustCompile("could not find `Cargo\\.toml`"), "there is no Cargo.toml in the workspace"},
-	{"npm", regexp.MustCompile(`(?i)could not read package\.json|no such file or directory, open '[^']*package\.json'`), "there is no package.json in the workspace"},
-	{"npm", regexp.MustCompile(`(?i)missing script`), "package.json has no script for this check"},
-	{"npm", regexp.MustCompile(`No tests found`), "jest found no tests to run"},
-	{"npm", regexp.MustCompile(`no test specified`), "package.json has no test script"},
-	{"make", regexp.MustCompile(`No targets specified and no makefile found`), "there is no Makefile in the workspace"},
-	{"make", regexp.MustCompile("No rule to make target [`'\"](test|check|build|vet|lint)['\"]"), "the Makefile has no such target"},
+	{familyGo, regexp.MustCompile(`go\.mod file not found|cannot find main module`), "there is no go.mod in the workspace"},
+	{familyGo, regexp.MustCompile(`requires go[^\n]*running go[^\n]*GOTOOLCHAIN=local`), "the installed Go toolchain is older than go.mod requires"},
+	{familyCargo, regexp.MustCompile("could not find `Cargo\\.toml`"), "there is no Cargo.toml in the workspace"},
+	{familyNpm, regexp.MustCompile(`(?i)could not read package\.json|no such file or directory, open '[^']*package\.json'`), "there is no package.json in the workspace"},
+	{familyNpm, regexp.MustCompile(`(?i)missing script`), "package.json has no script for this check"},
+	{familyNpm, regexp.MustCompile(`No tests found`), "jest found no tests to run"},
+	{familyNpm, regexp.MustCompile(`no test specified`), "package.json has no test script"},
+	{familyMake, regexp.MustCompile(`No targets specified and no makefile found`), "there is no Makefile in the workspace"},
+	{familyMake, regexp.MustCompile("No rule to make target [`'\"](test|check|build|vet|lint)['\"]"), "the Makefile has no such target"},
+}
+
+// verificationFamily names the tool family behind a verification result: from
+// the framework run_tests reports, or from the first word of the command after
+// its wrappers. It returns "" for anything else, and output is never
+// classified for those.
+func verificationFamily(result *Result) string {
+	switch framework, _ := result.Data["framework"].(string); framework {
+	case "go":
+		return familyGo
+	case "jest":
+		return familyNpm
+	case "pytest":
+		return familyPytest
+	case "cargo":
+		return familyCargo
+	}
+	command, _ := result.Data["command"].(string)
+	fields := stripVerificationWrappers(strings.Fields(command))
+	if len(fields) == 0 {
+		return ""
+	}
+	switch fields[0] {
+	case "go", "golangci-lint", "staticcheck":
+		return familyGo
+	case "npm":
+		return familyNpm
+	case "cargo":
+		return familyCargo
+	case "pytest", "python", "python3":
+		return familyPytest
+	case "make":
+		return familyMake
+	}
+	return ""
 }
 
 func verificationExitCode(result *Result) (int, bool) {
@@ -125,19 +170,6 @@ func verificationResultText(result *Result) string {
 		}
 	}
 	return text.String()
-}
-
-func verificationMentions(result *Result, word string) bool {
-	for _, key := range []string{"command", "framework"} {
-		if value, ok := result.Data[key].(string); ok && strings.Contains(value, word) {
-			return true
-		}
-	}
-	// run_tests runs jest through npm.
-	if framework, _ := result.Data["framework"].(string); word == "npm" && framework == "jest" {
-		return true
-	}
-	return false
 }
 
 const (

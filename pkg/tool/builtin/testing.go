@@ -43,7 +43,7 @@ func (t *RunTestsTool) TrustedVerification() bool {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with optional path and pattern filtering. Auto-detects test framework."
+	return "Run tests with optional path and pattern filtering. Auto-detects test framework. With no path, a Go module whose root has no package is tested with ./.... A workspace with no test framework returns an unavailable status, not a failure."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {
