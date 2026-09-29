@@ -50,27 +50,29 @@ func VerificationUnavailableReason(result *Result) string {
 		}
 		return "the check did not run"
 	}
-	exitCode, hasExit := verificationExitCode(result)
-	if hasExit && (exitCode == 126 || exitCode == 127) {
-		return "the command was not found or could not be started on this machine"
-	}
 	if strings.HasPrefix(result.Error, "sandbox blocked command") {
 		return "the sandbox blocked the command"
 	}
-	family := verificationFamily(result)
-	if family == "" {
-		return ""
-	}
+	exitCode, hasExit := verificationExitCode(result)
 	text := verificationResultText(result)
-	// Output that shows tests ran is a real result, even when a test prints
-	// one of the messages below. A package that failed to load or set up ran
-	// nothing, so its FAIL line does not count.
+	// Output that shows tests ran is a real result, whatever the exit code and
+	// even when a test prints one of the messages below. A package that failed
+	// to load or set up ran nothing, so its FAIL line does not count.
 	if verificationRanTests.MatchString(goSetupFailure.ReplaceAllString(text, "")) {
 		return ""
 	}
 	// npm reports a failed script with a lifecycle error. A script that ran and
 	// failed is a real failure, whatever else it printed.
+	family := verificationFamily(result)
 	if family == familyNpm && npmScriptRan.MatchString(text) {
+		return ""
+	}
+	// Exit 126 and 127 mean the shell could not start the command, and its
+	// message says so. Any other output is a check that ran.
+	if hasExit && (exitCode == 126 || exitCode == 127) && shellStartFailure.MatchString(text) {
+		return "the command was not found or could not be started on this machine"
+	}
+	if family == "" {
 		return ""
 	}
 	for _, marker := range verificationUnavailableMarkers {
@@ -87,6 +89,10 @@ func VerificationUnavailableReason(result *Result) string {
 // verificationRanTests matches the lines that go, jest, cargo, and pytest print
 // only after they ran tests.
 var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL[ \t]+\S|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?|collected [1-9][0-9]* items?|=*\s*[0-9]+ (failed|passed|errors?)\b)`)
+
+// shellStartFailure matches the messages a shell prints when it cannot start a
+// command.
+var shellStartFailure = regexp.MustCompile(`(?im)command not found|: not found\b|no such file or directory|permission denied|cannot execute`)
 
 // goSetupFailure matches the FAIL line go test prints for a pattern or package
 // that could not be loaded.
