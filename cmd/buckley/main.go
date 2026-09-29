@@ -457,9 +457,13 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	stopReason := ""
+	unverifiedReason := ""
 	previousOnStop := limits.OnStop
 	limits.OnStop = func(stop agentloop.Termination) {
 		stopReason = stop.StopReason()
+		if stop.Kind == agentloop.TerminationCompletedUnverified {
+			unverifiedReason = stop.Reason
+		}
 		fmt.Fprintf(os.Stderr, "One-shot stop: stop_reason=%q\n", stopReason)
 		if previousOnStop != nil {
 			previousOnStop(stop)
@@ -737,6 +741,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		responseText = string(artifactJSON)
 	}
 
+	if unverifiedReason != "" && outputSchema == "" {
+		// Say plainly, in the summary a lead reads, that nothing verified the change.
+		responseText = strings.TrimRight(responseText, "\n") + "\n\n[Buckley] Completed without verification: " + unverifiedReason + "."
+	}
 	if responseText != "" {
 		fmt.Print(responseText)
 	}

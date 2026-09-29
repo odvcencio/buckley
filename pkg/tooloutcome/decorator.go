@@ -78,6 +78,15 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 		}
 	}
 	if metadata.Verification {
+		// A check that never ran (a refused command, or a workspace with
+		// nothing to run) is not a failed check. Record it as unavailable so
+		// it neither counts as a failure nor replaces the last real result.
+		if reason := builtin.VerificationUnavailableReason(result); execErr == nil && reason != "" {
+			outcome.VerificationUnavailable = true
+			outcome.VerificationUnavailableReason = reason
+			outcome.Content += "\n\n[Buckley verification] This check did not run: " + reason + ". It is recorded as unavailable, not as a pass or a failure."
+			return outcome
+		}
 		outcome.VerificationObserved = true
 		outcome.VerificationPassed = execErr == nil && result != nil && result.Success
 		if outcome.StateObserved && outcome.StateChanged {

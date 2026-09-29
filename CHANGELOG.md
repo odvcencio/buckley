@@ -45,6 +45,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.
   See docs/CONFIGURATION.md.
 
+### Fixed
+- Headless mutation runs (`--task-intent mutation`, `--persist`) no longer
+  loop on "missing successful verification after the latest workspace
+  change" when no check can run. Refused `run_verification` calls (for
+  example `git diff --check` or `python -m unittest`) and `run_tests` calls
+  in a workspace with no test framework used to count as failed tests and
+  replaced the last real result. They are now recorded as unavailable and
+  leave earlier results alone. Three unavailable checks in a row, made
+  since the latest change, end the run as `completed_unverified`. So does a
+  final answer in a workspace where no accepted check can run, after one
+  question that asks whether the work is finished. That means a workspace
+  that holds only text files with no doctest example, images, and project
+  files that define no test, build, lint, or check: a `package.json`
+  without a `test`, `build`, or `lint` script, a Makefile of plain rules,
+  variables, and comments that defines no `test`, `check`, `build`, `vet`,
+  or `lint` target, or Python configuration that does not name pytest.
+  Any source file in any directory (hidden files and directories
+  included), a `go.mod`, a `Cargo.toml`, a Makefile with an include, a
+  conditional, a pattern rule, or anything else the scan does not
+  recognize, or anything the scan cannot search or read counts as a check
+  that might run. The `completed_unverified` outcome exits 0, reports
+  `stop_reason="completed_unverified: ..."`, and adds a note to the final
+  output. A real failing check that repeats four times with no workspace
+  change, or ten continuations for verification reasons, end the run as
+  `verification_stalled` (exit 1). The `run_verification` description and
+  refusal messages now list the accepted commands, and `nice -n N` and
+  `env GOWORK=off` may start one. Passing checks and real failures behave
+  as before.
+- `run_tests` with no path now tests every package of a Go module
+  (`./...`), as it already tests the whole tree for pytest, jest, and
+  cargo. It used to run `go test .`, which tests only the package in the
+  current directory and failed at once with "no Go files" when the module
+  root holds none, which looked like a failing test. A path you name, such
+  as `.`, is still used exactly.
+
 ## [0.8.2] - 2026-08-17
 
 ### Fixed

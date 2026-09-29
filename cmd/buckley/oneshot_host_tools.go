@@ -94,3 +94,27 @@ func maxNoChangeContinuations(limits acpLoopLimits) int {
 	}
 	return 0
 }
+
+const (
+	// defaultMaxVerificationUnavailable ends a continuing run as
+	// completed_unverified after this many verification calls in a row that
+	// could not run (a refused command, or a workspace with nothing to run).
+	defaultMaxVerificationUnavailable = 3
+	// defaultMaxVerificationStalls ends a continuing run as
+	// verification_stalled after this many failed verifications in a row with
+	// no workspace change between them.
+	defaultMaxVerificationStalls = 4
+	// defaultMaxVerificationContinuations ends a continuing run as
+	// verification_stalled after this many continuations rejected for missing
+	// or failed verification. Healthy runs need one or two.
+	defaultMaxVerificationContinuations = 10
+)
+
+// verificationLimit returns limit for a continuing run and 0 (no cap) for a
+// run that does not continue.
+func verificationLimit(limits acpLoopLimits, limit int) int {
+	if limits.MaxContinuations > 0 {
+		return limit
+	}
+	return 0
+}
