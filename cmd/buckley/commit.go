@@ -839,13 +839,17 @@ func createCommit(message string, compactOutput bool, useGraft bool, paths []str
 	return createCommitWithMetadata(message, compactOutput, useGraft, paths, commitmsg.ChangeMetadata{}, false)
 }
 
-func createCommitWithMetadata(message string, compactOutput bool, useGraft bool, paths []string, expected commitmsg.ChangeMetadata, addTrailer bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// commitStepTimeout bounds git commit (and its hooks) plus the follow-up
+// HEAD lookup. Commits that touch thousands of files need more than the old
+// 30 seconds on a busy machine.
+const commitStepTimeout = 2 * time.Minute
 
+func createCommitWithMetadata(message string, compactOutput bool, useGraft bool, paths []string, expected commitmsg.ChangeMetadata, addTrailer bool) error {
 	var commitEnv []string
 	if !useGraft && len(paths) > 0 {
-		env, cleanup, err := prepareScopedCommitIndex(ctx, paths)
+		prepCtx, prepCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		env, cleanup, err := prepareScopedCommitIndex(prepCtx, paths)
+		prepCancel()
 		if err != nil {
 			return err
 		}
@@ -867,6 +871,13 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 	if addTrailer {
 		message = commitmsg.AppendChangeMetadata(message, expected)
 	}
+
+	// Start the commit's own deadline only after the identity recheck above.
+	// The recheck hashes the full staged binary diff, which takes over a
+	// minute when a commit deletes gigabytes of tracked binaries; it must not
+	// use up the time git commit itself needs.
+	ctx, cancel := context.WithTimeout(context.Background(), commitStepTimeout)
+	defer cancel()
 
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")
