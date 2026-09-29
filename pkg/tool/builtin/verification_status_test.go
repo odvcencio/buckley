@@ -1074,3 +1074,26 @@ func TestRunTestsTool_PathHasNoSchemaDefault(t *testing.T) {
 		t.Errorf("path must stay optional: %v", (&RunTestsTool{}).Parameters().Required)
 	}
 }
+
+// A model fills in every schema default it is shown. Simulate that on a module
+// whose packages all sit below the root: the call must pass, not fail with
+// "no Go files" as it did when the schema advertised path ".".
+func TestRunTestsTool_ACallBuiltFromTheSchemaDefaultsPassesInARootlessModule(t *testing.T) {
+	root := writeGoModule(t, map[string]string{"pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest})
+	tool := &RunTestsTool{}
+	tool.SetWorkDir(root)
+	params := map[string]any{}
+	for name, property := range tool.Parameters().Properties {
+		if property.Default != nil {
+			params[name] = property.Default
+		}
+	}
+	if _, hasPath := params["path"]; hasPath {
+		t.Fatalf("the schema still offers a default path: %v", params)
+	}
+	params["timeout_seconds"] = float64(120)
+	result, err := tool.ExecuteWithContext(context.Background(), params)
+	if err != nil || !result.Success || result.Data["path"] != "./..." || result.Data["passed"] != 1 {
+		t.Fatalf("a call filled from the schema defaults failed: %+v err=%v", result, err)
+	}
+}
