@@ -319,7 +319,7 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"nested go module", []string{"tools/gen/go.mod"}, true},
 		{"package json", []string{"package.json"}, true},
 		{"cargo", []string{"Cargo.toml"}, true},
-		{"makefile", []string{"Makefile"}, true},
+		{"no makefile", []string{"docs/Makefile.txt"}, false},
 		{"python test", []string{"tests/test_hello.py"}, true},
 		{"go test file", []string{"pkg/a/a_test.go"}, true},
 		{"js spec", []string{"src/a.spec.ts"}, true},
@@ -616,6 +616,114 @@ func TestHasVerificationSurface_UnsearchedSubtreesCountAsUnknown(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 		if got, reason := HasVerificationSurface(root); !got {
 			t.Fatalf("an unreadable directory may hold a surface: %q", reason)
+		}
+	})
+}
+
+func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		file    string
+		content string
+		want    bool
+	}{
+		{"test target", "Makefile", "test:\n\t@true\n", true},
+		{"check and build on one rule", "Makefile", "check build: deps\n\t@true\n", true},
+		{"lint target after other rules", "Makefile", "all:\n\t@true\n\nlint:\n\t@true\n", true},
+		{"vet with carriage returns", "Makefile", "vet:\r\n\t@true\r\n", true},
+		{"GNUmakefile", "GNUmakefile", "lint:\n\t@true\n", true},
+		{"lowercase makefile", "makefile", "build:\n\t@true\n", true},
+		{"only an all target", "Makefile", "all:\n\t@true\n", false},
+		{"only a phony declaration", "Makefile", ".PHONY: test check\nall:\n\t@true\n", false},
+		{"a dependency named test", "Makefile", "all: test.o\n\t@true\n", false},
+		{"a target that only starts with test", "Makefile", "testdata:\n\t@true\n", false},
+		{"a comment that names a target", "Makefile", "# test: run everything\nall:\n\t@true\n", false},
+		{"variable assignments", "Makefile", "CC := gcc\nTESTS = a:b\nCHECK ::= x\nall:\n\t@true\n", false},
+		{"a recipe line that looks like a rule", "Makefile", "all:\n\ttest: not a rule\n", false},
+		{"an include may define it", "Makefile", "include rules.mk\nall:\n\t@true\n", true},
+		{"an optional include may define it", "Makefile", "-include rules.mk\nall:\n\t@true\n", true},
+		{"a match-anything rule", "Makefile", "%:\n\t@true\n", true},
+		{"a target named by a variable", "Makefile", "$(CHECKS):\n\t@true\n", true},
+		{"a conditional around an all target", "Makefile", "ifeq ($(OS),Windows_NT)\nall:\n\t@true\nendif\n", false},
+		{"a conditional with a colon the scan cannot split", "Makefile", "ifeq ($(SHELL),a:b)\nall:\n\t@true\nendif\n", true},
+		{"a Makefile too large to read in full", "Makefile", "all:\n" + strings.Repeat("\t@true\n", maxMakefileBytes/7+1), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, tc.file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, reason := HasVerificationSurface(root)
+			if got != tc.want {
+				t.Fatalf("HasVerificationSurface = %v (%q), want %v", got, reason, tc.want)
+			}
+			if !got && !strings.Contains(reason, "Makefile with a test, check, build, vet, or lint target") {
+				t.Errorf("reason does not name the Makefile rule: %q", reason)
+			}
+		})
+	}
+
+	t.Run("a Makefile deeper in the tree", func(t *testing.T) {
+		root := t.TempDir()
+		for name, content := range map[string]string{"tools/Makefile": "all:\n\t@true\n", "docs/notes.txt": "x\n"} {
+			path := filepath.Join(root, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, reason := HasVerificationSurface(root); got {
+			t.Fatalf("an all-only Makefile in a subdirectory offers no check: %q", reason)
+		}
+		if err := os.WriteFile(filepath.Join(root, "tools", "Makefile"), []byte("check:\n\t@true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("a check target in a subdirectory offers one: %q", reason)
+		}
+	})
+
+	t.Run("an unreadable Makefile", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads every file")
+		}
+		root := t.TempDir()
+		path := filepath.Join(root, "Makefile")
+		if err := os.WriteFile(path, []byte("all:\n"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("an unreadable Makefile may define a check: %q", reason)
+		}
+	})
+
+	t.Run("a symlinked Makefile is read through the link", func(t *testing.T) {
+		root := t.TempDir()
+		real := filepath.Join(t.TempDir(), "real.mk")
+		if err := os.WriteFile(real, []byte("test:\n\t@true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, filepath.Join(root, "Makefile")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("a symlinked Makefile with a test target offers a check: %q", reason)
+		}
+	})
+
+	t.Run("a symlinked project file", func(t *testing.T) {
+		root := t.TempDir()
+		real := filepath.Join(t.TempDir(), "mod")
+		if err := os.WriteFile(real, []byte("module x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, filepath.Join(root, "go.mod")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("a symlinked go.mod is a module: %q", reason)
 		}
 	})
 }

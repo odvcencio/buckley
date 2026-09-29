@@ -220,7 +220,7 @@ func unacceptedVerificationCommand(fields []string) string {
 	if !plainVerificationWord(head) {
 		return "the command does not start with an accepted check"
 	}
-	return fmt.Sprintf("%s is not an accepted check; ad hoc commands such as test, grep, diff, and git do not count as verification (run them with run_shell if you need them)", head)
+	return fmt.Sprintf("%s is not an accepted check; ad hoc commands such as test, grep, diff, and git do not count as verification, so run them with run_shell if you need them", head)
 }
 
 // plainVerificationWord reports whether word holds only bytes that are safe to

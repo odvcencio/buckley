@@ -55,8 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leave earlier results alone. Three unavailable checks in a row, made
   since the latest change, end the run as `completed_unverified`. So does a
   final answer in a workspace with no `go.mod`, `package.json`,
-  `Cargo.toml`, Python project file, Makefile, or test file, after one
-  question that asks whether the work is finished. That outcome exits 0, reports `stop_reason="completed_unverified: ..."`,
+  `Cargo.toml`, Python project file, test file, or Makefile with a `test`,
+  `check`, `build`, `vet`, or `lint` target, after one question that asks
+  whether the work is finished. That outcome exits 0, reports `stop_reason="completed_unverified: ..."`,
   and adds a note to the final output. A real failing check that repeats
   four times with no workspace change, or ten continuations for
   verification reasons, end the run as `verification_stalled` (exit 1).

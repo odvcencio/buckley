@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -254,8 +255,16 @@ func HasVerificationSurface(root string) (bool, string) {
 			return nil
 		}
 		if entry.Type()&fs.ModeSymlink != 0 {
+			// A symlink to a file falls through to the name checks below.
 			if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
 				unknown = true
+				return nil
+			}
+		}
+		if isMakefileName(entry.Name()) {
+			if makefileOffersCheck(path) {
+				found = true
+				return fs.SkipAll
 			}
 			return nil
 		}
@@ -282,7 +291,7 @@ func HasVerificationSurface(root string) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "no go.mod, package.json, Cargo.toml, Python project file, Makefile, or test file was found in the workspace"
+	return false, "no go.mod, package.json, Cargo.toml, Python project file, Makefile with a test, check, build, vet, or lint target, or test file was found in the workspace"
 }
 
 func skipSurfaceDir(name string) bool {
@@ -302,7 +311,16 @@ func hasProjectMarker(dir string) bool {
 		return false
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && isProjectMarkerFile(entry.Name()) {
+		if entry.IsDir() {
+			continue
+		}
+		if isMakefileName(entry.Name()) {
+			if makefileOffersCheck(filepath.Join(dir, entry.Name())) {
+				return true
+			}
+			continue
+		}
+		if isProjectMarkerFile(entry.Name()) {
 			return true
 		}
 	}
@@ -312,8 +330,64 @@ func hasProjectMarker(dir string) bool {
 func isProjectMarkerFile(name string) bool {
 	switch name {
 	case "go.mod", "package.json", "Cargo.toml", "pyproject.toml", "setup.py", "setup.cfg",
-		"pytest.ini", "tox.ini", "conftest.py", "Makefile", "makefile", "GNUmakefile":
+		"pytest.ini", "tox.ini", "conftest.py":
 		return true
+	}
+	return false
+}
+
+func isMakefileName(name string) bool {
+	return name == "Makefile" || name == "makefile" || name == "GNUmakefile"
+}
+
+// maxMakefileBytes bounds how much of a Makefile the scan reads.
+const maxMakefileBytes = 1 << 20
+
+// makefileOffersCheck reports whether the Makefile at path could run one of the
+// accepted make targets: it defines test, check, build, vet, or lint, or it
+// holds something the scan cannot resolve (an include, a rule that matches any
+// target, a target named by a variable) or cannot be read in full. Only a
+// Makefile that was read completely and defines none of them offers no check.
+func makefileOffersCheck(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxMakefileBytes+1))
+	if err != nil || len(data) > maxMakefileBytes {
+		return true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '\t' || line[0] == '#' {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		for _, directive := range []string{"include ", "-include ", "sinclude "} {
+			if strings.HasPrefix(trimmed, directive) {
+				return true
+			}
+		}
+		colon := strings.Index(trimmed, ":")
+		if colon <= 0 {
+			continue
+		}
+		if equals := strings.Index(trimmed, "="); equals >= 0 && equals < colon {
+			continue // a variable assignment such as X = a:b
+		}
+		if strings.HasPrefix(strings.TrimLeft(trimmed[colon:], ":"), "=") {
+			continue // a variable assignment such as CC := gcc
+		}
+		targets := trimmed[:colon]
+		if strings.Contains(targets, "$(") || strings.Contains(targets, "${") {
+			return true
+		}
+		for _, target := range strings.Fields(targets) {
+			switch target {
+			case "test", "check", "build", "vet", "lint", "%":
+				return true
+			}
+		}
 	}
 	return false
 }

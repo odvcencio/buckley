@@ -177,6 +177,22 @@ func TestOneShotLane_NoVerificationSurfaceEndsUnverifiedAfterOneQuestion(t *test
 	}
 }
 
+// A Makefile with no accepted target is not a way to verify anything: the lane
+// must take the same one-question path as a workspace with no Makefile at all.
+func TestOneShotLane_MakefileWithoutAnAcceptedTargetEndsUnverifiedAfterOneQuestion(t *testing.T) {
+	run := runScriptedLane(t, map[string]string{"target.txt": "before\n", "Makefile": "all:\n\t@true\n"}, []laneStep{
+		editStep("before", "after"),
+		sayStep("Updated target.txt."),
+		sayStep("Updated target.txt; nothing could verify it."),
+	})
+	if run.code != 0 || run.requests != 3 {
+		t.Fatalf("code=%d requests=%d stdout=%s stderr=%s", run.code, run.requests, run.stdout, run.stderr)
+	}
+	if !strings.Contains(run.stderr, `stop_reason="completed_unverified: no check applies to this workspace`) || strings.Count(run.stderr, "One-shot continuation:") != 1 {
+		t.Fatalf("stderr lacks the one question and the explicit outcome:\n%s", run.stderr)
+	}
+}
+
 // Every refused command used to count as a failed test. Now they are recorded
 // as checks that never ran, and three in a row end the lane as unverified.
 func TestOneShotLane_RefusedChecksEndUnverifiedAfterThree(t *testing.T) {
