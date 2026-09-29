@@ -347,6 +347,8 @@ type SessionUpdate struct {
 	RawInput   any                `json:"rawInput,omitempty"`
 	RawOutput  any                `json:"rawOutput,omitempty"`
 	Locations  []ToolCallLocation `json:"locations,omitempty"`
+	// ToolName is the internal tool name, for local progress reporting only.
+	ToolName string `json:"-"`
 }
 
 // ContentBlock represents a piece of content (text, image, resource, etc).

@@ -709,7 +709,8 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
 		defer cancel()
 	}
-	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr), limits)
+	runCtx = withACPReplaySafeStream(runCtx)
+	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr, cwd), limits)
 	if err != nil {
 		codeModeFailure = err
 		if outputSchema == artifactv1.SchemaVersion {
@@ -793,7 +794,7 @@ func oneShotTaskIntentInstruction(intent agentloop.TaskIntent) string {
 	return "Read-only context contract: gather only evidence relevant to the request, then finish with a concise summary for the next investigator or orchestrator. Include paths, symbols, or commands that support the summary, call out uncertainty, and do not edit or claim checks you did not run."
 }
 
-const oneShotProgressMinInterval = 10 * time.Second
+const oneShotProgressMinInterval = 30 * time.Second
 
 type oneShotProgress struct {
 	writer        io.Writer
@@ -806,9 +807,10 @@ type oneShotProgress struct {
 	toolCalls     int
 	toolUpdates   int
 	usageUpdates  int
+	tools         *oneShotToolTracker
 }
 
-func newOneShotProgressStream(writer io.Writer) acp.StreamFunc {
+func newOneShotProgressStream(writer io.Writer, workDir string) acp.StreamFunc {
 	if quietMode || writer == nil {
 		return nil
 	}
@@ -817,6 +819,7 @@ func newOneShotProgressStream(writer io.Writer) acp.StreamFunc {
 		now:         time.Now,
 		minInterval: oneShotProgressMinInterval,
 		phase:       "starting",
+		tools:       newOneShotToolTracker(writer, workDir),
 	}
 	return progress.Stream
 }
@@ -835,9 +838,11 @@ func (p *oneShotProgress) Stream(update acp.SessionUpdate) error {
 	case acp.SessionUpdateToolCall:
 		p.phase = "tool"
 		p.toolCalls++
+		p.tools.start(update)
 	case acp.SessionUpdateToolCallUpdate:
 		p.phase = "tool"
 		p.toolUpdates++
+		p.tools.update(update)
 	case acp.SessionUpdateUsageUpdate:
 		p.phase = "usage"
 		p.usageUpdates++
