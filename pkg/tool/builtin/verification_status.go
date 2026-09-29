@@ -509,71 +509,63 @@ func isMakefileName(name string) bool {
 const maxMakefileBytes = 1 << 20
 
 // makefileOffersCheck reports whether the Makefile at path could run one of the
-// accepted make targets: it defines test, check, build, vet, or lint, or it
-// holds something the scan cannot resolve (an include, a rule that matches any
-// target, a target named by a variable) or cannot be read in full. Only a
-// Makefile that was read completely and defines none of them offers no check.
+// accepted make targets. GNU make syntax is large, so the scan recognizes a few
+// plain shapes and treats anything else as a Makefile that might define a
+// check: an include, a conditional, a define block, a pattern or variable
+// target, a continued line, an eval, .DEFAULT, or a file it cannot read in
+// full. Only a Makefile made entirely of comments, variable assignments, special
+// targets such as .PHONY, recipes, and plain rules for other targets offers no
+// check.
 func makefileOffersCheck(path string) bool {
 	data, ok := readSmallFile(path)
 	if !ok {
 		return true
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" || line[0] == '\t' || line[0] == '#' {
-			continue
+		if line == "" || line[0] == '\t' {
+			continue // a blank line, or a recipe line
 		}
 		trimmed := strings.TrimSpace(line)
-		for _, directive := range []string{"include ", "-include ", "sinclude "} {
-			if strings.HasPrefix(trimmed, directive) {
-				return true
-			}
-		}
-		colon := strings.Index(trimmed, ":")
-		if colon <= 0 {
+		if trimmed == "" || trimmed[0] == '#' {
 			continue
 		}
-		if equals := strings.Index(trimmed, "="); equals >= 0 && equals < colon {
-			continue // a variable assignment such as X = a:b
-		}
-		if strings.HasPrefix(strings.TrimLeft(trimmed[colon:], ":"), "=") {
-			continue // a variable assignment such as CC := gcc
-		}
-		targets := trimmed[:colon]
-		if strings.Contains(targets, "$(") || strings.Contains(targets, "${") {
+		if strings.HasSuffix(trimmed, "\\") || strings.Contains(trimmed, "eval") {
 			return true
 		}
-		for _, target := range strings.Fields(targets) {
-			if makeTargetCanRunCheck(target) {
+		if makeAssignment.MatchString(trimmed) {
+			continue
+		}
+		if makeSpecialTarget.MatchString(trimmed) {
+			if strings.HasPrefix(trimmed, ".DEFAULT") {
 				return true
+			}
+			continue
+		}
+		rule := makePlainRule.FindStringSubmatch(trimmed)
+		if rule == nil {
+			return true
+		}
+		for _, target := range strings.Fields(rule[1]) {
+			for _, accepted := range acceptedMakeTargets {
+				if target == accepted {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
+
+var (
+	// makeAssignment matches a variable assignment: NAME = value, NAME := value,
+	// NAME ::= value, NAME ?= value, NAME += value, NAME != value.
+	makeAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\-]*[ \t]*(?::::|:::|::|[:?+!])?=`)
+	// makeSpecialTarget matches a special target such as .PHONY or .SUFFIXES.
+	makeSpecialTarget = regexp.MustCompile(`^\.[A-Z_]+[ \t]*::?`)
+	// makePlainRule matches a rule whose targets are plain names. A pattern
+	// (%) or variable ($) target does not match, so it counts as unknown.
+	makePlainRule = regexp.MustCompile(`^([A-Za-z0-9_./\-]+(?:[ \t]+[A-Za-z0-9_./\-]+)*)[ \t]*::?(?:[^=]|$)`)
+)
 
 // acceptedMakeTargets are the make targets the verification allowlist runs.
 var acceptedMakeTargets = []string{"test", "check", "build", "vet", "lint"}
-
-// makeTargetCanRunCheck reports whether a rule target in a Makefile can supply
-// the recipe for an accepted make target: the target is one of them, a pattern
-// that matches one (a stem of at least one character must fill the %), or
-// .DEFAULT, which runs for any target without a rule.
-func makeTargetCanRunCheck(target string) bool {
-	if target == ".DEFAULT" {
-		return true
-	}
-	prefix, suffix, isPattern := strings.Cut(target, "%")
-	for _, accepted := range acceptedMakeTargets {
-		if !isPattern {
-			if target == accepted {
-				return true
-			}
-			continue
-		}
-		if !strings.Contains(suffix, "%") && len(accepted) > len(prefix)+len(suffix) &&
-			strings.HasPrefix(accepted, prefix) && strings.HasSuffix(accepted, suffix) {
-			return true
-		}
-	}
-	return false
-}

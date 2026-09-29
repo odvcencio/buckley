@@ -714,13 +714,19 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 		{"a pattern that matches test on both ends", "Makefile", "te%t:\n\t@true\n", true},
 		{"a pattern among other targets", "Makefile", "all c%: deps\n\t@true\n", true},
 		{"the default rule", "Makefile", ".DEFAULT:\n\t@true\n", true},
-		{"an object pattern rule", "Makefile", "%.o: %.c\n\t@true\n", false},
-		{"a pattern that matches no accepted target", "Makefile", "foo%:\n\t@true\n", false},
-		{"a pattern with an empty stem", "Makefile", "test%:\n\t@true\n", false},
-		{"a pattern that cannot fill its stem", "Makefile", "%test:\n\t@true\n", false},
-		{"a pattern with two percent signs is not a rule", "Makefile", "%c%:\n\t@true\n", false},
+		{"an object pattern rule is not resolved", "Makefile", "%.o: %.c\n\t@true\n", true},
+		{"a pattern with another prefix is not resolved", "Makefile", "foo%:\n\t@true\n", true},
+		{"a pattern with an empty stem is not resolved", "Makefile", "test%:\n\t@true\n", true},
 		{"a target named by a variable", "Makefile", "$(CHECKS):\n\t@true\n", true},
-		{"a conditional around an all target", "Makefile", "ifeq ($(OS),Windows_NT)\nall:\n\t@true\nendif\n", false},
+		{"a conditional the scan does not resolve", "Makefile", "ifeq ($(OS),Windows_NT)\nall:\n\t@true\nendif\n", true},
+		{"a tab-separated include", "Makefile", "include\trules.txt\nall:\n\t@true\n", true},
+		{"an include with mixed whitespace", "Makefile", "  include \t rules.txt\nall:\n\t@true\n", true},
+		{"a continued line", "Makefile", "check \\\n  build:\n\t@true\n", true},
+		{"a continued line with the colon on the next line", "Makefile", "test \\\n:\n\t@true\n", true},
+		{"an eval that defines rules", "Makefile", "$(eval $(call RULE,check))\nall:\n\t@true\n", true},
+		{"a define block", "Makefile", "define RULE\ncheck:\n\t@true\nendef\n$(eval $(RULE))\n", true},
+		{"a rule with an inline recipe", "Makefile", "all: ; @true\ntest: ; @true\n", true},
+		{"a plain rule for another target with prerequisites", "Makefile", "all: a b c\n\t@true\na b c:\n\t@true\n", false},
 		{"a conditional with a colon the scan cannot split", "Makefile", "ifeq ($(SHELL),a:b)\nall:\n\t@true\nendif\n", true},
 		{"a Makefile too large to read in full", "Makefile", "all:\n" + strings.Repeat("\t@true\n", maxMakefileBytes/7+1), true},
 	} {
@@ -889,33 +895,47 @@ func TestMakefileOffersCheck_AgreesWithRealMake(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		content string
+		// extra holds files beside the Makefile, such as an included file.
+		extra map[string]string
 		// definite is false for Makefiles the parser deliberately over-approximates,
 		// where it says "offers a check" without proof that make can run one.
 		definite bool
 	}{
-		{"explicit test rule", "test:\n\t@echo ran\n", true},
-		{"several targets on one rule", "check build: deps\n\t@echo ran\ndeps:\n", true},
-		{"prefix pattern", "c%:\n\t@echo ran\n", true},
-		{"suffix pattern", "%k:\n\t@echo ran\n", true},
-		{"pattern with both ends", "te%t:\n\t@echo ran\n", true},
-		{"match-anything", "%:\n\t@echo ran\n", true},
-		{"default rule", ".DEFAULT:\n\t@echo ran\n", true},
-		{"all only", "all:\n\t@echo ran\n", true},
-		{"phony declaration only", ".PHONY: test\nall:\n\t@echo ran\n", true},
-		{"dependency named test", "all: test.o\n\t@echo ran\ntest.o:\n\t@echo ran\n", true},
-		{"testdata target", "testdata:\n\t@echo ran\n", true},
-		{"object pattern", "%.o: %.c\n\t@echo ran\n", true},
-		{"unrelated prefix pattern", "foo%:\n\t@echo ran\n", true},
-		{"pattern with an empty stem", "test%:\n\t@echo ran\n", true},
-		{"pattern that cannot fill its stem", "%test:\n\t@echo ran\n", true},
-		{"variable assignments", "CC := gcc\nTESTS = a:b\nall:\n\t@echo ran\n", true},
-		{"comment naming a target", "# test: everything\nall:\n\t@echo ran\n", true},
+		{"explicit test rule", "test:\n\t@echo ran\n", nil, true},
+		{"several targets on one rule", "check build: deps\n\t@echo ran\ndeps:\n", nil, true},
+		{"all only", "all:\n\t@echo ran\n", nil, true},
+		{"phony declaration only", ".PHONY: test\nall:\n\t@echo ran\n", nil, true},
+		{"dependency named test", "all: test.o\n\t@echo ran\ntest.o:\n\t@echo ran\n", nil, true},
+		{"testdata target", "testdata:\n\t@echo ran\n", nil, true},
+		{"variable assignments", "CC := gcc\nTESTS = a:b\nall:\n\t@echo ran\n", nil, true},
+		{"comment naming a target", "# test: everything\nall:\n\t@echo ran\n", nil, true},
+		{"plain rules for other targets", "all: a b\n\t@echo ran\na b:\n\t@echo ran\n", nil, true},
+		{"prefix pattern", "c%:\n\t@echo ran\n", nil, true},
+		{"suffix pattern", "%k:\n\t@echo ran\n", nil, true},
+		{"pattern with both ends", "te%t:\n\t@echo ran\n", nil, true},
+		{"match-anything", "%:\n\t@echo ran\n", nil, true},
+		{"default rule", ".DEFAULT:\n\t@echo ran\n", nil, true},
+		{"space-separated include", "include rules.txt\nall:\n\t@echo ran\n", map[string]string{"rules.txt": "check:\n\t@echo ran\n"}, true},
+		{"tab-separated include", "include\trules.txt\nall:\n\t@echo ran\n", map[string]string{"rules.txt": "check:\n\t@echo ran\n"}, true},
+		{"optional include", "-include rules.txt\nall:\n\t@echo ran\n", map[string]string{"rules.txt": "lint:\n\t@echo ran\n"}, true},
+		{"continued target list", "foo \\\n  check:\n\t@echo ran\n", nil, true},
+		{"target and colon on separate lines", "test \\\n: \n\t@echo ran\n", nil, true},
+		{"rule made by eval", "define RULE\ncheck:\n\t@echo ran\nendef\n$(eval $(RULE))\n", nil, true},
+		{"conditional rule", "ifneq ($(NOPE),1)\nvet:\n\t@echo ran\nendif\n", nil, true},
+		{"object pattern", "%.o: %.c\n\t@echo ran\n", nil, false},
+		{"unrelated prefix pattern", "foo%:\n\t@echo ran\n", nil, false},
+		{"pattern with an empty stem", "test%:\n\t@echo ran\n", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "Makefile")
 			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
 				t.Fatal(err)
+			}
+			for name, content := range tc.extra {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			offers := makefileOffersCheck(path)
 			ran := false

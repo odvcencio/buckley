@@ -210,6 +210,31 @@ func TestOneShotLane_RunnableTestInAHiddenDirectoryIsAVerificationSurface(t *tes
 	}
 }
 
+// An include hides rules from a scan of the Makefile alone, and make accepts a
+// tab after the directive. The lane must treat it as a surface and verify.
+func TestOneShotLane_TabSeparatedIncludeThatDefinesACheckIsAVerificationSurface(t *testing.T) {
+	requireMake(t)
+	run := runScriptedLane(t, map[string]string{
+		"target.txt": "before\n",
+		"Makefile":   "include\trules.txt\n",
+		"rules.txt":  "check:\n\t@test \"$$(cat target.txt)\" = after\n",
+	}, []laneStep{
+		editStep("before", "after"),
+		sayStep("Updated target.txt."),
+		verifyStep("make check"),
+		sayStep("Updated target.txt and make check passes."),
+	})
+	if run.code != 0 || run.requests != 4 {
+		t.Fatalf("code=%d requests=%d stdout=%s stderr=%s", run.code, run.requests, run.stdout, run.stderr)
+	}
+	if strings.Contains(run.stderr, "completed_unverified") || !strings.Contains(run.stderr, "passed=true") {
+		t.Fatalf("a check the included file defines must count:\n%s", run.stderr)
+	}
+	if strings.Contains(strings.Join(run.userMessages, "\n"), "nothing that can verify your change") {
+		t.Fatal("the lane was asked whether it is finished although make check could run")
+	}
+}
+
 // A Makefile with no accepted target is not a way to verify anything: the lane
 // must take the same one-question path as a workspace with no Makefile at all.
 func TestOneShotLane_MakefileWithoutAnAcceptedTargetEndsUnverifiedAfterOneQuestion(t *testing.T) {
