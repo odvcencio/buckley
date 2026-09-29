@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cargo. It used to run `go test .`, which tests only the package in the
   current directory and failed at once with "no Go files" when the module
   root holds none, which looked like a failing test. A path you name, such
-  as `.`, is still used exactly.
+  as `.`, is still used exactly, so the `path` parameter no longer
+  advertises a default of `.`, which models copied into every call. Omit it
+  to test everything.
 
 ## [0.8.2] - 2026-08-17
 

@@ -50,10 +50,12 @@ func (t *RunTestsTool) Parameters() ParameterSchema {
 	return ParameterSchema{
 		Type: "object",
 		Properties: map[string]PropertySchema{
+			// No default: a model copies a schema default into every call, and a
+			// path of "." names the root package alone for Go. Omitting the path
+			// tests the whole workspace.
 			"path": {
 				Type:        "string",
-				Description: "Optional: directory or file to test (default: current directory)",
-				Default:     ".",
+				Description: "Optional: directory or file to test. Omit it to test everything under the workspace root (for Go, every package). Name a path such as ./pkg/a to test one package.",
 			},
 			"pattern": {
 				Type:        "string",
