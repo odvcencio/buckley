@@ -134,7 +134,7 @@ Self-healing test: ✅ PASSES (semantic role matching)
 ### Prerequisites
 ```bash
 # Build Buckley with agent socket support
-cd /home/draco/work/buckley
+cd path/to/buckley
 make build
 
 # Terminal 1: Start Buckley with agent socket

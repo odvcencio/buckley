@@ -161,7 +161,7 @@ review:
       prefix: "" # Optional object prefix. Authentication: ADC or the current gcloud login.
   verification:
     runner:
-      wrapper: [] # Example: ["buildbox-run"]
-      cleanup: [] # Example: ["buildbox-run", "--cleanup"]; runs once per snapshot
+      wrapper: [] # Example: ["remote-run"]
+      cleanup: [] # Example: ["remote-run", "--cleanup"]; runs once per snapshot
       parallelism: 0
       timeout: 0s

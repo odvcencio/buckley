@@ -20,17 +20,17 @@ func TestAgent_JSONTags(t *testing.T) {
 	// Verify the Agent struct compiles and fields are accessible.
 	a := Agent{
 		Name:      "birch",
-		Workspace: "/home/draco/work/buckley",
-		Host:      "draco-desktop",
+		Workspace: "/home/user/work/buckley",
+		Host:      "dev-host",
 	}
 	if a.Name != "birch" {
 		t.Errorf("Name = %q, want %q", a.Name, "birch")
 	}
-	if a.Workspace != "/home/draco/work/buckley" {
+	if a.Workspace != "/home/user/work/buckley" {
 		t.Errorf("Workspace = %q, want expected", a.Workspace)
 	}
-	if a.Host != "draco-desktop" {
-		t.Errorf("Host = %q, want %q", a.Host, "draco-desktop")
+	if a.Host != "dev-host" {
+		t.Errorf("Host = %q, want %q", a.Host, "dev-host")
 	}
 }
 

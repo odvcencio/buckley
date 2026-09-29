@@ -424,7 +424,7 @@ func envExperimentMaxTokensPerRun(ctx envCtx, field reflect.Value, path []string
 }
 
 // envReviewVerificationRunner applies BUCKLEY_VERIFY_WRAPPER (shell-split
-// into an argv, for example "buildbox-run --node-modules"),
+// into an argv, for example "remote-run --node-modules"),
 // BUCKLEY_VERIFY_PARALLELISM (positive int only), and BUCKLEY_VERIFY_TIMEOUT
 // (positive duration only) to ReviewVerificationRunnerConfig.
 func envReviewVerificationRunner(ctx envCtx, field reflect.Value, path []string) {

@@ -455,7 +455,7 @@ func TestSoleKnownACPToolInvocationMarkup(t *testing.T) {
 	registry := tool.NewRegistry()
 	exactDeepSeek := `<search_text>
 <query>reserved synthesis request Tools nil ToolChoice none</query>
-<path>/home/draco/work/buckley</path>
+<path>/home/user/work/buckley</path>
 </search_text>`
 	proseExample := "A provider might return this example:\n" + exactDeepSeek
 	fencedExample := "```xml\n" + exactDeepSeek + "\n```"

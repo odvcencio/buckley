@@ -218,13 +218,13 @@ func TestApplyEnvOverridesOpenRouterHasNoEnabledVar(t *testing.T) {
 // positive, matching envReviewVerificationRunner.
 func TestApplyEnvOverridesReviewVerificationRunner(t *testing.T) {
 	cfg := DefaultConfig()
-	t.Setenv("BUCKLEY_VERIFY_WRAPPER", "buildbox-run --node-modules")
+	t.Setenv("BUCKLEY_VERIFY_WRAPPER", "remote-run --node-modules")
 	t.Setenv("BUCKLEY_VERIFY_PARALLELISM", "2")
 	t.Setenv("BUCKLEY_VERIFY_TIMEOUT", "10m")
 	ApplyEnvOverridesForTest(cfg)
 
 	runner := cfg.Review.Verification.Runner
-	wantWrapper := []string{"buildbox-run", "--node-modules"}
+	wantWrapper := []string{"remote-run", "--node-modules"}
 	if len(runner.Wrapper) != len(wantWrapper) {
 		t.Fatalf("wrapper = %v, want %v", runner.Wrapper, wantWrapper)
 	}
@@ -247,7 +247,7 @@ func TestApplyEnvOverridesReviewVerificationRunner(t *testing.T) {
 // untouched, matching the experiment env vars' positive-only convention.
 func TestApplyEnvOverridesReviewVerificationRunnerPositiveOnlyGuards(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Review.Verification.Runner.Wrapper = []string{"buildbox-run"}
+	cfg.Review.Verification.Runner.Wrapper = []string{"remote-run"}
 	wantTimeout := cfg.Review.Verification.Runner.Timeout
 
 	t.Setenv("BUCKLEY_VERIFY_WRAPPER", "")
@@ -256,7 +256,7 @@ func TestApplyEnvOverridesReviewVerificationRunnerPositiveOnlyGuards(t *testing.
 	ApplyEnvOverridesForTest(cfg)
 
 	runner := cfg.Review.Verification.Runner
-	if len(runner.Wrapper) != 1 || runner.Wrapper[0] != "buildbox-run" {
+	if len(runner.Wrapper) != 1 || runner.Wrapper[0] != "remote-run" {
 		t.Errorf("expected empty BUCKLEY_VERIFY_WRAPPER to be a no-op, got %v", runner.Wrapper)
 	}
 	if runner.Parallelism != 0 {
