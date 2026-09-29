@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1871,7 +1872,7 @@ func buildACPStreamChatResponse(req model.ChatRequest, turn acpStreamTurn) *mode
 // releasing its deltas early would duplicate them if the replay succeeds.
 func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
 	req.Stream = true
-	retryAllowed := acpStreamRetryAllowed(req)
+	retryAllowed := acpStreamRetryAllowed(req) || acpReplaySafeStream(ctx)
 	bufferDelivery := deferDelivery || retryAllowed
 
 	first, firstErr := streamACPTurnAttempt(ctx, mgr, req, stream, bufferDelivery)
@@ -1882,7 +1883,7 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 		return first, nil
 	}
 
-	if !retryAllowed || !acpStreamRetryCandidate(ctx, first, firstErr) {
+	if !retryAllowed || acpStreamRetryLimit(ctx, first, firstErr) == 0 {
 		if bufferDelivery && !deferDelivery {
 			flushACPStreamUpdates(stream, first.Updates)
 		}
@@ -1895,32 +1896,121 @@ func streamACPTurnWithDelivery(ctx context.Context, mgr *model.Manager, req mode
 		return first, errors.Join(ctxErr, firstErr)
 	}
 
-	// Keep the second attempt buffered too. If it fails, no fragment from
-	// either inference is presented as an accepted assistant answer.
-	second, secondErr := streamACPTurnAttempt(ctx, mgr, req, stream, true)
-	if secondErr == nil {
-		second.Attempts = []acpStreamAttemptEvidence{
-			{turn: first, err: firstErr},
-			{turn: second},
+	// Keep every retry buffered too. If they all fail, no fragment from any
+	// inference is presented as an accepted assistant answer.
+	attempts := []acpStreamAttemptEvidence{{turn: first, err: firstErr}}
+	cur, curErr := first, firstErr
+	for retries := 0; ; retries++ {
+		if retries >= acpStreamRetryLimit(ctx, cur, curErr) {
+			break
 		}
-		second.Usage = aggregateACPStreamAttemptUsage(second.Attempts)
-		if !deferDelivery {
-			flushACPStreamUpdates(stream, second.Updates)
+		if isRetryableHTTPGatewayError(curErr) {
+			if waitErr := acpStreamRetrySleep(ctx, retries+1); waitErr != nil {
+				return cur, errors.Join(waitErr, curErr)
+			}
 		}
-		return second, nil
+		next, nextErr := streamACPTurnAttempt(ctx, mgr, req, stream, true)
+		attempts = append(attempts, acpStreamAttemptEvidence{turn: next, err: nextErr})
+		if nextErr == nil {
+			next.Attempts = attempts
+			next.Usage = aggregateACPStreamAttemptUsage(attempts)
+			if !deferDelivery {
+				flushACPStreamUpdates(stream, next.Updates)
+			}
+			return next, nil
+		}
+		cur, curErr = next, nextErr
 	}
 
-	second.Attempts = []acpStreamAttemptEvidence{
-		{turn: first, err: firstErr},
-		{turn: second, err: secondErr},
+	cur.Attempts = attempts
+	cur.Usage = aggregateACPStreamAttemptUsage(attempts)
+	errs := make([]error, 0, len(attempts))
+	for _, attempt := range attempts {
+		errs = append(errs, attempt.err)
 	}
-	second.Usage = aggregateACPStreamAttemptUsage(second.Attempts)
-	return second, &partialStreamTurnError{
-		cause:    errors.Join(firstErr, secondErr),
-		text:     model.ExtractTextContentOrEmpty(second.Message.Content),
-		turn:     second,
-		attempts: second.Attempts,
+	return cur, &partialStreamTurnError{
+		cause:    errors.Join(errs...),
+		text:     model.ExtractTextContentOrEmpty(cur.Message.Content),
+		turn:     cur,
+		attempts: attempts,
 	}
+}
+
+type acpReplaySafeStreamKey struct{}
+
+// withACPReplaySafeStream marks a context whose stream consumer only counts
+// progress (headless one-shot mode). Assistant deltas are buffered until a
+// turn ends, so a replay after a transient provider failure cannot duplicate
+// output, even when earlier rounds executed tools.
+func withACPReplaySafeStream(ctx context.Context) context.Context {
+	return context.WithValue(ctx, acpReplaySafeStreamKey{}, true)
+}
+
+func acpReplaySafeStream(ctx context.Context) bool {
+	v, _ := ctx.Value(acpReplaySafeStreamKey{}).(bool)
+	return v
+}
+
+const (
+	acpTransportRetryLimit = 1
+	acpGatewayRetryLimit   = 3
+)
+
+// acpStreamRetrySleep waits before gateway-error retry n (1-based). Tests
+// replace it.
+var acpStreamRetrySleep = func(ctx context.Context, attempt int) error {
+	delay := time.Duration(attempt*attempt) * 2 * time.Second // 2s, 8s, 18s
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// isRetryableHTTPGatewayError reports whether every leaf of err is an HTTP
+// 502, 503, or 504 from the provider. Auth, payment, quota, and rate-limit
+// errors (401, 402, 403, 429) are never gateway errors, and a 5xx body that
+// names a quota, credit, or billing problem is excluded too.
+func isRetryableHTTPGatewayError(err error) bool {
+	return acpEveryErrorLeaf(err, func(leaf error) bool {
+		var apiErr *model.APIError
+		if !errors.As(leaf, &apiErr) {
+			return false
+		}
+		switch apiErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		default:
+			return false
+		}
+		text := strings.ToLower(apiErr.Message + " " + apiErr.Details + " " + apiErr.Code + " " + apiErr.Type)
+		for _, word := range []string{"quota", "credit", "billing", "insufficient", "payment", "unauthorized", "forbidden"} {
+			if strings.Contains(text, word) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// acpStreamRetryLimit returns how many replays a failed attempt may get. It
+// is 0 when the partial response carried any tool-call material.
+func acpStreamRetryLimit(ctx context.Context, turn acpStreamTurn, err error) int {
+	if err == nil || ctx.Err() != nil || strings.TrimSpace(turn.FinishReason) != "" {
+		return 0
+	}
+	if len(turn.Message.ToolCalls) > 0 || turn.ObservedToolDelta || isContextCancellationError(err) {
+		return 0
+	}
+	if isRetryableHTTPGatewayError(err) && ctx.Err() == nil {
+		return acpGatewayRetryLimit
+	}
+	if acpEveryErrorLeaf(err, isRetryableStreamTransportErrorLeaf) && ctx.Err() == nil {
+		return acpTransportRetryLimit
+	}
+	return 0
 }
 
 func streamACPTurnAttempt(ctx context.Context, mgr *model.Manager, req model.ChatRequest, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
@@ -1966,14 +2056,7 @@ func acpStreamRetryAllowed(req model.ChatRequest) bool {
 }
 
 func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error) bool {
-	if err == nil || ctx.Err() != nil || strings.TrimSpace(turn.FinishReason) != "" {
-		return false
-	}
-	if len(turn.Message.ToolCalls) > 0 || turn.ObservedToolDelta || isContextCancellationError(err) {
-		return false
-	}
-	safe := acpEveryErrorLeaf(err, isRetryableStreamTransportErrorLeaf)
-	return safe && ctx.Err() == nil
+	return acpStreamRetryLimit(ctx, turn, err) > 0
 }
 
 // isRetryableStreamTransportErrorLeaf reports whether a leaf error (the
@@ -3075,6 +3158,7 @@ func sendACPToolCallStart(stream acp.StreamFunc, call model.ToolCall, params map
 	update := acp.SessionUpdate{
 		SessionUpdate: acp.SessionUpdateToolCall,
 		ToolCallID:    call.ID,
+		ToolName:      call.Function.Name,
 		Title:         toolCallTitle(call.Function.Name, params),
 		Kind:          toolCallKind(call.Function.Name),
 		Status:        acp.ToolCallStatusInProgress,
