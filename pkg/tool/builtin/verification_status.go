@@ -200,7 +200,6 @@ func verificationResultText(result *Result) string {
 const (
 	surfaceMaxDepth   = 4
 	surfaceMaxEntries = 4000
-	surfaceMaxParents = 6
 )
 
 // HasVerificationSurface reports whether the workspace at root holds anything
@@ -271,8 +270,10 @@ func HasVerificationSurface(root string) (bool, string) {
 	if walkErr != nil || found || unknown {
 		return true, ""
 	}
+	// go, npm, and cargo look for their manifests in every parent directory, up
+	// to the repository root or the filesystem root, so the scan does too.
 	dir := abs
-	for range surfaceMaxParents {
+	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			break
 		}
@@ -285,7 +286,7 @@ func HasVerificationSurface(root string) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "nothing that an accepted check can run was found in the workspace: no go.mod, Cargo.toml, Go or Python test file, package.json with a test, build, or lint script, Python configuration for pytest, or Makefile with a test, check, build, vet, or lint target"
+	return false, "found no go.mod, Cargo.toml, Go or Python test file, package.json with a test, build, or lint script, Python configuration for pytest, or Makefile with a test, check, build, vet, or lint target"
 }
 
 func skipSurfaceDir(name string) bool {

@@ -378,6 +378,32 @@ func TestHasVerificationSurface_ParentModuleCounts(t *testing.T) {
 	}
 }
 
+// go, npm, and cargo find a manifest in any parent directory, however deep the
+// working directory sits below it.
+func TestHasVerificationSurface_ParentSearchReachesTheRepositoryRootFromAnyDepth(t *testing.T) {
+	root := newSurfaceRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte("[package]\nname = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(root, "a", "b", "c", "d", "e", "f", "g", "h", "i")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "note.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := HasVerificationSurface(deep); !got {
+		t.Fatalf("a Cargo.toml nine levels up applies to cargo test here: %q", reason)
+	}
+	// Without a manifest anywhere up to the repository root there is nothing.
+	if err := os.Remove(filepath.Join(root, "Cargo.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := HasVerificationSurface(deep); got {
+		t.Fatalf("no manifest up to the repository root offers no check: %q", reason)
+	}
+}
+
 func TestHasVerificationSurface_ParentSearchStopsAtRepositoryRoot(t *testing.T) {
 	outer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outer, "go.mod"), []byte("module outer\n"), 0o600); err != nil {
