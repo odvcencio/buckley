@@ -311,18 +311,15 @@ func HasVerificationSurface(root string) (bool, string) {
 	return false, "found only documents, data files, and project files that define no test, build, lint, or check"
 }
 
-// skipSurfaceDir reports whether the scan skips a directory by name: git's own
-// data and the caches that the accepted verification tools write for themselves.
-// They hold nothing a person put there to run. Every other directory is searched,
-// hidden ones included, because an accepted check can be pointed at any path
-// (pytest .checks/test_change.py). A large directory such as node_modules or
+// skipSurfaceDir reports whether the scan skips a directory by name. It skips
+// only .git: git's own data is not part of the workspace, and the fingerprint
+// that decides whether the workspace changed leaves it out too. Every other
+// directory is searched, hidden ones and tool caches included, because an
+// accepted check can be pointed at any path (pytest .checks/test_change.py, or a
+// test file left in .pytest_cache). A large directory such as node_modules or
 // vendor runs the scan out of entries, which counts as an unknown surface.
 func skipSurfaceDir(name string) bool {
-	switch name {
-	case ".git", ".pytest_cache", "__pycache__", ".mypy_cache", ".ruff_cache":
-		return true
-	}
-	return false
+	return name == ".git"
 }
 
 func hasProjectMarker(dir string) bool {
