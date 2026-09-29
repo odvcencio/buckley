@@ -2055,10 +2055,6 @@ func acpStreamRetryAllowed(req model.ChatRequest) bool {
 	return true
 }
 
-func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error) bool {
-	return acpStreamRetryLimit(ctx, turn, err) > 0
-}
-
 // isRetryableStreamTransportErrorLeaf reports whether a leaf error (the
 // innermost cause after acpEveryErrorLeaf finishes unwrapping) names a
 // transport-level failure safe to retry the whole turn for (C2): the

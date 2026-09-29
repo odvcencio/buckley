@@ -113,6 +113,9 @@ func TestRedactOneShotSecrets(t *testing.T) {
 		{`DB_PASSWORD="hunter two" run`, "hunter"},
 		{"curl -H 'Authorization: Bearer abcdefghijklmnop' x", "abcdefghijklmnop"},
 		{"tool --api-key hunter22secret go", "hunter22secret"},
+		{"curl -H 'X-API-Key: my-private-value' x", "my-private-value"},
+		{`curl -H "Authorization: Token abcdef123456" x`, "abcdef123456"},
+		{"curl -H 'Cookie: session=abc123xyz' x", "abc123xyz"},
 		{"echo sk-abcdefghijklmnop", "sk-abcdefghijklmnop"},
 	} {
 		got := redactOneShotSecrets(tc.in)

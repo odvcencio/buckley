@@ -186,12 +186,15 @@ var (
 	oneShotEnvSecret = regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(?:token|key|secret|passw(?:or)?d|credential|auth|bearer)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S+)`)
 	oneShotFlagSec   = regexp.MustCompile(`(?i)(--?[a-z-]*(?:token|key|secret|password|auth)[a-z-]*)(=|\s+)("[^"]*"|'[^']*'|\S+)`)
 	oneShotBearer    = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	// HTTP header form: "X-API-Key: value", "Authorization: value", "Cookie: ...".
+	oneShotHeader    = regexp.MustCompile(`(?i)\b([A-Za-z0-9-]*(?:token|key|secret|passw(?:or)?d|credential|auth|cookie)[A-Za-z0-9-]*)\s*:\s*("[^"]*"|'[^']*'|[^\s'"]+(?:\s+[A-Za-z0-9._~+/=-]{8,})?)`)
 	oneShotTokenLike = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{12,}|xox[abp]-[A-Za-z0-9-]{8,})`)
 )
 
 func redactOneShotSecrets(s string) string {
 	s = oneShotEnvSecret.ReplaceAllString(s, "$1=[redacted]")
 	s = oneShotFlagSec.ReplaceAllString(s, "$1$2[redacted]")
+	s = oneShotHeader.ReplaceAllString(s, "$1: [redacted]")
 	s = oneShotBearer.ReplaceAllString(s, "$1 [redacted]")
 	s = oneShotTokenLike.ReplaceAllString(s, "[redacted]")
 	return s

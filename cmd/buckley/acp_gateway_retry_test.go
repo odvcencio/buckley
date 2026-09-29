@@ -12,6 +12,10 @@ import (
 	"m31labs.dev/buckley/pkg/model"
 )
 
+func acpStreamRetryCandidate(ctx context.Context, turn acpStreamTurn, err error) bool {
+	return acpStreamRetryLimit(ctx, turn, err) > 0
+}
+
 func noGatewayBackoff(t *testing.T) *int32 {
 	t.Helper()
 	old := acpStreamRetrySleep
