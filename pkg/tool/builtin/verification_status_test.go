@@ -767,6 +767,8 @@ func TestHasVerificationSurface_ProjectFilesNeedToOfferACheck(t *testing.T) {
 		{"package.json with empty scripts", "package.json", `{"scripts":{}}`, false},
 		{"package.json with the npm init test script", "package.json", `{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`, false},
 		{"package.json with the npm init test script and a lint script", "package.json", `{"scripts":{"test":"echo \"Error: no test specified\" && exit 1","lint":"eslint ."}}`, true},
+		{"package.json whose test script only mentions the placeholder", "package.json", `{"scripts":{"test":"jest || echo no test specified"}}`, true},
+		{"package.json whose test script is not a string", "package.json", `{"scripts":{"test":["jest"]}}`, true},
 		{"package.json that does not parse", "package.json", `{"scripts":`, true},
 		{"pyproject.toml that configures pytest", "pyproject.toml", "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n", true},
 		{"pyproject.toml that names pytest in capitals", "pyproject.toml", "[tool.PYTEST]\n", true},

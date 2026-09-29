@@ -364,9 +364,12 @@ func fileMentions(path, word string) bool {
 	return !ok || strings.Contains(strings.ToLower(string(data)), word)
 }
 
+// npmInitTestScript is the placeholder test script that npm init writes.
+const npmInitTestScript = `echo "Error: no test specified" && exit 1`
+
 // packageJSONOffersCheck reports whether the package.json at path has a test,
 // build, or lint script, the scripts npm test and npm run build|lint can run.
-// The default test script that npm init writes does not count. A file that
+// The placeholder test script that npm init writes does not count. A file that
 // does not parse counts as offering a check.
 func packageJSONOffersCheck(path string) bool {
 	data, ok := readSmallFile(path)
@@ -384,7 +387,8 @@ func packageJSONOffersCheck(path string) bool {
 		case "build", "lint":
 			return true
 		case "test":
-			if !strings.Contains(string(raw), "no test specified") {
+			var script string
+			if json.Unmarshal(raw, &script) != nil || strings.TrimSpace(script) != npmInitTestScript {
 				return true
 			}
 		}
