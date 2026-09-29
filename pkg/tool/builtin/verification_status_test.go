@@ -204,9 +204,12 @@ func TestVerificationUnavailableReason(t *testing.T) {
 		{"typed unavailable", &Result{Data: verificationNotRun(VerificationStatusUnavailable, "x")}, true},
 		{"command not found", shellResult("go test ./...", 127, "", "bash: go: command not found"), true},
 		{"no go.mod", shellResult("go test ./...", 1, "", "go: go.mod file not found in current directory or any parent directory; see 'go help modules'"), true},
-		{"go under nice and env", shellResult("nice -n 10 env GOWORK=off go vet ./...", 1, "", "go: go.mod file not found in current directory"), true},
-		{"golangci-lint without go.mod", shellResult("golangci-lint run", 3, "", "go: go.mod file not found in current directory"), true},
-		{"run_tests go result", &Result{Error: "test command exited with code 1", Data: map[string]any{"framework": "go", "exit_code": 1, "output": "go: go.mod file not found in current directory"}}, true},
+		{"go under nice and env", shellResult("nice -n 10 env GOWORK=off go vet ./...", 1, "", "go: go.mod file not found in current directory or any parent directory; see 'go help modules'"), true},
+		{"golangci-lint without go.mod", shellResult("golangci-lint run", 3, "", "go: go.mod file not found in current directory or any parent directory; see 'go help modules'"), true},
+		{"run_tests go result", &Result{Error: "test command exited with code 1", Data: map[string]any{"framework": "go", "exit_code": 1, "output": "go: go.mod file not found in current directory or any parent directory; see 'go help modules'"}}, true},
+		{"go test wildcard with no module", shellResult("go test ./...", 1, "FAIL\t./... [setup failed]\nFAIL", "# ./...\npattern ./...: directory prefix . does not contain main module or its selected dependencies"), true},
+		{"go vet wildcard with no module", shellResult("go vet ./...", 1, "", "pattern ./...: directory prefix . does not contain main module or its selected dependencies"), true},
+		{"golangci-lint with no module", shellResult("golangci-lint run", 3, "", "level=error msg=\"[linters_context] typechecking error: pattern ./...: directory prefix . does not contain main module or its selected dependencies\""), true},
 		{"go toolchain mismatch", shellResult("go test ./...", 1, "", "go: go.mod requires go >= 1.99 (running go 1.24.0; GOTOOLCHAIN=local)"), true},
 		{"no cargo manifest", shellResult("cargo test", 101, "", "error: could not find `Cargo.toml` in `/x` or any parent directory"), true},
 		{"npm missing script", shellResult("npm test", 1, "", "npm error Missing script: \"test\""), true},
@@ -215,6 +218,12 @@ func TestVerificationUnavailableReason(t *testing.T) {
 		{"make no makefile", shellResult("make check", 2, "", "make: *** No targets specified and no makefile found.  Stop."), true},
 		{"make no target", shellResult("make test", 2, "", "make: *** No rule to make target 'test'.  Stop."), true},
 		{"pytest no tests", shellResult("pytest", 5, "no tests ran in 0.01s", ""), true},
+		{"pytest no tests with the banner", shellResult("python3 -m pytest -q", 5, "============================ no tests ran in 0.01s ============================", ""), true},
+		{"pytest collected nothing", shellResult("pytest", 5, "collected 0 items\n\n============================ no tests ran in 0.01s ============================", ""), true},
+		{"pytest is not installed", shellResult("python -m pytest", 1, "", "/usr/bin/python: No module named pytest"), true},
+		{"jest found no tests", shellResult("npm test", 1, "No tests found, exiting with code 1\n", ""), true},
+		{"npm enoent uppercase format", shellResult("npm test", 254, "", "npm ERR! enoent ENOENT: no such file or directory, open '/x/package.json'"), true},
+		{"npm missing script old format", shellResult("npm run lint", 1, "", "npm ERR! missing script: lint"), true},
 		{"sandbox", &Result{Error: "sandbox blocked command: rm"}, true},
 		// Real failures stay failures.
 		{"go test fails", shellResult("go test ./...", 1, "--- FAIL: TestX\nFAIL", ""), false},
@@ -222,6 +231,15 @@ func TestVerificationUnavailableReason(t *testing.T) {
 		{"go test prints missing script", shellResult("go test ./...", 1, "--- FAIL: TestNpm\nmissing script\nFAIL", ""), false},
 		{"go test prints go.mod not found inside a failing test", shellResult("go test ./...", 1, "=== RUN   TestTool\n--- FAIL: TestTool (0.00s)\n    tool_test.go:9: go: go.mod file not found in current directory or any parent directory\nFAIL\nFAIL\texample.com/tool\t0.003s", ""), false},
 		{"go test prints go.mod not found and another package passed", shellResult("go test ./...", 1, "ok  \texample.com/a\t0.002s\n", "go: go.mod file not found in current directory"), false},
+		{"npm script runs, fails, and prints missing script", shellResult("npm test", 1, "> pkg@1.0.0 test\n> node check.js\n\ncheck failed: missing script in config\n", ""), false},
+		{"npm script runs an inner npm that lacks a script", shellResult("npm test", 1, "> pkg@1.0.0 test\n> node check.js\n", "npm error Missing script: \"lint\"\nnpm error code ELIFECYCLE\nnpm error Lifecycle script `test` failed with error:"), false},
+		{"npm script prints no test specified", shellResult("npm test", 1, "> pkg@1.0.0 test\n> node check.js\n\nno test specified in config\n", ""), false},
+		{"jest words inside a failing script", shellResult("npm test", 1, "> pkg@1.0.0 test\n> node check.js\n\nthe log says: No tests found, exiting with code 1\n", ""), false},
+		{"go test build failure keeps its FAIL line", shellResult("go test ./...", 1, "FAIL\texample.com/x [build failed]\nFAIL", "pattern ./...: directory prefix . does not contain main module or its selected dependencies"), false},
+		{"indented go message", shellResult("go vet ./...", 1, "", "    tool_test.go:9: go: go.mod file not found in current directory or any parent directory"), false},
+		{"recursive make lacks a target", shellResult("make test", 2, "", "make[1]: *** No rule to make target 'test'.  Stop.\nmake: *** [Makefile:2: test] Error 2"), false},
+		{"make lacks a source file named test", shellResult("make check", 2, "", "make: *** No rule to make target 'test', needed by 'check'.  Stop."), false},
+		{"pytest prints no tests ran inside a test", shellResult("pytest", 5, "captured: the helper said no tests ran\n", ""), false},
 		{"npm test runs jest and prints missing script", shellResult("npm test", 1, "Tests:       1 failed, 1 total\nmissing script", ""), false},
 		{"go test prints a make rule", shellResult("go test ./...", 1, "make: *** No rule to make target 'test'.  Stop.", ""), false},
 		{"make prints a go message", shellResult("make test", 2, "", "go: go.mod file not found in current directory or any parent directory"), false},
@@ -465,5 +483,76 @@ func TestDirHasGoFiles(t *testing.T) {
 	}
 	if !dirHasGoFiles(filepath.Join(root, "missing")) {
 		t.Fatal("an unreadable directory must keep the caller's path")
+	}
+}
+
+// The marker table is only as good as the messages real tools print. This runs
+// each tool in a workspace that has nothing for it to run, and again where a
+// real failure prints the same words, and checks both readings.
+func TestVerificationUnavailableReason_RealToolOutput(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "")
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		command string
+		// unavailable is the expected reading.
+		unavailable bool
+	}{
+		{"go test wildcard, no module", nil, "go test ./...", true},
+		{"go test package, no module", nil, "go test .", true},
+		{"go vet wildcard, no module", nil, "go vet ./...", true},
+		{"go build, no module", nil, "go build", true},
+		{"go test fails and prints the go.mod message", map[string]string{
+			"go.mod":    "module example.com/x\n\ngo 1.22\n",
+			"x_test.go": "package x\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) {\n\tfmt.Println(\"go: go.mod file not found in current directory or any parent directory\")\n\tt.Fatal(\"no\")\n}\n",
+		}, "go test ./...", false},
+		{"cargo test, no manifest", nil, "cargo test", true},
+		{"npm test, no package.json", nil, "npm test", true},
+		{"npm run build, no package.json", nil, "npm run build", true},
+		{"npm test, no test script", map[string]string{"package.json": `{"name":"x","version":"1.0.0","scripts":{}}`}, "npm test", true},
+		{"npm test, default init script", map[string]string{"package.json": `{"name":"x","version":"1.0.0","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`}, "npm test", true},
+		{"npm test, script fails and prints missing script", map[string]string{"package.json": `{"name":"x","version":"1.0.0","scripts":{"test":"echo missing script && exit 1"}}`}, "npm test", false},
+		{"make test, no makefile", nil, "make test", true},
+		{"make test, no such target", map[string]string{"Makefile": "all:\n\t@true\n"}, "make test", true},
+		{"make test, recipe fails and prints missing script", map[string]string{"Makefile": "test:\n\t@echo missing script; exit 1\n"}, "make test", false},
+		{"pytest, no tests", nil, "pytest", true},
+		{"python3 -m pytest, no tests", nil, "python3 -m pytest", true},
+		{"pytest, test fails and prints the go.mod message", map[string]string{"test_x.py": "def test_x():\n    print('go: go.mod file not found in current directory or any parent directory')\n    assert False\n"}, "pytest", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			words := strings.Fields(tc.command)
+			versionArgs := []string{"--version"}
+			if words[0] == "go" {
+				versionArgs = []string{"version"}
+			}
+			if err := exec.Command(words[0], versionArgs...).Run(); err != nil {
+				t.Skipf("%s is not installed or not usable: %v", words[0], err)
+			}
+			if !tc.unavailable && (words[0] == "python3" || words[0] == "pytest") {
+				if err := exec.Command("python3", "-m", "pytest", "--version").Run(); err != nil {
+					t.Skip("pytest is not installed")
+				}
+			}
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			shell := &ShellCommandTool{}
+			shell.SetWorkDir(dir)
+			result, err := NewWorkspaceVerificationTool(shell).ExecuteWithContext(context.Background(), map[string]any{"command": tc.command})
+			if err != nil || result == nil {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if result.Success {
+				t.Skipf("the tool passed here; nothing to classify: %v", result.Data)
+			}
+			reason := VerificationUnavailableReason(result)
+			if (reason != "") != tc.unavailable {
+				t.Fatalf("reason = %q, want unavailable=%v\nexit=%v stdout=%q stderr=%q", reason, tc.unavailable, result.Data["exit_code"], result.Data["stdout"], result.Data["stderr"])
+			}
+		})
 	}
 }

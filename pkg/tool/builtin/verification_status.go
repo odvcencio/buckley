@@ -64,8 +64,14 @@ func VerificationUnavailableReason(result *Result) string {
 	}
 	text := verificationResultText(result)
 	// Output that shows tests ran is a real result, even when a test prints
-	// one of the messages below.
-	if verificationRanTests.MatchString(text) {
+	// one of the messages below. A package that failed to load or set up ran
+	// nothing, so its FAIL line does not count.
+	if verificationRanTests.MatchString(goSetupFailure.ReplaceAllString(text, "")) {
+		return ""
+	}
+	// npm reports a failed script with a lifecycle error. A script that ran and
+	// failed is a real failure, whatever else it printed.
+	if family == familyNpm && npmScriptRan.MatchString(text) {
 		return ""
 	}
 	for _, marker := range verificationUnavailableMarkers {
@@ -73,8 +79,7 @@ func VerificationUnavailableReason(result *Result) string {
 			return marker.reason
 		}
 	}
-	if hasExit && exitCode == 5 && family == familyPytest &&
-		(strings.Contains(text, "no tests ran") || strings.Contains(text, "collected 0 items")) {
+	if hasExit && exitCode == 5 && family == familyPytest && pytestNoTests.MatchString(text) {
 		return "pytest found no tests to run"
 	}
 	return ""
@@ -82,7 +87,17 @@ func VerificationUnavailableReason(result *Result) string {
 
 // verificationRanTests matches the lines that go, jest, cargo, and pytest print
 // only after they ran tests.
-var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL\s|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?|collected [1-9][0-9]* items?|=*\s*[0-9]+ (failed|passed|errors?)\b)`)
+var verificationRanTests = regexp.MustCompile(`(?m)^(--- (FAIL|PASS|SKIP)|=== (RUN|PAUSE|CONT)|FAIL[ \t]+\S|ok\s+\S|PASS$|Test Suites:|Tests:\s|test result:|running [1-9][0-9]* tests?|collected [1-9][0-9]* items?|=*\s*[0-9]+ (failed|passed|errors?)\b)`)
+
+// goSetupFailure matches the FAIL line go test prints for a pattern or package
+// that could not be loaded.
+var goSetupFailure = regexp.MustCompile(`(?m)^FAIL\s[^\n]*\[setup failed\]$`)
+
+// npmScriptRan matches npm's own report that a script ran and failed.
+var npmScriptRan = regexp.MustCompile(`(?im)^npm (?:error|err!)\s+(?:code\s+)?elifecycle\b|lifecycle script`)
+
+// pytestNoTests matches pytest's own report that it collected nothing.
+var pytestNoTests = regexp.MustCompile(`(?m)^(?:=+ )?(?:no tests ran\b|collected 0 items)`)
 
 // Tool families a verification command belongs to. A marker below applies only
 // to its own family, so a pytest test that prints a go message is still a real
@@ -95,22 +110,25 @@ const (
 	familyPytest = "pytest"
 )
 
-// verificationUnavailableMarkers are the messages that go, cargo, npm, make,
-// and pytest print when the workspace has nothing for them to run.
+// verificationUnavailableMarkers are the diagnostics that go, cargo, npm, make,
+// and pytest print when the workspace has nothing for them to run. Each pattern
+// is anchored to the start of a line and to the tool's own diagnostic format, so
+// a test or script that prints the same words is still a real failure.
 var verificationUnavailableMarkers = []struct {
 	family  string
 	pattern *regexp.Regexp
 	reason  string
 }{
-	{familyGo, regexp.MustCompile(`go\.mod file not found|cannot find main module`), "there is no go.mod in the workspace"},
-	{familyGo, regexp.MustCompile(`requires go[^\n]*running go[^\n]*GOTOOLCHAIN=local`), "the installed Go toolchain is older than go.mod requires"},
-	{familyCargo, regexp.MustCompile("could not find `Cargo\\.toml`"), "there is no Cargo.toml in the workspace"},
-	{familyNpm, regexp.MustCompile(`(?i)could not read package\.json|no such file or directory, open '[^']*package\.json'`), "there is no package.json in the workspace"},
-	{familyNpm, regexp.MustCompile(`(?i)missing script`), "package.json has no script for this check"},
-	{familyNpm, regexp.MustCompile(`No tests found`), "jest found no tests to run"},
-	{familyNpm, regexp.MustCompile(`no test specified`), "package.json has no test script"},
-	{familyMake, regexp.MustCompile(`No targets specified and no makefile found`), "there is no Makefile in the workspace"},
-	{familyMake, regexp.MustCompile("No rule to make target [`'\"](test|check|build|vet|lint)['\"]"), "the Makefile has no such target"},
+	{familyGo, regexp.MustCompile(`(?m)^go: (?:go\.mod file not found in current directory or any parent directory|cannot find main module)|pattern \S+: directory prefix \S+ does not contain main module or its selected dependencies`), "there is no go.mod in the workspace"},
+	{familyGo, regexp.MustCompile(`(?m)^go: go\.mod requires go[^\n]*\(running go [^;\n]*; GOTOOLCHAIN=local\)`), "the installed Go toolchain is older than go.mod requires"},
+	{familyCargo, regexp.MustCompile("(?m)^error: could not find `Cargo\\.toml` in "), "there is no Cargo.toml in the workspace"},
+	{familyNpm, regexp.MustCompile(`(?im)^npm (?:error|err!)\s+enoent\b[^\n]*package\.json`), "there is no package.json in the workspace"},
+	{familyNpm, regexp.MustCompile(`(?im)^npm (?:error|err!)\s+missing script\b`), "package.json has no script for this check"},
+	{familyNpm, regexp.MustCompile(`(?m)^No tests found, exiting with code`), "jest found no tests to run"},
+	{familyNpm, regexp.MustCompile(`(?m)^> echo "Error: no test specified" && exit 1$`), "package.json has no test script"},
+	{familyMake, regexp.MustCompile(`(?m)^make: \*\*\* No targets specified and no makefile found`), "there is no Makefile in the workspace"},
+	{familyMake, regexp.MustCompile("(?m)^make: \\*\\*\\* No rule to make target ['`\"](?:test|check|build|vet|lint)['`\"]\\.\\s+Stop\\."), "the Makefile has no such target"},
+	{familyPytest, regexp.MustCompile(`(?m)^\S*python\S*: No module named pytest\b`), "pytest is not installed"},
 }
 
 // verificationFamily names the tool family behind a verification result: from
