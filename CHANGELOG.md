@@ -73,10 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal messages now list the accepted commands, and `nice -n N` and
   `env GOWORK=off` may start one. Passing checks and real failures behave
   as before.
-- `run_tests` with no path now tests every package (`./...`) in a Go module
-  whose root holds no package. It used to fail at once with "no Go files"
-  there, which looked like a failing test. A path you name is still used
-  exactly.
+- `run_tests` with no path now tests every package of a Go module
+  (`./...`), as it already tests the whole tree for pytest, jest, and
+  cargo. It used to run `go test .`, which tests only the package in the
+  current directory and failed at once with "no Go files" when the module
+  root holds none, which looked like a failing test. A path you name, such
+  as `.`, is still used exactly.
 
 ## [0.8.2] - 2026-08-17
 

@@ -512,54 +512,43 @@ const (
 	goPassingTest   = "package a\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tif One() != 1 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n"
 )
 
-// A module whose packages all sit in subdirectories has nothing to test at its
-// root. run_tests with no path used to fail there in 0 s with "no Go files".
-func TestRunTestsTool_DefaultPathTestsEveryPackageWhenTheRootHasNone(t *testing.T) {
+// With no path, run_tests tests every Go package, as pytest, jest, and cargo
+// test the whole tree. It used to run "go test ." which tests only the package
+// in the current directory and fails when the module root holds none.
+func TestRunTestsTool_DefaultPathTestsEveryGoPackage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		files  map[string]string
+		passed int
+	}{
+		{"packages only below the root", map[string]string{"pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest}, 1},
+		{"a root package and a nested package", map[string]string{"a.go": goPassingSource, "a_test.go": goPassingTest, "pkg/b/b.go": strings.Replace(goPassingSource, "package a", "package b", 1), "pkg/b/b_test.go": strings.Replace(goPassingTest, "package a", "package b", 1)}, 2},
+		{"a root file that only builds on another platform", map[string]string{"helper_windows.go": "package x\n", "pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest}, 1},
+		{"a root file excluded by a build constraint", map[string]string{"tools.go": "//go:build ignore\n\npackage main\n", "pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest}, 1},
+		{"a root main package with no tests", map[string]string{"main.go": "package main\n\nfunc main() {}\n", "pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeGoModule(t, tc.files)
+			tool := &RunTestsTool{}
+			tool.SetWorkDir(root)
+			result, err := tool.ExecuteWithContext(context.Background(), map[string]any{"timeout_seconds": float64(120)})
+			if err != nil || !result.Success || result.Data["path"] != "./..." || result.Data["passed"] != tc.passed {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+
+	// A path the caller names is used exactly: "." is the root package alone.
 	root := writeGoModule(t, map[string]string{"pkg/a/a.go": goPassingSource, "pkg/a/a_test.go": goPassingTest})
 	tool := &RunTestsTool{}
 	tool.SetWorkDir(root)
-
-	result, err := tool.ExecuteWithContext(context.Background(), map[string]any{"timeout_seconds": float64(120)})
-	if err != nil || !result.Success || result.Data["path"] != "./..." || result.Data["passed"] != 1 {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-
-	// A path the caller names is honored exactly.
 	explicit, err := tool.ExecuteWithContext(context.Background(), map[string]any{"path": ".", "timeout_seconds": float64(120)})
 	if err != nil || explicit.Success || explicit.Data["path"] != "." {
 		t.Fatalf("an explicit path must be honored: %+v err=%v", explicit, err)
 	}
-}
-
-func TestRunTestsTool_DefaultPathKeepsTheRootPackageWhenThereIsOne(t *testing.T) {
-	root := writeGoModule(t, map[string]string{"a.go": goPassingSource, "a_test.go": goPassingTest})
-	tool := &RunTestsTool{}
-	tool.SetWorkDir(root)
-	result, err := tool.ExecuteWithContext(context.Background(), map[string]any{"timeout_seconds": float64(120)})
-	if err != nil || !result.Success || result.Data["path"] != "." || result.Data["passed"] != 1 {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-}
-
-func TestDirHasGoFiles(t *testing.T) {
-	root := t.TempDir()
-	if dirHasGoFiles(root) {
-		t.Fatal("an empty directory has no Go files")
-	}
-	if err := os.MkdirAll(filepath.Join(root, "sub.go"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if dirHasGoFiles(root) {
-		t.Fatal("a directory named like a Go file is not a Go file")
-	}
-	if err := os.WriteFile(filepath.Join(root, "a.go"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !dirHasGoFiles(root) {
-		t.Fatal("a.go is a Go file")
-	}
-	if !dirHasGoFiles(filepath.Join(root, "missing")) {
-		t.Fatal("an unreadable directory must keep the caller's path")
+	named, err := tool.ExecuteWithContext(context.Background(), map[string]any{"path": "pkg/a", "timeout_seconds": float64(120)})
+	if err != nil || !named.Success || named.Data["path"] != "pkg/a" || named.Data["passed"] != 1 {
+		t.Fatalf("a named package must run alone: %+v err=%v", named, err)
 	}
 }
 

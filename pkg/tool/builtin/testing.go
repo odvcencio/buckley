@@ -43,7 +43,7 @@ func (t *RunTestsTool) TrustedVerification() bool {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with optional path and pattern filtering. Auto-detects test framework. With no path, a Go module whose root has no package is tested with ./.... A workspace with no test framework returns an unavailable status, not a failure."
+	return "Run tests with optional path and pattern filtering. Auto-detects test framework. With no path, a Go module is tested with ./... (every package); name a path such as . to test one package. A workspace with no test framework returns an unavailable status, not a failure."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {
@@ -131,10 +131,12 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 
 	// Detect test framework
 	framework := t.detectTestFramework(absTestPath)
-	// A Go module whose packages all live in subdirectories has no package at
-	// its root, so "go test ." can only fail there. When the caller named no
-	// path, test every package instead.
-	if framework == "go" && !explicitPath && testPath == "." && !dirHasGoFiles(absTestPath) {
+	// pytest, jest, and cargo test the whole directory tree by default, but
+	// "go test ." tests only the package in the current directory, and fails
+	// outright when that directory holds none. When the caller named no path,
+	// test every package, as the other frameworks do. A path the caller names is
+	// used exactly.
+	if framework == "go" && !explicitPath && testPath == "." {
 		testPath = "./..."
 	}
 
@@ -255,20 +257,6 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	}
 
 	return result, nil
-}
-
-// dirHasGoFiles reports whether dir directly holds a Go source file.
-func dirHasGoFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return true
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
-			return true
-		}
-	}
-	return false
 }
 
 func (t *RunTestsTool) detectTestFramework(path string) string {
