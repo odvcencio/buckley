@@ -271,8 +271,8 @@ func HasVerificationSurface(root string) (bool, string) {
 			found = true
 			return fs.SkipAll
 		}
-		if isDoctestTextName(entry.Name()) {
-			// pytest --doctest-glob runs the examples in a text file, so a text
+		if !isProjectFileName(entry.Name()) && isTextLike(entry.Name()) {
+			// pytest --doctest-glob runs the examples in any text file, so a text
 			// file with an example is something an accepted check can run.
 			data, ok := readFileWithin(path, surfaceMaxTextBytes)
 			textBudget -= len(data)
@@ -374,21 +374,51 @@ var inertExtensions = map[string]bool{
 	".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
 }
 
-// isInertFile reports whether name is a file no accepted check runs: a hidden
-// file, an all-capitals file such as README or LICENSE, or a file of an inert
-// kind. A hidden file cannot be run by an accepted command: go ignores files
-// whose names start with a dot, and pytest cannot import a module named
-// .test_change (TestHiddenFilesCannotBeRunByAcceptedCommands runs both). Hidden
-// directories are different, because their files have ordinary names.
+// inertDotfiles are the hidden files that hold only settings, never code an
+// accepted check can run.
+var inertDotfiles = map[string]bool{
+	".gitignore": true, ".gitattributes": true, ".gitmodules": true, ".gitkeep": true, ".keep": true,
+	".dockerignore": true, ".editorconfig": true, ".env": true, ".mailmap": true, ".ds_store": true,
+	".npmrc": true, ".nvmrc": true, ".prettierignore": true, ".eslintignore": true,
+	".prettierrc": true, ".eslintrc": true, ".babelrc": true, ".stylelintrc": true, ".browserslistrc": true,
+	".python-version": true, ".node-version": true, ".ruby-version": true, ".tool-versions": true,
+}
+
+// isInertFile reports whether name is a file no accepted check runs as code: a
+// settings dotfile, an all-capitals file such as README or LICENSE, or a file of
+// an inert kind. A hidden file is otherwise judged by its name without the
+// leading dot, because pytest --import-mode=importlib runs .test_change.py
+// (TestHiddenFilesCanBeRunByAcceptedCommands runs it).
 func isInertFile(name string) bool {
 	if strings.HasPrefix(name, ".") {
-		return true
+		if inertDotfiles[strings.ToLower(name)] {
+			return true
+		}
+		name = strings.TrimPrefix(name, ".")
+		if name == "" {
+			return true
+		}
 	}
 	ext := filepath.Ext(name)
 	if ext == "" {
 		return name == strings.ToUpper(name)
 	}
 	return inertExtensions[strings.ToLower(ext)]
+}
+
+// binaryExtensions are the inert kinds that hold no text, so no doctest.
+var binaryExtensions = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true, ".webp": true, ".bmp": true,
+	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true, ".odt": true,
+	".zip": true, ".tar": true, ".gz": true, ".tgz": true,
+	".mp3": true, ".mp4": true, ".wav": true,
+	".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
+}
+
+// isTextLike reports whether an inert file may hold text: pytest --doctest-glob
+// takes any file name, so any text file with a doctest example can be run.
+func isTextLike(name string) bool {
+	return !binaryExtensions[strings.ToLower(filepath.Ext(name))]
 }
 
 // projectFileOffersCheck reports whether a project file gives an accepted
@@ -434,16 +464,6 @@ func readFileWithin(path string, limit int) ([]byte, bool) {
 
 // doctestExample matches the prompt of a Python doctest example.
 var doctestExample = regexp.MustCompile(`(?m)^[ \t]*>>> `)
-
-// isDoctestTextName reports whether name is a text or markup file that pytest
-// --doctest-glob can be pointed at.
-func isDoctestTextName(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".txt", ".md", ".markdown", ".rst", ".adoc", ".org", ".tex":
-		return true
-	}
-	return false
-}
 
 // fileMentions reports whether the file at path contains word, ignoring case. A
 // file it cannot read in full counts as mentioning it.

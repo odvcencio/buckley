@@ -348,8 +348,11 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"a document named build", []string{"docs/build.md"}, false},
 		{"a text file named lint", []string{"lint.txt"}, false},
 		{"documents, images, and data", []string{"README.md", "docs/guide.rst", "logo.PNG", "data.csv", "config.yaml", "tsconfig.json", "notes.txt", "go.sum", "package-lock.json"}, false},
-		{"hidden files", []string{".gitignore", ".env", ".editorconfig", ".golangci.yml", ".gitkeep", ".prettierrc", ".python-version", ".github/CODEOWNERS.md"}, false},
-		{"hidden files that only look like tests", []string{".test_change.py", ".change_test.go", ".check.sh"}, false},
+		{"settings dotfiles", []string{".gitignore", ".env", ".editorconfig", ".golangci.yml", ".gitkeep", ".prettierrc", ".python-version", ".github/CODEOWNERS.md"}, false},
+		{"a hidden Python test file", []string{".test_change.py"}, true},
+		{"a hidden Go test file", []string{".change_test.go"}, true},
+		{"a hidden script", []string{".check.sh"}, true},
+		{"a hidden file of an unknown kind", []string{".unknownrc"}, true},
 		{"all-capitals files", []string{"README", "LICENSE", "NOTICE"}, false},
 		{"a lane log and its meta file", []string{"lane.log", "lane.log.meta", "brief.txt"}, false},
 		{"pytest.ini", []string{"pytest.ini"}, true},
@@ -946,7 +949,13 @@ func TestHasVerificationSurface_TextFilesWithDoctestExamples(t *testing.T) {
 		{"a doctest in a nested document", map[string]string{"docs/api/usage.md": "text\n>>> f()\n"}, true},
 		{"a prompt that is not at the start of a line", map[string]string{"notes.txt": "the shell prompt >>> looks like this\n"}, false},
 		{"a text file too large to read", map[string]string{"big.txt": long}, true},
-		{"a data file is not read for doctests", map[string]string{"data.csv": ">>> 1\n", "config.yaml": ">>> 2\n"}, false},
+		{"a doctest in a data file", map[string]string{"data.csv": ">>> 1\n"}, true},
+		{"a doctest in a config file", map[string]string{"config.yaml": "key: value\n>>> 2\n"}, true},
+		{"a doctest in a log file", map[string]string{"lane.log": ">>> 3\n"}, true},
+		{"a doctest in a hidden settings file", map[string]string{".gitignore": ">>> 4\n"}, true},
+		{"a doctest in an all-capitals file", map[string]string{"README": ">>> 5\n"}, true},
+		{"prose in data and config files", map[string]string{"data.csv": "a,b\n1,2\n", "config.yaml": "key: value\n", ".gitignore": "*.log\n"}, false},
+		{"a prompt in an image is not read", map[string]string{"logo.png": ">>> 6\n"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newSurfaceRoot(t)
@@ -998,36 +1007,37 @@ func TestHasVerificationSurface_DoctestGlobReallyRunsATextFile(t *testing.T) {
 	}
 }
 
-// A file whose name starts with a dot cannot be verified by any accepted
-// command, so the scan treats hidden files as inert. Run the real tools to show
-// it: go ignores such a file, and pytest cannot import it.
-func TestHiddenFilesCannotBeRunByAcceptedCommands(t *testing.T) {
-	t.Run("pytest cannot collect a dot-prefixed module", func(t *testing.T) {
-		if err := exec.Command("pytest", "--version").Run(); err != nil {
-			t.Skip("pytest is not installed")
-		}
+// A hidden file is not out of reach of an accepted command: pytest imports it
+// with --import-mode=importlib, and --doctest-glob takes any file name. The scan
+// therefore judges a hidden file by its name without the dot. Go is the
+// exception, since it ignores such a file even when named; the scan counts a
+// hidden .go file anyway, which only errs toward "a check might run".
+func TestHiddenFilesCanBeRunByAcceptedCommands(t *testing.T) {
+	if err := exec.Command("pytest", "--version").Run(); err != nil {
+		t.Skip("pytest is not installed")
+	}
+	run := func(t *testing.T, file, content string, args ...string) (string, error) {
+		t.Helper()
 		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, ".test_change.py"), []byte("def test_change():\n    assert True\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		command := exec.Command("pytest", "-p", "no:cacheprovider", ".test_change.py")
+		command := exec.Command("pytest", append([]string{"-p", "no:cacheprovider"}, args...)...)
 		command.Dir = dir
 		command.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
 		output, err := command.CombinedOutput()
-		if err == nil || strings.Contains(string(output), "1 passed") {
-			t.Fatalf("pytest ran a hidden test file (err=%v):\n%s", err, output)
+		return string(output), err
+	}
+	t.Run("a dot-prefixed test module runs with importlib import mode", func(t *testing.T) {
+		output, err := run(t, ".test_change.py", "def test_change():\n    assert True\n", "--import-mode=importlib", ".test_change.py")
+		if err != nil || !strings.Contains(output, "1 passed") {
+			t.Fatalf("pytest did not run the hidden test file (err=%v):\n%s", err, output)
 		}
 	})
-	t.Run("go ignores a test file that starts with a dot", func(t *testing.T) {
-		root := writeGoModule(t, map[string]string{"a.go": goPassingSource, ".a_test.go": goPassingTest})
-		command := exec.Command("go", "test", "-json", "./...")
-		command.Dir = root
-		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("go test failed: %v\n%s", err, output)
-		}
-		if strings.Contains(string(output), `"Test":"TestOne"`) {
-			t.Fatalf("go ran a test from a file that starts with a dot:\n%s", output)
+	t.Run("a data file runs as a doctest through the glob", func(t *testing.T) {
+		output, err := run(t, "data.csv", ">>> 1 + 1\n3\n", "--doctest-glob=data.csv")
+		if err == nil || !strings.Contains(output, "1 failed") {
+			t.Fatalf("pytest did not run the doctest in the csv file (err=%v):\n%s", err, output)
 		}
 	})
 }
