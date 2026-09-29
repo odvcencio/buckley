@@ -203,13 +203,14 @@ const (
 )
 
 // HasVerificationSurface reports whether the workspace at root holds anything
-// the accepted verification commands could run: a module or project file, a
-// Makefile, or a test file. Parents up to the repository root count too,
-// because go, npm, and cargo look upward. It returns false, with a plain
-// reason, only when it searched the whole workspace and found nothing. Any part
-// it could not search counts as a surface it does not know about: a subtree
-// below the depth bound, an unreadable directory, a symlinked directory, or a
-// tree that outruns the entry budget. This never ends a run on a guess.
+// the accepted verification commands could run. It returns false, with a plain
+// reason, only when it searched the whole workspace and every file it found is
+// a document, an image, plain data, or a project file that defines no test,
+// build, lint, or check. Any other file counts, and so does any part it could
+// not search: a subtree below the depth bound, an unreadable directory, a
+// symlinked directory, or a tree that outruns the entry budget. Parent
+// directories up to the repository root count for project files, because go,
+// npm, and cargo look upward. This never ends a run on a guess.
 func HasVerificationSurface(root string) (bool, string) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -286,7 +287,7 @@ func HasVerificationSurface(root string) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "found no go.mod, Cargo.toml, Go or Python test file, package.json with a test, build, or lint script, Python configuration for pytest, or Makefile with a test, check, build, vet, or lint target"
+	return false, "found only documents, data files, and project files that define no test, build, lint, or check"
 }
 
 func skipSurfaceDir(name string) bool {
@@ -314,13 +315,52 @@ func hasProjectMarker(dir string) bool {
 }
 
 // fileOffersCheck reports whether the file at path could give an accepted
-// verification command something to run: a project file that offers a check,
-// or a Go or Python test file.
+// verification command something to run. A project file decides by its content.
+// Any other file counts unless it is plainly a document, an image, or data:
+// go vet main.go, pytest checks.py, and make test with a test.c beside it all run
+// without a manifest, so an unknown kind of file is a check that might run.
 func fileOffersCheck(path, name string) bool {
-	return projectFileOffersCheck(path, name) ||
-		strings.HasSuffix(name, "_test.go") ||
-		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) ||
-		strings.HasSuffix(name, "_test.py")
+	if isProjectFileName(name) {
+		return projectFileOffersCheck(path, name)
+	}
+	return !isInertFile(name)
+}
+
+// isProjectFileName reports whether name is a file whose content decides
+// whether it offers a check.
+func isProjectFileName(name string) bool {
+	switch name {
+	case "go.mod", "Cargo.toml", "pytest.ini", "package.json", "pyproject.toml", "setup.cfg", "tox.ini":
+		return true
+	}
+	return isMakefileName(name)
+}
+
+// inertExtensions are the file kinds no accepted verification command runs:
+// documents, images, media, archives, fonts, and plain data.
+var inertExtensions = map[string]bool{
+	".txt": true, ".md": true, ".markdown": true, ".rst": true, ".adoc": true, ".org": true, ".tex": true,
+	".log": true, ".meta": true, ".csv": true, ".tsv": true,
+	".json": true, ".jsonl": true, ".yaml": true, ".yml": true, ".toml": true, ".xml": true,
+	".html": true, ".htm": true, ".css": true, ".lock": true, ".sum": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true, ".ico": true, ".webp": true, ".bmp": true,
+	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true, ".odt": true,
+	".zip": true, ".tar": true, ".gz": true, ".tgz": true,
+	".mp3": true, ".mp4": true, ".wav": true,
+	".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
+}
+
+// isInertFile reports whether name is a hidden file, an all-capitals file such as
+// README or LICENSE, or a file of an inert kind.
+func isInertFile(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return name == strings.ToUpper(name)
+	}
+	return inertExtensions[strings.ToLower(ext)]
 }
 
 // projectFileOffersCheck reports whether a project file gives an accepted

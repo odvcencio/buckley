@@ -333,9 +333,24 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"no makefile", []string{"docs/Makefile.txt"}, false},
 		{"python test", []string{"tests/test_hello.py"}, true},
 		{"go test file", []string{"pkg/a/a_test.go"}, true},
-		{"js spec with no package.json to run it", []string{"src/a.spec.ts"}, false},
-		{"python setup file alone", []string{"setup.py"}, false},
-		{"python conftest alone", []string{"conftest.py"}, false},
+		{"a module-free go file", []string{"main.go"}, true},
+		{"a nested module-free go file", []string{"cmd/tool/main.go"}, true},
+		{"a source make builds into test", []string{"test.c"}, true},
+		{"a script make copies into check", []string{"tools/check.sh"}, true},
+		{"any other C source", []string{"testdata.c"}, true},
+		{"a python script pytest can be pointed at", []string{"tools/check_stuff.py"}, true},
+		{"a python setup file", []string{"setup.py"}, true},
+		{"a rust file", []string{"src/main.rs"}, true},
+		{"a javascript file", []string{"src/index.js"}, true},
+		{"a typescript spec", []string{"src/a.spec.ts"}, true},
+		{"an extensionless script", []string{"configure"}, true},
+		{"a file of an unknown kind", []string{"data.bin"}, true},
+		{"a document named build", []string{"docs/build.md"}, false},
+		{"a text file named lint", []string{"lint.txt"}, false},
+		{"documents, images, and data", []string{"README.md", "docs/guide.rst", "logo.PNG", "data.csv", "config.yaml", "tsconfig.json", "notes.txt", "go.sum", "package-lock.json"}, false},
+		{"hidden files", []string{".gitignore", ".env", ".editorconfig", ".golangci.yml"}, false},
+		{"all-capitals files", []string{"README", "LICENSE", "NOTICE"}, false},
+		{"a lane log and its meta file", []string{"lane.log", "lane.log.meta", "brief.txt"}, false},
 		{"pytest.ini", []string{"pytest.ini"}, true},
 		{"only node_modules", []string{"node_modules/x/package.json", "vendor/y/go.mod"}, false},
 		{"only hidden dirs", []string{".git/config", ".github/workflows/ci.yml"}, false},
@@ -354,8 +369,8 @@ func TestHasVerificationSurface(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("HasVerificationSurface = %v (%q), want %v", got, reason, tc.want)
 			}
-			if !got && !strings.Contains(reason, "go.mod") {
-				t.Errorf("reason does not name what was searched for: %q", reason)
+			if !got && !strings.Contains(reason, "project files that define no test, build, lint, or check") {
+				t.Errorf("reason does not say what was found: %q", reason)
 			}
 		})
 	}
@@ -707,8 +722,8 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("HasVerificationSurface = %v (%q), want %v", got, reason, tc.want)
 			}
-			if !got && !strings.Contains(reason, "Makefile with a test, check, build, vet, or lint target") {
-				t.Errorf("reason does not name the Makefile rule: %q", reason)
+			if !got && !strings.Contains(reason, "project files that define no test, build, lint, or check") {
+				t.Errorf("reason does not say what was found: %q", reason)
 			}
 		})
 	}

@@ -55,18 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leave earlier results alone. Three unavailable checks in a row, made
   since the latest change, end the run as `completed_unverified`. So does a
   final answer in a workspace where no accepted check can run, after one
-  question that asks whether the work is finished. A check can run when the
-  workspace has a `go.mod`, `Cargo.toml`, `pytest.ini`, a Go or Python test
-  file, a `package.json` with a `test`, `build`, or `lint` script, Python
-  configuration that names pytest, or a Makefile with a `test`, `check`,
-  `build`, `vet`, or `lint` target. Anything the scan cannot search or
-  resolve counts as a check that might run. That outcome exits 0, reports
+  question that asks whether the work is finished. That means a workspace
+  that holds only documents, images, data files, and project files that
+  define no test, build, lint, or check: a `package.json` without a
+  `test`, `build`, or `lint` script, a Makefile without a `test`, `check`,
+  `build`, `vet`, or `lint` target, or Python configuration that does not
+  name pytest. Any source file, a `go.mod`, a `Cargo.toml`, or anything
+  the scan cannot search or read counts as a check that might run. The
+  `completed_unverified` outcome exits 0, reports
   `stop_reason="completed_unverified: ..."`, and adds a note to the final
   output. A real failing check that repeats four times with no workspace
   change, or ten continuations for verification reasons, end the run as
-  `verification_stalled` (exit 1). The `run_verification` description and refusal messages now list the
-  accepted commands, and `nice -n N` and `env GOWORK=off` may start one.
-  Passing checks and real failures behave as before.
+  `verification_stalled` (exit 1). The `run_verification` description and
+  refusal messages now list the accepted commands, and `nice -n N` and
+  `env GOWORK=off` may start one. Passing checks and real failures behave
+  as before.
 - `run_tests` with no path now tests every package (`./...`) in a Go module
   whose root holds no package. It used to fail at once with "no Go files"
   there, which looked like a failing test. A path you name is still used
