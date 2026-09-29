@@ -1053,3 +1053,24 @@ func TestHiddenFilesCanBeRunByAcceptedCommands(t *testing.T) {
 		}
 	})
 }
+
+// A schema default is copied into every call, and a path of "." names the root
+// package alone for Go, so the path parameter must not advertise one. The run
+// logs showed models sending path "." to a module whose root holds no package.
+func TestRunTestsTool_PathHasNoSchemaDefault(t *testing.T) {
+	path, ok := (&RunTestsTool{}).Parameters().Properties["path"]
+	if !ok {
+		t.Fatal("run_tests has no path parameter")
+	}
+	if path.Default != nil {
+		t.Fatalf("path default = %v, want none", path.Default)
+	}
+	for _, want := range []string{"Omit it", "every package", "./pkg/a"} {
+		if !strings.Contains(path.Description, want) {
+			t.Errorf("path description omits %q: %s", want, path.Description)
+		}
+	}
+	if (&RunTestsTool{}).Parameters().Required != nil && len((&RunTestsTool{}).Parameters().Required) != 0 {
+		t.Errorf("path must stay optional: %v", (&RunTestsTool{}).Parameters().Required)
+	}
+}
