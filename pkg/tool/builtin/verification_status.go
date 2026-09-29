@@ -200,6 +200,11 @@ func verificationResultText(result *Result) string {
 const (
 	surfaceMaxDepth   = 4
 	surfaceMaxEntries = 4000
+	// A text file larger than surfaceMaxTextBytes, or more text than
+	// surfaceTextBudget across the scan, is not read; the scan then counts it as
+	// unknown.
+	surfaceMaxTextBytes = 64 << 10
+	surfaceTextBudget   = 8 << 20
 )
 
 // HasVerificationSurface reports whether the workspace at root holds anything
@@ -227,7 +232,7 @@ func HasVerificationSurface(root string) (bool, string) {
 		return true, ""
 	}
 	found, unknown := false, false
-	entries := 0
+	entries, textBudget := 0, surfaceTextBudget
 	walkErr := filepath.WalkDir(abs, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			if entry != nil && entry.IsDir() {
@@ -265,6 +270,22 @@ func HasVerificationSurface(root string) (bool, string) {
 		if fileOffersCheck(path, entry.Name()) {
 			found = true
 			return fs.SkipAll
+		}
+		if isDoctestTextName(entry.Name()) {
+			// pytest --doctest-glob runs the examples in a text file, so a text
+			// file with an example is something an accepted check can run.
+			data, ok := readFileWithin(path, surfaceMaxTextBytes)
+			textBudget -= len(data)
+			switch {
+			case !ok || textBudget < 0:
+				unknown = true
+				if textBudget < 0 {
+					return fs.SkipAll
+				}
+			case doctestExample.Match(data):
+				found = true
+				return fs.SkipAll
+			}
 		}
 		return nil
 	})
@@ -353,8 +374,12 @@ var inertExtensions = map[string]bool{
 	".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
 }
 
-// isInertFile reports whether name is a hidden file, an all-capitals file such as
-// README or LICENSE, or a file of an inert kind.
+// isInertFile reports whether name is a file no accepted check runs: a hidden
+// file, an all-capitals file such as README or LICENSE, or a file of an inert
+// kind. A hidden file cannot be run by an accepted command: go ignores files
+// whose names start with a dot, and pytest cannot import a module named
+// .test_change (TestHiddenFilesCannotBeRunByAcceptedCommands runs both). Hidden
+// directories are different, because their files have ordinary names.
 func isInertFile(name string) bool {
 	if strings.HasPrefix(name, ".") {
 		return true
@@ -389,16 +414,35 @@ func projectFileOffersCheck(path, name string) bool {
 
 // readSmallFile reads path in full when it is at most maxMakefileBytes long.
 func readSmallFile(path string) ([]byte, bool) {
+	return readFileWithin(path, maxMakefileBytes)
+}
+
+// readFileWithin reads path in full when it is at most limit bytes long. The
+// second result is false when the file is larger or cannot be read.
+func readFileWithin(path string, limit int) ([]byte, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, false
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxMakefileBytes+1))
-	if err != nil || len(data) > maxMakefileBytes {
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil || len(data) > limit {
 		return nil, false
 	}
 	return data, true
+}
+
+// doctestExample matches the prompt of a Python doctest example.
+var doctestExample = regexp.MustCompile(`(?m)^[ \t]*>>> `)
+
+// isDoctestTextName reports whether name is a text or markup file that pytest
+// --doctest-glob can be pointed at.
+func isDoctestTextName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".txt", ".md", ".markdown", ".rst", ".adoc", ".org", ".tex":
+		return true
+	}
+	return false
 }
 
 // fileMentions reports whether the file at path contains word, ignoring case. A

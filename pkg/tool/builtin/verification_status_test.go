@@ -348,7 +348,8 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"a document named build", []string{"docs/build.md"}, false},
 		{"a text file named lint", []string{"lint.txt"}, false},
 		{"documents, images, and data", []string{"README.md", "docs/guide.rst", "logo.PNG", "data.csv", "config.yaml", "tsconfig.json", "notes.txt", "go.sum", "package-lock.json"}, false},
-		{"hidden files", []string{".gitignore", ".env", ".editorconfig", ".golangci.yml"}, false},
+		{"hidden files", []string{".gitignore", ".env", ".editorconfig", ".golangci.yml", ".gitkeep", ".prettierrc", ".python-version", ".github/CODEOWNERS.md"}, false},
+		{"hidden files that only look like tests", []string{".test_change.py", ".change_test.go", ".check.sh"}, false},
 		{"all-capitals files", []string{"README", "LICENSE", "NOTICE"}, false},
 		{"a lane log and its meta file", []string{"lane.log", "lane.log.meta", "brief.txt"}, false},
 		{"pytest.ini", []string{"pytest.ini"}, true},
@@ -927,4 +928,106 @@ func TestMakefileOffersCheck_AgreesWithRealMake(t *testing.T) {
 			}
 		})
 	}
+}
+
+// pytest --doctest-glob runs the examples in a text file, so an accepted check
+// can run a document.
+func TestHasVerificationSurface_TextFilesWithDoctestExamples(t *testing.T) {
+	long := strings.Repeat("plain prose\n", surfaceMaxTextBytes/len("plain prose\n")+2)
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"prose only", map[string]string{"notes.txt": "hello\nworld\n", "README.md": "# Title\n\nText.\n"}, false},
+		{"a doctest in a text file", map[string]string{"notes.txt": "Example:\n>>> 1 + 1\n2\n"}, true},
+		{"an indented doctest in markdown", map[string]string{"README.md": "```python\n    >>> add(1, 2)\n    3\n```\n"}, true},
+		{"a doctest in reStructuredText", map[string]string{"docs/guide.rst": ">>> x = 1\n"}, true},
+		{"a doctest in a nested document", map[string]string{"docs/api/usage.md": "text\n>>> f()\n"}, true},
+		{"a prompt that is not at the start of a line", map[string]string{"notes.txt": "the shell prompt >>> looks like this\n"}, false},
+		{"a text file too large to read", map[string]string{"big.txt": long}, true},
+		{"a data file is not read for doctests", map[string]string{"data.csv": ">>> 1\n", "config.yaml": ">>> 2\n"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newSurfaceRoot(t)
+			for name, content := range tc.files {
+				path := filepath.Join(root, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, reason := HasVerificationSurface(root); got != tc.want {
+				t.Fatalf("HasVerificationSurface = %v (%q), want %v", got, reason, tc.want)
+			}
+		})
+	}
+
+	t.Run("more text than the scan will read", func(t *testing.T) {
+		root := newSurfaceRoot(t)
+		chunk := strings.Repeat("plain prose\n", 4096) // about 52 KB, under the per-file limit
+		for i := 0; i < surfaceTextBudget/len(chunk)+3; i++ {
+			if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("doc%03d.txt", i)), []byte(chunk), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("text past the read budget is an unknown surface: %q", reason)
+		}
+	})
+}
+
+// Running pytest --doctest-glob against a text file really does run its
+// examples, so the scan's answer for a document is not a guess.
+func TestHasVerificationSurface_DoctestGlobReallyRunsATextFile(t *testing.T) {
+	if err := exec.Command("pytest", "--version").Run(); err != nil {
+		t.Skip("pytest is not installed")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte(">>> 1 + 1\n3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("pytest", "-p", "no:cacheprovider", "--doctest-glob=notes.txt")
+	command.Dir = dir
+	command.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "1 failed") {
+		t.Fatalf("pytest did not run the doctest in the text file (err=%v):\n%s", err, output)
+	}
+}
+
+// A file whose name starts with a dot cannot be verified by any accepted
+// command, so the scan treats hidden files as inert. Run the real tools to show
+// it: go ignores such a file, and pytest cannot import it.
+func TestHiddenFilesCannotBeRunByAcceptedCommands(t *testing.T) {
+	t.Run("pytest cannot collect a dot-prefixed module", func(t *testing.T) {
+		if err := exec.Command("pytest", "--version").Run(); err != nil {
+			t.Skip("pytest is not installed")
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".test_change.py"), []byte("def test_change():\n    assert True\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("pytest", "-p", "no:cacheprovider", ".test_change.py")
+		command.Dir = dir
+		command.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+		output, err := command.CombinedOutput()
+		if err == nil || strings.Contains(string(output), "1 passed") {
+			t.Fatalf("pytest ran a hidden test file (err=%v):\n%s", err, output)
+		}
+	})
+	t.Run("go ignores a test file that starts with a dot", func(t *testing.T) {
+		root := writeGoModule(t, map[string]string{"a.go": goPassingSource, ".a_test.go": goPassingTest})
+		command := exec.Command("go", "test", "-json", "./...")
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("go test failed: %v\n%s", err, output)
+		}
+		if strings.Contains(string(output), `"Test":"TestOne"`) {
+			t.Fatalf("go ran a test from a file that starts with a dot:\n%s", output)
+		}
+	})
 }

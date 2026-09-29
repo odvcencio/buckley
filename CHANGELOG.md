@@ -56,14 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since the latest change, end the run as `completed_unverified`. So does a
   final answer in a workspace where no accepted check can run, after one
   question that asks whether the work is finished. That means a workspace
-  that holds only documents, images, data files, and project files that
-  define no test, build, lint, or check: a `package.json` without a
-  `test`, `build`, or `lint` script, a Makefile without a `test`, `check`,
-  `build`, `vet`, or `lint` target, or Python configuration that does not
-  name pytest. Any source file in any directory (hidden ones included), a
-  `go.mod`, a `Cargo.toml`, or anything the scan cannot search or read
-  counts as a check that might run. The
-  `completed_unverified` outcome exits 0, reports
+  that holds only documents with no doctest example, images, data files,
+  and project files that define no test, build, lint, or check: a
+  `package.json` without a `test`, `build`, or `lint` script, a Makefile
+  without a `test`, `check`, `build`, `vet`, or `lint` target, or Python
+  configuration that does not name pytest. Any source file in any
+  directory (hidden directories included), a `go.mod`, a `Cargo.toml`, or
+  anything the scan cannot search or read counts as a check that might
+  run. The `completed_unverified` outcome exits 0, reports
   `stop_reason="completed_unverified: ..."`, and adds a note to the final
   output. A real failing check that repeats four times with no workspace
   change, or ten continuations for verification reasons, end the run as
