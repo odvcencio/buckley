@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   squash/merge commit title and body from the PR, refuses when required
   checks are failing or pending, and never passes `--admin` unless given.
 - Review verification evidence can now run through a remote wrapper (for
-  example buildbox-run) instead of the local sandbox. Set
+  example remote-run) instead of the local sandbox. Set
   `review.verification.runner.wrapper` (or `BUCKLEY_VERIFY_WRAPPER`) to a
   shell-style argv prefix. The harness then batches each changed Go
   package's test evidence into as few remote `go test -json` invocations
@@ -38,8 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or transport failure grades UNAVAILABLE/INCONCLUSIVE, never
   CONFIRMED_FAIL, as long as the configured wrapper reserves the
   trusted exit codes (0, 1, and 101 for Rust) for the wrapped command's own
-  outcome. `buildbox-run` follows this contract: it now uses a dedicated
-  reserved exit code (90) for its own remote setup failures, so a failed
+  outcome. An example wrapper, `remote-run`, follows this contract: it now uses
+  a dedicated reserved exit code (90) for its own remote setup failures, so a failed
   `cd` into the synced directory can never be mistaken for a real test
   failure. The trusted-exit-code check is language-aware: it accepts exit
   code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.

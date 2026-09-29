@@ -106,7 +106,7 @@ func (t *RunVerificationTool) SetTimeoutLimit(limit time.Duration) {
 }
 
 // SetWrapper configures a remote verification wrapper (for example
-// buildbox-run) that runs each verification command on a remote host instead
+// remote-run) that runs each verification command on a remote host instead
 // of the local sandbox: `<wrapper...> <snapshot-dir> <argv...>`. An empty
 // argv keeps verification local. Wrapper mode applies only to the underlying
 // *reviewsandbox.Executor this tool owns; a caller-supplied Verifier is left

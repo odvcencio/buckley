@@ -15,7 +15,7 @@ import (
 // writeFakeWrapperScript writes an executable shell script that records
 // every invocation's argv (one line per call, appended) and replays canned
 // `go test -json` output, standing in for a remote wrapper such as
-// buildbox-run.
+// remote-run.
 func writeFakeWrapperScript(t *testing.T, invocationsFile, fixture string, exitCode int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-batch-wrapper.sh")
@@ -64,7 +64,7 @@ func initGoEvidenceRepo(t *testing.T, module string, packages ...string) string 
 // two changed packages' evidence requests through one remote `go test
 // -json` wrapper invocation instead of two, and parses each package's
 // PASS/FAIL from the replayed event stream. It also proves the immutable
-// review snapshot buildbox-run receives (a real PrepareReviewWorkspace
+// review snapshot remote-run receives (a real PrepareReviewWorkspace
 // checkout, not a copy) is itself a valid git worktree, by having the fake
 // wrapper run `git rev-parse --is-inside-work-tree` against the directory
 // it was handed.

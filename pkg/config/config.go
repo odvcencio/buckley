@@ -1180,8 +1180,8 @@ type ReviewVerificationConfig struct {
 //	review:
 //	  verification:
 //	    runner:
-//	      wrapper: ["buildbox-run"]
-//	      cleanup: ["buildbox-run", "--cleanup"]
+//	      wrapper: ["remote-run"]
+//	      cleanup: ["remote-run", "--cleanup"]
 //	      parallelism: 2
 //	      timeout: 10m
 type ReviewVerificationRunnerConfig struct {
@@ -1192,7 +1192,7 @@ type ReviewVerificationRunnerConfig struct {
 	// a remote build host over ssh) and is trusted to relay the real
 	// command's exit code. Empty keeps verification local.
 	// BUCKLEY_VERIFY_WRAPPER (shell-split, for example
-	// "buildbox-run --node-modules").
+	// "remote-run --node-modules").
 	Wrapper []string `yaml:"wrapper"`
 	// Cleanup runs `<cleanup...> <snapshot-dir>` once after all verification
 	// commands for that snapshot finish. Empty disables remote cleanup.
