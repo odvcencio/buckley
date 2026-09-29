@@ -297,6 +297,17 @@ func TestRunTestsTool_NoFrameworkIsUnavailableNotAFailure(t *testing.T) {
 	}
 }
 
+// newSurfaceRoot returns an empty workspace that is its own repository root, so
+// the scan never reads the machine's temp directory above it.
+func newSurfaceRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func TestHasVerificationSurface(t *testing.T) {
 	write := func(root, name string) {
 		t.Helper()
@@ -322,7 +333,10 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"no makefile", []string{"docs/Makefile.txt"}, false},
 		{"python test", []string{"tests/test_hello.py"}, true},
 		{"go test file", []string{"pkg/a/a_test.go"}, true},
-		{"js spec", []string{"src/a.spec.ts"}, true},
+		{"js spec with no package.json to run it", []string{"src/a.spec.ts"}, false},
+		{"python setup file alone", []string{"setup.py"}, false},
+		{"python conftest alone", []string{"conftest.py"}, false},
+		{"pytest.ini", []string{"pytest.ini"}, true},
 		{"only node_modules", []string{"node_modules/x/package.json", "vendor/y/go.mod"}, false},
 		{"only hidden dirs", []string{".git/config", ".github/workflows/ci.yml"}, false},
 		{"below the depth bound, a module", []string{"a/b/c/d/e/go.mod"}, true},
@@ -332,7 +346,7 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"deepest searched level, only a note", []string{"a/b/c/d/note.txt"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := newSurfaceRoot(t)
 			for _, name := range tc.files {
 				write(root, name)
 			}
@@ -382,7 +396,7 @@ func TestHasVerificationSurface_ParentSearchStopsAtRepositoryRoot(t *testing.T) 
 }
 
 func TestHasVerificationSurface_LargeTreeCountsAsAvailable(t *testing.T) {
-	root := t.TempDir()
+	root := newSurfaceRoot(t)
 	for i := 0; i < surfaceMaxEntries+50; i++ {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%05d.txt", i)), nil, 0o600); err != nil {
 			t.Fatal(err)
@@ -570,7 +584,7 @@ func TestVerificationUnavailableReason_RealToolOutput(t *testing.T) {
 
 func TestHasVerificationSurface_UnsearchedSubtreesCountAsUnknown(t *testing.T) {
 	t.Run("symlinked directory", func(t *testing.T) {
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		target := t.TempDir()
 		if err := os.WriteFile(filepath.Join(target, "go.mod"), []byte("module x\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -586,7 +600,7 @@ func TestHasVerificationSurface_UnsearchedSubtreesCountAsUnknown(t *testing.T) {
 		}
 	})
 	t.Run("symlinked file", func(t *testing.T) {
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		target := filepath.Join(t.TempDir(), "note.txt")
 		if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -602,7 +616,7 @@ func TestHasVerificationSurface_UnsearchedSubtreesCountAsUnknown(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root reads every directory")
 		}
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		locked := filepath.Join(root, "locked")
 		if err := os.Mkdir(locked, 0o755); err != nil {
 			t.Fatal(err)
@@ -643,13 +657,23 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 		{"an include may define it", "Makefile", "include rules.mk\nall:\n\t@true\n", true},
 		{"an optional include may define it", "Makefile", "-include rules.mk\nall:\n\t@true\n", true},
 		{"a match-anything rule", "Makefile", "%:\n\t@true\n", true},
+		{"a pattern with a prefix that matches check", "Makefile", "c%:\n\t@true\n", true},
+		{"a pattern with a suffix that matches check", "Makefile", "%k:\n\t@true\n", true},
+		{"a pattern that matches test on both ends", "Makefile", "te%t:\n\t@true\n", true},
+		{"a pattern among other targets", "Makefile", "all c%: deps\n\t@true\n", true},
+		{"the default rule", "Makefile", ".DEFAULT:\n\t@true\n", true},
+		{"an object pattern rule", "Makefile", "%.o: %.c\n\t@true\n", false},
+		{"a pattern that matches no accepted target", "Makefile", "foo%:\n\t@true\n", false},
+		{"a pattern with an empty stem", "Makefile", "test%:\n\t@true\n", false},
+		{"a pattern that cannot fill its stem", "Makefile", "%test:\n\t@true\n", false},
+		{"a pattern with two percent signs is not a rule", "Makefile", "%c%:\n\t@true\n", false},
 		{"a target named by a variable", "Makefile", "$(CHECKS):\n\t@true\n", true},
 		{"a conditional around an all target", "Makefile", "ifeq ($(OS),Windows_NT)\nall:\n\t@true\nendif\n", false},
 		{"a conditional with a colon the scan cannot split", "Makefile", "ifeq ($(SHELL),a:b)\nall:\n\t@true\nendif\n", true},
 		{"a Makefile too large to read in full", "Makefile", "all:\n" + strings.Repeat("\t@true\n", maxMakefileBytes/7+1), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := newSurfaceRoot(t)
 			if err := os.WriteFile(filepath.Join(root, tc.file), []byte(tc.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -664,7 +688,7 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 	}
 
 	t.Run("a Makefile deeper in the tree", func(t *testing.T) {
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		for name, content := range map[string]string{"tools/Makefile": "all:\n\t@true\n", "docs/notes.txt": "x\n"} {
 			path := filepath.Join(root, filepath.FromSlash(name))
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -689,7 +713,7 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root reads every file")
 		}
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		path := filepath.Join(root, "Makefile")
 		if err := os.WriteFile(path, []byte("all:\n"), 0o000); err != nil {
 			t.Fatal(err)
@@ -700,7 +724,7 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 	})
 
 	t.Run("a symlinked Makefile is read through the link", func(t *testing.T) {
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		real := filepath.Join(t.TempDir(), "real.mk")
 		if err := os.WriteFile(real, []byte("test:\n\t@true\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -714,7 +738,7 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 	})
 
 	t.Run("a symlinked project file", func(t *testing.T) {
-		root := t.TempDir()
+		root := newSurfaceRoot(t)
 		real := filepath.Join(t.TempDir(), "mod")
 		if err := os.WriteFile(real, []byte("module x\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -726,4 +750,134 @@ func TestHasVerificationSurface_MakefileNeedsAnAcceptedTarget(t *testing.T) {
 			t.Fatalf("a symlinked go.mod is a module: %q", reason)
 		}
 	})
+}
+
+func TestHasVerificationSurface_ProjectFilesNeedToOfferACheck(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		file    string
+		content string
+		want    bool
+	}{
+		{"package.json with a test script", "package.json", `{"scripts":{"test":"jest"}}`, true},
+		{"package.json with a build script", "package.json", `{"scripts":{"build":"tsc"}}`, true},
+		{"package.json with a lint script", "package.json", `{"scripts":{"lint":"eslint ."}}`, true},
+		{"package.json with only a start script", "package.json", `{"scripts":{"start":"node app.js"}}`, false},
+		{"package.json with no scripts", "package.json", `{"name":"x"}`, false},
+		{"package.json with empty scripts", "package.json", `{"scripts":{}}`, false},
+		{"package.json with the npm init test script", "package.json", `{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`, false},
+		{"package.json with the npm init test script and a lint script", "package.json", `{"scripts":{"test":"echo \"Error: no test specified\" && exit 1","lint":"eslint ."}}`, true},
+		{"package.json that does not parse", "package.json", `{"scripts":`, true},
+		{"pyproject.toml that configures pytest", "pyproject.toml", "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n", true},
+		{"pyproject.toml that names pytest in capitals", "pyproject.toml", "[tool.PYTEST]\n", true},
+		{"pyproject.toml that never mentions pytest", "pyproject.toml", "[project]\nname = \"x\"\n", false},
+		{"setup.cfg that configures pytest", "setup.cfg", "[tool:pytest]\naddopts = -q\n", true},
+		{"setup.cfg that does not", "setup.cfg", "[metadata]\nname = x\n", false},
+		{"tox.ini that runs pytest", "tox.ini", "[testenv]\ncommands = pytest\n", true},
+		{"tox.ini that does not", "tox.ini", "[tox]\nenvlist = py311\n", false},
+		{"pytest.ini is pytest configuration", "pytest.ini", "", true},
+		{"go.mod", "go.mod", "module x\n", true},
+		{"Cargo.toml", "Cargo.toml", "[package]\nname = \"x\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newSurfaceRoot(t)
+			if err := os.WriteFile(filepath.Join(root, tc.file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, reason := HasVerificationSurface(root)
+			if got != tc.want {
+				t.Fatalf("HasVerificationSurface = %v (%q), want %v", got, reason, tc.want)
+			}
+		})
+	}
+
+	t.Run("an unreadable package.json", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads every file")
+		}
+		root := newSurfaceRoot(t)
+		if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"scripts":{}}`), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("an unreadable package.json may hold a script: %q", reason)
+		}
+	})
+
+	t.Run("a package.json in a subdirectory is judged the same way", func(t *testing.T) {
+		root := newSurfaceRoot(t)
+		path := filepath.Join(root, "web", "package.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"scripts":{"start":"node x"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, reason := HasVerificationSurface(root); got {
+			t.Fatalf("a package.json without a check script offers none: %q", reason)
+		}
+		if err := os.WriteFile(path, []byte(`{"scripts":{"test":"node x"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("a test script offers a check: %q", reason)
+		}
+	})
+}
+
+// The Makefile parser must never say "no check" when real make can run an
+// accepted target. Each Makefile below is run with real make for every accepted
+// target; a Makefile the parser rejects must fail all of them.
+func TestMakefileOffersCheck_AgreesWithRealMake(t *testing.T) {
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make unavailable")
+	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		// definite is false for Makefiles the parser deliberately over-approximates,
+		// where it says "offers a check" without proof that make can run one.
+		definite bool
+	}{
+		{"explicit test rule", "test:\n\t@echo ran\n", true},
+		{"several targets on one rule", "check build: deps\n\t@echo ran\ndeps:\n", true},
+		{"prefix pattern", "c%:\n\t@echo ran\n", true},
+		{"suffix pattern", "%k:\n\t@echo ran\n", true},
+		{"pattern with both ends", "te%t:\n\t@echo ran\n", true},
+		{"match-anything", "%:\n\t@echo ran\n", true},
+		{"default rule", ".DEFAULT:\n\t@echo ran\n", true},
+		{"all only", "all:\n\t@echo ran\n", true},
+		{"phony declaration only", ".PHONY: test\nall:\n\t@echo ran\n", true},
+		{"dependency named test", "all: test.o\n\t@echo ran\ntest.o:\n\t@echo ran\n", true},
+		{"testdata target", "testdata:\n\t@echo ran\n", true},
+		{"object pattern", "%.o: %.c\n\t@echo ran\n", true},
+		{"unrelated prefix pattern", "foo%:\n\t@echo ran\n", true},
+		{"pattern with an empty stem", "test%:\n\t@echo ran\n", true},
+		{"pattern that cannot fill its stem", "%test:\n\t@echo ran\n", true},
+		{"variable assignments", "CC := gcc\nTESTS = a:b\nall:\n\t@echo ran\n", true},
+		{"comment naming a target", "# test: everything\nall:\n\t@echo ran\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "Makefile")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			offers := makefileOffersCheck(path)
+			ran := false
+			for _, target := range acceptedMakeTargets {
+				command := exec.Command("make", "-f", "Makefile", target)
+				command.Dir = dir
+				if output, err := command.CombinedOutput(); err == nil && strings.Contains(string(output), "ran") {
+					ran = true
+				}
+			}
+			if ran && !offers {
+				t.Fatalf("make ran an accepted target, but the parser reported no check\n%s", tc.content)
+			}
+			if tc.definite && offers != ran {
+				t.Fatalf("parser offers=%v, real make ran=%v\n%s", offers, ran, tc.content)
+			}
+		})
+	}
 }

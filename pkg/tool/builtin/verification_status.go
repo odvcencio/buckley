@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"encoding/json"
 	"io"
 	"io/fs"
 	"os"
@@ -261,14 +262,7 @@ func HasVerificationSurface(root string) (bool, string) {
 				return nil
 			}
 		}
-		if isMakefileName(entry.Name()) {
-			if makefileOffersCheck(path) {
-				found = true
-				return fs.SkipAll
-			}
-			return nil
-		}
-		if isVerificationSurfaceFile(entry.Name()) {
+		if fileOffersCheck(path, entry.Name()) {
 			found = true
 			return fs.SkipAll
 		}
@@ -291,7 +285,7 @@ func HasVerificationSurface(root string) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "no go.mod, package.json, Cargo.toml, Python project file, Makefile with a test, check, build, vet, or lint target, or test file was found in the workspace"
+	return false, "nothing that an accepted check can run was found in the workspace: no go.mod, Cargo.toml, Go or Python test file, package.json with a test, build, or lint script, Python configuration for pytest, or Makefile with a test, check, build, vet, or lint target"
 }
 
 func skipSurfaceDir(name string) bool {
@@ -311,27 +305,89 @@ func hasProjectMarker(dir string) bool {
 		return false
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if isMakefileName(entry.Name()) {
-			if makefileOffersCheck(filepath.Join(dir, entry.Name())) {
-				return true
-			}
-			continue
-		}
-		if isProjectMarkerFile(entry.Name()) {
+		if !entry.IsDir() && projectFileOffersCheck(filepath.Join(dir, entry.Name()), entry.Name()) {
 			return true
 		}
 	}
 	return false
 }
 
-func isProjectMarkerFile(name string) bool {
-	switch name {
-	case "go.mod", "package.json", "Cargo.toml", "pyproject.toml", "setup.py", "setup.cfg",
-		"pytest.ini", "tox.ini", "conftest.py":
+// fileOffersCheck reports whether the file at path could give an accepted
+// verification command something to run: a project file that offers a check,
+// or a Go or Python test file.
+func fileOffersCheck(path, name string) bool {
+	return projectFileOffersCheck(path, name) ||
+		strings.HasSuffix(name, "_test.go") ||
+		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) ||
+		strings.HasSuffix(name, "_test.py")
+}
+
+// projectFileOffersCheck reports whether a project file gives an accepted
+// verification command something to run. It counts only when it says so: a
+// package.json needs a test, build, or lint script, a Makefile needs an
+// accepted target, and Python configuration needs to mention pytest. A file the
+// scan cannot read or parse counts as offering a check. The tools look for
+// these files in parent directories, so the scan does too. Test files do not
+// propagate that way, so they are not project files.
+func projectFileOffersCheck(path, name string) bool {
+	switch {
+	case isMakefileName(name):
+		return makefileOffersCheck(path)
+	case name == "package.json":
+		return packageJSONOffersCheck(path)
+	case name == "pyproject.toml" || name == "setup.cfg" || name == "tox.ini":
+		return fileMentions(path, "pytest")
+	case name == "go.mod" || name == "Cargo.toml" || name == "pytest.ini":
 		return true
+	}
+	return false
+}
+
+// readSmallFile reads path in full when it is at most maxMakefileBytes long.
+func readSmallFile(path string) ([]byte, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxMakefileBytes+1))
+	if err != nil || len(data) > maxMakefileBytes {
+		return nil, false
+	}
+	return data, true
+}
+
+// fileMentions reports whether the file at path contains word, ignoring case. A
+// file it cannot read in full counts as mentioning it.
+func fileMentions(path, word string) bool {
+	data, ok := readSmallFile(path)
+	return !ok || strings.Contains(strings.ToLower(string(data)), word)
+}
+
+// packageJSONOffersCheck reports whether the package.json at path has a test,
+// build, or lint script, the scripts npm test and npm run build|lint can run.
+// The default test script that npm init writes does not count. A file that
+// does not parse counts as offering a check.
+func packageJSONOffersCheck(path string) bool {
+	data, ok := readSmallFile(path)
+	if !ok {
+		return true
+	}
+	var manifest struct {
+		Scripts map[string]json.RawMessage `json:"scripts"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return true
+	}
+	for name, raw := range manifest.Scripts {
+		switch name {
+		case "build", "lint":
+			return true
+		case "test":
+			if !strings.Contains(string(raw), "no test specified") {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -349,13 +405,8 @@ const maxMakefileBytes = 1 << 20
 // target, a target named by a variable) or cannot be read in full. Only a
 // Makefile that was read completely and defines none of them offers no check.
 func makefileOffersCheck(path string) bool {
-	file, err := os.Open(path)
-	if err != nil {
-		return true
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxMakefileBytes+1))
-	if err != nil || len(data) > maxMakefileBytes {
+	data, ok := readSmallFile(path)
+	if !ok {
 		return true
 	}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -383,8 +434,7 @@ func makefileOffersCheck(path string) bool {
 			return true
 		}
 		for _, target := range strings.Fields(targets) {
-			switch target {
-			case "test", "check", "build", "vet", "lint", "%":
+			if makeTargetCanRunCheck(target) {
 				return true
 			}
 		}
@@ -392,12 +442,29 @@ func makefileOffersCheck(path string) bool {
 	return false
 }
 
-func isVerificationSurfaceFile(name string) bool {
-	if isProjectMarkerFile(name) {
+// acceptedMakeTargets are the make targets the verification allowlist runs.
+var acceptedMakeTargets = []string{"test", "check", "build", "vet", "lint"}
+
+// makeTargetCanRunCheck reports whether a rule target in a Makefile can supply
+// the recipe for an accepted make target: the target is one of them, a pattern
+// that matches one (a stem of at least one character must fill the %), or
+// .DEFAULT, which runs for any target without a rule.
+func makeTargetCanRunCheck(target string) bool {
+	if target == ".DEFAULT" {
 		return true
 	}
-	return strings.HasSuffix(name, "_test.go") ||
-		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) ||
-		strings.HasSuffix(name, "_test.py") ||
-		strings.Contains(name, ".test.") || strings.Contains(name, ".spec.")
+	prefix, suffix, isPattern := strings.Cut(target, "%")
+	for _, accepted := range acceptedMakeTargets {
+		if !isPattern {
+			if target == accepted {
+				return true
+			}
+			continue
+		}
+		if !strings.Contains(suffix, "%") && len(accepted) > len(prefix)+len(suffix) &&
+			strings.HasPrefix(accepted, prefix) && strings.HasSuffix(accepted, suffix) {
+			return true
+		}
+	}
+	return false
 }
