@@ -318,7 +318,11 @@ func TestHasVerificationSurface(t *testing.T) {
 		{"js spec", []string{"src/a.spec.ts"}, true},
 		{"only node_modules", []string{"node_modules/x/package.json", "vendor/y/go.mod"}, false},
 		{"only hidden dirs", []string{".git/config", ".github/workflows/ci.yml"}, false},
-		{"too deep", []string{"a/b/c/d/e/go.mod"}, false},
+		{"below the depth bound, a module", []string{"a/b/c/d/e/go.mod"}, true},
+		{"below the depth bound, a test", []string{"a/b/c/d/e/f/test_deep.py"}, true},
+		{"below the depth bound, only a note", []string{"a/b/c/d/e/note.txt"}, true},
+		{"at the depth bound, a module", []string{"a/b/c/d/go.mod"}, true},
+		{"deepest searched level, only a note", []string{"a/b/c/d/note.txt"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -555,4 +559,56 @@ func TestVerificationUnavailableReason_RealToolOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHasVerificationSurface_UnsearchedSubtreesCountAsUnknown(t *testing.T) {
+	t.Run("symlinked directory", func(t *testing.T) {
+		root := t.TempDir()
+		target := t.TempDir()
+		if err := os.WriteFile(filepath.Join(target, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(root, "linked")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("a symlinked directory was not searched, so the workspace has an unknown surface: %q", reason)
+		}
+	})
+	t.Run("symlinked file", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(t.TempDir(), "note.txt")
+		if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(root, "note-link.txt")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, reason := HasVerificationSurface(root); got {
+			t.Fatalf("a symlink to a plain file hides no surface: %q", reason)
+		}
+	})
+	t.Run("unreadable directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads every directory")
+		}
+		root := t.TempDir()
+		locked := filepath.Join(root, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(locked, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		if got, reason := HasVerificationSurface(root); !got {
+			t.Fatalf("an unreadable directory may hold a surface: %q", reason)
+		}
+	})
 }

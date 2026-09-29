@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -198,10 +197,12 @@ const (
 
 // HasVerificationSurface reports whether the workspace at root holds anything
 // the accepted verification commands could run: a module or project file, a
-// Makefile, or a test file, within a few directory levels (parents up to the
-// repository root count too, because go, npm, and cargo look upward). When it
-// finds none it returns a plain reason. A large tree that outruns the search
-// budget counts as having a surface, so this never ends a run wrongly.
+// Makefile, or a test file. Parents up to the repository root count too,
+// because go, npm, and cargo look upward. It returns false, with a plain
+// reason, only when it searched the whole workspace and found nothing. Any part
+// it could not search counts as a surface it does not know about: a subtree
+// below the depth bound, an unreadable directory, a symlinked directory, or a
+// tree that outruns the entry budget. This never ends a run on a guess.
 func HasVerificationSurface(root string) (bool, string) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -217,18 +218,19 @@ func HasVerificationSurface(root string) (bool, string) {
 	if hasProjectMarker(abs) {
 		return true, ""
 	}
-	found, exhausted := false, false
+	found, unknown := false, false
 	entries := 0
 	walkErr := filepath.WalkDir(abs, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			if entry != nil && entry.IsDir() {
+				unknown = true
 				return fs.SkipDir
 			}
 			return nil
 		}
 		entries++
 		if entries > surfaceMaxEntries {
-			exhausted = true
+			unknown = true
 			return fs.SkipAll
 		}
 		if entry.IsDir() {
@@ -240,7 +242,14 @@ func HasVerificationSurface(root string) (bool, string) {
 			}
 			rel, relErr := filepath.Rel(abs, path)
 			if relErr != nil || strings.Count(rel, string(filepath.Separator)) >= surfaceMaxDepth {
+				unknown = true
 				return fs.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+				unknown = true
 			}
 			return nil
 		}
@@ -250,7 +259,7 @@ func HasVerificationSurface(root string) (bool, string) {
 		}
 		return nil
 	})
-	if walkErr != nil || found || exhausted {
+	if walkErr != nil || found || unknown {
 		return true, ""
 	}
 	dir := abs
@@ -267,7 +276,7 @@ func HasVerificationSurface(root string) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, fmt.Sprintf("no go.mod, package.json, Cargo.toml, Python project file, Makefile, or test file was found within %d directory levels of the workspace", surfaceMaxDepth)
+	return false, "no go.mod, package.json, Cargo.toml, Python project file, Makefile, or test file was found in the workspace"
 }
 
 func skipSurfaceDir(name string) bool {
