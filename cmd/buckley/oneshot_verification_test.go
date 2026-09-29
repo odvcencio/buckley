@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,9 @@ func runScriptedLane(t *testing.T, files map[string]string, script []laneStep) l
 	t.Setenv("BUCKLEY_UNSAFE", "1")
 	t.Setenv("BUCKLEY_TOOL_SANDBOX_MODE", "disabled")
 	for name, content := range files {
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -174,6 +178,35 @@ func TestOneShotLane_NoVerificationSurfaceEndsUnverifiedAfterOneQuestion(t *test
 	}
 	if !strings.Contains(run.stdout, "Updated target.txt; nothing could verify it.") || !strings.Contains(run.stdout, "[Buckley] Completed without verification: no check applies to this workspace") {
 		t.Fatalf("stdout must keep the model's confirmed answer and add the unverified note:\n%s", run.stdout)
+	}
+}
+
+// An accepted check can be pointed at any path, so a runnable test in a hidden
+// directory is a surface: the lane is not asked whether it is finished, and it
+// verifies with that test.
+func TestOneShotLane_RunnableTestInAHiddenDirectoryIsAVerificationSurface(t *testing.T) {
+	if err := exec.Command("pytest", "--version").Run(); err != nil {
+		t.Skip("pytest is not installed")
+	}
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
+	run := runScriptedLane(t, map[string]string{"target.txt": "before\n", ".checks/test_change.py": "def test_change():\n    assert True\n"}, []laneStep{
+		editStep("before", "after"),
+		sayStep("Updated target.txt."),
+		verifyStep("pytest -p no:cacheprovider .checks/test_change.py"),
+		verifyStep("pytest -p no:cacheprovider .checks/test_change.py -q"),
+		sayStep("Updated target.txt and the check passes."),
+	})
+	if run.code != 0 || run.requests != 5 {
+		t.Fatalf("code=%d requests=%d stdout=%s stderr=%s", run.code, run.requests, run.stdout, run.stderr)
+	}
+	if strings.Contains(run.stderr, "completed_unverified") || strings.Contains(run.stdout, "without verification") {
+		t.Fatalf("a workspace with a runnable test must not end unverified:\n%s", run.stderr)
+	}
+	if strings.Contains(strings.Join(run.userMessages, "\n"), "nothing that can verify your change") {
+		t.Fatalf("the lane was asked whether it is finished although a check could run:\n%s", strings.Join(run.userMessages, "\n"))
+	}
+	if !strings.Contains(run.stderr, "passed=true") {
+		t.Fatalf("the hidden test never counted as verification:\n%s", run.stderr)
 	}
 }
 
