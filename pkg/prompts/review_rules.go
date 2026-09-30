@@ -15,5 +15,5 @@ const (
 
 	// RuleUseHarnessVerificationEvidence keeps model-selected tools focused on
 	// analysis after Buckley has completed the deterministic verification plan.
-	RuleUseHarnessVerificationEvidence = "- Use Buckley's harness-collected verification evidence first. Do not repeat a passing command; rerun only failed or unavailable evidence when a focused retry can resolve it."
+	RuleUseHarnessVerificationEvidence = "- Use Buckley's harness-collected verification evidence first. Do not repeat a passing command merely to reproduce its status. When the depth contract requires model-directed verification and run_verification is enabled, make the required focused check of a source-grounded hypothesis in the current phase even when the deterministic plan passed. Otherwise rerun only failed or unavailable evidence when a focused retry can resolve it."
 )

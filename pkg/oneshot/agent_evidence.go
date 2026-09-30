@@ -73,7 +73,7 @@ func formatHostAgentEvidence(calls []AgentToolCall) string {
 	}
 	var b strings.Builder
 	b.WriteString("## Harness-Collected Verification Evidence\n\n")
-	b.WriteString("Buckley evaluated this deterministic plan against the immutable review snapshot before model synthesis. This evidence remains authoritative across validation retries and the approval critic. Do not claim the verification tools were unavailable merely because you did not invoke them yourself. Do not repeat a successful call unless contradictory source evidence makes a rerun necessary.\n")
+	b.WriteString("Buckley evaluated this deterministic plan against the immutable review snapshot before model synthesis. This evidence remains authoritative across validation retries and the approval critic. Do not claim the verification tools were unavailable merely because you did not invoke them yourself. Do not repeat a successful call merely to reproduce its status. When the depth contract requires model-directed verification and run_verification is enabled, make the required focused check of a source-grounded hypothesis in the current phase even when the deterministic plan passed. Harness-collected calls do not satisfy that per-phase requirement. Do not rerun the entire passing plan.\n")
 	appendAgentToolEvidence(&b, calls)
 	return strings.TrimSpace(b.String())
 }

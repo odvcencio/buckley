@@ -457,7 +457,9 @@ func appendReviewDepthSections(prompt, depth string) string {
 	}
 	return prompt + `
 
-BALANCED and IN-DEPTH output adds the literal headings ## Evidence Collected and ## Verification Ledger to the base review schema. Keep ## Coverage and Completeness: COMPLETE. Evidence Collected lists observed source, tool, and CI evidence; Verification Ledger records tested hypotheses and outcomes. Do not use Coverage as a substitute for either section. This applies to an independent approval critic's replacement review too.`
+BALANCED and IN-DEPTH output adds the literal headings ## Structural Impact, ## Evidence Collected, and ## Verification Ledger to the base review schema. Keep ## Coverage and Completeness: COMPLETE. Structural Impact traces the changed contracts and consumers; Evidence Collected lists observed source, tool, and CI evidence; Verification Ledger records tested hypotheses and outcomes. Do not use Coverage as a substitute for these sections. This applies to an independent approval critic's replacement review too.
+
+When run_verification is enabled and the depth contract requires model-directed verification, each primary reviewer and independent approval critic must issue at least one real snapshot-bound run_verification call in its own phase before final synthesis. Passing harness-collected evidence does not satisfy this per-phase requirement. Make a focused check of a source-grounded hypothesis, preferably with a specific test pattern; do not rerun the entire passing plan merely to reproduce its status. During repair, a model-directed call already recorded in the current phase satisfies this requirement; do not borrow a call from another phase. If authoritative remote CI policy disables run_verification, follow that policy instead.`
 }
 
 // validateReviewDepthOutput turns depth from a prompt hint into an observable

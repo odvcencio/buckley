@@ -131,7 +131,7 @@ func TestReviewDepthSectionsReachPrimaryAndCriticPrompts(t *testing.T) {
 		{"PR critic", (ReviewPRDef{Depth: "balanced"}).ApprovalCriticSystemPrompt()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, heading := range []string{"## Evidence Collected", "## Verification Ledger", "## Coverage", "Completeness: COMPLETE"} {
+			for _, heading := range []string{"## Structural Impact", "## Evidence Collected", "## Verification Ledger", "## Coverage", "Completeness: COMPLETE"} {
 				if !strings.Contains(tt.prompt, heading) {
 					t.Fatalf("review prompt missing required %s heading", heading)
 				}
@@ -143,18 +143,77 @@ func TestReviewDepthSectionsReachPrimaryAndCriticPrompts(t *testing.T) {
 	}
 }
 
+func TestReviewDepthPromptsRequireVerificationInEachPhase(t *testing.T) {
+	for _, depth := range []string{"balanced", "in-depth"} {
+		for _, tt := range []struct {
+			name   string
+			prompt string
+		}{
+			{"branch", (ReviewBranchDef{Depth: depth}).SystemPrompt()},
+			{"branch critic", (ReviewBranchDef{Depth: depth}).ApprovalCriticSystemPrompt()},
+			{"project", (ReviewProjectDef{Depth: depth}).SystemPrompt()},
+			{"PR", (ReviewPRDef{Depth: depth}).SystemPrompt()},
+			{"PR critic", (ReviewPRDef{Depth: depth}).ApprovalCriticSystemPrompt()},
+		} {
+			t.Run(depth+"/"+tt.name, func(t *testing.T) {
+				for _, instruction := range []string{
+					"each primary reviewer and independent approval critic must issue at least one real snapshot-bound run_verification call in its own phase",
+					"Passing harness-collected evidence does not satisfy this per-phase requirement",
+					"a model-directed call already recorded in the current phase satisfies this requirement",
+					"do not borrow a call from another phase",
+					"If authoritative remote CI policy disables run_verification, follow that policy instead",
+				} {
+					assert.Contains(t, tt.prompt, instruction)
+				}
+			})
+		}
+	}
+	assert.NotContains(t, (ReviewBranchDef{Depth: "spot"}).SystemPrompt(), "each primary reviewer and independent approval critic must issue")
+}
+
 func TestReviewDepthRequiresModelVerificationEvidence(t *testing.T) {
-	validProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
+	validProject := &ReviewAgentResult{Review: "## Structural Impact\n- changed contract\n\n## Evidence Collected\n- source\n\n## Coverage\n- **Completeness**: COMPLETE\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
 	balanced := ReviewProjectDef{Depth: "balanced"}
 	assert.NoError(t, balanced.ValidateResult(validProject))
 	qwenStyleProject := &ReviewAgentResult{Review: "## Evidence Collected\n- source\n\n## Coverage\n### Completeness: PARTIAL — deferred paths are disclosed\n\n## Verification Ledger\n- SUPPORTED: focused build\n"}
 	assert.ErrorContains(t, balanced.ValidateResult(qwenStyleProject), "Completeness: COMPLETE")
-	assert.True(t, oneshot.IsAgentExecutionEvidenceRequired(balanced.ValidateAgentExecution(validProject, nil)))
-	assert.NoError(t, balanced.ValidateAgentExecution(validProject, &oneshot.AgentResult{ToolCalls: []oneshot.AgentToolCall{{ID: "call-1", Name: "run_verification"}}}))
+	for _, tt := range []struct {
+		name  string
+		calls []oneshot.AgentToolCall
+		valid bool
+	}{
+		{name: "no calls"},
+		{name: "passing host evidence only", calls: []oneshot.AgentToolCall{{ID: "host-evidence-1", Name: "run_verification", Success: true}}},
+		{name: "whitespace does not hide host identity", calls: []oneshot.AgentToolCall{{ID: " host-evidence-1 ", Name: "run_verification", Success: true}}},
+		{name: "inspection is not verification", calls: []oneshot.AgentToolCall{{ID: "call-1", Name: "read_file", Success: true}}},
+		{name: "model-directed call", calls: []oneshot.AgentToolCall{{ID: "call-1", Name: "run_verification", Success: true}}, valid: true},
+		{name: "host and model-directed call", calls: []oneshot.AgentToolCall{{ID: "host-evidence-1", Name: "run_verification", Success: true}, {ID: "call-1", Name: "run_verification", Success: true}}, valid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := balanced.ValidateAgentExecution(validProject, &oneshot.AgentResult{ToolCalls: tt.calls})
+			if tt.valid {
+				assert.NoError(t, err)
+			} else {
+				assert.True(t, oneshot.IsAgentExecutionEvidenceRequired(err))
+			}
+		})
+	}
 
 	spot := ReviewProjectDef{}
 	assert.NoError(t, spot.ValidateAgentExecution(&ReviewAgentResult{}, nil))
 	assert.NotContains(t, spot.AllowedTools(), "run_verification")
+}
+
+func TestReviewDepthStillEnforcesStructuralImpactForChangeReviews(t *testing.T) {
+	complete := "## Structural Impact\n- changed contract\n\n## Evidence Collected\n- source\n\n## Coverage\nCompleteness: COMPLETE\n\n## Verification Ledger\n- focused check\n"
+	missingImpact := strings.Replace(complete, "## Structural Impact\n- changed contract\n\n", "", 1)
+	for _, depth := range []string{"balanced", "in-depth"} {
+		t.Run(depth, func(t *testing.T) {
+			// Both branch and PR ValidateResult use the change-review contract.
+			assert.NoError(t, validateReviewDepthOutput(complete, depth, false))
+			assert.ErrorContains(t, validateReviewDepthOutput(missingImpact, depth, false), "Structural Impact section")
+		})
+	}
 }
 
 func TestDiffStats_TotalChanges(t *testing.T) {

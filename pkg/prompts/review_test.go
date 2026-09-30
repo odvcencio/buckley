@@ -160,6 +160,20 @@ func TestBranchReviewPromptRendersSharedRuleConstants(t *testing.T) {
 	}
 }
 
+func TestBranchReviewPromptAllowsRequiredFocusedModelVerification(t *testing.T) {
+	prompt := reviewBranchWithToolsDefault(time.Unix(0, 0))
+	for _, instruction := range []string{
+		"Do not repeat a passing command merely to reproduce its status",
+		"When the depth contract requires model-directed verification and run_verification is enabled",
+		"in the current phase even when the deterministic plan passed",
+		"Otherwise rerun only failed or unavailable evidence",
+	} {
+		if !strings.Contains(prompt, instruction) {
+			t.Errorf("branch review prompt omitted %q", instruction)
+		}
+	}
+}
+
 func TestPRReviewPromptRestrictsMinorFindingsToRealDefects(t *testing.T) {
 	prompt := reviewPRCompactDefault(time.Unix(0, 0))
 	if !strings.Contains(prompt, "A Finding requires a demonstrated changed behavior, contract, security, data, performance, test, or operational defect") {
