@@ -839,3 +839,10 @@ func TestCodexCLIProvider_RemovesSnapshotOnRootError(t *testing.T) {
 		t.Fatalf("snapshot remains after error: %v", err)
 	}
 }
+
+func TestCodexReasoningConfigArgs_Max(t *testing.T) {
+	got := codexReasoningConfigArgs(&ReasoningConfig{Effort: "max"})
+	if !containsSubsequence(got, []string{"-c", `model_reasoning_effort="max"`}) {
+		t.Fatalf("Codex review args dropped max effort: %v", got)
+	}
+}

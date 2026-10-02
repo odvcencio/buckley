@@ -1265,7 +1265,7 @@ func TestRunACPLoop_CostBoundMissingUsageChargesReservation(t *testing.T) {
 	t.Parallel()
 	for name, trailer := range map[string]string{
 		"done":              "[DONE]",
-		"usage_unavailable": `{"error":{"message":"Particle could not report usage","code":"usage_tracking_unavailable"}}`,
+		"usage_unavailable": `{"error":{"message":"Provider could not report usage","code":"usage_tracking_unavailable"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

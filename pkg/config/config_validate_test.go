@@ -243,3 +243,11 @@ func TestValidateOneshotDataPolicy(t *testing.T) {
 		t.Fatalf("Validate error = %v, want oneshot.data_policy error", err)
 	}
 }
+
+func TestValidateAcceptsMaxReasoning(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Models.Reasoning = "max"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate with models.reasoning max: %v", err)
+	}
+}

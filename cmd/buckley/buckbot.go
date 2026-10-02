@@ -157,7 +157,7 @@ func printBuckbotUsage() {
 	fmt.Println("EXAMPLES:")
 	fmt.Println("  buckley buckbot")
 	fmt.Println("  buckley buckbot --scope branch")
-	fmt.Println("  buckley buckbot repo --model codex/auto")
+	fmt.Println("  buckley buckbot repo --model codex/auto --effort xhigh")
 	fmt.Println("  buckley buckbot repo --depth balanced")
 	fmt.Println("  buckley buckbot repo --depth in-depth --timeout 45m")
 	fmt.Println("  buckley buckbot --max-tool-calls 12")

@@ -6,20 +6,20 @@ import (
 )
 
 func TestArtifactNormalizationPreservesMetadata(t *testing.T) {
-	metadata := map[string]string{" subagent_run_id ": " child-one ", "provider": "particle"}
+	metadata := map[string]string{" subagent_run_id ": " child-one ", "provider": "example"}
 	a := Artifact{SchemaVersion: SchemaVersion, Kind: KindSubagentResult, Status: StatusCompleted, Title: "result", Summary: "source evidence", Metadata: metadata}
 	got, err := NormalizeAndValidate(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got.Metadata, map[string]string{"subagent_run_id": "child-one", "provider": "particle"}) {
+	if !reflect.DeepEqual(got.Metadata, map[string]string{"subagent_run_id": "child-one", "provider": "example"}) {
 		t.Fatalf("metadata lost: %#v", got.Metadata)
 	}
-	if !reflect.DeepEqual(metadata, map[string]string{" subagent_run_id ": " child-one ", "provider": "particle"}) {
+	if !reflect.DeepEqual(metadata, map[string]string{" subagent_run_id ": " child-one ", "provider": "example"}) {
 		t.Fatal("normalization changed caller metadata")
 	}
 	got.Metadata["provider"] = "changed"
-	if metadata["provider"] != "particle" {
+	if metadata["provider"] != "example" {
 		t.Fatal("normalization retained a mutable alias")
 	}
 	metadata["provider"] = "caller changed"

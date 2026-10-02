@@ -95,7 +95,7 @@ func ResolveReasoningEffortForTaskWithCapability(cfg *config.Config, checker Rea
 			configured = "auto"
 		case "off", "none":
 			configured = "off"
-		case "minimal", "low", "medium", "high", "xhigh":
+		case "minimal", "low", "medium", "high", "xhigh", "max":
 			configured = strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
 		default:
 			configured = "auto"
@@ -121,7 +121,7 @@ func ResolveReasoningEffortForTaskWithCapability(cfg *config.Config, checker Rea
 	switch configured {
 	case "off":
 		return "", capability
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return configured, capability
 	default:
 		if phase == "planning" || phase == "review" {

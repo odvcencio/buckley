@@ -37,7 +37,7 @@ func normalizeReasoningValue(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	case "off", "none":
 		return "off"
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return strings.ToLower(strings.TrimSpace(value))

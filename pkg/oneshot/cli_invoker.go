@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -227,7 +228,7 @@ func (inv *CLIInvoker) buildCodexCommand(tool tools.Definition, prompt string, s
 
 func normalizeCLIReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""
@@ -235,6 +236,9 @@ func normalizeCLIReasoningEffort(effort string) string {
 }
 
 func (inv *CLIInvoker) buildClaudeCommand(prompt string, schemaJSON []byte) (CLICommand, func(), error) {
+	if inv.reasoning != "" {
+		slog.Debug("Claude one-shot backend ignores reasoning effort", "effort", inv.reasoning)
+	}
 	args := []string{
 		"--print",
 		"--input-format", "text",

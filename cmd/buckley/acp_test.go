@@ -473,7 +473,7 @@ func TestSoleKnownACPToolInvocationMarkup(t *testing.T) {
 		{name: "fenced code example remains prose", text: fencedExample},
 		{name: "ordinary answer", text: "The search_text tool accepts query and path parameters."},
 		{name: "unknown tool", text: `<invented_tool><query>value</query></invented_tool>`},
-		{name: "malformed particle tool control markup", text: malformedToolControl, wantTool: "read_file", want: true},
+		{name: "malformed provider tool control markup", text: malformedToolControl, wantTool: "read_file", want: true},
 		{name: "malformed live tool control remains unsafe with later fence", text: malformedToolControlWithFence, wantTool: "read_file", want: true},
 		{name: "malformed unknown tool control uses generic label", text: `<tool_call>` + strings.Repeat("x", 120) + `|arg=value`, wantTool: "tool_call", want: true},
 		{name: "malformed markup prose example remains prose", text: "Example output: " + malformedToolControl},
