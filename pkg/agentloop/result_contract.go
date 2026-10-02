@@ -52,6 +52,19 @@ const (
 )
 
 const (
+	// TerminationCompletedUnverified ends a continuing run whose model gave a
+	// final answer while no check could verify the latest change: the workspace
+	// has no test or build command, or the attempts to run one all failed to
+	// start. The run is conclusive, and the reason says it is unverified.
+	TerminationCompletedUnverified = "completed_unverified"
+	// TerminationVerificationStalled ends a continuing run that could not reach
+	// a passing verification: the same check kept failing with no change, or
+	// verification stayed unsettled across many continuations. The run is
+	// incomplete.
+	TerminationVerificationStalled = "verification_stalled"
+)
+
+const (
 	// IncompleteToolRoundInterrupted reports that a tool round stopped after
 	// some outcomes were confirmed while at least one callback, persistence, or
 	// observer path remained unresolved. The raw cause stays in the error chain;
@@ -155,6 +168,8 @@ func applyIncompleteNoticeCode(notice *IncompleteResultNotice) {
 			notice.Reason = "workspace state could not be observed after a tool that may affect completion evidence"
 		}
 		notice.NextAction = "Restore observable workspace state or report that blocker without claiming verification."
+	case TerminationVerificationStalled:
+		notice.NextAction = "Fix or replace the check that keeps failing, or verify the change by hand, then rerun."
 	}
 }
 
@@ -215,11 +230,32 @@ type CompletionContract struct {
 	RequireObservableChange       bool
 	MaxRepairAttempts             int
 	MaxContinuations              int
-	OnContinuation                func(int, string)
-	TolerateObservationErrors     bool
-	RepairInstruction             string
-	TaskIntent                    TaskIntent
-	ValidateFinalResponse         func(string) error
+	// MaxNoChangeContinuations caps continuations rejected only because no
+	// workspace change was recorded. Zero means no separate cap.
+	MaxNoChangeContinuations int
+	// The verification limits below apply only to continuing runs
+	// (MaxContinuations > 0) and only to answers rejected for missing or failed
+	// post-change verification. Zero disables each one.
+	//
+	// MaxVerificationUnavailable ends the run as completed_unverified once this
+	// many verification calls in a row could not run.
+	MaxVerificationUnavailable int
+	// MaxVerificationStalls ends the run as verification_stalled once the same
+	// verification has failed this many times in a row with no workspace change
+	// between runs.
+	MaxVerificationStalls int
+	// MaxVerificationContinuations ends the run as verification_stalled after
+	// this many continuations rejected for verification reasons.
+	MaxVerificationContinuations int
+	// VerificationSurface reports whether any verification command can apply to
+	// the workspace at all. When it reports false, an answer that lacks
+	// verification ends the run as completed_unverified with the given reason.
+	VerificationSurface       func() (available bool, reason string)
+	OnContinuation            func(int, string)
+	TolerateObservationErrors bool
+	RepairInstruction         string
+	TaskIntent                TaskIntent
+	ValidateFinalResponse     func(string) error
 
 	// SubmittedResponse optionally supplies a caller-owned result accepted by a
 	// tool. Returning ready=false retains normal model completion. Returning
@@ -348,4 +384,99 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 			Detail: fmt.Sprintf("unknown task intent %q", normalized.TaskIntent),
 		}
 	}
+}
+
+// verificationAction is what a rejected final answer leads to.
+type verificationAction int
+
+const (
+	// verificationContinue sends the answer back with the usual instruction.
+	verificationContinue verificationAction = iota
+	// verificationConfirm asks the model once whether its work is finished,
+	// because nothing in the workspace can run a check. The answer to that
+	// question decides: more work, or a final report of unverified work.
+	verificationConfirm
+	// verificationEndUnverified ends the run as completed_unverified.
+	verificationEndUnverified
+	// verificationEndStalled ends the run as verification_stalled.
+	verificationEndStalled
+)
+
+// verificationStop decides what to do with a final answer that the contract
+// rejected for missing or failed post-change verification. rejections counts
+// the earlier continuations rejected for verification reasons, and confirmed
+// says the model was already asked whether its work is finished.
+//
+// The order matters. Evidence that nothing can verify the change ends the run
+// as completed_unverified, after one confirmation question when the workspace
+// has no check at all, so a model that only narrated a next step is not cut
+// off. A real failing check is never reported as unverified work: it ends as
+// verification_stalled only when the model keeps re-running it unchanged.
+func (c CompletionContract) verificationStop(err error, snapshot ProgressSnapshot, rejections int, confirmed bool) (verificationAction, string) {
+	var contractErr *CompletionContractError
+	if !errors.As(err, &contractErr) {
+		return verificationContinue, ""
+	}
+	switch contractErr.Reason {
+	case CompletionMissingPostChangeVerification:
+		if c.VerificationSurface != nil {
+			if available, why := c.VerificationSurface(); !available {
+				why = strings.TrimSpace(why)
+				if why == "" {
+					why = "nothing in the workspace can run a build or test"
+				}
+				reason := "no check applies to this workspace: " + why
+				if confirmed {
+					return verificationEndUnverified, reason
+				}
+				return verificationConfirm, reason
+			}
+		}
+		// The streak counts only attempts made since the latest workspace
+		// change, so a model that kept working after refused commands has not
+		// yet tried to verify its newest change.
+		if c.MaxVerificationUnavailable > 0 && snapshot.VerificationUnavailableStreak >= c.MaxVerificationUnavailable {
+			why := snapshot.lastUnavailableReason
+			if why == "" {
+				why = "the check did not run"
+			}
+			return verificationEndUnverified, fmt.Sprintf("%d verification attempts in a row could not run, last reason: %s", snapshot.VerificationUnavailableStreak, why)
+		}
+	case CompletionFailedPostChangeVerification:
+		if c.MaxVerificationStalls > 0 && snapshot.VerificationFailureStreak >= c.MaxVerificationStalls {
+			return verificationEndStalled, fmt.Sprintf("verification failed %d times in a row with no workspace change between runs", snapshot.VerificationFailureStreak)
+		}
+	default:
+		return verificationContinue, ""
+	}
+	if c.MaxVerificationContinuations > 0 && rejections >= c.MaxVerificationContinuations {
+		return verificationEndStalled, fmt.Sprintf("verification was still unsettled after %d continuations: %s", rejections, contractErr.Detail)
+	}
+	return verificationContinue, ""
+}
+
+// verificationNudge returns a short note for the tool result that pushed a
+// verification streak to one step below its limit, so the model changes course
+// before the run ends.
+func (c CompletionContract) verificationNudge(snapshot ProgressSnapshot, unavailable bool) string {
+	if unavailable {
+		if c.MaxVerificationUnavailable > 1 && snapshot.VerificationUnavailableStreak == c.MaxVerificationUnavailable-1 {
+			return fmt.Sprintf("Harness notice: %d verification attempts in a row did not run. Try one accepted command, such as go test ./..., make check, npm test, cargo test, or pytest. If none applies to this workspace, finish with a report that says the change is unverified and why; the run then ends as completed_unverified.", snapshot.VerificationUnavailableStreak)
+		}
+		return ""
+	}
+	if c.MaxVerificationStalls > 1 && snapshot.VerificationFailureStreak == c.MaxVerificationStalls-1 {
+		return fmt.Sprintf("Harness notice: this verification failed %d times in a row with no workspace change between runs. Change the code or the check before running it again; if it fails once more without a change, the run ends as verification_stalled.", snapshot.VerificationFailureStreak)
+	}
+	return ""
+}
+
+// isVerificationContractError reports whether err rejected an answer for
+// missing or failed post-change verification.
+func isVerificationContractError(err error) bool {
+	var contractErr *CompletionContractError
+	if !errors.As(err, &contractErr) {
+		return false
+	}
+	return contractErr.Reason == CompletionMissingPostChangeVerification || contractErr.Reason == CompletionFailedPostChangeVerification
 }

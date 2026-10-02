@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-04",
+  "kind": "fix",
+  "source": "odvcencio/buckley@64913a1f",
+  "diff": "buckley-small-04.diff",
+  "original": "fix(oneshot): clarify status preservation in source requirements check\n\n- Previously the comment implied \"terminal\" statuses were preserved, but only failed, blocked, and incomplete are kept; other statuses now correctly downgrade to incomplete when required source evidence is missing\n- Update doc comment to state the actual behavior so future readers don't misinterpret which statuses are preserved\n"
+}

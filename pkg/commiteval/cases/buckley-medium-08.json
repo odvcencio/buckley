@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-08",
+  "kind": "fix",
+  "source": "odvcencio/buckley@ad2c5531",
+  "diff": "buckley-medium-08.diff",
+  "original": "fix(commitmsg): enforce generated commit message style (#231)\n\nfix(commitmsg): enforce generated commit message style\n- Reject capitalized or action-repeating subjects so generated headers follow the required style.\n- Limit commit bodies to five bullets of at most 20 words each, and state these limits in generation guidance.\n- Add validation tests for subject style and bullet limits.\n"
+}

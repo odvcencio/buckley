@@ -1,0 +1,14 @@
+{
+  "name": "gosx-release",
+  "kind": "release",
+  "source": "odvcencio/gosx@db75b2ca",
+  "diff": "gosx-release.diff",
+  "original": "release: release v0.56.2\n\n- Document managed-region polling behavior and regenerated bundles for the release.\n- Update the README release references and canonical version constants to v0.56.2.\n",
+  "attr_globs": [
+    "client/js/bootstrap.js",
+    "client/js/bootstrap-lite.js",
+    "client/js/bootstrap-runtime.js",
+    "client/js/bootstrap-feature-*.js",
+    "client/js/*.js.map"
+  ]
+}

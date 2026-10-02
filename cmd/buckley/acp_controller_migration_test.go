@@ -564,7 +564,7 @@ func TestRunACPLoop_NoToolsRepairsDeepSeekXMLInvocationMarkup(t *testing.T) {
 
 	const attemptedCall = `<search_text>
 <query>reserved synthesis request Tools nil ToolChoice none</query>
-<path>/home/draco/work/buckley</path>
+<path>/home/user/work/buckley</path>
 </search_text>`
 	const finalAnswer = "No tools are available, so I can only answer from the supplied context."
 
@@ -647,7 +647,7 @@ func TestRunACPLoop_NoToolsRepeatedInvocationMarkupIsIncomplete(t *testing.T) {
 
 	const attemptedCall = `<search_text>
 <query>reserved synthesis request Tools nil ToolChoice none</query>
-<path>/home/draco/work/buckley</path>
+<path>/home/user/work/buckley</path>
 </search_text>`
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

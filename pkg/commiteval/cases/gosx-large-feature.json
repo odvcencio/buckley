@@ -1,0 +1,14 @@
+{
+  "name": "gosx-large-feature",
+  "kind": "feature",
+  "source": "odvcencio/gosx@999f034f",
+  "diff": "gosx-large-feature.diff",
+  "original": "add(runtime): event-mode live binds, region growth modes, hub backoff\n\n- data-gosx-live-mode=\"event\" applies a matched gosx:hub:event's own object payload directly to the root's data-gosx-live-bind keys with no fetch, so data-gosx-live-src becomes optional there and only serves the manual window.__gosx.live.refresh path; a src-less record treats every fetch trigger as a silent no-op instead of a network error.\n- data-gosx-region-mode=\"append|prepend\" grows a region beside its existing children rather than re-mounting the whole subtree, so a tape or board never re-initializes rows it already has. data-gosx-region-key drops a fragment node whose key matches a present child, and data-gosx-region-cursor fills a {cursor} token in the URL off an already-rendered child (first in prepend, last otherwise) \u2014 the growth-mode counterpart to {value}. A fully deduplicated fragment inserts nothing and emits no gosx:region:after.\n- Hub reconnects back off exponentially from 500 ms, doubling to a 15 s cap with up to 25 percent jitter, and reset the moment a socket actually opens; the attempt count is carried through connectHub so retries keep climbing instead of pinning to the base delay, and a second close can no longer stack an overlapping timer. This spreads out the thundering-herd reconnect storm after a server restart.\n- The live-bind attribute target maps are now built with Object.create(null) and probed through hasOwnProperty: an author-controlled bind target such as constructor, __proto__, or hasOwnProperty no longer resolves truthy through Object.prototype, so the attribute allowlist's decisions stop depending on which check happens to run first.\n- Go-side contracts expose the new surface: RegionModeAttr/RegionKeyAttr/RegionCursorAttr with matching RegionOptions Mode/Key/Cursor fields, and NavigationLiveModeAttr.\n- New coverage for region append/prepend and dedupe, event-mode binds, and reconnect backoff, plus prototype-name refusal cases in the attribute-bind test; bundle size budgets raised and the bootstrap chunks rebuilt for the larger navigation/regions/hubs runtime.\n- CHANGELOG and the runtime and hubs docs pages describe the event-mode, region growth, countdown retargeting, and reconnect-backoff contracts.\n\nRefs #217\n",
+  "attr_globs": [
+    "client/js/bootstrap.js",
+    "client/js/bootstrap-lite.js",
+    "client/js/bootstrap-runtime.js",
+    "client/js/bootstrap-feature-*.js",
+    "client/js/*.js.map"
+  ]
+}

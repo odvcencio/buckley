@@ -2,9 +2,12 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/commitmsg"
+	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
 )
 
@@ -159,5 +162,99 @@ func TestCommitResultFormatUsesBreakingReasonAndNormalizesBullets(t *testing.T) 
 	}
 	if !strings.Contains(formatted, "Refs #12") || strings.Contains(formatted, "Closes #99") {
 		t.Fatalf("unsafe issue footer escaped:\n%s", formatted)
+	}
+}
+
+func TestCommitValidateWithContextBlocksRemovedNames(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{DenyTerms: []string{"quuxcorp"}} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+
+	diff := "diff --git a/a.yaml b/a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@\n-owner: zorblax-prod\n+owner: example-prod\n"
+	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:staged": diff}}
+	def := CommitDefinition{}
+
+	check := func(subject, bullet string) error {
+		raw, _ := json.Marshal(map[string]any{"action": "update", "subject": subject, "body": []string{bullet}})
+		return def.ValidateWithContext(ctx, raw)
+	}
+	if err := check("rename the owner label", "Use the new name; the old name is gone."); err != nil {
+		t.Fatalf("clean message rejected: %v", err)
+	}
+	for _, bad := range []struct{ subject, bullet string }{
+		{"rename zorblax-prod to example-prod", "Replace the label."},
+		{"rename the owner label", "Stop naming QuuxCorp in manifests."},
+	} {
+		err := check(bad.subject, bad.bullet)
+		var leak *commitmsg.LeakError
+		if !errors.As(err, &leak) {
+			t.Fatalf("message %q not blocked: %v", bad.subject, err)
+		}
+		if msg := strings.ToLower(err.Error()); strings.Contains(msg, "zorblax") || strings.Contains(msg, "quuxcorp") {
+			t.Fatalf("error echoes private text: %v", err)
+		}
+	}
+}
+
+func TestCommitSystemPromptForbidsNamingRemovedIdentifiers(t *testing.T) {
+	isolateCommitPrompt(t)
+	p := CommitDefinition{}.SystemPrompt()
+	if !strings.Contains(p, "Never name removed or renamed identifiers, people, or organizations") {
+		t.Fatal("system prompt lacks the removed-name rule")
+	}
+	if strings.Contains(strings.ToLower(p), "caller migration") {
+		t.Fatal("system prompt asks for the caller migration")
+	}
+}
+
+func TestCommitPolicyFactsAreCountsOnly(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{DenyTerms: []string{"quuxcorp"}} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+
+	diff := "diff --git a/a.yaml b/a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@\n-owner: zorblax-prod\n+owner: example-prod\n"
+	ctx := &oneshot.Context{
+		Sources: map[string]string{"git_diff:staged": diff},
+		Diff:    oneshot.DiffStats{Files: 4, LowSignal: 1},
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"action": "update", "subject": "rename label", "body": []string{"Rename zorblax-prod for QuuxCorp.", "Two words"},
+	})
+	req, err := CommitDefinition{}.PolicyFacts(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"deny_hits": 1, "removed_echo": 1, "sensitive_hits": 0,
+		"max_bullet_words": 4, "bullet_count": 2, "generated_ratio": 0.25, "diff_files": 4,
+	}
+	for k, v := range want {
+		if req.Facts[k] != v {
+			t.Errorf("fact %s = %v, want %v", k, req.Facts[k], v)
+		}
+	}
+	for _, v := range req.Facts {
+		if s, ok := v.(string); ok {
+			t.Errorf("fact carries text: %q", s)
+		}
+	}
+	if err := req.Fail("repair", "deny_list"); strings.Contains(strings.ToLower(err.Error()), "quuxcorp") {
+		t.Fatalf("failure text echoes a private term: %v", err)
+	}
+}
+
+func TestValidateWithContextSkipsRemovedEchoForGeneratedDiffs(t *testing.T) {
+	prev := commitPolicyLoader
+	commitPolicyLoader = func() commitmsg.Policy { return commitmsg.Policy{} }
+	t.Cleanup(func() { commitPolicyLoader = prev })
+	diff := "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@\n-var zorblax=1\n+var q=1\n"
+	raw, _ := json.Marshal(map[string]any{"action": "update", "subject": "regenerate zorblax bundle", "body": []string{"Rebuild output."}})
+	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:staged": diff}, Diff: oneshot.DiffStats{Files: 1, LowSignal: 1}}
+	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err != nil {
+		t.Fatalf("generated-only diff should skip the removed-line check: %v", err)
+	}
+	ctx.Diff = oneshot.DiffStats{Files: 1}
+	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err == nil {
+		t.Fatal("source diff should flag the removed name")
 	}
 }

@@ -1,0 +1,25 @@
+diff --git a/client/client.go b/client/client.go
+index 1111111..2222222 100644
+--- a/client/client.go
++++ b/client/client.go
+@@ -3,12 +3,12 @@ package client
+-// ZorblaxClient talks to the billing service.
+-type ZorblaxClient struct {
++// Client talks to the billing service.
++type Client struct {
+ 	baseURL string
+ }
+-func NewZorblaxClient(baseURL string) *ZorblaxClient {
+-	return &ZorblaxClient{baseURL: baseURL}
++func New(baseURL string) *Client {
++	return &Client{baseURL: baseURL}
+ }
+diff --git a/cmd/main.go b/cmd/main.go
+index 3333333..4444444 100644
+--- a/cmd/main.go
++++ b/cmd/main.go
+@@ -8,5 +8,5 @@ func main() {
+-	c := client.NewZorblaxClient(os.Getenv("BASE_URL"))
++	c := client.New(os.Getenv("BASE_URL"))
+ 	_ = c
+ }

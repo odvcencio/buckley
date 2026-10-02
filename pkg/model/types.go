@@ -1621,7 +1621,22 @@ func (e *APIError) Error() string {
 	if openRouterPolicyBlocked(e) {
 		message += "; OpenRouter filtered every eligible endpoint; check Settings > Privacy and Guardrails for ZDR, data-collection, provider, and model restrictions"
 	}
+	if openRouterCreditBilledRoute(e) {
+		message += "; OpenRouter routed this request to an endpoint that does not use your own provider key (is_byok=false), so it bills OpenRouter credits; a ZDR requirement can exclude the provider that holds your key; pin that provider with providers.openrouter.byok_providers or add OpenRouter credits"
+	}
 	return message
+}
+
+// openRouterCreditBilledRoute reports an OpenRouter credit rejection (HTTP
+// 402) whose routing metadata says the request was not on the caller's own
+// key. Without this hint the error reads as "add credits" even when the
+// caller's BYOK key is funded and the real cause is the route choice.
+func openRouterCreditBilledRoute(e *APIError) bool {
+	if e == nil || e.StatusCode != 402 {
+		return false
+	}
+	text := strings.ReplaceAll(e.Message+" "+e.Details, " ", "")
+	return strings.Contains(text, `"is_byok":false`)
 }
 
 func openRouterPolicyBlocked(e *APIError) bool {

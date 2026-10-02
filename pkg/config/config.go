@@ -336,6 +336,14 @@ type ProviderSettings struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"`  // Can be set here or via env var
 	BaseURL string `yaml:"base_url"` // Optional custom base URL
+	// BYOKProviders pins OpenRouter requests to the upstream provider that
+	// holds the operator's own key (OpenRouter "bring your own key").
+	// Keys are model-ID prefixes or exact model IDs (for example "openai/");
+	// values are OpenRouter provider slugs (for example "openai"). A matching
+	// request is sent with provider.only set to that slug, so OpenRouter
+	// cannot route it to an endpoint that bills OpenRouter credits instead of
+	// the operator's key. Only providers.openrouter reads this field.
+	BYOKProviders map[string]string `yaml:"byok_providers,omitempty"`
 }
 
 // OpenAICompatibleConfig configures an OpenAI-compatible API provider.
@@ -1172,8 +1180,8 @@ type ReviewVerificationConfig struct {
 //	review:
 //	  verification:
 //	    runner:
-//	      wrapper: ["buildbox-run"]
-//	      cleanup: ["buildbox-run", "--cleanup"]
+//	      wrapper: ["remote-run"]
+//	      cleanup: ["remote-run", "--cleanup"]
 //	      parallelism: 2
 //	      timeout: 10m
 type ReviewVerificationRunnerConfig struct {
@@ -1184,7 +1192,7 @@ type ReviewVerificationRunnerConfig struct {
 	// a remote build host over ssh) and is trusted to relay the real
 	// command's exit code. Empty keeps verification local.
 	// BUCKLEY_VERIFY_WRAPPER (shell-split, for example
-	// "buildbox-run --node-modules").
+	// "remote-run --node-modules").
 	Wrapper []string `yaml:"wrapper"`
 	// Cleanup runs `<cleanup...> <snapshot-dir>` once after all verification
 	// commands for that snapshot finish. Empty disables remote cleanup.

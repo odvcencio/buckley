@@ -128,3 +128,41 @@ func TestGovernor_ErrorKindsAndReadRanges(t *testing.T) {
 		t.Fatalf("same kind and args did not stop: %+v", d)
 	}
 }
+
+func TestController_CapsNoChangeContinuations(t *testing.T) {
+	requests := 0
+	controller, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{TaskIntent: MutationIntent, RequireObservableChange: true, MaxContinuations: 200, MaxNoChangeContinuations: 3},
+		History:            &recordingHistory{},
+		BuildRequest:       func(context.Context, int) (model.ChatRequest, error) { return model.ChatRequest{Model: "test"}, nil },
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			requests++
+			return textResponse("Report: nothing to change", model.Usage{}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := controller.Run(context.Background())
+	if err == nil || requests != 4 || result.Termination.Kind != "no_observable_change" {
+		t.Fatalf("result=%+v requests=%d err=%v", result, requests, err)
+	}
+}
+
+func TestController_ReportOnlyContractAcceptsFinalAnswer(t *testing.T) {
+	controller, err := NewController(ControllerConfig{
+		CompletionContract: &CompletionContract{TaskIntent: MutationIntent, RequireObservableChange: false, MaxContinuations: 200},
+		History:            &recordingHistory{},
+		BuildRequest:       func(context.Context, int) (model.ChatRequest, error) { return model.ChatRequest{Model: "test"}, nil },
+		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+			return textResponse("vet clean", model.Usage{}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := controller.Run(context.Background())
+	if err != nil || result.Content != "vet clean" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}

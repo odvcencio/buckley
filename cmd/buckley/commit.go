@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/terminal"
 	"m31labs.dev/buckley/pkg/transparency"
 )
@@ -204,22 +206,33 @@ func runCommitCommand(args []string) error {
 		def = squashMsgCommitDefinition{CommitDefinition: commands.CommitDefinition{}, squashMsg: readGitDirFile(state.GitDir, "SQUASH_MSG")}
 	}
 
-	runtime, cleanup, err := newCommitCommandRuntime(opts, def)
-	defer cleanup()
-	if err != nil {
-		return err
+	fixed := generatedCommitRuntime(opts, state)
+	var runtime *commitCommandRuntime
+	if fixed != nil {
+		runtime = fixed
+	} else {
+		var cleanup func()
+		runtime, cleanup, err = newCommitCommandRuntime(opts, def)
+		defer cleanup()
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
-	if !quietMode {
+	if !quietMode && fixed == nil {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
 	result, err := runCommitGeneration(ctx, runtime.runner)
 	if err != nil {
 		printStagedIndexOnError()
+		var leak *commitmsg.LeakError
+		if errors.As(err, &leak) {
+			return fmt.Errorf("commit blocked: no message passed the safety check, so nothing was committed or pushed: %w", err)
+		}
 		return err
 	}
 
@@ -250,6 +263,39 @@ func runCommitCommand(args []string) error {
 	}
 
 	return nil
+}
+
+// fixedCommitRunner returns a message built without a model.
+type fixedCommitRunner struct{ commit *commands.CommitResult }
+
+func (r fixedCommitRunner) Run(context.Context) (*commitRunResult, error) {
+	return &commitRunResult{Commit: r.commit}, nil
+}
+
+// generatedCommitRuntime inspects the staged diff. When it holds generated files
+// only, it returns a runtime that writes the fixed regenerate message without
+// calling a model. When it mixes generated and source files, it warns. It
+// returns nil in every other case, including when the diff cannot be read.
+func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commitCommandRuntime {
+	if state.Kind != opNone {
+		return nil
+	}
+	stats, err := oneshot.StagedDiffStats(opts.paths)
+	if err != nil {
+		return nil
+	}
+	if stats.Mixed() && !quietMode {
+		termOut.Warn("commit mixes %d generated file(s) with %d source file(s); commit them separately so the message can describe the source change",
+			len(stats.GeneratedPaths), len(stats.SourcePaths))
+	}
+	cr := commands.GeneratedCommit(stats)
+	if cr == nil {
+		return nil
+	}
+	return &commitCommandRuntime{
+		ledger: transparency.NewCostLedger(),
+		runner: fixedCommitRunner{commit: cr},
+	}
 }
 
 func prepareCommitIndex(opts commitCommandOptions) error {
@@ -345,7 +391,16 @@ func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) 
 		return nil, func() {}, err
 	}
 
-	framework := withUtilityValidationFallbacks(oneshot.NewFramework(invoker, nil), opts.backend, "commit", modelID, cfg, mgr, ledger)
+	// A rules engine that fails to load must not disable the commit checks:
+	// the framework falls back to the built-in Go policy when the engine is nil.
+	policyEngine, engineErr := rules.NewDefaultEngine()
+	if engineErr != nil {
+		policyEngine = nil
+		if !quietMode {
+			termOut.Warn("commit policy rules unavailable (%v); using built-in defaults", engineErr)
+		}
+	}
+	framework := withUtilityValidationFallbacks(oneshot.NewFramework(invoker, policyEngine), opts.backend, "commit", modelID, cfg, mgr, ledger)
 	runtime := &commitCommandRuntime{
 		backend:   opts.backend,
 		modelID:   modelID,
@@ -784,13 +839,17 @@ func createCommit(message string, compactOutput bool, useGraft bool, paths []str
 	return createCommitWithMetadata(message, compactOutput, useGraft, paths, commitmsg.ChangeMetadata{}, false)
 }
 
-func createCommitWithMetadata(message string, compactOutput bool, useGraft bool, paths []string, expected commitmsg.ChangeMetadata, addTrailer bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// commitStepTimeout bounds git commit (and its hooks) plus the follow-up
+// HEAD lookup. Commits that touch thousands of files need more than the old
+// 30 seconds on a busy machine.
+const commitStepTimeout = 2 * time.Minute
 
+func createCommitWithMetadata(message string, compactOutput bool, useGraft bool, paths []string, expected commitmsg.ChangeMetadata, addTrailer bool) error {
 	var commitEnv []string
 	if !useGraft && len(paths) > 0 {
-		env, cleanup, err := prepareScopedCommitIndex(ctx, paths)
+		prepCtx, prepCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		env, cleanup, err := prepareScopedCommitIndex(prepCtx, paths)
+		prepCancel()
 		if err != nil {
 			return err
 		}
@@ -812,6 +871,13 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 	if addTrailer {
 		message = commitmsg.AppendChangeMetadata(message, expected)
 	}
+
+	// Start the commit's own deadline only after the identity recheck above.
+	// The recheck hashes the full staged binary diff, which takes over a
+	// minute when a commit deletes gigabytes of tracked binaries; it must not
+	// use up the time git commit itself needs.
+	ctx, cancel := context.WithTimeout(context.Background(), commitStepTimeout)
+	defer cancel()
 
 	// Write message to temp file
 	tmp, err := os.CreateTemp("", "buckley-commit-*.txt")

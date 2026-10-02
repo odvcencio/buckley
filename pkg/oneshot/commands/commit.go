@@ -111,7 +111,7 @@ func (CommitDefinition) Tool() tools.Definition {
 					"Whether this commit introduces a breaking change",
 				),
 				"breaking_reason": tools.StringProperty(
-					"If breaking is true, briefly describe the compatibility impact",
+					"If breaking is true, briefly describe the compatibility impact without naming removed or renamed identifiers",
 				),
 				"issues": tools.ArrayProperty(
 					"Issue numbers this change RELATES TO, without # prefix. Rendered as "+
@@ -143,6 +143,9 @@ Use the generate_commit tool to produce your response. The tool expects:
 - breaking_reason: If breaking is true, briefly explain the compatibility impact
 
 Guidelines:
+- Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name"
+- Start the subject with a lowercase word; do not repeat the action verb in it ("fix(x): fix ..." is rejected)
+- Write at most 5 bullets, each at most 20 words
 - Focus on the "what" and "why", not the "how"
 - Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
 - Match body detail to change size
@@ -187,6 +190,111 @@ func (CommitDefinition) Validate(result json.RawMessage) error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 	return commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues)
+}
+
+// commitPolicyLoader loads the leak-check policy. Tests replace it.
+var commitPolicyLoader = func() commitmsg.Policy { return commitmsg.LoadPolicy("") }
+
+// ValidateWithContext checks the message against the staged diff the model saw:
+// no identifiers that exist only on removed lines, no private deny-list terms,
+// and no emails, IP addresses, internal hosts, or key patterns. Findings never
+// echo the offending text.
+func (CommitDefinition) ValidateWithContext(ctx *oneshot.Context, result json.RawMessage) error {
+	var cr CommitResult
+	if err := json.Unmarshal(result, &cr); err != nil {
+		return fmt.Errorf("unmarshal: %w", err)
+	}
+	diff := ""
+	if ctx != nil {
+		diff = ctx.Sources["git_diff:staged"]
+	}
+	findings := commitPolicyLoader().Check(cr.Format(), diff)
+	if ctx != nil && ctx.Diff.GeneratedRatio() >= GeneratedRatioLimit {
+		findings = withoutRule(findings, commitmsg.RuleRemovedEcho)
+	}
+	if len(findings) > 0 {
+		return &commitmsg.LeakError{Findings: findings}
+	}
+	return nil
+}
+
+// GeneratedRatioLimit is the share of generated files above which removed
+// lines carry no meaning (bundles rename every identifier), so the removed-line
+// check is skipped. It matches commit_message.arb.
+const GeneratedRatioLimit = 0.8
+
+func withoutRule(findings []commitmsg.Finding, rule string) []commitmsg.Finding {
+	var out []commitmsg.Finding
+	for _, f := range findings {
+		if f.Rule != rule {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// PolicyFacts computes the counts and ratios that commit_message.arb decides on.
+// Facts never contain message text or private terms.
+func (CommitDefinition) PolicyFacts(ctx *oneshot.Context, result json.RawMessage) (*oneshot.PolicyRequest, error) {
+	var cr CommitResult
+	if err := json.Unmarshal(result, &cr); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return policyFactsFor(commitPolicyLoader(), ctx, cr), nil
+}
+
+func policyFactsFor(policy commitmsg.Policy, ctx *oneshot.Context, cr CommitResult) *oneshot.PolicyRequest {
+	diff, ratio, files := "", 0.0, 0
+	if ctx != nil {
+		diff = ctx.Sources["git_diff:staged"]
+		ratio, files = ctx.Diff.GeneratedRatio(), ctx.Diff.Files
+	}
+	findings := policy.Check(cr.Format(), diff)
+	var deny, echo, sensitive int
+	for _, f := range findings {
+		switch f.Rule {
+		case commitmsg.RuleDenyList:
+			deny += f.Count
+		case commitmsg.RuleRemovedEcho:
+			echo += f.Count
+		default:
+			sensitive += f.Count
+		}
+	}
+	maxWords, bullets := 0, 0
+	for _, b := range cr.Body {
+		b = commitmsg.NormalizeBullet(b)
+		if b == "" {
+			continue
+		}
+		bullets++
+		if n := len(strings.Fields(b)); n > maxWords {
+			maxWords = n
+		}
+	}
+	return &oneshot.PolicyRequest{
+		Domain:   "commit_message",
+		Strategy: "commit_message_policy",
+		Facts: map[string]any{
+			"deny_hits":        deny,
+			"removed_echo":     echo,
+			"sensitive_hits":   sensitive,
+			"max_bullet_words": maxWords,
+			"bullet_count":     bullets,
+			"generated_ratio":  ratio,
+			"diff_files":       files,
+		},
+		Fail: func(action, reason string) error {
+			if len(findings) > 0 && (reason == "deny_list" || reason == "sensitive_pattern" || reason == "removed_echo" || reason == "repeated_private_content") {
+				var e error = &commitmsg.LeakError{Findings: findings}
+				if action == "block" {
+					return fmt.Errorf("commit blocked by policy: %w", e)
+				}
+				return e
+			}
+			return fmt.Errorf("commit message policy %s: %s", action, reason)
+		},
+	}
 }
 
 func (CommitDefinition) Unmarshal(result json.RawMessage) (any, error) {

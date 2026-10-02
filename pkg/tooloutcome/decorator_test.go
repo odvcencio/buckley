@@ -334,3 +334,68 @@ func (t namedToolOutcomeTestTool) Parameters() builtin.ParameterSchema {
 func (t namedToolOutcomeTestTool) Execute(map[string]any) (*builtin.Result, error) {
 	return &builtin.Result{Success: true}, nil
 }
+
+func TestObservation_UnavailableVerificationIsNotAFailure(t *testing.T) {
+	ctx := context.Background()
+	metadata := tool.ToolMetadata{Category: tool.CategoryTesting, Impact: tool.ImpactReadOnly, Verification: true}
+	rejected := &builtin.Result{
+		Success: false,
+		Error:   "run_verification did not run",
+		Data: map[string]any{
+			builtin.VerificationStatusKey: builtin.VerificationStatusRejected,
+			builtin.VerificationReasonKey: "test is not an accepted check",
+		},
+	}
+	outcome := Begin(ctx, "", string(tool.ImpactReadOnly)).
+		Finish(ctx, agentloop.ToolOutcome{Content: "raw result", Success: false}, metadata, rejected, nil)
+	if outcome.VerificationObserved || outcome.VerificationPassed {
+		t.Fatalf("a call that never ran was recorded as a check result: %+v", outcome)
+	}
+	if !outcome.VerificationUnavailable || outcome.VerificationUnavailableReason != "test is not an accepted check" {
+		t.Fatalf("outcome = %+v, want unavailable with the tool's reason", outcome)
+	}
+	if !strings.HasPrefix(outcome.Content, "raw result") || !strings.Contains(outcome.Content, "did not run") || !strings.Contains(outcome.Content, "not as a pass or a failure") {
+		t.Fatalf("content does not tell the model the check did not run: %q", outcome.Content)
+	}
+
+	failing := &builtin.Result{Success: false, Error: "command exited with code 1", Data: map[string]any{"command": "go test ./...", "exit_code": 1, "stdout": "--- FAIL: TestX\nFAIL"}}
+	failed := Begin(ctx, "", string(tool.ImpactReadOnly)).
+		Finish(ctx, agentloop.ToolOutcome{Content: "raw", Success: false}, metadata, failing, nil)
+	if !failed.VerificationObserved || failed.VerificationPassed || failed.VerificationUnavailable {
+		t.Fatalf("a real failing check must stay an observed failure: %+v", failed)
+	}
+
+	passed := Begin(ctx, "", string(tool.ImpactReadOnly)).
+		Finish(ctx, agentloop.ToolOutcome{Content: "raw", Success: true}, metadata, &builtin.Result{Success: true}, nil)
+	if !passed.VerificationObserved || !passed.VerificationPassed || passed.VerificationUnavailable {
+		t.Fatalf("a passing check must stay an observed pass: %+v", passed)
+	}
+}
+
+func TestObservation_RefusedRunVerificationAndEmptyRunTestsAreUnavailable(t *testing.T) {
+	ctx := context.Background()
+	root := newToolOutcomeGitRepo(t)
+
+	verify := builtin.NewWorkspaceVerificationTool(&builtin.ShellCommandTool{})
+	verifyMetadata := tool.GetMetadata(verify)
+	if !verifyMetadata.Verification {
+		t.Fatal("run_verification must be a trusted verification tool")
+	}
+	refused, err := verify.ExecuteWithContext(ctx, map[string]any{"command": "git diff --check HEAD^ HEAD"})
+	outcome := BeginWithMetadata(ctx, root, verifyMetadata).
+		Finish(ctx, agentloop.ToolOutcome{Content: "raw", Success: false}, verifyMetadata, refused, err)
+	if outcome.VerificationObserved || !outcome.VerificationUnavailable {
+		t.Fatalf("refused run_verification outcome = %+v, want unavailable", outcome)
+	}
+
+	empty := t.TempDir()
+	runner := &builtin.RunTestsTool{}
+	runner.SetWorkDir(empty)
+	testMetadata := tool.GetMetadata(runner)
+	result, err := runner.ExecuteWithContext(ctx, map[string]any{})
+	outcome = Begin(ctx, "", string(tool.ImpactReadOnly)).
+		Finish(ctx, agentloop.ToolOutcome{Content: "raw", Success: false}, testMetadata, result, err)
+	if outcome.VerificationObserved || !outcome.VerificationUnavailable {
+		t.Fatalf("run_tests with no framework outcome = %+v, want unavailable", outcome)
+	}
+}

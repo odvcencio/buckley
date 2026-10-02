@@ -1,0 +1,16 @@
+{
+  "name": "synth-rename-yaml",
+  "kind": "rename",
+  "source": "synthetic",
+  "diff": "synth-rename-yaml.diff",
+  "planted": [
+    "zorblax"
+  ],
+  "golden": "update(deploy): rename the deployment and namespace\n\n- Use generic example names so the repository carries no deployment identity.\n",
+  "leaky": [
+    {
+      "message": "update(deploy): rename zorblax-prod to example-prod\n\n- Replace the old namespace in both manifests.\n",
+      "rule": "removed_echo"
+    }
+  ]
+}

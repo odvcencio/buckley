@@ -47,9 +47,12 @@ func BuildContext(sources []ContextSource, opts ContextOpts) (*Context, error) {
 	}
 
 	for _, src := range sources {
-		content, err := gatherSource(src, opts)
+		content, stats, err := gatherSourceWithStats(src, opts)
 		if err != nil {
 			return nil, fmt.Errorf("gathering %s: %w", src.Type, err)
+		}
+		if src.Type == "git_diff" {
+			ctx.Diff = stats
 		}
 		if content == "" {
 			continue
@@ -99,7 +102,15 @@ func sourceLabel(src ContextSource) string {
 }
 
 // gatherSource fetches content for a single ContextSource.
-func gatherSource(src ContextSource, opts ContextOpts) (string, error) {
+func gatherSourceWithStats(src ContextSource, opts ContextOpts) (string, DiffStats, error) {
+	if src.Type == "git_diff" {
+		return gatherGitDiffStats(src.Params, opts)
+	}
+	out, err := gatherSourceText(src, opts)
+	return out, DiffStats{}, err
+}
+
+func gatherSourceText(src ContextSource, opts ContextOpts) (string, error) {
 	switch src.Type {
 	case "git_diff":
 		return gatherGitDiff(src.Params, opts)
@@ -137,6 +148,12 @@ func diffSafetyArgs() []string {
 // low-signal bulk (binary, generated, minified files) is reduced to summary
 // lines so it cannot starve hand-written changes out of the byte budget.
 func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
+	out, _, err := gatherGitDiffStats(params, opts)
+	return out, err
+}
+
+func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, DiffStats, error) {
+	var stats DiffStats
 	args := append([]string{"diff"}, diffSafetyArgs()...)
 
 	if params["staged"] == "true" {
@@ -179,7 +196,7 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 			output, _, err = contextGitOutputLimited(0, args...)
 		}
 		if err != nil {
-			return "", err
+			return "", stats, err
 		}
 	}
 
@@ -190,17 +207,18 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 	if budget > len(truncMarker) {
 		budget -= len(truncMarker)
 	}
-	var res diffsignal.Result
-	if opts.RankDiffForPR {
-		res = diffsignal.PrioritizeForPR(output, budget)
-	} else {
-		res = diffsignal.Prioritize(output, budget)
+	var paths []string
+	for _, fd := range diffsignal.Split(output) {
+		paths = append(paths, fd.Path)
 	}
+	isGenerated := generatedByAttrs(paths, params["staged"] == "true")
+	stats = StatsForDiff(output, isGenerated)
+	res := diffsignal.PrioritizeWith(output, budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
 	output = res.Context
 	if res.Truncated {
 		output += truncMarker
 	}
-	return output, nil
+	return output, stats, nil
 }
 
 // gitLogBodyMaxLinesPerCommit bounds how many body lines gatherGitLog keeps
@@ -449,4 +467,22 @@ func contextEstimateTokens(s string) int {
 		return 0
 	}
 	return (len(s) + 3) / 4
+}
+
+// StatsForDiff classifies every file in a unified diff. generated marks paths
+// that gitattributes call generated; nil means path and content rules only.
+func StatsForDiff(raw string, generated func(path string) bool) DiffStats {
+	var stats DiffStats
+	for _, fd := range diffsignal.SplitWith(raw, generated) {
+		stats.Files++
+		if fd.LowSignal() {
+			stats.LowSignal++
+		}
+		if fd.Generated() {
+			stats.GeneratedPaths = append(stats.GeneratedPaths, fd.Path)
+		} else {
+			stats.SourcePaths = append(stats.SourcePaths, fd.Path)
+		}
+	}
+	return stats
 }

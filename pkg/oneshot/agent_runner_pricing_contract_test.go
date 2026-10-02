@@ -287,7 +287,7 @@ func TestAgentRunnerInvocationCostClassifiesPricingKnownBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mgr := newAgentRunnerPricingCatalogManager(t, tt.catalogJSON)
-			cost, unknown := agentRunnerInvocationCost(mgr, tt.providerID, tt.modelID, tokens)
+			cost, unknown, _ := agentRunnerInvocationCostDetail(mgr, tt.providerID, tt.modelID, tokens)
 			if cost != tt.wantCost || unknown != tt.wantUnknown {
 				t.Fatalf("agentRunnerInvocationCost = %v/%v, want %v/%v", cost, unknown, tt.wantCost, tt.wantUnknown)
 			}

@@ -43,6 +43,11 @@ type Trace struct {
 	// one contributing invocation had usage without authoritative pricing.
 	CostUnknown bool `json:"cost_unknown,omitempty"`
 
+	// CostEstimated reports that Cost includes an estimate computed from token
+	// counts and catalog prices because the provider reported no cost (for
+	// example a BYOK route). It is not an invoice value.
+	CostEstimated bool `json:"cost_estimated,omitempty"`
+
 	// Request contains the raw request (for --trace mode)
 	Request *RequestTrace `json:"request,omitempty"`
 
@@ -282,6 +287,7 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 	aggregate.Duration = 0
 	aggregate.Tokens = TokenUsage{}
 	aggregate.Cost = 0
+	aggregate.CostEstimated = false
 	aggregate.Attempts = valid
 	aggregate.ModelExecutions = nil
 	for _, attempt := range valid {
@@ -290,6 +296,7 @@ func AggregateTraceAttempts(attempts []TraceAttempt) *Trace {
 		aggregate.Tokens = AddTokenUsage(aggregate.Tokens, trace.Tokens)
 		aggregate.Cost += trace.Cost
 		aggregate.CostUnknown = aggregate.CostUnknown || trace.CostUnknown
+		aggregate.CostEstimated = aggregate.CostEstimated || trace.CostEstimated
 		aggregate.ModelExecutions = append(aggregate.ModelExecutions, trace.ModelExecutions...)
 	}
 	return &aggregate

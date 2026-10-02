@@ -1230,7 +1230,7 @@ func TestOneShotProgressStream_PrivacySafeCountsOnly(t *testing.T) {
 	})
 
 	out := buf.String()
-	for _, forbidden := range []string{"secret reasoning", "final text", "run_shell", "call_1", "secret command"} {
+	for _, forbidden := range []string{"secret reasoning", "final text", "call_1", "secret command"} {
 		if strings.Contains(out, forbidden) {
 			t.Fatalf("progress leaked %q in %q", forbidden, out)
 		}
@@ -1275,7 +1275,7 @@ func TestNewOneShotProgressStream_QuietModeDisablesCallback(t *testing.T) {
 	t.Cleanup(func() { quietMode = oldQuiet })
 
 	var buf bytes.Buffer
-	if got := newOneShotProgressStream(&buf); got != nil {
+	if got := newOneShotProgressStream(&buf, ""); got != nil {
 		t.Fatal("quiet mode should disable one-shot progress callback")
 	}
 	if buf.Len() != 0 {

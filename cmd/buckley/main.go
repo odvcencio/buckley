@@ -457,9 +457,13 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
 	stopReason := ""
+	unverifiedReason := ""
 	previousOnStop := limits.OnStop
 	limits.OnStop = func(stop agentloop.Termination) {
 		stopReason = stop.StopReason()
+		if stop.Kind == agentloop.TerminationCompletedUnverified {
+			unverifiedReason = stop.Reason
+		}
 		fmt.Fprintf(os.Stderr, "One-shot stop: stop_reason=%q\n", stopReason)
 		if previousOnStop != nil {
 			previousOnStop(stop)
@@ -473,6 +477,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		return 1
 	}
 	limits.allowHostTools = oneShotHostToolsAllowed(cfg) && !limits.ChildContract && limits.SourceScope == nil
+	if limits.TaskIntent == agentloop.MutationIntent && briefForbidsChanges(prompt) {
+		limits.noChangeExpected = true
+	}
 	limits = applyOneShotPersistence(cfg, limits, os.Stderr)
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -528,6 +535,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
+		removeImplicitSubagentDelegation(registry, agentProfile, allowedTools)
+	}
 	if limits.TaskIntent == agentloop.MutationIntent && !limits.ChildContract && limits.SourceScope == nil {
 		registerOneShotVerification(registry)
 	}
@@ -642,6 +652,9 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
 	}
 	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
+	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
+		toolFilter = ensureHostMutationTools(toolFilter, registry)
+	}
 	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
 	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)
@@ -700,7 +713,8 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
 		defer cancel()
 	}
-	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr), limits)
+	runCtx = withACPReplaySafeStream(runCtx)
+	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr, cwd), limits)
 	if err != nil {
 		codeModeFailure = err
 		if outputSchema == artifactv1.SchemaVersion {
@@ -727,6 +741,10 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 		responseText = string(artifactJSON)
 	}
 
+	if unverifiedReason != "" && outputSchema == "" {
+		// Say plainly, in the summary a lead reads, that nothing verified the change.
+		responseText = strings.TrimRight(responseText, "\n") + "\n\n[Buckley] Completed without verification: " + unverifiedReason + "."
+	}
 	if responseText != "" {
 		fmt.Print(responseText)
 	}
@@ -784,7 +802,7 @@ func oneShotTaskIntentInstruction(intent agentloop.TaskIntent) string {
 	return "Read-only context contract: gather only evidence relevant to the request, then finish with a concise summary for the next investigator or orchestrator. Include paths, symbols, or commands that support the summary, call out uncertainty, and do not edit or claim checks you did not run."
 }
 
-const oneShotProgressMinInterval = 10 * time.Second
+const oneShotProgressMinInterval = 30 * time.Second
 
 type oneShotProgress struct {
 	writer        io.Writer
@@ -797,9 +815,10 @@ type oneShotProgress struct {
 	toolCalls     int
 	toolUpdates   int
 	usageUpdates  int
+	tools         *oneShotToolTracker
 }
 
-func newOneShotProgressStream(writer io.Writer) acp.StreamFunc {
+func newOneShotProgressStream(writer io.Writer, workDir string) acp.StreamFunc {
 	if quietMode || writer == nil {
 		return nil
 	}
@@ -808,6 +827,7 @@ func newOneShotProgressStream(writer io.Writer) acp.StreamFunc {
 		now:         time.Now,
 		minInterval: oneShotProgressMinInterval,
 		phase:       "starting",
+		tools:       newOneShotToolTracker(writer, workDir),
 	}
 	return progress.Stream
 }
@@ -826,9 +846,11 @@ func (p *oneShotProgress) Stream(update acp.SessionUpdate) error {
 	case acp.SessionUpdateToolCall:
 		p.phase = "tool"
 		p.toolCalls++
+		p.tools.start(update)
 	case acp.SessionUpdateToolCallUpdate:
 		p.phase = "tool"
 		p.toolUpdates++
+		p.tools.update(update)
 	case acp.SessionUpdateUsageUpdate:
 		p.phase = "usage"
 		p.usageUpdates++
@@ -1625,6 +1647,8 @@ func printHelp() {
 	fmt.Println("  execute-task --plan <id> --task <id>")
 	fmt.Println("                                   Execute single task (CI/batch friendly)")
 	fmt.Println("  commit [--dry-run]               Generate structured commit via tool-use (transparent)")
+	fmt.Println("  commit-check [--file msg] [--strict]  Check a commit message with the same safety and style rules as commit")
+	fmt.Println("  hook install|uninstall|status    Manage the commit-msg hook that runs commit-check")
 	fmt.Println("  pr [--dry-run]                   Generate structured PR via tool-use (transparent)")
 	fmt.Println("  review [--scope worktree|branch|changes]")
 	fmt.Println("                                   Review local changes with repository context")
@@ -1639,6 +1663,7 @@ func printHelp() {
 	fmt.Println("  experiment promote <model-id> <profile-version>")
 	fmt.Println("                                   Promote a calibrated profile for dynamic execution")
 	fmt.Println("  eval [list|run|init|runs|show]   Run project chat eval scenarios")
+	fmt.Println("  eval commit [--live] [--json]    Check commit-message safety and style on 30 fixed diffs (CI gate offline)")
 	fmt.Println("  serve [--bind host:port]         Start local HTTP/WebSocket server")
 	fmt.Println("  attach [session-id] [--tui]      Join a running session over loopback gRPC (list if omitted; --tui observes full-screen)")
 	fmt.Println("  goal <start|run|status|report>   Record, run, and inspect durable goals (run drives the live model; list shows recent)")
@@ -2344,6 +2369,10 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runExecuteTaskCommand, args[1:])
 	case "commit":
 		return true, runCommand(runCommitCommand, args[1:])
+	case "commit-check":
+		return true, runCommand(runCommitCheckCommand, args[1:])
+	case "hook":
+		return true, runCommand(runHookCommand, args[1:])
 	case "pr":
 		return true, runCommand(runPRCommand, args[1:])
 	case "review":

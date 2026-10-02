@@ -44,6 +44,7 @@ OUTPUT REQUIREMENTS (plain text only):
   - After a blank line, include a concise summary of WHAT and WHY (not HOW).
   - Prefer a bullet list (each bullet starts with "- ").
   - Match detail to the size of the diff using "Diff Summary" / "Diffstat" (small: 1–2 bullets; medium: 2–4; large: 4–7; huge: 6–12).
+  - Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name".
   - Do not paste diff hunks, stack traces, or exhaustive file lists.
 
 %s

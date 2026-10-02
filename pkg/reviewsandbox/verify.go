@@ -615,7 +615,7 @@ func classifyVerificationRun(result Result, request Request, language Language, 
 // wrapperRemoteCommand builds the argv a remote wrapper executes after
 // syncing the immutable snapshot ROOT (never a single package subdirectory):
 // `sh -c 'cd "$1" && shift && exec "$@"' sh <relativePath> <command>
-// <args...>`. A wrapper such as buildbox-run syncs only the files tracked
+// <args...>`. A wrapper such as remote-run syncs only the files tracked
 // under whatever directory it is given (`git ls-files -co`); syncing a
 // package subdirectory directly, as an earlier version of this code did,
 // loses every ancestor file the build needs -- go.mod for Go, Cargo.toml
@@ -669,7 +669,7 @@ fi
 // whose remote command is `cd <dir> && <real command>` and lets a failed
 // `cd` fall through bash's default exit-code propagation could exit 1 for
 // a missing directory -- indistinguishable here from a real test failure.
-// buildbox-run avoids this with `cd <dir> || exit 90` (a reserved,
+// remote-run avoids this with `cd <dir> || exit 90` (a reserved,
 // otherwise-unused code) ahead of the wrapped command.
 func trustedWrapperExitCode(language Language, code int) bool {
 	if code == 0 {

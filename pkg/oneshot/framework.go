@@ -2,6 +2,7 @@ package oneshot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -278,11 +279,26 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}
 
 		// 5. Validate
-		validationErr := def.Validate(result.ToolCall.Arguments)
+		validate := func(args json.RawMessage) error {
+			if err := def.Validate(args); err != nil {
+				return err
+			}
+			if pd, ok := def.(PolicyDefinition); ok && f.engine != nil {
+				handled, err := f.evalPolicy(pd, gathered, args)
+				if handled {
+					return err
+				}
+			}
+			if cv, ok := def.(ContextValidator); ok {
+				return cv.ValidateWithContext(gathered, args)
+			}
+			return nil
+		}
+		validationErr := validate(result.ToolCall.Arguments)
 		if validationErr != nil {
 			if repairer, ok := def.(RepairableDefinition); ok {
 				repaired, repairs := repairer.Repair(result.ToolCall.Arguments)
-				if len(repairs) > 0 && def.Validate(repaired) == nil {
+				if len(repairs) > 0 && validate(repaired) == nil {
 					result.ToolCall.Arguments = repaired
 					validationErr = nil
 					for _, repair := range repairs {
@@ -293,6 +309,13 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		}
 		if err := validationErr; err != nil {
 			lastErr = fmt.Errorf("validation: %w", err)
+			if isTerminalValidation(err) {
+				if traceIndex >= 0 {
+					traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
+				}
+				attemptLimit = attempt + 1
+				break
+			}
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 			}
@@ -301,10 +324,16 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			// Echoing its own previous tool call arguments turns this into a
 			// targeted repair -- fix exactly this field in exactly this
 			// payload -- instead of a fresh, possibly-repeated guess.
-			userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
-				".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
-				truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
-				"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
+			if sensitiveValidation(err) {
+				// The rejected arguments may hold private text; do not echo them.
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
+					".\n\nCall " + tool.Name + " again with corrected arguments."
+			} else {
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
+					".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
+					truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
+					"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
+			}
 			if modelAttempts >= min(2, maxRetries) && fallbackIndex < len(f.validationFallbacks) {
 				next, fallbackErr := f.validationFallbacks[fallbackIndex]()
 				fallbackIndex++
@@ -1159,4 +1188,28 @@ func (f *Framework) resolveMaxRetries(cmdName string, optsRetries int) int {
 	}
 
 	return defaultMaxRetries
+}
+
+// evalPolicy runs the definition's policy strategy. It reports handled=false
+// when the engine cannot evaluate it, so the caller falls back to its own check.
+func (f *Framework) evalPolicy(pd PolicyDefinition, gathered *Context, args json.RawMessage) (bool, error) {
+	req, err := pd.PolicyFacts(gathered, args)
+	if err != nil || req == nil {
+		return false, nil
+	}
+	res, err := f.engine.EvalStrategy(req.Domain, req.Strategy, req.Facts)
+	if err != nil {
+		return false, nil
+	}
+	action, _ := res.Params["action"].(string)
+	reason, _ := res.Params["reason"].(string)
+	switch action {
+	case "allow":
+		return true, nil
+	case "repair":
+		return true, req.Fail(action, reason)
+	case "block":
+		return true, terminalValidationError{req.Fail(action, reason)}
+	}
+	return false, nil
 }

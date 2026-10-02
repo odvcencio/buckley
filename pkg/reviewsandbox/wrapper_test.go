@@ -12,7 +12,7 @@ import (
 )
 
 // writeFakeWrapper writes an executable shell script standing in for a
-// remote verification wrapper (for example buildbox-run) satisfying the
+// remote verification wrapper (for example remote-run) satisfying the
 // `<wrapper...> <snapshot-dir> <argv...>` contract, and returns its path.
 func writeFakeWrapper(t *testing.T, body string) string {
 	t.Helper()
@@ -72,13 +72,13 @@ func TestExecutorVerifyWrapperRunsWrapperWithSnapshotDirThenArgv(t *testing.T) {
 // regression test for a real production bug: an earlier version of this
 // code passed the package subdirectory (not the snapshot root) as the
 // wrapper's <local-dir>. A wrapper that syncs only files tracked under
-// <local-dir> (as buildbox-run's `git ls-files -co` does) then never syncs
+// <local-dir> (as remote-run's `git ls-files -co` does) then never syncs
 // go.mod, Cargo.toml, pyproject.toml, or package.json -- all of which live
 // above the package directory -- so every remote command failed
 // immediately with an error like "go.mod file not found in current
 // directory or any parent directory", and a trusted exit code let that
 // false failure through as CONFIRMED_FAIL. This test uses a real shell
-// wrapper that mimics buildbox-run's sync-then-cd contract closely enough
+// wrapper that mimics remote-run's sync-then-cd contract closely enough
 // to catch that regression: it copies only the directory it is given, then
 // runs the received command inside it.
 func TestExecutorVerifyWrapperSyncsSnapshotRootNotPackageSubdirectory(t *testing.T) {
@@ -86,7 +86,7 @@ func TestExecutorVerifyWrapperSyncsSnapshotRootNotPackageSubdirectory(t *testing
 	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
 	mustWriteFile(t, filepath.Join(snapshotRoot, "pkg", "foo", "foo.go"), "package foo\n")
 
-	// A minimal stand-in for buildbox-run: it "syncs" (copies) only the
+	// A minimal stand-in for remote-run: it "syncs" (copies) only the
 	// directory it receives as $1, then execs the remaining argv inside
 	// that copy. If Verify still handed it the package subdirectory
 	// instead of the snapshot root, the copy would never contain go.mod.
@@ -212,7 +212,7 @@ func TestExecutorVerifyWrapperGoExit101IsUntrustedNotFail(t *testing.T) {
 func TestExecutorVerifyWrapperExit255GradesUnavailableNotFail(t *testing.T) {
 	snapshotRoot := t.TempDir()
 	mustWriteFile(t, filepath.Join(snapshotRoot, "go.mod"), "module example.com/fake\n\ngo 1.26\n")
-	wrapper := writeFakeWrapper(t, "echo 'ssh: connect to host buildbox port 22: Connection refused' >&2\nexit 255\n")
+	wrapper := writeFakeWrapper(t, "echo 'ssh: connect to host build-host port 22: Connection refused' >&2\nexit 255\n")
 
 	executor := NewExecutorWithCodexCommand("")
 	executor.SetWrapper([]string{wrapper})

@@ -1,0 +1,7 @@
+{
+  "name": "buckley-small-02",
+  "kind": "test",
+  "source": "odvcencio/buckley@42983b14",
+  "diff": "buckley-small-02.diff",
+  "original": "test(ipc): close gRPC service in subscribe tests via t.Cleanup\n\n- Register t.Cleanup(svc.Close) in gRPC subscribe tests so service resources are released after each test\n- Prevents leaked connections or goroutines from affecting subsequent tests\n"
+}

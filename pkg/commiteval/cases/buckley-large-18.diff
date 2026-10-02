@@ -1,0 +1,239 @@
+diff --git a/pkg/agentloop/governor_test.go b/pkg/agentloop/governor_test.go
+index 8334a71c..bc15c5ed 100644
+--- a/pkg/agentloop/governor_test.go
++++ b/pkg/agentloop/governor_test.go
+@@ -1,6 +1,7 @@
+ package agentloop
+ 
+ import (
++	"fmt"
+ 	"strings"
+ 	"testing"
+ )
+@@ -236,3 +237,14 @@ func TestGovernorEscalatesFromCreativeCheckpointToActionBoundary(t *testing.T) {
+ 		t.Fatalf("limit = %+v, want deterministic stop", got)
+ 	}
+ }
++
++func TestGovernorChangedArgumentsAfterValidationErrorAreNotExactRepeat(t *testing.T) {
++	g := New(Config{})
++	msg := "error: retry with only `edits`"
++	for i := 0; i < 5; i++ {
++		args := fmt.Sprintf(`{"path":"f","edits":[{"old_string":"a%d","new_string":"b"}]}`, i)
++		if d := g.Observe("edit_file", args, msg, false); d.Kind == "exact_repeat" {
++			t.Fatalf("call %d stopped: %+v", i, d)
++		}
++	}
++}
+diff --git a/pkg/tool/builtin/edit.go b/pkg/tool/builtin/edit.go
+index 2ff233da..6b9065ff 100644
+--- a/pkg/tool/builtin/edit.go
++++ b/pkg/tool/builtin/edit.go
+@@ -72,14 +72,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
+ 
+ 	edits := []any{params}
+ 	if raw, batch := params["edits"]; batch {
+-		for _, key := range []string{"old_string", "new_string", "replace_all"} {
+-			if _, mixed := params[key]; mixed {
+-				return &Result{Success: false, Error: "edits cannot be combined with top-level replacement fields"}, nil
+-			}
+-		}
+-		edits, ok = raw.([]any)
+-		if !ok || len(edits) == 0 {
+-			return &Result{Success: false, Error: "edits must be a non-empty array of replacement objects"}, nil
++		var err *Result
++		edits, err = mergeTopLevelEdit(params, raw)
++		if err != nil {
++			return err, nil
+ 		}
+ 	}
+ 
+@@ -612,3 +608,62 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
+ 		},
+ 	}, nil
+ }
++
++const editsRetryHint = "Send either `edits` or old_string/new_string, not both; retry with only `edits`."
++
++// mergeTopLevelEdit resolves a call that carries an edits array. Top-level
++// replacement fields that repeat an entry of edits are ignored. A complete,
++// different top-level replacement is appended as the last edit: the batch is
++// atomic, so a conflict with earlier edits fails without writing. Incomplete
++// top-level fields cannot be applied safely and get a corrective error.
++func mergeTopLevelEdit(params map[string]any, raw any) ([]any, *Result) {
++	edits, ok := raw.([]any)
++	if !ok || len(edits) == 0 {
++		// An empty edits array with a complete top-level edit is a plain single edit.
++		if list, isList := raw.([]any); isList && len(list) == 0 && hasTopLevelString(params) {
++			return []any{params}, nil
++		}
++		return nil, &Result{Success: false, Error: "edits must be a non-empty array of replacement objects. " + editsRetryHint}
++	}
++	_, hasOld := params["old_string"]
++	_, hasNew := params["new_string"]
++	_, hasAll := params["replace_all"]
++	if !hasOld && !hasNew && !hasAll {
++		return edits, nil
++	}
++	oldS, oldOK := params["old_string"].(string)
++	newS, newOK := params["new_string"].(string)
++	if !oldOK || !newOK {
++		if !hasOld && !hasNew {
++			// A lone replace_all:false is the default and changes nothing; ignore it.
++			// replace_all:true would silently under-apply, so it gets an error.
++			if all, _ := params["replace_all"].(bool); !all {
++				return edits, nil
++			}
++		}
++		return nil, &Result{Success: false, Error: "edits cannot be combined with incomplete top-level replacement fields (old_string and new_string must both be strings). " + editsRetryHint}
++	}
++	replaceAll, _ := params["replace_all"].(bool)
++	for _, e := range edits {
++		m, isMap := e.(map[string]any)
++		if !isMap {
++			continue
++		}
++		eo, _ := m["old_string"].(string)
++		en, _ := m["new_string"].(string)
++		er, _ := m["replace_all"].(bool)
++		if eo == oldS && en == newS && er == replaceAll {
++			return edits, nil
++		}
++	}
++	merged := make([]any, 0, len(edits)+1)
++	merged = append(merged, edits...)
++	merged = append(merged, map[string]any{"old_string": oldS, "new_string": newS, "replace_all": replaceAll})
++	return merged, nil
++}
++
++func hasTopLevelString(params map[string]any) bool {
++	_, o := params["old_string"].(string)
++	_, n := params["new_string"].(string)
++	return o && n
++}
+diff --git a/pkg/tool/builtin/edit_batch_test.go b/pkg/tool/builtin/edit_batch_test.go
+index 61a14f16..500c7758 100644
+--- a/pkg/tool/builtin/edit_batch_test.go
++++ b/pkg/tool/builtin/edit_batch_test.go
+@@ -72,7 +72,6 @@ func TestEditFileTool_BatchRejectsWithoutWriting(t *testing.T) {
+ 		`{"edits":[{"old_string":"alpha","new_string":null}]}`,
+ 		`{"edits":[{"old_string":"alpha","new_string":"A"}],"old_string":"alpha","new_string":"B"}`,
+ 		`{"edits":[{"old_string":"alpha","new_string":"A"}],"new_string":"B"}`,
+-		`{"edits":[{"old_string":"alpha","new_string":"A"}],"replace_all":false}`,
+ 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"absent","new_string":"B"}]}`,
+ 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"beta","new_string":"B"}]}`,
+ 		`{"edits":[{"old_string":"alpha","new_string":"A"},{"old_string":"beta","new_string":42}]}`,
+diff --git a/pkg/tool/builtin/edit_mixed_test.go b/pkg/tool/builtin/edit_mixed_test.go
+new file mode 100644
+index 00000000..bf86ae6f
+--- /dev/null
++++ b/pkg/tool/builtin/edit_mixed_test.go
+@@ -0,0 +1,108 @@
++package builtin
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func runMixedEdit(t *testing.T, input string, build func(path string) map[string]any) (*Result, string) {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "f.txt")
++	if err := os.WriteFile(path, []byte(input), 0600); err != nil {
++		t.Fatal(err)
++	}
++	res, err := (&EditFileTool{}).Execute(build(path))
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, _ := os.ReadFile(path)
++	return res, string(got)
++}
++
++func edit(o, n string) map[string]any { return map[string]any{"old_string": o, "new_string": n} }
++
++func TestEditFileMixedEditsAndTopLevel(t *testing.T) {
++	t.Run("edits only", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
++			return map[string]any{"path": p, "edits": []any{edit("a", "A"), edit("b", "B")}}
++		})
++		if !res.Success || got != "A B" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("top level only", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "a", "new_string": "A"}
++		})
++		if !res.Success || got != "A b" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("both duplicate applies once", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "a", "new_string": "A", "edits": []any{edit("a", "A"), edit("b", "B")}}
++		})
++		if !res.Success || got != "A B" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("both different appends", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b c", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "c", "new_string": "C", "edits": []any{edit("a", "A"), edit("b", "B")}}
++		})
++		if !res.Success || got != "A B C" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("different top level that conflicts fails atomically", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "zzz", "new_string": "Z", "edits": []any{edit("a", "A")}}
++		})
++		if res.Success || got != "a b" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("incomplete top level gives retry text", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a b", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "a", "edits": []any{edit("a", "A")}}
++		})
++		want := "Send either `edits` or old_string/new_string, not both; retry with only `edits`."
++		if res.Success || !strings.Contains(res.Error, want) || got != "a b" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("lone replace_all false is ignored", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a", func(p string) map[string]any {
++			return map[string]any{"path": p, "replace_all": false, "edits": []any{edit("a", "A")}}
++		})
++		if !res.Success || got != "A" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("lone replace_all true is rejected", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a", func(p string) map[string]any {
++			return map[string]any{"path": p, "replace_all": true, "edits": []any{edit("a", "A")}}
++		})
++		if res.Success || !strings.Contains(res.Error, "retry with only `edits`") || got != "a" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++	t.Run("empty edits error text", func(t *testing.T) {
++		res, _ := runMixedEdit(t, "a", func(p string) map[string]any {
++			return map[string]any{"path": p, "edits": []any{}}
++		})
++		if res.Success || !strings.Contains(res.Error, "retry with only `edits`") {
++			t.Fatalf("%+v", res)
++		}
++	})
++	t.Run("empty edits with top level applies top level", func(t *testing.T) {
++		res, got := runMixedEdit(t, "a", func(p string) map[string]any {
++			return map[string]any{"path": p, "old_string": "a", "new_string": "A", "edits": []any{}}
++		})
++		if !res.Success || got != "A" {
++			t.Fatalf("%+v %q", res, got)
++		}
++	})
++}

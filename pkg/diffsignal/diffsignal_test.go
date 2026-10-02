@@ -869,3 +869,26 @@ func diffStringSets(expected, got []string) (missing, extra []string) {
 	}
 	return missing, extra
 }
+
+func TestSplitWithGeneratedAttr(t *testing.T) {
+	raw := "diff --git a/app/bundle.js b/app/bundle.js\n--- a/app/bundle.js\n+++ b/app/bundle.js\n@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/app/main.go b/app/main.go\n--- a/app/main.go\n+++ b/app/main.go\n@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/img.png b/img.png\nindex 1..2 100644\nBinary files a/img.png and b/img.png differ\n"
+	files := SplitWith(raw, func(p string) bool { return p == "app/bundle.js" })
+	if len(files) != 3 {
+		t.Fatalf("files = %d", len(files))
+	}
+	if files[0].Reason != ReasonGeneratedAttr || !files[0].Generated() {
+		t.Fatalf("bundle reason = %q", files[0].Reason)
+	}
+	if files[1].LowSignal() {
+		t.Fatal("source file marked low signal")
+	}
+	if files[2].Reason != ReasonBinary || files[2].Generated() {
+		t.Fatalf("plain binary must not count as generated: %q", files[2].Reason)
+	}
+	res := PrioritizeWith(raw, 0, Options{Generated: func(p string) bool { return p == "app/bundle.js" }})
+	if strings.Contains(res.Context, "+b\n@@") || res.LowSignal != 2 {
+		t.Fatalf("LowSignal=%d context=%q", res.LowSignal, res.Context)
+	}
+}

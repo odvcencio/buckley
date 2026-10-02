@@ -1,0 +1,7 @@
+{
+  "name": "buckley-medium-13",
+  "kind": "add",
+  "source": "odvcencio/buckley@b4394573",
+  "diff": "buckley-medium-13.diff",
+  "original": "add(ipc): skip view.patch broadcasts without interested consumers\n\n- Add Hub.hasEventInterest to check client and forwarder filters before broadcasting\n- Skip view.patch snapshot assembly when no consumer is interested, avoiding needless store queries\n- Cover interest checks for filtered clients, selective forwarders, and gRPC subscribers\n"
+}

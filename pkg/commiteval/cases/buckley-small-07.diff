@@ -1,0 +1,35 @@
+diff --git a/cmd/buckley/source_extractor_template_test.go b/cmd/buckley/source_extractor_template_test.go
+index c78ca7ef..f45a3ff7 100644
+--- a/cmd/buckley/source_extractor_template_test.go
++++ b/cmd/buckley/source_extractor_template_test.go
+@@ -26,13 +26,13 @@ func TestSourceExtractorTemplate(t *testing.T) {
+ 	if profile.Spec.Models != (agentspec.ModelSpec{}) {
+ 		t.Fatalf("template must not pin models: %+v", profile.Spec.Models)
+ 	}
+-	for _, limit := range []int{0, 3, 20} {
++	for _, limit := range []int{0, 3, 8, 12, 20} {
+ 		preview := buildAgentRunPreviewSnapshot(agentRunOptions{
+ 			subagent: "extract", model: "openai_compatible/future-model", maxToolCalls: limit,
+ 		}, profile)
+-		wantLimit := 8
+-		if limit == 3 {
+-			wantLimit = 3
++		wantLimit := 12
++		if limit > 0 && limit < wantLimit {
++			wantLimit = limit
+ 		}
+ 		if preview.ToolTier != "read_only" || preview.TaskIntent != "read_only" || preview.ApprovalMode != "safe" {
+ 			t.Fatalf("unsafe or ambiguous execution profile: %+v", preview)
+diff --git a/templates/agents/source-extractor.yaml b/templates/agents/source-extractor.yaml
+index 48fc0869..28e8ede9 100644
+--- a/templates/agents/source-extractor.yaml
++++ b/templates/agents/source-extractor.yaml
+@@ -18,7 +18,7 @@ tools:
+   allow: [read_file, search_text]
+ policies:
+   approval_mode: safe
+-  max_tool_calls: 8
++  max_tool_calls: 12
+ sandbox:
+   mode: workspace
+ subagents:

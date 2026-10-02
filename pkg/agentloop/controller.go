@@ -91,6 +91,13 @@ type controllerTotals struct {
 	startedAt                time.Time
 	completionRepairAttempts int
 	continuations            int
+	noChangeContinuations    int
+	// verificationContinuations counts continuations rejected for missing or
+	// failed post-change verification.
+	verificationContinuations int
+	// noCheckConfirmations counts the times the model was asked whether its
+	// work is finished because the workspace has no check at all.
+	noCheckConfirmations int
 }
 
 // RequestBuilder returns the base chat request for one round. Its Messages
@@ -208,6 +215,13 @@ type ToolOutcome struct {
 	// result. VerificationPassed is the typed pass/fail result.
 	VerificationObserved bool
 	VerificationPassed   bool
+	// VerificationUnavailable reports that a verification tool could not run
+	// its check: the call was refused before launch, or the workspace has
+	// nothing for it to run. Such an outcome holds no pass or fail evidence,
+	// so it is never VerificationObserved and never replaces the last
+	// verification result. The reason is a short plain sentence.
+	VerificationUnavailable       bool
+	VerificationUnavailableReason string
 	// EvidenceID optionally links this outcome to a durable evidence object.
 	// Verification passes that clear completion debt should provide one.
 	EvidenceID string `json:"-"`
@@ -372,7 +386,8 @@ type Termination struct {
 // errors or rejected output carried by other termination reasons.
 func (t Termination) StopReason() string {
 	switch t.Kind {
-	case "exact_repeat", "outcome_repeat", "action_cycle", "read_only_budget", "round_limit", "tool_call_limit", "step_cap", "model_request_limit", "emergency_fuse":
+	case "exact_repeat", "outcome_repeat", "action_cycle", "read_only_budget", "round_limit", "tool_call_limit", "step_cap", "model_request_limit", "emergency_fuse",
+		TerminationCompletedUnverified, TerminationVerificationStalled:
 		if t.Reason != "" {
 			return t.Kind + ": " + t.Reason
 		}
@@ -958,6 +973,27 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 					result.Termination = Termination{Kind: "completion_contract", Code: completionContractErrorCode(err), Reason: err.Error()}
 					c.recordDecision(ctx, "completion_contract_rejected", err.Error())
 					if contract.MaxContinuations > 0 {
+						action, verificationReason := contract.verificationStop(err, progress.Snapshot(), c.totals.verificationContinuations, c.totals.noCheckConfirmations > 0)
+						if action == verificationEndUnverified && contract.ValidateFinalResponse != nil && contract.ValidateFinalResponse(text) != nil {
+							// An answer that fails its output contract cannot end the run.
+							action = verificationContinue
+						}
+						switch action {
+						case verificationEndUnverified:
+							// The work is done and no check can verify it. End with an
+							// explicit conclusive outcome that says so, not a loop.
+							result.Termination = Termination{Kind: TerminationCompletedUnverified, Code: TerminationCompletedUnverified, Reason: verificationReason}
+							c.recordDecision(ctx, TerminationCompletedUnverified, verificationReason)
+							result.CompletionStatus = CompletionConclusive
+							if c.cfg.History != nil {
+								c.cfg.History.Append(msg)
+							}
+							return result, nil
+						case verificationEndStalled:
+							result.Termination = Termination{Kind: TerminationVerificationStalled, Code: TerminationVerificationStalled, Reason: verificationReason}
+							c.recordDecision(ctx, TerminationVerificationStalled, verificationReason)
+							return result, result.RequireConclusive()
+						}
 						if c.totals.continuations >= contract.MaxContinuations {
 							result.Termination = Termination{Kind: "continuation_limit", Code: "continuation_limit", Reason: fmt.Sprintf("reached the %d-continuation limit: %s", contract.MaxContinuations, err)}
 							c.recordDecision(ctx, "continuation_limit", result.Termination.Reason)
@@ -968,10 +1004,26 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 							c.recordDecision(ctx, "emergency_fuse", result.Termination.Reason)
 							return result, result.RequireConclusive()
 						}
+						if contract.MaxNoChangeContinuations > 0 && completionContractErrorCode(err) == string(CompletionMissingObservableChange) {
+							if c.totals.noChangeContinuations >= contract.MaxNoChangeContinuations {
+								result.Termination = Termination{Kind: "no_observable_change", Code: "no_observable_change", Reason: fmt.Sprintf("the model answered %d times without changing the workspace; if the task needs no file changes, say so in the brief: %s", c.totals.noChangeContinuations+1, err)}
+								c.recordDecision(ctx, "no_observable_change", result.Termination.Reason)
+								return result, result.RequireConclusive()
+							}
+							c.totals.noChangeContinuations++
+						}
 						c.totals.continuations++
+						if isVerificationContractError(err) {
+							c.totals.verificationContinuations++
+						}
+						instruction := continuationInstruction(err, text)
+						if action == verificationConfirm {
+							c.totals.noCheckConfirmations++
+							instruction = noCheckConfirmationInstruction(verificationReason, text)
+						}
 						if c.cfg.History != nil {
 							c.cfg.History.Append(msg)
-							c.cfg.History.Append(model.Message{Role: "user", Content: continuationInstruction(err, text)})
+							c.cfg.History.Append(model.Message{Role: "user", Content: instruction})
 						}
 						c.recordDecision(ctx, "oneshot_continuation", err.Error())
 						if contract.OnContinuation != nil {
@@ -3058,6 +3110,10 @@ func (c *Controller) persistToolOutcome(ctx context.Context, state *toolRoundSta
 	}
 	record["verification_observed"] = outcome.VerificationObserved
 	record["verification_passed"] = outcome.VerificationPassed
+	if outcome.VerificationUnavailable {
+		record["verification_unavailable"] = true
+		record["verification_unavailable_reason"] = modelstep.NormalizeErrorText(outcome.VerificationUnavailableReason)
+	}
 	record["yield_observed"] = outcome.YieldObserved
 	if outcome.YieldObserved {
 		record["yield_count"] = outcome.YieldCount
@@ -3124,6 +3180,13 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 		decision = mergeGovernorDecisions(decision, progressDecision)
 		if strings.TrimSpace(decision.Nudge) != "" {
 			content += "\n\n" + decision.Nudge
+		}
+		if outcome.VerificationUnavailable || (outcome.VerificationObserved && !outcome.VerificationPassed) {
+			if contract, enabled := c.completionContract(); enabled && contract.MaxContinuations > 0 {
+				if nudge := contract.verificationNudge(progress.Snapshot(), outcome.VerificationUnavailable); nudge != "" {
+					content += "\n\n" + nudge
+				}
+			}
 		}
 		if index == len(state.calls)-1 && !decision.Stop && !stopDecision.Stop {
 			if remaining := c.cfg.Governor.RemainingToolCalls(); remaining >= 1 && remaining <= 3 {

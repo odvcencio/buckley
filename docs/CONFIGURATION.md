@@ -195,7 +195,7 @@ choose a compatible model or change that account policy deliberately.
 review:
   verification:
     runner:
-      wrapper: ["buildbox-run"]
+      wrapper: ["remote-run"]
       parallelism: 2
       timeout: 10m
 ```
@@ -216,15 +216,15 @@ runs this command:
 The wrapper owns three things:
 
 - Moving the immutable snapshot directory to wherever it builds and tests.
-  For example, `buildbox-run` syncs it to a remote host over ssh.
+  For example, a `remote-run` script can sync it to a remote host over ssh.
 - Running `<argv...>` there.
 - Relaying the real command's exit code back to the harness.
 
 A well-behaved wrapper must reserve exit codes 0 (pass) and 1 (a Go,
 Python, or npm build/test failure) -- and 101 for Rust, see below -- for
 the wrapped command's own outcome. It must never let its own setup or
-transport failures exit with one of those codes; `buildbox-run` follows
-this rule with a dedicated reserved exit code (90) for its own
+transport failures exit with one of those codes; an example wrapper,
+`remote-run`, follows this rule with a dedicated reserved exit code (90) for its own
 pre-command setup failures, so bash's default `&&`-chain propagation can
 never make one of those look like a real test failure. The harness trusts
 this contract; it cannot distinguish a wrapper that violates it from a
@@ -263,7 +263,7 @@ An infrastructure fault is not evidence that the reviewed change is broken.
 Environment overrides:
 
 - `BUCKLEY_VERIFY_WRAPPER` sets `wrapper`. Shell-split the value into an
-  argv (for example `"buildbox-run --node-modules"`). An empty value
+  argv (for example `"remote-run --node-modules"`). An empty value
   leaves a configured wrapper unchanged.
 - `BUCKLEY_VERIFY_PARALLELISM` sets `parallelism`. Use a positive integer.
   Buckley ignores zero or negative values.
@@ -280,7 +280,7 @@ unavoidable environment difference (documented, not a bug):
 1. **Wrong sync root for a single package (fixed).** An earlier version
    passed the target package's subdirectory, not the snapshot root, as
    the wrapper's `<snapshot-dir>`. A wrapper that syncs only files
-   tracked under `<snapshot-dir>` (as `buildbox-run`'s `git ls-files -co`
+   tracked under `<snapshot-dir>` (as a `remote-run` script's `git ls-files -co`
    does) then never syncs go.mod, Cargo.toml, pyproject.toml, or
    package.json, all of which live above the package directory, so the
    remote command failed immediately with an error like "go.mod file not
@@ -313,19 +313,20 @@ unavoidable environment difference (documented, not a bug):
    `GOSUMDB=off`, `CI=true`, and an isolated `HOME`/`GOCACHE` (see
    `reviewsandbox.ToolEnvironment`); Codex is never invoked either way
    for Go. The remote wrapper path instead inherits the remote host's
-   normal environment plus what the wrapper itself sets --
-   `buildbox-run` exports `GOWORK=off`, `GOFLAGS=-p=8`, and
-   `GOMAXPROCS=8`, prepends its own Go/TinyGo toolchain directories to
-   `PATH`, and runs the command under `nice -n 19 ionice -c 3` so it
-   never competes with interactive work on a shared host. In this
+   normal environment plus what the wrapper itself sets -- in the
+   investigated setup, the example `remote-run` wrapper exports
+   `GOWORK=off`, `GOFLAGS=-p=8`, and `GOMAXPROCS=8`, prepends its own
+   Go/TinyGo toolchain directories to `PATH`, and runs the command under
+   `nice -n 19 ionice -c 3` so it never competes with interactive work on a
+   shared host. In this
    investigation, `codex CLI version` was not a relevant factor (the Go
    wrapper path never invokes Codex), and the observed evidence gaps
    traced fully to bugs 1 and 2 above, not to `nice`/`ionice` scheduling
-   or to a missing `.git` -- `buildbox-run`'s plain sync never includes
-   `.git` (see `--with-git` below), but no buckley package in this
+   or to a missing `.git` -- the example `remote-run` wrapper's plain sync never
+   includes `.git` (see `--with-git` below), but no buckley package in this
    investigation actually required one to build or test successfully.
 
-`buildbox-run --with-git` (see its `--help`) gives the remote copy a real
+An option such as `remote-run --with-git` gives the remote copy a real
 `.git` for code that does need one -- `git describe`, `git rev-parse
 --show-toplevel`, a test fixture that expects to be inside a real
 repository -- at the cost of an extra shallow clone, bundle, transfer,
@@ -474,6 +475,9 @@ providers:
     enabled: true
     api_key: ""  # Use env var instead: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
+    # Keep these models on the provider that holds your own key (BYOK).
+    byok_providers:
+      openai/: openai
 
   openai:
     enabled: false
@@ -499,6 +503,26 @@ providers:
     claude-: anthropic
     gemini-: google
 ```
+
+`providers.openrouter.byok_providers` maps a model-ID prefix (or an exact model
+ID) to an OpenRouter provider slug. If you added your own provider key to
+OpenRouter ("bring your own key", BYOK), OpenRouter can still send a request to
+another endpoint for the same model, and that endpoint bills OpenRouter credits
+instead of your key. A matching request is sent with `provider.only` set to the
+slug, so it stays on your key. The longest matching prefix wins. Buckley skips
+the pin when the request already sets `provider.only` or `provider.order`, or
+when a fallback chain mixes models with different pins.
+
+This matters most with `buckbot.openrouter_privacy_fallback`. For `openai/*`
+models, OpenRouter's zero-data-retention endpoints are Azure only, so a ZDR
+request never reaches an OpenAI BYOK key. With the pin, the ZDR attempt gets
+OpenRouter's policy 404 and the fallback retries with
+`provider.data_collection: deny` on the pinned provider. If you need strict
+ZDR instead, leave the model unpinned and fund OpenRouter credits.
+
+When OpenRouter rejects a request with HTTP 402 and its routing metadata says
+`is_byok: false`, Buckley's error names the credit-billed route and this
+setting.
 
 **Security Note:** Never commit API keys in config files. Use environment variables or `~/.buckley/config.env`.
 

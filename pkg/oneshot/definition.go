@@ -32,6 +32,40 @@ type Context struct {
 
 	// Tokens is the estimated total token count across all sources.
 	Tokens int
+
+	// Diff describes the git_diff source, when one was gathered.
+	Diff DiffStats
+}
+
+// DiffStats counts the files in a gathered diff. LowSignal files are binary,
+// generated, or minified and reach the model only as summary lines.
+type DiffStats struct {
+	Files     int
+	LowSignal int
+
+	// GeneratedPaths are build output: generated or vendored paths, minified
+	// content, or files that gitattributes mark linguist-generated or -diff.
+	// SourcePaths are all other changed files, including plain binaries.
+	GeneratedPaths []string
+	SourcePaths    []string
+}
+
+// GeneratedOnly reports a diff that changes generated files and nothing else.
+func (d DiffStats) GeneratedOnly() bool {
+	return d.Files > 0 && len(d.GeneratedPaths) == d.Files
+}
+
+// Mixed reports a diff that changes both generated and source files.
+func (d DiffStats) Mixed() bool {
+	return len(d.GeneratedPaths) > 0 && len(d.SourcePaths) > 0
+}
+
+// GeneratedRatio is the share of diff files classified as low signal.
+func (d DiffStats) GeneratedRatio() float64 {
+	if d.Files == 0 {
+		return 0
+	}
+	return float64(d.LowSignal) / float64(d.Files)
 }
 
 // Definition describes a oneshot command's shape.
@@ -58,6 +92,50 @@ type Definition interface {
 
 	// Unmarshal deserializes the raw tool call result into a typed value.
 	Unmarshal(result json.RawMessage) (any, error)
+}
+
+// ContextValidator is an optional Definition extension. The framework calls it
+// after Validate succeeds, with the gathered context, so a command can check its
+// result against the material the model saw (for example the staged diff).
+type ContextValidator interface {
+	ValidateWithContext(ctx *Context, result json.RawMessage) error
+}
+
+// PolicyRequest asks the framework to decide a result through an arbiter
+// strategy. Facts hold counts and ratios only, never message text.
+type PolicyRequest struct {
+	Domain   string
+	Strategy string
+	Facts    map[string]any
+	// Fail builds the validation error for a "repair" or "block" outcome.
+	Fail func(action, reason string) error
+}
+
+// PolicyDefinition is an optional Definition extension. When the framework has
+// a rules engine, it evaluates the request and follows the outcome: "allow"
+// accepts, "repair" retries with the error, and "block" stops the run. If the
+// engine cannot evaluate the strategy, the framework falls back to
+// ContextValidator, so a missing rule never disables the check.
+type PolicyDefinition interface {
+	PolicyFacts(ctx *Context, result json.RawMessage) (*PolicyRequest, error)
+}
+
+// TerminalError marks a validation error that must stop the retry loop.
+type terminalValidationError struct{ error }
+
+func (e terminalValidationError) Unwrap() error             { return e.error }
+func (e terminalValidationError) SensitiveValidation() bool { return sensitiveValidation(e.error) }
+
+func isTerminalValidation(err error) bool {
+	var t terminalValidationError
+	return errors.As(err, &t)
+}
+
+// sensitiveValidation reports whether a validation error asks the framework
+// not to echo the rejected arguments back to the model.
+func sensitiveValidation(err error) bool {
+	var s interface{ SensitiveValidation() bool }
+	return errors.As(err, &s) && s.SensitiveValidation()
 }
 
 // RepairableDefinition can fix mechanical format errors without another model call.

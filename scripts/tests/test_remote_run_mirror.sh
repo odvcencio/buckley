@@ -3,10 +3,10 @@ set -euo pipefail
 python3 - "$@" <<'PY'
 import os,pathlib,subprocess,tempfile,shutil,sys,textwrap
 
-# Usage: bash scripts/tests/test_buildbox_run_mirror.sh /path/to/buildbox-run
-# SSH and df are local fixtures; this test never connects to buildbox.
-if len(sys.argv)!=2: raise SystemExit("pass the path to buildbox-run")
-with tempfile.TemporaryDirectory(prefix="buildbox-mirror-test-") as fixture:
+# Usage: bash scripts/tests/test_remote_run_mirror.sh /path/to/remote-run
+# SSH and df are local fixtures; this test never connects to a remote host.
+if len(sys.argv)!=2: raise SystemExit("pass the path to the remote-run wrapper")
+with tempfile.TemporaryDirectory(prefix="remote-mirror-test-") as fixture:
     root=pathlib.Path(fixture)
     remote=root/'remote'; remote.mkdir()
     bin=root/'bin'; bin.mkdir()
