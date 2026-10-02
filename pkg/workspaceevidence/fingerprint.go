@@ -52,6 +52,9 @@ func gitStateFingerprint(ctx context.Context, root string, contentOnly bool) (st
 		if contentOnly {
 			// Staging, committing, and changing branches are not content edits.
 			manifest.head, manifest.unbornHeadRef, manifest.index = "", "", nil
+			paths := append([]string(nil), manifest.trackedPaths...)
+			manifest.trackedPaths = sortedUniquePaths(append(paths, manifest.untrackedPaths...))
+			manifest.untrackedPaths = nil
 		}
 		return hashGitManifest(ctx, rootFS, manifest)
 	}
@@ -480,7 +483,12 @@ type gitCommandResult struct {
 }
 
 func runGitCommand(ctx context.Context, root string, limit int64, args ...string) (gitCommandResult, error) {
+	return runGitCommandWithInput(ctx, root, limit, nil, args...)
+}
+
+func runGitCommandWithInput(ctx context.Context, root string, limit int64, input io.Reader, args ...string) (gitCommandResult, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
+	cmd.Stdin = input
 	stdout := boundedBuffer{limit: limit}
 	stderr := boundedBuffer{limit: limit}
 	cmd.Stdout = &stdout

@@ -20,6 +20,9 @@ func TestOneShotLane_CommittedMutation(t *testing.T) {
 		{name: "no change", command: "cat target.txt"},
 		{name: "merge origin main only", command: "git merge --no-ff origin/main -m 'merge upstream'"},
 		{name: "fast-forward origin main only", command: "git merge --ff-only origin/main"},
+		{name: "rebase origin main only", command: "git rebase origin/main"},
+		{name: "message-only amend after fast-forward", command: "git merge --ff-only origin/main && git commit --amend -qm 'amended message'"},
+		{name: "session commit then rebase", command: "printf 'after\\n' >target.txt && git commit -qam 'task change' && git rebase origin/main", wantChange: true},
 		{name: "own commit before merge", command: "printf 'after\\n' >target.txt && git commit -qam 'task change' && git merge --no-ff origin/main -m 'merge upstream'", wantChange: true},
 		{name: "own commit after merge", command: "git merge --no-ff origin/main -m 'merge upstream' && printf 'after\\n' >target.txt && git commit -qam 'task change'", wantChange: true},
 	} {
