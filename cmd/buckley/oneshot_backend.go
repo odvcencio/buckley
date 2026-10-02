@@ -381,6 +381,14 @@ func resolveOneshotEffort(commandName, flagValue string) (string, error) {
 	}
 }
 
+// resolveOneshotModelWithEffort resolves the model before applying an explicit
+// effort. Resolution can set cfg.Models.Reasoning from a model suffix such as
+// "-low"; an explicit flag or environment effort must win over that suffix.
+func resolveOneshotModelWithEffort(cfg *config.Config, effort string, resolve func(*config.Config) string) (string, *config.Config) {
+	modelID := resolve(cfg)
+	return modelID, configWithOneshotEffort(cfg, effort)
+}
+
 func configWithOneshotEffort(cfg *config.Config, effort string) *config.Config {
 	if effort == "" {
 		return cfg

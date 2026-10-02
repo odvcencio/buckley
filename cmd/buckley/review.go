@@ -389,8 +389,7 @@ func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
 }
 
 func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model.Manager, store *storage.Store, effort string) (*reviewCommandRuntime, error) {
-	cfg = configWithOneshotEffort(cfg, effort)
-	modelID := resolveReviewModel(cfg)
+	modelID, cfg := resolveOneshotModelWithEffort(cfg, effort, resolveReviewModel)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
 	}

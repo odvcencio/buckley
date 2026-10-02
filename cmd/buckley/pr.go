@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -227,9 +228,9 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
 
-	cfg = configWithOneshotEffort(cfg, opts.effort)
-
-	modelID := resolvePRModelID(opts.model, cfg, opts.backend)
+	modelID, cfg := resolveOneshotModelWithEffort(cfg, opts.effort, func(cfg *config.Config) string {
+		return resolvePRModelID(opts.model, cfg, opts.backend)
+	})
 	if opts.backend == oneshotBackendAPI && modelID == "" {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")

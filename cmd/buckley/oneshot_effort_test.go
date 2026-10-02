@@ -184,3 +184,41 @@ func TestReviewEffort_RuntimeOverridesLegacySuffixAndDepthGate(t *testing.T) {
 		t.Fatalf("explicit effort lost to review policy: effort=%q adaptive=%t forceFullDepth=%t", runtime.reasoningEffort, runtime.policy.adaptiveReasoning, runtime.policy.decisionsGate.forceFullDepth)
 	}
 }
+
+func TestOneshotEffort_ExplicitEffortWinsOverModelSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		name, flag, env, want string
+	}{
+		{"flag", "high", "", "high"},
+		{"specific env", "", "xhigh", "xhigh"},
+		{"suffix only", "", "", "low"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BUCKLEY_MODEL_COMMIT", "")
+			t.Setenv("BUCKLEY_MODEL_PR", "")
+			t.Setenv("BUCKLEY_EFFORT_COMMIT", tt.env)
+			t.Setenv("BUCKLEY_EFFORT_PR", tt.env)
+			t.Setenv("BUCKLEY_ONESHOT_EFFORT", "")
+			for _, command := range []string{"commit", "pr"} {
+				effort, err := resolveOneshotEffort(command, tt.flag)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := config.DefaultConfig()
+				resolve := resolveCommitModelID
+				if command == "pr" {
+					resolve = resolvePRModelID
+				}
+				modelID, resolved := resolveOneshotModelWithEffort(cfg, effort, func(cfg *config.Config) string {
+					return resolve("codex/gpt-5.6-sol-low", cfg, oneshot.CLIBackendCodex)
+				})
+				if strings.HasSuffix(modelID, "-low") {
+					t.Fatalf("%s model %q kept its reasoning suffix", command, modelID)
+				}
+				if got := cliReasoningEffort(resolved, oneshot.CLIBackendCodex); got != tt.want {
+					t.Fatalf("%s Codex effort = %q, want %q", command, got, tt.want)
+				}
+			}
+		})
+	}
+}

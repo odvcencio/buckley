@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 	"m31labs.dev/buckley/pkg/rules"
@@ -375,9 +376,9 @@ func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) 
 		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
 
-	cfg = configWithOneshotEffort(cfg, opts.effort)
-
-	modelID := resolveCommitModelID(opts.model, cfg, opts.backend)
+	modelID, cfg := resolveOneshotModelWithEffort(cfg, opts.effort, func(cfg *config.Config) string {
+		return resolveCommitModelID(opts.model, cfg, opts.backend)
+	})
 	if opts.backend == oneshotBackendAPI && modelID == "" {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_COMMIT or configure models.utility.commit)")
