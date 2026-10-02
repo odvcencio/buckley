@@ -84,7 +84,7 @@ func newACPHTTPStreamManager(t *testing.T, handler func(http.ResponseWriter, *ht
 	}))
 	t.Cleanup(server.Close)
 
-	cfg := configForACPParticleTerminalTest(server.URL)
+	cfg := configForACPStreamTerminalTest(server.URL)
 	mgr, err := model.NewManager(cfg)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -92,7 +92,7 @@ func newACPHTTPStreamManager(t *testing.T, handler func(http.ResponseWriter, *ht
 	return mgr, &requests, capture
 }
 
-func configForACPParticleTerminalTest(baseURL string) *config.Config {
+func configForACPStreamTerminalTest(baseURL string) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Providers.OpenAI.Enabled = true
 	cfg.Providers.OpenAI.APIKey = "test-key"

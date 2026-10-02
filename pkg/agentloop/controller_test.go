@@ -2601,7 +2601,7 @@ func assertNoPrivateReasoningLeak(t *testing.T, result *Result, history *recordi
 }
 
 // TestController_ReasoningOnlyTerminalRetriesExhaustIncomplete covers
-// Particle-style replies that carry private reasoning but no final-answer
+// Reasoning-only model replies carry private reasoning but no final-answer
 // content. Reasoning proves the model ran, so the controller uses the
 // bounded corrective-nudge path instead of transport backoff, but it must
 // never promote that reasoning into Result.Content or final history.

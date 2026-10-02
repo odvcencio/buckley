@@ -644,9 +644,9 @@ func (p *OpenAICompatibleProvider) compatiblePayload(req ChatRequest) any {
 			// reasoning_effort, and effort conversion above did not apply.
 			// Forwarding the raw OpenRouter-style nested `reasoning` object
 			// anyway makes strict OpenAI-compatible gateways reject the whole
-			// request (observed: Particle's deepseek-v4.1-flash, HTTP 400
-			// "Unsupported nested reasoning field 'max_tokens'", whose
-			// supported_parameters are only tools and reasoning_content).
+			// request (for example, deepseek-v4.1-flash with supported_parameters
+			// limited to tools and reasoning_content; strict gateways report HTTP
+			// 400 "Unsupported nested reasoning field 'max_tokens'").
 			// Drop it instead of guessing at wire compatibility. Models with
 			// no declared reasoning_content/reasoning_effort capability at
 			// all keep the legacy best-effort pass-through below.
