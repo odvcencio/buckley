@@ -250,7 +250,7 @@ type ModelConfig struct {
 	VisionFallback  []string            `yaml:"vision_fallback"` // Ordered list of vision models to try
 	FallbackChains  map[string][]string `yaml:"fallback_chains"`
 	DefaultProvider string              `yaml:"default_provider"` // Default provider (openrouter, openai, anthropic, google, codex)
-	// Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh",
+	// Reasoning level: "off", "minimal", "low", "medium", "high", "xhigh", "max",
 	// or "" for auto-detect. BUCKLEY_MODEL_REASONING and its legacy
 	// fallback BUCKLEY_REASONING are handled by the envReasoning hook
 	// (config_env.go), not the generic env-tag dispatcher, because a

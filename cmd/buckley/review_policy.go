@@ -123,7 +123,7 @@ func resolveReviewReasoningEffort(ctx context.Context, cfg *config.Config, check
 	switch explicit = strings.ToLower(strings.TrimSpace(explicit)); explicit {
 	case "off", "none":
 		return ""
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return explicit
 	}
 	configured := ""
@@ -133,7 +133,7 @@ func resolveReviewReasoningEffort(ctx context.Context, cfg *config.Config, check
 	switch configured {
 	case "off", "none":
 		return ""
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return configured
 	case "", "auto":
 		if effort, ok := reasoningChoiceGate(ctx, cfg); ok {
@@ -564,7 +564,7 @@ func resolveConfiguredReviewReasoning(cfg *config.Config) string {
 		return "medium"
 	}
 	switch value := strings.ToLower(strings.TrimSpace(cfg.Buckbot.Reasoning)); value {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return value
 	default:
 		return "medium"
@@ -584,7 +584,7 @@ func reviewReasoningIsAdaptive(cfg *config.Config, explicit string) bool {
 
 func validReviewReasoningEffort(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return true
 	default:
 		return false

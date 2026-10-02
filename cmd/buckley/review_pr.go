@@ -35,6 +35,7 @@ type reviewPRCommandOptions struct {
 	showCost             bool
 	post                 bool
 	model                string
+	effort               string
 	criticModel          string
 	timeout              time.Duration
 	outputFile           string
@@ -59,6 +60,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	post := fs.Bool("post", false, "post the completed review to GitHub (default: dry run)")
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
+	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_REVIEW, BUCKLEY_ONESHOT_EFFORT, or config)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
@@ -77,6 +79,10 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	fullDepth := fs.Bool("full-depth", false, "disable the review-depth Decisions gate and always run at full configured reasoning")
 
 	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
+		return reviewPRCommandOptions{}, err
+	}
+	effort, err := resolveOneshotEffort("review", *effortFlag)
+	if err != nil {
 		return reviewPRCommandOptions{}, err
 	}
 	if *budgetUSD < 0 {
@@ -116,6 +122,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		showCost:             *showCost,
 		post:                 *post,
 		model:                *modelFlag,
+		effort:               effort,
 		criticModel:          *criticModel,
 		timeout:              *timeout,
 		outputFile:           *outputFile,
@@ -175,7 +182,7 @@ func reviewPRFlagName(arg string) (string, bool) {
 
 func reviewPRFlagTakesValue(name string) bool {
 	switch name {
-	case "model", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts", "depth",
+	case "model", "effort", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts", "depth",
 		"shards", "concurrency":
 		return true
 	default:
@@ -242,7 +249,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store)
+	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store, opts.effort)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}

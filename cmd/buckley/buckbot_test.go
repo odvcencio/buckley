@@ -44,6 +44,9 @@ func TestRunBuckbotCommandRoutesGeneralReviews(t *testing.T) {
 		{name: "direct review flags", args: []string{"--project", "--no-interactive"}, want: call{kind: "review", args: []string{"--project", "--no-interactive"}}},
 		{name: "repository review", args: []string{"repo", "--no-interactive"}, want: call{kind: "review", args: []string{"--project", "--no-interactive"}}},
 		{name: "project alias", args: []string{"project"}, want: call{kind: "review", args: []string{"--project"}}},
+		{name: "effort on local review", args: []string{"--effort", "xhigh"}, want: call{kind: "review", args: []string{"--effort", "xhigh"}}},
+		{name: "effort on project review", args: []string{"repo", "--effort", "max"}, want: call{kind: "review", args: []string{"--project", "--effort", "max"}}},
+		{name: "effort on PR review", args: []string{"pr", "123", "--effort", "high"}, want: call{kind: "pr", args: []string{"123", "--effort", "high"}}},
 		{name: "pull request review", args: []string{"pr", "123", "--post"}, want: call{kind: "pr", args: []string{"123", "--post"}}},
 	}
 

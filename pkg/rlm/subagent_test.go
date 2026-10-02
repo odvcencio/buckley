@@ -613,3 +613,13 @@ func TestSubAgentExecute_NativeReviewWaitsForCleanup(t *testing.T) {
 		t.Fatal("provider cleanup was skipped")
 	}
 }
+
+func TestSubAgentReasoningConfigForwardsMaxEffortToCodex(t *testing.T) {
+	got := subAgentReasoningConfig("codex", "max", 2048)
+	if got == nil || got.Effort != "max" {
+		t.Fatalf("subAgentReasoningConfig(codex, max) = %+v, want Effort max", got)
+	}
+	if normalizeSubAgentReasoning(" MAX ") != "max" {
+		t.Fatalf("normalizeSubAgentReasoning should accept max")
+	}
+}

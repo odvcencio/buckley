@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
@@ -31,6 +32,7 @@ type prCommandOptions struct {
 	showCost     bool
 	base         string
 	model        string
+	effort       string
 	backend      string
 	timeout      time.Duration
 	diffBudget   int
@@ -62,6 +64,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or models.utility.pr for API backend)")
+	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_PR, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_PR_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 	diffBudget := fs.Int("diff-budget", diffsignal.PRDiffBudget, "total byte budget for gathered diff context (default: PR-scale budget, larger than the commit-message default)")
@@ -71,6 +74,10 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
 
 	if err := fs.Parse(args); err != nil {
+		return prCommandOptions{}, err
+	}
+	effort, err := resolveOneshotEffort("pr", *effortFlag)
+	if err != nil {
 		return prCommandOptions{}, err
 	}
 	backend, err := resolveOneshotBackend("pr", *backendFlag)
@@ -85,6 +92,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		showCost:     *showCost,
 		base:         *baseFlag,
 		model:        *modelFlag,
+		effort:       effort,
 		backend:      backend,
 		timeout:      *timeout,
 		diffBudget:   *diffBudget,
@@ -220,7 +228,9 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
 
-	modelID := resolvePRModelID(opts.model, cfg, opts.backend)
+	modelID, cfg := resolveOneshotModelWithEffort(cfg, opts.effort, func(cfg *config.Config) string {
+		return resolvePRModelID(opts.model, cfg, opts.backend)
+	})
 	if opts.backend == oneshotBackendAPI && modelID == "" {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("no model configured (set BUCKLEY_MODEL_PR or configure models.utility.pr)")

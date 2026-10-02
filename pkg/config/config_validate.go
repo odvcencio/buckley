@@ -96,10 +96,10 @@ func validateReasoning(c *Config) error {
 	validReasoning := map[string]bool{
 		"auto": true,
 		"off":  true, "none": true,
-		"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true,
+		"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
 	}
 	if !validReasoning[reasoning] {
-		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh)", c.Models.Reasoning)
+		return fmt.Errorf("invalid reasoning level: %s (valid: auto, off, minimal, low, medium, high, xhigh, max)", c.Models.Reasoning)
 	}
 	return nil
 }
