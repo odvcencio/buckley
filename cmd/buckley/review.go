@@ -34,6 +34,7 @@ type reviewCommandOptions struct {
 	verbose         bool
 	showCost        bool
 	model           string
+	effort          string
 	criticModel     string
 	timeout         time.Duration
 	outputFile      string
@@ -115,6 +116,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	verbose := fs.Bool("verbose", false, "show full context and reasoning")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
+	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_REVIEW, BUCKLEY_ONESHOT_EFFORT, or config)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout (project reviews default to 20m)")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
@@ -130,6 +132,10 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
 
 	if err := fs.Parse(args); err != nil {
+		return reviewCommandOptions{}, err
+	}
+	effort, err := resolveOneshotEffort("review", *effortFlag)
+	if err != nil {
 		return reviewCommandOptions{}, err
 	}
 	timeoutWasSet := false
@@ -179,6 +185,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		verbose:         *verbose,
 		showCost:        *showCost,
 		model:           *modelFlag,
+		effort:          effort,
 		criticModel:     *criticModel,
 		timeout:         *timeout,
 		outputFile:      *outputFile,
@@ -239,7 +246,7 @@ func runReviewCommand(args []string) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
-	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store)
+	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store, opts.effort)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
 	}
@@ -381,7 +388,8 @@ func applyReviewCriticModelOverride(cfg *config.Config, modelID string) {
 	cfg.Providers.Codex.Models = append(cfg.Providers.Codex.Models, normalized)
 }
 
-func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model.Manager, store *storage.Store) (*reviewCommandRuntime, error) {
+func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model.Manager, store *storage.Store, effort string) (*reviewCommandRuntime, error) {
+	cfg = configWithOneshotEffort(cfg, effort)
 	modelID := resolveReviewModel(cfg)
 	if modelID == "" {
 		return nil, fmt.Errorf("no review model configured")
@@ -393,7 +401,11 @@ func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model
 	if err := mgr.SetOpenRouterPrivacyFallback(privacyFallback); err != nil {
 		return nil, fmt.Errorf("configure OpenRouter privacy fallback: %w", err)
 	}
-	reasoningEffort := resolveReviewReasoningEffort(ctx, cfg, mgr, modelID, reviewReasoningOverride())
+	explicitReasoning := effort
+	if explicitReasoning == "" {
+		explicitReasoning = reviewReasoningOverride()
+	}
+	reasoningEffort := resolveReviewReasoningEffort(ctx, cfg, mgr, modelID, explicitReasoning)
 	arbEngine, err := rules.NewDefaultEngine()
 	if err != nil {
 		return nil, fmt.Errorf("initialize rules engine: %w", err)
@@ -429,8 +441,11 @@ func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model
 	policy.modelID = modelID
 	policy.adaptiveCodexModel = isAdaptiveCodexReviewSelector(resolveReviewModelSelector(cfg))
 	policy.reasoningEffort = reasoningEffort
-	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, reviewReasoningOverride())
+	policy.adaptiveReasoning = reviewReasoningIsAdaptive(cfg, explicitReasoning)
 	policy.engine = arbEngine
+	if effort != "" {
+		policy.decisionsGate.forceFullDepth = true
+	}
 	if behavior, found, err := reviewBehaviorProfile(cfg, mgr, store, modelID, policy.adaptiveCodexModel); err != nil {
 		_ = registry.Close()
 		if durableCleanup != nil {

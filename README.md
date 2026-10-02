@@ -101,6 +101,26 @@ buckley experiment run "compare-routing" -m z-ai/glm-5.2 -m moonshotai/kimi-k2.7
 
 `buckley buckbot` is the general-purpose name for Buckley's review agent: use it for a local review, `buckley buckbot repo` for a repository-wide advisory assessment, or `buckley buckbot pr <PR> --post` for an explicitly posted GitHub review. Buckbot has no automatic dollar cap by default, so any configured model can complete a review at its normal depth; use `--budget <USD>` only when a specific run needs a spend ceiling. `buckley review` examines one immutable snapshot of the selected local scope. With unstaged review enabled, worktree and changes reviews automatically include safe non-ignored untracked text files; ignored, secret-like, binary, symlinked, instruction, and otherwise unsafe paths remain excluded and are disclosed in the boundary inventory. Use `--include-untracked path/to/new.go` to provide an explicit safe allowlist when needed. Native Codex verification receives a self-contained copy of only the captured commit plus patch; its JSONL command events must prove successful, classifiable build and test runs that cover the changed source paths. Use `--model codex/auto` to select Luna with xhigh reasoning for focused changes, Terra with medium reasoning for standard changes, and Sol with medium reasoning for broad or project reviews. An exact model override remains fixed. API-model inspection tools are rooted to an independently materialized snapshot. When bubblewrap is available, they also receive audited read-only `exec_program` composition with no network or live-workspace mount; deterministic build/test/check verification remains separately sealed. `buckley review-pr` adds the remote PR diff, CI state, submitted reviews, and unresolved inline feedback; run it from a checkout whose `HEAD` is the PR head so verification is pinned to the same revision. API approvals require actual successful verification tool calls—not prose claiming PASS—and build/test evidence must use one applicable toolchain and cover every changed source package. Branch and PR approvals require passing verification, complete evidence, an explicit disposition for every supplied feedback ID, and an independent approval-critic pass. `buckley review -project` is an advisory architecture assessment and cannot issue an approval verdict. `buckley commit` and `buckley pr` use transparent tool-first workflows rather than opaque text-only prompting. In the TUI, fenced code blocks use Tree-sitter highlighting when the language grammar is available. Use `Shift+Enter` to add a line without sending and `Alt+C` to copy the latest code block. Conversation projection searches for the largest compacted history that fits the provider request budget.
 
+Use `--effort low|medium|high|xhigh|max` on `commit`, `pr`, `pr merge`,
+`review`, `review-pr`, and their `buckbot` aliases. Precedence is the flag,
+then `BUCKLEY_EFFORT_COMMIT`, `BUCKLEY_EFFORT_PR`, or `BUCKLEY_EFFORT_REVIEW`,
+then `BUCKLEY_ONESHOT_EFFORT`, then existing reasoning config
+(`models.reasoning` for commit/PR; `buckbot.reasoning` for reviews).
+An explicit review effort stays fixed when adaptive model selection changes.
+For Sol reviews, select `high` or `xhigh`; use `max` when needed:
+
+```bash
+buckley commit --backend codex --effort xhigh
+buckley review --model codex/gpt-6.1-sol --effort high
+buckley review-pr 123 --model codex/gpt-6.1-sol --effort xhigh
+```
+
+The Codex one-shot backend uses the Codex CLI's configured model unless you
+set `--model` or the command's model environment variable. It passes effort
+as `-c model_reasoning_effort="<value>"`. The Claude one-shot backend ignores
+effort and logs a debug note. API backends use existing model capability
+checks and reasoning policy; supported effort levels depend on the model.
+
 `buckley commit` validates the generated header, body, and issue footers, then
 rechecks that the staged index did not change before committing. It appends
 opaque `Buckley-Change-Hash` and `Buckley-Change-Stats` trailers by default;

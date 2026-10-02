@@ -43,6 +43,7 @@ type prMergeCommandOptions struct {
 	dryRun       bool
 	yes          bool
 	model        string
+	effort       string
 	backend      string
 	timeout      time.Duration
 }
@@ -57,6 +58,7 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 	dryRun := fs.Bool("dry-run", false, "print the generated merge title and body without merging")
 	yes := fs.Bool("yes", false, "skip confirmation and merge")
 	modelFlag := fs.String("model", "", "model to use for the merge message (default: BUCKLEY_MODEL_PR or models.utility.pr)")
+	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_PR, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 
@@ -84,6 +86,10 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 		return prMergeCommandOptions{}, fmt.Errorf("invalid PR number %q: %w", fs.Arg(0), err)
 	}
 
+	effort, err := resolveOneshotEffort("pr", *effortFlag)
+	if err != nil {
+		return prMergeCommandOptions{}, err
+	}
 	backend, err := resolveOneshotBackend("pr", *backendFlag)
 	if err != nil {
 		return prMergeCommandOptions{}, err
@@ -97,6 +103,7 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 		dryRun:       *dryRun,
 		yes:          *yes,
 		model:        *modelFlag,
+		effort:       effort,
 		backend:      backend,
 		timeout:      *timeout,
 	}, nil
@@ -314,7 +321,7 @@ func generatePRMergeMessage(opts prMergeCommandOptions, info prMergeInfo, diff s
 		prNumber: opts.number, prTitle: info.Title, prBody: info.Body,
 		baseBranch: info.Base, headBranch: info.Head, subjects: info.Commits, diff: diff,
 	}
-	commitOpts := commitCommandOptions{backend: opts.backend, model: opts.model, timeout: opts.timeout, showCost: true}
+	commitOpts := commitCommandOptions{backend: opts.backend, model: opts.model, effort: opts.effort, timeout: opts.timeout, showCost: true}
 	runtime, cleanup, err := newCommitCommandRuntime(commitOpts, def)
 	defer cleanup()
 	if err != nil {

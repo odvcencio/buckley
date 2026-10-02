@@ -372,7 +372,7 @@ func requestReasoningMaxTokens(req model.ChatRequest) int {
 
 func normalizeInvokerReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""

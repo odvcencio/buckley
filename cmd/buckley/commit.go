@@ -65,6 +65,7 @@ type commitCommandOptions struct {
 	contextTrailer bool
 	useGraft       bool
 	model          string
+	effort         string
 	backend        string
 	timeout        time.Duration
 	paths          []string
@@ -125,6 +126,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	contextTrailer := fs.Bool("context-trailer", true, "append an opaque change digest and aggregate stats trailer")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or models.utility.commit for API backend)")
+	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_COMMIT, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 	var pathsFlag stringSliceFlag
@@ -135,6 +137,10 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	forceWithLease := fs.Bool("force-with-lease", false, "with --squash: push the rewritten branch (git push --force-with-lease)")
 
 	if err := fs.Parse(args); err != nil {
+		return commitCommandOptions{}, err
+	}
+	effort, err := resolveOneshotEffort("commit", *effortFlag)
+	if err != nil {
 		return commitCommandOptions{}, err
 	}
 	backend, err := resolveOneshotBackend("commit", *backendFlag)
@@ -153,6 +159,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 		contextTrailer: *contextTrailer,
 		useGraft:       *graftMode || os.Getenv("BUCKLEY_USE_GRAFT") == "1",
 		model:          *modelFlag,
+		effort:         effort,
 		backend:        backend,
 		timeout:        *timeout,
 		paths:          append([]string(nil), pathsFlag...),
@@ -367,6 +374,8 @@ func newCommitCommandRuntime(opts commitCommandOptions, def oneshot.Definition) 
 		cleanup()
 		return nil, func() {}, fmt.Errorf("init dependencies: %w", err)
 	}
+
+	cfg = configWithOneshotEffort(cfg, opts.effort)
 
 	modelID := resolveCommitModelID(opts.model, cfg, opts.backend)
 	if opts.backend == oneshotBackendAPI && modelID == "" {

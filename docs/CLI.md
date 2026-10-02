@@ -190,7 +190,8 @@ buckley commit [OPTIONS]
 | `--minimal-output` | Minimize terminal output |
 | `--trace` | Show context audit and model reasoning after generation |
 | `--model <id>` | Override the commit-message model |
-| `--backend <api|codex|claude>` | Select the one-shot backend |
+| `--backend <api\|codex\|claude>` | Select the one-shot backend |
+| `--effort <level>` | Override reasoning effort |
 | `--timeout <duration>` | Bound message generation (default `2m`) |
 | `--squash <base>` | Squash every commit since the merge-base with `<base>` into one commit |
 | `--force` | With `--squash`, allow squashing a protected branch (`main`/`master`) |
@@ -198,6 +199,8 @@ buckley commit [OPTIONS]
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_COMMIT` - Override model for commit generation
+- `BUCKLEY_COMMIT_BACKEND` - Override backend; falls back to `BUCKLEY_ONESHOT_BACKEND`, then `api`
+- `BUCKLEY_EFFORT_COMMIT` - Override effort; falls back to `BUCKLEY_ONESHOT_EFFORT`, then reasoning config
 - `BUCKLEY_PROMPT_COMMIT` - Override prompt template
 
 **Example:**
@@ -270,9 +273,14 @@ buckley pr [OPTIONS]
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
 | `--base` | Base branch (default: from `BUCKLEY_PR_BASE` or repo default) |
+| `--model <id>` | Override the PR model |
+| `--backend <api\|codex\|claude>` | Select the one-shot backend |
+| `--effort <level>` | Override reasoning effort |
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_PR` - Override model for PR generation
+- `BUCKLEY_PR_BACKEND` - Override backend; falls back to `BUCKLEY_ONESHOT_BACKEND`, then `api`
+- `BUCKLEY_EFFORT_PR` - Override effort; falls back to `BUCKLEY_ONESHOT_EFFORT`, then reasoning config
 - `BUCKLEY_PROMPT_PR` - Override prompt template
 - `BUCKLEY_PR_BASE` - Override base branch
 
@@ -303,7 +311,7 @@ and `--subject`/`--body` are not passed.
 | `--delete-branch` | Delete the local and remote branch after merge |
 | `--dry-run` | Print the generated title and body without merging |
 | `--yes` | Skip confirmation and merge |
-| `--model <id>` / `--backend <api|codex|claude>` / `--timeout <duration>` | Same as `buckley pr` |
+| `--model <id>` / `--backend <api\|codex\|claude>` / `--effort <level>` / `--timeout <duration>` | Same as `buckley pr` |
 
 Before merging, buckley runs `gh pr checks <number>` and refuses, listing
 every check that is not passing, when any required check is failing or
@@ -314,6 +322,24 @@ merge requirements, not buckley's own check-passing gate.
 ```bash
 buckley pr merge 42 --squash --delete-branch
 buckley pr merge 42 --dry-run   # preview the generated squash message
+```
+
+For `commit`, `pr`, and `pr merge`, reasoning effort follows this precedence:
+`--effort` > `BUCKLEY_EFFORT_COMMIT` or `BUCKLEY_EFFORT_PR` >
+`BUCKLEY_ONESHOT_EFFORT` > `models.reasoning`. Accepted flag and environment
+values are `low`, `medium`, `high`, `xhigh`, and `max`; other values fail with
+an error. Existing config values such as `auto` and `off` retain their meaning.
+
+The `codex` backend passes effort as `-c model_reasoning_effort="<value>"` to
+`codex exec`. Without `--model`, `BUCKLEY_MODEL_COMMIT`, or `BUCKLEY_MODEL_PR`,
+it omits the model argument so the Codex CLI selects its configured default.
+Utility model config applies to the `api` backend. The `claude` backend ignores
+effort and logs a debug note. API requests use the existing reasoning capability
+checks and compatibility rules; choose an effort supported by the selected model.
+
+```bash
+buckley commit --backend codex --effort xhigh
+buckley pr --backend codex --model gpt-6.1-sol --effort high
 ```
 
 Both `commit` and `pr` use the `api` one-shot backend by default (OpenRouter, or
@@ -374,6 +400,21 @@ pass is discarded rather than presented as a caveated review. Project reviews de
 snapshot boundary excludes ignored paths, agent instructions, secret-like
 paths/content, symlinks, binary/control content, and oversized files; excluded
 paths are listed in the review rather than silently treated as inspected.
+
+`review`, `review-pr`, and every `buckbot` alias accept
+`--effort <level>`. Accepted levels are `low`, `medium`, `high`, `xhigh`, and
+`max`. Precedence is `--effort` >
+`BUCKLEY_EFFORT_REVIEW` > `BUCKLEY_ONESHOT_EFFORT` > `buckbot.reasoning`, with
+`models.reasoning` and adaptive policy supplying existing defaults when
+`buckbot.reasoning` is `auto`. Flag and environment overrides stay fixed across
+review-size planning and adaptive model selection. Reviews select their backend
+through the model's configured provider; use the `codex/` model prefix for Codex.
+
+```bash
+buckley review --model codex/gpt-6.1-sol --effort high
+buckley review-pr 123 --model codex/gpt-6.1-sol --effort xhigh
+buckley buckbot repo --model codex/gpt-6.1-sol --effort max
+```
 
 Every review surface supports three depth modes. `--depth spot` is the fast
 health scan and is the default for compatibility. `--depth balanced` performs
@@ -743,6 +784,13 @@ When running in interactive mode, use `/` prefix for commands:
 | `BUCKLEY_MODEL_REVIEW` | Override review model |
 | `BUCKLEY_MODEL_COMMIT` | Override model for `buckley commit` |
 | `BUCKLEY_MODEL_PR` | Override model for `buckley pr` |
+| `BUCKLEY_ONESHOT_BACKEND` | Default one-shot backend: `api`, `codex`, or `claude` |
+| `BUCKLEY_COMMIT_BACKEND` | Override backend for `commit` |
+| `BUCKLEY_PR_BACKEND` | Override backend for `pr` |
+| `BUCKLEY_EFFORT_COMMIT` | Reasoning effort for `commit` |
+| `BUCKLEY_EFFORT_PR` | Reasoning effort for `pr` and `pr merge` |
+| `BUCKLEY_EFFORT_REVIEW` | Reasoning effort for `review`, `review-pr`, and `buckbot` |
+| `BUCKLEY_ONESHOT_EFFORT` | Fallback effort: `low`, `medium`, `high`, `xhigh`, or `max` |
 | `BUCKLEY_PROMPT_COMMIT` | Custom commit prompt template |
 | `BUCKLEY_PROMPT_PR` | Custom PR prompt template |
 | `BUCKLEY_ONESHOT_DATA_POLICY` | `commit`/`pr` OpenRouter privacy mode: `none` (default), `zdr`, or `deny` |

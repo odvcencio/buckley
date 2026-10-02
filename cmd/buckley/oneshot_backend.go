@@ -81,7 +81,7 @@ func resolveCommitModelID(flagValue string, cfg *config.Config, backend string) 
 		return normalizeCLIModelID(normalizeModelIDWithReasoning(cfg, modelID), backend)
 	}
 	if backend != oneshotBackendAPI {
-		return defaultCLIModelID(cfg, backend, "commit")
+		return ""
 	}
 	if cfg != nil {
 		return cfg.GetUtilityCommitModel()
@@ -94,7 +94,7 @@ func resolvePRModelID(flagValue string, cfg *config.Config, backend string) stri
 		return normalizeCLIModelID(normalizeModelIDWithReasoning(cfg, modelID), backend)
 	}
 	if backend != oneshotBackendAPI {
-		return defaultCLIModelID(cfg, backend, "pr")
+		return ""
 	}
 	if cfg != nil {
 		return cfg.GetUtilityPRModel()
@@ -363,50 +363,47 @@ func policyBool(value any) bool {
 	return v
 }
 
-func defaultCLIModelID(cfg *config.Config, backend, utility string) string {
-	switch backend {
-	case oneshot.CLIBackendCodex:
-		if cfg != nil {
-			var utilityModel string
-			switch utility {
-			case "pr":
-				utilityModel = cfg.GetUtilityPRModel()
-			default:
-				utilityModel = cfg.GetUtilityCommitModel()
-			}
-			if strings.HasPrefix(strings.TrimSpace(utilityModel), "codex/") {
-				return normalizeCLIModelID(utilityModel, backend)
-			}
-			if strings.EqualFold(strings.TrimSpace(cfg.Models.DefaultProvider), "codex") && strings.TrimSpace(utilityModel) != "" && !strings.Contains(utilityModel, "/") {
-				return normalizeCLIModelID(utilityModel, backend)
-			}
-			for _, modelID := range cfg.Providers.Codex.Models {
-				if modelID = normalizeCLIModelID(modelID, backend); strings.TrimSpace(modelID) != "" && modelID != "default" {
-					return modelID
-				}
-			}
-		}
-		return normalizeCLIModelID(config.DefaultCodexModel, backend)
+// resolveOneshotEffort resolves operator overrides; an empty result retains config policy.
+func resolveOneshotEffort(commandName, flagValue string) (string, error) {
+	value := strings.TrimSpace(flagValue)
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv("BUCKLEY_EFFORT_" + strings.ToUpper(commandName)))
+	}
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv("BUCKLEY_ONESHOT_EFFORT"))
+	}
+	value = strings.ToLower(value)
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return value, nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported reasoning effort %q (use low, medium, high, xhigh, or max)", value)
 	}
 }
 
+func configWithOneshotEffort(cfg *config.Config, effort string) *config.Config {
+	if effort == "" {
+		return cfg
+	}
+	resolved := *cfg
+	resolved.Models.Reasoning = effort
+	resolved.Buckbot.Reasoning = effort
+	return &resolved
+}
+
 func cliReasoningEffort(cfg *config.Config, backend string) string {
-	if backend != oneshot.CLIBackendCodex {
-		return ""
+	if cfg != nil {
+		switch effort := strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning)); effort {
+		case "off", "none":
+			return ""
+		case "minimal", "low", "medium", "high", "xhigh", "max":
+			return effort
+		}
 	}
-	if cfg == nil {
+	if backend == oneshot.CLIBackendCodex {
 		return "xhigh"
 	}
-	switch strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning)) {
-	case "off", "none":
-		return ""
-	case "minimal", "low", "medium", "high", "xhigh":
-		return strings.ToLower(strings.TrimSpace(cfg.Models.Reasoning))
-	default:
-		return "xhigh"
-	}
+	return ""
 }
 
 func cliCommandForBackend(backend string) string {

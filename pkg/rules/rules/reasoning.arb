@@ -44,6 +44,14 @@ strategy reasoning_mode returns ReasoningConfig {
     }
 
     when {
+        reasoning.config == "max"
+        and model.supports_reasoning
+    } then ReasoningMax {
+        action: "set",
+        effort: "max",
+    }
+
+    when {
         reasoning.config == "auto"
         and task.name == "commit"
         and model.supports_reasoning

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -562,5 +563,57 @@ func TestParseCLIJSONClaudeEventArrayRejectsEnvelopeObjects(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no structured result object") {
 		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestCLIInvokerCodex_ModelAndEffortArgs(t *testing.T) {
+	for _, effort := range []string{"", "low", "medium", "high", "xhigh", "max"} {
+		for _, modelID := range []string{"", "gpt-6.1-sol"} {
+			t.Run(effort+"/"+modelID, func(t *testing.T) {
+				inv, err := NewCLIInvoker(CLIInvokerConfig{Backend: CLIBackendCodex, Model: modelID, ReasoningEffort: effort, TempDir: t.TempDir()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cmd, cleanup, err := inv.buildCodexCommand(testCLITool(), "prompt", []byte(`{"type":"object"}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer cleanup()
+				if modelID != "" && !containsSubsequence(cmd.Args, []string{"--model", modelID}) {
+					t.Fatalf("explicit model missing: %v", cmd.Args)
+				}
+				if modelID == "" {
+					for _, arg := range cmd.Args {
+						if arg == "-m" || arg == "--model" || strings.HasPrefix(arg, "--model=") {
+							t.Fatalf("default model should be omitted: %v", cmd.Args)
+						}
+					}
+				}
+				if effort != "" && !containsSubsequence(cmd.Args, []string{"-c", fmt.Sprintf("model_reasoning_effort=%q", effort)}) {
+					t.Fatalf("effort missing: %v", cmd.Args)
+				}
+				if effort == "" && containsSubsequence(cmd.Args, []string{"-c"}) {
+					t.Fatalf("unset effort should be omitted: %v", cmd.Args)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIInvokerClaude_EffortIgnoredWithDebugNote(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	inv, err := NewCLIInvoker(CLIInvokerConfig{Backend: CLIBackendClaude, ReasoningEffort: "max"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, _, err := inv.buildClaudeCommand("prompt", []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(cmd.Args, " "), "effort") || !strings.Contains(logs.String(), "ignores reasoning effort") {
+		t.Fatalf("Claude effort handling: args=%v logs=%s", cmd.Args, logs.String())
 	}
 }

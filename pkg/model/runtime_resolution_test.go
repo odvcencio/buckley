@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/rules"
 )
 
 func TestResolvePhaseModel_UsesExplicitOverride(t *testing.T) {
@@ -108,5 +109,24 @@ func TestResolveReasoningEffortForTask_RuntimeFallbackMatchesUtilityPolicy(t *te
 	}
 	if got := ResolveReasoningEffortForTask(&config.Config{}, checker, nil, "reasoning-model", "execution", "pr"); got != "medium" {
 		t.Fatalf("fallback pr effort = %q, want medium", got)
+	}
+}
+
+func TestResolveReasoningEffortForTask_Max(t *testing.T) {
+	engine := mustNewTestEngine(t)
+	cfg := &config.Config{Models: config.ModelConfig{Reasoning: "max"}}
+	for _, command := range []string{"commit", "pr", "review"} {
+		for _, policy := range []*rules.Engine{nil, engine} {
+			for _, supported := range []bool{false, true} {
+				checker := &stubReasoningChecker{models: map[string]bool{"reasoning-model": supported}}
+				want := ""
+				if supported {
+					want = "max"
+				}
+				if got := ResolveReasoningEffortForTask(cfg, checker, policy, "reasoning-model", "execution", command); got != want {
+					t.Fatalf("%s reasoning (policy=%v, supported=%v) = %q, want %q", command, policy != nil, supported, got, want)
+				}
+			}
+		}
 	}
 }

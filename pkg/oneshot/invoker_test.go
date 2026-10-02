@@ -989,3 +989,22 @@ func TestTruncateForTrace(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestProfile_MaxEffortReachesAPI(t *testing.T) {
+	client := &requestCapturingClient{responses: []*model.ChatResponse{{
+		Choices: []model.Choice{{Message: model.Message{ToolCalls: []model.ToolCall{{
+			ID: "call_effort", Type: "function", Function: model.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}}}}},
+	}}}
+	invoker := NewInvoker(InvokerConfig{
+		Client: client, Model: "test-model",
+		RequestProfile: RequestProfile{Reasoning: &model.ReasoningConfig{Effort: "max"}},
+	})
+	toolDef := tools.Definition{Name: "test_tool", Parameters: tools.ObjectSchema(map[string]tools.Property{}, "")}
+	if _, _, err := invoker.Invoke(context.Background(), "system", "user", toolDef, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.requests) != 1 || client.requests[0].Reasoning == nil || client.requests[0].Reasoning.Effort != "max" {
+		t.Fatalf("API request dropped max effort: %+v", client.requests)
+	}
+}
