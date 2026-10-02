@@ -207,8 +207,10 @@ type ToolOutcome struct {
 	// observation policy around this call. StateChanged is the resulting
 	// verdict. These are deliberately separate from EffectClass: permissions
 	// describe what a tool may do, while progress describes what it did.
-	StateObserved          bool
-	StateChanged           bool
+	StateObserved bool
+	StateChanged  bool
+	// StateFingerprint binds verification to the observed post-tool state.
+	StateFingerprint       string
 	StateObservationFailed bool
 	StateObservationError  string
 	// VerificationObserved reports that this outcome is a verification/check

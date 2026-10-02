@@ -75,6 +75,7 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 		} else {
 			outcome.StateObserved = true
 			outcome.StateChanged = o.beforeState != afterState
+			outcome.StateFingerprint = afterState
 		}
 	}
 	if metadata.Verification {

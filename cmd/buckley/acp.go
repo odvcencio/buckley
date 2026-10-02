@@ -1550,6 +1550,10 @@ func newACPLoopController(
 		mutations, observationErr := workspaceevidence.NewGitMutationRecorder(ctx, workDir)
 		if observationErr == nil {
 			completionContract.ObserveObservableChange = func() (bool, error) { return mutations.Observe(ctx) }
+			completionContract.ObserveWorkspaceState = func() (string, error) {
+				state, err := workspaceevidence.GitStateFingerprintWithFallback(ctx, workDir)
+				return state.Digest, err
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "One-shot observation: session baseline unavailable: %v\n", observationErr)
 		}

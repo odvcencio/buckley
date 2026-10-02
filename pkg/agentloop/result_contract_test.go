@@ -298,6 +298,51 @@ func TestCompletionContract_SessionMutationEvidence(t *testing.T) {
 	}
 }
 
+func TestCompletionContract_VerificationMatchesWorkspaceState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		verified string
+		current  string
+		err      error
+		want     CompletionContractReason
+	}{
+		{name: "same state", verified: "checked", current: "checked"},
+		{name: "change after verification", verified: "checked", current: "changed", want: CompletionMissingPostChangeVerification},
+		{name: "verification without state", current: "changed", want: CompletionMissingPostChangeVerification},
+		{name: "empty current state", want: CompletionMissingPostChangeVerification},
+		{name: "observation error", verified: "checked", err: errors.New("state unavailable"), want: CompletionStateObservationFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var progress progressTracker
+			progress.Observe("check", ToolOutcome{
+				Success:              true,
+				StateObserved:        tc.verified != "",
+				StateFingerprint:     tc.verified,
+				VerificationObserved: true,
+				VerificationPassed:   true,
+			})
+			contract := CompletionContract{
+				TaskIntent:                    MutationIntent,
+				RequireObservableChange:       true,
+				RequirePostChangeVerification: true,
+				ObserveObservableChange:       func() (bool, error) { return true, nil },
+				ObserveWorkspaceState:         func() (string, error) { return tc.current, tc.err },
+			}
+			err := contract.Validate(progress.Snapshot())
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var contractErr *CompletionContractError
+			if !errors.As(err, &contractErr) || contractErr.Reason != tc.want {
+				t.Fatalf("Validate = %v; want %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompletionContract_MutationIntent_WithPostChangeVerification(t *testing.T) {
 	tests := []struct {
 		name     string

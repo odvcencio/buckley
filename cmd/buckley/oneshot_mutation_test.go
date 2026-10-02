@@ -69,6 +69,40 @@ func TestOneShotLane_CommittedMutation(t *testing.T) {
 	}
 }
 
+func TestOneShotLane_CommittedMutationAfterVerificationRequiresFreshCheck(t *testing.T) {
+	requireMake(t)
+	final := sayStep("Work finished and verified.")
+	final.beforeReply = func() {
+		if err := os.WriteFile("target.txt", []byte("after\n"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		runMutationLaneGit(t, "commit", "-qam", "task change")
+	}
+	script := []laneStep{
+		verifyStep("make check"),
+		final,
+		verifyStep("make check"),
+		editStep("after", "before"),
+		{tool: "run_shell", args: map[string]any{"command": "git commit -qam 'repair change'"}},
+		verifyStep("make check"),
+		sayStep("Repaired the change and verified the final contents."),
+	}
+	run := runScriptedLane(t, map[string]string{
+		"target.txt": "before\n",
+		"Makefile":   "check:\n\t@test \"$$(cat target.txt)\" = before\n",
+	}, script, prepareMutationLaneGit)
+	if run.code != 0 || run.requests != len(script) {
+		t.Fatalf("stale verification accepted or repair failed: %+v", run)
+	}
+	if strings.Count(run.stderr, "One-shot continuation:") != 1 || !strings.Contains(run.stderr, "missing successful verification after the latest workspace change") {
+		t.Fatalf("missing fresh-check continuation: %s", run.stderr)
+	}
+	if !strings.Contains(run.stderr, "passed=false") || !strings.Contains(run.stdout, "Repaired the change") {
+		t.Fatalf("final contents were not checked and repaired: %+v", run)
+	}
+}
+
 func prepareMutationLaneGit(t *testing.T) {
 	t.Helper()
 	runMutationLaneGit(t, "config", "user.name", "Buckley Test")

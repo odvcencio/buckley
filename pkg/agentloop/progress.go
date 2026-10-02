@@ -100,6 +100,7 @@ type ProgressSnapshot struct {
 	VerificationPassedCalls   int    `json:"verification_passed_calls,omitempty"`
 	LastVerificationSequence  int    `json:"last_verification_sequence,omitempty"`
 	LastVerificationPassed    bool   `json:"last_verification_passed,omitempty"`
+	LastVerificationState     string `json:"last_verification_state,omitempty"`
 	// VerificationUnavailableCalls counts verification calls that could not
 	// run. VerificationUnavailableStreak counts them in a row since the latest
 	// workspace change; any check that actually ran (pass or fail), and any
@@ -158,6 +159,7 @@ func (t *progressTracker) Observe(toolName string, outcome ToolOutcome) {
 		t.snapshot.VerificationObservedCalls++
 		t.snapshot.LastVerificationSequence = t.snapshot.sequence
 		t.snapshot.LastVerificationPassed = outcome.VerificationPassed
+		t.snapshot.LastVerificationState = outcome.StateFingerprint
 		t.snapshot.VerificationUnavailableStreak = 0
 		if outcome.VerificationPassed {
 			t.snapshot.VerificationPassedCalls++

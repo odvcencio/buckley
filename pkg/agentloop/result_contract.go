@@ -259,6 +259,9 @@ type CompletionContract struct {
 	// ObserveObservableChange optionally checks session-scoped mutation evidence
 	// instead of treating every tool-level state transition as task work.
 	ObserveObservableChange func() (bool, error)
+	// ObserveWorkspaceState optionally supplies the current fingerprint to
+	// require verification of the same state, including changes between tools.
+	ObserveWorkspaceState func() (string, error)
 
 	// SubmittedResponse optionally supplies a caller-owned result accepted by a
 	// tool. Returning ready=false retains normal model completion. Returning
@@ -368,6 +371,21 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 			return &CompletionContractError{
 				Reason: CompletionFailedPostChangeVerification,
 				Detail: "latest verification after the final workspace change did not pass",
+			}
+		}
+		if normalized.ObserveWorkspaceState != nil {
+			state, err := normalized.ObserveWorkspaceState()
+			if err != nil {
+				return &CompletionContractError{
+					Reason: CompletionStateObservationFailed,
+					Detail: "current workspace state could not be observed: " + err.Error(),
+				}
+			}
+			if state == "" || snapshot.LastVerificationState != state {
+				return &CompletionContractError{
+					Reason: CompletionMissingPostChangeVerification,
+					Detail: "missing successful verification after the latest workspace change",
+				}
 			}
 		}
 	}
