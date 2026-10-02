@@ -256,6 +256,12 @@ type CompletionContract struct {
 	RepairInstruction         string
 	TaskIntent                TaskIntent
 	ValidateFinalResponse     func(string) error
+	// ObserveObservableChange optionally checks session-scoped mutation evidence
+	// instead of treating every tool-level state transition as task work.
+	ObserveObservableChange func() (bool, error)
+	// ObserveWorkspaceState optionally supplies the current fingerprint to
+	// require verification of the same state, including changes between tools.
+	ObserveWorkspaceState func() (string, error)
 
 	// SubmittedResponse optionally supplies a caller-owned result accepted by a
 	// tool. Returning ready=false retains normal model completion. Returning
@@ -328,6 +334,18 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 	normalized := c.Normalize()
 
 	stateChanged := snapshot.StateChangedCalls > 0
+	observableChange := stateChanged
+	if normalized.RequireObservableChange && normalized.ObserveObservableChange != nil {
+		var err error
+		observableChange, err = normalized.ObserveObservableChange()
+		if err != nil {
+			return &CompletionContractError{
+				Reason: CompletionStateObservationFailed,
+				Detail: "session mutations could not be observed: " + err.Error(),
+			}
+		}
+		stateChanged = stateChanged || observableChange
+	}
 	if normalized.RequirePostChangeVerification && !normalized.TolerateObservationErrors && snapshot.StateObservationFailures > 0 {
 		detail := "workspace state could not be observed after a tool that may affect completion evidence"
 		if snapshot.LastStateObservationError != "" {
@@ -355,6 +373,21 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 				Detail: "latest verification after the final workspace change did not pass",
 			}
 		}
+		if normalized.ObserveWorkspaceState != nil {
+			state, err := normalized.ObserveWorkspaceState()
+			if err != nil {
+				return &CompletionContractError{
+					Reason: CompletionStateObservationFailed,
+					Detail: "current workspace state could not be observed: " + err.Error(),
+				}
+			}
+			if state == "" || snapshot.LastVerificationState != state {
+				return &CompletionContractError{
+					Reason: CompletionMissingPostChangeVerification,
+					Detail: "missing successful verification after the latest workspace change",
+				}
+			}
+		}
 	}
 
 	switch normalized.TaskIntent {
@@ -362,7 +395,7 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 		return nil
 	case MutationIntent:
 		if normalized.RequireObservableChange {
-			if !stateChanged {
+			if !observableChange {
 				return &CompletionContractError{
 					Reason: CompletionMissingObservableChange,
 					Detail: "task requires observable workspace change but no mutations were recorded",
@@ -371,7 +404,7 @@ func (c CompletionContract) evaluate(snapshot ProgressSnapshot) error {
 		}
 		return nil
 	case UnknownIntent:
-		if normalized.RequireObservableChange && !stateChanged {
+		if normalized.RequireObservableChange && !observableChange {
 			return &CompletionContractError{
 				Reason: CompletionMissingObservableChange,
 				Detail: "task requires observable workspace change but no mutations were recorded",
