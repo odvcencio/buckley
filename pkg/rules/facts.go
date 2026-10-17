@@ -169,6 +169,7 @@ type PermissionFacts struct {
 	Tool              string `arb:"tool"`
 	Category          string `arb:"category"`
 	Arg               string `arb:"arg"`
+	CommandClass      string `arb:"command_class"`
 	WorkspaceRelative bool   `arb:"workspace_relative"`
 	Posture           string `arb:"posture"`
 }

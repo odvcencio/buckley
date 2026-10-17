@@ -12,6 +12,7 @@ import (
 // agree on every case (see TestBuiltinDefaults_ArbiterFallbackParity).
 func parityCases() []PermissionRequest {
 	return []PermissionRequest{
+		{Tool: "run_shell", Category: "shell", Arg: "buckley -p inspect", CommandClass: CommandClassAgentHarness, WorkspaceRelative: true},
 		{Tool: "read_file", Category: "file_read", Arg: ".env", WorkspaceRelative: true},
 		{Tool: "read_file", Category: "file_read", Arg: "/home/user/project/.env", WorkspaceRelative: true},
 		{Tool: "read_file", Category: "file_read", Arg: "config/.env.local", WorkspaceRelative: true},
@@ -53,6 +54,16 @@ func TestBuiltinDefaultRules_Go(t *testing.T) {
 		{"deny credentials path", PermissionRequest{Tool: "read_file", Category: "file_read", Arg: "aws-credentials.json"}, PermissionDeny},
 		{"deny id_rsa", PermissionRequest{Tool: "read_file", Category: "file_read", Arg: "id_rsa"}, PermissionDeny},
 		{"deny id_rsa.pub", PermissionRequest{Tool: "read_file", Category: "file_read", Arg: "id_rsa.pub"}, PermissionDeny},
+		{
+			name: "deny agent harness invocation",
+			req: PermissionRequest{
+				Tool:         "run_shell",
+				Category:     "shell",
+				Arg:          "buckley -p inspect",
+				CommandClass: CommandClassAgentHarness,
+			},
+			want: PermissionDeny,
+		},
 		{
 			name: "ask destructive rm outside workspace",
 			req:  PermissionRequest{Tool: "run_shell", Category: "shell", Arg: "rm -rf /", WorkspaceRelative: false},

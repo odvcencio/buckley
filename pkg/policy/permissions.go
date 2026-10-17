@@ -51,6 +51,7 @@ type PermissionRule struct {
 	ID                   string           `json:"id,omitempty" yaml:"id,omitempty"`
 	Tool                 string           `json:"tool" yaml:"tool"`
 	ArgPattern           string           `json:"arg_pattern" yaml:"arg_pattern"`
+	CommandClass         string           `json:"command_class,omitempty" yaml:"command_class,omitempty"`
 	Action               PermissionAction `json:"action" yaml:"action"`
 	OutsideWorkspaceOnly bool             `json:"outside_workspace_only,omitempty" yaml:"outside_workspace_only,omitempty"`
 }
@@ -68,6 +69,7 @@ type PermissionRequest struct {
 	Tool              string // tool name, e.g. "run_shell", "read_file"
 	Category          string // "shell", "file_read", "file_write", ...
 	Arg               string // command string or path matched against ArgPattern
+	CommandClass      string // deterministic shell classification, when available
 	WorkspaceRelative bool   // true when Arg resolves inside the workspace root
 	Posture           string // active posture name, e.g. "interactive", "unattended"
 }
@@ -139,6 +141,9 @@ func ruleMatches(req PermissionRequest, rule PermissionRule) bool {
 		return false
 	}
 	if rule.OutsideWorkspaceOnly && req.WorkspaceRelative {
+		return false
+	}
+	if rule.CommandClass != "" && !strings.EqualFold(rule.CommandClass, req.CommandClass) {
 		return false
 	}
 	if strings.TrimSpace(rule.ArgPattern) == "" {
