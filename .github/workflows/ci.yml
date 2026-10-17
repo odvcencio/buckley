@@ -15,6 +15,36 @@ permissions:
   contents: read
 
 jobs:
+  build:
+    name: Build (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build Buckley
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o /dev/null ./cmd/buckley
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet Go packages
+        env:
+          CGO_ENABLED: "0"
+        run: go vet ./pkg/... ./cmd/buckley
+
   test:
     name: Test
     runs-on: ubuntu-latest

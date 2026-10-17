@@ -119,6 +119,9 @@ func newOneshotToolInvoker(backend, commandName, modelID string, cfg *config.Con
 		if err != nil {
 			return nil, fmt.Errorf("resolve oneshot model route: %w", err)
 		}
+		if route.ProviderID == "codex" {
+			return newCodexRouteToolInvoker(route, modelID, cfg)
+		}
 		providerID := route.ProviderID
 		pricing, pricingUnknown := resolveOneshotToolPricing(route, mgr)
 		requestProfile, diagnostic := resolveOneshotRequestProfileWithDiagnostic(commandName, cfg, routeReasoningChecker{manager: mgr, route: route}, route.SelectedModel)
@@ -149,6 +152,39 @@ func newOneshotToolInvoker(backend, commandName, modelID string, cfg *config.Con
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", backend)
 	}
+}
+
+// newCodexRouteToolInvoker serves a codex-provider route with the Codex CLI
+// invoker. The provider answers chat turns with free text and never returns
+// tool calls, so a DefaultInvoker over it can only end in "model did not call
+// the tool". The CLI invoker constrains the reply with --output-schema, the
+// same path the explicit codex backend uses, and keeps the route's model, the
+// provider's configured command, and the configured reasoning effort.
+func newCodexRouteToolInvoker(route model.ModelRoute, requestedModel string, cfg *config.Config) (oneshot.ToolInvoker, error) {
+	selected := route.SelectedModel
+	if strings.TrimSpace(selected) == "" {
+		selected = requestedModel
+	}
+	cliModel := normalizeCLIModelID(selected, oneshot.CLIBackendCodex)
+	if cliModel == "default" {
+		cliModel = ""
+	}
+
+	command := ""
+	if cfg != nil {
+		command = strings.TrimSpace(cfg.Providers.Codex.Command)
+	}
+	if command == "" {
+		command = cliCommandForBackend(oneshot.CLIBackendCodex)
+	}
+
+	return oneshot.NewCLIInvoker(oneshot.CLIInvokerConfig{
+		Backend:         oneshot.CLIBackendCodex,
+		Command:         command,
+		Model:           cliModel,
+		ReasoningEffort: cliReasoningEffort(cfg, oneshot.CLIBackendCodex),
+		ExtraArgs:       []string{"--sandbox", "read-only", "--ephemeral", "-c", `approval_policy="never"`},
+	})
 }
 
 func resolveOneshotToolPricing(route model.ModelRoute, mgr *model.Manager) (transparency.ModelPricing, bool) {

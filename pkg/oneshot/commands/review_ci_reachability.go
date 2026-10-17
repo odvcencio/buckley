@@ -21,7 +21,7 @@ const maxPRGoTestFiles = 32
 
 const (
 	buckleyCITestScriptSHA256 = "689e4d66670f6091f441e9f31095219f602a81c99d79c2662a3f7d76c54a5d74"
-	buckleyCIWorkflowSHA256   = "e1556b2688783110439606468f2f7ecf2149292d39040dc3c0ffd4b2916e7859"
+	buckleyCIWorkflowSHA256   = "23adb2df663ed34b063916b436a4fb5e681f08a6eae073651bf305cb89fd2754"
 )
 
 type requiredCheckLink struct {
