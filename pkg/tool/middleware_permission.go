@@ -209,6 +209,8 @@ func permissionApprovalScope(ctx *ExecutionContext, req policy.PermissionRequest
 		dec.Rule.ID,
 		dec.Rule.Tool,
 		dec.Rule.ArgPattern,
+		dec.Rule.CommandClass,
+		req.CommandClass,
 		strconv.FormatBool(dec.Rule.OutsideWorkspaceOnly),
 		strconv.FormatBool(req.WorkspaceRelative),
 		exactArg,
@@ -240,6 +242,7 @@ func derivePermissionRequest(toolName string, params map[string]any, workspaceRo
 			Tool:              toolName,
 			Category:          "shell",
 			Arg:               cmd,
+			CommandClass:      policy.ClassifyShellCommand(rawCmd),
 			WorkspaceRelative: isShellCommandWorkspaceRelative(rawCmd, workspaceRoot),
 			Posture:           posture,
 		}, true
