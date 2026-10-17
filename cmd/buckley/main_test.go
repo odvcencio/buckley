@@ -352,13 +352,29 @@ func TestRemoveImplicitExternalCLIModelTools(t *testing.T) {
 	t.Run("api one-shot stays on its model transport", func(t *testing.T) {
 		registry := tool.NewRegistry()
 		removeImplicitExternalCLIModelTools(registry, nil, nil)
-		for _, name := range []string{"invoke_claude", "invoke_codex"} {
+		for _, name := range []string{"invoke_claude", "invoke_codex", "invoke_buckley"} {
 			if _, ok := registry.Get(name); ok {
 				t.Fatalf("%s remains available without an explicit opt-in", name)
 			}
 		}
+		if _, ok := registry.Get("spawn_subagent"); !ok {
+			t.Fatal("governed subagent delegation was removed")
+		}
+	})
+
+	t.Run("agent profile can opt into nested Buckley", func(t *testing.T) {
+		registry := tool.NewRegistry()
+		profile := &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{
+			Allow: []string{"invoke_buckley"},
+		}}}
+		removeImplicitExternalCLIModelTools(registry, profile, nil)
 		if _, ok := registry.Get("invoke_buckley"); !ok {
-			t.Fatal("API-native Buckley delegation was removed")
+			t.Fatal("explicitly allowed invoke_buckley was removed")
+		}
+		for _, name := range []string{"invoke_codex", "invoke_claude"} {
+			if _, ok := registry.Get(name); ok {
+				t.Fatalf("unrequested %s remains available", name)
+			}
 		}
 	})
 
@@ -377,13 +393,20 @@ func TestRemoveImplicitExternalCLIModelTools(t *testing.T) {
 	})
 
 	t.Run("child contract allowlist can opt in", func(t *testing.T) {
-		registry := tool.NewRegistry()
-		removeImplicitExternalCLIModelTools(registry, nil, []string{"invoke_codex"})
-		if _, ok := registry.Get("invoke_codex"); !ok {
-			t.Fatal("explicitly allowed invoke_codex was removed")
-		}
-		if _, ok := registry.Get("invoke_claude"); ok {
-			t.Fatal("unrequested invoke_claude remains available")
+		for _, allowed := range []string{"invoke_codex", "invoke_buckley"} {
+			registry := tool.NewRegistry()
+			removeImplicitExternalCLIModelTools(registry, nil, []string{allowed})
+			if _, ok := registry.Get(allowed); !ok {
+				t.Fatalf("explicitly allowed %s was removed", allowed)
+			}
+			for _, name := range []string{"invoke_codex", "invoke_claude", "invoke_buckley"} {
+				if name == allowed {
+					continue
+				}
+				if _, ok := registry.Get(name); ok {
+					t.Fatalf("unrequested %s remains available", name)
+				}
+			}
 		}
 	})
 }

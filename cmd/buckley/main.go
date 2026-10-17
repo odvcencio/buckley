@@ -2816,9 +2816,9 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 }
 
 // removeImplicitExternalCLIModelTools keeps an API one-shot run on its selected
-// model transport. Legacy CLI delegation changes model backends, so it is not
-// part of the implicit full tool pool. An agent profile or child contract can
-// still opt in by naming the exact tool in its allowlist.
+// model transport. Nested CLI delegation can lose the parent's selected model,
+// so it is excluded from the implicit full tool pool. An agent profile or child
+// contract can still opt in by naming the exact tool in its allowlist.
 func removeImplicitExternalCLIModelTools(registry *tool.Registry, profile *agentspec.RuntimeProfile, explicitAllowed []string) {
 	if registry == nil {
 		return
@@ -2832,7 +2832,7 @@ func removeImplicitExternalCLIModelTools(registry *tool.Registry, profile *agent
 			explicit[name] = struct{}{}
 		}
 	}
-	for _, name := range []string{"invoke_claude", "invoke_codex"} {
+	for _, name := range []string{"invoke_claude", "invoke_codex", "invoke_buckley"} {
 		if _, allowed := explicit[name]; !allowed {
 			registry.Remove(name)
 		}
