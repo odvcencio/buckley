@@ -17,6 +17,13 @@ import (
 	"m31labs.dev/buckley/pkg/runledger"
 )
 
+func withCompletedRunCacheLimits(entries int, bytes int64) CoordinatorOption {
+	return func(c *Coordinator) {
+		c.completedCacheEntries = entries
+		c.completedCacheLimit = bytes
+	}
+}
+
 func TestCoordinator_CompletedCachePreservesColdResultsAndReplay(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -51,7 +58,7 @@ func TestCoordinator_CompletedCachePreservesColdResultsAndReplay(t *testing.T) {
 				return req.ID + strings.Repeat("r", 64*1024-len(req.ID)), nil
 			}), 2)
 			t.Cleanup(func() { _ = manager.Close() })
-			coordinator := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(store), WithCompletedRunCacheLimits(test.entries, test.bytes))
+			coordinator := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(store), withCompletedRunCacheLimits(test.entries, test.bytes))
 			active, err := coordinator.Spawn(ctx, agentcoord.TaskSpec{RunID: "active", ParentSessionID: "reports", Agent: "active", Task: "keep working"})
 			if err != nil {
 				t.Fatal(err)
@@ -192,7 +199,7 @@ func TestCoordinator_CompletedCacheConcurrentWaits(t *testing.T) {
 		}
 	}), 2)
 	t.Cleanup(func() { _ = manager.Close() })
-	coordinator := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(store), WithCompletedRunCacheLimits(1, 1024))
+	coordinator := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(store), withCompletedRunCacheLimits(1, 1024))
 	for index := 0; index < 16; index++ {
 		run, err := coordinator.Spawn(ctx, agentcoord.TaskSpec{RunID: fmt.Sprintf("wait-%02d", index), ParentSessionID: "concurrent", Task: "finish during concurrent wait"})
 		if err != nil {
@@ -227,7 +234,7 @@ func TestCoordinator_CompletedCacheLeavesLocalReportsAvailable(t *testing.T) {
 	payload := strings.Repeat("local report", 1024)
 	manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) { return payload, nil }), 1)
 	t.Cleanup(func() { _ = manager.Close() })
-	coordinator := NewCoordinator(manager, WithCompletedRunCacheLimits(1, 1))
+	coordinator := NewCoordinator(manager, withCompletedRunCacheLimits(1, 1))
 	for index := 0; index < 3; index++ {
 		run, err := coordinator.Spawn(context.Background(), agentcoord.TaskSpec{RunID: fmt.Sprintf("local-%d", index), Task: "retain without an archive"})
 		if err != nil {
@@ -285,7 +292,7 @@ func TestCoordinator_CompletedCacheRetainsUnpersistedReports(t *testing.T) {
 				return strings.Repeat("unpersisted output", 1024), nil
 			}), 1)
 			t.Cleanup(func() { _ = manager.Close() })
-			coordinator := NewCoordinator(manager, WithRunLedger(reportLedger), WithEvidence(reportStore), WithCompletedRunCacheLimits(1, 1024))
+			coordinator := NewCoordinator(manager, WithRunLedger(reportLedger), WithEvidence(reportStore), withCompletedRunCacheLimits(1, 1024))
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			for index := 0; index < 6; index++ {

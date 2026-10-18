@@ -10,20 +10,6 @@ type completedRunCacheEntry struct {
 	bytes int64
 }
 
-// WithCompletedRunCacheLimits bounds local copies of durably stored reports.
-// Nonpositive limits use the defaults. Active workers retain their snapshots
-// until evidence publication and execution cleanup finish.
-func WithCompletedRunCacheLimits(entries int, bytes int64) CoordinatorOption {
-	return func(c *Coordinator) {
-		if entries > 0 {
-			c.completedCacheEntries = entries
-		}
-		if bytes > 0 {
-			c.completedCacheLimit = bytes
-		}
-	}
-}
-
 func (c *Coordinator) cacheCompletedRun(snapshot Snapshot) {
 	c.mu.Lock()
 	c.completedCache = append(c.completedCache, completedRunCacheEntry{id: snapshot.ID, bytes: int64(len(snapshot.Output))})

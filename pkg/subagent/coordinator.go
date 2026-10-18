@@ -2412,16 +2412,6 @@ func (c *Coordinator) addEvidence(runID string, ids ...string) {
 	}
 }
 
-func (c *Coordinator) evidenceRefs(runID string) []string {
-	if c == nil {
-		return nil
-	}
-	c.mu.RLock()
-	refs := append([]string(nil), c.evidenceByRun[runID]...)
-	c.mu.RUnlock()
-	return refs
-}
-
 func (c *Coordinator) noteDurabilityError(runID string, err error) {
 	if c == nil || err == nil {
 		return
