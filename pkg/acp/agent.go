@@ -134,8 +134,24 @@ func (a *Agent) ClientCapabilities() ClientCapabilities {
 
 // Serve starts the agent on the given reader/writer (typically stdin/stdout).
 // It blocks until the context is cancelled or an error occurs.
+// Cancellation closes reader when it implements io.Closer to unblock reads.
+// Shutdown closes writer when it implements io.Closer to unblock writes.
+// Pending requests are cancelled and joined before Serve returns.
 func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
 	a.transport = NewTransport(reader, writer)
+	requestCtx, cancelRequests := context.WithCancel(ctx)
+	var requests sync.WaitGroup
+	defer func() {
+		cancelRequests()
+		if closer, ok := writer.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		requests.Wait()
+	}()
+	if closer, ok := reader.(io.Closer); ok {
+		stopRead := context.AfterFunc(ctx, func() { _ = closer.Close() })
+		defer stopRead()
+	}
 
 	for {
 		select {
@@ -145,6 +161,9 @@ func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) e
 		}
 
 		msg, err := a.transport.ReadMessage()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err == io.EOF {
 			return nil
 		}
@@ -171,7 +190,11 @@ func (a *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) e
 		}
 
 		// Handle in goroutine to allow concurrent requests
-		go a.handleRequest(ctx, req)
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			a.handleRequest(requestCtx, req)
+		}()
 	}
 }
 

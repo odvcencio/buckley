@@ -118,10 +118,7 @@ func runACPCommand(args []string) error {
 	// is reading messages, well after this assignment completes.
 	var agent *acp.Agent
 	promptHandler, closeACPSessions := makePromptHandler(cfg, mgr, store, projectContext, cwd, logf, &agent, lifecycleObserver)
-	// S5: every session that spawned its own MCP servers (via session/new's
-	// mcpServers) tears them down when this ACP connection ends -- Buckley
-	// does not implement session/close, so process/connection teardown is
-	// the only "session end" signal available.
+	// Release session tools and MCP servers after Serve has drained requests.
 	defer closeACPSessions()
 
 	agent = acp.NewAgent("Buckley", version, acp.AgentHandlers{
@@ -207,16 +204,8 @@ func runACPCommand(args []string) error {
 	})
 
 	// Set up signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		logf("received shutdown signal")
-		cancel()
-	}()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 
 	logf("serving on stdio")
 
@@ -324,12 +313,17 @@ func makePromptHandler(
 		sessionsMu.Lock()
 		defer sessionsMu.Unlock()
 		for id, state := range sessions {
-			if state == nil || state.mcpManager == nil {
-				continue
+			if state.registry != nil {
+				if err := state.registry.Close(); err != nil {
+					logf("tools: session %s: close error: %v", id, err)
+				}
 			}
-			if err := state.mcpManager.Close(); err != nil {
-				logf("mcp: session %s: close error: %v", id, err)
+			if state.mcpManager != nil {
+				if err := state.mcpManager.Close(); err != nil {
+					logf("mcp: session %s: close error: %v", id, err)
+				}
 			}
+			delete(sessions, id)
 		}
 	}
 
