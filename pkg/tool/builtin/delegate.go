@@ -1126,6 +1126,8 @@ func (r *buckleySubagentRunner) runCaptured(ctx context.Context, request subagen
 		defer mailbox.Close()
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
+	cleanupProcess := configureSubagentCancellation(cmd)
+	defer cleanupProcess()
 	cmd.Dir = r.workDir
 	cmd.Env = replaceEnvironmentValue(GetDelegationGuard().PrepareChildEnv(), subagent.ChildContractEnv, contract)
 	if mailbox != nil {
@@ -1300,7 +1302,10 @@ func relaySubagentCommands(ctx context.Context, mailbox *subagent.FileMailbox, c
 			return
 		case <-stop:
 			return
-		case delivery := <-commands:
+		case delivery, ok := <-commands:
+			if !ok {
+				return
+			}
 			delivery.Acknowledge(mailbox.Append(delivery.Message))
 		}
 	}

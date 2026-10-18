@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+func configureSubagentCancellation(command *exec.Cmd) func() {
+	configureCommandCancellation(command)
+	return func() {}
+}
+
 func configureCommandCancellation(command *exec.Cmd) {
 	command.Cancel = func() error {
 		if command.Process == nil {

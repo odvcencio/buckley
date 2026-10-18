@@ -456,6 +456,8 @@ func executeOneShotWithStepCapAndOutputSchema(prompt string, cfg *config.Config,
 
 func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, planStore orchestrator.PlanStore, agentProfile *agentspec.RuntimeProfile, modelOverride string, allowedTools []string, codeMode bool, limits acpLoopLimits, outputSchema string) int {
 	_ = planStore
+	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	stopReason := ""
 	unverifiedReason := ""
 	previousOnStop := limits.OnStop
@@ -523,7 +525,26 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	conv := projectconversation.New("oneshot")
 	skillState := skill.NewRuntimeState(conv.AddSystemMessage)
 
+	var codeRuntime *codeModeRuntime
+	var codeModeFailure error
 	registry := tool.NewRegistry()
+	defer func() {
+		// Workers must finish publishing evidence before its backing store closes.
+		if err := registry.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: closing one-shot tools: %v\n", err)
+		}
+		if codeRuntime != nil {
+			var closeErr error
+			if codeModeFailure != nil {
+				closeErr = codeRuntime.Fail(codeModeFailure)
+			} else {
+				closeErr = codeRuntime.Close()
+			}
+			if closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", closeErr)
+			}
+		}
+	}()
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
@@ -597,8 +618,6 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	}
 	autoCodeMode := limits.SourceScope == nil && protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
 	enableCodeMode := codeMode || autoCodeMode
-	var codeRuntime *codeModeRuntime
-	var codeModeFailure error
 	if enableCodeMode {
 		codeRuntime, err = openCodeModeRuntime(cwd)
 		if err != nil {
@@ -610,17 +629,6 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 				return 1
 			}
 		} else {
-			defer func() {
-				var closeErr error
-				if codeModeFailure != nil {
-					closeErr = codeRuntime.Fail(codeModeFailure)
-				} else {
-					closeErr = codeRuntime.Close()
-				}
-				if closeErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: closing code mode: %v\n", closeErr)
-				}
-			}()
 			codeTool, toolErr := codeRuntime.Tool("oneshot")
 			if toolErr != nil {
 				codeModeFailure = toolErr
@@ -707,7 +715,6 @@ func executeOneShotWithLimitsAndOutputSchema(prompt string, cfg *config.Config, 
 	conv.AddSystemMessage(systemPrompt)
 	conv.AddUserMessage(prompt)
 
-	runCtx := context.Background()
 	var cancel context.CancelFunc
 	if limits.MaxElapsedSeconds > 0 {
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
