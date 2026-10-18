@@ -230,6 +230,48 @@ type Manager struct {
 	observer          LifecycleObserver
 	heartbeat         HeartbeatObserver
 	heartbeatInterval time.Duration
+	maxRetainedRuns   int
+	onRunDone         func()
+}
+
+var ErrRunNotFound = errors.New("subagent not found")
+
+var ErrReportCacheFull = errors.New("subagent report cache is full; retained reports must be persisted before spawning more workers")
+
+func (m *Manager) reportCapacityError() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.reportCapacityErrorLocked()
+}
+
+func (m *Manager) reportCapacityErrorLocked() error {
+	if m.maxRetainedRuns > 0 && len(m.runs) >= m.maxRetainedRuns {
+		return ErrReportCacheFull
+	}
+	return nil
+}
+
+func (m *Manager) configureCompletedRetention(limit int, cleanup func()) {
+	m.mu.Lock()
+	m.maxRetainedRuns = limit + m.maxConcurrent
+	m.onRunDone = cleanup
+	m.mu.Unlock()
+}
+
+func (m *Manager) evictCompleted(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.runs[id]
+	if !ok {
+		return true
+	}
+	select {
+	case <-current.done:
+		delete(m.runs, id)
+		return true
+	default:
+		return false
+	}
 }
 
 func NewManager(runner Runner, maxConcurrent int) *Manager {
@@ -414,6 +456,10 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		m.mu.Unlock()
 		return Snapshot{}, fmt.Errorf("subagent concurrency limit reached: %d", m.maxConcurrent)
 	}
+	if err := m.reportCapacityErrorLocked(); err != nil {
+		m.mu.Unlock()
+		return Snapshot{}, err
+	}
 	id := strings.TrimSpace(opts.ID)
 	if id == "" {
 		id = ulid.Make().String()
@@ -514,7 +560,15 @@ func minPositiveInt(values ...int) int {
 
 func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	defer m.wg.Done()
-	defer close(current.done)
+	defer func() {
+		close(current.done)
+		m.mu.RLock()
+		cleanup := m.onRunDone
+		m.mu.RUnlock()
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
 	defer current.cancel()
 
 	started := func(pid int) {
@@ -811,13 +865,15 @@ func (m *Manager) Wait(ctx context.Context, id string) (Snapshot, error) {
 	current, ok := m.runs[strings.TrimSpace(id)]
 	m.mu.RUnlock()
 	if !ok {
-		return Snapshot{}, fmt.Errorf("subagent not found: %s", strings.TrimSpace(id))
+		return Snapshot{}, fmt.Errorf("%w: %s", ErrRunNotFound, strings.TrimSpace(id))
 	}
 	select {
 	case <-ctx.Done():
 		return Snapshot{}, ctx.Err()
 	case <-current.done:
-		snapshot, _ := m.Status(id)
+		m.mu.RLock()
+		snapshot := cloneSnapshot(current.snapshot)
+		m.mu.RUnlock()
 		return snapshot, nil
 	}
 }
@@ -869,7 +925,9 @@ func (m *Manager) Close() error {
 func (m *Manager) activeLocked() int {
 	active := 0
 	for _, current := range m.runs {
-		if current.snapshot.State == StateRunning {
+		select {
+		case <-current.done:
+		default:
 			active++
 		}
 	}

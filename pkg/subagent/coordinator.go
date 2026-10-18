@@ -150,19 +150,23 @@ type Coordinator struct {
 	policy      AdmissionPolicy
 	adapter     string
 
-	mu                sync.RWMutex
-	runs              map[string]agentcoord.AgentTaskSpec
-	mailboxes         map[string][]agentcoord.AgentMessage
-	fallbackClaims    map[string]string
-	claimsByRun       map[string]map[string]struct{}
-	evidenceByRun     map[string][]string
-	durabilityError   map[string]string
-	ownedAttempts     map[string]agentcoord.AttachmentLease
-	mailboxLimit      int
-	attachmentLease   time.Duration
-	heartbeatInterval time.Duration
-	configurationErr  error
-	now               func() time.Time
+	mu                    sync.RWMutex
+	runs                  map[string]agentcoord.AgentTaskSpec
+	mailboxes             map[string][]agentcoord.AgentMessage
+	fallbackClaims        map[string]string
+	claimsByRun           map[string]map[string]struct{}
+	evidenceByRun         map[string][]string
+	durabilityError       map[string]string
+	ownedAttempts         map[string]agentcoord.AttachmentLease
+	mailboxLimit          int
+	attachmentLease       time.Duration
+	heartbeatInterval     time.Duration
+	configurationErr      error
+	now                   func() time.Time
+	completedCache        []completedRunCacheEntry
+	completedCacheBytes   int64
+	completedCacheEntries int
+	completedCacheLimit   int64
 }
 
 var _ agentcoord.AgentCoordinator = (*Coordinator)(nil)
@@ -172,19 +176,21 @@ var _ agentcoord.AgentCoordinator = (*Coordinator)(nil)
 // report that no live adapter is available.
 func NewCoordinator(manager *Manager, opts ...CoordinatorOption) *Coordinator {
 	c := &Coordinator{
-		manager:           manager,
-		adapter:           "local-process",
-		runs:              make(map[string]agentcoord.AgentTaskSpec),
-		mailboxes:         make(map[string][]agentcoord.AgentMessage),
-		fallbackClaims:    make(map[string]string),
-		claimsByRun:       make(map[string]map[string]struct{}),
-		evidenceByRun:     make(map[string][]string),
-		durabilityError:   make(map[string]string),
-		ownedAttempts:     make(map[string]agentcoord.AttachmentLease),
-		mailboxLimit:      defaultMailboxLimit,
-		attachmentLease:   defaultAttachmentLease,
-		heartbeatInterval: DefaultAttachmentHeartbeatInterval,
-		now:               func() time.Time { return time.Now().UTC() },
+		manager:               manager,
+		adapter:               "local-process",
+		runs:                  make(map[string]agentcoord.AgentTaskSpec),
+		mailboxes:             make(map[string][]agentcoord.AgentMessage),
+		fallbackClaims:        make(map[string]string),
+		claimsByRun:           make(map[string]map[string]struct{}),
+		evidenceByRun:         make(map[string][]string),
+		durabilityError:       make(map[string]string),
+		ownedAttempts:         make(map[string]agentcoord.AttachmentLease),
+		mailboxLimit:          defaultMailboxLimit,
+		attachmentLease:       defaultAttachmentLease,
+		heartbeatInterval:     DefaultAttachmentHeartbeatInterval,
+		now:                   func() time.Time { return time.Now().UTC() },
+		completedCacheEntries: DefaultCompletedRunCacheEntries,
+		completedCacheLimit:   DefaultCompletedRunCacheBytes,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -227,6 +233,9 @@ func NewCoordinator(manager *Manager, opts ...CoordinatorOption) *Coordinator {
 	if manager != nil {
 		manager.SetLifecycleObserver(c.observeLifecycle)
 		manager.SetHeartbeatObserver(c.heartbeatAttachment, c.heartbeatInterval)
+		if !nilPort(c.ledger) {
+			manager.configureCompletedRetention(c.completedCacheEntries, c.trimCompletedCache)
+		}
 	}
 	return c
 }
@@ -265,6 +274,7 @@ func (c *Coordinator) Spawn(ctx context.Context, spec agentcoord.AgentTaskSpec) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	c.trimCompletedCache()
 	if c.ledger != nil && c.configurationErr != nil {
 		return agentcoord.AgentRun{}, fmt.Errorf("subagent coordinator attachment timing: %w", c.configurationErr)
 	}
@@ -302,7 +312,7 @@ func (c *Coordinator) Spawn(ctx context.Context, spec agentcoord.AgentTaskSpec) 
 			c.unregisterRun(spec.RunID)
 			return agentcoord.AgentRun{}, fmt.Errorf("spawn local subagent: %w", err)
 		}
-		return c.agentRunFromSnapshot(snapshot), nil
+		return c.agentRunFromSnapshot(ctx, snapshot)
 	}
 
 	if err := c.requireDurableKernel(); err != nil {
@@ -333,12 +343,20 @@ func (c *Coordinator) Spawn(ctx context.Context, spec agentcoord.AgentTaskSpec) 
 	if err != nil {
 		return agentcoord.AgentRun{}, fmt.Errorf("ensure durable subagent run: %w", err)
 	}
+	if durableRun.EndedAt != nil || stateFromLedger(durableRun.Status).Terminal() {
+		restored, err := c.taskSpecForRun(ctx, spec.RunID)
+		if err != nil {
+			return agentcoord.AgentRun{}, err
+		}
+		return c.agentRunFromLedger(durableRun, restored, true), nil
+	}
+	if err := c.manager.reportCapacityError(); err != nil {
+		return agentcoord.AgentRun{}, err
+	}
 	if err := c.registerRun(logicalSpec); err != nil {
 		return agentcoord.AgentRun{}, err
 	}
-	if durableRun.EndedAt != nil || stateFromLedger(durableRun.Status).Terminal() {
-		return c.agentRunFromLedger(durableRun, true), nil
-	}
+	c.addEvidence(logicalSpec.RunID, taskEvidence...)
 
 	lease, owned, err := c.ensureSpawnAttachment(ctx, spec)
 	if err != nil {
@@ -382,19 +400,26 @@ func (c *Coordinator) Spawn(ctx context.Context, spec agentcoord.AgentTaskSpec) 
 		if snapshot.AttemptID != spec.AttemptID || snapshot.LeaseGeneration != spec.LeaseGeneration {
 			return agentcoord.AgentRun{}, fmt.Errorf("subagent run %s is locally attached under a different generation", spec.RunID)
 		}
-		return c.agentRunFromSnapshot(snapshot), nil
+		return c.agentRunFromSnapshot(ctx, snapshot)
 	}
 	if !owned {
-		return c.agentRunFromLedger(durableRun, true), nil
+		c.mu.Lock()
+		c.dropCachedRunLocked(spec.RunID)
+		c.mu.Unlock()
+		return c.agentRunFromLedger(durableRun, spec, true), nil
 	}
 	if _, err := c.renewLaunchAttachment(ctx, lease); err != nil {
 		return agentcoord.AgentRun{}, err
 	}
 	snapshot, err := c.manager.SpawnWithOptions(spawnOptionsFromTask(spec))
 	if err != nil {
+		c.mu.Lock()
+		c.dropCachedRunLocked(spec.RunID)
+		c.mu.Unlock()
+		c.forgetOwnedAttempt(spec.RunID, spec.AttemptID, spec.LeaseGeneration)
 		return agentcoord.AgentRun{}, fmt.Errorf("spawn local subagent: %w", err)
 	}
-	return c.agentRunFromSnapshot(snapshot), nil
+	return c.agentRunFromSnapshot(ctx, snapshot)
 }
 
 func (c *Coordinator) renewLaunchAttachment(ctx context.Context, lease agentcoord.AttachmentLease) (agentcoord.AttachmentLease, error) {
@@ -452,7 +477,6 @@ func (c *Coordinator) persistTaskContract(ctx context.Context, spec agentcoord.A
 	if err := c.evidence.Pin(ctx, obj.ID, "run:"+logical.RunID); err != nil {
 		return agentcoord.AgentTaskSpec{}, nil, "", fmt.Errorf("pin subagent task contract: %w", err)
 	}
-	c.addEvidence(logical.RunID, obj.ID)
 	return logical, []string{obj.ID}, digest, nil
 }
 
@@ -778,7 +802,7 @@ func (c *Coordinator) List(ctx context.Context, filter agentcoord.AgentRunFilter
 		return nil, fmt.Errorf("subagent coordinator durable ledger is unavailable")
 	}
 	if c.ledger == nil {
-		return c.listLocal(filter), nil
+		return c.listLocal(ctx, filter)
 	}
 	runs, err := c.ledger.ListRuns(ctx, runledger.RunQuery{
 		SessionID:   firstNonEmpty(strings.TrimSpace(filter.SessionID), strings.TrimSpace(filter.ParentSessionID)),
@@ -794,27 +818,35 @@ func (c *Coordinator) List(ctx context.Context, filter agentcoord.AgentRunFilter
 		if durable.Backend != c.adapter {
 			continue
 		}
-		if _, err := c.taskSpecForRun(ctx, durable.RunID); err != nil {
+		spec, err := c.taskSpecForRun(ctx, durable.RunID)
+		if err != nil {
 			return nil, err
 		}
 		if snapshot, ok := c.localSnapshot(durable.RunID); ok {
-			out = append(out, c.agentRunFromSnapshot(snapshot))
+			run, err := c.agentRunFromSnapshot(ctx, snapshot)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, run)
 			continue
 		}
-		out = append(out, c.agentRunFromLedger(durable, true))
+		out = append(out, c.agentRunFromLedger(durable, spec, true))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
 	return out, nil
 }
 
-func (c *Coordinator) listLocal(filter agentcoord.AgentRunFilter) []agentcoord.AgentRun {
+func (c *Coordinator) listLocal(ctx context.Context, filter agentcoord.AgentRunFilter) ([]agentcoord.AgentRun, error) {
 	if c == nil || c.manager == nil {
-		return nil
+		return nil, nil
 	}
 	snapshots := c.manager.List()
 	out := make([]agentcoord.AgentRun, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		run := c.agentRunFromSnapshot(snapshot)
+		run, err := c.agentRunFromSnapshot(ctx, snapshot)
+		if err != nil {
+			return nil, err
+		}
 		if !matchesRunFilter(run, filter) {
 			continue
 		}
@@ -823,7 +855,7 @@ func (c *Coordinator) listLocal(filter agentcoord.AgentRunFilter) []agentcoord.A
 			break
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Status returns a current process snapshot when attached, otherwise a
@@ -841,8 +873,12 @@ func (c *Coordinator) Status(ctx context.Context, id string) (agentcoord.AgentRu
 		return agentcoord.AgentRun{}, fmt.Errorf("subagent run id is required")
 	}
 	if snapshot, ok := c.localSnapshot(id); ok {
-		return c.agentRunFromSnapshot(snapshot), nil
+		return c.agentRunFromSnapshot(ctx, snapshot)
 	}
+	return c.storedRun(ctx, id)
+}
+
+func (c *Coordinator) storedRun(ctx context.Context, id string) (agentcoord.AgentRun, error) {
 	if c.ledger == nil {
 		return agentcoord.AgentRun{}, fmt.Errorf("subagent not found: %s", id)
 	}
@@ -856,10 +892,11 @@ func (c *Coordinator) Status(ctx context.Context, id string) (agentcoord.AgentRu
 	if durable.Backend != c.adapter {
 		return agentcoord.AgentRun{}, fmt.Errorf("subagent not found: %s", id)
 	}
-	if _, err := c.taskSpecForRun(ctx, id); err != nil {
+	spec, err := c.taskSpecForRun(ctx, id)
+	if err != nil {
 		return agentcoord.AgentRun{}, err
 	}
-	return c.agentRunFromLedger(durable, true), nil
+	return c.agentRunFromLedger(durable, spec, true), nil
 }
 
 // Wait waits for an attached local worker. A run that survived a worker loss
@@ -873,12 +910,13 @@ func (c *Coordinator) Wait(ctx context.Context, id string) (agentcoord.AgentRun,
 	}
 	id = strings.TrimSpace(id)
 	if c.manager != nil {
-		if _, ok := c.manager.Status(id); ok {
-			snapshot, err := c.manager.Wait(ctx, id)
-			if err != nil {
-				return agentcoord.AgentRun{}, err
-			}
-			return c.agentRunFromSnapshot(snapshot), nil
+		snapshot, err := c.manager.Wait(ctx, id)
+		if err == nil {
+			c.trimCompletedCache()
+			return c.agentRunFromSnapshot(ctx, snapshot)
+		}
+		if !errors.Is(err, ErrRunNotFound) {
+			return agentcoord.AgentRun{}, err
 		}
 	}
 	run, err := c.Status(ctx, id)
@@ -1353,19 +1391,29 @@ func (c *Coordinator) Cancel(ctx context.Context, id, reason string) (agentcoord
 	id = strings.TrimSpace(id)
 	snapshot, err := c.manager.Cancel(id)
 	if err != nil {
-		if run, statusErr := c.Status(ctx, id); statusErr == nil && !run.State.Terminal() {
+		if run, statusErr := c.Status(ctx, id); statusErr == nil {
+			if run.State.Terminal() {
+				return run, nil
+			}
 			return run, fmt.Errorf("subagent run %s is durable but has no attached local worker; cannot cancel it", id)
 		}
 		return agentcoord.AgentRun{}, err
 	}
-	spec, _ := c.taskSpec(id)
+	spec, err := c.taskSpecForRun(ctx, id)
+	if err != nil {
+		return agentcoord.AgentRun{}, err
+	}
 	if err := c.append(ctx, spec, runledger.EventSubagentUpdated, map[string]any{
 		"state":  "cancellation_requested",
 		"reason": boundedCoordinatorText(reason, 512),
 	}, nil); err != nil {
-		return c.agentRunFromSnapshot(snapshot), err
+		run, projectionErr := c.agentRunFromSnapshot(ctx, snapshot)
+		if projectionErr != nil {
+			return run, projectionErr
+		}
+		return run, err
 	}
-	return c.agentRunFromSnapshot(snapshot), nil
+	return c.agentRunFromSnapshot(ctx, snapshot)
 }
 
 // Claim reserves workspace resources before a child begins mutable work. With
@@ -1392,6 +1440,10 @@ func (c *Coordinator) Claim(ctx context.Context, request agentcoord.AgentClaimRe
 	if err := c.requireKnownRun(ctx, request.RunID); err != nil {
 		return agentcoord.AgentClaimResult{}, err
 	}
+	spec, err := c.taskSpecForRun(ctx, request.RunID)
+	if err != nil {
+		return agentcoord.AgentClaimResult{}, err
+	}
 
 	if c.ledger != nil && nilPort(c.claims) {
 		return agentcoord.AgentClaimResult{}, fmt.Errorf("subagent coordinator durable claims require a claim journal")
@@ -1406,7 +1458,6 @@ func (c *Coordinator) Claim(ctx context.Context, request agentcoord.AgentClaimRe
 		return agentcoord.AgentClaimResult{}, err
 	}
 
-	spec, _ := c.taskSpec(request.RunID)
 	if err := c.append(ctx, spec, runledger.EventSubagentClaimed, map[string]any{
 		"resources": resources,
 	}, nil); err != nil {
@@ -1434,10 +1485,13 @@ func (c *Coordinator) Release(ctx context.Context, request agentcoord.AgentClaim
 	if err != nil {
 		return err
 	}
+	spec, err := c.taskSpecForRun(ctx, request.RunID)
+	if err != nil {
+		return err
+	}
 	if err := c.releaseClaims(ctx, request.RunID, resources, reason); err != nil {
 		return err
 	}
-	spec, _ := c.taskSpec(request.RunID)
 	if err := c.append(ctx, spec, runledger.EventSubagentReleased, map[string]any{
 		"resources": resources,
 		"reason":    boundedCoordinatorText(reason, 512),
@@ -1708,6 +1762,9 @@ func (c *Coordinator) observeLifecycle(snapshot Snapshot) {
 	c.mu.Lock()
 	delete(c.ownedAttempts, snapshot.ID)
 	c.mu.Unlock()
+	if c.ledger != nil && err == nil && c.durabilityErrorFor(snapshot.ID) == "" {
+		c.cacheCompletedRun(snapshot)
+	}
 }
 
 func (c *Coordinator) storeTerminalReport(ctx context.Context, spec agentcoord.AgentTaskSpec, snapshot Snapshot) ([]string, error) {
@@ -1800,7 +1857,10 @@ func (c *Coordinator) storeTerminalReport(ctx context.Context, spec agentcoord.A
 // take precedence, and completed execution does not promote incomplete or
 // nonconforming requested-schema output.
 func (c *Coordinator) terminalArtifact(spec agentcoord.AgentTaskSpec, snapshot Snapshot, raw artifactv1.EvidenceRef) (artifactv1.Artifact, error) {
-	run := c.agentRunFromSnapshot(snapshot)
+	run, err := c.agentRunFromSnapshot(context.Background(), snapshot)
+	if err != nil {
+		return artifactv1.Artifact{}, err
+	}
 	run.Task = spec
 	generated, err := artifactv1.FromSubagentRun(run)
 	if err != nil {
@@ -1867,9 +1927,12 @@ func (c *Coordinator) finishDurably(ctx context.Context, spec agentcoord.AgentTa
 		"error":   terminalError,
 	}
 	outcome := map[string]any{
-		"summary":       boundedCoordinatorText(snapshot.Output, 4096),
-		"error":         terminalError,
-		"evidence_refs": refs,
+		"summary":          boundedCoordinatorText(snapshot.Output, 4096),
+		"error":            terminalError,
+		"evidence_refs":    refs,
+		"attempt_id":       spec.AttemptID,
+		"lease_generation": spec.LeaseGeneration,
+		"pid":              snapshot.PID,
 	}
 	endedAt := snapshot.FinishedAt
 	if endedAt.IsZero() {
@@ -2115,14 +2178,7 @@ func (c *Coordinator) taskSpecForRun(ctx context.Context, runID string) (agentco
 			if restored.RunID != durable.RunID || restored.SessionID != durable.SessionID || logicalTaskDigest(restored) != contract.InputDigest {
 				return agentcoord.AgentTaskSpec{}, fmt.Errorf("durable task contract for run %s failed identity validation", runID)
 			}
-			if !nilPort(c.attachments) {
-				if lease, currentErr := c.attachments.Current(ctx, restored.SessionID, restored.RunID); currentErr == nil {
-					restored.AttemptID = lease.AttemptID
-					restored.LeaseGeneration = lease.LeaseGeneration
-				}
-			}
-			c.setTaskSpec(restored)
-			return restored, nil
+			return c.restoreAttempt(ctx, durable, restored), nil
 		}
 		if !errors.Is(contractErr, runledger.ErrNotFound) {
 			return agentcoord.AgentTaskSpec{}, fmt.Errorf("read durable run contract %s: %w", runID, contractErr)
@@ -2138,18 +2194,34 @@ func (c *Coordinator) taskSpecForRun(ctx context.Context, runID string) (agentco
 		Model:           durable.ModelID,
 		Budget:          budgetFromMap(durable.Budget),
 	}
-	if !nilPort(c.attachments) {
-		if lease, currentErr := c.attachments.Current(ctx, durable.SessionID, durable.RunID); currentErr == nil {
-			restored.AttemptID = lease.AttemptID
-			restored.LeaseGeneration = lease.LeaseGeneration
-		}
-	}
-	c.setTaskSpec(restored)
-	return restored, nil
+	return c.restoreAttempt(ctx, durable, restored), nil
 }
 
-func (c *Coordinator) agentRunFromSnapshot(snapshot Snapshot) agentcoord.AgentRun {
-	spec, ok := c.taskSpec(snapshot.ID)
+func (c *Coordinator) restoreAttempt(ctx context.Context, durable runledger.AgentRun, spec agentcoord.AgentTaskSpec) agentcoord.AgentTaskSpec {
+	spec.AttemptID = mapString(durable.Outcome, "attempt_id")
+	spec.LeaseGeneration = int64(mapInt(durable.Outcome, "lease_generation"))
+	if durable.EndedAt != nil {
+		return spec
+	}
+	if !nilPort(c.attachments) {
+		if lease, err := c.attachments.Current(ctx, durable.SessionID, durable.RunID); err == nil {
+			spec.AttemptID = lease.AttemptID
+			spec.LeaseGeneration = lease.LeaseGeneration
+		}
+	}
+	return spec
+}
+
+func (c *Coordinator) agentRunFromSnapshot(ctx context.Context, snapshot Snapshot) (agentcoord.AgentRun, error) {
+	c.mu.RLock()
+	spec, ok := c.runs[snapshot.ID]
+	refs := append([]string(nil), c.evidenceByRun[snapshot.ID]...)
+	durabilityErr := c.durabilityError[snapshot.ID]
+	c.mu.RUnlock()
+	if !ok && c.ledger != nil {
+		return c.storedRun(ctx, snapshot.ID)
+	}
+	spec.SourceScope = agentcoord.CloneSourceScope(spec.SourceScope)
 	if !ok {
 		spec = taskSpecFromSnapshot(snapshot)
 	}
@@ -2163,9 +2235,9 @@ func (c *Coordinator) agentRunFromSnapshot(snapshot Snapshot) agentcoord.AgentRu
 	result := agentcoord.AgentResult{
 		Summary:      boundedCoordinatorText(snapshot.Output, 4096),
 		Error:        terminalErrorProjection(snapshot.Error, nil),
-		EvidenceRefs: c.evidenceRefs(snapshot.ID),
+		EvidenceRefs: refs,
 	}
-	if durabilityErr := c.durabilityErrorFor(snapshot.ID); durabilityErr != "" {
+	if durabilityErr != "" {
 		state = agentcoord.AgentRunFailed
 		result.Error = firstNonEmpty(result.Error, durabilityErr)
 	}
@@ -2185,23 +2257,10 @@ func (c *Coordinator) agentRunFromSnapshot(snapshot Snapshot) agentcoord.AgentRu
 		Claims:          c.claimsFor(snapshot.ID),
 		MailboxCount:    c.mailboxCount(snapshot.ID),
 		Result:          result,
-	}
+	}, nil
 }
 
-func (c *Coordinator) agentRunFromLedger(durable runledger.AgentRun, unattached bool) agentcoord.AgentRun {
-	spec, ok := c.taskSpec(durable.RunID)
-	if !ok {
-		spec = agentcoord.AgentTaskSpec{
-			ID:              durable.TaskID,
-			SessionID:       durable.SessionID,
-			RunID:           durable.RunID,
-			ParentRunID:     durable.ParentRunID,
-			ParentSessionID: durable.SessionID,
-			Agent:           durable.AgentID,
-			Model:           durable.ModelID,
-			Budget:          budgetFromMap(durable.Budget),
-		}
-	}
+func (c *Coordinator) agentRunFromLedger(durable runledger.AgentRun, spec agentcoord.AgentTaskSpec, unattached bool) agentcoord.AgentRun {
 	state := stateFromLedger(durable.Status)
 	if unattached && (state == agentcoord.AgentRunQueued || state == agentcoord.AgentRunRunning) {
 		state = agentcoord.AgentRunResumable
@@ -2227,6 +2286,7 @@ func (c *Coordinator) agentRunFromLedger(durable runledger.AgentRun, unattached 
 		Task:            spec,
 		State:           state,
 		Adapter:         durable.Backend,
+		PID:             mapInt(durable.Outcome, "pid"),
 		StartedAt:       durable.StartedAt,
 		FinishedAt:      finishedAt,
 		AttemptID:       spec.AttemptID,
