@@ -101,7 +101,11 @@ func TestOneShot_CompletionClosesOutstandingWorkers(t *testing.T) {
 	code := -1
 	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			code = executeOneShotWithTaskIntent("Delegate the observation, then finish.", cfg, mgr, nil, nil, nil, nil, "openai_compatible/worker-test", []string{"spawn_subagent"}, false, agentloop.ReadOnlyIntent)
+			code = executeOneShot("Delegate the observation, then finish.", cfg, mgr, nil, nil, oneShotOptions{
+				ModelOverride: "openai_compatible/worker-test",
+				AllowedTools:  []string{"spawn_subagent"},
+				Limits:        acpLoopLimits{TaskIntent: agentloop.ReadOnlyIntent},
+			})
 		})
 	})
 	if code != 0 || requests.Load() != 2 {
@@ -130,7 +134,11 @@ func TestOneShot_SignalPreservesPartialOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		code := executeOneShotWithTaskIntent("Summarize the available evidence.", cfg, mgr, nil, nil, nil, nil, "openai_compatible/signal-test", []string{}, false, agentloop.ReadOnlyIntent)
+		code := executeOneShot("Summarize the available evidence.", cfg, mgr, nil, nil, oneShotOptions{
+			ModelOverride: "openai_compatible/signal-test",
+			AllowedTools:  []string{},
+			Limits:        acpLoopLimits{TaskIntent: agentloop.ReadOnlyIntent},
+		})
 		if code != 1 {
 			t.Fatalf("interrupted one-shot returned %d, want 1", code)
 		}

@@ -59,7 +59,7 @@ func TestOneShotArtifactRoute_NegotiatesSelectedRouteAndRetainsItThroughACP(t *t
 		t.Run(tc.name, func(t *testing.T) {
 			result := runOneShotArtifactRouteFixture(t, tc.selectedModel, tc.responseMode, artifactJSON, false)
 			if result.exitCode != 0 {
-				t.Fatalf("executeOneShotWithLimitsAndOutputSchema exit = %d, stdout=%q", result.exitCode, result.stdout)
+				t.Fatalf("executeOneShot exit = %d, stdout=%q", result.exitCode, result.stdout)
 			}
 			if !strings.Contains(result.stdout, artifactv1.SchemaVersion) {
 				t.Fatalf("one-shot output = %q, want rendered artifact JSON", result.stdout)
@@ -87,7 +87,7 @@ func TestOneShotArtifactRoute_NegotiatesSelectedRouteAndRetainsItThroughACP(t *t
 func TestOneShotArtifactRoute_DriftFailsBeforeProviderIO(t *testing.T) {
 	result := runOneShotArtifactRouteFixture(t, "selected-unknown", "direct_json", oneShotArtifactRouteJSON(t), true)
 	if result.exitCode != 1 {
-		t.Fatalf("executeOneShotWithLimitsAndOutputSchema exit = %d, want 1", result.exitCode)
+		t.Fatalf("executeOneShot exit = %d, want 1", result.exitCode)
 	}
 	if result.routeChecks != 2 {
 		t.Fatalf("routing hook calls = %d, want negotiation resolution plus route-locked dispatch check", result.routeChecks)
@@ -236,7 +236,11 @@ func runOneShotArtifactRouteFixture(t *testing.T, selectedModel, responseMode, a
 	t.Cleanup(func() { quietMode = previousQuiet })
 	result := oneShotArtifactRouteFixtureResult{exitCode: -1}
 	result.stdout = captureStdout(t, func() {
-		result.exitCode = executeOneShotWithLimitsAndOutputSchema("return the required artifact", cfg, mgr, nil, nil, nil, nil, artifactRouteTestAlias, []string{"read_file"}, false, acpLoopLimits{}, artifactv1.SchemaVersion)
+		result.exitCode = executeOneShot("return the required artifact", cfg, mgr, nil, nil, oneShotOptions{
+			ModelOverride: artifactRouteTestAlias,
+			AllowedTools:  []string{"read_file"},
+			OutputSchema:  artifactv1.SchemaVersion,
+		})
 	})
 	mu.Lock()
 	result.requests = append([]acpToolOfferWireRequest(nil), requests...)
