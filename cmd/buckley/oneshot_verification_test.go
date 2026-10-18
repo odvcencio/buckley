@@ -141,7 +141,11 @@ func runScriptedLane(t *testing.T, files map[string]string, script []laneStep, s
 	run := laneRun{code: -1}
 	run.stderr = captureStderr(t, func() {
 		run.stdout = captureStdout(t, func() {
-			run.code = executeOneShotWithTaskIntent("Edit target.txt, then check it.", cfg, mgr, nil, nil, nil, nil, "openai_compatible/lane-test", []string{"edit_file", "run_verification", "run_shell", "run_tests"}, false, agentloop.MutationIntent)
+			run.code = executeOneShot("Edit target.txt, then check it.", cfg, mgr, nil, nil, oneShotOptions{
+				ModelOverride: "openai_compatible/lane-test",
+				AllowedTools:  []string{"edit_file", "run_verification", "run_shell", "run_tests"},
+				Limits:        acpLoopLimits{TaskIntent: agentloop.MutationIntent},
+			})
 		})
 	})
 	run.requests = int(requests.Load())

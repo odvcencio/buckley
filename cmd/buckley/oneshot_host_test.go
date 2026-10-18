@@ -182,7 +182,11 @@ func TestOneShotMutation_FortyHostToolCalls(t *testing.T) {
 			code := -1
 			stderr := captureStderr(t, func() {
 				stdout = captureStdout(t, func() {
-					code = executeOneShotWithTaskIntent("Read instructions, check network, edit target.txt, then verify.", cfg, mgr, nil, nil, nil, nil, "openai_compatible/host-test", []string{"read_file", "edit_file", "run_shell", "run_tests"}, false, agentloop.MutationIntent)
+					code = executeOneShot("Read instructions, check network, edit target.txt, then verify.", cfg, mgr, nil, nil, oneShotOptions{
+						ModelOverride: "openai_compatible/host-test",
+						AllowedTools:  []string{"read_file", "edit_file", "run_shell", "run_tests"},
+						Limits:        acpLoopLimits{TaskIntent: agentloop.MutationIntent},
+					})
 				})
 			})
 			content, err := os.ReadFile("target.txt")

@@ -17,7 +17,6 @@ import (
 	"m31labs.dev/buckley/pkg/agentspec"
 	artifactv1 "m31labs.dev/buckley/pkg/artifact/v1"
 	projectcontext "m31labs.dev/buckley/pkg/context"
-	"m31labs.dev/buckley/pkg/orchestrator"
 	"m31labs.dev/buckley/pkg/subagent"
 	"m31labs.dev/buckley/pkg/tool"
 )
@@ -1123,7 +1122,6 @@ func runAgentRun(args []string) error {
 	if err != nil {
 		projectCtx = nil
 	}
-	planStore := orchestrator.NewFilePlanStore(cfg.Artifacts.PlanningDir)
 	allowedTools := append([]string(nil), subProfile.Spec.Tools.Allow...)
 	limits, err := resolveAgentRunLoopLimits(subProfile, childContract, contractPresent)
 	if err != nil {
@@ -1140,7 +1138,13 @@ func runAgentRun(args []string) error {
 	if outputSchema == "" && subProfile != nil && subProfile.Spec != nil {
 		outputSchema = strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"])
 	}
-	exitCode := executeOneShotWithLimitsAndOutputSchema(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, planStore, subProfile, modelOverride, allowedTools, false, limits, outputSchema)
+	exitCode := executeOneShot(formatSubagentTask(opts.subagent, opts.task), cfg, mgr, store, projectCtx, oneShotOptions{
+		AgentProfile:  subProfile,
+		ModelOverride: modelOverride,
+		AllowedTools:  allowedTools,
+		Limits:        limits,
+		OutputSchema:  outputSchema,
+	})
 	if exitCode != 0 {
 		return withExitCode(fmt.Errorf("agent run failed"), exitCode)
 	}

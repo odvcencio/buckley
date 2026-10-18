@@ -209,3 +209,86 @@ func redactOneShotSecrets(s string) string {
 	s = oneShotTokenLike.ReplaceAllString(s, "[redacted]")
 	return s
 }
+
+const oneShotProgressMinInterval = 30 * time.Second
+
+type oneShotProgress struct {
+	writer        io.Writer
+	now           func() time.Time
+	minInterval   time.Duration
+	lastEmit      time.Time
+	phase         string
+	thoughtChunks int
+	messageChunks int
+	toolCalls     int
+	toolUpdates   int
+	usageUpdates  int
+	tools         *oneShotToolTracker
+}
+
+func newOneShotProgressStream(writer io.Writer, workDir string) acp.StreamFunc {
+	if quietMode || writer == nil {
+		return nil
+	}
+	progress := &oneShotProgress{
+		writer:      writer,
+		now:         time.Now,
+		minInterval: oneShotProgressMinInterval,
+		phase:       "starting",
+		tools:       newOneShotToolTracker(writer, workDir),
+	}
+	return progress.Stream
+}
+
+func (p *oneShotProgress) Stream(update acp.SessionUpdate) error {
+	if p == nil {
+		return nil
+	}
+	switch update.SessionUpdate {
+	case acp.SessionUpdateAgentThoughtChunk:
+		p.phase = "thinking"
+		p.thoughtChunks++
+	case acp.SessionUpdateAgentMessageChunk:
+		p.phase = "receiving"
+		p.messageChunks++
+	case acp.SessionUpdateToolCall:
+		p.phase = "tool"
+		p.toolCalls++
+		p.tools.start(update)
+	case acp.SessionUpdateToolCallUpdate:
+		p.phase = "tool"
+		p.toolUpdates++
+		p.tools.update(update)
+	case acp.SessionUpdateUsageUpdate:
+		p.phase = "usage"
+		p.usageUpdates++
+	default:
+		return nil
+	}
+	p.emit(false)
+	return nil
+}
+
+func (p *oneShotProgress) emit(force bool) {
+	if p == nil || p.writer == nil {
+		return
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	if !force && !p.lastEmit.IsZero() && p.minInterval > 0 && now.Sub(p.lastEmit) < p.minInterval {
+		return
+	}
+	p.lastEmit = now
+	fmt.Fprintf(
+		p.writer,
+		"One-shot progress: phase=%s thought_chunks=%d message_chunks=%d tool_calls=%d tool_updates=%d usage_updates=%d\n",
+		p.phase,
+		p.thoughtChunks,
+		p.messageChunks,
+		p.toolCalls,
+		p.toolUpdates,
+		p.usageUpdates,
+	)
+}

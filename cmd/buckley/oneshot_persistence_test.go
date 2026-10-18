@@ -159,7 +159,11 @@ func TestOneShot_PersistsUntilPostChangeVerification(t *testing.T) {
 			var stdout string
 			stderr := captureStderr(t, func() {
 				stdout = captureStdout(t, func() {
-					code = executeOneShotWithTaskIntent("Edit target, then check it.", cfg, mgr, nil, nil, nil, nil, "openai_compatible/persist-test", []string{"edit_file", "run_verification", "run_shell"}, false, agentloop.MutationIntent)
+					code = executeOneShot("Edit target, then check it.", cfg, mgr, nil, nil, oneShotOptions{
+						ModelOverride: "openai_compatible/persist-test",
+						AllowedTools:  []string{"edit_file", "run_verification", "run_shell"},
+						Limits:        acpLoopLimits{TaskIntent: agentloop.MutationIntent},
+					})
 				})
 			})
 			if code != 0 || requests.Load() != 8 || strings.Count(stderr, "One-shot continuation:") != 3 || !strings.Contains(stdout, "Task complete and verified") {
