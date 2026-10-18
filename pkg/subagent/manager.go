@@ -422,11 +422,14 @@ func (m *Manager) SpawnWithOptions(opts SpawnOptions) (Snapshot, error) {
 		m.mu.Unlock()
 		return Snapshot{}, fmt.Errorf("subagent run already exists: %s", id)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	deadlineBound := false
-	if timeoutSeconds := minPositiveInt(opts.TimeoutSeconds, opts.Budget.MaxElapsedSecond); timeoutSeconds > 0 {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	timeoutSeconds := minPositiveInt(opts.TimeoutSeconds, opts.Budget.MaxElapsedSecond)
+	deadlineBound := timeoutSeconds > 0
+	if deadlineBound {
 		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
-		deadlineBound = true
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
 	}
 	current := &run{
 		snapshot: Snapshot{
@@ -512,6 +515,7 @@ func minPositiveInt(values ...int) int {
 func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	defer m.wg.Done()
 	defer close(current.done)
+	defer current.cancel()
 
 	started := func(pid int) {
 		m.mu.Lock()
@@ -588,6 +592,9 @@ func (m *Manager) run(ctx context.Context, current *run, request Request) {
 	m.mu.Lock()
 	current.snapshot.OutputSpoolPath = ""
 	current.snapshot.rawError = ""
+	current.commands = nil
+	current.ctx = nil
+	current.cancel = nil
 	m.mu.Unlock()
 }
 
