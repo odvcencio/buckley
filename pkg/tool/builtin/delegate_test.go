@@ -33,6 +33,25 @@ func installDelegationGuardForTest(t *testing.T) *DelegationGuard {
 	return guard
 }
 
+func TestRelaySubagentCommands_ClosedChannelStopsRelay(t *testing.T) {
+	mailbox, err := subagent.NewFileMailbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mailbox.Close() })
+	commands := make(chan subagent.CommandDelivery)
+	close(commands)
+	stopped := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go relaySubagentCommands(ctx, mailbox, commands, make(chan struct{}), stopped)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("relay kept polling a closed command channel")
+	}
+}
+
 func TestSubagentCommandArgs_GenericProfileIsScopedAndCleanedUp(t *testing.T) {
 	args, cleanup, err := subagentCommandArgs(subagent.Request{Task: "inspect this"})
 	if err != nil {

@@ -842,8 +842,16 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			result.CompletionStatus = CompletionIncomplete
 			reason := "the provider failed after returning a partial response"
 			result.FinishReason = FinishReasonModelError
-			result.Termination = Termination{Kind: FinishReasonModelError, Reason: reason, ProviderError: providerError}
-			c.recordDecision(ctx, FinishReasonModelError, reason)
+			kind := FinishReasonModelError
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(roundErr, ctxErr) {
+				kind = "cancelled"
+				if errors.Is(ctxErr, context.DeadlineExceeded) {
+					kind = "deadline_exceeded"
+				}
+				reason = "the turn stopped after receiving a partial model response"
+			}
+			result.Termination = Termination{Kind: kind, Reason: reason, ProviderError: providerError}
+			c.recordDecision(ctx, kind, reason)
 			return result, errors.Join(result.RequireConclusive(), roundErr)
 		}
 		if roundErr != nil {

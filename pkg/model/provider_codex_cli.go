@@ -555,6 +555,13 @@ func ReviewWorkspaceRepositoryRoot(ctx context.Context, workDir string) (string,
 	}
 	for {
 		if info, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil && info.IsDir() {
+			head, headErr := os.Lstat(filepath.Join(dir, ".git", "HEAD"))
+			if headErr != nil {
+				return "", fmt.Errorf("materialized review repository HEAD is unavailable: %w", headErr)
+			}
+			if !head.Mode().IsRegular() {
+				return "", fmt.Errorf("materialized review repository HEAD is not a regular file")
+			}
 			return filepath.Clean(dir), nil
 		}
 		parent := filepath.Dir(dir)

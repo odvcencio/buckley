@@ -819,6 +819,10 @@ func (s *fakeProviderThreadStore) DeleteProviderThread(sessionID, providerID str
 
 func TestCodexCLIProvider_RemovesSnapshotOnRootError(t *testing.T) {
 	provider := NewCodexCLIProvider(config.CodexConfig{Command: "codex"}, config.SandboxConfig{}, config.ApprovalConfig{})
+	provider.runner = func(context.Context, CodexCLICommand) (CodexCLICommandResult, error) {
+		t.Fatal("invalid snapshot root reached the Codex backend")
+		return CodexCLICommandResult{}, nil
+	}
 	root := t.TempDir()
 	snapshot, err := NewReviewSnapshot(ReviewSnapshotHead, root, root, "1111111111111111111111111111111111111111", nil)
 	if err != nil {
@@ -837,6 +841,25 @@ func TestCodexCLIProvider_RemovesSnapshotOnRootError(t *testing.T) {
 	}
 	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
 		t.Fatalf("snapshot remains after error: %v", err)
+	}
+}
+
+func TestReviewWorkspaceRepositoryRoot_InvalidMetadata(t *testing.T) {
+	for _, name := range []string{"missing HEAD", "HEAD directory"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, ".git"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if name == "HEAD directory" {
+				if err := os.Mkdir(filepath.Join(root, ".git", "HEAD"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, err := ReviewWorkspaceRepositoryRoot(t.Context(), root); err == nil || got != "" {
+				t.Fatalf("invalid metadata became review root: root=%q err=%v", got, err)
+			}
+		})
 	}
 }
 
