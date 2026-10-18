@@ -19,12 +19,30 @@ import (
 	"testing"
 	"time"
 
+	"m31labs.dev/buckley/pkg/acp"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
 )
 
-func TestOneShot_CompletionClosesOutstandingWorkers(t *testing.T) {
+func TestSessionShutdown_ClosesOutstandingWorkers(t *testing.T) {
+	mode := os.Getenv("BUCKLEY_TEST_SESSION_SHUTDOWN")
+	if mode == "" {
+		for _, mode := range []string{"one-shot", "ACP", "ACP with MCP"} {
+			t.Run(mode, func(t *testing.T) {
+				// Each host owns process-wide delegation limits and executable state.
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSessionShutdown_ClosesOutstandingWorkers$")
+				cmd.Env = append(os.Environ(), "BUCKLEY_TEST_SESSION_SHUTDOWN="+mode, "TMPDIR="+t.TempDir())
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("session cleanup failed: %v\n%s", err, output)
+				}
+			})
+		}
+		return
+	}
+	t.Setenv("BUCKLEY_DELEGATION_DEPTH", "0")
 	root, tmp := t.TempDir(), t.TempDir()
 	t.Chdir(root)
 	t.Setenv("TMPDIR", tmp)
@@ -98,25 +116,40 @@ func TestOneShot_CompletionClosesOutstandingWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code := -1
-	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() {
-			code = executeOneShot("Delegate the observation, then finish.", cfg, mgr, nil, nil, oneShotOptions{
-				ModelOverride: "openai_compatible/worker-test",
-				AllowedTools:  []string{"spawn_subagent"},
-				Limits:        acpLoopLimits{TaskIntent: agentloop.ReadOnlyIntent},
+	switch mode {
+	case "one-shot":
+		code := -1
+		stderr := captureStderr(t, func() {
+			_ = captureStdout(t, func() {
+				code = executeOneShot("Delegate the observation, then finish.", cfg, mgr, nil, nil, oneShotOptions{
+					ModelOverride: "openai_compatible/worker-test",
+					AllowedTools:  []string{"spawn_subagent"},
+					Limits:        acpLoopLimits{TaskIntent: agentloop.ReadOnlyIntent},
+				})
 			})
 		})
-	})
-	if code != 0 || requests.Load() != 2 {
-		t.Fatalf("parent did not complete: code=%d requests=%d stderr=%s", code, requests.Load(), stderr)
+		if code != 0 || requests.Load() != 2 {
+			t.Fatalf("parent did not complete: code=%d requests=%d stderr=%s", code, requests.Load(), stderr)
+		}
+	case "ACP", "ACP with MCP":
+		handler, cleanup := makePromptHandler(cfg, mgr, nil, nil, root, func(string, ...interface{}) {}, nil, nil)
+		t.Cleanup(cleanup)
+		session := &acp.AgentSession{ID: "shutdown", WorkingDirectory: root, Mode: acpModePrefix + "openai_compatible/worker-test"}
+		if mode == "ACP with MCP" {
+			session.McpServers = []acp.McpServer{{Name: "fake", Command: acpFakeMCPServerBin, Args: []string{"-tools=0"}}}
+		}
+		if _, err := handler(context.Background(), session, []acp.ContentBlock{acp.NewTextContent("Delegate the observation, then finish.")}, func(acp.SessionUpdate) error { return nil }); err != nil {
+			t.Fatalf("ACP prompt: %v", err)
+		}
+		cleanup()
+		cleanup()
 	}
 	if _, err := os.Stat(cleanupPath); err != nil {
 		t.Fatalf("parent returned without shutting down its worker: %v", err)
 	}
 	files, err := os.ReadDir(tmp)
 	if err != nil || len(files) != 0 {
-		t.Fatalf("one-shot worker temporary files remain: %v, %v", files, err)
+		t.Fatalf("session worker temporary files remain: %v, %v", files, err)
 	}
 }
 

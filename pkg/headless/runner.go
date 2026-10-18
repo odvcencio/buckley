@@ -644,6 +644,9 @@ func (r *Runner) commandLoop() {
 			if !ok {
 				return
 			}
+			if r.State() == StateStopped {
+				return
+			}
 			if err := r.runSessionCommand(cmd); err != nil {
 				_ = r.persistSystemMessage(r.formatCommandError(err))
 			}
@@ -828,10 +831,8 @@ func (r *Runner) Stop() {
 		if r.cancelFunc != nil {
 			r.cancelFunc()
 		}
-		if r.hookCloser != nil {
-			_ = r.hookCloser.Close()
-			r.hookCloser = nil
-		}
+		hooks := r.hookCloser
+		r.hookCloser = nil
 		r.mu.Unlock()
 
 		if r.commandStop != nil {
@@ -841,10 +842,21 @@ func (r *Runner) Stop() {
 			if r.commandStopped != nil {
 				close(r.commandStopped)
 			}
+		} else if r.commandStopped != nil && (lifecycleManaged || r.durable) {
+			<-r.commandStopped
+		}
+		if hooks != nil {
+			_ = hooks.Close()
+		}
+		var cleanupErr error
+		if r.tools != nil {
+			cleanupErr = r.tools.Close()
+		}
+		if lifecycleManaged && !activated {
 			return
 		}
-		if r.durable && r.commandStopped != nil {
-			<-r.commandStopped
+		if cleanupErr != nil {
+			r.emitError("failed to close session tools", cleanupErr)
 		}
 
 		r.emit(RunnerEvent{
@@ -931,6 +943,9 @@ func (r *Runner) runConversationLoopWithIntent(taskIntent string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
 	r.cancelFunc = cancel
+	if r.state == StateStopped {
+		cancel()
+	}
 	r.mu.Unlock()
 	defer func() {
 		cancel()
@@ -2392,6 +2407,10 @@ func (r *Runner) resumeForCommand(commandID string) error {
 // their existing idempotent behavior while still reflecting active work.
 func (r *Runner) setResumedState(commandID string) {
 	r.mu.Lock()
+	if r.state == StateStopped {
+		r.mu.Unlock()
+		return
+	}
 	activeCommandID := r.activeCommandID
 	if strings.TrimSpace(commandID) != "" && activeCommandID == commandID {
 		activeCommandID = ""
@@ -2421,6 +2440,10 @@ func (r *Runner) setResumedState(commandID string) {
 func (r *Runner) setState(state RunnerState) {
 	r.mu.Lock()
 	oldState := r.state
+	if oldState == StateStopped {
+		r.mu.Unlock()
+		return
+	}
 	r.state = state
 	r.lastActive = time.Now()
 	r.mu.Unlock()
