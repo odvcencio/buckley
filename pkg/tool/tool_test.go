@@ -125,3 +125,63 @@ func TestReadFileModelOutputKeepsPageContinuationForLongFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchModelOutput_PagesPreserveStructuredEvidence(t *testing.T) {
+	for _, useToon := range []bool{false, true} {
+		for _, escaped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("toon=%v/escaped=%v", useToon, escaped), func(t *testing.T) {
+				SetResultEncoding(useToon)
+				t.Cleanup(func() { SetResultEncoding(true) })
+				root := t.TempDir()
+				padding := strings.Repeat("x", 8000)
+				if escaped {
+					padding = strings.Repeat("\x01", 4000)
+				}
+				if err := os.WriteFile(filepath.Join(root, "data.txt"), []byte(strings.Repeat("needle"+padding+"\n", 32)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				search := &builtin.SearchTextTool{}
+				search.SetWorkDir(root)
+				for offset := 0; offset < 32; {
+					result, err := search.Execute(map[string]any{"query": "needle", "path": "data.txt", "offset": offset, "limit": 500})
+					if err != nil || !result.Success {
+						t.Fatalf("search: %+v %v", result, err)
+					}
+					encoded, err := ToModelOutput(result)
+					if err != nil || len(encoded) > DefaultModelOutputBytes {
+						t.Fatalf("model encoding: bytes=%d error=%v", len(encoded), err)
+					}
+					if useToon {
+						records := result.Data["matches"].([]map[string]any)
+						if strings.Contains(encoded, "output_head") || !strings.Contains(encoded, fmt.Sprintf("matches[%d]", len(records))) || strings.Count(encoded, "needle") != len(records) {
+							t.Fatalf("TOON page lost structured evidence at offset %d", offset)
+						}
+						offset += len(records)
+						if strings.Contains(encoded, "next_offset") != (offset < 32) {
+							t.Fatalf("TOON page lost continuation at offset %d", offset)
+						}
+						continue
+					}
+					decoded, err := FromJSON(encoded)
+					if err != nil || !decoded.Success {
+						t.Fatalf("model evidence could not be decoded: %v", err)
+					}
+					records, _ := decoded.Data["matches"].([]any)
+					if len(records) == 0 || len(records) != len(result.Data["matches"].([]map[string]any)) || fmt.Sprint(decoded.Data["count"]) != "32" {
+						t.Fatalf("model lost structured records or counts: offset=%d records=%d", offset, len(records))
+					}
+					for i, item := range records {
+						record := item.(map[string]any)
+						if fmt.Sprint(record["line"]) != fmt.Sprint(offset+i+1) || !strings.Contains(record["match"].(string), "needle") {
+							t.Fatalf("model lost record identity or match at offset %d", offset+i)
+						}
+					}
+					offset += len(records)
+					if next, more := decoded.Data["next_offset"]; (offset < 32) != more || (more && fmt.Sprint(next) != fmt.Sprint(offset)) {
+						t.Fatalf("model lost continuation: offset=%d next=%v", offset, next)
+					}
+				}
+			})
+		}
+	}
+}

@@ -3,6 +3,7 @@ package builtin
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,7 +21,7 @@ func (t *SearchTextTool) Name() string {
 }
 
 func (t *SearchTextTool) Description() string {
-	return "Search text with regex, globs, context, hidden repository paths, and bounded pages. Use next_offset until absent to exhaust a large result set; .git is excluded."
+	return "Search text with regex, globs, context, and hidden repository paths; .git is excluded. Pages are capped at 16 KiB of records. Long lines are excerpted with truncation metadata and byte columns. Follow next_offset until absent to exhaust results."
 }
 
 func (t *SearchTextTool) Parameters() ParameterSchema {
@@ -202,24 +203,41 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	matches := make([]map[string]any, 0, limit)
+	pageLimit := DefaultSearchPageBytes
+	if t.maxOutputBytes > 0 {
+		pageLimit = min(pageLimit, t.maxOutputBytes)
+	}
+	textLimit := min(DefaultSearchRecordBytes, max(pageLimit/8, 1))
+	pageBytes, pageFull := 2, false
+	pageError := ""
 	matchCount := 0
 	recordCount := 0
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), 4<<20)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
+		match, valid := parseSearchLine(scanner.Bytes())
+		if !valid {
 			continue
 		}
-		match := parseSearchLine(line)
-		if match == nil {
-			continue
-		}
-		if recordCount >= offset && len(matches) < limit {
-			matches = append(matches, match)
+		if recordCount >= offset && len(matches) < limit && !pageFull {
+			record := match.result(textLimit)
+			encoded, _ := json.Marshal(record)
+			additional := len(encoded)
+			if len(matches) > 0 {
+				additional++
+			}
+			if pageBytes+additional > pageLimit {
+				pageFull = true
+				if len(matches) == 0 {
+					pageError = fmt.Sprintf("search record metadata exceeds the %d-byte page budget; increase the configured tool output limit or narrow the search path", pageLimit)
+				}
+			} else {
+				matches = append(matches, record)
+				pageBytes += additional
+			}
 		}
 		recordCount++
-		if match["kind"] == "match" {
+		if !match.isContext {
 			matchCount++
 		}
 	}
@@ -236,6 +254,9 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	}
 	if scanErr != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("search output could not be parsed safely: %v", scanErr)}, nil
+	}
+	if pageError != "" {
+		return &Result{Success: false, Error: pageError}, nil
 	}
 	exitCode := 0
 	if err != nil {
@@ -317,94 +338,6 @@ func (b *cappedSearchBuffer) String() string {
 		return ""
 	}
 	return b.buf.String()
-}
-
-func parseSearchLine(line string) map[string]any {
-	if strings.Contains(line, "\x00") {
-		parts := strings.SplitN(line, "\x00", 2)
-		if len(parts) != 2 {
-			return nil
-		}
-		rest := parts[1]
-		separator := strings.IndexByte(rest, ':')
-		kind := "match"
-		if contextSeparator := strings.IndexByte(rest, '-'); separator < 0 || (contextSeparator >= 0 && contextSeparator < separator) {
-			separator = contextSeparator
-			kind = "context"
-		}
-		if separator <= 0 {
-			return nil
-		}
-		content := rest[separator+1:]
-		match := content
-		contextText := ""
-		if kind == "context" {
-			match = ""
-			contextText = content
-		}
-		return map[string]any{
-			"path": strings.TrimSpace(parts[0]), "line": parseInt(rest[:separator], 0),
-			"column": 0, "match": match, "context": contextText, "kind": kind,
-		}
-	}
-	if strings.Contains(line, "\x1f") {
-		parts := strings.SplitN(line, "\x1f", 3)
-		if len(parts) != 3 {
-			return nil
-		}
-		return map[string]any{
-			"path":    strings.TrimSpace(parts[0]),
-			"line":    parseInt(parts[1], 0),
-			"column":  0,
-			"match":   "",
-			"context": parts[2],
-			"kind":    "context",
-		}
-	}
-	if strings.Contains(line, "\x1e") {
-		parts := strings.SplitN(line, "\x1e", 4)
-		if len(parts) != 4 {
-			return nil
-		}
-		return map[string]any{
-			"path":    strings.TrimSpace(parts[0]),
-			"line":    parseInt(parts[1], 0),
-			"column":  parseInt(parts[2], 0),
-			"match":   parts[3],
-			"context": "",
-			"kind":    "match",
-		}
-	}
-	// grep fallback output remains colon-delimited. Ripgrep always uses the
-	// unambiguous record separators above, including for colon-bearing paths.
-	parts := strings.SplitN(line, ":", 4)
-	if len(parts) < 2 {
-		return nil
-	}
-
-	path := strings.TrimSpace(parts[0])
-	lineNum := 0
-	column := 0
-	content := ""
-
-	if len(parts) >= 3 {
-		lineNum = parseInt(parts[1], 0)
-		column = parseInt(parts[2], 0)
-		if len(parts) == 4 {
-			content = parts[3]
-		}
-	} else if len(parts) == 2 {
-		lineNum = parseInt(parts[1], 0)
-	}
-
-	return map[string]any{
-		"path":    path,
-		"line":    lineNum,
-		"column":  column,
-		"match":   content,
-		"context": "",
-		"kind":    "match",
-	}
 }
 
 // SearchReplaceTool performs search and replace within a file
