@@ -198,6 +198,10 @@ var migrations = []SQLiteMigration{
 	{27, "experiment_run_input_manifest", ensureExperimentRunInputManifestSchema},
 	{28, "experiment_run_model_executions", ensureExperimentRunModelExecutionsSchema},
 	{29, "experiment_run_usage_evidence", ensureExperimentRunUsageEvidenceSchema},
+	{30, "message_summary_index", func(db MigrationDB) error {
+		_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_summary ON messages(session_id, id) WHERE is_summary = 1`)
+		return err
+	}},
 }
 
 // sqliteTimestampLayout keeps every fractional second at nine digits.

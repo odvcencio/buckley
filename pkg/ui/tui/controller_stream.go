@@ -26,7 +26,10 @@ func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string
 	if strings.TrimSpace(modelID) == "" {
 		c.app.RemoveThinkingIndicator()
 		c.finishTurnUndo(sess, turnBoundary)
-		_, err := model.ResolvePhaseModelRequired(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)
+		err := sess.persistenceErr
+		if err == nil {
+			_, err = model.ResolvePhaseModelRequired(c.cfg, c.modelMgr, c.rulesEngine, "execution", c.modelOverride)
+		}
 		if err == nil {
 			err = fmt.Errorf("no execution model resolved; configure a model before sending a message")
 		}
@@ -78,6 +81,9 @@ func retainedIncompleteStreamResult(result toolLoopResult, err error) bool {
 
 func (c *Controller) finishStreamLifecycle(sess *SessionState) {
 	c.mu.Lock()
+	if err := c.boundSessionWorkingSetLocked(sess); err != nil {
+		sess.persistenceErr = err
+	}
 	sess.Streaming = false
 	sess.Cancel = nil
 	c.mu.Unlock()
@@ -88,7 +94,9 @@ func (c *Controller) finishStreamLifecycle(sess *SessionState) {
 func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) string {
 	c.app.SetStatus("Preparing request")
 	sess.Conversation.AddUserMessage(prompt)
-	c.saveLatestConversationMessage(sess)
+	if err := c.saveLatestConversationMessage(sess); err != nil {
+		return ""
+	}
 	return c.resolveExecutionModel()
 }
 

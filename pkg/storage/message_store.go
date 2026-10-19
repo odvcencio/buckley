@@ -198,6 +198,12 @@ func (s *Store) SaveMessage(msg *Message) error {
 
 // ReplaceMessages replaces all messages for a session with the provided set.
 func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
+	return s.ReplaceMessagesAfter(sessionID, 0, messages)
+}
+
+// ReplaceMessagesAfter edits only the loaded tail, preserving an unloaded
+// historical prefix. A zero boundary retains ReplaceMessages' full replacement.
+func (s *Store) ReplaceMessagesAfter(sessionID string, beforeID int64, messages []Message) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("replacing messages: begin tx: %w", err)
@@ -209,7 +215,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		}
 	}()
 
-	if _, err = tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID); err != nil {
+	if _, err = tx.Exec(`DELETE FROM messages WHERE session_id = ? AND id > ?`, sessionID, beforeID); err != nil {
 		return fmt.Errorf("replacing messages: delete old: %w", err)
 	}
 
@@ -225,7 +231,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	totalTokens := 0
 	latest := time.Time{}
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		ts := msg.Timestamp
 		if ts.IsZero() {
 			ts = time.Now()
@@ -235,7 +241,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 		}
 		totalTokens += msg.Tokens
 
-		if _, err := stmt.Exec(
+		result, err := stmt.Exec(
 			sessionID,
 			msg.Role,
 			msg.Content,
@@ -250,21 +256,33 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 			msg.Tokens,
 			msg.IsSummary,
 			msg.IsTruncated,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("replacing messages: insert: %w", err)
 		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("replacing messages: last insert id: %w", err)
+		}
+		messages[i].ID = id
 	}
 
 	if latest.IsZero() {
 		latest = time.Now()
 	}
 
+	messageCount := len(messages)
+	if beforeID > 0 {
+		if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM messages WHERE session_id = ?`, sessionID).Scan(&messageCount, &totalTokens); err != nil {
+			return fmt.Errorf("replacing message tail: aggregate session stats: %w", err)
+		}
+	}
 	// Update session stats within the same transaction for atomicity
 	if _, err := tx.Exec(`
 		UPDATE sessions
 		SET message_count = ?, total_tokens = ?, last_active = ?
 		WHERE session_id = ?
-	`, len(messages), totalTokens, sqliteTimestamp(latest), sessionID); err != nil {
+	`, messageCount, totalTokens, sqliteTimestamp(latest), sessionID); err != nil {
 		return fmt.Errorf("replacing messages: update session stats: %w", err)
 	}
 
@@ -274,7 +292,7 @@ func (s *Store) ReplaceMessages(sessionID string, messages []Message) error {
 	committed = true
 
 	s.notify(newEvent(EventSessionUpdated, sessionID, sessionID, map[string]any{
-		"messageCount": len(messages),
+		"messageCount": messageCount,
 		"totalTokens":  totalTokens,
 		"lastActive":   latest,
 	}))
@@ -301,9 +319,11 @@ func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message,
 		return nil, fmt.Errorf("querying messages: %w", err)
 	}
 	defer rows.Close()
+	return scanMessages(rows)
+}
 
-	capHint := max(limit, 0)
-	messages := make([]Message, 0, capHint)
+func scanMessages(rows *sql.Rows) ([]Message, error) {
+	messages := make([]Message, 0, 64)
 	for rows.Next() {
 		var msg Message
 		var contentJSON sql.NullString
@@ -456,7 +476,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 
 // GetAllMessages retrieves all messages for a session.
 func (s *Store) GetAllMessages(sessionID string) ([]Message, error) {
-	return s.GetMessages(sessionID, 999999, 0)
+	return s.GetMessages(sessionID, -1, 0)
 }
 
 // GetMessagesWithSessions retrieves messages for multiple sessions in a single query.

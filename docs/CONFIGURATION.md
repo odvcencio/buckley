@@ -668,18 +668,31 @@ approval:
 
 ### resources
 
-Set the disk budget in user config; project config cannot change it.
+Set resource budgets in user config; project config cannot change them.
 
 ```yaml
 resources:
+  session_memory_bytes: 8388608 # 8 MiB of retained working state per session
   storage_bytes: 536870912      # 512 MiB per database, including owned evidence
 ```
+
+Headless and TUI session memory accounting bounds retained conversation history
+and queued input; the TUI shares its allocation with rendered history and undo
+records. Resume loads
+the original instructions, task, latest summary and a recent message window.
+Older transcript records stay on disk for resume and replay. Trimming a window
+starts a new provider continuation epoch. Instructions or a latest message that
+cannot fit pause the session; raise the limit and restart to reload them.
+This bounds retained working state, not total process RSS, provider-native state
+or temporary allocations during a model or tool call. The minimum enabled memory
+budget is 64 KiB; an explicit `0` disables it.
 
 Disk accounting is transactional. SQLite allocation, indexes and WAL growth also
 have limits; conservative headroom can stop writes before the configured byte
 total is reached. A full budget rejects further storage writes without deleting
-active history or replay evidence. Raise the limit and restart, or clean completed
-history before continuing.
+active history or replay evidence. Work admission and tool effects reserve room
+for their outcomes; a full budget pauses work. Raise the limit and restart, or
+clean completed history before continuing.
 Existing files above a newly lowered limit remain readable and are not truncated.
 Workspace files, Git objects, external tool allocations and legacy shared blobs
 are outside the database's owned budget.

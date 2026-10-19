@@ -18,6 +18,7 @@ type turnBoundary struct {
 	store          *shadowgit.Store
 	beforeTree     string
 	messagesBefore int
+	historyVersion uint64
 }
 
 // sessionUndoStore lazily resolves and caches sess's shadow-git store. It
@@ -45,11 +46,12 @@ func (c *Controller) sessionUndoStore(sess *SessionState) *shadowgit.Store {
 func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 	c.mu.Lock()
 	messagesBefore := len(sess.Conversation.Messages)
+	historyVersion := sess.historyVersion
 	sess.redoStack = nil
 	c.mu.Unlock()
 
 	store := c.sessionUndoStore(sess)
-	boundary := turnBoundary{store: store, messagesBefore: messagesBefore}
+	boundary := turnBoundary{store: store, messagesBefore: messagesBefore, historyVersion: historyVersion}
 	if store == nil {
 		return boundary
 	}
@@ -76,6 +78,10 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	}
 
 	c.mu.Lock()
+	if sess.historyVersion != boundary.historyVersion {
+		c.mu.Unlock()
+		return
+	}
 	messagesAfter := len(sess.Conversation.Messages)
 	if messagesAfter <= boundary.messagesBefore {
 		c.mu.Unlock()
@@ -107,7 +113,12 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	c.mu.Lock()
 	sess.undoStack = append(sess.undoStack, record)
 	if len(sess.undoStack) > maxUndoDepth {
-		sess.undoStack = sess.undoStack[len(sess.undoStack)-maxUndoDepth:]
+		sess.undoStack = append([]turnUndoRecord(nil), sess.undoStack[len(sess.undoStack)-maxUndoDepth:]...)
+	}
+	limit := sessionWorkingMemoryBytes(c.cfg) / 4
+	for limit > 0 && len(sess.undoStack) > 0 && undoMemoryBytes(sess.undoStack) > limit {
+		sess.undoStack[0] = turnUndoRecord{}
+		sess.undoStack = sess.undoStack[1:]
 	}
 	c.mu.Unlock()
 }
@@ -159,6 +170,7 @@ func (c *Controller) undoLastTurn() {
 	}
 
 	c.mu.Lock()
+	sess.undoStack[len(sess.undoStack)-1] = turnUndoRecord{}
 	sess.undoStack = sess.undoStack[:len(sess.undoStack)-1]
 	sess.redoStack = append(sess.redoStack, record)
 	sess.Conversation.Messages = sess.Conversation.Messages[:record.messagesBefore]
@@ -222,6 +234,7 @@ func (c *Controller) redoLastTurn() {
 	}
 
 	c.mu.Lock()
+	sess.redoStack[len(sess.redoStack)-1] = turnUndoRecord{}
 	sess.redoStack = sess.redoStack[:len(sess.redoStack)-1]
 	sess.undoStack = append(sess.undoStack, record)
 	sess.Conversation.Messages = append(sess.Conversation.Messages, record.messages...)

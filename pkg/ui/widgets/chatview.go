@@ -39,6 +39,7 @@ type ChatView struct {
 	highlighters map[string]*gotreesitter.Highlighter
 	lastSource   string
 	lastContent  string
+	memoryBytes  int
 
 	// Callbacks
 	onScrollChange    func(top, total, viewHeight int)
@@ -47,7 +48,7 @@ type ChatView struct {
 
 // NewChatView creates a new chat view widget.
 func NewChatView() *ChatView {
-	return &ChatView{
+	view := &ChatView{
 		buffer:         scrollback.NewBuffer(80, 24),
 		userStyle:      backend.DefaultStyle(),
 		assistantStyle: backend.DefaultStyle(),
@@ -60,6 +61,27 @@ func NewChatView() *ChatView {
 		searchStyle:    backend.DefaultStyle().Reverse(true),
 		syntax:         defaultCodeSyntaxStyles(),
 	}
+	view.SetMemoryBudget(scrollback.DefaultMaxBytes)
+	return view
+}
+
+// SetMemoryBudget bounds rendered history and the streaming replacement text.
+func (c *ChatView) SetMemoryBudget(bytes int) {
+	c.memoryBytes = bytes
+	c.buffer.SetMaxBytes(bytes - max(0, bytes/16))
+	c.lastContent = c.boundedDisplayText(c.lastContent)
+}
+
+func (c *ChatView) boundedDisplayText(content string) string {
+	if c.memoryBytes <= 0 || len(content) <= c.memoryBytes/16 {
+		return strings.Clone(content)
+	}
+	const notice = "\n[Display shortened]"
+	end := max(0, c.memoryBytes/16-len(notice))
+	for end > 0 && content[end]&0xc0 == 0x80 {
+		end--
+	}
+	return content[:end] + notice
 }
 
 // SetStyles configures the message styles.
@@ -107,6 +129,7 @@ func (c *ChatView) OnScrollChange(fn func(top, total, viewHeight int)) {
 
 // AddMessage adds a message to the chat.
 func (c *ChatView) AddMessage(content, source string) {
+	content = c.boundedDisplayText(content)
 	if source == "thinking" && strings.TrimSpace(content) == "" {
 		c.buffer.AppendAuxLine("  ◦ thinking...", scrollback.LineStyle{
 			FG:     extractFG(c.thinkingStyle),
@@ -129,6 +152,7 @@ func (c *ChatView) AppendText(text string) {
 	}
 
 	c.lastContent += text
+	c.lastContent = c.boundedDisplayText(c.lastContent)
 	lines := c.buildMessageLines(c.lastContent, c.lastSource)
 	c.buffer.ReplaceLastMessage(lines)
 }
@@ -138,6 +162,7 @@ func (c *ChatView) ReplaceText(content string) {
 	if c.lastSource == "" {
 		return
 	}
+	content = c.boundedDisplayText(content)
 	c.lastContent = content
 	c.buffer.ReplaceLastMessage(c.buildMessageLines(content, c.lastSource))
 }

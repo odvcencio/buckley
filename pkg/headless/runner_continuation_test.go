@@ -154,6 +154,71 @@ func TestRunner_ContinuationHitsOnSecondTurnAndPersists(t *testing.T) {
 	}
 }
 
+func TestRunner_WorkingSetEvictionStartsNewContinuationEpoch(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "live"
+		if restart {
+			name = "restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			var requests []map[string]any
+			server := openAIContinuationTestServer(t, &requests, "ok")
+			t.Cleanup(server.Close)
+			cfg := newContinuationTestConfig(server.URL)
+			cfg.Resources.SessionMemoryBytes = 64 << 10
+			mgr, err := model.NewManager(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := storage.New(t.TempDir() + "/continuation.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.EnsureSession("session-1"); err != nil {
+				t.Fatal(err)
+			}
+			conv := conversation.New("session-1")
+			conv.AddUserMessage("original task")
+			runner := &Runner{sessionID: "session-1", config: cfg, modelManager: mgr,
+				conv: conv, store: store, modelOverride: "gpt-5.4"}
+			req, useContinuation := runner.buildChatRequest()
+			if _, err := runner.callModel(context.Background(), req, useContinuation); err != nil {
+				t.Fatal(err)
+			}
+			for range 100 {
+				conv.AddAssistantMessage(strings.Repeat("history ", 256))
+			}
+			if err := conv.SaveAllMessages(store); err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				runner.conv = conversation.New("session-1")
+				if err := runner.conv.LoadWorkingSet(store, runnerWorkingMemoryBytes(cfg, false)); err != nil {
+					t.Fatal(err)
+				}
+				runner.continuation = nil
+			} else if err := runner.boundWorkingSet(); err != nil {
+				t.Fatal(err)
+			}
+			if !runner.conv.HasPartialHistory() {
+				t.Fatal("history did not exceed the working budget")
+			}
+			req, useContinuation = runner.buildChatRequest()
+			if _, err := runner.callModel(context.Background(), req, useContinuation); err != nil {
+				t.Fatal(err)
+			}
+			if runner.continuation.Hit() || !runner.continuation.Active() || len(requests) != 2 {
+				t.Fatal("trimmed history reused the previous epoch or repeated a provider call")
+			}
+			canonical, err := store.GetAllMessages("session-1")
+			if err != nil || len(canonical) != 101 || canonical[0].Content != "original task" {
+				t.Fatalf("canonical history changed: count=%d error=%v", len(canonical), err)
+			}
+		})
+	}
+}
+
 // TestRunner_BuildChatRequestProjectionAloneBoundsLargeTranscript proves the
 // non-continuation path in buildChatRequest, now that it starts from the
 // full transcript (conv.ToModelMessages) instead of running an independent
