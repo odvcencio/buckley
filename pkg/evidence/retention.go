@@ -98,14 +98,12 @@ func (s *SQLiteStore) sweep(ctx context.Context, policy RetentionPolicy, now tim
 			if len(ids) == 0 {
 				break
 			}
-			for _, id := range ids {
-				deleted, err := s.deleteUnpinnedObject(ctx, id, guards)
-				if err != nil {
-					return err
-				}
-				if deleted {
-					removed(id)
-				}
+			deleted, err := s.deleteUnpinnedObjects(ctx, ids, guards)
+			if err != nil {
+				return err
+			}
+			for _, id := range deleted {
+				removed(id)
 			}
 		}
 	}
@@ -149,27 +147,38 @@ func (s *SQLiteStore) expiredUnpinnedIDs(ctx context.Context, kinds []Kind, cuto
 	return ids, rows.Err()
 }
 
-func (s *SQLiteStore) deleteUnpinnedObject(ctx context.Context, id, guards string) (bool, error) {
-	deleted := false
+func (s *SQLiteStore) deleteUnpinnedObjects(ctx context.Context, ids []string, guards string) ([]string, error) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i], args[i] = "?", id
+	}
+	var deleted []string
 	err := storage.WithSQLiteWriteTransaction(ctx, s.db, func(conn *sql.Conn) error {
-		var path sql.NullString
-		err := conn.QueryRowContext(ctx, `DELETE FROM evidence_objects
-			WHERE evidence_id = ? AND NOT EXISTS (
-				SELECT 1 FROM evidence_pins WHERE evidence_id = ?)
-			`+guards+` RETURNING blob_path`, id, id).Scan(&path)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
+		rows, err := conn.QueryContext(ctx, `DELETE FROM evidence_objects
+			WHERE evidence_id IN (`+strings.Join(placeholders, ",")+`) AND NOT EXISTS (
+				SELECT 1 FROM evidence_pins WHERE evidence_id = evidence_objects.evidence_id)
+			`+guards+` RETURNING evidence_id`, args...)
 		if err != nil {
-			return fmt.Errorf("evidence: delete object %s: %w", id, err)
+			return fmt.Errorf("evidence: delete expired objects: %w", err)
 		}
-		deleted = true
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			deleted = append(deleted, id)
+		}
 		// Files are removed after the row transaction commits. Orphan cleanup
 		// rechecks references under the same writer lock used by Put; rollback
 		// and a new writer can therefore never leave a row without its blob.
-		return nil
+		return rows.Err()
 	})
-	return deleted && err == nil, err
+	if err != nil {
+		return nil, err
+	}
+	return deleted, nil
 }
 
 // Ledger references predating lifetime pins still protect their evidence. These
@@ -182,18 +191,26 @@ func (s *SQLiteStore) retainedReferenceGuards(ctx context.Context) (string, erro
 		{"task_checkpoints", "markdown_evidence_id = evidence_objects.evidence_id"},
 		{"agent_run_contracts", "task_evidence_id = evidence_objects.evidence_id"},
 		{"agent_mailbox", "content_ref = evidence_objects.evidence_id"},
-		{"run_events", `json_extract(payload_json, '$.request_evidence_id') = evidence_objects.evidence_id
-			OR json_extract(payload_json, '$.response_evidence_id') = evidence_objects.evidence_id
-			OR json_extract(payload_json, '$.output_evidence_id') = evidence_objects.evidence_id
-			OR json_extract(payload_json, '$.evidence_id') = evidence_objects.evidence_id
-			OR EXISTS (SELECT 1 FROM json_each(evidence_ids_json) WHERE value = evidence_objects.evidence_id)`},
+		{"run_events", ""},
 	} {
 		var exists bool
 		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, reference.table).Scan(&exists); err != nil {
 			return "", err
 		}
 		if exists {
-			guard += " AND NOT EXISTS (SELECT 1 FROM " + reference.table + " WHERE " + reference.predicate + ")"
+			if reference.table == "run_events" {
+				// An uncorrelated list parses retained event bodies once per
+				// batch instead of once for every candidate evidence object.
+				guard += ` AND evidence_id NOT IN (
+					SELECT refs.value FROM run_events CROSS JOIN json_each(json_extract(payload_json,
+						'$.request_evidence_id', '$.response_evidence_id', '$.output_evidence_id', '$.evidence_id')) AS refs
+					WHERE refs.value IS NOT NULL
+					UNION ALL
+					SELECT refs.value FROM run_events CROSS JOIN json_each(evidence_ids_json) AS refs
+					WHERE refs.value IS NOT NULL)`
+			} else {
+				guard += " AND NOT EXISTS (SELECT 1 FROM " + reference.table + " WHERE " + reference.predicate + ")"
+			}
 		}
 	}
 	return guard, nil

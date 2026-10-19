@@ -168,7 +168,7 @@ func TestDeleteObject_SharedBlobSurvivesUntilLastReferenceGone(t *testing.T) {
 		t.Fatalf("expected shared blob path for identical content, got %q and %q", a.BlobPath, b.BlobPath)
 	}
 
-	if deleted, err := store.deleteUnpinnedObject(ctx, a.ID, ""); err != nil || !deleted {
+	if deleted, err := store.deleteUnpinnedObjects(ctx, []string{a.ID}, ""); err != nil || len(deleted) != 1 {
 		t.Fatalf("delete object: deleted=%v err=%v", deleted, err)
 	}
 

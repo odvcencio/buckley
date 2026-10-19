@@ -3,9 +3,11 @@ package evidence
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,8 +28,8 @@ func TestSweep_PinAfterSelectionProtectsObject(t *testing.T) {
 	if err := store.Pin(ctx, obj.ID, "user:keep"); err != nil {
 		t.Fatal(err)
 	}
-	deleted, err := store.deleteUnpinnedObject(ctx, ids[0], "")
-	if err != nil || deleted {
+	deleted, err := store.deleteUnpinnedObjects(ctx, ids, "")
+	if err != nil || len(deleted) != 0 {
 		t.Fatalf("deleted=%v err=%v", deleted, err)
 	}
 	if _, err := store.Get(ctx, obj.ID); err != nil {
@@ -61,6 +63,47 @@ func TestSweepCount_CleansCorruptBlobsAndMultipleBatches(t *testing.T) {
 	files, err := store.CleanupOrphanBlobs(ctx)
 	if err != nil || len(files) != 1 {
 		t.Fatalf("files=%v err=%v", files, err)
+	}
+}
+
+func TestSweepCount_PreservesLegacyEventReferencesIncludingEscapedIDs(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.DB().Exec(`CREATE TABLE run_events(payload_json TEXT, evidence_ids_json TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now()
+	var ids []string
+	for i := 0; i < 6; i++ {
+		obj, err := store.Put(ctx, Object{Kind: KindToolResult, InlineBody: []byte(fmt.Sprintf("legacy-%d", i)), CreatedAt: now.Add(-40 * 24 * time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, obj.ID)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"request_evidence_id": ids[0], "response_evidence_id": ids[1],
+		"output_evidence_id": ids[2], "evidence_id": ids[3],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	escaped := strings.Replace(string(payload), ids[0], fmt.Sprintf(`\u%04x%s`, ids[0][0], ids[0][1:]), 1)
+	linked, err := json.Marshal([]string{ids[4]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO run_events VALUES(?, ?), ('{}', '[]')`, escaped, string(linked)); err != nil {
+		t.Fatal(err)
+	}
+	count, err := store.SweepCount(ctx, DefaultRetentionPolicy(), now)
+	if err != nil || count != 1 {
+		t.Fatalf("sweep removed referenced evidence or retained an orphan: count=%d err=%v", count, err)
+	}
+	for _, id := range ids[:5] {
+		if _, err := store.Get(ctx, id); err != nil {
+			t.Fatalf("referenced object %s lost: %v", id, err)
+		}
 	}
 }
 
