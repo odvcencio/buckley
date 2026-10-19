@@ -29,6 +29,9 @@ func TestSubagentModelOutput_FindingsAndPagesSurviveEncoding(t *testing.T) {
 			worker.SetCoordinator(coordinator)
 			worker.SetTelemetry(nil, "owner")
 			t.Cleanup(func() { _ = worker.Close() })
+			registry := NewEmptyRegistry()
+			registry.Register(worker)
+			registry.Use(ResultSizeLimit(64*1024, "..."))
 			ctx := context.Background()
 			for i := 0; i < 13; i++ {
 				id := fmt.Sprintf("worker-%02d", i)
@@ -41,7 +44,7 @@ func TestSubagentModelOutput_FindingsAndPagesSurviveEncoding(t *testing.T) {
 				}
 			}
 			for _, action := range []string{"status", "wait"} {
-				result, err := worker.ExecuteWithContext(ctx, map[string]any{"action": action, "id": "worker-00"})
+				result, err := registry.ExecuteWithContext(ctx, worker.Name(), map[string]any{"action": action, "id": "worker-00"})
 				if err != nil || !result.Success {
 					t.Fatalf("%s: %+v %v", action, result, err)
 				}
@@ -50,7 +53,7 @@ func TestSubagentModelOutput_FindingsAndPagesSurviveEncoding(t *testing.T) {
 					t.Fatalf("%s handoff lost: %s err=%v", action, wire, err)
 				}
 			}
-			result, err := worker.ExecuteWithContext(ctx, map[string]any{"action": "list"})
+			result, err := registry.ExecuteWithContext(ctx, worker.Name(), map[string]any{"action": "list"})
 			if err != nil || !result.Success {
 				t.Fatalf("list: %+v %v", result, err)
 			}

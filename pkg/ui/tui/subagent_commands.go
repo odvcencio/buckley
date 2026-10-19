@@ -11,6 +11,7 @@ import (
 
 const subagentCommandUsage = `Subagent commands:
   /agents
+  /agent list [next]
   /agent spawn [@name] <task>
   /agent status <run-id>
   /agent messages <run-id>
@@ -31,8 +32,10 @@ func parseSubagentCommand(args []string) (parsedSubagentCommand, error) {
 	params := map[string]any{"action": action}
 	switch action {
 	case "list":
-		if len(args) != 1 {
-			return parsedSubagentCommand{}, fmt.Errorf("usage: /agent list")
+		if len(args) == 2 && args[1] == "next" {
+			params["cursor"] = "next"
+		} else if len(args) != 1 {
+			return parsedSubagentCommand{}, fmt.Errorf("usage: /agent list [next]")
 		}
 	case "spawn":
 		rest := append([]string(nil), args[1:]...)
@@ -98,11 +101,26 @@ func (c *Controller) handleSubagentCommand(args []string) {
 		c.app.AddMessage("Subagent controls are unavailable in this session.", "system")
 		return
 	}
+	if command.action == "list" && command.params["cursor"] == "next" {
+		c.mu.Lock()
+		cursor := sess.subagentListCursor
+		c.mu.Unlock()
+		if cursor == "" {
+			c.app.AddMessage("No more subagents to list. Use /agents to start again.", "system")
+			return
+		}
+		command.params["cursor"] = cursor
+	}
 	ctx := builtin.WithUserInitiatedSubagentCommand(context.Background())
 	result, err := sess.ToolRegistry.ExecuteWithContext(ctx, "spawn_subagent", command.params)
 	if err != nil {
 		c.app.AddMessage("Subagent command failed: "+err.Error(), "system")
 		return
+	}
+	if command.action == "list" && result != nil && result.Success {
+		c.mu.Lock()
+		sess.subagentListCursor, _ = result.Data["next_cursor"].(string)
+		c.mu.Unlock()
 	}
 	message, ok := formatSubagentCommandResult(command.action, result)
 	if !ok {
@@ -139,6 +157,9 @@ func formatSubagentCommandResult(action string, result *builtin.Result) (string,
 		for _, run := range runs {
 			fmt.Fprintf(&output, "\n- %s", formatSubagentRun("list", run))
 		}
+		if more, _ := result.Data["has_more"].(bool); more {
+			output.WriteString("\nMore subagents: /agent list next")
+		}
 		return output.String(), true
 	}
 	if messages, ok := result.Data["messages"].([]agentcoord.Message); ok && action == "messages" {
@@ -173,6 +194,11 @@ func formatSubagentRun(action string, run agentcoord.Run) string {
 	case "cancel":
 		return fmt.Sprintf("Cancellation requested for %s subagent %s.", agent, run.ID)
 	default:
-		return fmt.Sprintf("%s [%s] %s — %s", run.ID, run.State, agent, run.Task.Task)
+		task := oneLine(truncatePreview(run.Task.Task, 160))
+		message := fmt.Sprintf("%s [%s] %s — %s", run.ID, run.State, agent, task)
+		if action != "list" && strings.TrimSpace(run.Result.Summary) != "" {
+			message += "\n" + truncatePreview(run.Result.Summary, 4096)
+		}
+		return message
 	}
 }
