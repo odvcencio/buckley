@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"runtime"
@@ -252,26 +253,23 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 
 	err := command.Run()
 	exitCode := 0
+	executionError := ""
 	if err != nil {
-		if ctx.Err() == context.Canceled {
-			return &Result{
-				Success: false,
-				Error:   "command interrupted by user",
-			}, nil
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("command timed out after %ds\n%s", timeout, strings.TrimSpace(stderr.String())),
-			}, nil
-		}
+		exitCode = -1
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
-		} else {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("command failed: %v\n%s", err, strings.TrimSpace(stderr.String())),
-			}, nil
+		}
+		switch ctx.Err() {
+		case context.Canceled:
+			executionError = "command interrupted by user"
+		case context.DeadlineExceeded:
+			executionError = fmt.Sprintf("command timed out after %ds", timeout)
+		default:
+			if exitCode >= 0 {
+				executionError = fmt.Sprintf("command exited with code %d", exitCode)
+			} else {
+				executionError = fmt.Sprintf("command failed: %v", err)
+			}
 		}
 	}
 
@@ -283,6 +281,12 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 		"stderr":    stderrStr,
 		"exit_code": exitCode,
 	}
+	if err != nil && ctx.Err() == context.Canceled {
+		data["canceled"] = true
+	}
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		data["timed_out"] = true
+	}
 	if stdout.Truncated() {
 		data["stdout_truncated"] = true
 	}
@@ -293,24 +297,11 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 	result := &Result{
 		Success: err == nil,
 		Data:    data,
-		Error: func() string {
-			if err != nil {
-				return fmt.Sprintf("command exited with code %d", exitCode)
-			}
-			return ""
-		}(),
+		Error:   executionError,
 	}
 	if stdout.Truncated() || stderr.Truncated() {
-		display := map[string]any{
-			"command":          cmd,
-			"stdout":           stdoutStr,
-			"stderr":           stderrStr,
-			"exit_code":        exitCode,
-			"stdout_truncated": stdout.Truncated(),
-			"stderr_truncated": stderr.Truncated(),
-		}
 		result.ShouldAbridge = true
-		result.DisplayData = display
+		result.DisplayData = maps.Clone(data)
 	}
 
 	return result, nil

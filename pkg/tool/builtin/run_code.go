@@ -86,12 +86,19 @@ func (t *DynamicCodeTool) ExecuteWithContext(ctx context.Context, params map[str
 	if result.Data == nil {
 		result.Data = make(map[string]any)
 	}
-	delete(result.Data, "command")
-	result.Data["language"] = language
-	result.Data["code_bytes"] = len(code)
-	result.DisplayData = map[string]any{
-		"summary": fmt.Sprintf("Executed %s snippet (%d bytes)", language, len(code)),
+	if result.DisplayData == nil {
+		result.DisplayData = make(map[string]any)
 	}
+	for _, data := range []map[string]any{result.Data, result.DisplayData} {
+		delete(data, "command")
+		data["language"] = language
+		data["code_bytes"] = len(code)
+	}
+	status := "Executed"
+	if !result.Success {
+		status = "Failed"
+	}
+	result.DisplayData["summary"] = fmt.Sprintf("%s %s snippet (%d bytes)", status, language, len(code))
 	return result, execErr
 }
 
