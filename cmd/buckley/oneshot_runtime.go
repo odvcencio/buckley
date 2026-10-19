@@ -108,6 +108,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	var codeRuntime *codeModeRuntime
 	var codeModeFailure error
 	registry := tool.NewRegistry()
+	tool.ApplyToolMiddlewareConfig(registry, cfg)
 	defer func() {
 		// Workers must finish publishing evidence before its backing store closes.
 		if err := registry.Close(); err != nil {
