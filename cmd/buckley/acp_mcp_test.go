@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/acp"
@@ -18,6 +19,16 @@ import (
 var acpFakeMCPServerBin string
 
 func TestMain(m *testing.M) {
+	if os.Getenv("BUCKLEY_TEST_RUN_MAIN") == "1" {
+		separator := slices.Index(os.Args, "--")
+		if separator < 0 {
+			fmt.Fprintln(os.Stderr, "CLI test helper requires arguments after --")
+			os.Exit(2)
+		}
+		os.Args = append(os.Args[:1], os.Args[separator+1:]...)
+		main()
+		return
+	}
 	dir, err := os.MkdirTemp("", "buckley-acp-fakeserver-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "acp test setup: mkdtemp:", err)

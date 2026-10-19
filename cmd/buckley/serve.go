@@ -24,7 +24,6 @@ import (
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/telemetry"
-	"m31labs.dev/buckley/pkg/tool"
 )
 
 type ipcServer interface {
@@ -239,10 +238,7 @@ func runServeCommand(args []string) error {
 		agentProfile.ApplyToConfig(appCfg)
 	}
 	applyStartupModelOverride(appCfg, modelOverrideFlag)
-	if encodingOverrideFlag != "" {
-		appCfg.Encoding.UseToon = encodingOverrideFlag != "json"
-	}
-	tool.SetResultEncoding(appCfg.Encoding.UseToon)
+	configureToolEncoding(appCfg)
 
 	opts, err := parseServeCommandOptions(args, appCfg.IPC)
 	if err != nil {
