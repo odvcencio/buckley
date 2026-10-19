@@ -1472,37 +1472,6 @@ func TestInitIPCStore(t *testing.T) {
 	}
 }
 
-func TestEncodingOverrideFlagApplied(t *testing.T) {
-	// Test that encoding override flag affects config
-	origFlag := encodingOverrideFlag
-	t.Cleanup(func() { encodingOverrideFlag = origFlag })
-
-	// Test json encoding
-	encodingOverrideFlag = "json"
-	cfg := config.DefaultConfig()
-	cfg.Encoding.UseToon = true
-
-	// The actual override happens in initDependencies, verify the logic
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
-	}
-
-	if cfg.Encoding.UseToon {
-		t.Error("encoding should be false (json mode)")
-	}
-
-	// Test toon encoding
-	encodingOverrideFlag = "toon"
-	cfg.Encoding.UseToon = false
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
-	}
-
-	if !cfg.Encoding.UseToon {
-		t.Error("encoding should be true (toon mode)")
-	}
-}
-
 func TestWorktreeCommandUsage(t *testing.T) {
 	// Test worktree command with no args shows usage
 	err := runWorktreeCommand(nil)

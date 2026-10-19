@@ -10,7 +10,6 @@ import (
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/rules"
 	"m31labs.dev/buckley/pkg/storage"
-	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -60,10 +59,7 @@ func initOneshotDependencies(backend string) (*config.Config, *model.Manager, *s
 	if err != nil {
 		return nil, nil, nil, withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
 	}
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
-	}
-	tool.SetResultEncoding(cfg.Encoding.UseToon)
+	configureToolEncoding(cfg)
 
 	cwd, err := os.Getwd()
 	if err != nil {

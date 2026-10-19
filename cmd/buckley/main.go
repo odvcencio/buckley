@@ -250,7 +250,7 @@ func main() {
 		agentProfile.ApplyToConfig(cfg)
 	}
 	applyStartupModelOverride(cfg, modelOverrideFlag)
-	tool.SetResultEncoding(cfg.Encoding.UseToon)
+	configureToolEncoding(cfg)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -728,6 +728,13 @@ func loadConfiguredConfig() (*config.Config, error) {
 	return config.Load()
 }
 
+func configureToolEncoding(cfg *config.Config) {
+	if encodingOverrideFlag != "" {
+		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
+	}
+	tool.SetResultEncoding(cfg.Encoding.UseToon)
+}
+
 func initReviewDependencies(criticModel string) (*config.Config, *model.Manager, *storage.Store, error) {
 	return initDependenciesWithReviewCritic(criticModel, true)
 }
@@ -739,9 +746,6 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return nil, nil, nil, withExitCode(fmt.Errorf("failed to load config: %w", err), 2)
-	}
-	if encodingOverrideFlag != "" {
-		cfg.Encoding.UseToon = encodingOverrideFlag != "json"
 	}
 	agentProfile, err := loadStartupAgentProfile(agentProfileFlag)
 	if err != nil {
@@ -755,7 +759,7 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 		applyReviewCriticModelOverride(cfg, criticModel)
 	}
 	applyAgentProviderLock(cfg)
-	tool.SetResultEncoding(cfg.Encoding.UseToon)
+	configureToolEncoding(cfg)
 
 	cwd, err := os.Getwd()
 	if err != nil {
