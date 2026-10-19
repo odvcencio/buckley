@@ -2614,6 +2614,7 @@ func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string) []st
 // verification surfaces needed to finish honestly after discovery is parked.
 // It deliberately excludes general read/search and destructive escape hatches.
 func acpActionToolNames(registry *tool.Registry, allowed []string, hostTools bool) []string {
+	hasFilter := allowed != nil
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
 		allowedSet[name] = struct{}{}
@@ -2621,7 +2622,7 @@ func acpActionToolNames(registry *tool.Registry, allowed []string, hostTools boo
 	names := make([]string, 0)
 	for _, registered := range registry.List() {
 		name := registered.Name()
-		if len(allowedSet) > 0 {
+		if hasFilter {
 			if _, ok := allowedSet[name]; !ok {
 				continue
 			}

@@ -1982,8 +1982,16 @@ func resolveOneShotToolFilter(profile *agentspec.RuntimeProfile, registry *tool.
 	}
 	if len(allowed) == 0 {
 		allowed = toolsForTier(registry, tier)
+		if allowed == nil && len(denied) > 0 {
+			allowed = []string{}
+			if registry != nil {
+				for _, candidate := range registry.List() {
+					allowed = append(allowed, candidate.Name())
+				}
+			}
+		}
 	}
-	if len(allowed) == 0 && len(denied) == 0 {
+	if allowed == nil && len(denied) == 0 {
 		return nil
 	}
 	return subtractToolNames(allowed, denied)

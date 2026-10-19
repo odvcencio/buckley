@@ -6,6 +6,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/agentspec"
+	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/tool"
 )
 
@@ -50,6 +51,18 @@ func TestActionWindowKeepsShellForHostLanes(t *testing.T) {
 	for _, want := range []string{"run_shell", "git_status", "write_file"} {
 		if !containsString(with.AllowedTools, want) {
 			t.Fatalf("host action window %v is missing %s", with.AllowedTools, want)
+		}
+	}
+}
+
+func TestActionWindow_EmptyCallerFilterStaysEmpty(t *testing.T) {
+	registry := hostToolTestRegistry()
+	state := skill.NewRuntimeState(nil)
+	state.SetToolFilter([]string{})
+	for _, host := range []bool{false, true} {
+		turn := buildACPToolTurn(registry, state, nil, true, true, true, agentloop.MutationIntent, host)
+		if turn.Enabled || turn.UseTools || len(turn.Tools) != 0 || turn.AllowedTools == nil || len(turn.AllowedTools) != 0 {
+			t.Fatalf("empty action filter expanded (host=%v): %+v", host, turn)
 		}
 	}
 }
