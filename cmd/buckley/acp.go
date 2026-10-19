@@ -1546,11 +1546,11 @@ func newACPLoopController(
 
 	completionContract := acpCompletionContract(limits)
 	if completionContract != nil && completionContract.RequireObservableChange && limits.bestEffortObservation && strings.TrimSpace(workDir) != "" {
-		mutations, observationErr := workspaceevidence.NewGitMutationRecorder(ctx, workDir)
+		mutations, observationErr := workspaceevidence.NewWorkspaceMutationRecorder(ctx, workDir)
 		if observationErr == nil {
 			completionContract.ObserveObservableChange = func() (bool, error) { return mutations.Observe(ctx) }
 			completionContract.ObserveWorkspaceState = func() (string, error) {
-				state, err := workspaceevidence.GitStateFingerprintWithFallback(ctx, workDir)
+				state, err := workspaceevidence.WorkspaceStateFingerprintWithFallback(ctx, workDir)
 				return state.Digest, err
 			}
 		} else {
