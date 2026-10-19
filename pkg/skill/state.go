@@ -8,6 +8,7 @@ type RuntimeState struct {
 	mu            sync.RWMutex
 	toolFilter    []string
 	toolFilterSet bool
+	toolCeiling   []string
 	metadata      map[string]any
 	inject        func(string)
 }
@@ -56,7 +57,23 @@ func (s *RuntimeState) ClearToolFilter() {
 	s.mu.Unlock()
 }
 
-// ToolFilter returns the currently active tool allowlist (copy).
+// SetToolCeiling limits which tools active skills may expose. Nil leaves the
+// caller unrestricted; an empty slice permits no tools. Clearing a skill's
+// filter does not clear this caller-owned limit.
+func (s *RuntimeState) SetToolCeiling(allowedTools []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if allowedTools == nil {
+		s.toolCeiling = nil
+	} else {
+		s.toolCeiling = append([]string{}, allowedTools...)
+	}
+}
+
+// ToolFilter returns a copy of the effective allowlist within the caller's ceiling.
 func (s *RuntimeState) ToolFilter() []string {
 	if s == nil {
 		return nil
@@ -64,9 +81,25 @@ func (s *RuntimeState) ToolFilter() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.toolFilterSet {
-		return nil
+		if s.toolCeiling == nil {
+			return nil
+		}
+		return append([]string{}, s.toolCeiling...)
 	}
-	return append([]string{}, s.toolFilter...)
+	if s.toolCeiling == nil {
+		return append([]string{}, s.toolFilter...)
+	}
+	allowed := make(map[string]struct{}, len(s.toolCeiling))
+	for _, name := range s.toolCeiling {
+		allowed[name] = struct{}{}
+	}
+	tools := make([]string, 0, len(s.toolFilter))
+	for _, name := range s.toolFilter {
+		if _, ok := allowed[name]; ok {
+			tools = append(tools, name)
+		}
+	}
+	return tools
 }
 
 // GetMetadata returns stored metadata values.

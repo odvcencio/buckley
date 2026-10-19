@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1271,6 +1272,25 @@ func TestResolveOneShotToolFilterRespectsAgentTierAndDeny(t *testing.T) {
 	got = resolveOneShotToolFilter(profile, registry, []string{"read_file", "read_file"})
 	if strings.Join(got, ",") != "read_file" {
 		t.Fatalf("explicit filter=%v want read_file", got)
+	}
+
+	profile.Spec.Tools.Tier = "read_only"
+	got = resolveOneShotToolFilter(profile, registry, []string{"read_file", "run_shell"})
+	if !reflect.DeepEqual(got, []string{"read_file", "run_shell"}) {
+		t.Fatalf("explicit selector changed its requested scope: %v", got)
+	}
+
+	profile.Spec.Tools = agentspec.ToolSpec{Deny: []string{"run_shell"}}
+	got = resolveOneShotToolFilter(profile, registry, nil)
+	if !reflect.DeepEqual(got, []string{"read_file", "write_file"}) {
+		t.Fatalf("deny-only profile disabled other tools: %v", got)
+	}
+
+	registry.Remove("read_file")
+	profile.Spec.Tools = agentspec.ToolSpec{Tier: "read_only"}
+	got = resolveOneShotToolFilter(profile, registry, nil)
+	if got == nil || len(got) != 0 {
+		t.Fatalf("empty tier became unrestricted: %#v", got)
 	}
 }
 

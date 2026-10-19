@@ -236,15 +236,22 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			registry.Remove(strings.TrimSpace(name))
 		}
 	}
-	toolFilter := resolveOneShotToolFilter(opts.AgentProfile, registry, opts.AllowedTools)
+	callerTools := resolveOneShotToolFilter(opts.AgentProfile, registry, opts.AllowedTools)
+	toolFilter := callerTools
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
 	}
-	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
 	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
 		toolFilter = ensureHostMutationTools(toolFilter, registry)
+		if callerTools != nil {
+			toolFilter = intersectAgentRunTools(toolFilter, callerTools)
+		}
 	}
+	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)
 	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
+	callerTools = ensureRequiredOneShotTools(callerTools, artifactSubmission != nil, codeRuntime != nil)
+	callerTools = sourceScopeToolFilter(callerTools, limits.SourceScope)
+	skillState.SetToolCeiling(callerTools)
 	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)
 	}
