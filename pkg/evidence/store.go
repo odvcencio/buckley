@@ -126,6 +126,10 @@ func New(dbPath string, opts ...Option) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
+	if err := storage.EnableSQLiteIncrementalVacuum(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("evidence: enable incremental vacuum: %w", err)
+	}
 
 	if err := storage.EnableSQLiteWAL(db); err != nil {
 		_ = db.Close()
@@ -136,8 +140,12 @@ func New(dbPath string, opts ...Option) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("evidence: run migrations: %w", err)
 	}
+	if err := storage.RefreshStorageBudget(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("evidence: refresh storage budget: %w", err)
+	}
 
-	blobs, err := NewBlobStore(cfg.blobRoot)
+	blobs, err := newSQLiteBlobStore(db, cfg.blobRoot)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -158,11 +166,32 @@ func NewWithDB(db *sql.DB, blobRoot string) (*SQLiteStore, error) {
 	if err := runMigrations(db); err != nil {
 		return nil, fmt.Errorf("evidence: run migrations: %w", err)
 	}
-	blobs, err := NewBlobStore(blobRoot)
+	if err := storage.RefreshStorageBudget(context.Background(), db); err != nil {
+		return nil, fmt.Errorf("evidence: refresh storage budget: %w", err)
+	}
+	blobs, err := newSQLiteBlobStore(db, blobRoot)
 	if err != nil {
 		return nil, err
 	}
 	return &SQLiteStore{db: db, blobs: blobs}, nil
+}
+
+func newSQLiteBlobStore(db *sql.DB, root string) (*BlobStore, error) {
+	blobs, err := NewBlobStore(root)
+	if err != nil {
+		return nil, err
+	}
+	var path string
+	if err := db.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&path); err != nil {
+		return nil, err
+	}
+	if path == "" {
+		path = fmt.Sprintf("memory:%p", db)
+	} else if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	blobs.namespace = "db-" + ContentSHA256Hex([]byte(path))
+	return blobs, nil
 }
 
 // Close closes the underlying database connection opened by New. It must
@@ -194,6 +223,56 @@ func (s *SQLiteStore) Blobs() *BlobStore {
 // formula and the dedup index disagree on that point, and how this method
 // resolves it).
 func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
+	var stored Object
+	var pendingBlob string
+	err := storage.WithSQLiteWriteTransaction(ctx, s.db, func(conn *sql.Conn) error {
+		var err error
+		stored, err = s.put(ctx, conn, obj, &pendingBlob)
+		if err != nil {
+			return err
+		}
+		// Pin associations in the same transaction as deduplication. Reusing
+		// old content must not expose it to a sweep before the caller can pin it.
+		reason := ""
+		if id, ok := obj.Metadata[MetaRunID].(string); ok && id != "" {
+			reason = "run:" + id
+		} else if id, ok := obj.Metadata[MetaSessionID].(string); ok && id != "" {
+			reason = "session:" + id
+		}
+		if reason != "" {
+			if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO evidence_pins
+				(evidence_id, reason, created_at) VALUES (?, ?, ?)`,
+				stored.ID, reason, sqliteTimestamp(time.Now().UTC())); err != nil {
+				return fmt.Errorf("evidence: pin association: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil && pendingBlob != "" {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cleanupErr := storage.WithSQLiteWriteTransaction(cleanup, s.db, func(conn *sql.Conn) error {
+			var referenced bool
+			if err := conn.QueryRowContext(cleanup, `SELECT EXISTS(SELECT 1 FROM evidence_objects WHERE blob_path = ?)`, pendingBlob).Scan(&referenced); err != nil {
+				return err
+			}
+			if referenced {
+				return nil
+			}
+			if err := os.Remove(pendingBlob); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		})
+		err = errors.Join(err, cleanupErr)
+	}
+	if storage.IsStorageBudgetError(err) && !errors.Is(err, storage.ErrStorageBudget) {
+		err = fmt.Errorf("%w: %w", storage.ErrStorageBudget, err)
+	}
+	return stored, err
+}
+
+func (s *SQLiteStore) put(ctx context.Context, conn *sql.Conn, obj Object, pendingBlob *string) (Object, error) {
 	if obj.Kind == "" {
 		return Object{}, fmt.Errorf("evidence: kind is required")
 	}
@@ -201,11 +280,18 @@ func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
 	content := obj.InlineBody
 	sha := ContentSHA256Hex(content)
 
-	if existing, err := s.getByKindHash(ctx, obj.Kind, sha); err == nil {
+	if existing, err := s.getByKindHash(ctx, conn, obj.Kind, sha); err == nil {
 		return existing, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return Object{}, err
 	}
+	metadataJSON, err := marshalMetadata(obj.Metadata)
+	if err != nil {
+		return Object{}, fmt.Errorf("evidence: marshal metadata: %w", err)
+	}
+	// Check while holding the writer lock and before writing a blob. Accounting
+	// triggers cover the object and pin atomically; rejected writes leave no file.
+	charge := int64(4096 + 2*(len(metadataJSON)+len(obj.Kind)+len(obj.MediaType)+len(obj.Encoding)))
 
 	id := ComputeContentID(obj.Kind, obj.MediaType, content)
 
@@ -217,19 +303,21 @@ func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
 	storageKind := StorageInline
 	inlineBody := content
 	blobPath := ""
+	storedBytes := int64(len(content))
 	if len(content) > InlineThreshold {
 		storageKind = StorageBlob
-		path, err := s.blobs.Write(sha, content)
+		path, bytes, err := s.blobs.write(sha, content, func(bytes int64) error {
+			return storage.CheckStorageBudget(ctx, conn, charge+4*bytes)
+		})
 		if err != nil {
 			return Object{}, fmt.Errorf("evidence: write blob: %w", err)
 		}
 		blobPath = path
+		*pendingBlob = path
+		storedBytes = bytes
 		inlineBody = nil
-	}
-
-	metadataJSON, err := marshalMetadata(obj.Metadata)
-	if err != nil {
-		return Object{}, fmt.Errorf("evidence: marshal metadata: %w", err)
+	} else if err := storage.CheckStorageBudget(ctx, conn, charge+6*storedBytes); err != nil {
+		return Object{}, err
 	}
 
 	createdAt := obj.CreatedAt
@@ -237,22 +325,22 @@ func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
 		createdAt = time.Now().UTC()
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = conn.ExecContext(ctx, `
 		INSERT INTO evidence_objects (
 			evidence_id, kind, media_type, encoding, content_sha256, byte_count,
 			estimated_tokens, sensitivity, storage_kind, inline_body, blob_path,
-			metadata_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			metadata_json, created_at, stored_byte_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		id, string(obj.Kind), obj.MediaType, obj.Encoding, sha, int64(len(content)),
 		obj.EstimatedTokens, string(sensitivity), string(storageKind), inlineBody, nullableString(blobPath),
-		metadataJSON, sqliteTimestamp(createdAt),
+		metadataJSON, sqliteTimestamp(createdAt), storedBytes,
 	)
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			// A concurrent writer won the race for this (kind, content)
 			// pair between our dedup check and this insert; defer to it.
-			return s.getByKindHash(ctx, obj.Kind, sha)
+			return s.getByKindHash(ctx, conn, obj.Kind, sha)
 		}
 		return Object{}, fmt.Errorf("evidence: insert object: %w", err)
 	}
@@ -285,8 +373,8 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (Object, error) {
 	return s.materialize(obj)
 }
 
-func (s *SQLiteStore) getByKindHash(ctx context.Context, kind Kind, sha256Hex string) (Object, error) {
-	obj, err := s.scanObject(s.db.QueryRowContext(ctx, objectSelectColumns+" WHERE kind = ? AND content_sha256 = ?", string(kind), sha256Hex))
+func (s *SQLiteStore) getByKindHash(ctx context.Context, conn *sql.Conn, kind Kind, sha256Hex string) (Object, error) {
+	obj, err := s.scanObject(conn.QueryRowContext(ctx, objectSelectColumns+" WHERE kind = ? AND content_sha256 = ?", string(kind), sha256Hex))
 	if err != nil {
 		return Object{}, err
 	}
@@ -311,16 +399,23 @@ func (s *SQLiteStore) Pin(ctx context.Context, id, reason string) error {
 	if reason == "" {
 		return fmt.Errorf("evidence: pin reason is required")
 	}
-	if _, err := s.Get(ctx, id); err != nil {
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO evidence_pins (evidence_id, reason, created_at)
-		VALUES (?, ?, ?)
+		SELECT evidence_id, ?, ? FROM evidence_objects WHERE evidence_id = ?
 		ON CONFLICT(evidence_id, reason) DO NOTHING
-	`, id, reason, sqliteTimestamp(time.Now().UTC()))
+	`, reason, sqliteTimestamp(time.Now().UTC()), id)
 	if err != nil {
 		return fmt.Errorf("evidence: pin %s: %w", id, err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM evidence_objects WHERE evidence_id = ?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -517,6 +612,63 @@ func ensurePrivateSQLiteFile(path string) error {
 var migrations = []storage.SQLiteMigration{
 	{Version: 1, Name: "evidence_objects", Apply: createEvidenceObjectsTable},
 	{Version: 2, Name: "evidence_pins", Apply: createEvidencePinsTable},
+	{Version: 3, Name: "evidence_storage_bytes", Apply: migrateEvidenceStorageBytes},
+}
+
+func migrateEvidenceStorageBytes(db storage.MigrationDB) error {
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('evidence_objects') WHERE name = 'stored_byte_count')`).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE evidence_objects ADD COLUMN stored_byte_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	var cursor int64
+	for {
+		rows, err := db.Query(`SELECT rowid, storage_kind, COALESCE(blob_path, ''), byte_count
+			FROM evidence_objects WHERE rowid > ? AND stored_byte_count = 0 ORDER BY rowid LIMIT 256`, cursor)
+		if err != nil {
+			return err
+		}
+		var batch []struct {
+			id         int64
+			kind, path string
+			bytes      int64
+		}
+		for rows.Next() {
+			var item struct {
+				id         int64
+				kind, path string
+				bytes      int64
+			}
+			if err := rows.Scan(&item.id, &item.kind, &item.path, &item.bytes); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, item)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, item := range batch {
+			cursor = item.id
+			if item.kind == string(StorageBlob) {
+				if info, err := os.Stat(item.path); err == nil {
+					item.bytes = info.Size()
+				}
+			}
+			if _, err := db.Exec(`UPDATE evidence_objects SET stored_byte_count = ? WHERE rowid = ?`, item.bytes, item.id); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func createEvidenceObjectsTable(db storage.MigrationDB) error {

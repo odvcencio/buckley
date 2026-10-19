@@ -66,7 +66,7 @@ func (s *Store) CreateSessionUnpublished(session *Session) error {
 
 	var completedAt any
 	if session.CompletedAt != nil {
-		completedAt = *session.CompletedAt
+		completedAt = sqliteTimestamp(*session.CompletedAt)
 	}
 
 	// Retry logic for handling transient SQLITE_BUSY during concurrent operations (e.g., indexing)
@@ -437,7 +437,7 @@ func (s *Store) SetSessionStatus(sessionID string, status string) error {
 
 	if status == SessionStatusCompleted {
 		now := time.Now()
-		res, err = s.db.Exec(`UPDATE sessions SET status = ?, completed_at = ? WHERE session_id = ?`, status, now, sessionID)
+		res, err = s.db.Exec(`UPDATE sessions SET status = ?, completed_at = ? WHERE session_id = ?`, status, sqliteTimestamp(now), sessionID)
 		payload = map[string]any{
 			"status":      status,
 			"completedAt": now,

@@ -60,6 +60,15 @@ var mergeStrategies = map[string]mergeStrategy{
 	"approval.mode":        scopedScalarMerge,
 	"sandbox.mode":         scopedScalarMerge,
 	"sandbox.allow_unsafe": scopedScalarMerge,
+	// A project cannot expire history belonging to other projects.
+	"retention.enabled":                scopedScalarMerge,
+	"retention.interval":               scopedScalarMerge,
+	"retention.history_ttl":            scopedScalarMerge,
+	"retention.max_completed_sessions": scopedScalarMerge,
+	"retention.max_completed_runs":     scopedScalarMerge,
+	"retention.ephemeral_evidence_ttl": scopedScalarMerge,
+	"retention.durable_evidence_ttl":   scopedScalarMerge,
+	"resources.storage_bytes":          scopedScalarMerge,
 
 	// Per-name / per-key merges: a project config can add or override a
 	// single named entry without restating everything else at that level.

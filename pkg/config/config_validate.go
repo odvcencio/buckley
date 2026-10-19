@@ -41,6 +41,8 @@ var configValidators = []func(*Config) error{
 	validateOneshotDataPolicy,
 	validateDecisions,
 	validateReviewVerificationRunner,
+	validateRetention,
+	validateResources,
 }
 
 // Validate checks configuration values for correctness and returns an

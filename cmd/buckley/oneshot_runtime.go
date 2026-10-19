@@ -199,7 +199,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	autoCodeMode := limits.SourceScope == nil && protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic && adaptiveProtocolExecutionStage(*adaptiveProtocol).CodeMode == "auto_read_only"
 	enableCodeMode := opts.CodeMode || autoCodeMode
 	if enableCodeMode {
-		codeRuntime, err = openCodeModeRuntime(cwd)
+		codeRuntime, err = openCodeModeRuntime(cwd, cfg)
 		if err != nil {
 			if autoCodeMode && !opts.CodeMode {
 				fmt.Fprintf(os.Stderr, "Warning: adaptive protocol kept code mode at suggest because isolated execution is unavailable: %v\n", err)

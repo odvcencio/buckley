@@ -168,8 +168,8 @@ func TestDeleteObject_SharedBlobSurvivesUntilLastReferenceGone(t *testing.T) {
 		t.Fatalf("expected shared blob path for identical content, got %q and %q", a.BlobPath, b.BlobPath)
 	}
 
-	if err := store.deleteObject(ctx, a.ID); err != nil {
-		t.Fatalf("deleteObject(a) error = %v", err)
+	if deleted, err := store.deleteUnpinnedObject(ctx, a.ID, ""); err != nil || !deleted {
+		t.Fatalf("delete object: deleted=%v err=%v", deleted, err)
 	}
 
 	// b's row still references the shared blob; it must still be readable.

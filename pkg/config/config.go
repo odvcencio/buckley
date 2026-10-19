@@ -176,6 +176,8 @@ type Config struct {
 	Diagnostics    DiagnosticsConfig  `yaml:"diagnostics"`
 	Notify         NotifyConfig       `yaml:"notify"`
 	Launch         LaunchConfig       `yaml:"launch"`
+	Retention      RetentionConfig    `yaml:"retention"`
+	Resources      ResourceConfig     `yaml:"resources"`
 
 	// Context Fabric / durable agent runtime scaffolding. All flags default
 	// off or to current (legacy) behavior; no runtime code reads these yet.

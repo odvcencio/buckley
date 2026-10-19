@@ -90,6 +90,11 @@ func runACPCommand(args []string) error {
 		return err
 	}
 	defer store.Close()
+	stopHistory, err := startSessionHistoryMaintenance(context.Background(), cfg, store)
+	if err != nil {
+		return err
+	}
+	defer stopHistory()
 
 	// ACP owns one process-lifetime telemetry hub. Controller lifecycle events
 	// are best-effort metadata projections; they are not ACP session updates.

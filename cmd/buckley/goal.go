@@ -97,6 +97,9 @@ func runGoalWorker(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := storage.ConfigureStorageBudget(context.Background(), stores.evidence.DB(), cfg.Resources.StorageBytes); err != nil {
+		return fmt.Errorf("configure goal storage budget: %w", err)
+	}
 
 	registry := tool.NewRegistry()
 	tool.ApplyToolMiddlewareConfig(registry, cfg)
@@ -136,6 +139,11 @@ func runGoalWorker(args []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	stopRetention, err := startHistoryMaintenance(ctx, cfg, stores.evidence)
+	if err != nil {
+		return err
+	}
+	defer stopRetention()
 	healthCtx, cancelHealth := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelHealth()
 	if err := backend.Health(healthCtx); err != nil {
@@ -423,6 +431,9 @@ func runGoalRun(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := storage.ConfigureStorageBudget(ctx, stores.evidence.DB(), cfg.Resources.StorageBytes); err != nil {
+			return fmt.Errorf("configure goal storage budget: %w", err)
+		}
 		backend, err := goalBackendForFn(*backendName)
 		if err != nil {
 			return err
@@ -446,6 +457,9 @@ func runGoalRun(args []string) error {
 			return err
 		}
 		defer store.Close()
+		if err := storage.ConfigureStorageBudget(ctx, stores.evidence.DB(), cfg.Resources.StorageBytes); err != nil {
+			return fmt.Errorf("configure goal storage budget: %w", err)
+		}
 		registry := tool.NewRegistry()
 		tool.ApplyToolMiddlewareConfig(registry, cfg)
 		registry.ConfigureContainers(cfg, workDir)
@@ -481,6 +495,11 @@ func runGoalRun(args []string) error {
 		return err
 	}
 
+	stopRetention, err := startHistoryMaintenance(ctx, cfg, stores.evidence)
+	if err != nil {
+		return err
+	}
+	defer stopRetention()
 	fmt.Printf("Running goal %s: %s\n", runID, goal.Statement)
 	if goal.BudgetUSD > 0 {
 		fmt.Printf("Budget: $%.2f · posture: %s\n", goal.BudgetUSD, goal.Posture)

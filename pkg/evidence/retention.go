@@ -2,9 +2,16 @@ package evidence
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
+
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // RetentionPolicy configures how long unpinned evidence is kept before
@@ -16,6 +23,9 @@ type RetentionPolicy struct {
 	// DurableTTL bounds checkpoints, review receipts, and commit
 	// proposals. Default: 180 days.
 	DurableTTL time.Duration
+	// OtherTTL expires other known kinds after their owning history is
+	// removed. Zero leaves their retention to the caller.
+	OtherTTL time.Duration
 }
 
 // DefaultRetentionPolicy returns the defaults from section 13.5.
@@ -47,40 +57,63 @@ var ephemeralKinds = []Kind{
 
 var durableKinds = []Kind{KindCheckpoint, KindReview, KindCommitProposal}
 
+var otherKinds = []Kind{KindSource, KindProjection, KindContextBundle, KindContextManifest,
+	KindDiff, KindSubagentTask, KindSubagentReport, KindSubagentMessage, KindMemoryRecall}
+
 // Sweep deletes unpinned objects older than their class's TTL and returns
 // the IDs it removed. It never deletes an object with an active pin
 // (section 13.5: "User-pinned evidence: indefinite").
 func (s *SQLiteStore) Sweep(ctx context.Context, policy RetentionPolicy, now time.Time) ([]string, error) {
 	var removed []string
-
-	ephemeralCutoff := now.Add(-policy.EphemeralTTL)
-	ids, err := s.expiredUnpinnedIDs(ctx, ephemeralKinds, ephemeralCutoff)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if err := s.deleteObject(ctx, id); err != nil {
-			return removed, err
-		}
-		removed = append(removed, id)
-	}
-
-	durableCutoff := now.Add(-policy.DurableTTL)
-	ids, err = s.expiredUnpinnedIDs(ctx, durableKinds, durableCutoff)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if err := s.deleteObject(ctx, id); err != nil {
-			return removed, err
-		}
-		removed = append(removed, id)
-	}
-
-	return removed, nil
+	err := s.sweep(ctx, policy, now, func(id string) { removed = append(removed, id) })
+	return removed, err
 }
 
-func (s *SQLiteStore) expiredUnpinnedIDs(ctx context.Context, kinds []Kind, cutoff time.Time) ([]string, error) {
+// SweepCount keeps cleanup memory bounded even for a large retention backlog.
+func (s *SQLiteStore) SweepCount(ctx context.Context, policy RetentionPolicy, now time.Time) (int, error) {
+	removed := 0
+	err := s.sweep(ctx, policy, now, func(string) { removed++ })
+	return removed, err
+}
+
+func (s *SQLiteStore) sweep(ctx context.Context, policy RetentionPolicy, now time.Time, removed func(string)) error {
+	guards, err := s.retainedReferenceGuards(ctx)
+	if err != nil {
+		return err
+	}
+	for _, class := range []struct {
+		kinds []Kind
+		ttl   time.Duration
+	}{
+		{ephemeralKinds, policy.EphemeralTTL}, {durableKinds, policy.DurableTTL}, {otherKinds, policy.OtherTTL},
+	} {
+		if class.ttl <= 0 {
+			continue
+		}
+		for {
+			ids, err := s.expiredUnpinnedIDs(ctx, class.kinds, now.Add(-class.ttl), guards)
+			if err != nil {
+				return err
+			}
+			if len(ids) == 0 {
+				break
+			}
+			for _, id := range ids {
+				deleted, err := s.deleteUnpinnedObject(ctx, id, guards)
+				if err != nil {
+					return err
+				}
+				if deleted {
+					removed(id)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) expiredUnpinnedIDs(ctx context.Context, kinds []Kind, cutoff time.Time, guards string) ([]string, error) {
 	placeholders := ""
 	args := []any{}
 	for i, k := range kinds {
@@ -97,7 +130,7 @@ func (s *SQLiteStore) expiredUnpinnedIDs(ctx context.Context, kinds []Kind, cuto
 		WHERE kind IN (%s)
 		  AND created_at < ?
 		  AND evidence_id NOT IN (SELECT evidence_id FROM evidence_pins)
-	`, placeholders)
+	`+guards+` ORDER BY created_at, evidence_id LIMIT 256`, placeholders)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -116,35 +149,54 @@ func (s *SQLiteStore) expiredUnpinnedIDs(ctx context.Context, kinds []Kind, cuto
 	return ids, rows.Err()
 }
 
-// deleteObject removes id's row and, if no other object shares its blob
-// file (blob files are content-addressed by sha256 alone, independent of
-// kind, so two different kinds of identical bytes can share one blob),
-// deletes the blob file too.
-func (s *SQLiteStore) deleteObject(ctx context.Context, id string) error {
-	obj, err := s.Get(ctx, id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+func (s *SQLiteStore) deleteUnpinnedObject(ctx context.Context, id, guards string) (bool, error) {
+	deleted := false
+	err := storage.WithSQLiteWriteTransaction(ctx, s.db, func(conn *sql.Conn) error {
+		var path sql.NullString
+		err := conn.QueryRowContext(ctx, `DELETE FROM evidence_objects
+			WHERE evidence_id = ? AND NOT EXISTS (
+				SELECT 1 FROM evidence_pins WHERE evidence_id = ?)
+			`+guards+` RETURNING blob_path`, id, id).Scan(&path)
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		return err
-	}
-
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM evidence_objects WHERE evidence_id = ?`, id); err != nil {
-		return fmt.Errorf("evidence: delete object %s: %w", id, err)
-	}
-
-	if obj.Storage != StorageBlob || obj.BlobPath == "" {
+		if err != nil {
+			return fmt.Errorf("evidence: delete object %s: %w", id, err)
+		}
+		deleted = true
+		// Files are removed after the row transaction commits. Orphan cleanup
+		// rechecks references under the same writer lock used by Put; rollback
+		// and a new writer can therefore never leave a row without its blob.
 		return nil
-	}
+	})
+	return deleted && err == nil, err
+}
 
-	var refCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM evidence_objects WHERE blob_path = ?`, obj.BlobPath).Scan(&refCount); err != nil {
-		return fmt.Errorf("evidence: check blob refcount: %w", err)
+// Ledger references predating lifetime pins still protect their evidence. These
+// tables are optional: an evidence store can be used without a run ledger.
+func (s *SQLiteStore) retainedReferenceGuards(ctx context.Context) (string, error) {
+	guard := ""
+	for _, reference := range []struct{ table, predicate string }{
+		{"execution_steps", "output_evidence_id = evidence_objects.evidence_id"},
+		{"context_receipts", "bundle_evidence_id = evidence_objects.evidence_id OR manifest_evidence_id = evidence_objects.evidence_id"},
+		{"task_checkpoints", "markdown_evidence_id = evidence_objects.evidence_id"},
+		{"agent_run_contracts", "task_evidence_id = evidence_objects.evidence_id"},
+		{"agent_mailbox", "content_ref = evidence_objects.evidence_id"},
+		{"run_events", `json_extract(payload_json, '$.request_evidence_id') = evidence_objects.evidence_id
+			OR json_extract(payload_json, '$.response_evidence_id') = evidence_objects.evidence_id
+			OR json_extract(payload_json, '$.output_evidence_id') = evidence_objects.evidence_id
+			OR json_extract(payload_json, '$.evidence_id') = evidence_objects.evidence_id
+			OR EXISTS (SELECT 1 FROM json_each(evidence_ids_json) WHERE value = evidence_objects.evidence_id)`},
+	} {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, reference.table).Scan(&exists); err != nil {
+			return "", err
+		}
+		if exists {
+			guard += " AND NOT EXISTS (SELECT 1 FROM " + reference.table + " WHERE " + reference.predicate + ")"
+		}
 	}
-	if refCount > 0 {
-		return nil
-	}
-	return s.blobs.Delete(obj.BlobPath)
+	return guard, nil
 }
 
 // CleanupOrphanBlobs deletes blob files with no corresponding
@@ -153,38 +205,80 @@ func (s *SQLiteStore) deleteObject(ctx context.Context, id string) error {
 // inconsistent state to repair before continuing (section 13.2: "Orphan
 // cleanup MUST be safe and resumable").
 func (s *SQLiteStore) CleanupOrphanBlobs(ctx context.Context) ([]string, error) {
-	referenced := make(map[string]bool)
-	rows, err := s.db.QueryContext(ctx, `SELECT blob_path FROM evidence_objects WHERE blob_path IS NOT NULL AND blob_path != ''`)
-	if err != nil {
-		return nil, fmt.Errorf("evidence: list referenced blobs: %w", err)
-	}
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("evidence: scan referenced blob: %w", err)
-		}
-		referenced[path] = true
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
-
 	var removed []string
-	walkErr := s.blobs.Walk(func(path string) error {
-		if referenced[path] {
+	err := s.cleanupOrphanBlobs(ctx, func(path string) { removed = append(removed, path) })
+	return removed, err
+}
+
+// CleanupOrphanBlobCount reclaims orphan files without retaining every path.
+func (s *SQLiteStore) CleanupOrphanBlobCount(ctx context.Context) (int, error) {
+	removed := 0
+	err := s.cleanupOrphanBlobs(ctx, func(string) { removed++ })
+	return removed, err
+}
+
+func (s *SQLiteStore) cleanupOrphanBlobs(ctx context.Context, removed func(string)) error {
+	walkErr := s.blobs.walk(func(path string) error {
+		return storage.WithSQLiteWriteTransaction(ctx, s.db, func(conn *sql.Conn) error {
+			var referenced bool
+			if err := conn.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM evidence_objects WHERE blob_path = ?)`, path).Scan(&referenced); err != nil {
+				return err
+			}
+			if referenced {
+				return nil
+			}
+			if err := s.blobs.Delete(path); err != nil {
+				return err
+			}
+			removed(path)
 			return nil
-		}
-		if err := s.blobs.Delete(path); err != nil {
+		})
+	}, func(dir string) error {
+		return storage.WithSQLiteWriteTransaction(ctx, s.db, func(_ *sql.Conn) error {
+			err := os.Remove(dir)
+			if os.IsNotExist(err) || errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+				return nil
+			}
 			return err
-		}
-		removed = append(removed, path)
-		return nil
+		})
 	})
 	if walkErr != nil {
-		return removed, fmt.Errorf("evidence: walk blob store: %w", walkErr)
+		return fmt.Errorf("evidence: walk blob store: %w", walkErr)
 	}
-	return removed, nil
+	return nil
+}
+
+// CleanupStaleTemps removes interrupted blob writes after a grace period.
+func (s *SQLiteStore) CleanupStaleTemps(ctx context.Context, cutoff time.Time) (int, error) {
+	removed := 0
+	err := filepath.WalkDir(s.blobs.writeRoot(), func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".blob-") || !strings.HasSuffix(entry.Name(), ".tmp") {
+			return nil
+		}
+		return storage.WithSQLiteWriteTransaction(ctx, s.db, func(_ *sql.Conn) error {
+			info, err := entry.Info()
+			if os.IsNotExist(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if !info.ModTime().Before(cutoff) {
+				return nil
+			}
+			if err := s.blobs.Delete(path); err != nil {
+				return err
+			}
+			removed++
+			return nil
+		})
+	})
+	return removed, err
 }

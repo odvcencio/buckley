@@ -65,6 +65,10 @@ func New(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
+	if err := EnableSQLiteIncrementalVacuum(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable incremental vacuum: %w", err)
+	}
 
 	if err := EnableSQLiteWAL(db); err != nil {
 		_ = db.Close()
