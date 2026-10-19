@@ -629,7 +629,7 @@ func TestDurableRunner_TransientTranscriptLoadReleasesForSingleRetry(t *testing.
 		CommandJournal: store, RunLedger: ledger, EvidenceStore: evidenceStore, StepJournal: stepJournal,
 		LeaseOwner: "transcript-retry-owner",
 		DurableTiming: &DurableTiming{
-			LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+			LeaseDuration: 5 * time.Second, HeartbeatInterval: 100 * time.Millisecond,
 			ScanInterval: 10 * time.Millisecond, CancellationInterval: 10 * time.Millisecond,
 			OperationTimeout: time.Second,
 		},

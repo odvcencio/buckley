@@ -4,6 +4,7 @@ package builtin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,7 +99,7 @@ func TestBuckleySubagentRunner_ShutdownRetainsOutputAndCleansDescendants(t *test
 			}
 			for {
 				data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", descendant))
-				if os.IsNotExist(err) {
+				if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
 					break
 				}
 				if err != nil {

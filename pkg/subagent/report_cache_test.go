@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,78 @@ func withCompletedRunCacheLimits(entries int, bytes int64) CoordinatorOption {
 	return func(c *Coordinator) {
 		c.completedCacheEntries = entries
 		c.completedCacheLimit = bytes
+	}
+}
+
+func TestCoordinator_CompletedCacheBoundsFullTaskContracts(t *testing.T) {
+	for _, field := range []string{"task", "spec", "system_prompt", "metadata"} {
+		t.Run(field, func(t *testing.T) {
+			store, err := evidence.New(filepath.Join(t.TempDir(), "contracts.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			ledger, err := runledger.NewWithDB(store.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			manager := NewManager(runnerFunc(func(context.Context, Request, func(int)) (string, error) {
+				calls.Add(1)
+				return "done", nil
+			}), 1)
+			t.Cleanup(func() { _ = manager.Close() })
+			const limit = 256 << 10
+			c := NewCoordinator(manager, WithRunLedger(ledger), WithEvidence(store), withCompletedRunCacheLimits(64, limit))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			var first agentcoord.TaskSpec
+			var expected agentcoord.TaskSpec
+			for i := range 4 {
+				spec := agentcoord.TaskSpec{RunID: fmt.Sprintf("contract-%d", i), ParentSessionID: "contracts", Task: "inspect the contract"}
+				payload := fmt.Sprintf("payload-%d-%s", i, strings.Repeat("x", 200<<10))
+				switch field {
+				case "task":
+					spec.Task = payload
+				case "spec":
+					spec.Spec = payload
+				case "system_prompt":
+					spec.SystemPrompt = payload
+				case "metadata":
+					spec.Metadata = map[string]string{"payload": payload}
+				}
+				run, err := c.Spawn(ctx, spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 {
+					first, expected = spec, run.Task
+				}
+				if _, err := c.Wait(ctx, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, cached := manager.Status(first.RunID); cached {
+				t.Fatal("tiny reports kept oversized contracts in the completed cache")
+			}
+			for range 2 {
+				run, err := c.Wait(ctx, first.RunID)
+				actualJSON, actualErr := json.Marshal(run.Task)
+				expectedJSON, expectedErr := json.Marshal(expected)
+				if err != nil || actualErr != nil || expectedErr != nil || run.State != agentcoord.RunCompleted || !bytes.Equal(actualJSON, expectedJSON) {
+					t.Fatalf("cold %s contract changed: state=%s error=%v", field, run.State, err)
+				}
+			}
+			if run, err := c.Spawn(ctx, first); err != nil || run.State != agentcoord.RunCompleted {
+				t.Fatalf("idempotent cold spawn: state=%s error=%v", run.State, err)
+			}
+			c.mu.RLock()
+			bytes, entries, tasks := c.completedCacheBytes, len(c.completedCache), len(c.runs)
+			c.mu.RUnlock()
+			if bytes > limit || entries > 1 || tasks > 1 || calls.Load() != 4 {
+				t.Fatalf("unbounded cache or repeated work: bytes=%d entries=%d tasks=%d calls=%d", bytes, entries, tasks, calls.Load())
+			}
+		})
 	}
 }
 
