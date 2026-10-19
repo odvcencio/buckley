@@ -1202,6 +1202,9 @@ func TestGoalTurnEngine_ObservesActualWorkspaceChangeSeparatelyFromToolImpact(t 
 
 func TestGoalTurnEngine_StateObservationFailureFailsClosed(t *testing.T) {
 	engine, _ := newGoalEngineUnderTest(t, []string{goalEngineTextResponse})
+	if err := os.Mkdir(filepath.Join(engine.workDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	engine.registry.Register(&goalStateTestTool{
 		name: "write_file",
 		metadata: tool.ToolMetadata{
@@ -1215,7 +1218,23 @@ func TestGoalTurnEngine_StateObservationFailureFailsClosed(t *testing.T) {
 	outcome := engine.dispatchGoalTool(context.Background(), goalloop.TaskContext{Phase: goalloop.PhaseExecute},
 		model.ToolCall{ID: "call-change", Function: model.FunctionCall{Name: "write_file", Arguments: `{}`}}, &goalTurnState{})
 	if !outcome.Success || !outcome.StateObservationFailed || outcome.StateObserved || outcome.StateChanged || outcome.StateObservationError == "" {
-		t.Fatalf("non-git modifying tool = %+v, want fail-closed observation failure", outcome)
+		t.Fatalf("invalid Git modifying tool = %+v, want fail-closed observation failure", outcome)
+	}
+}
+
+func TestGoalTurnEngine_OrdinaryFolderMutationIsObserved(t *testing.T) {
+	engine, _ := newGoalEngineUnderTest(t, []string{goalEngineTextResponse})
+	engine.registry.Register(&goalStateTestTool{
+		name:     "write_file",
+		metadata: tool.ToolMetadata{Impact: tool.ImpactModifying},
+		execute: func() error {
+			return os.WriteFile(filepath.Join(engine.workDir, "changed.txt"), []byte("real change\n"), 0o644)
+		},
+	})
+	outcome := engine.dispatchGoalTool(context.Background(), goalloop.TaskContext{Phase: goalloop.PhaseExecute},
+		model.ToolCall{ID: "call-change", Function: model.FunctionCall{Name: "write_file", Arguments: `{}`}}, &goalTurnState{})
+	if !outcome.Success || !outcome.StateObserved || !outcome.StateChanged || outcome.StateObservationFailed {
+		t.Fatalf("ordinary-folder mutation was not observed: %+v", outcome)
 	}
 }
 
