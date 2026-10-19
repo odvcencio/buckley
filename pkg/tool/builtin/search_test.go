@@ -184,12 +184,14 @@ func TestSearchTextTool(t *testing.T) {
 }
 
 func TestParseSearchLine_GrepNullFilenamePreservesMatchText(t *testing.T) {
-	match := parseSearchLine("dir/a.go\x007:needle:with:colons")
-	if match == nil || match["path"] != "dir/a.go" || match["line"] != 7 || match["match"] != "needle:with:colons" || match["kind"] != "match" {
+	parsed, valid := parseSearchLine([]byte("dir/a.go\x007:needle:with:colons"))
+	match := parsed.result(DefaultSearchRecordBytes)
+	if !valid || match["path"] != "dir/a.go" || match["line"] != 7 || match["match"] != "needle:with:colons" || match["kind"] != "match" {
 		t.Fatalf("grep match = %#v", match)
 	}
-	contextLine := parseSearchLine("dir/a.go\x006-before")
-	if contextLine == nil || contextLine["line"] != 6 || contextLine["context"] != "before" || contextLine["kind"] != "context" {
+	parsed, valid = parseSearchLine([]byte("dir/a.go\x006-before"))
+	contextLine := parsed.result(DefaultSearchRecordBytes)
+	if !valid || contextLine["line"] != 6 || contextLine["context"] != "before" || contextLine["kind"] != "context" {
 		t.Fatalf("grep context = %#v", contextLine)
 	}
 }
@@ -793,14 +795,15 @@ func TestParseSearchLine(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseSearchLine(tc.line)
+			record, valid := parseSearchLine([]byte(tc.line))
+			got := record.result(DefaultSearchRecordBytes)
 			if tc.wantNil {
-				if got != nil {
+				if valid {
 					t.Errorf("parseSearchLine(%q) = %v, want nil", tc.line, got)
 				}
 				return
 			}
-			if got == nil {
+			if !valid {
 				t.Errorf("parseSearchLine(%q) = nil, want non-nil", tc.line)
 				return
 			}
