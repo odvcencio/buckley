@@ -7,20 +7,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// EncodeAll is concurrency-safe; a single reusable worker bounds scratch
+// memory across stores instead of allocating GOMAXPROCS workers per blob.
+var blobEncoder = sync.OnceValues(func() (*zstd.Encoder, error) {
+	return zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20))
+})
 
 // BlobStore persists evidence bodies larger than InlineThreshold as
 // zstd-compressed files under a content-addressed directory layout:
 //
 //	<root>/sha256/ab/cd/<full-hash>.zst
 //
+// SQLite stores add a database namespace beneath sha256. Legacy shared paths
+// remain readable; orphan cleanup leaves that unowned namespace untouched.
+//
 // Writes are crash-safe: content is written to a temporary file, fsynced,
 // and atomically renamed into place. A blob file only becomes visible at its
 // final path once it is fully durable.
 type BlobStore struct {
 	root string
+	// SQLite stores sharing a data directory own separate writable namespaces.
+	// Reads still accept legacy paths beneath root; cleanup visits only ours.
+	namespace string
 }
 
 // NewBlobStore creates a BlobStore rooted at root, creating the directory
@@ -49,7 +62,11 @@ func (b *BlobStore) PathForHash(sha256Hex string) (string, error) {
 	if !validSHA256Hex(sha256Hex) {
 		return "", fmt.Errorf("evidence: invalid content hash %q", sha256Hex)
 	}
-	return filepath.Join(b.root, "sha256", sha256Hex[0:2], sha256Hex[2:4], sha256Hex+".zst"), nil
+	return filepath.Join(b.writeRoot(), sha256Hex[0:2], sha256Hex[2:4], sha256Hex+".zst"), nil
+}
+
+func (b *BlobStore) writeRoot() string {
+	return filepath.Join(b.root, "sha256", b.namespace)
 }
 
 func validSHA256Hex(s string) bool {
@@ -70,33 +87,47 @@ func validSHA256Hex(s string) bool {
 // rename. Write is idempotent: if the blob already exists, it returns the
 // existing path without rewriting it.
 func (b *BlobStore) Write(sha256Hex string, content []byte) (string, error) {
+	path, _, err := b.write(sha256Hex, content, nil)
+	return path, err
+}
+
+func (b *BlobStore) write(sha256Hex string, content []byte, admit func(int64) error) (string, int64, error) {
 	finalPath, err := b.PathForHash(sha256Hex)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if actual := ContentSHA256Hex(content); actual != sha256Hex {
-		return "", fmt.Errorf("evidence: content hash mismatch: declared %s, actual %s", sha256Hex, actual)
+		return "", 0, fmt.Errorf("evidence: content hash mismatch: declared %s, actual %s", sha256Hex, actual)
 	}
 
-	if _, err := os.Stat(finalPath); err == nil {
-		return finalPath, nil
+	if info, err := os.Stat(finalPath); err == nil {
+		if admit != nil {
+			if err := admit(info.Size()); err != nil {
+				return "", 0, err
+			}
+		}
+		return finalPath, info.Size(), nil
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("evidence: stat blob: %w", err)
-	}
-
-	dir := filepath.Dir(finalPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("evidence: create blob dir: %w", err)
+		return "", 0, fmt.Errorf("evidence: stat blob: %w", err)
 	}
 
 	compressed, err := compressZstd(content)
 	if err != nil {
-		return "", fmt.Errorf("evidence: compress blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: compress blob: %w", err)
+	}
+	if admit != nil {
+		if err := admit(int64(len(compressed))); err != nil {
+			return "", 0, err
+		}
+	}
+	dir := filepath.Dir(finalPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", 0, fmt.Errorf("evidence: create blob dir: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".blob-*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("evidence: create temp blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: create temp blob: %w", err)
 	}
 	tmpPath := tmp.Name()
 	cleanupTmp := true
@@ -108,26 +139,26 @@ func (b *BlobStore) Write(sha256Hex string, content []byte) (string, error) {
 
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return "", fmt.Errorf("evidence: chmod temp blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: chmod temp blob: %w", err)
 	}
 	if _, err := tmp.Write(compressed); err != nil {
 		_ = tmp.Close()
-		return "", fmt.Errorf("evidence: write temp blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: write temp blob: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return "", fmt.Errorf("evidence: fsync temp blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: fsync temp blob: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("evidence: close temp blob: %w", err)
+		return "", 0, fmt.Errorf("evidence: close temp blob: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return "", fmt.Errorf("evidence: rename blob into place: %w", err)
+		return "", 0, fmt.Errorf("evidence: rename blob into place: %w", err)
 	}
 	cleanupTmp = false
 
-	return finalPath, nil
+	return finalPath, int64(len(compressed)), nil
 }
 
 // confinePath resolves path and rejects anything that escapes the blob
@@ -189,35 +220,62 @@ func (b *BlobStore) Delete(path string) error {
 // Walk invokes fn for every blob file currently on disk. It is used by
 // orphan cleanup to find blobs with no corresponding evidence_objects row.
 func (b *BlobStore) Walk(fn func(path string) error) error {
-	shaRoot := filepath.Join(b.root, "sha256")
-	if _, err := os.Stat(shaRoot); os.IsNotExist(err) {
-		return nil
-	}
-	return filepath.Walk(shaRoot, func(path string, info os.FileInfo, err error) error {
+	return b.walk(fn, nil)
+}
+
+func (b *BlobStore) walk(fn func(string) error, afterDir func(string) error) error {
+	var visit func(string) error
+	visit = func(dir string) error {
+		file, err := os.Open(dir)
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return nil
+		defer file.Close()
+		for {
+			entries, readErr := file.ReadDir(128)
+			if readErr != nil && readErr != io.EOF {
+				return readErr
+			}
+			for _, entry := range entries {
+				path := filepath.Join(dir, entry.Name())
+				if entry.IsDir() {
+					if err := visit(path); err != nil {
+						return err
+					}
+				} else if filepath.Ext(path) == ".zst" {
+					if err := fn(path); err != nil {
+						return err
+					}
+				}
+			}
+			if readErr == io.EOF {
+				break
+			}
 		}
-		if filepath.Ext(path) != ".zst" {
-			return nil
+		if err := file.Close(); err != nil {
+			return err
 		}
-		return fn(path)
-	})
+		if afterDir != nil && dir != b.writeRoot() {
+			return afterDir(dir)
+		}
+		return nil
+	}
+	return visit(b.writeRoot())
 }
 
 func compressZstd(content []byte) ([]byte, error) {
-	enc, err := zstd.NewWriter(nil)
+	enc, err := blobEncoder()
 	if err != nil {
 		return nil, err
 	}
-	defer enc.Close()
 	return enc.EncodeAll(content, make([]byte, 0, len(content))), nil
 }
 
 func decompressZstd(compressed []byte) ([]byte, error) {
-	dec, err := zstd.NewReader(bytes.NewReader(compressed))
+	dec, err := zstd.NewReader(bytes.NewReader(compressed), zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
 	if err != nil {
 		return nil, err
 	}

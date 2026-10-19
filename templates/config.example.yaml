@@ -41,6 +41,18 @@ personality:
       voice:
         review: Direct, concise code review voice that cites files and line ranges.
 
+resources:
+  storage_bytes: 536870912
+
+retention:
+  enabled: true
+  interval: 6h
+  history_ttl: 720h
+  max_completed_sessions: 100
+  max_completed_runs: 1000
+  ephemeral_evidence_ttl: 720h
+  durable_evidence_ttl: 4320h
+
 memory:
   auto_compact_threshold: 0.9
   max_compactions: 2

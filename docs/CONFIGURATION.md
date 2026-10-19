@@ -666,6 +666,49 @@ approval:
 | `auto` | Full workspace access, approval for external operations |
 | `yolo` | Full autonomy (dangerous, use with caution) |
 
+### resources
+
+Set the disk budget in user config; project config cannot change it.
+
+```yaml
+resources:
+  storage_bytes: 536870912      # 512 MiB per database, including owned evidence
+```
+
+Disk accounting is transactional. SQLite allocation, indexes and WAL growth also
+have limits; conservative headroom can stop writes before the configured byte
+total is reached. A full budget rejects further storage writes without deleting
+active history or replay evidence. Raise the limit and restart, or clean completed
+history before continuing.
+Existing files above a newly lowered limit remain readable and are not truncated.
+Workspace files, Git objects, external tool allocations and legacy shared blobs
+are outside the database's owned budget.
+The minimum enabled budget is 16 MiB; an explicit `0` disables it.
+
+### retention
+
+Completed history is cleaned at startup and every six hours. Active and paused
+sessions, unfinished work, user pins and evidence referenced by retained runs
+are protected. A run and its transcript expire together, preserving resume and
+replay for retained history. These protections can exceed the count limits;
+the storage budget then prevents further growth.
+
+```yaml
+retention:
+  enabled: true
+  interval: 6h
+  history_ttl: 720h
+  max_completed_sessions: 100
+  max_completed_runs: 1000
+  ephemeral_evidence_ttl: 720h
+  durable_evidence_ttl: 4320h
+```
+
+Set retention in user config. A zero TTL or count disables that rule. Preview
+cleanup with `buckley db cleanup --dry-run`, then run `buckley db cleanup` to
+apply it. Use `--db path` for one database, or `--vacuum` to reclaim free space
+in a legacy database; full vacuum needs temporary disk space.
+
 ### memory
 
 Conversation memory and compaction.

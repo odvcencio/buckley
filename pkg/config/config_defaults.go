@@ -124,6 +124,8 @@ func DefaultConfig() *Config {
 		Review: ReviewConfig{Verification: ReviewVerificationConfig{
 			Runner: ReviewVerificationRunnerConfig{Cleanup: []string{}},
 		}},
+		Retention: defaultRetentionConfig(),
+		Resources: defaultResourceConfig(),
 		Buckbot: BuckbotConfig{
 			Model:                      defaultBuckbotModel,
 			CriticModel:                defaultBuckbotCriticModel,

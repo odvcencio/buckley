@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -27,7 +28,7 @@ type codeModeRuntime struct {
 	closed        bool
 }
 
-func openCodeModeRuntime(workspaceRoot string) (*codeModeRuntime, error) {
+func openCodeModeRuntime(workspaceRoot string, cfg *config.Config) (*codeModeRuntime, error) {
 	workspaceRoot = strings.TrimSpace(workspaceRoot)
 	if workspaceRoot == "" {
 		return nil, fmt.Errorf("code mode requires a workspace root")
@@ -39,10 +40,15 @@ func openCodeModeRuntime(workspaceRoot string) (*codeModeRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	stopHistory, err := startHistoryMaintenance(context.Background(), cfg, stores.evidence)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
 	return &codeModeRuntime{
 		workspaceRoot: workspaceRoot,
 		stores:        stores,
-		cleanup:       cleanup,
+		cleanup:       func() { stopHistory(); cleanup() },
 		tools:         make(map[string]tool.Tool),
 		runs:          make(map[string]string),
 	}, nil

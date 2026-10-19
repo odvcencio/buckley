@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/execmode"
 	"m31labs.dev/buckley/pkg/runledger"
 )
@@ -22,7 +23,7 @@ func TestCodeModeRuntimeCreatesOneDurableRunPerSession(t *testing.T) {
 	}
 	t.Setenv("BUCKLEY_DATA_DIR", dataDir)
 
-	runtime, err := openCodeModeRuntime(workspace)
+	runtime, err := openCodeModeRuntime(workspace, config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("openCodeModeRuntime: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestCodeModeRuntimeFailureMarksRunFailed(t *testing.T) {
 	}
 	t.Setenv("BUCKLEY_DATA_DIR", dataDir)
 
-	runtime, err := openCodeModeRuntime(workspace)
+	runtime, err := openCodeModeRuntime(workspace, config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("openCodeModeRuntime: %v", err)
 	}
