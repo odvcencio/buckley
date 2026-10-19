@@ -69,6 +69,7 @@ var mergeStrategies = map[string]mergeStrategy{
 	"retention.ephemeral_evidence_ttl": scopedScalarMerge,
 	"retention.durable_evidence_ttl":   scopedScalarMerge,
 	"resources.storage_bytes":          scopedScalarMerge,
+	"resources.session_memory_bytes":   scopedScalarMerge,
 
 	// Per-name / per-key merges: a project config can add or override a
 	// single named entry without restating everything else at that level.

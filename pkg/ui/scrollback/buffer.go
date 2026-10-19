@@ -16,6 +16,8 @@ type Buffer struct {
 	// Content
 	lines     []Line
 	maxLines  int
+	maxBytes  int
+	bytes     int
 	totalRows int // Total rendered rows (accounting for wrapping)
 
 	// Viewport
@@ -93,10 +95,13 @@ const (
 // DefaultMaxLines is the default history limit.
 const DefaultMaxLines = 10000
 
+const DefaultMaxBytes = 8 << 20
+
 // NewBuffer creates a new scrollback buffer.
 func NewBuffer(width, height int) *Buffer {
 	return &Buffer{
 		maxLines:   DefaultMaxLines,
+		maxBytes:   DefaultMaxBytes,
 		width:      width,
 		height:     height,
 		scrollMode: ScrollModeFollow,
@@ -109,6 +114,13 @@ func (b *Buffer) SetMaxLines(max int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.maxLines = max
+	b.trimExcess()
+}
+
+func (b *Buffer) SetMaxBytes(max int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.maxBytes = max
 	b.trimExcess()
 }
 
@@ -205,6 +217,8 @@ func (b *Buffer) ReplaceLastMessage(lines []Line) {
 	if b.lastMessageStart < len(b.lines) {
 		for i := b.lastMessageStart; i < len(b.lines); i++ {
 			b.totalRows -= len(b.lines[i].Wrapped)
+			b.bytes -= lineRetainedBytes(b.lines[i])
+			b.lines[i] = Line{}
 		}
 		b.lines = b.lines[:b.lastMessageStart]
 	}
@@ -232,6 +246,7 @@ func (b *Buffer) AppendText(text string) {
 
 	last := &b.lines[len(b.lines)-1]
 	oldRows := len(last.Wrapped)
+	oldBytes := lineRetainedBytes(*last)
 
 	last.Content += text
 	if len(last.Spans) > 0 {
@@ -241,6 +256,8 @@ func (b *Buffer) AppendText(text string) {
 	last.Wrapped = wrapLineWithSpans(last.Content, last.Spans, last.Prefix, b.width-2, last.IsCode)
 
 	b.totalRows += len(last.Wrapped) - oldRows
+	b.bytes += lineRetainedBytes(*last) - oldBytes
+	b.trimExcess()
 
 	if b.scrollMode == ScrollModeFollow {
 		b.scrollToBottom()
@@ -256,10 +273,17 @@ func (b *Buffer) appendLineLocked(line Line, trackMessage bool) {
 	if line.Timestamp.IsZero() {
 		line.Timestamp = time.Now()
 	}
+	line.Content = strings.Clone(line.Content)
+	line.Source = strings.Clone(line.Source)
+	line.Language = strings.Clone(line.Language)
+	line.Style.Prefix = strings.Clone(line.Style.Prefix)
+	line.Spans = cloneLineSpans(line.Spans)
+	line.Prefix = cloneLineSpans(line.Prefix)
 	line.Wrapped = wrapLineWithSpans(line.Content, line.Spans, line.Prefix, b.width-2, line.IsCode)
 
 	b.lines = append(b.lines, line)
 	b.totalRows += len(line.Wrapped)
+	b.bytes += lineRetainedBytes(line)
 
 	b.trimExcess()
 
@@ -274,7 +298,9 @@ func (b *Buffer) Clear() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.lines = b.lines[:0]
+	clear(b.lines)
+	b.lines = nil
+	b.bytes = 0
 	b.totalRows = 0
 	b.scrollTop = 0
 	// Clear selection inline (already holding lock)
@@ -305,6 +331,8 @@ func (b *Buffer) RemoveLastLineIfSource(source string) bool {
 
 	// Remove the line
 	b.totalRows -= len(last.Wrapped)
+	b.bytes -= lineRetainedBytes(last)
+	b.lines[len(b.lines)-1] = Line{}
 	b.lines = b.lines[:len(b.lines)-1]
 
 	// Adjust scroll if needed
@@ -777,15 +805,18 @@ func (b *Buffer) clampScroll() {
 }
 
 func (b *Buffer) trimExcess() {
-	for len(b.lines) > b.maxLines {
+	evicted := false
+	for len(b.lines) > 0 && (len(b.lines) > b.maxLines || (b.maxBytes > 0 && b.bytes > b.maxBytes)) {
+		evicted = true
 		removed := b.lines[0]
 		b.totalRows -= len(removed.Wrapped)
+		b.bytes -= lineRetainedBytes(removed)
+		b.lines[0] = Line{}
 		b.lines = b.lines[1:]
 		if b.hasLastMessage {
 			b.lastMessageStart--
 			if b.lastMessageStart < 0 {
 				b.lastMessageStart = 0
-				b.hasLastMessage = false
 			}
 		}
 
@@ -802,14 +833,52 @@ func (b *Buffer) trimExcess() {
 			}
 		}
 	}
+	if evicted {
+		b.searchMatches = nil
+		b.searchIndex = 0
+		if cap(b.lines) > 2*max(1, len(b.lines)) {
+			b.lines = append([]Line(nil), b.lines...)
+		}
+	}
 }
 
 func (b *Buffer) rewrapAll() {
 	b.totalRows = 0
+	b.bytes = 0
 	for i := range b.lines {
 		b.lines[i].Wrapped = wrapLineWithSpans(b.lines[i].Content, b.lines[i].Spans, b.lines[i].Prefix, b.width-2, b.lines[i].IsCode)
 		b.totalRows += len(b.lines[i].Wrapped)
+		b.bytes += lineRetainedBytes(b.lines[i])
 	}
+	b.trimExcess()
+}
+
+func cloneLineSpans(spans []Span) []Span {
+	if spans == nil {
+		return nil
+	}
+	cloned := append([]Span(nil), spans...)
+	for i := range cloned {
+		cloned[i].Text = strings.Clone(cloned[i].Text)
+	}
+	return cloned
+}
+
+func lineRetainedBytes(line Line) int {
+	bytes := 256 + len(line.Content) + len(line.Source) + len(line.Language) + len(line.Style.Prefix)
+	for _, span := range line.Spans {
+		bytes += 64 + len(span.Text)
+	}
+	for _, span := range line.Prefix {
+		bytes += 64 + len(span.Text)
+	}
+	for _, wrapped := range line.Wrapped {
+		bytes += 64 + len(wrapped.Text)
+		for _, span := range wrapped.Spans {
+			bytes += 64 + len(span.Text)
+		}
+	}
+	return bytes
 }
 
 func (b *Buffer) scrollToMatch(pos Position) {

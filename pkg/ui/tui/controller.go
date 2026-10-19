@@ -104,16 +104,19 @@ type QueuedMessage struct {
 
 // SessionState holds the state for a single session.
 type SessionState struct {
-	ID            string
-	Conversation  *conversation.Conversation
-	ToolRegistry  *tool.Registry
-	HookCloser    io.Closer
-	SkillRegistry *skill.Registry
-	SkillState    *skill.RuntimeState
-	Streaming     bool
-	Compacting    bool
-	Cancel        context.CancelFunc
-	MessageQueue  []QueuedMessage // Messages queued while streaming
+	ID              string
+	Conversation    *conversation.Conversation
+	ToolRegistry    *tool.Registry
+	HookCloser      io.Closer
+	SkillRegistry   *skill.Registry
+	SkillState      *skill.RuntimeState
+	Streaming       bool
+	Compacting      bool
+	Cancel          context.CancelFunc
+	MessageQueue    []QueuedMessage // Messages queued while streaming
+	deferredHistory bool
+	persistenceErr  error
+	historyVersion  uint64
 
 	DisableToolsNextTurn bool
 	subagentListCursor   string
@@ -189,7 +192,7 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 	}
 
 	if loadMessages && store != nil {
-		if err := sess.Conversation.LoadFromStorage(store); err != nil {
+		if err := sess.Conversation.LoadWorkingSet(store, sessionWorkingMemoryBytes(cfg)); err != nil {
 			return nil, fmt.Errorf("load session %s messages: %w", sessionID, err)
 		}
 	}
@@ -294,6 +297,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)
 	}
+	app.chatView.SetMemoryBudget(sessionWorkingMemoryBytes(cfg.Config) / 2)
 
 	ctrl := &Controller{
 		app:                 app,
@@ -435,14 +439,27 @@ func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*Session
 	if err != nil {
 		return nil, fmt.Errorf("list project sessions: %w", err)
 	}
+	active := make([]storage.Session, 0, len(allSessions))
 	for _, s := range allSessions {
 		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
 			continue
 		}
-		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, true, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
+		active = append(active, s)
+	}
+	selected := 0
+	for i, s := range active {
+		if cfg.SessionID != "" && s.ID == cfg.SessionID || cfg.SessionID == "" && s.MessageCount > 0 {
+			selected = i
+			break
+		}
+	}
+	for i, s := range active {
+		loadHistory := i == selected
+		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, loadHistory, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
 		if err != nil {
 			return nil, err
 		}
+		sess.deferredHistory = !loadHistory
 		projectSessions = append(projectSessions, sess)
 	}
 	return projectSessions, nil
@@ -563,6 +580,11 @@ func (c *Controller) submitPrompt(text string, steering bool) {
 }
 
 func (c *Controller) submitPromptWithIntent(text string, steering bool, taskIntent agentloop.TaskIntent) {
+	if err := c.checkStorageBudget(context.Background()); err != nil {
+		c.app.AddMessage(err.Error(), "system")
+		c.app.SetStatus("Paused - storage budget")
+		return
+	}
 	c.mu.Lock()
 
 	// Get current session
@@ -572,6 +594,11 @@ func (c *Controller) submitPromptWithIntent(text string, steering bool, taskInte
 	if sess.Compacting {
 		c.mu.Unlock()
 		c.app.AddMessage("Context compaction is running. Wait for it to finish before sending another message.", "system")
+		return
+	}
+	if err := c.checkQueueMemory(sess, text); err != nil {
+		c.mu.Unlock()
+		c.app.AddMessage(err.Error(), "system")
 		return
 	}
 
@@ -1542,7 +1569,6 @@ func (c *Controller) resumeSession(reference string) {
 	defer c.mu.Unlock()
 	for i, sess := range c.sessions {
 		if sess.ID == target.ID {
-			c.currentSession = i
 			c.switchToSessionLocked(i)
 			return
 		}
@@ -1573,8 +1599,7 @@ func (c *Controller) nextSession() {
 		return
 	}
 
-	c.currentSession = (c.currentSession + 1) % len(c.sessions)
-	c.switchToSessionLocked(c.currentSession)
+	c.switchToSessionLocked((c.currentSession + 1) % len(c.sessions))
 }
 
 // nextSessionAndRefreshNav switches to the next session and refreshes the
@@ -1601,8 +1626,7 @@ func (c *Controller) prevSession() {
 		return
 	}
 
-	c.currentSession = (c.currentSession - 1 + len(c.sessions)) % len(c.sessions)
-	c.switchToSessionLocked(c.currentSession)
+	c.switchToSessionLocked((c.currentSession - 1 + len(c.sessions)) % len(c.sessions))
 }
 
 // switchToSessionLocked loads a session by index.
@@ -1613,6 +1637,14 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	}
 
 	sess := c.sessions[idx]
+	if sess.deferredHistory {
+		if err := sess.Conversation.LoadWorkingSet(c.store, sessionWorkingMemoryBytes(c.cfg)); err != nil {
+			c.app.AddMessage("Could not load session: "+err.Error(), "system")
+			return
+		}
+		sess.deferredHistory = false
+	}
+	c.currentSession = idx
 	c.conversation = sess.Conversation
 	c.registry = sess.ToolRegistry
 
@@ -1661,17 +1693,21 @@ func (c *Controller) Stop() {
 }
 
 // saveLatestConversationMessage persists the newest model-visible turn for a session.
-func (c *Controller) saveLatestConversationMessage(sess *SessionState) {
+func (c *Controller) saveLatestConversationMessage(sess *SessionState) error {
 	if c == nil || c.store == nil || sess == nil || sess.Conversation == nil {
-		return
+		return nil
 	}
 	if len(sess.Conversation.Messages) == 0 {
-		return
+		return nil
 	}
 	msg := sess.Conversation.Messages[len(sess.Conversation.Messages)-1]
 	if err := sess.Conversation.SaveMessage(c.store, msg); err != nil {
+		sess.persistenceErr = err
 		c.app.AddMessage("Error saving chat turn: "+err.Error(), "system")
+		return err
 	}
+	sess.persistenceErr = nil
+	return nil
 }
 
 // handleReview reviews the current git diff in conversation.
@@ -1900,6 +1936,7 @@ func (c *Controller) processMessageQueue(sess *SessionState) bool {
 
 	// Pop the first queued message
 	queued := sess.MessageQueue[0]
+	sess.MessageQueue[0] = QueuedMessage{}
 	sess.MessageQueue = sess.MessageQueue[1:]
 
 	// Mark as acknowledged

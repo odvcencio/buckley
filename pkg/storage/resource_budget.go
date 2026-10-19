@@ -261,6 +261,34 @@ func CheckStorageBudget(ctx context.Context, db budgetReader, additionalBytes in
 	if budget.LimitBytes == 0 {
 		return nil
 	}
+	return checkStorageBudget(budget, additionalBytes)
+}
+
+// CheckStorageHeadroom reserves space for an admitted effect's outcome and
+// transcript finalization. Triggers enforce the absolute storage ceiling.
+func CheckStorageHeadroom(ctx context.Context, db budgetReader, additionalBytes int64) error {
+	if pool, ok := db.(*sql.DB); ok {
+		if err := RecoverStorageBudgetWAL(ctx, pool); err != nil {
+			return err
+		}
+	}
+	budget, err := readStorageBudget(ctx, db)
+	if err != nil || budget.LimitBytes == 0 {
+		return err
+	}
+	additionalBytes += min(int64(64<<20), budget.LimitBytes/4)
+	var freeBytes int64
+	if err := db.QueryRowContext(ctx, `SELECT (max_page_count - page_count + freelist_count) * page_size
+		FROM pragma_max_page_count, pragma_page_count, pragma_freelist_count, pragma_page_size`).Scan(&freeBytes); err != nil {
+		return err
+	}
+	if freeBytes < min(int64(16<<20), budget.LimitBytes/16) {
+		return fmt.Errorf("%w: SQLite allocation has %d bytes of headroom; raise resources.storage_bytes or prune completed history", ErrStorageBudget, freeBytes)
+	}
+	return checkStorageBudget(budget, additionalBytes)
+}
+
+func checkStorageBudget(budget StorageBudget, additionalBytes int64) error {
 	if additionalBytes > budget.LimitBytes || budget.UsedBytes > budget.LimitBytes-additionalBytes {
 		return fmt.Errorf("%w: %d of %d bytes used; %d bytes required; raise resources.storage_bytes or prune completed history", ErrStorageBudget, budget.UsedBytes, budget.LimitBytes, additionalBytes)
 	}

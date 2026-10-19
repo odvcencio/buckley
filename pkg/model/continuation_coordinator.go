@@ -43,6 +43,9 @@ type ContinuationCoordinator struct {
 	// state is keyed by this shape so Restore, which receives the same caller
 	// shape, can find the row (providers persist canonical IDs internally).
 	requestModel string
+	// A deliberate epoch reset must not reload stale state if deletion failed
+	// or the caller restored only a bounded transcript window.
+	restoreDisabled bool
 }
 
 // NewContinuationCoordinator creates a coordinator for one session. store may
@@ -72,7 +75,7 @@ func (cc *ContinuationCoordinator) Eligible(modelID string) bool {
 // the persisted state belongs to a different provider/model (decision 0001
 // invalidation), or the persisted prefix no longer fits the transcript.
 func (cc *ContinuationCoordinator) Restore(providerID, modelID string, currentMessages []Message) {
-	if cc == nil || cc.store == nil || cc.sessionID == "" || cc.cursor.Active() {
+	if cc == nil || cc.store == nil || cc.sessionID == "" || cc.cursor.Active() || cc.restoreDisabled {
 		return
 	}
 	raw := cc.loadPersisted(providerID, modelID)
@@ -224,6 +227,7 @@ func (cc *ContinuationCoordinator) Reset() {
 	}
 	cc.cursor.Reset()
 	cc.hit = false
+	cc.restoreDisabled = true
 	if cc.store != nil && cc.sessionID != "" && providerID != "" {
 		_ = cc.store.DeleteProviderContinuation(cc.sessionID, providerID)
 	}

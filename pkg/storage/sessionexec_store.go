@@ -476,6 +476,13 @@ func (s *Store) Accept(ctx context.Context, request sessionexec.AcceptRequest) (
 		if !errors.Is(err, sessionexec.ErrNotFound) {
 			return err
 		}
+		checkBudget := CheckStorageBudget
+		if lane == sessionexec.LaneWork {
+			checkBudget = CheckStorageHeadroom
+		}
+		if err := checkBudget(db.ctx, db.conn, int64(4096+2*len(request.Content))); err != nil {
+			return err
+		}
 
 		target := ""
 		if request.Type == "steer" || request.Type == "interrupt" {
@@ -1409,6 +1416,9 @@ func (s *Store) BeginEffect(ctx context.Context, request sessionexec.EffectReque
 			return err
 		}
 		if err := sessionExecCheckLease(db, request.Lease, now, true); err != nil {
+			return err
+		}
+		if err := CheckStorageHeadroom(db.ctx, db.conn, 4096); err != nil {
 			return err
 		}
 

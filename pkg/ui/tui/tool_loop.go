@@ -234,6 +234,9 @@ func (c *Controller) continuationCoordinatorForSession(sess *SessionState) *mode
 			store = c.store
 		}
 		sess.continuation = model.NewContinuationCoordinator(c.modelMgr, store, sess.ID)
+		if sess.Conversation.HasPartialHistory() {
+			sess.continuation.Reset()
+		}
 	}
 	return sess.continuation
 }
@@ -293,6 +296,18 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 	currentRound := 0
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
+		c.mu.Lock()
+		if sess.persistenceErr == nil {
+			sess.persistenceErr = c.boundSessionWorkingSetLocked(sess)
+		}
+		persistErr := sess.persistenceErr
+		c.mu.Unlock()
+		if persistErr != nil {
+			return model.ChatRequest{}, persistErr
+		}
+		if err := c.checkStorageBudget(ctx); err != nil {
+			return model.ChatRequest{}, err
+		}
 		currentRound = round
 		route, err := c.modelMgr.ResolveModelRoute(modelID)
 		if err != nil {
@@ -330,6 +345,15 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		for i, tc := range calls {
 			if ctx.Err() != nil {
 				return outcomes, ctx.Err()
+			}
+			c.mu.Lock()
+			persistErr := sess.persistenceErr
+			c.mu.Unlock()
+			if persistErr != nil {
+				return outcomes, persistErr
+			}
+			if err := c.checkStorageBudget(ctx); err != nil {
+				return outcomes, err
 			}
 			metadata := c.toolLoopMetadata(sess, tc.Function.Name)
 			observation := tooloutcome.BeginWithMetadata(ctx, c.workDir, metadata)
