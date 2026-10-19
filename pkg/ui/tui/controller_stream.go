@@ -19,8 +19,17 @@ func (c *Controller) streamResponse(ctx context.Context, prompt string, sess *Se
 }
 
 func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string, sess *SessionState, taskIntent agentloop.TaskIntent) {
-	defer c.finishStreamLifecycle(sess)
+	for {
+		advance := c.streamResponseTurn(ctx, prompt, sess, taskIntent)
+		nextCtx, queued, ok := c.finishStreamTurn(sess, advance)
+		if !ok {
+			return
+		}
+		ctx, prompt, taskIntent = nextCtx, queued.Content, queued.TaskIntent
+	}
+}
 
+func (c *Controller) streamResponseTurn(ctx context.Context, prompt string, sess *SessionState, taskIntent agentloop.TaskIntent) bool {
 	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
 	if strings.TrimSpace(modelID) == "" {
@@ -34,7 +43,7 @@ func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string
 			err = fmt.Errorf("no execution model resolved; configure a model before sending a message")
 		}
 		c.handleStreamError(ctx, err)
-		return
+		return false
 	}
 	result, err := c.runToolLoopWithIntent(ctx, sess, modelID, taskIntent)
 	c.app.RemoveThinkingIndicator()
@@ -48,28 +57,20 @@ func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string
 		} else {
 			c.app.SetStatus("Error")
 		}
-		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
-			return
-		}
-		return
+		return ctx.Err() == context.Canceled
 	}
 	if c.handleStreamError(ctx, err) {
-		if ctx.Err() == context.Canceled && c.processMessageQueue(sess) {
-			return
-		}
-		return
+		return ctx.Err() == context.Canceled
 	}
 
 	c.renderStreamResponse(result)
 	c.updateStreamUsage(modelID, result.Text, result.Usage)
-	if c.processMessageQueue(sess) {
-		return
-	}
 	if result.HarnessStopReason != "" {
 		c.app.SetStatus("Ready - harness stopped tools")
 	} else {
 		c.app.SetStatus(readyStatusForFinishReason(result.ProviderFinishReason))
 	}
+	return true
 }
 
 func retainedIncompleteStreamResult(result toolLoopResult, err error) bool {
@@ -79,16 +80,46 @@ func retainedIncompleteStreamResult(result toolLoopResult, err error) bool {
 	return strings.TrimSpace(result.Text) != "" || result.Usage != nil
 }
 
-func (c *Controller) finishStreamLifecycle(sess *SessionState) {
+func (c *Controller) finishStreamTurn(sess *SessionState, advance bool) (context.Context, QueuedMessage, bool) {
 	c.mu.Lock()
 	if err := c.boundSessionWorkingSetLocked(sess); err != nil {
 		sess.persistenceErr = err
+		advance = false
+		c.app.SetStatus("Paused - session memory budget")
+	}
+	if sess.Cancel != nil {
+		sess.Cancel()
 	}
 	sess.Streaming = false
 	sess.Cancel = nil
-	c.mu.Unlock()
 	c.emitStreaming(sess.ID, false)
+	if !advance || len(sess.MessageQueue) == 0 {
+		c.mu.Unlock()
+		c.refreshSessionNav()
+		return nil, QueuedMessage{}, false
+	}
+	queued := sess.MessageQueue[0]
+	sess.MessageQueue[0] = QueuedMessage{}
+	sess.MessageQueue = sess.MessageQueue[1:]
+	if len(sess.MessageQueue) == 0 {
+		sess.MessageQueue = nil
+	}
+	sess.DisableToolsNextTurn = queued.DisableTools
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.Cancel, sess.Streaming = cancel, true
+	c.emitStreaming(sess.ID, true)
+	remaining := len(sess.MessageQueue)
+	c.mu.Unlock()
+	ack := fmt.Sprintf("Processing queued message from %s", queued.Timestamp.Format("15:04:05"))
+	if queued.Steering {
+		ack = fmt.Sprintf("Applying steering from %s", queued.Timestamp.Format("15:04:05"))
+	}
+	if remaining > 0 {
+		ack += fmt.Sprintf(" (%d more queued)", remaining)
+	}
+	c.app.AddMessage(ack, "system")
 	c.refreshSessionNav()
+	return ctx, queued, true
 }
 
 func (c *Controller) prepareStreamRequest(prompt string, sess *SessionState) string {
