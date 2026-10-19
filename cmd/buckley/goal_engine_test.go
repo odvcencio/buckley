@@ -697,6 +697,9 @@ func TestGoalTurnEngine_SameBatchObservationFailureIsSanitizedBeforeSummaryAndSn
 		goalEngineTwoToolCallResponse(goalCompleteToolName, `{}`, "write_file", `{}`),
 		goalEngineTextResponse,
 	})
+	if err := os.Mkdir(filepath.Join(engine.workDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	engine.registry.Register(&goalStateTestTool{
 		name:     "write_file",
 		metadata: tool.ToolMetadata{Impact: tool.ImpactModifying},
