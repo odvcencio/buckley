@@ -16,7 +16,12 @@ const runSelectColumns = `SELECT run_id, session_id, parent_run_id, task_id, age
 // RFC3339Nano values with variable fractional widths, where plain TEXT order
 // incorrectly places .12 before .1 in ascending order.
 const (
-	runStartedAtEpochKey    = `CAST(strftime('%s', started_at) AS INTEGER)`
+	// SQLite rounds fractional timestamps to milliseconds. Strip the fraction
+	// before deriving whole seconds so .999999999 cannot move into the next second.
+	runStartedAtEpochKey = `CAST(strftime('%s', substr(started_at, 1, 19) || CASE
+		WHEN substr(started_at, -1) = 'Z' THEN 'Z'
+		WHEN substr(started_at, -6, 1) IN ('+', '-') THEN substr(started_at, -6)
+		ELSE '' END) AS INTEGER)`
 	runStartedAtFractionKey = `CASE WHEN substr(started_at, 20, 1) = '.'
 		THEN CAST('0.' || substr(started_at, 21) AS REAL)
 		ELSE 0 END`
@@ -30,6 +35,9 @@ func (s *SQLiteStore) GetRun(ctx context.Context, runID string) (AgentRun, error
 
 // ListRuns implements Store.
 func (s *SQLiteStore) ListRuns(ctx context.Context, q RunQuery) ([]AgentRun, error) {
+	if q.BeforeStartedAt.IsZero() != (q.BeforeRunID == "") {
+		return nil, fmt.Errorf("runledger: list cursor requires both start time and run ID")
+	}
 	clauses := []string{"1 = 1"}
 	args := []any{}
 	if q.SessionID != "" {
@@ -43,6 +51,14 @@ func (s *SQLiteStore) ListRuns(ctx context.Context, q RunQuery) ([]AgentRun, err
 	if q.ParentRunID != "" {
 		clauses = append(clauses, "parent_run_id = ?")
 		args = append(args, q.ParentRunID)
+	}
+	if q.Backend != "" {
+		clauses = append(clauses, "backend = ?")
+		args = append(args, q.Backend)
+	}
+	if !q.BeforeStartedAt.IsZero() {
+		clauses = append(clauses, "("+runStartedAtEpochKey+", "+runStartedAtFractionKey+", run_id) < (?, CAST(? AS REAL), ?)")
+		args = append(args, q.BeforeStartedAt.Unix(), fmt.Sprintf("0.%09d", q.BeforeStartedAt.Nanosecond()), q.BeforeRunID)
 	}
 	order := runStartedAtEpochKey + " ASC, " + runStartedAtFractionKey + " ASC, run_id ASC"
 	if q.Order == RunOrderNewestFirst {
