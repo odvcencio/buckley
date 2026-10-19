@@ -73,7 +73,7 @@ func (t *SubagentTool) cancelTargets(ctx context.Context, coordinator agentcoord
 			return &Result{Success: false, Error: failures[0].Error}, nil
 		}
 		result := subagentRunResult(runs[0])
-		result.DisplayData = map[string]any{"summary": "Subagent cancellation requested"}
+		result.DisplayData["summary"] = "Subagent cancellation requested"
 		return result, nil
 	}
 	return subagentBatchResult("cancel", selector, targets, nil, runs, failures), nil

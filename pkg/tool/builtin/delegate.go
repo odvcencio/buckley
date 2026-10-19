@@ -530,6 +530,15 @@ func (t *SubagentTool) Parameters() ParameterSchema {
 				Enum:        []string{"spawn", "list", "status", "wait", "steer", "send", "messages", "cancel", "claim", "release"},
 				Default:     "spawn",
 			},
+			"limit": {
+				Type:        "integer",
+				Description: "Maximum runs per newest-first list page (default 10, maximum 20).",
+				Default:     DefaultSubagentListLimit,
+			},
+			"cursor": {
+				Type:        "string",
+				Description: "Opaque next_cursor from a previous list result; omit for the first page.",
+			},
 			"agent": {
 				Type:        "string",
 				Description: "Named subagent from the discovered project agent profile. Omit for a generic Buckley child.",
@@ -672,12 +681,7 @@ func (t *SubagentTool) executeWithContext(ctx context.Context, params map[string
 	case "spawn":
 		return t.spawn(ctx, coordinator, params, userInitiated)
 	case "list":
-		session, _, _, _ := t.runtimeContext()
-		runs, err := coordinator.List(ctx, agentcoord.RunFilter{ParentSessionID: session})
-		if err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
-		return &Result{Success: true, Data: map[string]any{"runs": runs, "count": len(runs)}}, nil
+		return t.list(ctx, coordinator, params)
 	case "status":
 		run, err := t.runInCurrentSession(ctx, coordinator, delegateStringParam(params, "id"))
 		if err != nil {
@@ -1005,6 +1009,7 @@ func subagentRunResult(run agentcoord.Run) *Result {
 		Error:   run.Result.Error,
 		DisplayData: map[string]any{
 			"summary": fmt.Sprintf("Subagent %s is %s", run.ID, run.State),
+			"run":     subagentRunView(run, 4096),
 		},
 		ShouldAbridge: true,
 	}

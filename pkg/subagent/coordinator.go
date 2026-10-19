@@ -801,14 +801,25 @@ func (c *Coordinator) List(ctx context.Context, filter agentcoord.AgentRunFilter
 	if c.ledger != nil && nilPort(c.ledger) {
 		return nil, fmt.Errorf("subagent coordinator durable ledger is unavailable")
 	}
+	if filter.BeforeStartedAt.IsZero() != (filter.BeforeRunID == "") {
+		return nil, fmt.Errorf("subagent list cursor requires both start time and run ID")
+	}
 	if c.ledger == nil {
 		return c.listLocal(ctx, filter)
 	}
+	order := runledger.RunOrderOldestFirst
+	if filter.NewestFirst {
+		order = runledger.RunOrderNewestFirst
+	}
 	runs, err := c.ledger.ListRuns(ctx, runledger.RunQuery{
-		SessionID:   firstNonEmpty(strings.TrimSpace(filter.SessionID), strings.TrimSpace(filter.ParentSessionID)),
-		TaskID:      strings.TrimSpace(filter.TaskID),
-		ParentRunID: strings.TrimSpace(filter.ParentRunID),
-		Limit:       filter.Limit,
+		SessionID:       firstNonEmpty(strings.TrimSpace(filter.SessionID), strings.TrimSpace(filter.ParentSessionID)),
+		TaskID:          strings.TrimSpace(filter.TaskID),
+		ParentRunID:     strings.TrimSpace(filter.ParentRunID),
+		Limit:           filter.Limit,
+		Backend:         c.adapter,
+		Order:           order,
+		BeforeStartedAt: filter.BeforeStartedAt,
+		BeforeRunID:     filter.BeforeRunID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list durable subagent runs: %w", err)
@@ -827,12 +838,17 @@ func (c *Coordinator) List(ctx context.Context, filter agentcoord.AgentRunFilter
 			if err != nil {
 				return nil, err
 			}
+			// Page cursors use the immutable ledger timestamp across cache
+			// eviction and restart, even when live process state is fresher.
+			run.StartedAt = durable.StartedAt
 			out = append(out, run)
 			continue
 		}
 		out = append(out, c.agentRunFromLedger(durable, spec, true))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		return runOrderBefore(out[i].StartedAt, out[i].ID, out[j].StartedAt, out[j].ID, filter.NewestFirst)
+	})
 	return out, nil
 }
 
@@ -841,6 +857,9 @@ func (c *Coordinator) listLocal(ctx context.Context, filter agentcoord.AgentRunF
 		return nil, nil
 	}
 	snapshots := c.manager.List()
+	sort.Slice(snapshots, func(i, j int) bool {
+		return runOrderBefore(snapshots[i].StartedAt, snapshots[i].ID, snapshots[j].StartedAt, snapshots[j].ID, filter.NewestFirst)
+	})
 	out := make([]agentcoord.AgentRun, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		run, err := c.agentRunFromSnapshot(ctx, snapshot)
@@ -2386,7 +2405,21 @@ func matchesRunFilter(run agentcoord.AgentRun, filter agentcoord.AgentRunFilter)
 	if value := strings.TrimSpace(filter.TaskID); value != "" && run.Task.ID != value {
 		return false
 	}
+	if !filter.BeforeStartedAt.IsZero() && !runOrderBefore(run.StartedAt, run.ID, filter.BeforeStartedAt, filter.BeforeRunID, false) {
+		return false
+	}
 	return true
+}
+
+func runOrderBefore(at time.Time, id string, other time.Time, otherID string, newest bool) bool {
+	order := at.Compare(other)
+	if order == 0 {
+		order = strings.Compare(id, otherID)
+	}
+	if newest {
+		return order > 0
+	}
+	return order < 0
 }
 
 func (c *Coordinator) addEvidence(runID string, ids ...string) {

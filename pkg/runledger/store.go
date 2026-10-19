@@ -153,11 +153,14 @@ const (
 
 // RunQuery selects runs for ListRuns.
 type RunQuery struct {
-	SessionID   string
-	TaskID      string
-	ParentRunID string
-	Limit       int
-	Order       RunOrder
+	SessionID       string
+	TaskID          string
+	ParentRunID     string
+	Backend         string
+	Limit           int
+	Order           RunOrder
+	BeforeStartedAt time.Time
+	BeforeRunID     string
 }
 
 // LiveSink receives a best-effort, fire-and-forget copy of every

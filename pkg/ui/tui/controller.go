@@ -116,6 +116,7 @@ type SessionState struct {
 	MessageQueue  []QueuedMessage // Messages queued while streaming
 
 	DisableToolsNextTurn bool
+	subagentListCursor   string
 
 	// continuation lazily holds this session's provider continuation cursor
 	// (decision 0001), behind the models.provider_continuation flag.

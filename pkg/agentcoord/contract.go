@@ -113,11 +113,14 @@ type Run struct {
 // RunFilter narrows a coordinator List request. Empty fields are not filters;
 // callers may use it for a session, a parent, or a specific task.
 type RunFilter struct {
-	SessionID       string `json:"session_id,omitempty"`
-	ParentRunID     string `json:"parent_run_id,omitempty"`
-	ParentSessionID string `json:"parent_session_id,omitempty"`
-	TaskID          string `json:"task_id,omitempty"`
-	Limit           int    `json:"limit,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	ParentRunID     string    `json:"parent_run_id,omitempty"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	TaskID          string    `json:"task_id,omitempty"`
+	Limit           int       `json:"limit,omitempty"`
+	NewestFirst     bool      `json:"newest_first,omitempty"`
+	BeforeStartedAt time.Time `json:"before_started_at,omitempty"`
+	BeforeRunID     string    `json:"before_run_id,omitempty"`
 }
 
 // Message is a durable mailbox entry. Delivery is explicit: queued means it
