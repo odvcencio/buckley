@@ -69,9 +69,10 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 		if o.beforeErr != nil || afterErr != nil {
 			outcome.StateObservationFailed = true
 			outcome.StateObservationError = errors.Join(o.beforeErr, afterErr).Error()
-		} else if o.bestEffort && strings.HasPrefix(o.beforeState, "status:") != strings.HasPrefix(afterState, "status:") {
+		} else if strings.HasPrefix(o.beforeState, "status:") != strings.HasPrefix(afterState, "status:") ||
+			strings.HasPrefix(o.beforeState, "files:") != strings.HasPrefix(afterState, "files:") {
 			outcome.StateObservationFailed = true
-			outcome.StateObservationError = "workspace observation changed between diff and status methods; run a fresh check to establish comparable state"
+			outcome.StateObservationError = "workspace observation changed methods; run a fresh check to establish comparable state"
 		} else {
 			outcome.StateObserved = true
 			outcome.StateChanged = o.beforeState != afterState
@@ -99,9 +100,9 @@ func (o Observation) Finish(ctx context.Context, outcome agentloop.ToolOutcome, 
 
 func (o *Observation) fingerprint(ctx context.Context) (string, error) {
 	if !o.bestEffort {
-		return workspaceevidence.GitStateFingerprint(ctx, o.workDir)
+		return workspaceevidence.WorkspaceStateFingerprint(ctx, o.workDir)
 	}
-	state, err := workspaceevidence.GitStateFingerprintWithFallback(ctx, o.workDir)
+	state, err := workspaceevidence.WorkspaceStateFingerprintWithFallback(ctx, o.workDir)
 	if state.Warning != "" {
 		o.warning = state.Warning
 	}

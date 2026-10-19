@@ -461,6 +461,9 @@ func TestRunner_IncompleteTurnWithoutDraftPersistsNoticeOnly(t *testing.T) {
 
 func TestRunner_CompletionContractUnobservableMutationFailsClosed(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

@@ -248,6 +248,7 @@ func stringSlicesEqual(left, right []string) bool {
 func hashGitManifest(ctx context.Context, rootFS *os.Root, manifest gitManifest) (string, error) {
 	hash := sha256.New()
 	contentBytes := int64(0)
+	buffer := make([]byte, fingerprintBufferBytes)
 	if manifest.unbornHeadRef != "" {
 		writeFingerprintRecord(hash, "git/head/unborn-ref", []byte(manifest.unbornHeadRef))
 	} else {
@@ -257,19 +258,19 @@ func hashGitManifest(ctx context.Context, rootFS *os.Root, manifest gitManifest)
 
 	entries := 0
 	for _, path := range manifest.trackedPaths {
-		if err := writePathFingerprint(ctx, hash, rootFS, "tracked", path, &contentBytes, &entries); err != nil {
+		if err := writePathFingerprint(ctx, hash, rootFS, "tracked", path, &contentBytes, &entries, buffer); err != nil {
 			return "", err
 		}
 	}
 	for _, path := range manifest.untrackedPaths {
-		if err := writePathFingerprint(ctx, hash, rootFS, "untracked", path, &contentBytes, &entries); err != nil {
+		if err := writePathFingerprint(ctx, hash, rootFS, "untracked", path, &contentBytes, &entries, buffer); err != nil {
 			return "", err
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func writePathFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, contentBytes *int64, entries *int) error {
+func writePathFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, contentBytes *int64, entries *int, buffer []byte) error {
 	clean := filepath.Clean(path)
 	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("observe workspace state: unsafe path %q", path)
@@ -291,12 +292,20 @@ func writePathFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind,
 		}
 		return fmt.Errorf("observe workspace state %q: %w", path, err)
 	}
+	if info.IsDir() {
+		writeFingerprintRecord(h, kind+"/dir", []byte(slashPath))
+		return writeDirectoryFingerprint(ctx, h, root, kind, clean, info, contentBytes, entries, buffer)
+	}
+	return writeLeafFingerprint(ctx, h, root, kind, clean, info, contentBytes, buffer)
+}
+
+func writeLeafFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, info os.FileInfo, contentBytes *int64, buffer []byte) error {
 	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := root.Readlink(clean)
+		target, err := root.Readlink(path)
 		if err != nil {
 			return fmt.Errorf("observe workspace symlink %q: %w", path, err)
 		}
-		after, err := root.Lstat(clean)
+		after, err := root.Lstat(path)
 		if err != nil {
 			return fmt.Errorf("observe workspace symlink %q: %w", path, err)
 		}
@@ -306,21 +315,17 @@ func writePathFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind,
 		writeFingerprintRecord(h, kind+"/symlink", []byte(target))
 		return nil
 	}
-	if info.IsDir() {
-		writeFingerprintRecord(h, kind+"/dir", []byte(slashPath))
-		return writeDirectoryFingerprint(ctx, h, root, kind, clean, info, contentBytes, entries)
-	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("observe workspace state %q: unsupported file type", path)
 	}
 	writeFingerprintRecord(h, kind+"/stat", []byte(fmt.Sprintf("%s %d", info.Mode().String(), info.Size())))
-	if err := writeFileContentFingerprint(ctx, h, root, kind, clean, info, contentBytes); err != nil {
+	if err := writeFileContentFingerprint(ctx, h, root, kind, path, info, contentBytes, buffer); err != nil {
 		return fmt.Errorf("observe workspace state %q: %w", path, err)
 	}
 	return nil
 }
 
-func writeDirectoryFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, before os.FileInfo, contentBytes *int64, entries *int) error {
+func writeDirectoryFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, before os.FileInfo, contentBytes *int64, entries *int, buffer []byte) error {
 	dir, err := root.Open(path)
 	if err != nil {
 		return err
@@ -349,7 +354,7 @@ func writeDirectoryFingerprint(ctx context.Context, h hash.Hash, root *os.Root, 
 			continue
 		}
 		child := filepath.Join(path, name)
-		if err := writePathFingerprint(ctx, h, root, kind, child, contentBytes, entries); err != nil {
+		if err := writePathFingerprint(ctx, h, root, kind, child, contentBytes, entries, buffer); err != nil {
 			return err
 		}
 	}
@@ -374,7 +379,7 @@ func writeFingerprintRecord(h hash.Hash, label string, value []byte) {
 	_, _ = h.Write([]byte{0})
 }
 
-func writeFileContentFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, before os.FileInfo, contentBytes *int64) error {
+func writeFileContentFingerprint(ctx context.Context, h hash.Hash, root *os.Root, kind, path string, before os.FileInfo, contentBytes *int64, buffer []byte) error {
 	if before.Size() < 0 {
 		return fmt.Errorf("negative file size")
 	}
@@ -402,12 +407,11 @@ func writeFileContentFingerprint(ctx context.Context, h hash.Hash, root *os.Root
 	defer stopClose()
 
 	contentHash := sha256.New()
-	buf := make([]byte, fingerprintBufferBytes)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		n, readErr := file.Read(buf)
+		n, readErr := file.Read(buffer)
 		if n > 0 {
 			if contentBytes != nil {
 				if int64(n) > maxFingerprintContentBytes-*contentBytes {
@@ -415,7 +419,7 @@ func writeFileContentFingerprint(ctx context.Context, h hash.Hash, root *os.Root
 				}
 				*contentBytes += int64(n)
 			}
-			_, _ = contentHash.Write(buf[:n])
+			_, _ = contentHash.Write(buffer[:n])
 		}
 		if readErr == io.EOF {
 			break

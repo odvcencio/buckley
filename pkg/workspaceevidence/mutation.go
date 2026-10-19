@@ -4,8 +4,54 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
+
+// WorkspaceMutationRecorder observes task changes in ordinary folders and
+// retains Git's session-commit attribution when a repository is present.
+type WorkspaceMutationRecorder struct {
+	git        *GitMutationRecorder
+	root       string
+	startState string
+}
+
+func NewWorkspaceMutationRecorder(ctx context.Context, root string) (*WorkspaceMutationRecorder, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, fmt.Errorf("observe workspace root: path is empty")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	git, err := workspaceUsesGit(root)
+	if err != nil {
+		return nil, err
+	}
+	if git {
+		recorder, err := NewGitMutationRecorder(ctx, root)
+		if err != nil {
+			return nil, err
+		}
+		return &WorkspaceMutationRecorder{git: recorder}, nil
+	}
+	state, err := directoryStateFingerprint(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkspaceMutationRecorder{root: root, startState: state}, nil
+}
+
+func (r *WorkspaceMutationRecorder) Observe(ctx context.Context) (bool, error) {
+	if r.git != nil {
+		return r.git.Observe(ctx)
+	}
+	state, err := directoryStateFingerprint(ctx, r.root)
+	if err != nil {
+		return false, err
+	}
+	return state != r.startState, nil
+}
 
 // GitMutationRecorder keeps the run's starting history and workspace state.
 // Local commit reflog entries distinguish task commits from imported history,

@@ -366,6 +366,9 @@ func TestDispatchACPToolCallTagsTestingVerificationOnly(t *testing.T) {
 
 func TestDispatchACPToolCallFallsBackToEffectWhenGitObservationUnavailable(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	registry := tool.NewEmptyRegistry()
 	registry.Register(&acpStateTestTool{
 		name:     "write_file",

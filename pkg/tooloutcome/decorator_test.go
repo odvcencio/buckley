@@ -3,6 +3,7 @@ package tooloutcome
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,10 +139,13 @@ func TestObservation_ExternalRunTestsReplacementSuccessDoesNotVerify(t *testing.
 
 func TestObservation_FingerprintFailureFailsClosed(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	outcome := Begin(context.Background(), root, string(tool.ImpactModifying)).
 		Finish(context.Background(), agentloop.ToolOutcome{Success: true}, tool.ToolMetadata{Impact: tool.ImpactModifying}, &builtin.Result{Success: true}, nil)
 	if !outcome.StateObservationFailed || outcome.StateObserved || outcome.StateChanged || outcome.StateObservationError == "" {
-		t.Fatalf("non-git modifying outcome = %+v, want fail-closed state observation error", outcome)
+		t.Fatalf("invalid Git modifying outcome = %+v, want fail-closed state observation error", outcome)
 	}
 }
 
@@ -154,6 +158,68 @@ func TestObservation_FallbackMethodChangeDoesNotClaimMutation(t *testing.T) {
 	outcome := observation.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, metadata, &builtin.Result{Success: true}, nil)
 	if !outcome.StateObservationFailed || outcome.StateObserved || outcome.StateChanged || !strings.Contains(outcome.StateObservationError, "fresh check") {
 		t.Fatalf("incomparable fingerprints claimed a mutation: %+v", outcome)
+	}
+}
+
+func TestObservation_RepositoryAppearedDoesNotClaimMutation(t *testing.T) {
+	root := t.TempDir()
+	metadata := tool.ToolMetadata{Impact: tool.ImpactModifying}
+	observation := BeginWithMetadata(context.Background(), root, metadata)
+	runToolOutcomeGit(t, root, "init", "-q")
+	outcome := observation.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, metadata, &builtin.Result{Success: true}, nil)
+	if !outcome.StateObservationFailed || outcome.StateObserved || outcome.StateChanged || !strings.Contains(outcome.StateObservationError, "fresh check") {
+		t.Fatalf("observation method change claimed a mutation: %+v", outcome)
+	}
+}
+
+func TestObservation_DirectoryMutationRequiresStableVerification(t *testing.T) {
+	for _, bestEffort := range []bool{false, true} {
+		for _, changesDuringCheck := range []bool{false, true} {
+			name := fmt.Sprintf("best_effort=%v/change_during_check=%v", bestEffort, changesDuringCheck)
+			t.Run(name, func(t *testing.T) {
+				root := t.TempDir()
+				begin := BeginWithMetadata
+				if bestEffort {
+					begin = BeginBestEffortWithMetadata
+				}
+				metadata := tool.ToolMetadata{Impact: tool.ImpactModifying}
+				observation := begin(context.Background(), root, metadata)
+				target := filepath.Join(root, "source.txt")
+				if err := os.WriteFile(target, []byte("changed\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				mutation := observation.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, metadata, &builtin.Result{Success: true}, nil)
+				if !mutation.StateObserved || !mutation.StateChanged || mutation.StateObservationFailed {
+					t.Fatalf("directory mutation = %+v", mutation)
+				}
+				contract := agentloop.CompletionContract{TaskIntent: agentloop.MutationIntent, RequireObservableChange: true, RequirePostChangeVerification: true}
+				snapshot := agentloop.ProgressSnapshot{StateObservedCalls: 1, StateChangedCalls: 1, LastStateChangeSequence: 1}
+				if err := contract.Validate(snapshot); err == nil {
+					t.Fatal("unverified directory mutation completed")
+				}
+				metadata = tool.ToolMetadata{Impact: tool.ImpactReadOnly, Verification: true}
+				check := begin(context.Background(), root, metadata)
+				if changesDuringCheck {
+					if err := os.WriteFile(target, []byte("changed during check\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				verified := check.Finish(context.Background(), agentloop.ToolOutcome{Success: true}, metadata, &builtin.Result{Success: true}, nil)
+				if !verified.StateObserved || !verified.VerificationPassed || verified.StateChanged != changesDuringCheck {
+					t.Fatalf("directory verification = %+v", verified)
+				}
+				snapshot.StateObservedCalls++
+				snapshot.VerificationObservedCalls, snapshot.VerificationPassedCalls = 1, 1
+				snapshot.LastVerificationPassed, snapshot.LastVerificationSequence = true, 2
+				if changesDuringCheck {
+					snapshot.StateChangedCalls++
+					snapshot.LastStateChangeSequence = 2
+				}
+				if err := contract.Validate(snapshot); (err != nil) != changesDuringCheck {
+					t.Fatalf("verification acceptance changed=%v: %v", changesDuringCheck, err)
+				}
+			})
+		}
 	}
 }
 
