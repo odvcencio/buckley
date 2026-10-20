@@ -183,7 +183,7 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 	// of silently discarding them. Capping raw capture here duplicated that
 	// cutoff at a point before Prioritize ever saw the tail files, so they
 	// vanished with no summary line at all (Important-2).
-	output, _, err := contextGitOutputLimited(0, args...)
+	output, _, err := contextGitOutputLimited(0, contextPathArgs(params, args)...)
 	if err != nil {
 		// Retry without ...HEAD for base diff
 		if base := params["base"]; base != "" {
@@ -193,7 +193,7 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 				args = append(args, "--")
 				args = append(args, pathsArgs...)
 			}
-			output, _, err = contextGitOutputLimited(0, args...)
+			output, _, err = contextGitOutputLimited(0, contextPathArgs(params, args)...)
 		}
 		if err != nil {
 			return "", stats, err
@@ -363,7 +363,7 @@ func gatherGitFiles(params map[string]string) (string, error) {
 		args = append(args, pathsArgs...)
 	}
 
-	output, err := contextGitOutput(args...)
+	output, err := contextGitOutput(contextPathArgs(params, args)...)
 	if err != nil {
 		// Retry without ...HEAD for base
 		if base := params["base"]; base != "" {
@@ -373,7 +373,7 @@ func gatherGitFiles(params map[string]string) (string, error) {
 				args = append(args, "--")
 				args = append(args, pathsArgs...)
 			}
-			output, err = contextGitOutput(args...)
+			output, err = contextGitOutput(contextPathArgs(params, args)...)
 		}
 		if err != nil {
 			return "", err
@@ -422,6 +422,13 @@ func gatherCommand(params map[string]string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+func contextPathArgs(params map[string]string, args []string) []string {
+	if params["literal_paths"] == "true" {
+		return append([]string{"--literal-pathspecs"}, args...)
+	}
+	return args
+}
+
 // contextGitOutput runs a git command and returns its output.
 func contextGitOutput(args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"--no-pager"}, args...)...)
@@ -429,7 +436,7 @@ func contextGitOutput(args ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimSuffix(string(output), "\n"), nil
 }
 
 // contextGitOutputLimited runs a git command, optionally capping output at
@@ -448,7 +455,7 @@ func contextGitOutputLimited(maxBytes int, args ...string) (string, bool, error)
 	if maxBytes > 0 && len(output) > maxBytes {
 		return string(output[:maxBytes]), true, nil
 	}
-	return strings.TrimSpace(string(output)), false, nil
+	return strings.TrimSuffix(string(output), "\n"), false, nil
 }
 
 // contextReadFileLimited reads up to maxBytes from a file.

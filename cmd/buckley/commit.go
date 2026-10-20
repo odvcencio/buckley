@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,8 +35,8 @@ func (s scopedCommitDefinition) ContextSources() []oneshot.ContextSource {
 	// NUL-separated pathspec list, understood by gatherGitDiff / gatherGitFiles.
 	pathsParam := strings.Join(s.paths, "\x00")
 	return []oneshot.ContextSource{
-		{Type: "git_diff", Params: map[string]string{"staged": "true", "paths": pathsParam}},
-		{Type: "git_files", Params: map[string]string{"staged": "true", "paths": pathsParam}},
+		{Type: "git_diff", Params: map[string]string{"staged": "true", "paths": pathsParam, "literal_paths": "true"}},
+		{Type: "git_files", Params: map[string]string{"staged": "true", "paths": pathsParam, "literal_paths": "true"}},
 		{Type: "agents_md"},
 	}
 }
@@ -130,8 +131,14 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_COMMIT, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
-	var pathsFlag stringSliceFlag
-	fs.Var(&pathsFlag, "paths", "scope commit to these paths only (repeatable); stages them if not already staged, other staged files remain staged")
+	var pathsFlag []string
+	fs.Func("paths", "scope commit to these literal file or directory paths (repeatable); preserves filename whitespace and leaves other staged files staged", func(value string) error {
+		if value == "" {
+			return fmt.Errorf("commit path cannot be empty")
+		}
+		pathsFlag = append(pathsFlag, value)
+		return nil
+	})
 	exclusive := fs.Bool("exclusive", false, "with --paths: error if any staged file falls outside the given paths")
 	squashFlag := fs.String("squash", "", "squash all commits since the merge-base with this ref into one commit")
 	force := fs.Bool("force", false, "with --squash: allow squashing a protected branch (main/master)")
@@ -676,13 +683,12 @@ func oneshotMinimalOutputEnabled() bool {
 func listStagedFiles() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only").Output()
+	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "--no-renames", "-z").Output()
 	if err != nil {
 		return nil, err
 	}
 	var files []string
-	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f = strings.TrimSpace(f)
+	for _, f := range strings.Split(string(out), "\x00") {
 		if f != "" {
 			files = append(files, f)
 		}
@@ -726,8 +732,8 @@ func stagedFilesOutsidePaths(paths []string) ([]string, error) {
 // pathspecs. Matching is prefix-based: "a" matches "a/foo.go" and "a" itself.
 func fileMatchesPaths(file string, paths []string) bool {
 	for _, p := range paths {
-		p = strings.TrimRight(p, "/")
-		if file == p || strings.HasPrefix(file, p+"/") {
+		p = filepath.ToSlash(filepath.Clean(p))
+		if p == "." || file == p || strings.HasPrefix(file, p+"/") {
 			return true
 		}
 	}
@@ -794,7 +800,7 @@ func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 	// Always mirror to git (buckley needs git diff for context). The "--"
 	// makes git read every entry as a path, so a stray argument after
 	// buckley's own "--" (for example "-m") cannot reach git add as an option.
-	gitArgs := append([]string{"add", "--"}, files...)
+	gitArgs := append([]string{"--literal-pathspecs", "add", "--"}, files...)
 	gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 	gitCmd.Stdout = io.Discard
 	var gitStderr bytes.Buffer
@@ -814,18 +820,9 @@ func stageForGraft(compactOutput bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Get list of git-staged files
-	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only").Output()
+	toAdd, err := listStagedFiles()
 	if err != nil {
 		return fmt.Errorf("list staged files: %w", err)
-	}
-	files := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var toAdd []string
-	for _, f := range files {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			toAdd = append(toAdd, f)
-		}
 	}
 	if len(toAdd) == 0 {
 		return nil
@@ -995,7 +992,7 @@ func collectStagedChangeMetadata(paths []string) (commitmsg.ChangeMetadata, erro
 }
 
 func collectStagedChangeMetadataWithEnv(paths []string, env []string) (commitmsg.ChangeMetadata, error) {
-	args := []string{"diff", "--cached", "--binary", "--no-ext-diff", "--no-color"}
+	args := []string{"--literal-pathspecs", "diff", "--cached", "--binary", "--no-ext-diff", "--no-color"}
 	if len(paths) > 0 {
 		args = append(args, "--")
 		args = append(args, paths...)
@@ -1015,7 +1012,7 @@ func collectStagedChangeMetadataWithEnv(paths []string, env []string) (commitmsg
 		return commitmsg.ChangeMetadata{}, fmt.Errorf("git diff: %w", err)
 	}
 
-	numstatArgs := []string{"diff", "--cached", "--numstat"}
+	numstatArgs := []string{"--literal-pathspecs", "diff", "--cached", "--numstat"}
 	if len(paths) > 0 {
 		numstatArgs = append(numstatArgs, "--")
 		numstatArgs = append(numstatArgs, paths...)
@@ -1028,8 +1025,8 @@ func collectStagedChangeMetadataWithEnv(paths []string, env []string) (commitmsg
 	}
 
 	metadata := commitmsg.ChangeMetadata{Digest: fmt.Sprintf("sha256:%x", hash.Sum(nil))}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, line := range strings.Split(string(output), "\n") {
+		if line == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "\t", 3)
