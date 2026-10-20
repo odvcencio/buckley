@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	"github.com/pmezard/go-difflib/difflib"
 
+	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -114,10 +114,7 @@ func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[strin
 		if oldContent == content {
 			return execFn(params)
 		}
-		diffText, err = r.buildUnifiedDiff(absPath, oldContent, content)
-		if err != nil {
-			return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to build diff: %v", err)}, nil
-		}
+		diffText = textdiff.Unified(absPath, oldContent, content)
 	} else if oldStr, ok := params["old_string"].(string); ok {
 		newStr, _ := params["new_string"].(string)
 		diffText = fmt.Sprintf("edit_file %s:\n- %s\n+ %s", absPath, oldStr, newStr)
@@ -238,17 +235,6 @@ func (r *Registry) awaitDecision(parentCtx context.Context, changeID string) (*m
 	defer cancel()
 
 	return r.missionStore.WaitForDecision(ctx, changeID, 750*time.Millisecond)
-}
-
-func (r *Registry) buildUnifiedDiff(path, from, to string) (string, error) {
-	diff := difflib.UnifiedDiff{
-		A:        difflib.SplitLines(from),
-		B:        difflib.SplitLines(to),
-		FromFile: path,
-		ToFile:   path,
-		Context:  3,
-	}
-	return difflib.GetUnifiedDiffString(diff)
 }
 
 func derivePatchTarget(rawPatch string) string {

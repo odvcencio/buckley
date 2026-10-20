@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pmezard/go-difflib/difflib"
+	"m31labs.dev/buckley/internal/textdiff"
 )
 
 // EditFileTool performs targeted string replacement edits in a file
@@ -267,7 +267,7 @@ func generateDiff(path, oldContent, newContent string) *DiffInfo {
 		info.LinesRemoved += count
 	}
 
-	info.UnifiedDiff = generateUnifiedDiff(path, oldContent, newContent)
+	info.UnifiedDiff = textdiff.Unified(path, oldContent, newContent)
 	info.Preview = info.UnifiedDiff
 	lineCount := strings.Count(info.UnifiedDiff, "\n") + 1
 	if lineCount > 15 {
@@ -278,21 +278,6 @@ func generateDiff(path, oldContent, newContent string) *DiffInfo {
 		info.Preview = info.UnifiedDiff[:end-1] + fmt.Sprintf("\n... (%d more lines)", lineCount-15)
 	}
 	return info
-}
-
-// generateUnifiedDiff creates a unified diff format output
-func generateUnifiedDiff(path, oldContent, newContent string) string {
-	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A:        difflib.SplitLines(oldContent),
-		B:        difflib.SplitLines(newContent),
-		FromFile: path,
-		ToFile:   path,
-		Context:  3,
-	})
-	if err != nil {
-		return fmt.Sprintf("--- %s\n+++ %s\n", path, path)
-	}
-	return diff
 }
 
 func pluralize(count int) string {

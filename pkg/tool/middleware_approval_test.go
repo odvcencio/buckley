@@ -66,6 +66,15 @@ func TestApprovalMiddlewareWriteFile(t *testing.T) {
 	}
 
 	changeID := waitForPendingChange(t, store.DB())
+	var approvalDiff string
+	if err := store.DB().QueryRow(`SELECT diff FROM pending_changes WHERE id = ?`, changeID).Scan(&approvalDiff); err != nil {
+		t.Fatal(err)
+	}
+	wantDiff := "--- " + target + "\n+++ " + target + "\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"
+	if approvalDiff != wantDiff {
+		t.Fatalf("approval did not preserve newline evidence: got=%q want=%q", approvalDiff, wantDiff)
+	}
+
 	if err := missionStore.UpdatePendingChangeStatus(changeID, "approved", "tester"); err != nil {
 		t.Fatalf("approve change: %v", err)
 	}
