@@ -96,6 +96,29 @@ func TestGenerateUnifiedDiff_EmptyFiles(t *testing.T) {
 	}
 }
 
+func TestEditFileTool_CompletedPatchRoundTripsWithoutRetainingLargeSources(t *testing.T) {
+	requireGNUPatch(t)
+	for _, old := range []string{"old\nlast", "old\r\nlast\r\n", "old\n" + strings.Repeat("unchanged\n", 10000)} {
+		root := t.TempDir()
+		path := filepath.Join(root, "f.txt")
+		if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+			t.Fatal(err)
+		}
+		edit := &builtin.EditFileTool{}
+		edit.SetWorkDir(root)
+		r, err := edit.Execute(map[string]any{"path": "f.txt", "old_string": "old", "new_string": "new"})
+		if err != nil || !r.Success || r.DiffPreview.DiffTruncated {
+			t.Fatalf("completed edit failed: %+v %v", r, err)
+		}
+		patch := strings.Replace(r.DiffPreview.UnifiedDiff, "--- "+path+"\n", "--- f.txt\n", 1)
+		patch = strings.Replace(patch, "+++ "+path+"\n", "+++ f.txt\n", 1)
+		if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+			t.Fatal(err)
+		}
+		assertGeneratedPatchRoundTrip(t, root, patch, strings.Replace(old, "old", "new", 1), 0)
+	}
+}
+
 func TestGenerateUnifiedDiff_StandardLineTermination(t *testing.T) {
 	for _, tc := range []struct{ name, old, next, body string }{
 		{"lf", "old\n", "new\n", "@@ -1 +1 @@\n-old\n+new\n"},

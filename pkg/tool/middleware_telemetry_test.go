@@ -66,6 +66,41 @@ func TestTelemetryMiddlewarePublishesToolEvents(t *testing.T) {
 	}
 }
 
+func TestTelemetryMiddleware_TruncatedDiffPreservesCountsAndIdentity(t *testing.T) {
+	hub := telemetry.NewHub()
+	ch, unsubscribe := hub.Subscribe()
+	t.Cleanup(unsubscribe)
+	r := NewEmptyRegistry()
+	r.EnableTelemetry(hub, "truncated-diff")
+	result := &builtin.Result{Success: true, DiffPreview: &builtin.DiffInfo{
+		FilePath: "file.txt", LinesAdded: 3, LinesRemoved: 2,
+		DiffTruncated: true, DiffBytes: 10000, DiffSHA256: strings.Repeat("a", 64), Preview: "bounded preview",
+	}}
+	exec := r.telemetryMiddleware()(func(*ExecutionContext) (*builtin.Result, error) {
+		return result, nil
+	})
+	if _, err := exec(&ExecutionContext{ToolName: "edit_file", Params: map[string]any{}, Metadata: map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range drainTelemetryEvents(ch) {
+		if event.Type != telemetry.EventToolCompleted {
+			continue
+		}
+		if event.Data["addedLines"] != float64(3) || event.Data["removedLines"] != float64(2) {
+			t.Fatalf("lost counts for omitted patch: %+v", event.Data)
+		}
+		detail := telemetryResultDetail(result)
+		if !strings.Contains(detail, `"diff_truncated": true`) || !strings.Contains(detail, "bounded preview") || !strings.Contains(detail, strings.Repeat("a", 64)) {
+			t.Fatalf("lost omission evidence: %s", detail)
+		}
+		if event.Data["result_fingerprint"] != telemetry.FingerprintText(telemetry.SanitizeText(detail, telemetry.MaxResultBytes)) {
+			t.Fatal("completion event lost the result identity")
+		}
+		return
+	}
+	t.Fatal("completion event missing")
+}
+
 func TestTelemetryMiddlewarePublishesShellEvents(t *testing.T) {
 	hub := telemetry.NewHub()
 	eventCh, unsubscribe := hub.Subscribe()

@@ -56,13 +56,21 @@ type Result struct {
 
 // DiffInfo contains diff information for file changes
 type DiffInfo struct {
-	FilePath     string `json:"file_path"`
-	IsNew        bool   `json:"is_new"`
-	IsDelete     bool   `json:"is_delete"`
-	LinesAdded   int    `json:"lines_added"`
-	LinesRemoved int    `json:"lines_removed"`
-	OldContent   string `json:"old_content,omitempty"` // Original content
-	NewContent   string `json:"new_content,omitempty"` // New content
-	UnifiedDiff  string `json:"unified_diff"`          // Unified diff format
-	Preview      string `json:"preview"`               // First few lines of diff for display
+	FilePath      string `json:"file_path"`
+	IsNew         bool   `json:"is_new"`
+	IsDelete      bool   `json:"is_delete"`
+	LinesAdded    int    `json:"lines_added"`
+	LinesRemoved  int    `json:"lines_removed"`
+	OldContent    string `json:"old_content,omitempty"` // Original content
+	NewContent    string `json:"new_content,omitempty"` // New content
+	UnifiedDiff   string `json:"unified_diff"`          // Unified diff format
+	Preview       string `json:"preview"`               // First few lines of diff for display
+	SourceOmitted bool   `json:"source_omitted,omitempty"`
+	OldBytes      int    `json:"old_bytes,omitempty"`
+	NewBytes      int    `json:"new_bytes,omitempty"`
+	OldSHA256     string `json:"old_sha256,omitempty"`
+	NewSHA256     string `json:"new_sha256,omitempty"`
+	DiffTruncated bool   `json:"diff_truncated,omitempty"`
+	DiffBytes     int    `json:"diff_bytes,omitempty"`
+	DiffSHA256    string `json:"diff_sha256,omitempty"`
 }
