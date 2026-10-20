@@ -56,6 +56,9 @@ func TestAnalyzeComplexityTool_RejectsIncompleteAnalysis(t *testing.T) {
 	}{
 		{name: "invalid Go", file: "broken.go", source: "package p\nfunc broken(", message: "parse"},
 		{name: "invalid Python", file: "broken.py", source: "def broken(:\n    pass\n", message: "parse"},
+		{name: "empty Python function", file: "broken.py", source: "def broken():\n", message: "empty Python suite"},
+		{name: "empty Python class", file: "broken.py", source: "class Broken:\n    # comment only\n", message: "empty Python suite"},
+		{name: "empty Python conditional", file: "broken.py", source: "if True:\n", message: "empty Python suite"},
 		{name: "invalid JS", file: "broken.js", source: "function broken( {", message: "parse"},
 		{name: "unsupported", file: "source.rb", source: "def f; end", message: "unsupported"},
 		{name: "fractional threshold", file: "source.py", source: "def f(): pass\n", params: map[string]any{"threshold": 1.5}, message: "positive integer"},
@@ -281,6 +284,7 @@ function* generate(xs) { for (const x of xs) { if (x) yield x; } }
 		{"view.tsx", `interface I { method(x: boolean): number; }
 const View = (x: boolean) => x ? <div/> : <span/>;
 `, map[string]int{"View": 2}},
+		{"declare.ts", "declare function declared(x: number): number;\nabstract class A { abstract f(): number; }", map[string]int{}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			dir := t.TempDir()

@@ -418,10 +418,22 @@ func (a *complexityAnalysis) treeFile(path, source, grammar string) error {
 			return fmt.Errorf("parse %s: incomplete or invalid syntax at line %d", path, node.StartPoint().Row+1)
 		}
 		kind := node.Type(language)
+		if grammar == "source.py" && kind == "block" {
+			hasStatement := false
+			for i := 0; i < node.NamedChildCount(); i++ {
+				if node.NamedChild(i).Type(language) != "comment" {
+					hasStatement = true
+					break
+				}
+			}
+			if !hasStatement {
+				return fmt.Errorf("parse %s: empty Python suite at line %d", path, node.StartPoint().Row+1)
+			}
+		}
 		if complexityTreeFunction(kind) {
 			body := node.ChildByFieldName("body", language)
 			if body == nil {
-				return nil
+				return fmt.Errorf("parse %s: missing function body at line %d", path, node.StartPoint().Row+1)
 			}
 			name, err := complexityTreeName(node, language, source)
 			if err != nil {
