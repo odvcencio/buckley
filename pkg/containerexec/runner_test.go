@@ -66,7 +66,7 @@ func TestMapPaths(t *testing.T) {
 		want   map[string]any
 	}{
 		{
-			name: "output path mapping",
+			name: "output remains verbatim",
 			result: &builtin.Result{
 				Success: true,
 				Data: map[string]any{
@@ -74,7 +74,7 @@ func TestMapPaths(t *testing.T) {
 				},
 			},
 			want: map[string]any{
-				"output": "/home/user/project/src/main.go:10",
+				"output": "/workspace/src/main.go:10",
 			},
 		},
 		{

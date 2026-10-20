@@ -27,6 +27,7 @@ type Registry struct {
 	containerCompose string
 	containerWorkDir string
 	containerExecute bool
+	maxOutputBytes   int
 	sandbox          SandboxExecutor
 	telemetryHub     *telemetry.Hub
 	telemetrySession string
@@ -156,6 +157,9 @@ func (r *Registry) SetMaxOutputBytes(max int) {
 	if r == nil {
 		return
 	}
+	r.mu.Lock()
+	r.maxOutputBytes = max
+	r.mu.Unlock()
 	tools := r.snapshotTools()
 	for _, t := range tools {
 		if setter, ok := t.(interface{ SetMaxOutputBytes(int) }); ok {
