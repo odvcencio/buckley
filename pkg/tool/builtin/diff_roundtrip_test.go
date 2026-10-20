@@ -25,6 +25,10 @@ func TestEditFileTool_GeneratedDiffRoundTrips(t *testing.T) {
 		{"truncate", "old\n", ""},
 		{"truncate-unterminated", "old", ""},
 		{"multiple-hunks", "old\n" + strings.Repeat("same\n", 12) + "tail", "new\n" + strings.Repeat("same\n", 12) + "TAIL"},
+		{"trimmed-prefix", strings.Repeat("same\n", 20) + "old\ntail", strings.Repeat("same\n", 20) + "new\ntail"},
+		{"trimmed-suffix", "old\n" + strings.Repeat("same\n", 20), "new\n" + strings.Repeat("same\n", 20)},
+		{"repeated-context", strings.Repeat("same\n", 500), strings.Repeat("same\n", 250) + "changed\n" + strings.Repeat("same\n", 249)},
+		{"repeated-crlf", strings.Repeat("same\r\n", 500), strings.Repeat("same\r\n", 250) + "changed\r\n" + strings.Repeat("same\r\n", 249)},
 	} {
 		for _, limit := range []int64{0, 4096} {
 			t.Run(fmt.Sprintf("%s/limit-%d", tc.name, limit), func(t *testing.T) {
@@ -118,6 +122,7 @@ func FuzzGenerateUnifiedDiff_RoundTrip(f *testing.F) {
 	for _, pair := range [][2]string{{"", "new"}, {"old", "new\n"}, {"old\n", "new"}, {"old\nlast", "new\nlast"}, {"\x00old\n", "\x00new"}, {"a\r\n", "b\r\n"}} {
 		f.Add(pair[0], pair[1])
 	}
+	f.Add(strings.Repeat("same\n", 16)+"old\n"+strings.Repeat("same\n", 16), strings.Repeat("same\n", 16)+"new\n"+strings.Repeat("same\n", 16))
 	f.Fuzz(func(t *testing.T, old, next string) {
 		if len(old)+len(next) > 256 {
 			t.Skip()
