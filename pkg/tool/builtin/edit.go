@@ -188,7 +188,7 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		if err != nil {
 			return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
 		}
-		if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
+		if err := writeMutationFile(absPath, newContent, info.Mode().Perm()); err != nil {
 			return &Result{Success: false, Error: fmt.Sprintf("failed to write file: %v", err)}, nil
 		}
 	}
@@ -375,7 +375,7 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
 	}
-	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
+	if err := writeMutationFile(absPath, newContent, info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
@@ -515,7 +515,7 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
 	}
-	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
+	if err := writeMutationFile(absPath, newContent, info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

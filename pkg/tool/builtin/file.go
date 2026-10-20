@@ -566,14 +566,14 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		fileExists = false
 	}
 
-	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
+	if err := writeMutationFile(absPath, content, 0644); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
 		}, nil
 	}
 
-	lines := strings.Split(content, "\n")
+	lineCount := strings.Count(content, "\n") + 1
 	isNew := !fileExists
 
 	result := &Result{
@@ -587,16 +587,16 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Show compact summary in conversation
-	summary := fmt.Sprintf("✓ Wrote %s (%d lines, %d bytes)", filepath.Base(absPath), len(lines), len(content))
+	summary := fmt.Sprintf("✓ Wrote %s (%d lines, %d bytes)", filepath.Base(absPath), lineCount, len(content))
 	if isNew {
-		summary = fmt.Sprintf("✓ Created %s (%d lines, %d bytes)", filepath.Base(absPath), len(lines), len(content))
+		summary = fmt.Sprintf("✓ Created %s (%d lines, %d bytes)", filepath.Base(absPath), lineCount, len(content))
 	}
 
 	result.DisplayData = map[string]any{
 		"path":    absPath,
 		"size":    len(content),
 		"summary": summary,
-		"lines":   len(lines),
+		"lines":   lineCount,
 		"is_new":  isNew,
 	}
 
