@@ -289,8 +289,8 @@ func TestGenerateDevService(t *testing.T) {
 		t.Errorf("Expected image buckley/go:1.22, got %s", service.Image)
 	}
 
-	if service.ContainerName != "buckley-dev-go" {
-		t.Errorf("Expected container_name buckley-dev-go, got %s", service.ContainerName)
+	if service.ContainerName != "" {
+		t.Errorf("generated container name must be scoped by Compose, got %s", service.ContainerName)
 	}
 
 	if service.WorkingDir != "/workspace" {
