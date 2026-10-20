@@ -33,7 +33,7 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				ctx.StartTime = time.Now()
 			}
 
-			rich := extractTelemetryFieldsSafely(name, params)
+			rich := r.extractTelemetryFieldsSafely(ctx)
 			metadata := telemetryArgumentsSafely(ctx.Metadata, params)
 			r.publishToolEventBestEffort(telemetry.EventToolStarted, ctx.CallID, name, rich, ctx.StartTime, nil, nil, ctx.Attempt, metadata)
 			defer func() {
@@ -63,6 +63,16 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				res, err = execFn(params)
 			}
 
+			bestEffortTelemetry(func() {
+				if res != nil && res.Success {
+					if res.DiffPreview != nil {
+						rich = touch.WithDiff(rich, res.DiffPreview.UnifiedDiff)
+						rich.FilePath = res.DiffPreview.FilePath
+					} else if path, ok := res.Data["path"].(string); ok {
+						rich.FilePath = path
+					}
+				}
+			})
 			completionMetadata := telemetryArgumentsSafely(ctx.Metadata, ctx.Params)
 			r.publishToolEventBestEffort(eventTypeForResult(res, err), ctx.CallID, name, rich, time.Now(), res, err, ctx.Attempt, completionMetadata)
 			return res, err
@@ -70,13 +80,24 @@ func (r *Registry) telemetryMiddleware() Middleware {
 	}
 }
 
-func extractTelemetryFieldsSafely(name string, params map[string]any) (rich touch.RichFields) {
+func (r *Registry) extractTelemetryFieldsSafely(ctx *ExecutionContext) (rich touch.RichFields) {
 	defer func() {
 		if recover() != nil {
 			rich = touch.RichFields{}
 		}
 	}()
-	return touch.ExtractFromArgs(name, params)
+	options := touch.ExtractOptions{}
+	if resolver, ok := ctx.Tool.(interface{ ResolvePath(string) (string, error) }); ok {
+		options.ResolvePath = resolver.ResolvePath
+	}
+	if budget, ok := ctx.Tool.(interface{ FileMutationLimit() int64 }); ok {
+		options.MaxFileBytes = budget.FileMutationLimit()
+	}
+	_, options.SkipFileDiff = r.checkBuiltinPermissionDefaults(ctx)
+	if ctx.ToolName == "edit_file" {
+		options.SkipFileDiff = true
+	}
+	return touch.ExtractFromArgsWithOptions(ctx.ToolName, ctx.Params, options)
 }
 
 func telemetryArgumentsSafely(metadata map[string]any, params map[string]any) (out map[string]any) {

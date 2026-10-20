@@ -2,17 +2,40 @@ package touch
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/approval"
 )
 
-const diffLineLimit = 200
+const (
+	diffLineLimit = 200
+	// DefaultPreviewFileBytes bounds optional whole-file preview work.
+	DefaultPreviewFileBytes = 64 << 10
+	// DefaultPreviewBytes bounds retained diff text across all preview lines.
+	DefaultPreviewBytes = 16 << 10
+	previewLineBytes    = 2 << 10
+)
+
+// ExtractOptions controls optional file preview I/O; metadata is always extracted.
+type ExtractOptions struct {
+	MaxFileBytes int64
+	ResolvePath  func(string) (string, error)
+	SkipFileDiff bool
+}
+
+func (o ExtractOptions) fileLimit() int64 {
+	if o.MaxFileBytes > 0 {
+		return min(o.MaxFileBytes, DefaultPreviewFileBytes)
+	}
+	return DefaultPreviewFileBytes
+}
 
 type DiffLine struct {
 	Type    string `json:"type"`
@@ -40,11 +63,24 @@ func ExtractFromJSON(toolName, raw string) RichFields {
 }
 
 func ExtractFromArgs(toolName string, args map[string]any) RichFields {
+	return ExtractFromArgsWithOptions(toolName, args, ExtractOptions{})
+}
+
+func ExtractFromArgsWithOptions(toolName string, args map[string]any, options ExtractOptions) RichFields {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	rich := RichFields{
 		OperationType: inferOperationType(name, ""),
 	}
 
+	path := pathParam(args)
+	if path != "" && options.ResolvePath != nil {
+		resolved, err := options.ResolvePath(path)
+		if err != nil {
+			options.SkipFileDiff = true
+		} else {
+			path = resolved
+		}
+	}
 	switch name {
 	case "run_shell":
 		cmd := stringParam(args, "command", "cmd")
@@ -56,38 +92,33 @@ func ExtractFromArgs(toolName string, args map[string]any) RichFields {
 		}
 		rich.Description = "Run shell command"
 	case "write_file":
-		path := pathParam(args)
 		rich.OperationType = approval.OpWrite.String()
 		rich.Description = "Write file"
 		rich.FilePath = path
-		rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = diffPreviewForWrite(path, stringParam(args, "content"))
-		if path != "" && isNewFile(path) {
+		if !options.SkipFileDiff {
+			rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = diffPreviewForWrite(path, rawTextParam(args, "content"), options.fileLimit())
+		}
+		if !options.SkipFileDiff && path != "" && isNewFile(path) {
 			rich.Description = "Create file"
 		}
 	case "edit_file":
-		path := pathParam(args)
 		rich.OperationType = approval.OpWrite.String()
 		rich.Description = "Edit file"
 		rich.FilePath = path
-		rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = diffPreviewForEdit(
-			path,
-			stringParam(args, "old_string"),
-			stringParam(args, "new_string"),
-			boolParam(args, "replace_all"),
-		)
+		if !options.SkipFileDiff && !hasBatchEdits(args) {
+			rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = diffPreviewForEdit(path, rawTextParam(args, "old_string"), rawTextParam(args, "new_string"), boolParam(args, "replace_all"), options.fileLimit())
+		}
 	case "apply_patch":
-		patch := stringParam(args, "patch")
+		patch := rawTextParam(args, "patch")
 		rich.OperationType = approval.OpWrite.String()
 		rich.Description = "Apply patch"
 		rich.FilePath = firstPatchFilePath(patch)
 		rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = diffFromPatch(patch)
 	case "read_file":
-		path := pathParam(args)
 		rich.OperationType = approval.OpRead.String()
 		rich.Description = "Read file"
 		rich.FilePath = path
 	case "list_directory":
-		path := pathParam(args)
 		rich.OperationType = approval.OpRead.String()
 		rich.Description = "List directory"
 		rich.FilePath = path
@@ -96,7 +127,7 @@ func ExtractFromArgs(toolName string, args map[string]any) RichFields {
 			rich.OperationType = inferOperationType(name, "")
 		}
 		rich.Command = stringParam(args, "command")
-		rich.FilePath = pathParam(args)
+		rich.FilePath = path
 		if rich.Description == "" && strings.TrimSpace(toolName) != "" {
 			rich.Description = strings.ReplaceAll(toolName, "_", " ")
 		}
@@ -214,30 +245,37 @@ func containsAny(source string, tokens ...string) bool {
 	return false
 }
 
-func diffPreviewForWrite(path, newContent string) ([]DiffLine, int32, int32, []LineRange) {
-	if strings.TrimSpace(path) == "" {
+func diffPreviewForWrite(path, newContent string, limit int64) ([]DiffLine, int32, int32, []LineRange) {
+	if strings.TrimSpace(path) == "" || int64(len(newContent)) > limit {
 		return nil, 0, 0, nil
 	}
-	oldContent, ok := readFileAllowMissing(path)
+	oldContent, ok := readFileAllowMissing(path, limit)
 	if !ok {
 		return nil, 0, 0, nil
 	}
 	return parseUnifiedDiff(textdiff.Unified(path, oldContent, newContent))
 }
 
-func diffPreviewForEdit(path, oldString, newString string, replaceAll bool) ([]DiffLine, int32, int32, []LineRange) {
-	if strings.TrimSpace(path) == "" || oldString == "" {
+func diffPreviewForEdit(path, oldString, newString string, replaceAll bool, limit int64) ([]DiffLine, int32, int32, []LineRange) {
+	if strings.TrimSpace(path) == "" || oldString == "" || int64(len(newString)) > limit {
 		return nil, 0, 0, nil
 	}
-	content, err := os.ReadFile(path)
-	if err != nil {
+	oldContent, ok := readFileAllowMissing(path, limit)
+	if !ok {
 		return nil, 0, 0, nil
 	}
-	oldContent := string(content)
 	if !strings.Contains(oldContent, oldString) {
 		return nil, 0, 0, nil
 	}
 	if !replaceAll && strings.Count(oldContent, oldString) > 1 {
+		return nil, 0, 0, nil
+	}
+	count := strings.Count(oldContent, oldString)
+	if !replaceAll {
+		count = min(count, 1)
+	}
+	growth := int64(len(newString)) - int64(len(oldString))
+	if growth > 0 && int64(count) > (limit-int64(len(oldContent)))/growth {
 		return nil, 0, 0, nil
 	}
 	var newContent string
@@ -256,21 +294,28 @@ func diffFromPatch(patch string) ([]DiffLine, int32, int32, []LineRange) {
 	return parseUnifiedDiff(patch)
 }
 
+// WithDiff enriches metadata from an already computed unified diff without I/O.
+func WithDiff(rich RichFields, diff string) RichFields {
+	rich.DiffLines, rich.AddedLines, rich.RemovedLines, rich.Ranges = parseUnifiedDiff(diff)
+	return rich
+}
+
 func parseUnifiedDiff(diff string) ([]DiffLine, int32, int32, []LineRange) {
 	if strings.TrimSpace(diff) == "" {
 		return nil, 0, 0, nil
 	}
-	lines := strings.Split(diff, "\n")
-	preview := make([]DiffLine, 0, len(lines))
+	preview := make([]DiffLine, 0, min(strings.Count(diff, "\n"), diffLineLimit))
+	remaining := DefaultPreviewBytes
 	ranges := make([]LineRange, 0, 4)
 	var added int32
 	var removed int32
 
-	for _, line := range lines {
+	for line := range strings.Lines(diff) {
+		line = strings.TrimSuffix(line, "\n")
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "@@") {
+		if strings.HasPrefix(line, "@@") && len(ranges) < diffLineLimit && len(line) <= 512 {
 			if r, ok := parseHunkHeader(line); ok {
 				ranges = append(ranges, r)
 			}
@@ -285,8 +330,12 @@ func parseUnifiedDiff(diff string) ([]DiffLine, int32, int32, []LineRange) {
 		if lineType == "" {
 			continue
 		}
-		if len(preview) < diffLineLimit {
-			preview = append(preview, DiffLine{Type: lineType, Content: content})
+		if len(preview) < diffLineLimit && remaining > 0 {
+			content = boundedDiffLine(content, min(remaining, previewLineBytes))
+			if content != "" {
+				preview = append(preview, DiffLine{Type: lineType, Content: content})
+				remaining -= len(content)
+			}
 		}
 	}
 	return preview, added, removed, ranges
@@ -375,15 +424,53 @@ func classifyDiffLine(line string) (string, string, bool, bool) {
 	}
 }
 
-func readFileAllowMissing(path string) (string, bool) {
-	content, err := os.ReadFile(path)
-	if err == nil {
-		return string(content), true
-	}
+func readFileAllowMissing(path string, limit int64) (string, bool) {
+	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return "", true
 	}
-	return "", false
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return "", false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(content)) > limit {
+		return "", false
+	}
+	return string(content), true
+}
+
+func rawTextParam(args map[string]any, key string) string {
+	text, _ := args[key].(string)
+	return text
+}
+
+func hasBatchEdits(args map[string]any) bool {
+	raw, exists := args["edits"]
+	if !exists {
+		return false
+	}
+	edits, ok := raw.([]any)
+	return !ok || len(edits) > 0
+}
+
+func boundedDiffLine(text string, limit int) string {
+	if len(text) <= limit {
+		return strings.Clone(text)
+	}
+	const marker = "... [truncated]"
+	if limit < len(marker) {
+		return ""
+	}
+	end := limit - len(marker)
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[:end] + marker
 }
 
 func isNewFile(path string) bool {
@@ -398,25 +485,26 @@ func firstPatchFilePath(patch string) string {
 	if strings.TrimSpace(patch) == "" {
 		return ""
 	}
-	for _, line := range strings.Split(patch, "\n") {
+	for line := range strings.Lines(patch) {
+		line = strings.TrimSuffix(line, "\n")
 		if strings.HasPrefix(line, "+++ ") {
 			path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
 			if path == "/dev/null" {
 				continue
 			}
-			return cleanPatchPath(path)
+			return strings.Clone(cleanPatchPath(path))
 		}
 		if strings.HasPrefix(line, "--- ") {
 			path := strings.TrimSpace(strings.TrimPrefix(line, "--- "))
 			if path == "/dev/null" {
 				continue
 			}
-			return cleanPatchPath(path)
+			return strings.Clone(cleanPatchPath(path))
 		}
-		if strings.HasPrefix(line, "diff --git ") {
+		if strings.HasPrefix(line, "diff --git ") && len(line) <= 4096 {
 			fields := strings.Fields(line)
 			if len(fields) >= 4 {
-				return cleanPatchPath(fields[3])
+				return strings.Clone(cleanPatchPath(fields[3]))
 			}
 		}
 	}
