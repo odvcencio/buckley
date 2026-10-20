@@ -23,7 +23,12 @@ func NewGenerator() (*Generator, error) {
 
 // Generate creates a docker-compose.yml for the profile
 func (g *Generator) Generate(profile *envdetect.EnvironmentProfile, outputPath string) error {
+	projectName, err := ProjectName(filepath.Dir(outputPath))
+	if err != nil {
+		return err
+	}
 	compose := &ComposeFile{
+		Name:     projectName,
 		Version:  "3.9",
 		Services: make(map[string]Service),
 		Volumes:  make(map[string]Volume),
@@ -77,10 +82,9 @@ func (g *Generator) generateDevService(lang envdetect.Language) Service {
 	workdir := "/workspace"
 
 	return Service{
-		Image:         image,
-		ContainerName: fmt.Sprintf("buckley-dev-%s", lang.Name),
-		Init:          true,
-		WorkingDir:    workdir,
+		Image:      image,
+		Init:       true,
+		WorkingDir: workdir,
 		Volumes: []string{
 			".:" + workdir,                            // Mount worktree
 			"~/.ssh:/root/.ssh:ro",                    // SSH keys
@@ -107,11 +111,10 @@ func (g *Generator) generateBackingService(svc envdetect.Service) Service {
 	image := fmt.Sprintf("%s:%s", svc.Type, svc.Version)
 
 	service := Service{
-		Image:         image,
-		ContainerName: fmt.Sprintf("buckley-%s", svc.Type),
-		Networks:      []string{"buckley"},
-		Restart:       "unless-stopped",
-		Environment:   svc.Env,
+		Image:       image,
+		Networks:    []string{"buckley"},
+		Restart:     "unless-stopped",
+		Environment: svc.Env,
 	}
 
 	// Add ports

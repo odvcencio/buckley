@@ -16,11 +16,19 @@ func (g *Generator) loadOverrides(workDir string) error {
 		return err
 	}
 
-	return yaml.Unmarshal(data, &g.overrides)
+	var overrides map[string]any
+	if err := yaml.Unmarshal(data, &overrides); err != nil {
+		return err
+	}
+	g.overrides = overrides
+	return nil
 }
 
 // applyOverrides merges user overrides into the compose file
 func (g *Generator) applyOverrides(compose *ComposeFile) {
+	if name, ok := g.overrides["name"].(string); ok && name != "" {
+		compose.Name = name
+	}
 	// Merge service overrides
 	if services, ok := g.overrides["services"].(map[string]any); ok {
 		for name, override := range services {

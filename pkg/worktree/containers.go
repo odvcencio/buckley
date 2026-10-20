@@ -210,6 +210,10 @@ func (wm *Manager) generateComposeFromSpec(wtPath string, spec *ContainerSpec) (
 	if spec.BaseImage == "" {
 		return "", fmt.Errorf("container spec missing base_image")
 	}
+	projectName, err := containers.ProjectName(wtPath)
+	if err != nil {
+		return "", err
+	}
 
 	mounts := []string{}
 	if spec.workspaceMountEnabled() {
@@ -220,6 +224,7 @@ func (wm *Manager) generateComposeFromSpec(wtPath string, spec *ContainerSpec) (
 	}
 
 	var sb strings.Builder
+	fmt.Fprintf(&sb, "name: %s\n", projectName)
 	sb.WriteString("version: '3.9'\nservices:\n  dev:\n    init: true\n")
 	if spec.Name != "" {
 		sb.WriteString("    container_name: ")

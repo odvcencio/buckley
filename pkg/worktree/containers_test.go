@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/pkg/containers"
 )
 
 func TestResolveEnvValue(t *testing.T) {
@@ -188,6 +191,19 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				}
 
 				contentStr := string(content)
+				var compose struct {
+					Name string `yaml:"name"`
+				}
+				if err := yaml.Unmarshal(content, &compose); err != nil {
+					t.Fatal(err)
+				}
+				wantName, err := containers.ProjectName(wtPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if compose.Name != wantName {
+					t.Errorf("project name = %q, want %q", compose.Name, wantName)
+				}
 
 				// Basic validation
 				if !strings.Contains(contentStr, "version:") {
@@ -270,7 +286,8 @@ func TestManager_prepareComposeFile_CustomFile(t *testing.T) {
 	// Create a custom compose file in temp dir
 	tmpDir := t.TempDir()
 	customCompose := filepath.Join(tmpDir, "custom-compose.yml")
-	customContent := `version: '3.9'
+	customContent := `name: user-project
+version: '3.9'
 services:
   dev:
     image: custom:latest
@@ -306,6 +323,9 @@ services:
 	contentStr := string(content)
 	if !strings.Contains(contentStr, wtPath) {
 		t.Error("rendered compose should contain worktree path")
+	}
+	if contentStr != strings.ReplaceAll(customContent, "{{WORKTREE_PATH}}", wtPath) {
+		t.Error("custom compose changed beyond template substitution")
 	}
 }
 
