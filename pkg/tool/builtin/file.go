@@ -227,7 +227,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		return readFileFailure("binary_file", fmt.Sprintf("%s contains NUL bytes; use a format-specific tool or a bounded hex dump through run_shell", absPath)), nil
 	}
 	contentStr := string(content)
-	lines := fileLines(contentStr)
+	totalLines := strings.Count(contentStr, "\n")
+	if contentStr != "" && !strings.HasSuffix(contentStr, "\n") {
+		totalLines++
+	}
 	if _, hasAnchor := params["anchor"]; hasAnchor {
 		_, hasStart := params["start_line"]
 		_, hasEnd := params["end_line"]
@@ -259,14 +262,16 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		var matches []int
 		total := 0
-		for i, line := range lines {
-			if selected != nil && selected.StartLine > 0 && (i+1 < selected.StartLine || i+1 > selected.EndLine) {
+		lineNumber := 0
+		for line := range strings.SplitSeq(contentStr, "\n") {
+			lineNumber++
+			if selected != nil && selected.StartLine > 0 && (lineNumber < selected.StartLine || lineNumber > selected.EndLine) {
 				continue
 			}
 			if strings.Contains(line, anchor) {
 				total++
 				if len(matches) < 8 {
-					matches = append(matches, i+1)
+					matches = append(matches, lineNumber)
 				}
 			}
 		}
@@ -284,7 +289,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
-	startLine, endLine, explicitPage, err := readFilePage(params, len(lines))
+	startLine, endLine, explicitPage, err := readFilePage(params, totalLines)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
@@ -298,7 +303,20 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		numbered = typed
 	}
 
-	pageLines := lines[startLine-1 : endLine]
+	pageLines := make([]string, 0, endLine-startLine+1)
+	if endLine >= startLine {
+		lineNumber := 0
+		for line := range strings.SplitSeq(contentStr, "\n") {
+			lineNumber++
+			if lineNumber < startLine {
+				continue
+			}
+			pageLines = append(pageLines, line)
+			if lineNumber == endLine {
+				break
+			}
+		}
+	}
 	pageContent := strings.Join(pageLines, "\n")
 	if numbered {
 		var sb strings.Builder
@@ -310,14 +328,14 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		pageContent = sb.String()
 	}
-	hasMore := endLine < len(lines)
+	hasMore := endLine < totalLines
 	if selected != nil && selected.EndLine > 0 {
 		hasMore = hasMore && endLine < selected.EndLine
 	}
 	page := map[string]any{
 		"start_line":  startLine,
 		"end_line":    endLine,
-		"total_lines": len(lines),
+		"total_lines": totalLines,
 		"has_more":    hasMore,
 	}
 	if hasMore {
@@ -337,7 +355,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	if shouldAbridge {
-		preview := fmt.Sprintf("Read %s (lines %d-%d of %d, %d bytes)", filepath.Base(absPath), startLine, endLine, len(lines), len(content))
+		preview := fmt.Sprintf("Read %s (lines %d-%d of %d, %d bytes)", filepath.Base(absPath), startLine, endLine, totalLines, len(content))
 		if hasMore {
 			preview += fmt.Sprintf("; continue with start_line=%d", endLine+1)
 		}
@@ -357,17 +375,6 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 }
 
 const readFilePageLines = 100
-
-func fileLines(content string) []string {
-	if content == "" {
-		return nil
-	}
-	lines := strings.Split(content, "\n")
-	if lines[len(lines)-1] == "" {
-		return lines[:len(lines)-1]
-	}
-	return lines
-}
 
 // normalizeReadFileParams drops placeholder values that models send for unused
 // optional arguments: an empty anchor, zero or negative line numbers, and null
