@@ -147,7 +147,7 @@ func (t *ListMergeConflictsTool) ExecuteWithContext(parent context.Context, para
 		return &Result{Error: "file must be at most 8192 bytes without NUL"}, nil
 	}
 	if cursor.File != "" {
-		abs, e := resolveLiteralPath(dir, cursor.File)
+		abs, e := resolvePath(dir, cursor.File)
 		if e != nil {
 			return &Result{Error: e.Error()}, nil
 		}
@@ -255,7 +255,7 @@ func (t *ListMergeConflictsTool) ExecuteWithContext(parent context.Context, para
 	rows := make([]*conflictFileSummary, 0, len(paths))
 	remaining := int64(DefaultConflictScanBytes)
 	for _, path := range paths {
-		abs, err := resolveLiteralPath(dir, path)
+		abs, err := resolvePath(dir, path)
 		if err != nil {
 			return &Result{Error: err.Error()}, nil
 		}

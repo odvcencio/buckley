@@ -279,11 +279,11 @@ func extractPathArg(params map[string]any) string {
 	if params == nil {
 		return ""
 	}
-	if p, ok := params["path"].(string); ok && strings.TrimSpace(p) != "" {
-		return strings.TrimSpace(p)
+	if p, ok := params["path"].(string); ok && p != "" {
+		return p
 	}
-	if p, ok := params["file_path"].(string); ok && strings.TrimSpace(p) != "" {
-		return strings.TrimSpace(p)
+	if p, ok := params["file_path"].(string); ok && p != "" {
+		return p
 	}
 	return ""
 }
@@ -308,7 +308,6 @@ func filePathCategory(toolName string) string {
 // when the workspace is unknown, never silently stand down (fail-safe).
 func isWorkspaceRelative(path, workspaceRoot string) bool {
 	workspaceRoot = strings.TrimSpace(workspaceRoot)
-	path = strings.TrimSpace(path)
 	if workspaceRoot == "" || path == "" {
 		return false
 	}
@@ -662,7 +661,6 @@ func shellHasOutsideWindowsOperand(cmd, workspaceRoot string) bool {
 // remains the source of truth so native drive and UNC paths are handled by
 // the platform implementation.
 func isWindowsAbsolutePath(path string) bool {
-	path = strings.TrimSpace(path)
 	if strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//") {
 		return true
 	}

@@ -204,7 +204,10 @@ func boolParam(args map[string]any, key string) bool {
 }
 
 func pathParam(args map[string]any) string {
-	path := stringParam(args, "path", "file_path")
+	path := rawTextParam(args, "path")
+	if path == "" {
+		path = rawTextParam(args, "file_path")
+	}
 	if path == "" {
 		return ""
 	}
@@ -246,7 +249,7 @@ func containsAny(source string, tokens ...string) bool {
 }
 
 func diffPreviewForWrite(path, newContent string, limit int64) ([]DiffLine, int32, int32, []LineRange) {
-	if strings.TrimSpace(path) == "" || int64(len(newContent)) > limit {
+	if path == "" || int64(len(newContent)) > limit {
 		return nil, 0, 0, nil
 	}
 	oldContent, ok := readFileAllowMissing(path, limit)
@@ -257,7 +260,7 @@ func diffPreviewForWrite(path, newContent string, limit int64) ([]DiffLine, int3
 }
 
 func diffPreviewForEdit(path, oldString, newString string, replaceAll bool, limit int64) ([]DiffLine, int32, int32, []LineRange) {
-	if strings.TrimSpace(path) == "" || oldString == "" || int64(len(newString)) > limit {
+	if path == "" || oldString == "" || int64(len(newString)) > limit {
 		return nil, 0, 0, nil
 	}
 	oldContent, ok := readFileAllowMissing(path, limit)
@@ -474,7 +477,7 @@ func boundedDiffLine(text string, limit int) string {
 }
 
 func isNewFile(path string) bool {
-	if strings.TrimSpace(path) == "" {
+	if path == "" {
 		return false
 	}
 	_, err := os.Stat(path)

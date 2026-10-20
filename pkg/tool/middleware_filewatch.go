@@ -77,7 +77,7 @@ func extractFileChanges(ctx *ExecutionContext, res *builtin.Result) []filewatch.
 		return []filewatch.FileChange{change}
 	case "apply_patch":
 		rich := touch.ExtractFromArgs(toolName, ctx.Params)
-		path := strings.TrimSpace(rich.FilePath)
+		path := rich.FilePath
 		if path == "" {
 			return nil
 		}
@@ -88,7 +88,6 @@ func extractFileChanges(ctx *ExecutionContext, res *builtin.Result) []filewatch.
 }
 
 func buildChange(ctx *ExecutionContext, path string, changeType filewatch.ChangeType) filewatch.FileChange {
-	path = strings.TrimSpace(path)
 	size, modTime := statPath(path)
 	return filewatch.FileChange{
 		Path:     filepath.Clean(path),
@@ -113,7 +112,7 @@ func filePathFromResult(res *builtin.Result) string {
 		return ""
 	}
 	if res.DiffPreview != nil {
-		if path := strings.TrimSpace(res.DiffPreview.FilePath); path != "" {
+		if path := res.DiffPreview.FilePath; path != "" {
 			return path
 		}
 	}
@@ -140,11 +139,11 @@ func stringFromMap(data map[string]any, key string) string {
 	}
 	switch v := value.(type) {
 	case string:
-		return strings.TrimSpace(v)
+		return v
 	case fmt.Stringer:
-		return strings.TrimSpace(v.String())
+		return v.String()
 	default:
-		return strings.TrimSpace(fmt.Sprintf("%v", value))
+		return fmt.Sprintf("%v", value)
 	}
 }
 

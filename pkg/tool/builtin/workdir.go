@@ -89,10 +89,6 @@ func (w *workDirAware) ResolvePath(raw string) (string, error) {
 }
 
 func resolvePath(workDir, raw string) (string, error) {
-	return resolveLiteralPath(workDir, strings.TrimSpace(raw))
-}
-
-func resolveLiteralPath(workDir, raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("path cannot be empty")
 	}
@@ -153,11 +149,11 @@ func resolveRelPath(workDir, raw string) (string, string, error) {
 }
 
 func isWithinDir(base, target string) bool {
-	base = filepath.Clean(strings.TrimSpace(base))
-	target = filepath.Clean(strings.TrimSpace(target))
 	if base == "" || target == "" {
 		return false
 	}
+	base = filepath.Clean(base)
+	target = filepath.Clean(target)
 	rel, err := filepath.Rel(base, target)
 	if err != nil {
 		return false
@@ -170,23 +166,21 @@ func isWithinDir(base, target string) bool {
 }
 
 func evalSymlinksFallback(path string) string {
-	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
 	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil && strings.TrimSpace(resolved) != "" {
+	if err == nil && resolved != "" {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(path)
 }
 
 func evalSymlinksFallbackForTarget(path string) string {
-	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && strings.TrimSpace(resolved) != "" {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
 		return filepath.Clean(resolved)
 	}
 

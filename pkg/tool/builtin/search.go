@@ -393,7 +393,7 @@ func (t *SearchReplaceTool) Parameters() ParameterSchema {
 
 func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 	path, ok := params["path"].(string)
-	if !ok || strings.TrimSpace(path) == "" {
+	if !ok || path == "" {
 		return &Result{
 			Success: false,
 			Error:   "path parameter must be a non-empty string",

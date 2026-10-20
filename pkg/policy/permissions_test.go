@@ -22,6 +22,12 @@ func TestMatchGlobPath(t *testing.T) {
 		{"id_rsa no match", "**/id_rsa*", "/home/user/.ssh/known_hosts", false},
 		{"single star does not span dirs", "*.env", "sub/.env", false},
 		{"single star matches basename in dir", "sub/*.env", "sub/.env", true},
+		{"literal trailing whitespace", "note.txt ", "note.txt ", true},
+		{"trailing whitespace is distinct", "note.txt", "note.txt ", false},
+		{"pattern whitespace is literal", "note.txt ", "note.txt", false},
+		{"literal leading whitespace", " note.txt", " note.txt", true},
+		{"leading whitespace is distinct", "note.txt", " note.txt", false},
+		{"whitespace filename", "   ", "   ", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -29,6 +35,16 @@ func TestMatchGlobPath(t *testing.T) {
 				t.Errorf("matchGlobPath(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuleMatches_WhitespaceFilePatternIsLiteral(t *testing.T) {
+	rule := PermissionRule{Tool: "write_file", ArgPattern: "   ", Action: PermissionDeny}
+	for _, path := range []string{"   ", "note.txt", ""} {
+		req := PermissionRequest{Tool: "write_file", Category: string(CategoryFileWrite), Arg: path}
+		if got := ruleMatches(req, rule); got != (path == "   ") {
+			t.Fatalf("literal pattern matched %q: %v", path, got)
+		}
 	}
 }
 

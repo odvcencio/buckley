@@ -45,7 +45,7 @@ func (t *MarkResolvedTool) ExecuteWithContext(parent context.Context, params map
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
-	abs, err := resolveLiteralPath(dir, path)
+	abs, err := resolvePath(dir, path)
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}

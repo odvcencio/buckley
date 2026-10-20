@@ -35,7 +35,7 @@ func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	if !t.outsideWorkDirReads || t.sourceScope != nil {
 		return resolvePath(t.workDir, path)
 	}
-	if strings.TrimSpace(path) == "" {
+	if path == "" {
 		return "", fmt.Errorf("path cannot be empty")
 	}
 	if !filepath.IsAbs(path) {
@@ -47,7 +47,6 @@ func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	}
 	resolvedTarget := evalSymlinksFallbackForTarget(abs)
 	for _, denied := range t.deniedReadPaths {
-		denied = strings.TrimSpace(denied)
 		if denied == "" {
 			continue
 		}
