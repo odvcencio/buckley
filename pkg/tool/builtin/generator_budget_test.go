@@ -94,7 +94,7 @@ func TestGeneratorTools_InputAndConstructionBudgets(t *testing.T) {
 		{"test Python input", strings.Repeat("# padding\n", 100) + "def add(a,b):return a+b\n", "source_test.py", &GenerateTestTool{}, map[string]any{"source_file": "source.py", "function_name": "add", "test_file": "source_test.py"}, 512},
 		{"doc parameter expansion", "package fixture\nfunc Add(" + strings.Repeat("a int,", 500) + "z int){}\n", "source.go", &GenerateDocstringTool{}, map[string]any{"file": "source.go", "function_name": "Add"}, 4096},
 		{"doc description", generatorSource, "source.go", &GenerateDocstringTool{}, map[string]any{"file": "source.go", "function_name": "Add", "description": strings.Repeat("x", 2048)}, 512},
-		{"test repeated name", generatorSource, "source_test.go", &GenerateTestTool{}, map[string]any{"source_file": "source.go", "function_name": strings.Repeat("x", 256)}, 512},
+		{"test repeated name", generatorSource, "source_test.go", &GenerateTestTool{}, map[string]any{"source_file": "source.go", "function_name": strings.Repeat("x", 1024)}, 512},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

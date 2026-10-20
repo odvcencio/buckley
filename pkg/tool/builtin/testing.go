@@ -5,19 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Pre-compiled regex patterns for test output parsing.
-var (
-	cargoResultRe = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
-	goPackageRe   = regexp.MustCompile(`package\s+(\w+)`)
-)
+var cargoResultRe = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. (\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored`)
 
 // RunTestsTool runs tests with smart filtering and reporting
 type RunTestsTool struct{ workDirAware }
@@ -509,7 +510,7 @@ func (t *GenerateTestTool) Name() string {
 }
 
 func (t *GenerateTestTool) Description() string {
-	return "Generate test scaffolding for a function, method, or file. Auto-detects language (Go, JS/TS, Python)."
+	return "Generate skipped test scaffolds for Go, JS/TS, or Python. Implement behavioral assertions and remove the skip before using run_tests as verification."
 }
 
 func (t *GenerateTestTool) Parameters() ParameterSchema {
@@ -522,7 +523,7 @@ func (t *GenerateTestTool) Parameters() ParameterSchema {
 			},
 			"function_name": {
 				Type:        "string",
-				Description: "Optional: specific function to generate test for. If omitted, generates tests for all public functions.",
+				Description: "Optional target function or method label. Omit for a file-level skipped scaffold; assertions are not inferred.",
 			},
 			"test_file": {
 				Type:        "string",
@@ -576,12 +577,7 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 	// Detect language
 	language := t.detectLanguage(sourceFile)
 
-	// Named templates interpolate the function name three times.
-	if int64(len(functionName)) > t.mutationFileLimit()/3 {
-		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
-	}
-
-	if language != "go" && int64(len(filepath.Base(sourceFile))) > t.mutationFileLimit()-int64(len(functionName))*3 {
+	if int64(len(functionName)) > t.mutationFileLimit() || int64(len(filepath.Base(sourceFile))) > t.mutationFileLimit() {
 		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
 	}
 
@@ -609,20 +605,24 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 	result := &Result{
 		Success: true,
 		Data: map[string]any{
-			"source_file":   sourceFile,
-			"test_file":     testFile,
-			"function_name": functionName,
-			"language":      language,
-			"content":       testContent,
+			"source_file":             sourceFile,
+			"test_file":               testFile,
+			"function_name":           functionName,
+			"language":                language,
+			"content":                 testContent,
+			"status":                  "scaffold",
+			"requires_implementation": true,
 		},
 		ShouldAbridge: true,
 	}
 
 	result.DisplayData = map[string]any{
-		"source_file": sourceFile,
-		"test_file":   testFile,
-		"language":    language,
-		"summary":     fmt.Sprintf("✓ Generated test file: %s", testFile),
+		"source_file":             sourceFile,
+		"test_file":               testFile,
+		"language":                language,
+		"summary":                 fmt.Sprintf("Created skipped test scaffold: %s; add assertions and remove the skip before verification", testFile),
+		"status":                  "scaffold",
+		"requires_implementation": true,
 	}
 
 	return result, nil
@@ -686,129 +686,62 @@ func (t *GenerateTestTool) generateTestContent(sourceFile, functionName, languag
 	}
 }
 
+const scaffoldSkipReason = "TODO: implement behavioral assertions, then remove this skip"
+
 func (t *GenerateTestTool) generateGoTest(sourceFile, functionName string) (string, error) {
-	// Read source to get package name
 	content, err := t.readMutationFile(sourceFile)
 	if err != nil {
 		return "", err
 	}
-
-	matches := goPackageRe.FindStringSubmatch(content)
-	packageName := "main"
-	if len(matches) > 1 {
-		packageName = matches[1]
+	source, err := parser.ParseFile(token.NewFileSet(), sourceFile, content, parser.PackageClauseOnly|parser.SkipObjectResolution)
+	if err != nil {
+		return "", fmt.Errorf("read source package: %w", err)
 	}
-
-	var template string
-	if functionName != "" {
-		template = fmt.Sprintf(`package %s
-
-import "testing"
-
-func Test%s(t *testing.T) {
-	tests := []struct {
-		name string
-		// Add test fields here
-	}{
-		{
-			name: "basic case",
-			// Add test values
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Call %s and verify results
-			// got := %s(...)
-			// if got != tt.want {
-			//     t.Errorf("got %%v, want %%v", got, tt.want)
-			// }
-		})
-	}
-}
-`, packageName, functionName, functionName, functionName)
+	text := generatedText{limit: t.mutationFileLimit()}
+	text.append("package ", source.Name.Name, "\n\nimport \"testing\"\n\nfunc Test_")
+	appendScaffoldIdentifier(&text, strings.TrimSuffix(filepath.Base(sourceFile), filepath.Ext(sourceFile)))
+	if functionName == "" {
+		text.append("_File")
 	} else {
-		template = fmt.Sprintf(`package %s
-
-import "testing"
-
-// TODO: Add test functions here
-`, packageName)
+		text.append("_Target_")
+		appendScaffoldIdentifier(&text, functionName)
 	}
-
-	return template, nil
+	text.append("(t *testing.T) {\n\tt.Skip(", strconv.Quote(scaffoldSkipReason), ")\n\t// Arrange inputs, call the subject, and assert its behavior.\n}\n")
+	return text.result()
 }
 
 func (t *GenerateTestTool) generateJSTest(sourceFile, functionName string) (string, error) {
-	var template string
-	if functionName != "" {
-		template = fmt.Sprintf(`import { %s } from './%s';
-
-describe('%s', () => {
-	it('should handle basic case', () => {
-		// Arrange
-		const input = /* TODO: add input */;
-		const expected = /* TODO: add expected output */;
-
-		// Act
-		const result = %s(input);
-
-		// Assert
-		expect(result).toBe(expected);
-	});
-
-	it('should handle edge case', () => {
-		// TODO: Add edge case test
-	});
-});
-`, functionName, filepath.Base(sourceFile), functionName, functionName)
-	} else {
-		template = fmt.Sprintf(`import { } from './%s';
-
-describe('TODO: Module name', () => {
-	// TODO: Add test cases
-});
-`, filepath.Base(sourceFile))
+	label := functionName
+	if label == "" {
+		label = filepath.Base(sourceFile)
 	}
-
-	return template, nil
+	text := generatedText{limit: t.mutationFileLimit()}
+	text.append("// TODO: import the subject from ", strconv.Quote("./"+filepath.Base(sourceFile)), ".\n\ndescribe(", strconv.Quote(label), ", () => {\n  it.skip(", strconv.Quote(scaffoldSkipReason), ", () => {\n    // Arrange inputs, call the subject, and assert its behavior.\n  });\n});\n")
+	return text.result()
 }
 
 func (t *GenerateTestTool) generatePythonTest(sourceFile, functionName string) (string, error) {
-	moduleName := strings.TrimSuffix(filepath.Base(sourceFile), ".py")
-
-	var template string
-	if functionName != "" {
-		template = fmt.Sprintf(`import pytest
-from %s import %s
-
-
-class Test%s:
-	def test_basic_case(self):
-		"""Test basic functionality"""
-		# Arrange
-		input_value = None  # TODO: add input
-		expected = None  # TODO: add expected output
-
-		# Act
-		result = %s(input_value)
-
-		# Assert
-		assert result == expected
-
-	def test_edge_case(self):
-		"""Test edge case"""
-		# TODO: Add edge case test
-		pass
-`, moduleName, functionName, functionName, functionName)
+	text := generatedText{limit: t.mutationFileLimit()}
+	text.append("import pytest\n\n# TODO: import the subject from ", strconv.Quote(filepath.Base(sourceFile)), ".\n\ndef test_")
+	if functionName == "" {
+		text.append("file_scaffold")
 	} else {
-		template = fmt.Sprintf(`import pytest
-from %s import *
-
-
-# TODO: Add test classes and functions
-`, moduleName)
+		appendScaffoldIdentifier(&text, functionName)
 	}
+	text.append("():\n    pytest.skip(", strconv.Quote(scaffoldSkipReason), ")\n    # Arrange inputs, call the subject, and assert its behavior.\n")
+	return text.result()
+}
 
-	return template, nil
+func appendScaffoldIdentifier(text *generatedText, label string) {
+	for _, r := range label {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if !text.append(string(r)) {
+				return
+			}
+		} else {
+			if !text.append("_", strconv.FormatInt(int64(r), 16), "_") {
+				return
+			}
+		}
+	}
 }
