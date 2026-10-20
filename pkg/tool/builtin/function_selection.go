@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -66,23 +67,8 @@ func findNamedGoFunction(source *ast.File, target string) (*ast.FuncDecl, error)
 			continue
 		}
 		name := fn.Name.Name
-		if strings.Contains(target, ".") && fn.Recv != nil && len(fn.Recv.List) > 0 {
-			receiver := fn.Recv.List[0].Type
-			for receiver != nil {
-				switch node := receiver.(type) {
-				case *ast.StarExpr:
-					receiver = node.X
-				case *ast.IndexExpr:
-					receiver = node.X
-				case *ast.IndexListExpr:
-					receiver = node.X
-				case *ast.Ident:
-					name = node.Name + "." + name
-					receiver = nil
-				default:
-					receiver = nil
-				}
-			}
+		if strings.Contains(target, ".") {
+			name = qualifiedGoFunctionName(fn)
 		}
 		if name != target {
 			continue
@@ -136,6 +122,14 @@ func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Langu
 
 func treeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, content string) string {
 	switch node.Type(language) {
+	case "type_alias_statement":
+		name := node.NamedChild(0)
+		for name != nil && name.Type(language) != "identifier" {
+			name = name.NamedChild(0)
+		}
+		if name != nil {
+			return content[name.StartByte():name.EndByte()]
+		}
 	case "function_expression", "generator_function", "arrow_function", "lambda", "object", "class":
 		parent := node.Parent()
 		for parent != nil && (parent.Type(language) == "parenthesized_expression" || parent.Type(language) == "as_expression" || parent.Type(language) == "satisfies_expression") {
@@ -207,7 +201,7 @@ func boundedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.Lan
 		kind := current.Type(language)
 		if current != node && !complexityTreeFunction(kind) {
 			switch kind {
-			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration":
+			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration", "type_alias_statement":
 			default:
 				continue
 			}
@@ -226,4 +220,64 @@ func boundedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.Lan
 	}
 	slices.Reverse(parts)
 	return strings.Join(parts, "."), nil
+}
+
+func qualifiedGoFunctionName(fn *ast.FuncDecl) string {
+	name := fn.Name.Name
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return name
+	}
+	receiver := fn.Recv.List[0].Type
+	for receiver != nil {
+		switch node := receiver.(type) {
+		case *ast.StarExpr:
+			receiver = node.X
+		case *ast.IndexExpr:
+			receiver = node.X
+		case *ast.IndexListExpr:
+			receiver = node.X
+		case *ast.Ident:
+			return node.Name + "." + name
+		default:
+			return name
+		}
+	}
+	return name
+}
+
+func walkDeclarationTree(ctx context.Context, root *gotreesitter.Node, language *gotreesitter.Language, python bool, visit func(*gotreesitter.Node) error) error {
+	var walk func(*gotreesitter.Node, int) error
+	walk = func(node *gotreesitter.Node, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if depth > 512 {
+			return fmt.Errorf("declaration syntax depth exceeds 512")
+		}
+		if node.IsMissing() || node.IsError() {
+			return fmt.Errorf("invalid declaration syntax at line %d", node.StartPoint().Row+1)
+		}
+		if python && node.Type(language) == "block" {
+			hasStatement := false
+			for i := 0; i < node.NamedChildCount(); i++ {
+				if node.NamedChild(i).Type(language) != "comment" {
+					hasStatement = true
+					break
+				}
+			}
+			if !hasStatement {
+				return fmt.Errorf("empty Python suite at line %d", node.StartPoint().Row+1)
+			}
+		}
+		if err := visit(node); err != nil {
+			return err
+		}
+		for i := 0; i < node.ChildCount(); i++ {
+			if err := walk(node.Child(i), depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(root, 0)
 }
