@@ -122,6 +122,14 @@ func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Langu
 
 func treeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, content string) string {
 	switch node.Type(language) {
+	case "type_alias_statement":
+		name := node.NamedChild(0)
+		for name != nil && name.Type(language) != "identifier" {
+			name = name.NamedChild(0)
+		}
+		if name != nil {
+			return content[name.StartByte():name.EndByte()]
+		}
 	case "function_expression", "generator_function", "arrow_function", "lambda", "object", "class":
 		parent := node.Parent()
 		for parent != nil && (parent.Type(language) == "parenthesized_expression" || parent.Type(language) == "as_expression" || parent.Type(language) == "satisfies_expression") {
@@ -193,7 +201,7 @@ func boundedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.Lan
 		kind := current.Type(language)
 		if current != node && !complexityTreeFunction(kind) {
 			switch kind {
-			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration":
+			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration", "type_alias_statement":
 			default:
 				continue
 			}

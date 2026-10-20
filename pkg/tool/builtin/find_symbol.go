@@ -363,7 +363,7 @@ func (a *symbolMatches) treeFile(ctx context.Context, file, source, grammar stri
 			kind = "class"
 		case "interface_declaration":
 			kind = "interface"
-		case "type_alias_declaration", "enum_declaration":
+		case "type_alias_declaration", "type_alias_statement", "enum_declaration":
 			kind = "type"
 		default:
 			if complexityTreeFunction(node.Type(language)) || isJSSignature(node, language) {

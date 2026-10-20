@@ -45,6 +45,8 @@ func TestFindSymbolTool_SyntaxAndKinds(t *testing.T) {
 		{"literal.js", "// function Target() {}\nconst text = 'function Target() {}';\n", "Target", "function", 0, nil},
 		{"literal.ts", "function Target() {}\n", "Target.*", "function", 0, nil},
 		{"alias.ts", "type Target = { value: string };\n", "Target", "type", 1, []string{"Target"}},
+		{"alias.py", "type Target[T] = list[T]\n", "Target", "type", 1, []string{"Target"}},
+		{"nested_alias.py", "class Service:\n    type Target = int\n", "Service.Target", "type", 1, []string{"Service.Target"}},
 		{"interface.ts", "interface Reader { Target(): string; }\n", "Reader.Target", "function", 1, []string{"Reader.Target"}},
 		{"assignment.js", "exports.Target = function(a) { return a; };\n", "Target", "function", 1, []string{"exports.Target"}},
 		{"lambda.py", "Target = lambda x: x + 1\n", "Target", "function", 1, []string{"Target"}},
