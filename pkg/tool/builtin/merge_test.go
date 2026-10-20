@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,33 @@ import (
 
 	"m31labs.dev/buckley/pkg/encoding/toon"
 )
+
+func TestConflictCursor_CompactRoundTripAndMalformedInput(t *testing.T) {
+	for _, cursor := range []conflictCursor{
+		{Version: 1, Kind: "files", Offset: 1, Index: strings.Repeat("a", 64)},
+		{Version: 1, Kind: "files", File: "space \nfile", Offset: 20000, Index: strings.Repeat("b", 64)},
+		{Version: 1, Kind: "sections", File: "config one.txt", Offset: 2, Index: strings.Repeat("c", 64), Source: strings.Repeat("d", 64)},
+	} {
+		token := encodeConflictCursor(cursor)
+		decoded, err := decodeConflictCursor(token)
+		if err != nil || decoded != cursor || len(token) > 128 {
+			t.Fatalf("cursor=%+v token length=%d decoded=%+v error=%v", cursor, len(token), decoded, err)
+		}
+		for i := 0; i < len(token); i++ {
+			if _, err := decodeConflictCursor(token[:i]); err == nil {
+				t.Fatalf("truncated cursor accepted at byte %d", i)
+			}
+		}
+		if _, err := decodeConflictCursor(token + "."); err == nil {
+			t.Fatal("punctuation accepted as part of cursor")
+		}
+	}
+	for _, raw := range [][]byte{{}, {2, 'f', 1, 0}, {1, 'x', 1, 0}, {1, 'f', 0, 0}, {1, 'f', 255}, {1, 's', 1, 0}} {
+		if _, err := decodeConflictCursor(base64.RawURLEncoding.EncodeToString(raw)); err == nil {
+			t.Fatalf("malformed cursor accepted: %v", raw)
+		}
+	}
+}
 
 func conflictTestSection(ours, base, theirs string, size int) string {
 	text := strings.Repeat("<", size) + " HEAD\n" + ours + "\n"

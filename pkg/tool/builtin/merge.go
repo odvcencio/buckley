@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -39,8 +40,58 @@ type conflictCursor struct {
 }
 
 func encodeConflictCursor(cursor conflictCursor) string {
-	raw, _ := json.Marshal(cursor)
+	kind := byte('f')
+	if cursor.Kind == "sections" {
+		kind = 's'
+	}
+	raw := []byte{1, kind}
+	raw = binary.AppendUvarint(raw, uint64(cursor.Offset))
+	raw = binary.AppendUvarint(raw, uint64(len(cursor.File)))
+	raw = append(raw, cursor.File...)
+	index, _ := hex.DecodeString(cursor.Index)
+	raw = append(raw, index...)
+	if kind == 's' {
+		source, _ := hex.DecodeString(cursor.Source)
+		raw = append(raw, source...)
+	}
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeConflictCursor(value string) (conflictCursor, error) {
+	cursor := conflictCursor{Version: 1, Kind: "files"}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	if err != nil || len(raw) < 4 || raw[0] != 1 || (raw[1] != 'f' && raw[1] != 's') {
+		return cursor, fmt.Errorf("invalid conflict cursor")
+	}
+	kind := raw[1]
+	offset, n := binary.Uvarint(raw[2:])
+	if n <= 0 || offset < 1 || offset > DefaultConflictScanBytes {
+		return cursor, fmt.Errorf("invalid conflict cursor offset")
+	}
+	raw = raw[2+n:]
+	fileBytes, n := binary.Uvarint(raw)
+	if n <= 0 || fileBytes > 8192 {
+		return cursor, fmt.Errorf("invalid conflict cursor file length")
+	}
+	raw = raw[n:]
+	digestBytes := uint64(sha256.Size)
+	if kind == 's' {
+		cursor.Kind = "sections"
+		digestBytes *= 2
+	}
+	if uint64(len(raw)) != fileBytes+digestBytes {
+		return cursor, fmt.Errorf("invalid conflict cursor length")
+	}
+	cursor.File, cursor.Offset = string(raw[:fileBytes]), int64(offset)
+	if !utf8.ValidString(cursor.File) || strings.ContainsRune(cursor.File, 0) || (kind == 's' && cursor.File == "") {
+		return cursor, fmt.Errorf("invalid conflict cursor file")
+	}
+	raw = raw[fileBytes:]
+	cursor.Index = hex.EncodeToString(raw[:sha256.Size])
+	if kind == 's' {
+		cursor.Source = hex.EncodeToString(raw[sha256.Size:])
+	}
+	return cursor, nil
 }
 
 func (t *ListMergeConflictsTool) Name() string { return "list_merge_conflicts" }
@@ -77,9 +128,9 @@ func (t *ListMergeConflictsTool) ExecuteWithContext(parent context.Context, para
 			return &Result{Error: "invalid conflict cursor"}, nil
 		}
 		if s != "" {
-			raw, e := base64.RawURLEncoding.Strict().DecodeString(s)
-			if e != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Version != 1 || (cursor.Kind != "files" && cursor.Kind != "sections") || cursor.Offset < 1 || cursor.Offset > DefaultConflictScanBytes || !validConflictDigest(cursor.Index) || (cursor.Kind == "sections" && (cursor.File == "" || !validConflictDigest(cursor.Source))) {
-				return &Result{Error: "invalid conflict cursor; pass a returned cursor unchanged"}, nil
+			cursor, err = decodeConflictCursor(s)
+			if err != nil {
+				return &Result{Error: "invalid conflict cursor; copy a returned cursor exactly or restart without a cursor"}, nil
 			}
 		}
 	}
@@ -287,12 +338,4 @@ func (t *ListMergeConflictsTool) ExecuteWithContext(parent context.Context, para
 			return &Result{Error: fmt.Sprintf("conflict result exceeds %d-byte output budget", budget)}, nil
 		}
 	}
-}
-
-func validConflictDigest(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
 }
