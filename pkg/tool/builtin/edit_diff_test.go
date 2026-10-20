@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,24 +134,26 @@ func assertDiffMetadata(t testing.TB, info *DiffInfo, path, old, next string) {
 	if (old == next) != (info.UnifiedDiff == "") {
 		t.Fatal("diff does not reflect whether the source changed")
 	}
-	bags := []map[string]int{{}, {}}
-	for index, content := range []string{old, next} {
-		for _, line := range strings.Split(content, "\n") {
-			if strings.TrimSpace(line) != "" {
-				bags[index][line]++
-			}
-		}
-	}
-	added, removed := 0, 0
-	for line, count := range bags[0] {
-		removed += max(0, count-bags[1][line])
-	}
-	for line, count := range bags[1] {
-		added += max(0, count-bags[0][line])
-	}
 	unified := info.UnifiedDiff
 	preview := unified
 	lines := strings.Split(unified, "\n")
+	added, removed := 0, 0
+	for _, line := range lines {
+		if fields := diffHunkRanges.FindStringSubmatch(line); fields != nil {
+			oldCount, newCount := 1, 1
+			if fields[1] != "" {
+				oldCount, _ = strconv.Atoi(fields[1])
+			}
+			if fields[2] != "" {
+				newCount, _ = strconv.Atoi(fields[2])
+			}
+			removed += oldCount
+			added += newCount
+		} else if strings.HasPrefix(line, " ") {
+			removed--
+			added--
+		}
+	}
 	if len(lines) > 15 {
 		preview = strings.Join(lines[:15], "\n") + fmt.Sprintf("\n... (%d more lines)", len(lines)-15)
 	}
@@ -159,6 +163,31 @@ func assertDiffMetadata(t testing.TB, info *DiffInfo, path, old, next string) {
 		OldContent: old, NewContent: next, Preview: preview}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("diff metadata differs: got=%+v want=%+v", got, want)
+	}
+}
+
+var diffHunkRanges = regexp.MustCompile(`^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@`)
+
+func TestGenerateDiff_CountsPatchChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, old, next string
+		added, removed  int
+	}{
+		{"add blank", "", "\n", 1, 0},
+		{"remove blank", "\n", "", 0, 1},
+		{"whitespace", " \n", "\t\n", 1, 1},
+		{"move", "a\nb\n", "b\na\n", 1, 1},
+		{"final newline", "last", "last\n", 1, 1},
+		{"header-like content", "-- fake\n", "++ fake\n", 1, 1},
+		{"multiple hunks", "old\n" + strings.Repeat("same\n", 12) + "old\n", "new\n" + strings.Repeat("same\n", 12) + "new\n\n", 3, 2},
+		{"unchanged", "same\n", "same\n", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := generateDiff("fixture.txt", tc.old, tc.next)
+			if got.LinesAdded != tc.added || got.LinesRemoved != tc.removed {
+				t.Errorf("counts = +%d/-%d, want +%d/-%d\n%s", got.LinesAdded, got.LinesRemoved, tc.added, tc.removed, got.UnifiedDiff)
+			}
+		})
 	}
 }
 
