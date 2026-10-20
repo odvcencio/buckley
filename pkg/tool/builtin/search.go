@@ -421,7 +421,7 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	content, err := t.readMutationFile(absPath)
+	original, err := t.readMutationFile(absPath)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -429,7 +429,6 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	original := string(content)
 	var replaced string
 	var replacements int
 	if !useRegex && caseSensitive && (maxReplacements > 0 || !strings.Contains(replace, "$")) {

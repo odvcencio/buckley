@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"math"
@@ -48,42 +47,49 @@ func writeMutationFile(path, content string, perm os.FileMode) error {
 	return closeErr
 }
 
-func (w *workDirAware) readMutationFile(path string) ([]byte, error) {
+func (w *workDirAware) readMutationFile(path string) (string, error) {
 	limit := w.mutationFileLimit()
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return "", fmt.Errorf("%s is not a regular file", path)
 	}
 	if info.Size() > limit {
-		return nil, mutationBudgetError(limit)
+		return "", mutationBudgetError(limit)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer file.Close()
-	reader := &io.LimitedReader{R: file, N: limit}
-	// Leave room for Buffer's EOF probe without growing a completed snapshot.
-	extraCapacity := min(int64(bytes.MinRead), int64(math.MaxInt)-info.Size())
-	buffer := bytes.NewBuffer(make([]byte, 0, int(info.Size()+extraCapacity)))
-	_, err = buffer.ReadFrom(reader)
-	if err != nil {
-		return nil, err
+	var buffer strings.Builder
+	buffer.Grow(int(info.Size()))
+	remaining := limit
+	var scratch [4096]byte
+	for remaining > 0 {
+		n, readErr := file.Read(scratch[:int(min(int64(len(scratch)), remaining))])
+		buffer.Write(scratch[:n])
+		remaining -= int64(n)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
 	}
 	// The file may grow after Stat. Peek beyond the bounded snapshot without
 	// adding one to the policy limit, which can be MaxInt64.
-	if reader.N == 0 {
+	if remaining == 0 {
 		var extra [1]byte
 		if n, err := file.Read(extra[:]); n > 0 {
-			return nil, mutationBudgetError(limit)
+			return "", mutationBudgetError(limit)
 		} else if err != nil && err != io.EOF {
-			return nil, err
+			return "", err
 		}
 	}
-	return buffer.Bytes(), nil
+	return buffer.String(), nil
 }
 
 func (w *workDirAware) checkReplacementGrowth(size, oldBytes, newBytes, count int) error {

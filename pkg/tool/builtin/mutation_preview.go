@@ -41,7 +41,7 @@ func (t *SearchReplaceTool) Preview(params map[string]any) (*Result, error) {
 
 func (w *workDirAware) mutationPreview(path, before, after string, exists bool) (*Result, error) {
 	// Capture only compact source evidence while approval is parked.
-	digest := sha256.Sum256([]byte(before))
+	digest := mutationDigest(before)
 	target := evalSymlinksFallbackForTarget(path)
 	info, err := os.Stat(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -87,10 +87,23 @@ func (w *workDirAware) mutationPreview(path, before, after string, exists bool) 
 			if err != nil {
 				return fmt.Errorf("recheck approved file: %w", err)
 			}
-			if sha256.Sum256(content) != digest {
+			if mutationDigest(content) != digest {
 				return fmt.Errorf("file changed since approval; retry")
 			}
 			return nil
 		},
 	}, nil
+}
+
+func mutationDigest(content string) [sha256.Size]byte {
+	hash := sha256.New()
+	scratch := make([]byte, min(len(content), 4096))
+	for len(content) > 0 {
+		n := copy(scratch, content)
+		hash.Write(scratch[:n])
+		content = content[n:]
+	}
+	var digest [sha256.Size]byte
+	hash.Sum(digest[:0])
+	return digest
 }

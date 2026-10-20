@@ -84,11 +84,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	content, err := t.readMutationFile(absPath)
+	oldContent, err := t.readMutationFile(absPath)
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
-	oldContent := string(content)
 
 	newContent, replacements := oldContent, 0
 	for i, raw := range edits {
@@ -335,17 +334,16 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	content, err := t.readMutationFile(absPath)
+	oldContent, err := t.readMutationFile(absPath)
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
 
 	limit := t.mutationFileLimit()
 	// Insertion adds a line separator even when text is empty.
-	if int64(len(text)) >= limit-int64(len(content)) {
+	if int64(len(text)) >= limit-int64(len(oldContent)) {
 		return &Result{Success: false, Error: mutationBudgetError(limit).Error()}, nil
 	}
-	oldContent := string(content)
 	lineCount := strings.Count(oldContent, "\n") + 1
 	if lineNum < 1 {
 		lineNum = 1
@@ -475,12 +473,11 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	content, err := t.readMutationFile(absPath)
+	oldContent, err := t.readMutationFile(absPath)
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
 
-	oldContent := string(content)
 	lineCount := strings.Count(oldContent, "\n") + 1
 
 	if startLine < 1 {
