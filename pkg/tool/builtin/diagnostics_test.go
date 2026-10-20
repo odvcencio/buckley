@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,7 +25,7 @@ func TestPostEditDiagnostics_BuildsContainingPackage(t *testing.T) {
 		t.Fatalf("creating nested package source: %v", err)
 	}
 
-	if got := postEditDiagnostics(goFile); got != "" {
+	if got := postEditDiagnostics(context.Background(), goFile); got != "" {
 		t.Fatalf("postEditDiagnostics() = %q, want no diagnostics from the valid nested package", got)
 	}
 }

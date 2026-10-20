@@ -550,9 +550,8 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 	result := &Result{
 		Success: true,
 		Data: map[string]any{
-			"path":    absPath,
-			"size":    len(content),
-			"content": content, // Full content
+			"path": absPath,
+			"size": len(content),
 		},
 		ShouldAbridge: true,
 	}

@@ -6,6 +6,7 @@ type limitedBuffer struct {
 	buf       bytes.Buffer
 	max       int
 	truncated bool
+	total     int64
 }
 
 func newLimitedBuffer(max int) *limitedBuffer {
@@ -16,6 +17,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if b == nil {
 		return len(p), nil
 	}
+	b.total += int64(len(p))
 	if b.max <= 0 {
 		return b.buf.Write(p)
 	}
@@ -44,4 +46,11 @@ func (b *limitedBuffer) Truncated() bool {
 		return false
 	}
 	return b.truncated
+}
+
+func (b *limitedBuffer) TotalBytes() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.total
 }
