@@ -191,9 +191,7 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				}
 
 				contentStr := string(content)
-				var compose struct {
-					Name string `yaml:"name"`
-				}
+				var compose map[string]any
 				if err := yaml.Unmarshal(content, &compose); err != nil {
 					t.Fatal(err)
 				}
@@ -201,13 +199,13 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if compose.Name != wantName {
-					t.Errorf("project name = %q, want %q", compose.Name, wantName)
+				if compose["name"] != wantName {
+					t.Errorf("project name = %q, want %q", compose["name"], wantName)
 				}
 
 				// Basic validation
-				if !strings.Contains(contentStr, "version:") {
-					t.Error("compose file should contain version")
+				if _, exists := compose["version"]; exists {
+					t.Error("generated compose must omit the obsolete version attribute")
 				}
 				if !strings.Contains(contentStr, "init: true") {
 					t.Error("generated container must reap orphaned processes")

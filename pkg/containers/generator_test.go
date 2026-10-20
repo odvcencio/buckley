@@ -49,9 +49,12 @@ func TestGenerator_GenerateGoProject(t *testing.T) {
 		t.Fatalf("Failed to parse compose file: %v", err)
 	}
 
-	// Verify version
-	if compose.Version != "3.9" {
-		t.Errorf("Expected version 3.9, got %s", compose.Version)
+	var document map[string]any
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := document["version"]; exists {
+		t.Error("generated compose must omit the obsolete version attribute")
 	}
 
 	// Verify dev-go service exists

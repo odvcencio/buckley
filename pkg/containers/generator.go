@@ -29,7 +29,6 @@ func (g *Generator) Generate(profile *envdetect.EnvironmentProfile, outputPath s
 	}
 	compose := &ComposeFile{
 		Name:     projectName,
-		Version:  "3.9",
 		Services: make(map[string]Service),
 		Volumes:  make(map[string]Volume),
 		Networks: map[string]Network{
