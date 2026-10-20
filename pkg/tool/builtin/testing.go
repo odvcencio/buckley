@@ -48,7 +48,7 @@ func (t *RunTestsTool) TrustedVerification() bool {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with optional path/pattern filtering and framework detection. Omit path to test every Go package (./...); path . tests one package. Streams Go/Cargo counts while retaining bounded output and failure details; truncation and original readable output bytes are reported. Structured Jest/Pytest reports have an 8 MiB read budget, and complete results are capped at 24 KiB (or the configured smaller limit). Evidence-budget failures cannot verify a pass. A workspace with no framework returns unavailable."
+	return "Run tests with optional path/pattern filtering and framework detection. Omit path to test every Go package (./...); path . tests one package. Streams Go/Cargo counts while retaining bounded output and failure details; truncation and original readable output bytes are reported. Jest/Pytest reports have an 8 MiB capture budget; Unix streams report payloads without disk storage. Complete results are capped at 24 KiB (or the configured smaller limit). Evidence-budget failures cannot verify a pass. A workspace with no framework returns unavailable."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {
@@ -358,6 +358,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		cmd *exec.Cmd
 	)
 	var reportPath string
+	var reportCapture *testReportCapture
 	var jestPath string
 	commandDir := strings.TrimSpace(t.workDir)
 
@@ -368,6 +369,11 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 		}
 		defer os.RemoveAll(dir)
 		reportPath = filepath.Join(dir, "results")
+		reportCapture, err = newTestReportCapture(reportPath, min(int64(DefaultTestReportBytes), t.mutationFileLimit()))
+		if err != nil {
+			return "", 1, 0, nil, err
+		}
+		defer reportCapture.close()
 	}
 
 	switch framework {
@@ -505,14 +511,16 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 	}
 	if reportPath != "" {
 		parsed := testReport{}
-		if raw, _, exceeded, err := readFileSnapshot(reportPath, min(int64(DefaultTestReportBytes), t.mutationFileLimit())); err == nil && !exceeded {
+		if raw, exceeded, err := reportCapture.bytes(ctx); err == nil && !exceeded {
 			if framework == "jest" {
-				parsed = parseJestReport([]byte(raw), jestPath)
+				parsed = parseJestReport(raw, jestPath)
 			} else {
-				parsed = parsePytestReport([]byte(raw))
+				parsed = parsePytestReport(raw)
 			}
 		} else if exceeded {
 			parsed.verificationError = "structured test report exceeds the capture byte budget; narrow the path or pattern"
+		} else if err != nil {
+			parsed.verificationError = "structured test report capture failed: " + err.Error()
 		}
 		report = &parsed
 	}
