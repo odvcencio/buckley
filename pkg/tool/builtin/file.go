@@ -545,7 +545,7 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		if err != nil && exists {
 			return &Result{Error: fmt.Sprintf("failed to preview file: %v", err)}, nil
 		}
-		return t.mutationPreview(absPath, string(before), content, exists)
+		return t.mutationPreview(absPath, before, content, exists)
 	}
 
 	// Create parent directory if it doesn't exist
