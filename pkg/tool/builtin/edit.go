@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"m31labs.dev/buckley/internal/textdiff"
 )
 
 // EditFileTool performs targeted string replacement edits in a file
@@ -265,7 +267,7 @@ func generateDiff(path, oldContent, newContent string) *DiffInfo {
 		info.LinesRemoved += count
 	}
 
-	info.UnifiedDiff = GenerateUnifiedDiff(path, oldContent, newContent)
+	info.UnifiedDiff = textdiff.Unified(path, oldContent, newContent)
 	info.Preview = info.UnifiedDiff
 	lineCount := strings.Count(info.UnifiedDiff, "\n") + 1
 	if lineCount > 15 {

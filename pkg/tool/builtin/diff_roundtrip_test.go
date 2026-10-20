@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
@@ -85,7 +86,7 @@ func TestGenerateUnifiedDiff_EmptyFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			assertGeneratedPatchRoundTrip(t, root, builtin.GenerateUnifiedDiff("f.txt", tc.old, tc.next), tc.next, 4096)
+			assertGeneratedPatchRoundTrip(t, root, textdiff.Unified("f.txt", tc.old, tc.next), tc.next, 4096)
 		})
 	}
 }
@@ -100,13 +101,13 @@ func TestGenerateUnifiedDiff_StandardLineTermination(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := "--- f.txt\n+++ f.txt\n" + tc.body
-			if got := builtin.GenerateUnifiedDiff("f.txt", tc.old, tc.next); got != want {
+			if got := textdiff.Unified("f.txt", tc.old, tc.next); got != want {
 				t.Fatalf("got=%q want=%q", got, want)
 			}
 		})
 	}
 	for _, content := range []string{"", "same", "same\n"} {
-		if got := builtin.GenerateUnifiedDiff("f.txt", content, content); got != "" {
+		if got := textdiff.Unified("f.txt", content, content); got != "" {
 			t.Fatalf("unchanged diff=%q", got)
 		}
 	}
@@ -121,7 +122,7 @@ func FuzzGenerateUnifiedDiff_RoundTrip(f *testing.F) {
 		if len(old)+len(next) > 256 {
 			t.Skip()
 		}
-		patch := builtin.GenerateUnifiedDiff("f.txt", old, next)
+		patch := textdiff.Unified("f.txt", old, next)
 		if old == next {
 			if patch != "" {
 				t.Fatalf("unchanged diff=%q", patch)

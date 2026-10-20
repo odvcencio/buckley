@@ -1,4 +1,4 @@
-package builtin
+package textdiff
 
 import (
 	"fmt"
@@ -7,9 +7,9 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 )
 
-// GenerateUnifiedDiff formats a three-context-line unified diff, preserving
+// Unified formats a three-context-line unified diff, preserving
 // empty files and missing final newlines.
-func GenerateUnifiedDiff(path, oldContent, newContent string) string {
+func Unified(path, oldContent, newContent string) string {
 	if oldContent == newContent {
 		return ""
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/internal/textdiff"
 )
 
 func TestEditFileTool(t *testing.T) {
@@ -306,7 +308,7 @@ func TestGenerateDiff_NewFile(t *testing.T) {
 }
 
 func TestGenerateUnifiedDiff_CrossedLinesMakesProgress(t *testing.T) {
-	diff := GenerateUnifiedDiff(
+	diff := textdiff.Unified(
 		"crossed.txt",
 		"same\nold\nnew\ntail",
 		"same\nnew\nold\ntail",

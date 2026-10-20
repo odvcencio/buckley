@@ -10,6 +10,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -113,7 +114,7 @@ func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[strin
 		if oldContent == content {
 			return execFn(params)
 		}
-		diffText = builtin.GenerateUnifiedDiff(absPath, oldContent, content)
+		diffText = textdiff.Unified(absPath, oldContent, content)
 	} else if oldStr, ok := params["old_string"].(string); ok {
 		newStr, _ := params["new_string"].(string)
 		diffText = fmt.Sprintf("edit_file %s:\n- %s\n+ %s", absPath, oldStr, newStr)

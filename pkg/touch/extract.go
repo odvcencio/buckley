@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pmezard/go-difflib/difflib"
+	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/approval"
 )
 
@@ -222,11 +222,7 @@ func diffPreviewForWrite(path, newContent string) ([]DiffLine, int32, int32, []L
 	if !ok {
 		return nil, 0, 0, nil
 	}
-	diffText, err := buildUnifiedDiff(path, oldContent, newContent)
-	if err != nil {
-		return nil, 0, 0, nil
-	}
-	return parseUnifiedDiff(diffText)
+	return parseUnifiedDiff(textdiff.Unified(path, oldContent, newContent))
 }
 
 func diffPreviewForEdit(path, oldString, newString string, replaceAll bool) ([]DiffLine, int32, int32, []LineRange) {
@@ -250,11 +246,7 @@ func diffPreviewForEdit(path, oldString, newString string, replaceAll bool) ([]D
 	} else {
 		newContent = strings.Replace(oldContent, oldString, newString, 1)
 	}
-	diffText, err := buildUnifiedDiff(path, oldContent, newContent)
-	if err != nil {
-		return nil, 0, 0, nil
-	}
-	return parseUnifiedDiff(diffText)
+	return parseUnifiedDiff(textdiff.Unified(path, oldContent, newContent))
 }
 
 func diffFromPatch(patch string) ([]DiffLine, int32, int32, []LineRange) {
@@ -262,17 +254,6 @@ func diffFromPatch(patch string) ([]DiffLine, int32, int32, []LineRange) {
 		return nil, 0, 0, nil
 	}
 	return parseUnifiedDiff(patch)
-}
-
-func buildUnifiedDiff(path, from, to string) (string, error) {
-	diff := difflib.UnifiedDiff{
-		A:        difflib.SplitLines(from),
-		B:        difflib.SplitLines(to),
-		FromFile: path,
-		ToFile:   path,
-		Context:  3,
-	}
-	return difflib.GetUnifiedDiffString(diff)
 }
 
 func parseUnifiedDiff(diff string) ([]DiffLine, int32, int32, []LineRange) {
