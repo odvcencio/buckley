@@ -29,6 +29,7 @@ func TestEditFileTool_GeneratedDiffRoundTrips(t *testing.T) {
 		{"trimmed-suffix", "old\n" + strings.Repeat("same\n", 20), "new\n" + strings.Repeat("same\n", 20)},
 		{"repeated-context", strings.Repeat("same\n", 500), strings.Repeat("same\n", 250) + "changed\n" + strings.Repeat("same\n", 249)},
 		{"repeated-crlf", strings.Repeat("same\r\n", 500), strings.Repeat("same\r\n", 250) + "changed\r\n" + strings.Repeat("same\r\n", 249)},
+		{"dense-context", strings.Repeat("\n", 128) + "old\n" + strings.Repeat("\n", 128), strings.Repeat("\n", 128) + "new\n" + strings.Repeat("\n", 128)},
 	} {
 		for _, limit := range []int64{0, 4096} {
 			t.Run(fmt.Sprintf("%s/limit-%d", tc.name, limit), func(t *testing.T) {

@@ -212,6 +212,7 @@ func BenchmarkGenerateDiff(b *testing.B) {
 		fmt.Fprintf(&after, "new-%06d\n", index)
 	}
 	old := before.String()
+	dense := strings.Repeat("\n", 65536) + "old\n" + strings.Repeat("\n", 65536)
 	for _, tc := range []struct{ name, next string }{
 		{"unchanged", old},
 		{"one-line", strings.Replace(old, "old-008192", "new-008192", 1)},
@@ -224,6 +225,13 @@ func BenchmarkGenerateDiff(b *testing.B) {
 			}
 		})
 	}
+	b.Run("newline-dense", func(b *testing.B) {
+		next := strings.Replace(dense, "old", "new", 1)
+		b.ReportAllocs()
+		for b.Loop() {
+			benchmarkEditDiff = generateDiff("fixture.txt", dense, next)
+		}
+	})
 }
 
 func BenchmarkEditFileTool_LongFile(b *testing.B) {
