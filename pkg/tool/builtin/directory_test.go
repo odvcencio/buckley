@@ -167,7 +167,7 @@ func TestListDirectoryTool_EmptyAndChangedDirectoriesTerminate(t *testing.T) {
 func TestListDirectoryTool_RejectsInvalidSelectors(t *testing.T) {
 	tool := &ListDirectoryTool{}
 	tool.SetWorkDir(t.TempDir())
-	for _, params := range []map[string]any{{"path": true}, {"cursor": 17}, {"cursor": "not a cursor"}, {"cursor": strings.Repeat("a", 4097)}, {"cursor": base64.RawURLEncoding.EncodeToString([]byte("../outside"))}, {"limit": 0}, {"limit": -1}, {"limit": 1001}, {"limit": 1.5}, {"limit": math.NaN()}, {"limit": math.Inf(1)}, {"limit": "2"}, {"limit": json.Number("9223372036854775808")}, {"path": "../outside"}} {
+	for _, params := range []map[string]any{{"path": true}, {"cursor": 17}, {"cursor": "not a cursor"}, {"cursor": strings.Repeat("a", maxDirectoryCursorBytes+1)}, {"cursor": base64.RawURLEncoding.EncodeToString([]byte("../outside"))}, {"limit": 0}, {"limit": -1}, {"limit": 1001}, {"limit": 1.5}, {"limit": math.NaN()}, {"limit": math.Inf(1)}, {"limit": "2"}, {"limit": json.Number("9223372036854775808")}, {"path": "../outside"}} {
 		r, err := tool.Execute(params)
 		if err != nil || r.Success || r.Error == "" {
 			t.Fatalf("accepted %+v: %+v %v", params, r, err)
@@ -273,5 +273,19 @@ func TestListDirectoryTool_UnavailableMetadataKeepsEntryVisible(t *testing.T) {
 	file := r.Data["files"].([]map[string]any)[0]
 	if file["name"] != "visible.txt" || file["metadata_error"] == nil || file["size"] != nil || file["is_dir"] != nil {
 		t.Fatalf("metadata uncertainty was hidden: %+v", file)
+	}
+}
+
+func TestListDirectoryTool_AcceptsLongCursorWithinPageBudget(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	tool := &ListDirectoryTool{}
+	tool.SetWorkDir(dir)
+	cursor := base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("z", 5000)))
+	r, err := tool.Execute(map[string]any{"cursor": cursor})
+	if err != nil || !r.Success || r.Data["count"] != 1 || r.Data["returned"] != 0 || r.Data["next_cursor"] != nil {
+		t.Fatalf("valid long cursor rejected: %+v %v", r, err)
 	}
 }

@@ -20,7 +20,7 @@ const (
 	MaxDirectoryPageEntries     = 1000
 	DefaultDirectoryPageBytes   = 16 << 10
 	directoryReadBatch          = 256
-	maxDirectoryCursorBytes     = 4096
+	maxDirectoryCursorBytes     = DefaultDirectoryPageBytes
 )
 
 // ListDirectoryTool lists bounded, sorted pages of directory entries.
