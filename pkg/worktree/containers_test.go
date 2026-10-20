@@ -193,6 +193,9 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				if !strings.Contains(contentStr, "version:") {
 					t.Error("compose file should contain version")
 				}
+				if !strings.Contains(contentStr, "init: true") {
+					t.Error("generated container must reap orphaned processes")
+				}
 				if !strings.Contains(contentStr, "services:") {
 					t.Error("compose file should contain services")
 				}

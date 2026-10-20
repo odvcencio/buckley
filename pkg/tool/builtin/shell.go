@@ -226,32 +226,30 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 
-	var command *exec.Cmd
-	if t.containerEnabled {
-		args := []string{"compose", "-f", t.composeFile, "exec", "-T"}
-		for _, pair := range envPairs(t.env) {
-			args = append(args, "-e", pair)
-		}
-		service := t.containerService
-		if service == "" {
-			service = "dev"
-		}
-		args = append(args, service, "bash", "-c", cmd)
-		command = exec.CommandContext(ctx, "docker", args...)
-	} else {
-		command = exec.CommandContext(ctx, "bash", "-lc", cmd)
-	}
-	if strings.TrimSpace(t.workDir) != "" {
-		command.Dir = strings.TrimSpace(t.workDir)
-	}
-	configureCommandCancellation(command)
-	command.Env = mergeEnv(command.Env, t.env)
 	stdout := newLimitedBuffer(t.maxOutputBytes)
 	stderr := newLimitedBuffer(t.maxOutputBytes)
-	command.Stdout = io.MultiWriter(stdout, newShellProgressWriter(ctx, "stdout"))
-	command.Stderr = io.MultiWriter(stderr, newShellProgressWriter(ctx, "stderr"))
+	out := io.MultiWriter(stdout, newShellProgressWriter(ctx, "stdout"))
+	diagnostic := io.MultiWriter(stderr, newShellProgressWriter(ctx, "stderr"))
+	var err error
+	var remote containerCommandState
+	if t.containerEnabled {
+		remote, err = t.runContainerCommand(ctx, cmd, out, diagnostic)
+	} else {
+		command := exec.CommandContext(ctx, "bash", "-lc", cmd)
+		command.Dir = strings.TrimSpace(t.workDir)
+		configureCommandCancellation(command)
+		command.Env = mergeEnv(command.Env, t.env)
+		command.Stdout, command.Stderr = out, diagnostic
+		err = command.Run()
+	}
+	cause := ctx.Err()
+	if t.containerEnabled && remote.complete && remote.accepted {
+		cause = nil
+	}
+	if t.containerEnabled && cause != nil && err == nil {
+		err = cause
+	}
 
-	err := command.Run()
 	exitCode := 0
 	executionError := ""
 	if err != nil {
@@ -259,11 +257,11 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		}
-		switch ctx.Err() {
+		switch cause {
 		case context.Canceled:
 			executionError = "command interrupted by user"
 		case context.DeadlineExceeded:
-			executionError = fmt.Sprintf("command timed out after %ds", timeout)
+			executionError = "command timed out (deadline exceeded)"
 		default:
 			if exitCode >= 0 {
 				executionError = fmt.Sprintf("command exited with code %d", exitCode)
@@ -281,11 +279,18 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 		"stderr":    stderrStr,
 		"exit_code": exitCode,
 	}
-	if err != nil && ctx.Err() == context.Canceled {
+	if err != nil && cause == context.Canceled {
 		data["canceled"] = true
 	}
-	if err != nil && ctx.Err() == context.DeadlineExceeded {
+	if err != nil && cause == context.DeadlineExceeded {
 		data["timed_out"] = true
+	}
+	if t.containerEnabled && remote.attempted && (cause != nil || !remote.complete) {
+		data["remote_stopped"] = remote.stopped
+		data["outcome_unknown"] = true
+		if !remote.stopped {
+			executionError += "; remote termination could not be verified, inspect before retrying"
+		}
 	}
 	if stdout.Truncated() {
 		data["stdout_truncated"] = true

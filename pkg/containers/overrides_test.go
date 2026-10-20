@@ -180,3 +180,11 @@ func TestMergeService(t *testing.T) {
 		t.Errorf("Ports not merged correctly: got %v", service.Ports)
 	}
 }
+
+func TestMergeService_RespectsInitOverride(t *testing.T) {
+	service := Service{Init: true}
+	mergeService(&service, map[string]any{"init": false})
+	if service.Init {
+		t.Fatal("explicit init override was ignored")
+	}
+}

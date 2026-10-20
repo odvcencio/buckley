@@ -220,7 +220,7 @@ func (wm *Manager) generateComposeFromSpec(wtPath string, spec *ContainerSpec) (
 	}
 
 	var sb strings.Builder
-	sb.WriteString("version: '3.9'\nservices:\n  dev:\n")
+	sb.WriteString("version: '3.9'\nservices:\n  dev:\n    init: true\n")
 	if spec.Name != "" {
 		sb.WriteString("    container_name: ")
 		sb.WriteString(spec.Name)
