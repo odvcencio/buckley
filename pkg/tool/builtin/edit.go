@@ -346,22 +346,22 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: mutationBudgetError(limit).Error()}, nil
 	}
 	oldContent := string(content)
-	lines := strings.Split(oldContent, "\n")
+	lineCount := strings.Count(oldContent, "\n") + 1
 	if lineNum < 1 {
 		lineNum = 1
 	}
-	if lineNum > len(lines)+1 {
-		lineNum = len(lines) + 1
+	if lineNum > lineCount+1 {
+		lineNum = lineCount + 1
 	}
 
-	// Insert the text
-	insertLines := strings.Split(text, "\n")
-	newLines := make([]string, 0, len(lines)+len(insertLines))
-	newLines = append(newLines, lines[:lineNum-1]...)
-	newLines = append(newLines, insertLines...)
-	newLines = append(newLines, lines[lineNum-1:]...)
-
-	newContent := strings.Join(newLines, "\n")
+	var newContent string
+	if lineNum == lineCount+1 {
+		newContent = oldContent + "\n" + text
+	} else {
+		offset := mutationLineOffset(oldContent, lineNum)
+		newContent = oldContent[:offset] + text + "\n" + oldContent[offset:]
+	}
+	linesInserted := strings.Count(text, "\n") + 1
 
 	if t.previewMutation {
 		return t.mutationPreview(absPath, oldContent, newContent, true)
@@ -383,7 +383,7 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	summary := fmt.Sprintf("✓ Inserted %d line%s at line %d in %s",
-		len(insertLines), pluralize(len(insertLines)),
+		linesInserted, pluralize(linesInserted),
 		lineNum, filepath.Base(absPath))
 
 	return &Result{
@@ -393,7 +393,7 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		Data: map[string]any{
 			"path":           absPath,
 			"line":           lineNum,
-			"lines_inserted": len(insertLines),
+			"lines_inserted": linesInserted,
 		},
 		DisplayData: map[string]any{
 			"path":    absPath,
@@ -481,13 +481,13 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	oldContent := string(content)
-	lines := strings.Split(oldContent, "\n")
+	lineCount := strings.Count(oldContent, "\n") + 1
 
 	if startLine < 1 {
 		startLine = 1
 	}
-	if endLine > len(lines) {
-		endLine = len(lines)
+	if endLine > lineCount {
+		endLine = lineCount
 	}
 	if startLine > endLine {
 		return &Result{
@@ -496,12 +496,14 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	// Delete the lines
-	newLines := make([]string, 0, len(lines)-(endLine-startLine+1))
-	newLines = append(newLines, lines[:startLine-1]...)
-	newLines = append(newLines, lines[endLine:]...)
-
-	newContent := strings.Join(newLines, "\n")
+	start := mutationLineOffset(oldContent, startLine)
+	var newContent string
+	if endLine == lineCount {
+		newContent = oldContent[:max(0, start-1)]
+	} else {
+		stop := start + mutationLineOffset(oldContent[start:], endLine-startLine+2)
+		newContent = oldContent[:start] + oldContent[stop:]
+	}
 
 	if t.previewMutation {
 		return t.mutationPreview(absPath, oldContent, newContent, true)
