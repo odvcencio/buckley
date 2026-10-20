@@ -14,6 +14,7 @@ const DefaultAnalysisEntries = 10000
 type sourceScan struct {
 	ctx            context.Context
 	remaining      int64
+	fileLimit      int64
 	entries, files int
 }
 
@@ -39,7 +40,11 @@ func (a *sourceScan) scan(path string, depth int, include func(string, bool) (bo
 		if !selected {
 			return nil
 		}
-		source, _, exceeded, err := readFileSnapshot(path, a.remaining)
+		limit := a.remaining
+		if a.fileLimit > 0 {
+			limit = min(limit, a.fileLimit)
+		}
+		source, _, exceeded, err := readFileSnapshot(path, limit)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
 		}

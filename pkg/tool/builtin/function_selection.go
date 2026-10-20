@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/odvcencio/gotreesitter"
@@ -135,7 +136,7 @@ func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Langu
 
 func treeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, content string) string {
 	switch node.Type(language) {
-	case "function_expression", "generator_function", "arrow_function", "object", "class":
+	case "function_expression", "generator_function", "arrow_function", "lambda", "object", "class":
 		parent := node.Parent()
 		for parent != nil && (parent.Type(language) == "parenthesized_expression" || parent.Type(language) == "as_expression" || parent.Type(language) == "satisfies_expression") {
 			parent = parent.Parent()
@@ -148,6 +149,8 @@ func treeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, 
 			case "pair":
 				binding = parent.ChildByFieldName("key", language)
 			case "assignment_expression":
+				binding = parent.ChildByFieldName("left", language)
+			case "assignment":
 				binding = parent.ChildByFieldName("left", language)
 			}
 			if binding != nil {
@@ -193,4 +196,34 @@ func qualifiedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.L
 		}
 	}
 	return name
+}
+
+const maxQualifiedFunctionBytes = 8 << 10
+
+func boundedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, source string) (string, error) {
+	parts := []string{}
+	length := 0
+	for current := node; current != nil; current = current.Parent() {
+		kind := current.Type(language)
+		if current != node && !complexityTreeFunction(kind) {
+			switch kind {
+			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration":
+			default:
+				continue
+			}
+		}
+		name := treeFunctionName(current, language, source)
+		if name == "" && current == node {
+			name = "<anonymous>"
+		}
+		if name != "" {
+			length += len(name) + 1
+			if length > maxQualifiedFunctionBytes {
+				return "", fmt.Errorf("qualified function name exceeds %d-byte output budget", maxQualifiedFunctionBytes)
+			}
+			parts = append(parts, name)
+		}
+	}
+	slices.Reverse(parts)
+	return strings.Join(parts, "."), nil
 }
