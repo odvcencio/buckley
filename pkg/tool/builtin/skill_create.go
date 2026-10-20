@@ -78,6 +78,9 @@ func (t *CreateSkillTool) Execute(params map[string]any) (*Result, error) {
 		overwrite = rawOverwrite
 	}
 
+	if int64(len(nameRaw)) > t.mutationFileLimit() {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
+	}
 	name := normalizeSkillName(nameRaw)
 	if name == "" {
 		return &Result{Success: false, Error: "invalid skill name after normalization"}, nil
@@ -116,7 +119,7 @@ func (t *CreateSkillTool) Execute(params map[string]any) (*Result, error) {
 		}
 	}
 
-	content, err := buildSkillContent(name, description, body)
+	content, err := buildSkillContent(name, description, body, t.mutationFileLimit())
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
@@ -189,7 +192,7 @@ func normalizeSkillName(raw string) string {
 	return name
 }
 
-func buildSkillContent(name, description, body string) (string, error) {
+func buildSkillContent(name, description, body string, limit int64) (string, error) {
 	frontmatter := struct {
 		Name        string `yaml:"name"`
 		Description string `yaml:"description"`
@@ -202,12 +205,18 @@ func buildSkillContent(name, description, body string) (string, error) {
 		return "", fmt.Errorf("failed to encode frontmatter: %w", err)
 	}
 
+	body = strings.TrimSpace(body)
+	headerSize := int64(len(frontBytes)) + 10
+	if int64(len(body)) > limit-headerSize {
+		return "", mutationBudgetError(limit)
+	}
 	var b strings.Builder
+	b.Grow(int(headerSize + int64(len(body))))
 	b.WriteString("---\n")
-	b.WriteString(string(frontBytes))
+	b.Write(frontBytes)
 	b.WriteString("---\n\n")
-	b.WriteString(strings.TrimSpace(body))
-	b.WriteString("\n")
+	b.WriteString(body)
+	b.WriteByte('\n')
 	return b.String(), nil
 }
 
