@@ -3,7 +3,6 @@ package containers
 // ComposeFile represents a docker-compose.yml
 type ComposeFile struct {
 	Name     string             `yaml:"name,omitempty"`
-	Version  string             `yaml:"version"`
 	Services map[string]Service `yaml:"services"`
 	Volumes  map[string]Volume  `yaml:"volumes,omitempty"`
 	Networks map[string]Network `yaml:"networks,omitempty"`
