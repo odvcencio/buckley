@@ -236,7 +236,7 @@ func (t *ShellCommandTool) ExecuteWithContext(ctx context.Context, params map[st
 		if service == "" {
 			service = "dev"
 		}
-		args = append(args, service, "bash", "-lc", cmd)
+		args = append(args, service, "bash", "-c", cmd)
 		command = exec.CommandContext(ctx, "docker", args...)
 	} else {
 		command = exec.CommandContext(ctx, "bash", "-lc", cmd)

@@ -1,12 +1,16 @@
 package containerexec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
@@ -19,22 +23,45 @@ type ExecutableTool interface {
 	Execute(map[string]any) (*builtin.Result, error)
 }
 
+// DefaultOutputBytes caps a standalone container tool's JSON response.
+const DefaultOutputBytes = 16 << 20
+
+const diagnosticBytes = 16 << 10
+
+// RunnerOption configures standalone container tool execution.
+type RunnerOption func(*ContainerRunner)
+
+// WithOutputLimit overrides the JSON response budget with a positive byte limit.
+func WithOutputLimit(limit int) RunnerOption {
+	return func(r *ContainerRunner) {
+		if limit > 0 {
+			r.outputLimit = limit
+		}
+	}
+}
+
 // ContainerRunner wraps tool execution to run inside containers
 type ContainerRunner struct {
 	composeFile string
 	service     string
 	workDir     string
 	tool        ExecutableTool
+	outputLimit int
 }
 
 // NewContainerRunner creates a new container runner
-func NewContainerRunner(composeFile, service, workDir string, t ExecutableTool) *ContainerRunner {
-	return &ContainerRunner{
+func NewContainerRunner(composeFile, service, workDir string, t ExecutableTool, options ...RunnerOption) *ContainerRunner {
+	runner := &ContainerRunner{
 		composeFile: composeFile,
 		service:     service,
 		workDir:     workDir,
 		tool:        t,
+		outputLimit: DefaultOutputBytes,
 	}
+	for _, option := range options {
+		option(runner)
+	}
+	return runner
 }
 
 // Name returns the underlying tool name
@@ -62,6 +89,9 @@ func (cr *ContainerRunner) ExecuteWithContext(ctx context.Context, params map[st
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// For tools that can run on host (read-only operations), run directly
 	if CanRunOnHost(cr.tool.Name()) {
 		if contextTool, ok := cr.tool.(interface {
@@ -84,52 +114,117 @@ func (cr *ContainerRunner) executeInContainer(ctx context.Context, params map[st
 		return nil, fmt.Errorf("failed to marshal params: %w", err)
 	}
 
-	// Build docker compose exec command
-	// We'll create a wrapper script that the tool can execute
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", cr.composeFile,
-		"exec", "-T", cr.service,
-		"sh", "-c", fmt.Sprintf("echo '%s' | %s", string(paramsJSON), cr.tool.Name()))
-
-	// Execute command
-	output, err := cmd.CombinedOutput()
+	composePath, err := filepath.Abs(cr.composeFile)
 	if err != nil {
-		return &builtin.Result{
-			Success: false,
-			Error:   fmt.Sprintf("container execution failed: %v\nOutput: %s", err, string(output)),
-		}, nil
+		return nil, fmt.Errorf("resolve compose file: %w", err)
 	}
-
-	// Parse result from JSON output
-	var result builtin.Result
-	if err := json.Unmarshal(output, &result); err != nil {
-		// If not JSON, treat as raw output
-		return &builtin.Result{
-			Success: true,
-			Data: map[string]any{
-				"output": string(output),
-			},
-		}, nil
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "exec", "-T", cr.service, cr.tool.Name())
+	cmd.Dir = cr.workDir
+	cmd.Stdin = bytes.NewReader(paramsJSON)
+	cmd.WaitDelay = time.Second
+	stdout := &responseBuffer{limit: cr.outputLimit}
+	stderr := &responseBuffer{limit: diagnosticBytes}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	runErr := cmd.Run()
+	if ctx.Err() != nil {
+		data := map[string]any{"outcome_unknown": true}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			data["timed_out"] = true
+		} else {
+			data["canceled"] = true
+		}
+		return &builtin.Result{Error: fmt.Sprintf("container execution interrupted: %v; remote outcome unknown, inspect the target before retrying", ctx.Err()), Data: data}, nil
 	}
-
-	// Map container paths to host paths in results
+	trimmed := bytes.TrimSpace(stdout.buf.Bytes())
+	structured := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || bytes.Equal(trimmed, []byte("null")))
+	if stdout.truncated && (structured || runErr != nil) {
+		return &builtin.Result{Error: fmt.Sprintf("container response exceeded %d bytes; tool may have completed, inspect the target before retrying", cr.outputLimit), Data: map[string]any{"output_truncated": true, "outcome_unknown": true}}, nil
+	}
+	var response struct {
+		builtin.Result
+		Success *bool `json:"success"`
+	}
+	decodeErr := json.Unmarshal(stdout.buf.Bytes(), &response)
+	if decodeErr != nil && runErr == nil && !structured {
+		data := map[string]any{"output": stdout.buf.String()}
+		if stdout.truncated {
+			data["output_truncated"] = true
+		}
+		if stderr.buf.Len() > 0 {
+			data["stderr"] = stderr.buf.String()
+		}
+		if stderr.truncated {
+			data["stderr_truncated"] = true
+		}
+		return &builtin.Result{Success: true, Data: data}, nil
+	}
+	if decodeErr != nil || response.Success == nil {
+		detail := "invalid JSON tool response"
+		if runErr != nil {
+			detail = fmt.Sprintf("container execution failed: %v", runErr)
+		}
+		if stderr.buf.Len() > 0 {
+			detail += "\n" + stderr.buf.String()
+		}
+		return &builtin.Result{Error: detail, Data: map[string]any{"outcome_unknown": true}}, nil
+	}
+	result := response.Result
+	result.Success = *response.Success
+	if runErr != nil {
+		if result.Success {
+			if result.Data == nil {
+				result.Data = make(map[string]any)
+			}
+			result.Data["outcome_unknown"] = true
+		}
+		result.Success = false
+		if result.Error == "" {
+			result.Error = fmt.Sprintf("container execution failed: %v", runErr)
+			if stderr.buf.Len() > 0 {
+				result.Error += "\n" + stderr.buf.String()
+			}
+		}
+	}
 	cr.mapPaths(&result)
-
 	return &result, nil
 }
 
-// mapPaths converts container paths to host paths in the result
-func (cr *ContainerRunner) mapPaths(result *builtin.Result) {
-	// Convert /workspace paths to actual worktree paths
-	if output, ok := result.Data["output"].(string); ok {
-		// Replace container workspace path with host work dir
-		output = strings.ReplaceAll(output, "/workspace", cr.workDir)
-		result.Data["output"] = output
-	}
+type responseBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
 
-	if filePath, ok := result.Data["path"].(string); ok {
-		if strings.HasPrefix(filePath, "/workspace") {
-			result.Data["path"] = strings.Replace(filePath, "/workspace", cr.workDir, 1)
+func (b *responseBuffer) Write(data []byte) (int, error) {
+	size := len(data)
+	keep := min(size, max(b.limit-b.buf.Len(), 0))
+	_, _ = b.buf.Write(data[:keep])
+	b.truncated = b.truncated || keep < size
+	return size, nil
+}
+
+// mapPaths converts structured file paths without altering tool output or content.
+func (cr *ContainerRunner) mapPaths(result *builtin.Result) {
+	if cr.workDir == "" {
+		return
+	}
+	mapPath := func(raw string) string {
+		clean := path.Clean(raw)
+		if clean == "/workspace" {
+			return cr.workDir
 		}
+		if strings.HasPrefix(clean, "/workspace/") {
+			return filepath.Join(cr.workDir, filepath.FromSlash(strings.TrimPrefix(clean, "/workspace/")))
+		}
+		return raw
+	}
+	for _, data := range []map[string]any{result.Data, result.DisplayData} {
+		if value, ok := data["path"].(string); ok {
+			data["path"] = mapPath(value)
+		}
+	}
+	if result.DiffPreview != nil {
+		result.DiffPreview.FilePath = mapPath(result.DiffPreview.FilePath)
 	}
 }
 
