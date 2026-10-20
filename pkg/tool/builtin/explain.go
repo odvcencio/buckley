@@ -147,8 +147,8 @@ func (t *ExplainCodeTool) Execute(params map[string]any) (*Result, error) {
 			return 0, err
 		}
 		jsonBytes := len(encoded)
-		encoded, err = codec.Marshal(payload)
-		return max(jsonBytes, len(encoded)), err
+		toonEncoded, err := codec.MarshalString(payload)
+		return max(jsonBytes, len(toonEncoded)), err
 	}
 	baseBytes, err := size()
 	if err != nil {

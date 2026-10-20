@@ -811,7 +811,7 @@ func (e *Executor) applyReviewFixes(task *Task, review *ReviewResult) (*BuilderR
 }
 
 func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, error) {
-	issuesData, err := e.issuesCodec.Marshal(review.Issues)
+	issuesData, err := e.issuesCodec.MarshalString(review.Issues)
 	if err != nil {
 		return "", err
 	}
@@ -819,7 +819,7 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 		"Task %q failed review.\n\nReview summary:\n%s\n\nIssues (TOON):\n%s\n\nUpdate the necessary files to resolve every blocking issue. Respond using the same code block format as the builder agent:\n```filepath:path/to/file.go\n<contents>\n```",
 		task.Title,
 		review.Summary,
-		string(issuesData),
+		issuesData,
 	)
 
 	req := model.ChatRequest{

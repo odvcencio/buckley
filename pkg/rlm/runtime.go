@@ -804,11 +804,11 @@ func (r *Runtime) formatCoordinatorResult(res *builtin.Result) string {
 	if codec == nil {
 		codec = toon.New(true) // Default to TOON
 	}
-	encoded, err := codec.Marshal(payload)
+	encoded, err := codec.MarshalString(payload)
 	if err != nil {
 		return fmt.Sprintf("{\"success\":%t}", res.Success)
 	}
-	return string(encoded)
+	return encoded
 }
 
 func extractText(msg model.Message) string {
