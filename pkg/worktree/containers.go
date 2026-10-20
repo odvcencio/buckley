@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"m31labs.dev/buckley/pkg/containerexec"
 	"m31labs.dev/buckley/pkg/containers"
 	"m31labs.dev/buckley/pkg/envdetect"
@@ -219,54 +221,33 @@ func (wm *Manager) generateComposeFromSpec(wtPath string, spec *ContainerSpec) (
 	if spec.workspaceMountEnabled() {
 		mounts = append(mounts, fmt.Sprintf("%s:%s", filepath.ToSlash(wtPath), spec.Workdir))
 	}
-	for _, mount := range spec.Mounts {
-		mounts = append(mounts, mount)
+	mounts = append(mounts, spec.Mounts...)
+	environment := make(map[string]string, len(spec.Env))
+	for key, value := range spec.Env {
+		environment[key] = resolveEnvValue(value)
 	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "name: %s\n", projectName)
-	sb.WriteString("services:\n  dev:\n    init: true\n")
-	if spec.Name != "" {
-		sb.WriteString("    container_name: ")
-		sb.WriteString(spec.Name)
-		sb.WriteByte('\n')
+	compose := containers.ComposeFile{
+		Name: projectName,
+		Services: map[string]containers.Service{
+			"dev": {
+				Image:         spec.BaseImage,
+				ContainerName: spec.Name,
+				Init:          true,
+				WorkingDir:    spec.Workdir,
+				Command:       []string{"/bin/sh", "-c", "while sleep 3600; do :; done"},
+				Volumes:       mounts,
+				Environment:   environment,
+				Ports:         spec.Ports,
+			},
+		},
 	}
-	sb.WriteString("    image: ")
-	sb.WriteString(spec.BaseImage)
-	sb.WriteByte('\n')
-	sb.WriteString("    command: /bin/sh -c \"while sleep 3600; do :; done\"\n")
-	sb.WriteString("    working_dir: ")
-	sb.WriteString(spec.Workdir)
-	sb.WriteByte('\n')
-	if len(mounts) > 0 {
-		sb.WriteString("    volumes:\n")
-		for _, mount := range mounts {
-			sb.WriteString("      - \"")
-			sb.WriteString(mount)
-			sb.WriteString("\"\n")
-		}
-	}
-	if len(spec.Env) > 0 {
-		sb.WriteString("    environment:\n")
-		for key, value := range spec.Env {
-			sb.WriteString("      - ")
-			sb.WriteString(key)
-			sb.WriteString("=")
-			sb.WriteString(resolveEnvValue(value))
-			sb.WriteByte('\n')
-		}
-	}
-	if len(spec.Ports) > 0 {
-		sb.WriteString("    ports:\n")
-		for _, port := range spec.Ports {
-			sb.WriteString("      - \"")
-			sb.WriteString(port)
-			sb.WriteString("\"\n")
-		}
+	data, err := yaml.Marshal(compose)
+	if err != nil {
+		return "", fmt.Errorf("marshal generated compose file: %w", err)
 	}
 
 	target := filepath.Join(wtPath, "docker-compose.worktree.yml")
-	if err := os.WriteFile(target, []byte(sb.String()), 0644); err != nil {
+	if err := os.WriteFile(target, data, 0644); err != nil {
 		return "", fmt.Errorf("write generated compose file: %w", err)
 	}
 	return target, nil

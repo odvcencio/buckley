@@ -3,6 +3,7 @@ package worktree
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -156,7 +157,11 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				if !strings.Contains(content, "environment:") {
 					t.Error("compose file should contain environment section")
 				}
-				if !strings.Contains(content, "FOO=bar") {
+				var compose containers.ComposeFile
+				if err := yaml.Unmarshal([]byte(content), &compose); err != nil {
+					t.Fatal(err)
+				}
+				if compose.Services["dev"].Environment["FOO"] != "bar" {
 					t.Error("compose file should contain env var FOO")
 				}
 			},
@@ -220,6 +225,99 @@ func TestManager_generateComposeFromSpec(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestManager_generateComposeFromSpec_EnvironmentValues(t *testing.T) {
+	t.Setenv("BUCKLEY_TEST_COMPOSE_ENV", "resolved: \"value\"\nnext")
+	tests := []struct {
+		name, value, want string
+	}{
+		{"colon", "hello: world", "hello: world"},
+		{"multiline", "first\nsecond\n", "first\nsecond\n"},
+		{"quotes", `say "hello" and 'goodbye'`, `say "hello" and 'goodbye'`},
+		{"comment", "value # literal", "value # literal"},
+		{"whitespace", "  padded\tvalue  ", "  padded\tvalue  "},
+		{"empty", "", ""},
+		{"boolean", "false", "false"},
+		{"null", "null", "null"},
+		{"number", "00123", "00123"},
+		{"backslashes", `C:\path\file`, `C:\path\file`},
+		{"compose escape", "literal $$HOME", "literal $$HOME"},
+		{"resolved variable", "${BUCKLEY_TEST_COMPOSE_ENV}", "resolved: \"value\"\nnext"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := &Manager{}
+			path, err := mgr.generateComposeFromSpec(t.TempDir(), &ContainerSpec{
+				BaseImage: "alpine:latest",
+				Workdir:   "/workspace",
+				Env:       map[string]string{"MESSAGE": tt.value},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var compose containers.ComposeFile
+			if err := yaml.Unmarshal(data, &compose); err != nil {
+				t.Fatal(err)
+			}
+			if got := compose.Services["dev"].Environment["MESSAGE"]; got != tt.want {
+				t.Errorf("MESSAGE = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestManager_generateComposeFromSpec_QuotedPaths(t *testing.T) {
+	wtPath := filepath.Join(t.TempDir(), `work "tree"`)
+	if err := os.Mkdir(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	spec := &ContainerSpec{
+		Name:      "explicit-dev",
+		BaseImage: "alpine:latest",
+		Workdir:   `/workspace "quoted"`,
+		Mounts:    []string{`/host "cache":/cache:ro`},
+		Ports:     []string{"127.0.0.1::8080", "8081:81"},
+		Env:       map[string]string{"Z": "last", "A": "first"},
+	}
+	mgr := &Manager{}
+	path, err := mgr.generateComposeFromSpec(wtPath, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compose containers.ComposeFile
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatal(err)
+	}
+	dev := compose.Services["dev"]
+	wantVolumes := append([]string{filepath.ToSlash(wtPath) + ":" + spec.Workdir}, spec.Mounts...)
+	if dev.ContainerName != spec.Name || dev.Image != spec.BaseImage || dev.WorkingDir != spec.Workdir || !dev.Init {
+		t.Fatalf("service settings changed: %+v", dev)
+	}
+	if !reflect.DeepEqual(dev.Volumes, wantVolumes) || !reflect.DeepEqual(dev.Ports, spec.Ports) {
+		t.Fatalf("mounts or ports changed: %+v", dev)
+	}
+	if want := []string{"/bin/sh", "-c", "while sleep 3600; do :; done"}; !reflect.DeepEqual(dev.Command, want) {
+		t.Errorf("command = %q, want %q", dev.Command, want)
+	}
+	if _, err := mgr.generateComposeFromSpec(wtPath, spec); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(data) {
+		t.Error("regeneration changed compose content")
 	}
 }
 
