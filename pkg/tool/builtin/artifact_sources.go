@@ -104,7 +104,7 @@ func capturedReadPage(data map[string]any) (capturedSource, error) {
 	if !pathOK || path == "" || !contentOK || !pageOK {
 		return capturedSource{}, fmt.Errorf("read result requires path, content and page")
 	}
-	start, err := readFileLineNumber("start_line", page["start_line"])
+	start, err := positiveIntParameter("start_line", page["start_line"])
 	if err != nil {
 		return capturedSource{}, err
 	}
@@ -118,7 +118,7 @@ func capturedReadPage(data map[string]any) (capturedSource, error) {
 	if content == "" && start == 1 && zeroEnd {
 		return capturedSource{Path: path}, nil
 	}
-	end, err := readFileLineNumber("end_line", page["end_line"])
+	end, err := positiveIntParameter("end_line", page["end_line"])
 	if err != nil {
 		return capturedSource{}, err
 	}

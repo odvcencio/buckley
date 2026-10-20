@@ -71,18 +71,24 @@ func ResultYieldForTool(toolName string, result *builtin.Result, execErr error) 
 		return ResultYield{}
 	}
 
-	count, ok := resultCount(result.Data)
+	countKey := "count"
+	if strings.TrimSpace(toolName) == "list_directory" {
+		if _, paged := result.Data["returned"]; paged {
+			countKey = "returned"
+		}
+	}
+	count, ok := resultCount(result.Data, countKey)
 	if !ok || count < 0 {
 		return ResultYield{}
 	}
 	return ResultYield{Observed: true, Count: count, Unit: unit}
 }
 
-func resultCount(data map[string]any) (int, bool) {
+func resultCount(data map[string]any, key string) (int, bool) {
 	if data == nil {
 		return 0, false
 	}
-	value, ok := data["count"]
+	value, ok := data[key]
 	if !ok {
 		return 0, false
 	}

@@ -38,6 +38,20 @@ func TestResultYieldForTool_RepositoryExplorationCounts(t *testing.T) {
 			summary:  "2 entries",
 		},
 		{
+			name:     "directory page yield uses returned entries",
+			toolName: "list_directory",
+			result:   &builtin.Result{Success: true, Data: map[string]any{"count": 1000, "returned": 2}},
+			want:     ResultYield{Observed: true, Count: 2, Unit: "entry"},
+			summary:  "2 entries",
+		},
+		{
+			name:     "directory terminal page has zero yield",
+			toolName: "list_directory",
+			result:   &builtin.Result{Success: true, Data: map[string]any{"count": 1000, "returned": 0}},
+			want:     ResultYield{Observed: true, Count: 0, Unit: "entry"},
+			summary:  "0 entries",
+		},
+		{
 			name:     "failed query has no yield",
 			toolName: "search_text",
 			result:   &builtin.Result{Success: false, Error: "missing"},

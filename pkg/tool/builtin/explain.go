@@ -60,7 +60,7 @@ func (t *ExplainCodeTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Error: "function_name requires file and cannot be combined with line selectors"}, nil
 	}
 	if hasStart {
-		line, err := readFileLineNumber("start_line", params["start_line"])
+		line, err := positiveIntParameter("start_line", params["start_line"])
 		if err != nil {
 			return &Result{Error: err.Error()}, nil
 		}
@@ -68,7 +68,7 @@ func (t *ExplainCodeTool) Execute(params map[string]any) (*Result, error) {
 		end = line
 	}
 	if hasEnd {
-		line, err := readFileLineNumber("end_line", params["end_line"])
+		line, err := positiveIntParameter("end_line", params["end_line"])
 		if err != nil {
 			return &Result{Error: err.Error()}, nil
 		}
