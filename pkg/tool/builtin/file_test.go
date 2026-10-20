@@ -632,7 +632,8 @@ func TestPatchFileTool(t *testing.T) {
 		},
 	} {
 		t.Run("infer strip "+tc.name, func(t *testing.T) {
-			if got := inferPatchStrip(tc.patch); got != tc.want {
+			files, _ := parseUnifiedPatch(tc.patch, false)
+			if got := inferPatchStrip(files); got != tc.want {
 				t.Fatalf("inferPatchStrip() = %d, want %d for %q", got, tc.want, tc.patch)
 			}
 		})

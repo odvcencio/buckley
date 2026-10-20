@@ -8,7 +8,7 @@ import (
 )
 
 func TestRegistry_FileSizePolicyBoundsDispatchedMutations(t *testing.T) {
-	for _, name := range []string{"edit_file", "search_replace"} {
+	for _, name := range []string{"edit_file", "search_replace", "apply_patch"} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "fixture.txt")
@@ -21,6 +21,8 @@ func TestRegistry_FileSizePolicyBoundsDispatchedMutations(t *testing.T) {
 			params := map[string]any{"path": "fixture.txt"}
 			if name == "edit_file" {
 				params["old_string"], params["new_string"], params["replace_all"] = "a", "bb", true
+			} else if name == "apply_patch" {
+				params = map[string]any{"patch": "--- fixture.txt\n+++ fixture.txt\n@@ -1 +1 @@\n-aaaa\n\\ No newline at end of file\n+bbbbbbbb\n\\ No newline at end of file\n"}
 			} else {
 				params["search"], params["replace"] = "a", "bb"
 			}
