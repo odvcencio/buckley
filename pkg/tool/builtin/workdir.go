@@ -3,13 +3,13 @@ package builtin
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
 type workDirAware struct {
+	previewMutation  bool
 	workDir          string
 	env              map[string]string
 	maxFileSizeBytes int64
@@ -76,6 +76,11 @@ func (w *workDirAware) execContextWithParent(parent context.Context) (context.Co
 		return parent, func() {}
 	}
 	return context.WithTimeout(parent, w.maxExecTime)
+}
+
+// ResolvePath applies the same workspace fence used during execution.
+func (w *workDirAware) ResolvePath(raw string) (string, error) {
+	return resolvePath(w.workDir, raw)
 }
 
 func resolvePath(workDir, raw string) (string, error) {
@@ -177,16 +182,18 @@ func evalSymlinksFallbackForTarget(path string) string {
 		return filepath.Clean(resolved)
 	}
 
-	dir := filepath.Dir(path)
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err == nil && strings.TrimSpace(resolvedDir) != "" {
-		return filepath.Clean(filepath.Join(resolvedDir, filepath.Base(path)))
-	}
+	return resolveMissingTarget(path)
+}
 
-	// If the parent directory doesn't exist yet, fall back to the cleaned target.
-	if _, statErr := os.Stat(dir); statErr != nil {
-		return filepath.Clean(path)
+// Keep new-file resolution stable even when parent directories do not exist.
+// filepath.EvalSymlinks alone cannot resolve such a target.
+func resolveMissingTarget(path string) string {
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path
 	}
-
-	return filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		return filepath.Join(resolved, filepath.Base(path))
+	}
+	return filepath.Join(resolveMissingTarget(parent), filepath.Base(path))
 }

@@ -459,6 +459,10 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		}
 	}
 
+	if t.previewMutation {
+		return t.mutationPreview(absPath, original, replaced, true)
+	}
+
 	if replacements == 0 {
 		return &Result{
 			Success: true,

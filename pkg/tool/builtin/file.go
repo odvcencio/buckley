@@ -539,6 +539,15 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	if t.previewMutation {
+		before, err := t.readMutationFile(absPath)
+		exists := !os.IsNotExist(err)
+		if err != nil && exists {
+			return &Result{Error: fmt.Sprintf("failed to preview file: %v", err)}, nil
+		}
+		return t.mutationPreview(absPath, string(before), content, exists)
+	}
+
 	// Create parent directory if it doesn't exist
 	dir := filepath.Dir(absPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {

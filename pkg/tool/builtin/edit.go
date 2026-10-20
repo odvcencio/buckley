@@ -155,6 +155,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		replacements += count
 	}
 
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
+
 	// Generate diff preview
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
@@ -382,6 +386,10 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 
 	newContent := strings.Join(newLines, "\n")
 
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
+
 	// Generate diff
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
@@ -517,6 +525,10 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	newLines = append(newLines, lines[endLine:]...)
 
 	newContent := strings.Join(newLines, "\n")
+
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
 
 	// Generate diff
 	diffPreview := generateDiff(absPath, oldContent, newContent)
