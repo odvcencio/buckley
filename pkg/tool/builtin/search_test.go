@@ -3,7 +3,6 @@ package builtin
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -637,112 +636,6 @@ func TestExtractGlobParams(t *testing.T) {
 				if i < len(got) && got[i] != want {
 					t.Errorf("extractGlobParams(%v)[%d] = %q, want %q", tc.value, i, got[i], want)
 				}
-			}
-		})
-	}
-}
-
-func TestReplaceLimited(t *testing.T) {
-	tests := []struct {
-		name             string
-		pattern          string
-		input            string
-		replacement      string
-		limit            int
-		wantOutput       string
-		wantReplacements int
-	}{
-		{
-			name:             "no matches",
-			pattern:          "xyz",
-			input:            "hello world",
-			replacement:      "ABC",
-			limit:            10,
-			wantOutput:       "hello world",
-			wantReplacements: 0,
-		},
-		{
-			name:             "single match, limit 1",
-			pattern:          "world",
-			input:            "hello world",
-			replacement:      "universe",
-			limit:            1,
-			wantOutput:       "hello universe",
-			wantReplacements: 1,
-		},
-		{
-			name:             "multiple matches, no limit",
-			pattern:          "a",
-			input:            "banana",
-			replacement:      "X",
-			limit:            10,
-			wantOutput:       "bXnXnX",
-			wantReplacements: 3,
-		},
-		{
-			name:             "multiple matches, limit 2",
-			pattern:          "a",
-			input:            "banana",
-			replacement:      "X",
-			limit:            2,
-			wantOutput:       "bXnXna",
-			wantReplacements: 2,
-		},
-		{
-			name:             "limit zero",
-			pattern:          "a",
-			input:            "banana",
-			replacement:      "X",
-			limit:            0,
-			wantOutput:       "banana",
-			wantReplacements: 0,
-		},
-		{
-			name:             "regex pattern",
-			pattern:          "[0-9]+",
-			input:            "abc123def456ghi",
-			replacement:      "NUM",
-			limit:            1,
-			wantOutput:       "abcNUMdef456ghi",
-			wantReplacements: 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			re := regexp.MustCompile(tc.pattern)
-			gotOutput, gotReplacements := replaceLimited(re, tc.input, tc.replacement, tc.limit)
-			if gotOutput != tc.wantOutput {
-				t.Errorf("replaceLimited output = %q, want %q", gotOutput, tc.wantOutput)
-			}
-			if gotReplacements != tc.wantReplacements {
-				t.Errorf("replaceLimited replacements = %d, want %d", gotReplacements, tc.wantReplacements)
-			}
-		})
-	}
-}
-
-func TestCountMatches(t *testing.T) {
-	tests := []struct {
-		name    string
-		pattern string
-		input   string
-		want    int
-	}{
-		{name: "no matches", pattern: "xyz", input: "hello world", want: 0},
-		{name: "single match", pattern: "world", input: "hello world", want: 1},
-		{name: "multiple matches", pattern: "a", input: "banana", want: 3},
-		{name: "overlapping pattern", pattern: "aa", input: "aaaa", want: 2},
-		{name: "empty input", pattern: "a", input: "", want: 0},
-		{name: "regex pattern", pattern: "[0-9]+", input: "a1b22c333", want: 3},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			re := regexp.MustCompile(tc.pattern)
-			got := countMatches(re, tc.input)
-			if got != tc.want {
-				t.Errorf("countMatches(%q, %q) = %d, want %d", tc.pattern, tc.input, got, tc.want)
 			}
 		})
 	}

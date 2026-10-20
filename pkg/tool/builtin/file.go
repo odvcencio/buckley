@@ -524,10 +524,10 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	if t.maxFileSizeBytes > 0 && int64(len(content)) > t.maxFileSizeBytes {
+	if int64(len(content)) > t.mutationFileLimit() {
 		return &Result{
 			Success: false,
-			Error:   fmt.Sprintf("content too large: %d bytes (max %d)", len(content), t.maxFileSizeBytes),
+			Error:   fmt.Sprintf("content too large: %d bytes (max %d)", len(content), t.mutationFileLimit()),
 		}, nil
 	}
 
