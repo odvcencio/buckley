@@ -77,12 +77,16 @@ func telemetryResultDetail(result *builtin.Result) string {
 	}
 	if result.DiffPreview != nil {
 		payload["diff"] = map[string]any{
-			"file_path":     result.DiffPreview.FilePath,
-			"is_new":        result.DiffPreview.IsNew,
-			"is_delete":     result.DiffPreview.IsDelete,
-			"lines_added":   result.DiffPreview.LinesAdded,
-			"lines_removed": result.DiffPreview.LinesRemoved,
-			"unified_diff":  result.DiffPreview.UnifiedDiff,
+			"file_path":      result.DiffPreview.FilePath,
+			"is_new":         result.DiffPreview.IsNew,
+			"is_delete":      result.DiffPreview.IsDelete,
+			"lines_added":    result.DiffPreview.LinesAdded,
+			"lines_removed":  result.DiffPreview.LinesRemoved,
+			"unified_diff":   result.DiffPreview.UnifiedDiff,
+			"diff_truncated": result.DiffPreview.DiffTruncated,
+			"diff_bytes":     result.DiffPreview.DiffBytes,
+			"diff_sha256":    result.DiffPreview.DiffSHA256,
+			"preview":        result.DiffPreview.Preview,
 		}
 	}
 	trimmed := preBoundIfOversized(payload, maxTelemetryResultBytes)

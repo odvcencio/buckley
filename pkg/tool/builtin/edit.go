@@ -22,7 +22,7 @@ func (t *EditFileTool) Name() string {
 }
 
 func (t *EditFileTool) Description() string {
-	return "Replace exact text in one file. Use old_string/new_string for one replacement, or edits for several sequential replacements in one call. Read current text first; all matches must succeed before any write. Returns one combined diff."
+	return "Replace exact text in one file. Use old_string/new_string for one replacement, or edits for several sequential replacements in one call. Read current text first; all matches must succeed before any write. Completed edits return bounded diff evidence; oversized patches are omitted with hashes, byte counts and an explicit flag. Use read_file for current source. Approval previews retain the complete proposed patch."
 }
 
 func (t *EditFileTool) Parameters() ParameterSchema {
@@ -181,6 +181,7 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			},
 		}, nil
 	}
+	compactAppliedDiff(diffPreview)
 
 	if oldContent != newContent {
 		info, err := os.Stat(absPath)
@@ -214,6 +215,11 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 			"summary": summary,
 			"diff":    diffPreview.Preview,
 		},
+	}
+	if diffPreview.DiffTruncated {
+		result.DisplayData["diff_truncated"] = true
+		result.DisplayData["diff_bytes"] = diffPreview.DiffBytes
+		result.DisplayData["diff_sha256"] = diffPreview.DiffSHA256
 	}
 	attachPostEditDiagnostics(result, absPath)
 	return result, nil

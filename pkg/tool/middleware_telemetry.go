@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -67,6 +68,10 @@ func (r *Registry) telemetryMiddleware() Middleware {
 				if res != nil && res.Success {
 					if res.DiffPreview != nil {
 						rich = touch.WithDiff(rich, res.DiffPreview.UnifiedDiff)
+						if res.DiffPreview.DiffTruncated {
+							rich.AddedLines = int32(min(res.DiffPreview.LinesAdded, math.MaxInt32))
+							rich.RemovedLines = int32(min(res.DiffPreview.LinesRemoved, math.MaxInt32))
+						}
 						rich.FilePath = res.DiffPreview.FilePath
 					} else if path, ok := res.Data["path"].(string); ok {
 						rich.FilePath = path
