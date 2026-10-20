@@ -13,72 +13,6 @@ import (
 	"unicode/utf8"
 )
 
-// GitStatusTool shows git status
-type GitStatusTool struct{ workDirAware }
-
-func (t *GitStatusTool) Name() string {
-	return "git_status"
-}
-
-func (t *GitStatusTool) Description() string {
-	return "Show git working tree status: modified, staged, and untracked files."
-}
-
-func (t *GitStatusTool) Parameters() ParameterSchema {
-	return ParameterSchema{
-		Type: "object",
-		Properties: map[string]PropertySchema{
-			"path": {
-				Type:        "string",
-				Description: "Repository or directory path to inspect (default: current workdir)",
-			},
-			"repo_path": {
-				Type:        "string",
-				Description: "Alias for path",
-			},
-		},
-		Required: []string{},
-	}
-}
-
-func (t *GitStatusTool) Execute(params map[string]any) (*Result, error) {
-	dir, err := gitCommandDir(t.workDir, params)
-	if err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
-	}
-
-	ctx, cancel := t.execContext()
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	if strings.TrimSpace(dir) != "" {
-		cmd.Dir = strings.TrimSpace(dir)
-	}
-	cmd.Env = mergeEnv(cmd.Env, t.env)
-	output, err := cmd.CombinedOutput()
-
-	if ctx.Err() != nil {
-		return &Result{
-			Success: false,
-			Error:   "git command timed out",
-		}, nil
-	}
-
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   formatGitFailure(err, string(output)),
-		}, nil
-	}
-
-	return &Result{
-		Success: true,
-		Data: map[string]any{
-			"status": string(output),
-		},
-	}, nil
-}
-
 // GitDiffTool shows git diff
 type GitDiffTool struct{ workDirAware }
 
@@ -142,14 +76,14 @@ func (t *GitDiffTool) Execute(params map[string]any) (*Result, error) {
 	}
 	offset := int64(0)
 	if value, ok := params["byte_offset"]; ok {
-		offset, err = diffPageNumber("byte_offset", value, 0, maxDiffByteOffset)
+		offset, err = gitPageNumber("byte_offset", value, 0, maxDiffByteOffset)
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 	}
 	pageBytes := int64(defaultDiffPageBytes)
 	if value, ok := params["max_bytes"]; ok {
-		pageBytes, err = diffPageNumber("max_bytes", value, 4, maxDiffPageBytes)
+		pageBytes, err = gitPageNumber("max_bytes", value, 4, maxDiffPageBytes)
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
@@ -276,7 +210,7 @@ func (w *diffPageWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func diffPageNumber(name string, value any, minimum, maximum int64) (int64, error) {
+func gitPageNumber(name string, value any, minimum, maximum int64) (int64, error) {
 	invalid := func() (int64, error) {
 		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
 	}
