@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,17 +43,18 @@ func prepareScopedCommitIndex(ctx context.Context, paths []string) (env []string
 	if err = lock.Close(); err != nil {
 		return nil, nil, fmt.Errorf("close index lock: %w", err)
 	}
-	data, err := os.ReadFile(indexPath)
+	index, err := os.Open(indexPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read staged index: %w", err)
+		return nil, nil, fmt.Errorf("open staged index: %w", err)
 	}
+	defer index.Close()
 	// A sibling preserves relative shared-index references in split indexes.
 	snapshot, err := os.CreateTemp(filepath.Dir(indexPath), "buckley-commit-index-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create scoped index: %w", err)
 	}
 	snapshotPath = snapshot.Name()
-	_, writeErr := snapshot.Write(data)
+	_, writeErr := io.Copy(snapshot, index)
 	closeErr := snapshot.Close()
 	if writeErr != nil {
 		return nil, nil, fmt.Errorf("copy staged index: %w", writeErr)

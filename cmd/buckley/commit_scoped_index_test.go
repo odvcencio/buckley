@@ -251,3 +251,44 @@ func TestScopedCommitSnapshot_HoldsOriginalIndexLock(t *testing.T) {
 		t.Fatalf("snapshot changed: %q %v", output, err)
 	}
 }
+
+func TestScopedCommitSnapshot_CopyFailureCleanup(t *testing.T) {
+	for _, mode := range []string{"missing index", "unreadable index data"} {
+		t.Run(mode, func(t *testing.T) {
+			repo := initTempGitRepo(t)
+			t.Chdir(repo)
+			indexPath := gitOutputInDir(t, repo, "rev-parse", "--git-path", "index")
+			original, err := os.ReadFile(indexPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backup := indexPath + ".fixture-backup"
+			if err := os.Rename(indexPath, backup); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "unreadable index data" {
+				if err := os.Mkdir(indexPath, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, cleanup, err := prepareScopedCommitIndex(context.Background(), []string{"README.md"})
+			if cleanup != nil {
+				cleanup()
+			}
+			if err == nil {
+				t.Fatal("unreadable index produced a snapshot")
+			}
+			after, readErr := os.ReadFile(backup)
+			if readErr != nil || !bytes.Equal(after, original) {
+				t.Fatalf("source backup changed: %v", readErr)
+			}
+			if _, err := os.Stat(indexPath + ".lock"); !os.IsNotExist(err) {
+				t.Fatalf("owned index lock remains: %v", err)
+			}
+			snapshots, err := filepath.Glob(filepath.Join(filepath.Dir(indexPath), "buckley-commit-index-*"))
+			if err != nil || len(snapshots) != 0 {
+				t.Fatalf("incomplete snapshots remain: %v %v", snapshots, err)
+			}
+		})
+	}
+}
