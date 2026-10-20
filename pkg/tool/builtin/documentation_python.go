@@ -8,36 +8,9 @@ import (
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-type pythonDocumentationEdit struct {
-	docstring, prefix, suffix string
-	start, end, line          int
-	existing                  bool
-}
-
-func newPythonDocumentationParser() *gotreesitter.Parser {
-	parser := gotreesitter.NewParser(grammars.PythonLanguage())
-	parser.SetTimeoutMicros(1_000_000)
-	return parser
-}
-
-func parsePythonDocumentation(parser *gotreesitter.Parser, content string) (*gotreesitter.Tree, error) {
-	tree, err := parser.ParseStrict([]byte(content))
-	if err != nil {
-		if tree != nil {
-			tree.Release()
-		}
-		return nil, fmt.Errorf("parse Python source: %w", err)
-	}
-	if tree.RootNode() == nil || tree.RootNode().HasError() {
-		tree.Release()
-		return nil, fmt.Errorf("Python source is invalid or incomplete")
-	}
-	return tree, nil
-}
-
-func (t *GenerateDocstringTool) pythonDocstringEdit(parser *gotreesitter.Parser, content, functionName, description string) (pythonDocumentationEdit, error) {
-	edit := pythonDocumentationEdit{}
-	tree, err := parsePythonDocumentation(parser, content)
+func (t *GenerateDocstringTool) pythonDocstringEdit(parser *gotreesitter.Parser, content, functionName, description string) (documentationEdit, error) {
+	edit := documentationEdit{}
+	tree, err := parseFunctionTree(parser, content)
 	if err != nil {
 		return edit, err
 	}
