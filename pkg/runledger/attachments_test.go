@@ -406,42 +406,54 @@ func TestFinalization_ExpiredLatestAttemptCannotEndNonterminalRun(t *testing.T) 
 }
 
 func TestFinalization_RejectsEveryNonterminalStatusWithoutMutation(t *testing.T) {
-	for _, status := range []string{"", "queued", "running", "resumable", "unknown", "COMPLETED"} {
-		t.Run(firstNonEmptyMailbox(status, "empty"), func(t *testing.T) {
-			store := newMailboxTestStore(t)
-			ctx := context.Background()
-			runID := "run-nonterminal-" + firstNonEmptyMailbox(status, "empty")
-			sessionID := "session-nonterminal-" + firstNonEmptyMailbox(status, "empty")
-			seedMailboxRun(t, store, sessionID, runID)
-			lease, err := store.Attach(ctx, agentcoord.AttachmentRequest{
-				SessionID: sessionID, RunID: runID, AttemptID: "attempt-" + runID, LeaseDuration: time.Second,
+	for _, expired := range []bool{false, true} {
+		for _, status := range []string{"", "queued", "running", "resumable", "unknown", "COMPLETED"} {
+			t.Run(fmt.Sprintf("%s/expired=%t", firstNonEmptyMailbox(status, "empty"), expired), func(t *testing.T) {
+				store := newMailboxTestStore(t)
+				ctx := context.Background()
+				runID := "run-nonterminal-" + firstNonEmptyMailbox(status, "empty")
+				sessionID := "session-nonterminal-" + firstNonEmptyMailbox(status, "empty")
+				seedMailboxRun(t, store, sessionID, runID)
+				lease, err := store.Attach(ctx, agentcoord.AttachmentRequest{
+					SessionID: sessionID, RunID: runID, AttemptID: "attempt-" + runID, LeaseDuration: time.Second,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.AcquireClaims(ctx, runID, []string{"pkg/" + runID}); err != nil {
+					t.Fatal(err)
+				}
+				if expired {
+					lease.LeaseExpiresAt = lease.AttachedAt.Add(-time.Second)
+					if _, err := store.db.ExecContext(ctx, `UPDATE agent_run_attempts SET lease_expires_at = ? WHERE attempt_id = ?`, sqliteLeaseTimestamp(lease.LeaseExpiresAt), lease.AttemptID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = store.FinalizeRunAttempt(ctx, AttemptFinalization{
+					SessionID: sessionID, RunID: runID, AttemptID: lease.AttemptID, LeaseGeneration: lease.LeaseGeneration,
+					Status: status, Outcome: map[string]any{"status": status},
+					Events: []Event{{ID: StableEventID("nonterminal", runID), RunID: runID, SessionID: sessionID, Type: EventSubagentUpdated}},
+				})
+				if err == nil {
+					t.Fatalf("FinalizeRunAttempt accepted nonterminal status %q", status)
+				}
+				run, err := store.GetRun(ctx, runID)
+				if err != nil || run.EndedAt != nil {
+					t.Fatalf("run after rejected status = %+v, %v", run, err)
+				}
+				claims, err := store.ListClaims(ctx, ClaimQuery{RunID: runID})
+				if err != nil || len(claims) != 1 || claims[0].ReleasedAt != nil {
+					t.Fatalf("claims after rejected status = %+v, %v", claims, err)
+				}
+				var state, expires string
+				var generation int64
+				var detached sql.NullString
+				err = store.db.QueryRowContext(ctx, `SELECT state, lease_generation, lease_expires_at, detached_at FROM agent_run_attempts WHERE attempt_id = ?`, lease.AttemptID).Scan(&state, &generation, &expires, &detached)
+				if err != nil || state != string(lease.State) || generation != lease.LeaseGeneration || !parseSQLiteTimestamp(expires).Equal(lease.LeaseExpiresAt) || detached.Valid {
+					t.Fatalf("attachment changed after rejected status: state=%s generation=%d expires=%s detached=%v err=%v", state, generation, expires, detached, err)
+				}
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.AcquireClaims(ctx, runID, []string{"pkg/" + runID}); err != nil {
-				t.Fatal(err)
-			}
-			err = store.FinalizeRunAttempt(ctx, AttemptFinalization{
-				SessionID: sessionID, RunID: runID, AttemptID: lease.AttemptID, LeaseGeneration: lease.LeaseGeneration,
-				Status: status, Outcome: map[string]any{"status": status},
-				Events: []Event{{ID: StableEventID("nonterminal", runID), RunID: runID, SessionID: sessionID, Type: EventSubagentUpdated}},
-			})
-			if err == nil {
-				t.Fatalf("FinalizeRunAttempt accepted nonterminal status %q", status)
-			}
-			run, err := store.GetRun(ctx, runID)
-			if err != nil || run.EndedAt != nil {
-				t.Fatalf("run after rejected status = %+v, %v", run, err)
-			}
-			claims, err := store.ListClaims(ctx, ClaimQuery{RunID: runID})
-			if err != nil || len(claims) != 1 {
-				t.Fatalf("claims after rejected status = %+v, %v", claims, err)
-			}
-			if _, err := store.Current(ctx, sessionID, runID); err != nil {
-				t.Fatalf("attachment after rejected status = %v", err)
-			}
-		})
+		}
 	}
 }
 
