@@ -200,7 +200,7 @@ func TestCommitChangesTool_PathValidation(t *testing.T) {
 		},
 		{
 			name:       "empty entry",
-			params:     map[string]any{"paths": []any{"a.go", "   "}},
+			params:     map[string]any{"paths": []any{"a.go", ""}},
 			wantErrSub: "cannot be empty",
 		},
 		{
@@ -618,5 +618,20 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestCommitChangesTool_LiteralCanonicalPaths(t *testing.T) {
+	root := t.TempDir()
+	tool := &CommitChangesTool{}
+	tool.SetWorkDir(root)
+	for _, name := range []string{" leading.txt", "trailing.txt ", "tab\tname.txt", "line\nname.txt", ":(glob)*.txt", "comma,a.txt", "   "} {
+		got, err := tool.canonicalPaths(map[string]any{"paths": []any{name, filepath.Join(root, name)}})
+		if err != nil || len(got) != 1 || got[0] != name {
+			t.Fatalf("literal canonical scope %q: %q %v", name, got, err)
+		}
+	}
+	if _, err := tool.canonicalPaths(map[string]any{"paths": []any{"one\x00two"}}); err == nil {
+		t.Fatal("NUL expanded a scope during context transport")
 	}
 }

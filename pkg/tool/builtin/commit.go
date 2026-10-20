@@ -205,26 +205,19 @@ func (t *CommitChangesTool) canonicalPaths(params map[string]any) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	resolvedBase := evalSymlinksFallback(base)
 
 	canonical := make([]string, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, raw := range entries {
-		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			return nil, fmt.Errorf("paths entries cannot be empty")
 		}
-		candidate := raw
-		if !filepath.IsAbs(candidate) {
-			candidate = filepath.Join(base, candidate)
+		if strings.ContainsRune(raw, 0) {
+			return nil, fmt.Errorf("paths entries cannot contain NUL")
 		}
-		candidate = filepath.Clean(candidate)
-		if !isWithinDir(base, candidate) {
-			return nil, fmt.Errorf("path %q escapes workdir", raw)
-		}
-		// Harden against symlink escapes.
-		if !isWithinDir(resolvedBase, evalSymlinksFallbackForTarget(candidate)) {
-			return nil, fmt.Errorf("path %q escapes workdir via symlink", raw)
+		candidate, err := resolvePath(base, raw)
+		if err != nil {
+			return nil, err
 		}
 		// Deduplicate by absolute identity so "./a.go", "sub/../a.go",
 		// and their absolute spellings collapse into one scope.
