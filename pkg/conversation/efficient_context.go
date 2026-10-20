@@ -131,9 +131,9 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		var hasToolDigest bool
 		if msg.Role == "tool" {
 			if content, ok := msg.Content.(string); ok && content != "" {
-				identity := msg.Name + "\x00" + content
-				if signature, ok := toolCallSignatures[msg.ToolCallID]; ok {
-					identity = signature
+				identity, matched := toolCallSignatures[msg.ToolCallID]
+				if !matched {
+					identity = msg.Name + "\x00" + content
 				}
 				toolDigest = sha256.Sum256([]byte(identity))
 				hasToolDigest = true
