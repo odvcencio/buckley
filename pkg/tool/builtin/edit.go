@@ -232,46 +232,23 @@ func generateDiff(path, oldContent, newContent string) *DiffInfo {
 		return info
 	}
 
-	// Identical leading and trailing lines cancel from the multiset counts.
-	// Keep the original content below for the complete canonical diff.
-	oldChanged, newChanged := oldContent, newContent
-	for oldChanged != "" && newChanged != "" {
-		oldLine, oldRest, _ := strings.Cut(oldChanged, "\n")
-		newLine, newRest, _ := strings.Cut(newChanged, "\n")
-		if oldLine != newLine {
-			break
-		}
-		oldChanged, newChanged = oldRest, newRest
-	}
-	for oldChanged != "" && newChanged != "" {
-		oldEnd, newEnd := strings.LastIndexByte(oldChanged, '\n'), strings.LastIndexByte(newChanged, '\n')
-		if oldChanged[oldEnd+1:] != newChanged[newEnd+1:] {
-			break
-		}
-		oldChanged, newChanged = oldChanged[:max(oldEnd, 0)], newChanged[:max(newEnd, 0)]
-	}
-
-	remaining := make(map[string]int)
-	for line := range strings.SplitSeq(oldChanged, "\n") {
-		if strings.TrimSpace(line) != "" {
-			remaining[line]++
-		}
-	}
-	for line := range strings.SplitSeq(newChanged, "\n") {
-		if strings.TrimSpace(line) == "" {
+	info.UnifiedDiff = textdiff.Unified(path, oldContent, newContent)
+	inHunk := false
+	for line := range strings.SplitSeq(info.UnifiedDiff, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			inHunk = true
 			continue
 		}
-		if remaining[line] > 0 {
-			remaining[line]--
-		} else {
+		if !inHunk || line == "" {
+			continue
+		}
+		switch line[0] {
+		case '+':
 			info.LinesAdded++
+		case '-':
+			info.LinesRemoved++
 		}
 	}
-	for _, count := range remaining {
-		info.LinesRemoved += count
-	}
-
-	info.UnifiedDiff = textdiff.Unified(path, oldContent, newContent)
 	info.Preview = info.UnifiedDiff
 	lineCount := strings.Count(info.UnifiedDiff, "\n") + 1
 	if lineCount > 15 {
