@@ -30,6 +30,11 @@ func TestUnified_ChangeWindowPreservesRanges(t *testing.T) {
 		{"no path", "", old, strings.Replace(old, "line-12", "changed", 1)},
 		{"create", "f", "", "new"},
 		{"delete", "f", "old", ""},
+		{"partial prefix", "f", old + "last", old + "last-more"},
+		{"partial suffix", "f", old + "last", old + "prefix-last"},
+		{"terminated suffix fragment", "f", "abc\nlast\n", "prefix-abc\nlast\n"},
+		{"suffix consumes shorter file", "f", "same\none\n", "one\n"},
+		{"empty-line insertion", "f", "one\ntwo\n", "one\n\ntwo\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
@@ -42,6 +47,15 @@ func TestUnified_ChangeWindowPreservesRanges(t *testing.T) {
 				t.Fatalf("diff changed ranges or context:\ngot:\n%s\nwant:\n%s", got, want)
 			}
 		})
+	}
+}
+
+func TestUnified_NewlineDenseContext(t *testing.T) {
+	old := strings.Repeat("\n", 65536) + "old\n" + strings.Repeat("\n", 65536)
+	next := strings.Replace(old, "old", "new", 1)
+	want := "--- f\n+++ f\n@@ -65534,7 +65534,7 @@\n \n \n \n-old\n+new\n \n \n \n"
+	if got := Unified("f", old, next); got != want {
+		t.Fatalf("dense-context diff = %q, want %q", got, want)
 	}
 }
 
