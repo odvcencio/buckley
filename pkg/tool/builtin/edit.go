@@ -179,16 +179,14 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	// Write the new content
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
-	}
-	if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to write file: %v", err),
-		}, nil
+	if oldContent != newContent {
+		info, err := os.Stat(absPath)
+		if err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
+		}
+		if err := os.WriteFile(absPath, []byte(newContent), info.Mode().Perm()); err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("failed to write file: %v", err)}, nil
+		}
 	}
 
 	summary := fmt.Sprintf("✓ Edited %s (+%d/-%d lines, %d replacement%s)",
@@ -220,76 +218,73 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 
 // generateDiff creates a diff preview between old and new content
 func generateDiff(path, oldContent, newContent string) *DiffInfo {
-	oldLines := strings.Split(oldContent, "\n")
-	newLines := strings.Split(newContent, "\n")
+	info := &DiffInfo{
+		FilePath:   path,
+		IsNew:      oldContent == "",
+		OldContent: oldContent,
+		NewContent: newContent,
+	}
+	if oldContent == newContent {
+		return info
+	}
 
-	// Calculate line changes
-	linesAdded := 0
-	linesRemoved := 0
-	oldSet := make(map[string]int)
-	newSet := make(map[string]int)
+	// Identical leading and trailing lines cancel from the multiset counts.
+	// Keep the original content below for the complete canonical diff.
+	oldChanged, newChanged := oldContent, newContent
+	for oldChanged != "" && newChanged != "" {
+		oldLine, oldRest, _ := strings.Cut(oldChanged, "\n")
+		newLine, newRest, _ := strings.Cut(newChanged, "\n")
+		if oldLine != newLine {
+			break
+		}
+		oldChanged, newChanged = oldRest, newRest
+	}
+	for oldChanged != "" && newChanged != "" {
+		oldEnd, newEnd := strings.LastIndexByte(oldChanged, '\n'), strings.LastIndexByte(newChanged, '\n')
+		if oldChanged[oldEnd+1:] != newChanged[newEnd+1:] {
+			break
+		}
+		oldChanged, newChanged = oldChanged[:max(oldEnd, 0)], newChanged[:max(newEnd, 0)]
+	}
 
-	for _, line := range oldLines {
+	remaining := make(map[string]int)
+	for line := range strings.SplitSeq(oldChanged, "\n") {
 		if strings.TrimSpace(line) != "" {
-			oldSet[line]++
+			remaining[line]++
 		}
 	}
-	for _, line := range newLines {
-		if strings.TrimSpace(line) != "" {
-			newSet[line]++
+	for line := range strings.SplitSeq(newChanged, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
-	}
-
-	for line, count := range newSet {
-		if oldCount, exists := oldSet[line]; exists {
-			if count > oldCount {
-				linesAdded += count - oldCount
-			}
+		if remaining[line] > 0 {
+			remaining[line]--
 		} else {
-			linesAdded += count
+			info.LinesAdded++
 		}
 	}
+	for _, count := range remaining {
+		info.LinesRemoved += count
+	}
 
-	for line, count := range oldSet {
-		if newCount, exists := newSet[line]; exists {
-			if count > newCount {
-				linesRemoved += count - newCount
-			}
-		} else {
-			linesRemoved += count
+	info.UnifiedDiff = generateUnifiedDiff(path, oldContent, newContent)
+	info.Preview = info.UnifiedDiff
+	lineCount := strings.Count(info.UnifiedDiff, "\n") + 1
+	if lineCount > 15 {
+		end := 0
+		for range 15 {
+			end += strings.IndexByte(info.UnifiedDiff[end:], '\n') + 1
 		}
+		info.Preview = info.UnifiedDiff[:end-1] + fmt.Sprintf("\n... (%d more lines)", lineCount-15)
 	}
-
-	// Generate unified diff
-	unifiedDiff := generateUnifiedDiff(path, oldLines, newLines)
-
-	// Create preview (first 15 lines)
-	previewLines := strings.Split(unifiedDiff, "\n")
-	var preview string
-	if len(previewLines) > 15 {
-		preview = strings.Join(previewLines[:15], "\n")
-		preview += fmt.Sprintf("\n... (%d more lines)", len(previewLines)-15)
-	} else {
-		preview = unifiedDiff
-	}
-
-	return &DiffInfo{
-		FilePath:     path,
-		IsNew:        oldContent == "",
-		LinesAdded:   linesAdded,
-		LinesRemoved: linesRemoved,
-		OldContent:   oldContent,
-		NewContent:   newContent,
-		UnifiedDiff:  unifiedDiff,
-		Preview:      preview,
-	}
+	return info
 }
 
 // generateUnifiedDiff creates a unified diff format output
-func generateUnifiedDiff(path string, oldLines, newLines []string) string {
+func generateUnifiedDiff(path, oldContent, newContent string) string {
 	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A:        difflib.SplitLines(strings.Join(oldLines, "\n")),
-		B:        difflib.SplitLines(strings.Join(newLines, "\n")),
+		A:        difflib.SplitLines(oldContent),
+		B:        difflib.SplitLines(newContent),
 		FromFile: path,
 		ToFile:   path,
 		Context:  3,
