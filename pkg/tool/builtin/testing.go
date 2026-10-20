@@ -585,7 +585,7 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Write test file
-	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+	if err := writeMutationFile(testFile, testContent, 0644); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write test file: %v", err),

@@ -124,7 +124,7 @@ func (t *CreateSkillTool) Execute(params map[string]any) (*Result, error) {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to create directory: %v", err)}, nil
 	}
-	if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
+	if err := writeMutationFile(targetPath, content, 0644); err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to write skill file: %v", err)}, nil
 	}
 

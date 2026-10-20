@@ -27,6 +27,7 @@ func TestTextMutationTools_PreservePermissions(t *testing.T) {
 		{"edit", &EditFileTool{}, map[string]any{"old_string": "alpha", "new_string": "a"}, "a\nbeta\n"},
 		{"insert", &InsertTextTool{}, map[string]any{"line": 2, "text": "insert"}, "alpha\ninsert\nbeta\n"},
 		{"delete", &DeleteLinesTool{}, map[string]any{"start_line": 2, "end_line": 2}, "alpha\n"},
+		{"search replace", &SearchReplaceTool{}, map[string]any{"search": "alpha", "replace": "a"}, "a\nbeta\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
