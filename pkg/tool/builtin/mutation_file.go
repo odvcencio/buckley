@@ -22,6 +22,19 @@ func mutationBudgetError(limit int64) error {
 	return fmt.Errorf("file too large to edit: input or replacement exceeds %d bytes", limit)
 }
 
+func writeMutationFile(path, content string, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString(content)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}
+
 func (w *workDirAware) readMutationFile(path string) ([]byte, error) {
 	limit := w.mutationFileLimit()
 	info, err := os.Stat(path)
