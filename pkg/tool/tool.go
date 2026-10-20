@@ -44,13 +44,9 @@ func ToOpenAIFunction(t Tool) map[string]any {
 	}
 }
 
-// ToJSON converts a result to JSON
+// ToJSON encodes a full result in the configured JSON or TOON format.
 func ToJSON(r *builtin.Result) (string, error) {
-	data, err := toon.New(!useJSONResults.Load()).Marshal(r)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+	return toon.New(!useJSONResults.Load()).MarshalString(r)
 }
 
 // ToModelOutput encodes only fields that help the model decide its next step.
@@ -104,14 +100,14 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 	if len(data) > 0 {
 		payload["data"] = data
 	}
-	encoded, err := codec.Marshal(payload)
+	encoded, err := codec.MarshalString(payload)
 	if err != nil {
 		return "", err
 	}
 	if limit <= 0 || len(encoded) <= limit {
-		return string(encoded), nil
+		return encoded, nil
 	}
-	original := string(encoded)
+	original := encoded
 	originalBytes := len(encoded)
 	partBytes := (limit - 1024) / 2
 	if partBytes < 0 {
@@ -128,12 +124,12 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 		if r.Error != "" {
 			compact["error"] = modelOutputPrefix(r.Error, 512)
 		}
-		encoded, err = codec.Marshal(compact)
+		encoded, err = codec.MarshalString(compact)
 		if err != nil {
 			return "", err
 		}
 		if len(encoded) <= limit {
-			return string(encoded), nil
+			return encoded, nil
 		}
 		if partBytes == 0 {
 			return "", fmt.Errorf("model output limit %d too small for compact payload", limit)

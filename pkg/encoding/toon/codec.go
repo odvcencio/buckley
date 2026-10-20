@@ -24,11 +24,24 @@ func (c *Codec) Marshal(v any) ([]byte, error) {
 	if !c.useToon || v == nil {
 		return json.Marshal(v)
 	}
-	encoded, err := gotoon.Encode(v)
+	encoded, err := c.MarshalString(v)
 	if err != nil {
-		return nil, fmt.Errorf("toon encode: %w", err)
+		return nil, err
 	}
 	return []byte(encoded), nil
+}
+
+// MarshalString encodes v without a byte-slice round trip for TOON output.
+func (c *Codec) MarshalString(v any) (string, error) {
+	if !c.useToon || v == nil {
+		encoded, err := c.Marshal(v)
+		return string(encoded), err
+	}
+	encoded, err := gotoon.Encode(v)
+	if err != nil {
+		return "", fmt.Errorf("toon encode: %w", err)
+	}
+	return encoded, nil
 }
 
 // Unmarshal decodes JSON payloads back into Go values. TOON is designed for

@@ -15,8 +15,8 @@ func renderSchema(spec any, useToon bool) string {
 	}
 
 	if useToon {
-		if data, err := toon.New(true).Marshal(spec); err == nil {
-			return string(data)
+		if data, err := toon.New(true).MarshalString(spec); err == nil {
+			return data
 		}
 	}
 

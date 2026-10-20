@@ -425,12 +425,12 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 		if payload == nil {
 			payload = result.DisplayData
 		}
-		encoded, encErr := codec.Marshal(payload)
+		encoded, encErr := codec.MarshalString(payload)
 		if encErr != nil {
 			return toolCallExecution{filePath: normalizeFilePath(rich.FilePath), delegationResult: delegationResult}, encErr
 		}
 		return toolCallExecution{
-			payload:          string(encoded),
+			payload:          encoded,
 			filePath:         normalizeFilePath(rich.FilePath),
 			delegationResult: delegationResult,
 		}, nil
@@ -440,7 +440,7 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 	if payload == nil {
 		payload = result.DisplayData
 	}
-	encoded, err := codec.Marshal(payload)
+	encoded, err := codec.MarshalString(payload)
 	if err != nil {
 		return toolCallExecution{filePath: normalizeFilePath(rich.FilePath), delegationResult: delegationResult}, err
 	}
@@ -453,7 +453,7 @@ func executeToolCall(ctx context.Context, registry *tool.Registry, codec *toon.C
 		}
 	}
 
-	return toolCallExecution{payload: string(encoded), filePath: filePath, success: true, delegationResult: delegationResult}, nil
+	return toolCallExecution{payload: encoded, filePath: filePath, success: true, delegationResult: delegationResult}, nil
 }
 
 func (e *experimentExecutor) applyDelegationEvidence(metrics *runMetrics, result *agent.DelegationResult, maxTokens int, maxCost float64) error {

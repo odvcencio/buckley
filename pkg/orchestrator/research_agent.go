@@ -191,8 +191,8 @@ func (r *ResearchAgent) generateInsights(ctx context.Context, goal string, files
 	plainNotes := formatPlainNotes(files)
 	notesBlock := plainNotes
 	if r.useToon && r.notesCodec != nil {
-		if encoded, err := r.notesCodec.Marshal(newNoteEntries(files)); err == nil {
-			notesBlock = string(encoded)
+		if encoded, err := r.notesCodec.MarshalString(newNoteEntries(files)); err == nil {
+			notesBlock = encoded
 		}
 	}
 

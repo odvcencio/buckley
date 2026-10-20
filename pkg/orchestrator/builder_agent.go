@@ -646,11 +646,7 @@ func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, e
 
 	// Return result as string for LLM
 	if result.Success {
-		data, err := a.resultCodec.Marshal(result.Data)
-		if err != nil {
-			return "", err
-		}
-		return string(data), nil
+		return a.resultCodec.MarshalString(result.Data)
 	}
 	return "", fmt.Errorf("tool execution failed: %s", result.Error)
 }
