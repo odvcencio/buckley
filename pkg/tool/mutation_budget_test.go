@@ -2,6 +2,7 @@ package tool
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,12 @@ import (
 func TestRegistry_FileSizePolicyBoundsDispatchedMutations(t *testing.T) {
 	for _, name := range []string{"edit_file", "search_replace", "apply_patch"} {
 		t.Run(name, func(t *testing.T) {
+			if name == "apply_patch" {
+				version, err := exec.Command("patch", "--version").CombinedOutput()
+				if err != nil || !strings.Contains(string(version), "GNU patch") {
+					t.Skipf("GNU patch unavailable: %v %s", err, version)
+				}
+			}
 			root := t.TempDir()
 			path := filepath.Join(root, "fixture.txt")
 			if err := os.WriteFile(path, []byte("aaaa"), 0o600); err != nil {
