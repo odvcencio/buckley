@@ -60,6 +60,9 @@ func TestGenerator_GenerateGoProject(t *testing.T) {
 	}
 
 	devGo := compose.Services["dev-go"]
+	if !devGo.Init {
+		t.Fatal("development container must reap orphaned processes")
+	}
 	if devGo.Image != "buckley/go:1.22" {
 		t.Errorf("Expected image buckley/go:1.22, got %s", devGo.Image)
 	}

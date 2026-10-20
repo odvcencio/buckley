@@ -79,6 +79,7 @@ func (g *Generator) generateDevService(lang envdetect.Language) Service {
 	return Service{
 		Image:         image,
 		ContainerName: fmt.Sprintf("buckley-dev-%s", lang.Name),
+		Init:          true,
 		WorkingDir:    workdir,
 		Volumes: []string{
 			".:" + workdir,                            // Mount worktree

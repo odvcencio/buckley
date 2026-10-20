@@ -13,6 +13,7 @@ type Service struct {
 	Image         string            `yaml:"image,omitempty"`
 	ContainerName string            `yaml:"container_name,omitempty"`
 	Build         *BuildConfig      `yaml:"build,omitempty"`
+	Init          bool              `yaml:"init,omitempty"`
 	WorkingDir    string            `yaml:"working_dir,omitempty"`
 	Command       []string          `yaml:"command,omitempty"`
 	Entrypoint    []string          `yaml:"entrypoint,omitempty"`
