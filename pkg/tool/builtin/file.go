@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -202,19 +201,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	snapshotLimit := t.maxFileSizeBytes
-	if snapshotLimit <= 0 && selected == nil {
+	if snapshotLimit <= 0 {
 		snapshotLimit = defaultReadFileSnapshotBytes
 	}
-	if snapshotLimit > 0 {
-		if info, err := os.Stat(absPath); err == nil && info.Size() > snapshotLimit {
-			if selected != nil {
-				return readFileFailure("file_too_large", fmt.Sprintf("%s has %d bytes (snapshot limit %d); select a smaller source file", absPath, info.Size(), t.maxFileSizeBytes)), nil
-			}
-			return t.readLargeFilePage(absPath, params, info.Size(), snapshotLimit)
-		}
-	}
-
-	content, err := os.ReadFile(absPath)
+	contentStr, size, exceeded, err := readFileSnapshot(absPath, snapshotLimit)
 	if err != nil {
 		kind := "file_access"
 		if os.IsNotExist(err) {
@@ -222,11 +212,19 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		return readFileFailure(kind, fmt.Sprintf("cannot read %s: %v; paths are relative to %s; use find_files to locate the file", absPath, err, t.workDir)), nil
 	}
+	if exceeded {
+		if selected != nil {
+			if size > snapshotLimit {
+				return readFileFailure("file_too_large", fmt.Sprintf("%s has %d bytes (snapshot limit %d); select a smaller source file", absPath, size, snapshotLimit)), nil
+			}
+			return readFileFailure("file_too_large", fmt.Sprintf("%s exceeds snapshot limit %d; select a smaller source file", absPath, snapshotLimit)), nil
+		}
+		return t.readLargeFilePage(absPath, params, size, snapshotLimit)
+	}
 
-	if bytes.IndexByte(content, 0) >= 0 {
+	if strings.IndexByte(contentStr, 0) >= 0 {
 		return readFileFailure("binary_file", fmt.Sprintf("%s contains NUL bytes; use a format-specific tool or a bounded hex dump through run_shell", absPath)), nil
 	}
-	contentStr := string(content)
 	totalLines := strings.Count(contentStr, "\n")
 	if contentStr != "" && !strings.HasSuffix(contentStr, "\n") {
 		totalLines++
@@ -348,21 +346,21 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 		Data: map[string]any{
 			"path":    absPath,
 			"content": contentStr, // Full content remains available to non-model callers.
-			"size":    len(content),
+			"size":    len(contentStr),
 			"page":    page,
 		},
 		ShouldAbridge: shouldAbridge,
 	}
 
 	if shouldAbridge {
-		preview := fmt.Sprintf("Read %s (lines %d-%d of %d, %d bytes)", filepath.Base(absPath), startLine, endLine, totalLines, len(content))
+		preview := fmt.Sprintf("Read %s (lines %d-%d of %d, %d bytes)", filepath.Base(absPath), startLine, endLine, totalLines, len(contentStr))
 		if hasMore {
 			preview += fmt.Sprintf("; continue with start_line=%d", endLine+1)
 		}
 		result.DisplayData = map[string]any{
 			"path":    absPath,
 			"content": pageContent,
-			"size":    len(content),
+			"size":    len(contentStr),
 			"page":    page,
 			"preview": preview,
 		}

@@ -2,7 +2,6 @@ package builtin
 
 import (
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"strings"
@@ -64,32 +63,11 @@ func (w *workDirAware) readMutationFile(path string) (string, error) {
 		return "", err
 	}
 	defer file.Close()
-	var buffer strings.Builder
-	buffer.Grow(int(info.Size()))
-	remaining := limit
-	var scratch [4096]byte
-	for remaining > 0 {
-		n, readErr := file.Read(scratch[:int(min(int64(len(scratch)), remaining))])
-		buffer.Write(scratch[:n])
-		remaining -= int64(n)
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", readErr
-		}
+	content, exceeded, err := readSnapshotString(file, info.Size(), limit)
+	if exceeded {
+		return "", mutationBudgetError(limit)
 	}
-	// The file may grow after Stat. Peek beyond the bounded snapshot without
-	// adding one to the policy limit, which can be MaxInt64.
-	if remaining == 0 {
-		var extra [1]byte
-		if n, err := file.Read(extra[:]); n > 0 {
-			return "", mutationBudgetError(limit)
-		} else if err != nil && err != io.EOF {
-			return "", err
-		}
-	}
-	return buffer.String(), nil
+	return content, err
 }
 
 func (w *workDirAware) checkReplacementGrowth(size, oldBytes, newBytes, count int) error {
