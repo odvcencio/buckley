@@ -23,6 +23,9 @@ func resolutionTestRepo(t *testing.T, name, attrs, style string) string {
 		statusTestGit(t, dir, "config", "merge.conflictStyle", style)
 	}
 	for _, file := range []string{name, "other.txt"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, file)), 0755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(dir, file), []byte("base\n"), 0640); err != nil {
 			t.Fatal(err)
 		}

@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -125,13 +125,12 @@ func (t *MarkResolvedTool) ExecuteWithContext(parent context.Context, params map
 		text := attributes.String()
 		return &Result{Error: formatGitFailure(err, text[:min(len(text), budget/2)])}, nil
 	}
-	fields := strings.Split(attributes.String(), "\x00")
-	if attributes.Truncated() || len(fields) != 4 || fields[0] != path || fields[1] != "conflict-marker-size" || fields[3] != "" {
-		return &Result{Error: "invalid conflict-marker-size attributes from Git"}, nil
+	if attributes.Truncated() {
+		return &Result{Error: "conflict-marker-size attributes exceed output budget"}, nil
 	}
-	markerSize, err := strconv.ParseInt(fields[2], 10, 32)
-	if err != nil || markerSize <= 0 {
-		markerSize = 7
+	markerSize, err := parseConflictMarkerSize(path, attributes.String())
+	if err != nil {
+		return &Result{Error: err.Error()}, nil
 	}
 	if err := checkResolutionFile(ctx, abs, fileLimit, markerSize); err != nil {
 		return &Result{Error: "conflict marker validation failed; file was not staged: " + err.Error()}, nil
@@ -170,46 +169,20 @@ func checkResolutionFile(ctx context.Context, path string, limit, markerSize int
 		source = f
 	}
 	input := &io.LimitedReader{R: source, N: limit + 1}
-	buffer := make([]byte, 32<<10)
-	line, column := int64(1), int64(0)
-	var marker byte
-	matching := false
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, err := input.Read(buffer)
+	reader := bufio.NewReaderSize(input, 4096)
+	for line := int64(1); ; line++ {
+		kind, _, _, err := readConflictLine(ctx, reader, markerSize, 0)
 		if input.N == 0 {
 			return mutationBudgetError(limit)
-		}
-		for _, b := range buffer[:n] {
-			if column == 0 {
-				marker = b
-				matching = b == '<' || b == '>' || b == '=' || b == '|'
-			}
-			if matching {
-				if column < markerSize {
-					matching = b == marker
-				} else {
-					space := b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
-					if space && ((marker != '<' && marker != '>') || b == ' ') {
-						return fmt.Errorf("leftover conflict marker on line %d", line)
-					}
-					matching = false
-				}
-			}
-			if b == '\n' {
-				line++
-				column = 0
-			} else {
-				column++
-			}
 		}
 		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if kind != 0 {
+			return fmt.Errorf("leftover conflict marker on line %d", line)
 		}
 	}
 }
