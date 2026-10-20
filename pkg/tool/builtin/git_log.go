@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -90,7 +89,7 @@ func (t *GitLogTool) ExecuteWithContext(parent context.Context, params map[strin
 	if cursor != "" {
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(cursor)
 		var c gitLogTextCursor
-		if err != nil || json.Unmarshal(raw, &c) != nil || c.Version != 1 || !validGitLogID(c.Commit) || c.Offset < 1 || c.Offset > DefaultGitLogScanBytes {
+		if err != nil || json.Unmarshal(raw, &c) != nil || c.Version != 1 || !validGitCommitID(c.Commit) || c.Offset < 1 || c.Offset > DefaultGitLogScanBytes {
 			return &Result{Error: "invalid text_cursor; pass the returned cursor unchanged"}, nil
 		}
 		count, anchor, oneline, textOffset = 1, c.Commit, c.Oneline, c.Offset
@@ -117,7 +116,7 @@ func (t *GitLogTool) ExecuteWithContext(parent context.Context, params map[strin
 		if value := params["anchor"]; value != nil {
 			var ok bool
 			anchor, ok = value.(string)
-			if !ok || (anchor != "" && !validGitLogID(anchor)) {
+			if !ok || (anchor != "" && !validGitCommitID(anchor)) {
 				return &Result{Error: "anchor must be a full 40/64-character commit ID"}, nil
 			}
 		}
@@ -148,7 +147,7 @@ func (t *GitLogTool) ExecuteWithContext(parent context.Context, params map[strin
 			return &Result{Error: formatGitFailure(err, stderr.String())}, nil
 		}
 		anchor = strings.TrimSpace(output.String())
-		if output.Truncated() || !validGitLogID(anchor) {
+		if output.Truncated() || !validGitCommitID(anchor) {
 			return &Result{Error: "invalid starting commit from git"}, nil
 		}
 	}
@@ -203,7 +202,7 @@ func (t *GitLogTool) ExecuteWithContext(parent context.Context, params map[strin
 			break
 		}
 		id := string(prefix[:len(anchor)])
-		if prefix[len(anchor)] != 0 || !validGitLogID(id) {
+		if prefix[len(anchor)] != 0 || !validGitCommitID(id) {
 			err = fmt.Errorf("malformed commit ID in git log")
 			break
 		}
@@ -285,13 +284,6 @@ func (t *GitLogTool) ExecuteWithContext(parent context.Context, params map[strin
 			return &Result{Error: fmt.Sprintf("git log result exceeds %d-byte output budget; reduce count", budget)}, nil
 		}
 	}
-}
-func validGitLogID(id string) bool {
-	if len(id) != 40 && len(id) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(id)
-	return err == nil
 }
 func gitLogRecordSize(r *bufio.Reader) (int64, error) {
 	line, err := r.ReadSlice('\n')
