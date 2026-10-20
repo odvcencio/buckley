@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
 )
@@ -577,12 +579,14 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 // PatchFileTool applies a unified diff patch to the repository
 type PatchFileTool struct{ workDirAware }
 
+const DefaultPatchOutputBytes = 4 << 10
+
 func (t *PatchFileTool) Name() string {
 	return "apply_patch"
 }
 
 func (t *PatchFileTool) Description() string {
-	return "Apply a standard unified diff with ---/+++ file headers and counted @@ hunks. The *** Begin Patch format is not supported. Keep patches small and read current lines before editing."
+	return "Apply a standard unified diff with ---/+++ file headers and counted @@ hunks. The *** Begin Patch format is not supported. Keep patches small and read current lines before editing. Command diagnostics are bounded; truncated output reports its full byte count."
 }
 
 func (t *PatchFileTool) Parameters() ParameterSchema {
@@ -603,6 +607,10 @@ func (t *PatchFileTool) Parameters() ParameterSchema {
 }
 
 func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *PatchFileTool) ExecuteWithContext(parent context.Context, params map[string]any) (*Result, error) {
 	rawPatch, ok := params["patch"].(string)
 	if !ok || strings.TrimSpace(rawPatch) == "" {
 		return &Result{
@@ -681,30 +689,21 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	ctx, cancel := t.execContext()
+	ctx, cancel := t.execContextWithParent(parent)
 	defer cancel()
 
-	tempDir, err := os.MkdirTemp("", "buckley-patch-")
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to create patch staging directory: %v", err),
-		}, nil
+	outputLimit := DefaultPatchOutputBytes
+	if t.maxOutputBytes > 0 {
+		outputLimit = min(outputLimit, t.maxOutputBytes)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
-	runPatch := func(dryRun bool) ([]byte, error) {
-		rejectFile := filepath.Join(tempDir, "rejects")
-		if dryRun {
-			rejectFile = filepath.Join(tempDir, "preflight-rejects")
-		}
+	runPatch := func(dryRun bool) *Result {
 		args := []string{
 			fmt.Sprintf("-p%d", strip),
 			"-N",
 			"-s",
 			"--batch",
 			"--no-backup-if-mismatch",
-			"-r", rejectFile,
+			"-r", "-",
 		}
 		if t.maxFileSizeBytes > 0 {
 			args = append(args, "--get=0")
@@ -719,48 +718,48 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		cmd.Env = env
 		cmd.Stdin = strings.NewReader(rawPatch)
-		return cmd.CombinedOutput()
+		configureCommandCancellation(cmd)
+		defer func() {
+			if cmd.Process != nil {
+				_ = cmd.Cancel()
+			}
+		}()
+		output := newLimitedBuffer(outputLimit)
+		cmd.Stdout, cmd.Stderr = output, output
+		err := cmd.Run()
+		text := strings.ToValidUTF8(strings.TrimSpace(output.String()), "�")
+		truncated := output.Truncated() || len(text) > outputLimit
+		if truncated {
+			keep := min(len(text), outputLimit)
+			for keep > 0 && !utf8.ValidString(text[:keep]) {
+				keep--
+			}
+			text = text[:keep] + fmt.Sprintf("\n... (patch output truncated, %d bytes total)", output.TotalBytes())
+		}
+		result := &Result{Success: err == nil && ctx.Err() == nil, Data: map[string]any{"strip": strip}}
+		if truncated {
+			result.Data["output_truncated"] = true
+			result.Data["output_bytes"] = output.TotalBytes()
+		}
+		if ctx.Err() != nil {
+			result.Error = fmt.Sprintf("patch command canceled: %v\n%s", ctx.Err(), text)
+		} else if err != nil {
+			result.Error = fmt.Sprintf("patch command failed: %v\n%s", err, text)
+		} else {
+			result.Data["message"] = text
+		}
+		return result
 	}
 
-	preflightOutput, err := runPatch(true)
-	if ctx.Err() != nil {
-		return &Result{
-			Success: false,
-			Error:   "patch command timed out",
-		}, nil
-	}
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("patch command failed: %v\n%s", err, strings.TrimSpace(string(preflightOutput))),
-		}, nil
+	if result := runPatch(true); !result.Success {
+		return result, nil
 	}
 
 	if err := t.checkPatchFileBudget(files, strip, env); err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	output, err := runPatch(false)
-	if ctx.Err() != nil {
-		return &Result{
-			Success: false,
-			Error:   "patch command timed out",
-		}, nil
-	}
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("patch command failed: %v\n%s", err, strings.TrimSpace(string(output))),
-		}, nil
-	}
-
-	return &Result{
-		Success: true,
-		Data: map[string]any{
-			"strip":   strip,
-			"message": strings.TrimSpace(string(output)),
-		},
-	}, nil
+	return runPatch(false), nil
 }
 
 func inferPatchStrip(files []unifiedPatchFile) int {
