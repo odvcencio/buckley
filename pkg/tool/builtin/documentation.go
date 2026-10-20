@@ -2,16 +2,14 @@ package builtin
 
 import (
 	"fmt"
-	"iter"
+	"go/parser"
+	"go/token"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 )
-
-// parensContentRe extracts content within parentheses for parameter parsing.
-var parensContentRe = regexp.MustCompile(`\(([^)]*)\)`)
 
 // GenerateDocstringTool generates documentation comments for functions
 type GenerateDocstringTool struct{ workDirAware }
@@ -34,7 +32,7 @@ func (t *GenerateDocstringTool) Parameters() ParameterSchema {
 			},
 			"function_name": {
 				Type:        "string",
-				Description: "Name of the function to document. Python accepts qualified names such as Class.method or outer.inner to disambiguate.",
+				Description: "Name of the function to document. Qualified names such as Type.Method, Class.method, or outer.inner disambiguate targets.",
 			},
 			"description": {
 				Type:        "string",
@@ -63,7 +61,11 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	}
 
 	description := ""
-	if desc, ok := params["description"].(string); ok {
+	if value, present := params["description"]; present && value != nil {
+		desc, ok := value.(string)
+		if !ok {
+			return &Result{Error: "description parameter must be a string"}, nil
+		}
 		description = desc
 	}
 
@@ -87,43 +89,38 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	// Detect language
 	language := t.detectLanguage(file)
 
-	var docstring string
-	var pythonParser *gotreesitter.Parser
-	var lineNum, insert, end int
-	prefix, suffix := "", "\n"
-	if language == "python" {
-		if int64(len(functionName)) > t.mutationFileLimit() || int64(len(description)) > t.mutationFileLimit() {
-			return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
-		}
-		pythonParser = newPythonDocumentationParser()
-		edit, err := t.pythonDocstringEdit(pythonParser, content, functionName, description)
-		if err != nil {
-			return &Result{Error: fmt.Sprintf("failed to generate docstring: %v", err)}, nil
-		}
-		if edit.existing {
-			return &Result{Success: true, Data: map[string]any{
-				"file": file, "function_name": functionName, "line": edit.line, "language": language, "message": "Function already has documentation",
-			}}, nil
-		}
-		docstring, lineNum, insert, end = edit.docstring, edit.line, edit.start, edit.end
-		prefix, suffix = edit.prefix, edit.suffix
-	} else {
-		docstring, lineNum, err = t.generateDocstring(content, functionName, description, language)
-		if err != nil {
-			return &Result{Error: fmt.Sprintf("failed to generate docstring: %v", err)}, nil
-		}
-		insert = mutationLineOffset(content, lineNum)
-		end = insert
-		if lineNum > 1 {
-			previous := mutationLineOffset(content, lineNum-1)
-			prevLine := strings.TrimSpace(content[previous:insert])
-			if t.isDocComment(prevLine, language) {
-				return &Result{Success: true, Data: map[string]any{
-					"file": file, "function_name": functionName, "message": "Function already has documentation", "existing_doc": prevLine,
-				}}, nil
-			}
-		}
+	if int64(len(functionName)) > t.mutationFileLimit() || int64(len(description)) > t.mutationFileLimit() {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
 	}
+	var edit documentationEdit
+	var syntaxParser *gotreesitter.Parser
+	var syntaxLanguage *gotreesitter.Language
+	switch language {
+	case "go":
+		edit, err = t.goDocstringEdit(content, functionName, description)
+	case "python":
+		syntaxLanguage = grammars.PythonLanguage()
+		syntaxParser = newFunctionParser(syntaxLanguage)
+		edit, err = t.pythonDocstringEdit(syntaxParser, content, functionName, description)
+	case "javascript":
+		entry := grammars.DetectLanguage(file)
+		if entry == nil {
+			return &Result{Error: "unsupported JavaScript/TypeScript file type"}, nil
+		}
+		syntaxLanguage = entry.Language()
+		syntaxParser = newFunctionParser(syntaxLanguage)
+		edit, err = t.jsDocstringEdit(syntaxParser, syntaxLanguage, content, functionName, description)
+	default:
+		err = fmt.Errorf("unsupported language: %s", language)
+	}
+	if err != nil {
+		return &Result{Error: fmt.Sprintf("failed to generate docstring: %v", err)}, nil
+	}
+	if edit.existing {
+		return &Result{Success: true, Data: map[string]any{"file": file, "function_name": functionName, "line": edit.line, "language": language, "message": "Function already has documentation"}}, nil
+	}
+	docstring, lineNum, insert, end := edit.docstring, edit.line, edit.start, edit.end
+	prefix, suffix := edit.prefix, edit.suffix
 	if err := t.checkReplacementGrowth(len(content), end-insert, len(prefix)+len(docstring)+len(suffix), 1); err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
@@ -135,10 +132,18 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	output.WriteString(suffix)
 	output.WriteString(content[end:])
 	newContent := output.String()
-	if language == "python" {
-		tree, err := parsePythonDocumentation(pythonParser, newContent)
+	if language == "go" {
+		if _, err := parser.ParseFile(token.NewFileSet(), file, newContent, parser.SkipObjectResolution); err != nil {
+			return &Result{Error: fmt.Sprintf("generated Go documentation is invalid: %v", err)}, nil
+		}
+	} else {
+		tree, err := parseFunctionTree(syntaxParser, newContent)
 		if err != nil {
-			return &Result{Error: fmt.Sprintf("generated Python documentation is invalid: %v", err)}, nil
+			return &Result{Error: fmt.Sprintf("generated documentation is invalid: %v", err)}, nil
+		}
+		if language == "javascript" && documentationSyntaxDigest(tree.RootNode(), syntaxLanguage, newContent) != edit.syntaxDigest {
+			tree.Release()
+			return &Result{Error: "documentation would change code structure; split the target declaration onto its own line"}, nil
 		}
 		tree.Release()
 	}
@@ -177,145 +182,11 @@ func (t *GenerateDocstringTool) detectLanguage(file string) string {
 	switch ext {
 	case ".go":
 		return "go"
-	case ".js", ".ts":
+	case ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx":
 		return "javascript"
 	case ".py":
 		return "python"
 	default:
 		return "unknown"
-	}
-}
-
-func (t *GenerateDocstringTool) isDocComment(line, language string) bool {
-	switch language {
-	case "go":
-		return strings.HasPrefix(line, "//")
-	case "javascript":
-		return strings.HasPrefix(line, "/**") || strings.HasPrefix(line, "//")
-	}
-	return false
-}
-
-func (t *GenerateDocstringTool) generateDocstring(content, functionName, description, language string) (string, int, error) {
-	if int64(len(functionName)) > t.mutationFileLimit() || int64(len(description)) > t.mutationFileLimit() {
-		return "", 0, mutationBudgetError(t.mutationFileLimit())
-	}
-	// Find the function
-	var expression string
-	name := regexp.QuoteMeta(functionName)
-	switch language {
-	case "go":
-		expression = fmt.Sprintf(`(?m)^func\s+(?:\(\w+\s+\*?\w+\)\s+)?%s\s*\([^)]*\)`, name)
-	case "javascript":
-		expression = fmt.Sprintf(`(?m)^(?:export\s+)?(?:async\s+)?function\s+%s\s*\(`, name)
-	default:
-		return "", 0, fmt.Errorf("unsupported language: %s", language)
-	}
-
-	pattern, err := regexp.Compile(expression)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid function name: %w", err)
-	}
-	match := pattern.FindStringIndex(content)
-	if match == nil {
-		return "", 0, fmt.Errorf("function %s not found", functionName)
-	}
-
-	// Find line number
-	lineNum := strings.Count(content[:match[0]], "\n") + 1
-
-	// Extract function signature
-	signature, _, _ := strings.Cut(content[match[0]:], "\n")
-
-	// Generate appropriate docstring
-	var docstring string
-	switch language {
-	case "go":
-		docstring, err = t.generateGoDoc(functionName, signature, description)
-	case "javascript":
-		docstring, err = t.generateJSDoc(functionName, signature, description)
-	}
-
-	return docstring, lineNum, err
-}
-
-func (t *GenerateDocstringTool) generateGoDoc(functionName, signature, description string) (string, error) {
-	if description == "" {
-		description = fmt.Sprintf("%s TODO: add description", functionName)
-	}
-	doc := generatedText{limit: t.mutationFileLimit()}
-	doc.append("// ", description, "\n")
-	first := true
-	for param := range docParameters(signature, "go") {
-		if first {
-			doc.append("//\n")
-			first = false
-		}
-		if !doc.append("// ", param, ": TODO: describe parameter\n") {
-			return doc.result()
-		}
-	}
-	if t.extractGoReturnType(signature) != "" {
-		doc.append("//\n// Returns: TODO: describe return value\n")
-	}
-	text, err := doc.result()
-	return strings.TrimRight(text, "\n"), err
-}
-
-func (t *GenerateDocstringTool) generateJSDoc(functionName, signature, description string) (string, error) {
-	if description == "" {
-		description = "TODO: add description"
-	}
-	doc := generatedText{limit: t.mutationFileLimit()}
-	doc.append("/**\n * ", description, "\n")
-	first := true
-	for param := range docParameters(signature, "javascript") {
-		if first {
-			doc.append(" *\n")
-			first = false
-		}
-		if !doc.append(" * @param {*} ", param, " - TODO: describe parameter\n") {
-			return doc.result()
-		}
-	}
-	doc.append(" * @returns {*} TODO: describe return value\n */")
-	return doc.result()
-}
-
-func (t *GenerateDocstringTool) extractGoReturnType(signature string) string {
-	if _, after, ok := strings.Cut(signature, ")"); ok {
-		result := strings.TrimSpace(after)
-		if result != "" && result != "{" {
-			return result
-		}
-	}
-	return ""
-}
-
-func docParameters(signature, language string) iter.Seq[string] {
-	return func(yield func(string) bool) {
-		matches := parensContentRe.FindStringSubmatch(signature)
-		if len(matches) < 2 {
-			return
-		}
-		for param := range strings.SplitSeq(matches[1], ",") {
-			param = strings.TrimSpace(param)
-			if param == "" {
-				continue
-			}
-			switch language {
-			case "go":
-				for field := range strings.FieldsSeq(param) {
-					param = field
-					break
-				}
-			case "javascript":
-				param, _, _ = strings.Cut(param, "=")
-				param, _, _ = strings.Cut(param, ":")
-			}
-			if !yield(strings.TrimSpace(param)) {
-				return
-			}
-		}
 	}
 }

@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -11,6 +12,8 @@ import (
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
+
+var errNamedFunctionNotFound = errors.New("function not found")
 
 type explainSelection struct{ start, end int }
 
@@ -28,18 +31,12 @@ func selectExplainFunction(content, target, file string) (explainSelection, erro
 		return explainSelection{}, fmt.Errorf("unsupported function selection for %s; select lines instead", filepath.Ext(file))
 	}
 	language := entry.Language()
-	p := gotreesitter.NewParser(language)
-	p.SetTimeoutMicros(1_000_000)
-	tree, err := p.ParseStrict([]byte(content))
-	if tree != nil {
-		defer tree.Release()
-	}
+	p := newFunctionParser(language)
+	tree, err := parseFunctionTree(p, content)
 	if err != nil {
-		return explainSelection{}, fmt.Errorf("parse function source: %w", err)
+		return explainSelection{}, err
 	}
-	if tree.RootNode() == nil || tree.RootNode().HasError() {
-		return explainSelection{}, fmt.Errorf("function source is invalid or incomplete; select lines to inspect a fragment")
-	}
+	defer tree.Release()
 	node, err := findNamedTreeFunction(tree.RootNode(), language, content, target)
 	if err != nil {
 		return explainSelection{}, err
@@ -53,6 +50,14 @@ func selectExplainGoFunction(content, target, file string) (explainSelection, er
 	if err != nil {
 		return explainSelection{}, fmt.Errorf("parse Go function source: %w", err)
 	}
+	selected, err := findNamedGoFunction(source, target)
+	if err != nil {
+		return explainSelection{}, err
+	}
+	return explainSelection{fset.Position(selected.Pos()).Offset, fset.Position(selected.End()).Offset}, nil
+}
+
+func findNamedGoFunction(source *ast.File, target string) (*ast.FuncDecl, error) {
 	var selected *ast.FuncDecl
 	for _, declaration := range source.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
@@ -82,14 +87,14 @@ func selectExplainGoFunction(content, target, file string) (explainSelection, er
 			continue
 		}
 		if selected != nil {
-			return explainSelection{}, fmt.Errorf("function %s is ambiguous; use a qualified name such as Class.method", target)
+			return nil, fmt.Errorf("function %s is ambiguous; use a qualified name such as Class.method", target)
 		}
 		selected = fn
 	}
 	if selected == nil {
-		return explainSelection{}, fmt.Errorf("function %s not found", target)
+		return nil, fmt.Errorf("%w: %s", errNamedFunctionNotFound, target)
 	}
-	return explainSelection{fset.Position(selected.Pos()).Offset, fset.Position(selected.End()).Offset}, nil
+	return selected, nil
 }
 
 func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Language, content, target string) (*gotreesitter.Node, error) {
@@ -108,14 +113,7 @@ func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Langu
 			return gotreesitter.WalkContinue
 		}
 		if qualified {
-			for parent := node.Parent(); parent != nil; parent = parent.Parent() {
-				switch parent.Type(language) {
-				case "function_definition", "class_definition", "function_declaration", "generator_function_declaration", "function_expression", "generator_function", "arrow_function", "method_definition", "class_declaration", "class", "object", "internal_module":
-					if prefix := treeFunctionName(parent, language, content); prefix != "" {
-						name = prefix + "." + name
-					}
-				}
-			}
+			name = qualifiedTreeFunctionName(node, language, content)
 		}
 		if name == target {
 			selected = node
@@ -127,7 +125,7 @@ func findNamedTreeFunction(root *gotreesitter.Node, language *gotreesitter.Langu
 		return gotreesitter.WalkContinue
 	})
 	if matches == 0 {
-		return nil, fmt.Errorf("function %s not found", target)
+		return nil, fmt.Errorf("%w: %s", errNamedFunctionNotFound, target)
 	}
 	if matches > 1 {
 		return nil, fmt.Errorf("function %s is ambiguous; use a qualified name such as Class.method", target)
@@ -161,4 +159,38 @@ func treeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, 
 		return content[name.StartByte():name.EndByte()]
 	}
 	return ""
+}
+
+func newFunctionParser(language *gotreesitter.Language) *gotreesitter.Parser {
+	p := gotreesitter.NewParser(language)
+	p.SetTimeoutMicros(1_000_000)
+	return p
+}
+
+func parseFunctionTree(p *gotreesitter.Parser, content string) (*gotreesitter.Tree, error) {
+	tree, err := p.ParseStrict([]byte(content))
+	if err != nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, fmt.Errorf("parse function source: %w", err)
+	}
+	if tree.RootNode() == nil || tree.RootNode().HasError() {
+		tree.Release()
+		return nil, fmt.Errorf("function source is invalid or incomplete")
+	}
+	return tree, nil
+}
+
+func qualifiedTreeFunctionName(node *gotreesitter.Node, language *gotreesitter.Language, content string) string {
+	name := treeFunctionName(node, language, content)
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.Type(language) {
+		case "function_definition", "class_definition", "function_declaration", "generator_function_declaration", "function_expression", "generator_function", "arrow_function", "method_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module", "interface_declaration", "type_alias_declaration":
+			if prefix := treeFunctionName(parent, language, content); prefix != "" {
+				name = prefix + "." + name
+			}
+		}
+	}
+	return name
 }
