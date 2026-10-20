@@ -240,96 +240,6 @@ func gitPageNumber(name string, value any, minimum, maximum int64) (int64, error
 	return number, nil
 }
 
-// GitBlameTool shows git blame
-type GitBlameTool struct{ workDirAware }
-
-func (t *GitBlameTool) Name() string {
-	return "git_blame"
-}
-
-func (t *GitBlameTool) Description() string {
-	return "Show line-by-line authorship for a file: commit hash, author, date, and content."
-}
-
-func (t *GitBlameTool) Parameters() ParameterSchema {
-	return ParameterSchema{
-		Type: "object",
-		Properties: map[string]PropertySchema{
-			"file": {
-				Type:        "string",
-				Description: "File to show blame for",
-			},
-			"path": {
-				Type:        "string",
-				Description: "Alias for file (compatibility)",
-			},
-			"repo_path": {
-				Type:        "string",
-				Description: "Repository or directory path to run git blame in (default: current workdir)",
-			},
-		},
-		Required: []string{},
-	}
-}
-
-func (t *GitBlameTool) Execute(params map[string]any) (*Result, error) {
-	file, ok := params["file"].(string)
-	if !ok || strings.TrimSpace(file) == "" {
-		file, ok = params["path"].(string)
-	}
-	if !ok {
-		return &Result{
-			Success: false,
-			Error:   "file parameter required",
-		}, nil
-	}
-
-	dir, err := gitCommandDir(t.workDir, map[string]any{"repo_path": params["repo_path"]})
-	if err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
-	}
-
-	if strings.TrimSpace(dir) != "" {
-		_, rel, err := resolveRelPath(dir, file)
-		if err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
-		file = rel
-	}
-
-	ctx, cancel := t.execContext()
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "blame", file)
-	if strings.TrimSpace(dir) != "" {
-		cmd.Dir = strings.TrimSpace(dir)
-	}
-	cmd.Env = mergeEnv(cmd.Env, t.env)
-	output, err := cmd.CombinedOutput()
-
-	if ctx.Err() != nil {
-		return &Result{
-			Success: false,
-			Error:   "git command timed out",
-		}, nil
-	}
-
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   formatGitFailure(err, string(output)),
-		}, nil
-	}
-
-	return &Result{
-		Success: true,
-		Data: map[string]any{
-			"file":  file,
-			"blame": string(output),
-		},
-	}, nil
-}
-
 func gitCommandDir(workDir string, params map[string]any) (string, error) {
 	dir := strings.TrimSpace(workDir)
 	raw, _ := params["repo_path"].(string)
@@ -354,4 +264,12 @@ func formatGitFailure(err error, output string) string {
 		return message
 	}
 	return message + ": " + output
+}
+
+func validGitCommitID(id string) bool {
+	if len(id) != 40 && len(id) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
 }
