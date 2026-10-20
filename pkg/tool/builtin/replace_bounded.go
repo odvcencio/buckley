@@ -40,8 +40,17 @@ func (s *regexpScan) next() []int {
 		} else {
 			_, width := utf8.DecodeLastRuneInString(s.input[:s.position])
 			base := s.position - width
-			if found := s.continuation.FindStringSubmatchIndex(s.input[base:]); found != nil {
-				match = found[2:]
+			found := s.re.FindStringSubmatchIndex(s.input[base:])
+			// Matches after the preceding rune already have the original
+			// boundary context. Only a match on that rune needs the fallback.
+			if found != nil && found[0] < width {
+				found = s.continuation.FindStringSubmatchIndex(s.input[base:])
+				if found != nil {
+					found = found[2:]
+				}
+			}
+			if found != nil {
+				match = found
 				for i, index := range match {
 					if index >= 0 {
 						match[i] += base
@@ -137,6 +146,10 @@ func replacementParts(re *regexp.Regexp, template string) []replacementPart {
 }
 
 func replaceRegexpBounded(re *regexp.Regexp, input, replacement string, maxReplacements int, limit int64) (string, int, error) {
+	return replaceRegexpBoundedMode(re, input, replacement, maxReplacements, limit, false)
+}
+
+func replaceRegexpBoundedMode(re *regexp.Regexp, input, replacement string, maxReplacements int, limit int64, dryRun bool) (string, int, error) {
 	scan, err := newRegexpScan(re, input)
 	if err != nil {
 		return "", 0, err
@@ -174,6 +187,9 @@ func replaceRegexpBounded(re *regexp.Regexp, input, replacement string, maxRepla
 	remaining := int64(len(input)) - removed
 	if remaining > limit-inserted {
 		return "", 0, mutationBudgetError(limit)
+	}
+	if dryRun {
+		return input, count, nil
 	}
 	size := remaining + inserted
 	var output strings.Builder
