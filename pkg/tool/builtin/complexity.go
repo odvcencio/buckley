@@ -7,8 +7,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -22,7 +20,7 @@ import (
 const (
 	DefaultComplexityOutputBytes = 8 << 10
 	DefaultComplexityFunctions   = 20
-	DefaultComplexityEntries     = 10000
+	DefaultComplexityEntries     = DefaultAnalysisEntries
 )
 
 // AnalyzeComplexityTool estimates decisions in parsed functions without external programs.
@@ -86,8 +84,8 @@ func (t *AnalyzeComplexityTool) ExecuteWithContext(parent context.Context, param
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
-	analysis := complexityAnalysis{ctx: ctx, threshold: threshold, remaining: t.mutationFileLimit(), functions: make([]complexityFunction, 0, DefaultComplexityFunctions)}
-	err = analysis.scan(path, language, 0)
+	analysis := complexityAnalysis{sourceScan: sourceScan{ctx: ctx, remaining: t.mutationFileLimit()}, threshold: threshold, functions: make([]complexityFunction, 0, DefaultComplexityFunctions)}
+	err = analysis.scan(path, language)
 	if err != nil {
 		message := err.Error()
 		// Parser diagnostics can include an entire malformed source token.
@@ -142,10 +140,9 @@ type complexityFunction struct {
 	line, complexity int
 }
 type complexityAnalysis struct {
-	ctx                                       context.Context
-	threshold, entries, files, total, complex int
-	remaining                                 int64
-	functions                                 []complexityFunction
+	sourceScan
+	threshold, total, complex int
+	functions                 []complexityFunction
 }
 
 func (a *complexityAnalysis) record(fn complexityFunction) error {
@@ -198,23 +195,19 @@ func complexityLanguage(path string) (language, grammarFile string) {
 	return "", ""
 }
 
-func (a *complexityAnalysis) scan(path, filter string, depth int) error {
-	if err := a.ctx.Err(); err != nil {
-		return err
-	}
-	if depth > 64 {
-		return fmt.Errorf("directory depth exceeds 64; narrow the path")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("%s: analysis requires a regular file", path)
+func (a *complexityAnalysis) scan(path, filter string) error {
+	return a.sourceScan.scan(path, 0, func(file string, root bool) (bool, error) {
+		language, _ := complexityLanguage(file)
+		if root && filter != "" {
+			return true, nil
 		}
-		language, grammar := complexityLanguage(path)
-		if depth == 0 && filter != "" {
+		if root && language == "" {
+			return false, fmt.Errorf("unsupported source file %s", file)
+		}
+		return language != "" && (filter == "" || language == filter), nil
+	}, func(file, source string) error {
+		language, grammar := complexityLanguage(file)
+		if file == path && filter != "" {
 			language = filter
 			switch filter {
 			case "python":
@@ -226,64 +219,12 @@ func (a *complexityAnalysis) scan(path, filter string, depth int) error {
 					grammar = "source.ts"
 				}
 			}
-		} else if filter != "" && language != filter {
-			return nil
 		}
-		if language == "" {
-			if depth > 0 {
-				return nil
-			}
-			return fmt.Errorf("unsupported source file %s", path)
-		}
-		source, _, exceeded, err := readFileSnapshot(path, a.remaining)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", path, err)
-		}
-		if exceeded {
-			return fmt.Errorf("source byte budget exceeded at %s; narrow the path", path)
-		}
-		a.remaining -= int64(len(source))
-		a.files++
 		if language == "go" {
-			return a.goFile(path, source)
+			return a.goFile(file, source)
 		}
-		return a.treeFile(path, source, grammar)
-	}
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	for {
-		entries, err := dir.ReadDir(directoryReadBatch)
-		for _, entry := range entries {
-			a.entries++
-			if a.entries > DefaultComplexityEntries {
-				return fmt.Errorf("traversal exceeds %d entries; narrow the path", DefaultComplexityEntries)
-			}
-			if err := a.ctx.Err(); err != nil {
-				return err
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				continue
-			}
-			if entry.IsDir() {
-				switch entry.Name() {
-				case ".git", "node_modules", "vendor", ".venv", "venv", "__pycache__":
-					continue
-				}
-			}
-			if err := a.scan(filepath.Join(path, entry.Name()), filter, depth+1); err != nil {
-				return err
-			}
-		}
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
+		return a.treeFile(file, source, grammar)
+	})
 }
 
 func (a *complexityAnalysis) goFile(path, source string) error {
