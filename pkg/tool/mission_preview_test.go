@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,8 @@ func TestApprovalMiddleware_FilePreviewMatchesExecution(t *testing.T) {
 	}{
 		{"newline-only", "old", "old\n", &builtin.WriteFileTool{}, map[string]any{"content": "old\n"}},
 		{"write-relative", "old", "new", &builtin.WriteFileTool{}, map[string]any{"content": "new"}},
+		{"literal-path", "old", "new", &builtin.WriteFileTool{}, map[string]any{"content": "new"}},
+		{"literal-whitespace", "old", "new", &builtin.WriteFileTool{}, map[string]any{"content": "new"}},
 		{"batch-placeholders", "alpha beta", "FIRST SECOND", &builtin.EditFileTool{}, map[string]any{"old_string": "", "new_string": "", "replace_all": false, "edits": []any{map[string]any{"old_string": "alpha", "new_string": "FIRST"}, map[string]any{"old_string": "beta", "new_string": "SECOND"}}}},
 		{"insert-int", "alpha\nomega", "alpha\nbeta\nomega", &builtin.InsertTextTool{}, map[string]any{"line": 2, "text": "beta"}},
 		{"delete-int", "a\nb\nc", "a\nc", &builtin.DeleteLinesTool{}, map[string]any{"start_line": 2, "end_line": 2}},
@@ -39,7 +42,17 @@ func TestApprovalMiddleware_FilePreviewMatchesExecution(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Chdir(other)
-			path := filepath.Join(project, "note.txt")
+			name := "note.txt"
+			if tc.name == "literal-path" || tc.name == "literal-whitespace" {
+				if runtime.GOOS == "windows" {
+					t.Skip("POSIX whitespace path")
+				}
+				name = "note.txt "
+				if tc.name == "literal-whitespace" {
+					name = "   "
+				}
+			}
+			path := filepath.Join(project, name)
 			if err := os.WriteFile(path, []byte(tc.before), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -57,7 +70,7 @@ func TestApprovalMiddleware_FilePreviewMatchesExecution(t *testing.T) {
 			registry.SetWorkDir(project)
 			registry.EnableMissionControl(missions, "agent", true, 3*time.Second)
 			registry.UpdateMissionSession("preview")
-			tc.params["path"] = "note.txt"
+			tc.params["path"] = name
 			done := make(chan struct{})
 			var result *builtin.Result
 			var execErr error

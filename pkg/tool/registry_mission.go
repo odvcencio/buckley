@@ -94,7 +94,7 @@ func (r *Registry) shouldGateChanges() bool {
 func (r *Registry) executeWithMissionWrite(ctx context.Context, tool Tool, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	params = cloneApprovalParams(params)
 	path, ok := params["path"].(string)
-	if !ok || strings.TrimSpace(path) == "" {
+	if !ok || path == "" {
 		return &builtin.Result{Error: "path parameter is required"}, nil
 	}
 	absPath, err := filepath.Abs(path)

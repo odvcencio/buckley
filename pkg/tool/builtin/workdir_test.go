@@ -152,7 +152,9 @@ func TestIsWithinDir(t *testing.T) {
 		{name: "parent escape", base: "/foo/bar", target: "/foo", want: false},
 		{name: "sibling escape", base: "/foo", target: "/bar", want: false},
 		{name: "dotdot escape", base: "/foo", target: "/foo/../bar", want: false},
-		{name: "whitespace trimmed", base: "  /foo  ", target: "  /foo/bar  ", want: true},
+		{name: "literal whitespace directory", base: "/foo ", target: "/foo /bar", want: true},
+		{name: "trailing whitespace sibling", base: "/foo", target: "/foo /bar", want: false},
+		{name: "trimmed directory is distinct", base: "/foo ", target: "/foo", want: false},
 	}
 
 	for _, tc := range tests {
@@ -183,10 +185,11 @@ func TestResolvePath(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "whitespace raw path",
-			workDir: tmpDir,
-			raw:     "   ",
-			wantErr: true,
+			name:      "literal whitespace raw path",
+			workDir:   tmpDir,
+			raw:       "   ",
+			wantAbs:   true,
+			checkPath: filepath.Join(tmpDir, "   "),
 		},
 		{
 			name:    "relative path within workDir",
@@ -235,6 +238,9 @@ func TestResolvePath(t *testing.T) {
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 				return
+			}
+			if tc.checkPath != "" && got != tc.checkPath {
+				t.Errorf("resolved path = %q, want %q", got, tc.checkPath)
 			}
 			if tc.wantAbs && !filepath.IsAbs(got) {
 				t.Errorf("expected absolute path, got %q", got)
@@ -287,8 +293,8 @@ func TestEvalSymlinksFallback(t *testing.T) {
 
 	t.Run("whitespace path", func(t *testing.T) {
 		got := evalSymlinksFallback("   ")
-		if got != "" {
-			t.Errorf("expected empty, got %q", got)
+		if got != "   " {
+			t.Errorf("literal whitespace changed: %q", got)
 		}
 	})
 
@@ -318,8 +324,8 @@ func TestEvalSymlinksFallbackForTarget(t *testing.T) {
 
 	t.Run("whitespace path", func(t *testing.T) {
 		got := evalSymlinksFallbackForTarget("   ")
-		if got != "" {
-			t.Errorf("expected empty, got %q", got)
+		if got != "   " {
+			t.Errorf("literal whitespace changed: %q", got)
 		}
 	})
 

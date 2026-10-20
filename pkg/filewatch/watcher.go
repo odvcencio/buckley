@@ -70,7 +70,7 @@ func (fw *FileWatcher) Subscribe(pattern string, handler FileChangeHandler) stri
 	id := ulid.Make().String()
 	sub := &Subscription{
 		ID:      id,
-		Pattern: strings.TrimSpace(pattern),
+		Pattern: pattern,
 		Handler: handler,
 	}
 	fw.mu.Lock()
@@ -143,11 +143,10 @@ func (fw *FileWatcher) ensureHistoryLocked() {
 }
 
 func matchesPattern(pattern, filePath string) bool {
-	pattern = strings.TrimSpace(pattern)
 	if pattern == "" || pattern == "*" {
 		return true
 	}
-	cleanPath := filepath.ToSlash(strings.TrimSpace(filePath))
+	cleanPath := filepath.ToSlash(filePath)
 	cleanPattern := filepath.ToSlash(pattern)
 	if ok, _ := path.Match(cleanPattern, cleanPath); ok {
 		return true

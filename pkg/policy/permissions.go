@@ -146,7 +146,7 @@ func ruleMatches(req PermissionRequest, rule PermissionRule) bool {
 	if rule.CommandClass != "" && !strings.EqualFold(rule.CommandClass, req.CommandClass) {
 		return false
 	}
-	if strings.TrimSpace(rule.ArgPattern) == "" {
+	if rule.ArgPattern == "" || (!isPathCategory(req.Category) && strings.TrimSpace(rule.ArgPattern) == "") {
 		if rule.Action == PermissionAllow && shellRequestHasControlText(req) {
 			return false
 		}
@@ -222,8 +222,8 @@ func isPathCategory(category string) bool {
 // the path are split on "/" and matched segment by segment; "**" consumes
 // zero or more path segments.
 func matchGlobPath(pattern, path string) bool {
-	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
-	path = filepath.ToSlash(strings.TrimSpace(path))
+	pattern = filepath.ToSlash(pattern)
+	path = filepath.ToSlash(path)
 	if pattern == "" || path == "" {
 		return false
 	}
