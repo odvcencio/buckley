@@ -166,13 +166,6 @@ func (g *goTestStream) finish(output string) goTestReport {
 	return r
 }
 
-// Retained evidence is bounded even when the caller already owns a raw transcript.
-func parseGoTestOutput(raw string) goTestReport {
-	stream := testStream{framework: "go", goReport: &goTestStream{}}
-	_, _ = stream.Write([]byte(raw))
-	stream.finish()
-	return stream.goReport.finish(stream.text.String())
-}
 func truncateString(value string, max int) string {
 	if max <= 0 || len(value) <= max {
 		return value

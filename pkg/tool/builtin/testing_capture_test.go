@@ -13,6 +13,13 @@ import (
 	"unicode/utf8"
 )
 
+func parseGoTestOutput(raw string) goTestReport {
+	stream := testStream{framework: "go", goReport: &goTestStream{}}
+	_, _ = stream.Write([]byte(raw))
+	stream.finish()
+	return stream.goReport.finish(stream.text.String())
+}
+
 func TestTestStream_FailureOutsideExcerpt(t *testing.T) {
 	for _, framework := range []string{"jest", "pytest"} {
 		t.Run(framework, func(t *testing.T) {
