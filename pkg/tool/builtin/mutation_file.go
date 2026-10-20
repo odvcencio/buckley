@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strings"
 )
 
 // DefaultMutationFileBytes bounds whole-file mutations when no file policy is set.
@@ -20,6 +21,18 @@ func (w *workDirAware) mutationFileLimit() int64 {
 
 func mutationBudgetError(limit int64) error {
 	return fmt.Errorf("file too large to edit: input or replacement exceeds %d bytes", limit)
+}
+
+func mutationLineOffset(content string, line int) int {
+	offset := 0
+	for i := 1; i < line; i++ {
+		end := strings.IndexByte(content[offset:], '\n')
+		if end < 0 {
+			return len(content)
+		}
+		offset += end + 1
+	}
+	return offset
 }
 
 func writeMutationFile(path, content string, perm os.FileMode) error {
