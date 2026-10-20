@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -123,7 +122,7 @@ func sourceScopePageParams(params map[string]any, selected *agentcoord.SourceFil
 	}{{"start_line", selected.StartLine}, {"end_line", selected.EndLine}} {
 		line := selector.fallback
 		if value, present := params[selector.name]; present {
-			parsed, err := readFileLineNumber(selector.name, value)
+			parsed, err := positiveIntParameter(selector.name, value)
 			if err != nil {
 				return nil, err
 			}
@@ -415,7 +414,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 	startLine = 1
 	if value, ok := params["start_line"]; ok {
 		explicitPage = true
-		startLine, err = readFileLineNumber("start_line", value)
+		startLine, err = positiveIntParameter("start_line", value)
 		if err != nil {
 			return 0, 0, false, err
 		}
@@ -425,7 +424,7 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 	endLine = pageEnd
 	if value, ok := params["end_line"]; ok {
 		explicitPage = true
-		endLine, err = readFileLineNumber("end_line", value)
+		endLine, err = positiveIntParameter("end_line", value)
 		if err != nil {
 			return 0, 0, false, err
 		}
@@ -449,39 +448,6 @@ func readFilePage(params map[string]any, totalLines int) (startLine, endLine int
 		endLine = totalLines
 	}
 	return startLine, endLine, explicitPage, nil
-}
-
-func readFileLineNumber(name string, value any) (int, error) {
-	const positiveIntegerError = "%s parameter must be a positive integer"
-	var number float64
-	switch typed := value.(type) {
-	case float64:
-		number = typed
-	case float32:
-		number = float64(typed)
-	case int:
-		if typed < 1 {
-			return 0, fmt.Errorf(positiveIntegerError, name)
-		}
-		return typed, nil
-	case int64:
-		if typed < 1 || typed > int64(math.MaxInt) {
-			return 0, fmt.Errorf(positiveIntegerError, name)
-		}
-		return int(typed), nil
-	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil || parsed < 1 || parsed > int64(math.MaxInt) {
-			return 0, fmt.Errorf(positiveIntegerError, name)
-		}
-		return int(parsed), nil
-	default:
-		return 0, fmt.Errorf(positiveIntegerError, name)
-	}
-	if number < 1 || math.Trunc(number) != number || number >= math.Ldexp(1, strconv.IntSize-1) {
-		return 0, fmt.Errorf(positiveIntegerError, name)
-	}
-	return int(number), nil
 }
 
 // WriteFileTool writes content to a file
@@ -607,77 +573,6 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 
 	attachPostEditDiagnostics(result, absPath)
 	return result, nil
-}
-
-// ListDirectoryTool lists files in a directory
-type ListDirectoryTool struct{ workDirAware }
-
-func (t *ListDirectoryTool) Name() string {
-	return "list_directory"
-}
-
-func (t *ListDirectoryTool) Description() string {
-	return "List files and directories at a path. Returns name, type, and size for each entry."
-}
-
-func (t *ListDirectoryTool) Parameters() ParameterSchema {
-	return ParameterSchema{
-		Type: "object",
-		Properties: map[string]PropertySchema{
-			"path": {
-				Type:        "string",
-				Description: "Path to the directory to list",
-				Default:     ".",
-			},
-		},
-		Required: []string{},
-	}
-}
-
-func (t *ListDirectoryTool) Execute(params map[string]any) (*Result, error) {
-	path := "."
-	if p, ok := params["path"].(string); ok {
-		path = p
-	}
-
-	absPath, err := resolvePath(t.workDir, path)
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   err.Error(),
-		}, nil
-	}
-
-	entries, err := os.ReadDir(absPath)
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read directory: %v", err),
-		}, nil
-	}
-
-	files := []map[string]any{}
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-
-		files = append(files, map[string]any{
-			"name":   entry.Name(),
-			"is_dir": entry.IsDir(),
-			"size":   info.Size(),
-		})
-	}
-
-	return &Result{
-		Success: true,
-		Data: map[string]any{
-			"path":  absPath,
-			"files": files,
-			"count": len(files),
-		},
-	}, nil
 }
 
 // PatchFileTool applies a unified diff patch to the repository

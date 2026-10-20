@@ -31,26 +31,26 @@ func TestReadFileToolRejectsOverflowingLineNumbers(t *testing.T) {
 	}
 }
 
-func TestReadFileLineNumberPreservesIntegerBounds(t *testing.T) {
+func TestPositiveIntParameter_PreservesIntegerBounds(t *testing.T) {
 	for _, value := range []any{1, int64(1), float64(1), float32(1), json.Number("1")} {
-		if got, err := readFileLineNumber("start_line", value); err != nil || got != 1 {
+		if got, err := positiveIntParameter("start_line", value); err != nil || got != 1 {
 			t.Fatalf("valid small %T(%v) decoded as %d, err=%v", value, value, got, err)
 		}
 	}
 	belowLimit := math.Nextafter(math.Ldexp(1, strconv.IntSize-1), 0)
 	if math.Trunc(belowLimit) == belowLimit {
-		if got, err := readFileLineNumber("start_line", belowLimit); err != nil || got != int(belowLimit) {
+		if got, err := positiveIntParameter("start_line", belowLimit); err != nil || got != int(belowLimit) {
 			t.Fatalf("representable boundary decoded as %d, err=%v", got, err)
 		}
 	}
 	for _, value := range []any{int(math.MaxInt), int64(math.MaxInt), json.Number(strconv.FormatInt(int64(math.MaxInt), 10))} {
-		got, err := readFileLineNumber("end_line", value)
+		got, err := positiveIntParameter("end_line", value)
 		if err != nil || got != math.MaxInt {
 			t.Fatalf("%T(%v) decoded as %d, err=%v", value, value, got, err)
 		}
 	}
 	for _, value := range []any{math.Ldexp(1, strconv.IntSize-1), float32(math.Inf(1)), math.NaN(), 0, -1, int64(-1), json.Number("9223372036854775808"), json.Number("1.5")} {
-		if got, err := readFileLineNumber("start_line", value); err == nil {
+		if got, err := positiveIntParameter("start_line", value); err == nil {
 			t.Fatalf("accepted invalid %T(%v) as %d", value, value, got)
 		}
 	}

@@ -320,11 +320,11 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	startLine, err := readFileLineNumber("start_line", params["start_line"])
+	startLine, err := positiveIntParameter("start_line", params["start_line"])
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
-	endLine, err := readFileLineNumber("end_line", params["end_line"])
+	endLine, err := positiveIntParameter("end_line", params["end_line"])
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
@@ -333,7 +333,7 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 	}
 	insertLine := startLine
 	if value, present := params["insert_before_line"]; present {
-		insertLine, err = readFileLineNumber("insert_before_line", value)
+		insertLine, err = positiveIntParameter("insert_before_line", value)
 		if err != nil {
 			return &Result{Error: err.Error()}, nil
 		}
