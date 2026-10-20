@@ -152,8 +152,13 @@ func BinarySearch(arr []int, target int) int {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// May succeed or fail depending on implementation
-		_ = result
+		if !result.Success {
+			t.Fatalf("explain: %+v", result)
+		}
+		analysis := result.Data["explanation"].(map[string]any)
+		if analysis["has_loops"] != true || analysis["has_conditions"] != true {
+			t.Fatalf("missing control-flow indicators: %+v", analysis)
+		}
 	})
 
 	t.Run("explain specific lines", func(t *testing.T) {
@@ -172,7 +177,9 @@ func BinarySearch(arr []int, target int) int {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		_ = result
+		if !result.Success || result.Data["code"] != "line2\nline3\nline4" {
+			t.Fatalf("wrong line selection: %+v", result)
+		}
 	})
 
 	t.Run("nonexistent file", func(t *testing.T) {

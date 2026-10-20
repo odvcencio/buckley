@@ -43,38 +43,9 @@ func (t *GenerateDocstringTool) pythonDocstringEdit(parser *gotreesitter.Parser,
 	}
 	defer tree.Release()
 	language := grammars.PythonLanguage()
-	var target *gotreesitter.Node
-	matches := 0
-	qualified := strings.Contains(functionName, ".")
-	gotreesitter.Walk(tree.RootNode(), func(node *gotreesitter.Node, depth int) gotreesitter.WalkAction {
-		if node.Type(language) != "function_definition" {
-			return gotreesitter.WalkContinue
-		}
-		name := node.ChildByFieldName("name", language)
-		candidate := content[name.StartByte():name.EndByte()]
-		if qualified {
-			for parent := node.Parent(); parent != nil; parent = parent.Parent() {
-				switch parent.Type(language) {
-				case "function_definition", "class_definition":
-					name := parent.ChildByFieldName("name", language)
-					candidate = content[name.StartByte():name.EndByte()] + "." + candidate
-				}
-			}
-		}
-		if candidate == functionName {
-			target = node
-			matches++
-			if matches > 1 {
-				return gotreesitter.WalkStop
-			}
-		}
-		return gotreesitter.WalkContinue
-	})
-	if matches == 0 {
-		return edit, fmt.Errorf("function %s not found", functionName)
-	}
-	if matches > 1 {
-		return edit, fmt.Errorf("function %s is ambiguous; use a qualified name such as Class.method", functionName)
+	target, err := findNamedTreeFunction(tree.RootNode(), language, content, functionName)
+	if err != nil {
+		return edit, err
 	}
 	body := target.ChildByFieldName("body", language)
 	if body == nil || body.NamedChildCount() == 0 {
