@@ -78,6 +78,11 @@ func (w *workDirAware) execContextWithParent(parent context.Context) (context.Co
 	return context.WithTimeout(parent, w.maxExecTime)
 }
 
+// FileMutationLimit reports the effective whole-file mutation budget.
+func (w *workDirAware) FileMutationLimit() int64 {
+	return w.mutationFileLimit()
+}
+
 // ResolvePath applies the same workspace fence used during execution.
 func (w *workDirAware) ResolvePath(raw string) (string, error) {
 	return resolvePath(w.workDir, raw)
