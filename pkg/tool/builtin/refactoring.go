@@ -3,7 +3,6 @@ package builtin
 import (
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -280,7 +279,7 @@ func (t *ExtractFunctionTool) Name() string {
 }
 
 func (t *ExtractFunctionTool) Description() string {
-	return "Extract selected code into a new function, inferring parameters and return values from variable usage."
+	return "Extract complete, self-contained statements into a zero-argument helper. Go defaults to a local closure that captures outer locals and validates scope and syntax before writing. Parameters and returns are not inferred; use edit_file for unsupported control flow or declarations needed outside the selection."
 }
 
 func (t *ExtractFunctionTool) Parameters() ParameterSchema {
@@ -305,7 +304,7 @@ func (t *ExtractFunctionTool) Parameters() ParameterSchema {
 			},
 			"insert_before_line": {
 				Type:        "integer",
-				Description: "Optional: line number to insert new function before (default: before start_line)",
+				Description: "Optional: insertion line at or before start_line. Defaults to start_line; Go uses a local closure. An explicit earlier Go insertion creates a top-level helper and requires self-contained statements.",
 			},
 		},
 		Required: []string{"file", "start_line", "end_line", "function_name"},
@@ -321,20 +320,26 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	startLine, ok := params["start_line"].(float64)
-	if !ok || startLine < 1 {
-		return &Result{
-			Success: false,
-			Error:   "start_line must be a positive integer",
-		}, nil
+	startLine, err := readFileLineNumber("start_line", params["start_line"])
+	if err != nil {
+		return &Result{Error: err.Error()}, nil
 	}
-
-	endLine, ok := params["end_line"].(float64)
-	if !ok || endLine < startLine {
-		return &Result{
-			Success: false,
-			Error:   "end_line must be >= start_line",
-		}, nil
+	endLine, err := readFileLineNumber("end_line", params["end_line"])
+	if err != nil {
+		return &Result{Error: err.Error()}, nil
+	}
+	if endLine < startLine {
+		return &Result{Error: "end_line must be >= start_line"}, nil
+	}
+	insertLine := startLine
+	if value, present := params["insert_before_line"]; present {
+		insertLine, err = readFileLineNumber("insert_before_line", value)
+		if err != nil {
+			return &Result{Error: err.Error()}, nil
+		}
+		if insertLine > startLine {
+			return &Result{Error: "insert_before_line must be at or before start_line"}, nil
+		}
 	}
 
 	functionName, ok := params["function_name"].(string)
@@ -345,6 +350,10 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	if int64(len(functionName)) > t.mutationFileLimit() {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
+	}
+
 	if strings.TrimSpace(t.workDir) != "" {
 		abs, err := resolvePath(t.workDir, filepath)
 		if err != nil {
@@ -353,72 +362,65 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 		filepath = abs
 	}
 
-	// Read the file
-	content, err := os.ReadFile(filepath)
+	content, err := t.readMutationFile(filepath)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read file: %v", err),
-		}, nil
+		return &Result{Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
-
-	lines := strings.Split(string(content), "\n")
-	if int(startLine) > len(lines) || int(endLine) > len(lines) {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("line numbers out of range (file has %d lines)", len(lines)),
-		}, nil
+	totalLines := strings.Count(content, "\n") + 1
+	if startLine > totalLines || endLine > totalLines {
+		return &Result{Error: fmt.Sprintf("line numbers out of range (file has %d lines)", totalLines)}, nil
 	}
-
-	// Extract the code block
-	extractedLines := lines[int(startLine)-1 : int(endLine)]
-	extractedCode := strings.Join(extractedLines, "\n")
-
-	// Detect language and generate function
-	var newFunction string
-	var functionCall string
-
+	start := mutationLineOffset(content, startLine)
+	end := len(content)
+	if endLine < totalLines {
+		end = mutationLineOffset(content, endLine+1)
+	}
+	insert := mutationLineOffset(content, insertLine)
+	extractedCode := strings.TrimSuffix(content[start:end], "\n")
+	if strings.TrimSpace(extractedCode) == "" {
+		return &Result{Error: "select at least one complete statement"}, nil
+	}
+	firstLine := ""
+	for line := range strings.SplitSeq(extractedCode, "\n") {
+		if strings.TrimSpace(line) != "" {
+			firstLine = line
+			break
+		}
+	}
+	indentation := t.detectIndentation(firstLine)
+	var newFunction, functionCall string
 	if strings.HasSuffix(filepath, ".go") {
-		newFunction, functionCall = t.generateGoFunction(functionName, extractedCode, extractedLines)
+		newFunction, functionCall, err = prepareGoExtraction(filepath, content, extractedCode, functionName, start, end, insert)
+		if err != nil {
+			return &Result{Error: err.Error()}, nil
+		}
 	} else if strings.HasSuffix(filepath, ".js") || strings.HasSuffix(filepath, ".ts") {
 		newFunction, functionCall = t.generateJSFunction(functionName, extractedCode)
 	} else if strings.HasSuffix(filepath, ".py") {
-		newFunction, functionCall = t.generatePythonFunction(functionName, extractedCode, extractedLines)
+		newFunction, functionCall, err = t.generatePythonFunction(functionName, extractedCode, indentation, insert, start, content)
+		if err != nil {
+			return &Result{Error: err.Error()}, nil
+		}
 	} else {
-		// Generic extraction
 		newFunction = fmt.Sprintf("function %s() {\n%s\n}", functionName, extractedCode)
 		functionCall = fmt.Sprintf("%s()", functionName)
 	}
-
-	// Determine where to insert the new function
-	insertLine := int(startLine) - 1
-	if ibl, ok := params["insert_before_line"].(float64); ok && ibl > 0 {
-		insertLine = int(ibl) - 1
+	call := indentation + functionCall
+	if strings.HasSuffix(content[start:end], "\n") {
+		call += "\n"
 	}
-
-	// Build new file content
-	newLines := []string{}
-
-	// Lines before insertion point
-	newLines = append(newLines, lines[:insertLine]...)
-
-	// New function
-	newLines = append(newLines, newFunction)
-	newLines = append(newLines, "")
-
-	// Lines between insertion point and extracted code
-	if insertLine < int(startLine)-1 {
-		newLines = append(newLines, lines[insertLine:int(startLine)-1]...)
+	if err := t.checkReplacementGrowth(len(content), end-start, len(newFunction)+2+len(call), 1); err != nil {
+		return &Result{Error: err.Error()}, nil
 	}
-
-	// Function call replacing extracted code
-	indentation := t.detectIndentation(extractedLines[0])
-	newLines = append(newLines, indentation+functionCall)
-
-	// Lines after extracted code
-	newLines = append(newLines, lines[int(endLine):]...)
-
-	newContent := strings.Join(newLines, "\n")
+	var output strings.Builder
+	output.Grow(len(content) - (end - start) + len(newFunction) + 2 + len(call))
+	output.WriteString(content[:insert])
+	output.WriteString(newFunction)
+	output.WriteString("\n\n")
+	output.WriteString(content[insert:start])
+	output.WriteString(call)
+	output.WriteString(content[end:])
+	newContent := output.String()
 
 	// Write the modified file
 	if err := writeMutationFile(filepath, newContent, 0644); err != nil {
@@ -433,7 +435,7 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 		Data: map[string]any{
 			"file":            filepath,
 			"function_name":   functionName,
-			"extracted_lines": fmt.Sprintf("%d-%d", int(startLine), int(endLine)),
+			"extracted_lines": fmt.Sprintf("%d-%d", startLine, endLine),
 			"new_function":    newFunction,
 			"function_call":   functionCall,
 		},
@@ -443,18 +445,10 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 	result.DisplayData = map[string]any{
 		"file":          filepath,
 		"function_name": functionName,
-		"summary":       fmt.Sprintf("✓ Extracted lines %d-%d into function '%s'", int(startLine), int(endLine), functionName),
+		"summary":       fmt.Sprintf("✓ Extracted lines %d-%d into function '%s'", startLine, endLine, functionName),
 	}
 
 	return result, nil
-}
-
-func (t *ExtractFunctionTool) generateGoFunction(name, code string, lines []string) (string, string) {
-	indentation := t.detectIndentation(lines[0])
-
-	// Simple Go function generation (basic version)
-	return fmt.Sprintf("func %s() {\n%s\n}", name, code),
-		fmt.Sprintf("%s%s()", indentation, name)
 }
 
 func (t *ExtractFunctionTool) generateJSFunction(name, code string) (string, string) {
@@ -462,11 +456,38 @@ func (t *ExtractFunctionTool) generateJSFunction(name, code string) (string, str
 		fmt.Sprintf("%s()", name)
 }
 
-func (t *ExtractFunctionTool) generatePythonFunction(name, code string, lines []string) (string, string) {
-	indentation := t.detectIndentation(lines[0])
-
-	return fmt.Sprintf("def %s():\n%s", name, code),
-		fmt.Sprintf("%s%s()", indentation, name)
+func (t *ExtractFunctionTool) generatePythonFunction(name, code, sourceIndent string, insert, start int, content string) (string, string, error) {
+	targetIndent := sourceIndent
+	if insert != start {
+		line, _, _ := strings.Cut(content[insert:], "\n")
+		targetIndent = t.detectIndentation(line)
+	}
+	unit := "    "
+	if strings.Contains(sourceIndent, "\t") {
+		unit = "\t"
+	}
+	size := int64(len(targetIndent) + len(name) + 8)
+	limit := t.mutationFileLimit()
+	for line := range strings.SplitSeq(code, "\n") {
+		additional := int64(len(targetIndent) + len(unit) + len(strings.TrimPrefix(line, sourceIndent)) + 1)
+		if additional > limit-size {
+			return "", "", mutationBudgetError(limit)
+		}
+		size += additional
+	}
+	var body strings.Builder
+	body.Grow(int(size))
+	body.WriteString(targetIndent)
+	body.WriteString("def ")
+	body.WriteString(name)
+	body.WriteString("():\n")
+	for line := range strings.SplitSeq(code, "\n") {
+		body.WriteString(targetIndent)
+		body.WriteString(unit)
+		body.WriteString(strings.TrimPrefix(line, sourceIndent))
+		body.WriteByte('\n')
+	}
+	return strings.TrimSuffix(body.String(), "\n"), name + "()", nil
 }
 
 func (t *ExtractFunctionTool) detectIndentation(line string) string {
