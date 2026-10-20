@@ -14,6 +14,30 @@ import (
 	"time"
 )
 
+func TestReportBuffer_FragmentedWrites(t *testing.T) {
+	const limit = 1 << 20
+	buffer := reportBuffer{limit: limit}
+	for i := 0; i < limit+1; i++ {
+		_, _ = buffer.Write([]byte{byte(i)})
+	}
+	capacity := 0
+	for _, chunk := range buffer.chunks {
+		capacity += cap(chunk)
+	}
+	if capacity > limit || len(buffer.chunks) > 64 {
+		t.Fatalf("fragmented capture grew metadata: capacity=%d segments=%d", capacity, len(buffer.chunks))
+	}
+	data := buffer.bytes()
+	if len(data) != limit || !buffer.truncated {
+		t.Fatalf("bytes=%d truncated=%v", len(data), buffer.truncated)
+	}
+	for i, value := range data {
+		if value != byte(i) {
+			t.Fatalf("byte %d=%d", i, value)
+		}
+	}
+}
+
 func TestTestReportCapture_StreamsWithoutDiskPayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results")
 	capture, err := newTestReportCapture(path, 1024)

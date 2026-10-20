@@ -31,9 +31,20 @@ type reportBuffer struct {
 func (b *reportBuffer) Write(p []byte) (int, error) {
 	n := len(p)
 	keep := min(n, b.limit-b.size)
-	if keep > 0 {
-		b.chunks = append(b.chunks, append([]byte(nil), p[:keep]...))
-		b.size += keep
+	p = p[:keep]
+	for len(p) > 0 {
+		if len(b.chunks) == 0 || len(b.chunks[len(b.chunks)-1]) == cap(b.chunks[len(b.chunks)-1]) {
+			capacity := 32 << 10
+			if len(b.chunks) == 0 {
+				capacity = 4 << 10
+			}
+			b.chunks = append(b.chunks, make([]byte, 0, min(capacity, b.limit-b.size)))
+		}
+		last := len(b.chunks) - 1
+		take := min(len(p), cap(b.chunks[last])-len(b.chunks[last]))
+		b.chunks[last] = append(b.chunks[last], p[:take]...)
+		b.size += take
+		p = p[take:]
 	}
 	b.truncated = b.truncated || keep < n
 	return n, nil
