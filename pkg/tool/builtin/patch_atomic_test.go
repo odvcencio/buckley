@@ -13,7 +13,7 @@ import (
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
-func requireGNUPatch(t *testing.T) {
+func requireGNUPatch(t testing.TB) {
 	t.Helper()
 
 	patchPath, err := exec.LookPath("patch")

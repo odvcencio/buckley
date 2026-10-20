@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pmezard/go-difflib/difflib"
 )
 
 func TestGenerateDiff_PreservesEvidence(t *testing.T) {
@@ -35,10 +33,7 @@ func TestGenerateDiff_PreservesEvidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, want := generateDiff("fixture.txt", tc.old, tc.next), referenceEditDiff(t, "fixture.txt", tc.old, tc.next)
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("diff evidence differs: got=%+v want=%+v", got, want)
-			}
+			assertDiffMetadata(t, generateDiff("fixture.txt", tc.old, tc.next), "fixture.txt", tc.old, tc.next)
 		})
 	}
 }
@@ -62,8 +57,9 @@ func TestEditFileTool_ApprovalPreviewRetainsFullEvidence(t *testing.T) {
 	if err != nil || !preview.Success || !preview.NeedsApproval {
 		t.Fatalf("preview failed: %+v %v", preview, err)
 	}
-	want := referenceEditDiff(t, path, old, next)
-	if !reflect.DeepEqual(preview.DiffPreview, want) || preview.Data["old_content"] != old || preview.Data["new_content"] != next {
+	assertDiffMetadata(t, preview.DiffPreview, path, old, next)
+	want := preview.DiffPreview
+	if preview.Data["old_content"] != old || preview.Data["new_content"] != next {
 		t.Fatal("approval preview omitted complete source or diff evidence")
 	}
 	if !strings.Contains(preview.DiffPreview.Preview, "... (") || !strings.Contains(preview.DiffPreview.UnifiedDiff, "+new-19") {
@@ -111,9 +107,10 @@ func TestEditFileTool_NoChangePreservesModificationTime(t *testing.T) {
 			tool.SetWorkDir(root)
 			tc.params["path"] = "fixture.txt"
 			result, err := tool.Execute(tc.params)
-			if err != nil || !result.Success || !reflect.DeepEqual(result.DiffPreview, referenceEditDiff(t, path, "old\n", "old\n")) {
+			if err != nil || !result.Success {
 				t.Fatalf("no-op edit failed or changed evidence: %+v %v", result, err)
 			}
+			assertDiffMetadata(t, result.DiffPreview, path, "old\n", "old\n")
 			after, err := os.Stat(path)
 			if err != nil || !after.ModTime().Equal(before.ModTime()) {
 				t.Fatalf("no-op changed modification time: before=%v after=%v error=%v", before, after, err)
@@ -125,10 +122,16 @@ func TestEditFileTool_NoChangePreservesModificationTime(t *testing.T) {
 	}
 }
 
-// Use the previous two-bag statistics and canonical difflib output as an
-// independent oracle for the optimized statistics and preview extraction.
-func referenceEditDiff(t testing.TB, path, old, next string) *DiffInfo {
+// Check source retention, line statistics, and display extraction independently.
+// GNU patch round trips verify the diff body in diff_roundtrip_test.go.
+func assertDiffMetadata(t testing.TB, info *DiffInfo, path, old, next string) {
 	t.Helper()
+	if info == nil {
+		t.Fatal("missing diff evidence")
+	}
+	if (old == next) != (info.UnifiedDiff == "") {
+		t.Fatal("diff does not reflect whether the source changed")
+	}
 	bags := []map[string]int{{}, {}}
 	for index, content := range []string{old, next} {
 		for _, line := range strings.Split(content, "\n") {
@@ -144,19 +147,19 @@ func referenceEditDiff(t testing.TB, path, old, next string) *DiffInfo {
 	for line, count := range bags[1] {
 		added += max(0, count-bags[0][line])
 	}
-	unified, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A: difflib.SplitLines(old), B: difflib.SplitLines(next), FromFile: path, ToFile: path, Context: 3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	unified := info.UnifiedDiff
 	preview := unified
 	lines := strings.Split(unified, "\n")
 	if len(lines) > 15 {
 		preview = strings.Join(lines[:15], "\n") + fmt.Sprintf("\n... (%d more lines)", len(lines)-15)
 	}
-	return &DiffInfo{FilePath: path, IsNew: old == "", LinesAdded: added, LinesRemoved: removed,
-		OldContent: old, NewContent: next, UnifiedDiff: unified, Preview: preview}
+	got := *info
+	got.UnifiedDiff = ""
+	want := DiffInfo{FilePath: path, IsNew: old == "", LinesAdded: added, LinesRemoved: removed,
+		OldContent: old, NewContent: next, Preview: preview}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("diff metadata differs: got=%+v want=%+v", got, want)
+	}
 }
 
 func FuzzGenerateDiff_PreservesEvidence(f *testing.F) {
@@ -167,10 +170,7 @@ func FuzzGenerateDiff_PreservesEvidence(f *testing.F) {
 		if len(old)+len(next) > 4096 {
 			t.Skip()
 		}
-		got, want := generateDiff("f", old, next), referenceEditDiff(t, "f", old, next)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("old=%q next=%q got=%+v want=%+v", old, next, got, want)
-		}
+		assertDiffMetadata(t, generateDiff("f", old, next), "f", old, next)
 	})
 }
 

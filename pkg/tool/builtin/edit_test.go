@@ -306,7 +306,7 @@ func TestGenerateDiff_NewFile(t *testing.T) {
 }
 
 func TestGenerateUnifiedDiff_CrossedLinesMakesProgress(t *testing.T) {
-	diff := generateUnifiedDiff(
+	diff := GenerateUnifiedDiff(
 		"crossed.txt",
 		"same\nold\nnew\ntail",
 		"same\nnew\nold\ntail",
