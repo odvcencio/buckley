@@ -421,7 +421,7 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	content, err := os.ReadFile(absPath)
+	content, err := t.readMutationFile(absPath)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -429,31 +429,34 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	pattern := search
-	if !useRegex {
-		pattern = regexp.QuoteMeta(search)
-	}
-	if !caseSensitive {
-		pattern = "(?i)" + pattern
-	}
-
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("invalid pattern: %v", err),
-		}, nil
-	}
-
 	original := string(content)
 	var replaced string
 	var replacements int
-
-	if maxReplacements > 0 {
-		replaced, replacements = replaceLimited(re, original, replace, maxReplacements)
+	if !useRegex && caseSensitive && (maxReplacements > 0 || !strings.Contains(replace, "$")) {
+		replacements = strings.Count(original, search)
+		if maxReplacements > 0 {
+			replacements = min(replacements, maxReplacements)
+		}
+		if err := t.checkReplacementGrowth(len(original), len(search), len(replace), replacements); err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
+		replaced = strings.Replace(original, search, replace, replacements)
 	} else {
-		replaced = re.ReplaceAllString(original, replace)
-		replacements = countMatches(re, original)
+		pattern := search
+		if !useRegex {
+			pattern = regexp.QuoteMeta(search)
+		}
+		if !caseSensitive {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("invalid pattern: %v", err)}, nil
+		}
+		replaced, replacements, err = replaceRegexpBounded(re, original, replace, maxReplacements, t.mutationFileLimit())
+		if err != nil {
+			return &Result{Success: false, Error: err.Error()}, nil
+		}
 	}
 
 	if replacements == 0 {
@@ -478,8 +481,8 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	// Calculate line changes
-	oldLines := strings.Split(original, "\n")
-	newLines := strings.Split(replaced, "\n")
+	oldLines := strings.Count(original, "\n") + 1
+	newLines := strings.Count(replaced, "\n") + 1
 
 	result := &Result{
 		Success: true,
@@ -488,54 +491,25 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 			"replacements":   replacements,
 			"original":       original,
 			"replaced":       replaced,
-			"original_lines": len(oldLines),
-			"new_lines":      len(newLines),
+			"original_lines": oldLines,
+			"new_lines":      newLines,
 		},
 		ShouldAbridge: true,
 	}
 
 	// Show compact summary in conversation
 	summary := fmt.Sprintf("✎ Modified %s: %d replacement(s), %d→%d lines",
-		filepath.Base(absPath), replacements, len(oldLines), len(newLines))
+		filepath.Base(absPath), replacements, oldLines, newLines)
 
 	result.DisplayData = map[string]any{
 		"path":         absPath,
 		"replacements": replacements,
 		"summary":      summary,
-		"old_lines":    len(oldLines),
-		"new_lines":    len(newLines),
+		"old_lines":    oldLines,
+		"new_lines":    newLines,
 	}
 
 	return result, nil
-}
-
-func replaceLimited(re *regexp.Regexp, input, replacement string, limit int) (string, int) {
-	matches := re.FindAllStringIndex(input, -1)
-	if len(matches) == 0 {
-		return input, 0
-	}
-
-	var builder strings.Builder
-	lastIndex := 0
-	replacements := 0
-
-	for _, loc := range matches {
-		if replacements >= limit {
-			break
-		}
-		start, end := loc[0], loc[1]
-		builder.WriteString(input[lastIndex:start])
-		builder.WriteString(replacement)
-		lastIndex = end
-		replacements++
-	}
-
-	builder.WriteString(input[lastIndex:])
-	return builder.String(), replacements
-}
-
-func countMatches(re *regexp.Regexp, input string) int {
-	return len(re.FindAllStringIndex(input, -1))
 }
 
 func parseBool(value any, defaultVal bool) bool {

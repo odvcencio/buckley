@@ -84,23 +84,9 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	// Check file size before reading
-	if t.maxFileSizeBytes > 0 {
-		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
-			}, nil
-		}
-	}
-
-	// Read existing file
-	content, err := os.ReadFile(absPath)
+	content, err := t.readMutationFile(absPath)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read file: %v", err),
-		}, nil
+		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
 	oldContent := string(content)
 
@@ -156,6 +142,9 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 				unchanged = ". The file remains unchanged."
 			}
 			return &Result{Success: false, Error: fmt.Sprintf("edit %d: old_string appears %d times %s%s. Either provide a more specific string or use replace_all=true%s", i+1, count, where, locHint, unchanged)}, nil
+		}
+		if err := t.checkReplacementGrowth(len(newContent), len(oldString), len(newString), count); err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("edit %d: %v", i+1, err)}, nil
 		}
 		if replaceAll {
 			newContent = strings.ReplaceAll(newContent, oldString, newString)
@@ -385,27 +374,18 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	// Check file size before reading
-	if t.maxFileSizeBytes > 0 {
-		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
-			}, nil
-		}
-	}
-
-	content, err := os.ReadFile(absPath)
+	content, err := t.readMutationFile(absPath)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read file: %v", err),
-		}, nil
+		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
 
+	limit := t.mutationFileLimit()
+	// Insertion adds a line separator even when text is empty.
+	if int64(len(text)) >= limit-int64(len(content)) {
+		return &Result{Success: false, Error: mutationBudgetError(limit).Error()}, nil
+	}
 	oldContent := string(content)
 	lines := strings.Split(oldContent, "\n")
-
 	if lineNum < 1 {
 		lineNum = 1
 	}
@@ -530,22 +510,9 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	// Check file size before reading
-	if t.maxFileSizeBytes > 0 {
-		if info, err := os.Stat(absPath); err == nil && info.Size() > t.maxFileSizeBytes {
-			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("file too large to edit: %d bytes (max %d)", info.Size(), t.maxFileSizeBytes),
-			}, nil
-		}
-	}
-
-	content, err := os.ReadFile(absPath)
+	content, err := t.readMutationFile(absPath)
 	if err != nil {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("failed to read file: %v", err),
-		}, nil
+		return &Result{Success: false, Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
 
 	oldContent := string(content)
