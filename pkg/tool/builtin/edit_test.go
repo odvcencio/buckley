@@ -308,8 +308,8 @@ func TestGenerateDiff_NewFile(t *testing.T) {
 func TestGenerateUnifiedDiff_CrossedLinesMakesProgress(t *testing.T) {
 	diff := generateUnifiedDiff(
 		"crossed.txt",
-		[]string{"same", "old", "new", "tail"},
-		[]string{"same", "new", "old", "tail"},
+		"same\nold\nnew\ntail",
+		"same\nnew\nold\ntail",
 	)
 
 	if !strings.Contains(diff, "--- crossed.txt") || !strings.Contains(diff, "+++ crossed.txt") {
