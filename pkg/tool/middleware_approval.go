@@ -37,7 +37,7 @@ func (r *Registry) approvalMiddleware() Middleware {
 			switch strings.TrimSpace(ctx.ToolName) {
 			case "write_file", "edit_file", "insert_text", "delete_lines",
 				"search_replace", "patch_file", "rename_symbol", "extract_function":
-				return r.executeWithMissionWrite(execCtx, ctx.Params, func(params map[string]any) (*builtin.Result, error) {
+				return r.executeWithMissionWrite(execCtx, ctx.Tool, ctx.Params, func(params map[string]any) (*builtin.Result, error) {
 					ctx.Params = params
 					return next(ctx)
 				})

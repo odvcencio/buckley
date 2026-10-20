@@ -26,6 +26,7 @@ func TestFileMutation_BudgetFailureLeavesFileUnchanged(t *testing.T) {
 		{"search-oversized-input", "aaaa", 3, &SearchReplaceTool{}, map[string]any{"search": "a", "replace": "b"}},
 		{"search-expansion", "aaaa", 4, &SearchReplaceTool{}, map[string]any{"search": "a", "replace": "bb"}},
 		{"search-regex-expansion", "aaaa", 4, &SearchReplaceTool{}, map[string]any{"search": "(a)", "replace": "$1$1", "use_regex": true}},
+		{"search-limited-regex-expansion", "aaaa", 4, &SearchReplaceTool{}, map[string]any{"search": "(a)", "replace": "$1$1$1$1$1", "use_regex": true, "max_replacements": 1}},
 		{"search-limited-expansion", "aaaa", 4, &SearchReplaceTool{}, map[string]any{"search": "a", "replace": "bb", "max_replacements": 1}},
 		{"write-output", "aaaa", 4, &WriteFileTool{}, map[string]any{"content": "bbbbb"}},
 		{"delete-oversized-input", "a\nb\nc", 4, &DeleteLinesTool{}, map[string]any{"start_line": 1, "end_line": 1}},

@@ -155,6 +155,10 @@ func (t *EditFileTool) Execute(params map[string]any) (*Result, error) {
 		replacements += count
 	}
 
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
+
 	// Generate diff preview
 	diffPreview := generateDiff(absPath, oldContent, newContent)
 
@@ -312,7 +316,7 @@ func (t *InsertTextTool) Parameters() ParameterSchema {
 			},
 			"text": {
 				Type:        "string",
-				Description: "Text to insert",
+				Description: "Text to insert. Line separators are added automatically; omit a trailing newline unless you want an extra blank line.",
 			},
 		},
 		Required: []string{"path", "line", "text"},
@@ -381,6 +385,10 @@ func (t *InsertTextTool) Execute(params map[string]any) (*Result, error) {
 	newLines = append(newLines, lines[lineNum-1:]...)
 
 	newContent := strings.Join(newLines, "\n")
+
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
 
 	// Generate diff
 	diffPreview := generateDiff(absPath, oldContent, newContent)
@@ -517,6 +525,10 @@ func (t *DeleteLinesTool) Execute(params map[string]any) (*Result, error) {
 	newLines = append(newLines, lines[endLine:]...)
 
 	newContent := strings.Join(newLines, "\n")
+
+	if t.previewMutation {
+		return t.mutationPreview(absPath, oldContent, newContent, true)
+	}
 
 	// Generate diff
 	diffPreview := generateDiff(absPath, oldContent, newContent)

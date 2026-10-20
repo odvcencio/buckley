@@ -45,6 +45,9 @@ type Result struct {
 	DisplayData   map[string]any `json:"display_data,omitempty"`   // Abridged data for conversation display
 	ShouldAbridge bool           `json:"should_abridge,omitempty"` // Whether to show abridged version in chat
 
+	// ValidateApproval rechecks a read-only preview before an approved write.
+	ValidateApproval func() error `json:"-"`
+
 	// Diff preview support for file modifications
 	NeedsApproval bool       `json:"needs_approval,omitempty"` // Whether this change requires user approval
 	DiffPreview   *DiffInfo  `json:"diff_preview,omitempty"`   // Preview of changes for approval

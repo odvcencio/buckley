@@ -365,7 +365,7 @@ func (t *SearchReplaceTool) Parameters() ParameterSchema {
 			},
 			"replace": {
 				Type:        "string",
-				Description: "Replacement text",
+				Description: "Replacement text. With use_regex=true, $1 or ${name} expands a capture and $$ inserts a dollar sign, including when max_replacements is set.",
 			},
 			"use_regex": {
 				Type:        "boolean",
@@ -457,6 +457,10 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 		if err != nil {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
+	}
+
+	if t.previewMutation {
+		return t.mutationPreview(absPath, original, replaced, true)
 	}
 
 	if replacements == 0 {

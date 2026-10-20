@@ -2,15 +2,14 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
-	"m31labs.dev/buckley/internal/textdiff"
 	"m31labs.dev/buckley/pkg/mission"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -92,57 +91,104 @@ func (r *Registry) shouldGateChanges() bool {
 	return r.requireMissionApproval && r.missionStore != nil && r.missionSession != ""
 }
 
-func (r *Registry) executeWithMissionWrite(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+func (r *Registry) executeWithMissionWrite(ctx context.Context, tool Tool, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
+	params = cloneApprovalParams(params)
 	path, ok := params["path"].(string)
 	if !ok || strings.TrimSpace(path) == "" {
-		return &builtin.Result{Success: false, Error: "path parameter is required"}, nil
+		return &builtin.Result{Error: "path parameter is required"}, nil
 	}
-
 	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return &builtin.Result{Success: false, Error: fmt.Sprintf("invalid path: %v", err)}, nil
+	resolver, resolves := tool.(interface{ ResolvePath(string) (string, error) })
+	if resolves {
+		absPath, err = resolver.ResolvePath(path)
 	}
-
-	// Build a diff description based on available parameters.
-	// write_file provides "content", edit_file provides "old_string"/"new_string", etc.
+	if err != nil {
+		return &builtin.Result{Error: err.Error()}, nil
+	}
+	r.mu.RLock()
+	container, compose, workDir := r.containerExecute, r.containerCompose, r.containerWorkDir
+	r.mu.RUnlock()
 	var diffText string
-	if content, ok := params["content"].(string); ok {
-		oldContent := ""
-		if existing, err := os.ReadFile(absPath); err == nil {
-			oldContent = string(existing)
+	var validate func() error
+	if previewer, ok := tool.(interface {
+		Preview(map[string]any) (*builtin.Result, error)
+	}); ok && !container {
+		preview, err := previewer.Preview(params)
+		if err != nil || preview == nil || !preview.Success {
+			return preview, err
 		}
-		if oldContent == content {
-			return execFn(params)
+		if preview.DiffPreview == nil || preview.ValidateApproval == nil {
+			return &builtin.Result{Error: "tool returned incomplete approval evidence"}, nil
 		}
-		diffText = textdiff.Unified(absPath, oldContent, content)
-	} else if oldStr, ok := params["old_string"].(string); ok {
-		newStr, _ := params["new_string"].(string)
-		diffText = fmt.Sprintf("edit_file %s:\n- %s\n+ %s", absPath, oldStr, newStr)
-	} else if text, ok := params["text"].(string); ok {
-		line, _ := params["line"].(float64)
-		diffText = fmt.Sprintf("insert_text %s at line %d:\n+ %s", absPath, int(line), text)
-	} else if startLine, ok := params["start_line"].(float64); ok {
-		endLine, _ := params["end_line"].(float64)
-		diffText = fmt.Sprintf("delete_lines %s: lines %d-%d", absPath, int(startLine), int(endLine))
-	} else {
-		diffText = fmt.Sprintf("file modification: %s (params: %v)", absPath, params)
+		absPath = preview.DiffPreview.FilePath
+		diffText = preview.DiffPreview.UnifiedDiff
+		validate = preview.ValidateApproval
+		// Bind execution to the workspace target used to compute the diff.
+		params["path"] = absPath
 	}
-
-	changeID, err := r.recordPendingChange(absPath, diffText, "write_file")
+	if diffText == "" {
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return &builtin.Result{Error: fmt.Sprintf("encode approval arguments: %v", err)}, nil
+		}
+		diffText = fmt.Sprintf("%s requested for %s:\n%s", tool.Name(), absPath, encoded)
+	}
+	changeID, err := r.recordPendingChange(absPath, diffText, tool.Name())
 	if err != nil {
-		return &builtin.Result{Success: false, Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
+		return &builtin.Result{Error: fmt.Sprintf("failed to create pending change: %v", err)}, nil
 	}
-
 	change, err := r.awaitDecision(ctx, changeID)
 	if err != nil {
-		return &builtin.Result{Success: false, Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
+		return &builtin.Result{Error: fmt.Sprintf("approval wait failed: %v", err)}, nil
 	}
 	if change.Status != "approved" {
-		return &builtin.Result{Success: false, Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
+		return &builtin.Result{Error: fmt.Sprintf("change %s %s by %s", change.ID, change.Status, change.ReviewedBy)}, nil
 	}
-
+	r.mu.RLock()
+	backendChanged := container != r.containerExecute || compose != r.containerCompose || workDir != r.containerWorkDir
+	r.mu.RUnlock()
+	if backendChanged {
+		return &builtin.Result{Error: "execution backend changed since approval; retry"}, nil
+	}
+	if resolves {
+		current, err := resolver.ResolvePath(path)
+		if err != nil || current != absPath {
+			return &builtin.Result{Error: "workspace target changed since approval; retry"}, nil
+		}
+	}
+	if validate != nil {
+		if err := validate(); err != nil {
+			return &builtin.Result{Error: err.Error()}, nil
+		}
+	}
 	return execFn(params)
 }
+
+func cloneApprovalParams(params map[string]any) map[string]any {
+	copy := make(map[string]any, len(params))
+	for key, value := range params {
+		copy[key] = cloneApprovalValue(value)
+	}
+	return copy
+}
+
+func cloneApprovalValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneApprovalParams(v)
+	case []any:
+		copy := make([]any, len(v))
+		for i, item := range v {
+			copy[i] = cloneApprovalValue(item)
+		}
+		return copy
+	case []string:
+		return append([]string(nil), v...)
+	default:
+		return value
+	}
+}
+
 func (r *Registry) executeWithMissionPatch(ctx context.Context, params map[string]any, execFn func(map[string]any) (*builtin.Result, error)) (*builtin.Result, error) {
 	rawPatch, ok := params["patch"].(string)
 	if !ok || strings.TrimSpace(rawPatch) == "" {
