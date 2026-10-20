@@ -365,7 +365,7 @@ func (t *SearchReplaceTool) Parameters() ParameterSchema {
 			},
 			"replace": {
 				Type:        "string",
-				Description: "Replacement text",
+				Description: "Replacement text. With use_regex=true, $1 or ${name} expands a capture and $$ inserts a dollar sign, including when max_replacements is set.",
 			},
 			"use_regex": {
 				Type:        "boolean",

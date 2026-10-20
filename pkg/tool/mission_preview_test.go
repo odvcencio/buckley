@@ -25,6 +25,7 @@ func TestApprovalMiddleware_FilePreviewMatchesExecution(t *testing.T) {
 		{"batch-placeholders", "alpha beta", "FIRST SECOND", &builtin.EditFileTool{}, map[string]any{"old_string": "", "new_string": "", "replace_all": false, "edits": []any{map[string]any{"old_string": "alpha", "new_string": "FIRST"}, map[string]any{"old_string": "beta", "new_string": "SECOND"}}}},
 		{"insert-int", "alpha\nomega", "alpha\nbeta\nomega", &builtin.InsertTextTool{}, map[string]any{"line": 2, "text": "beta"}},
 		{"delete-int", "a\nb\nc", "a\nc", &builtin.DeleteLinesTool{}, map[string]any{"start_line": 2, "end_line": 2}},
+		{"limited-regex-captures", "FIRST SECOND", "SECOND FIRST", &builtin.SearchReplaceTool{}, map[string]any{"search": `(FIRST) (SECOND)`, "replace": "${2} ${1}", "use_regex": true, "max_replacements": 1}},
 		{"regex-replace", "item=12\n", "item=13\n", &builtin.SearchReplaceTool{}, map[string]any{"search": `(item=)(\d+)`, "replace": "${1}13", "use_regex": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

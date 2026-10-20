@@ -316,7 +316,7 @@ func (t *InsertTextTool) Parameters() ParameterSchema {
 			},
 			"text": {
 				Type:        "string",
-				Description: "Text to insert",
+				Description: "Text to insert. Line separators are added automatically; omit a trailing newline unless you want an extra blank line.",
 			},
 		},
 		Required: []string{"path", "line", "text"},

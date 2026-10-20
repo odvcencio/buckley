@@ -42,7 +42,7 @@ func TestReplaceRegexpBounded_PreservesReplacementSemantics(t *testing.T) {
 			for _, replacement := range []string{"X", "$0$0", "${word}", "$1/${2}/$$", "$0x", "${", "$01", "${missing}", "$", "界${word}", "$1000000000"} {
 				for _, maximum := range []int{0, 1, 2} {
 					want := re.ReplaceAllString(input, replacement)
-					matches := re.FindAllStringIndex(input, -1)
+					matches := re.FindAllStringSubmatchIndex(input, -1)
 					count := len(matches)
 					if maximum > 0 {
 						count = min(count, maximum)
@@ -50,7 +50,7 @@ func TestReplaceRegexpBounded_PreservesReplacementSemantics(t *testing.T) {
 						end := 0
 						for _, match := range matches[:count] {
 							output.WriteString(input[end:match[0]])
-							output.WriteString(replacement)
+							output.Write(re.ExpandString(nil, replacement, input, match))
 							end = match[1]
 						}
 						output.WriteString(input[end:])

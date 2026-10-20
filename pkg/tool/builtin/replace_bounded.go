@@ -77,8 +77,8 @@ type replacementPart struct {
 	group   int
 }
 
-func replacementParts(re *regexp.Regexp, template string, expand bool) []replacementPart {
-	if !expand || !strings.Contains(template, "$") {
+func replacementParts(re *regexp.Regexp, template string) []replacementPart {
+	if !strings.Contains(template, "$") {
 		return []replacementPart{{literal: template, group: -1}}
 	}
 	var parts []replacementPart
@@ -145,7 +145,7 @@ func replaceRegexpBounded(re *regexp.Regexp, input, replacement string, maxRepla
 	if first == nil {
 		return input, 0, nil
 	}
-	parts := replacementParts(re, replacement, maxReplacements <= 0)
+	parts := replacementParts(re, replacement)
 	count, removed, inserted := 0, int64(0), int64(0)
 	for match := first; match != nil; match = scan.next() {
 		count++
