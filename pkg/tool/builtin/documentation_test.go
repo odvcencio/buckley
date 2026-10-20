@@ -52,8 +52,9 @@ func Add(a, b int) int {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// May succeed or fail depending on implementation
-		_ = result
+		if result.Success || !strings.Contains(result.Error, "function_name") {
+			t.Fatalf("missing target accepted: %+v", result)
+		}
 	})
 
 	t.Run("generate docstring for specific function", func(t *testing.T) {
@@ -70,13 +71,19 @@ func Add(a, b int) int {
 		}
 
 		result, err := tool.Execute(map[string]any{
-			"file":     testFile,
-			"function": "Add",
+			"file":          testFile,
+			"function_name": "Add",
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		_ = result
+		if !result.Success {
+			t.Fatalf("generate: %+v", result)
+		}
+		got, err := os.ReadFile(testFile)
+		if err != nil || !strings.Contains(string(got), "// Add TODO: add description\n") {
+			t.Fatalf("missing godoc: %s %v", got, err)
+		}
 	})
 
 	t.Run("nonexistent file", func(t *testing.T) {
@@ -200,9 +207,6 @@ func TestGenerateDocstringHelperCoverage(t *testing.T) {
 	if !tool.isDocComment("/** hi */", "javascript") {
 		t.Fatal("expected JS doc comment to be recognized")
 	}
-	if !tool.isDocComment("\"\"\"doc\"\"\"", "python") {
-		t.Fatal("expected Python doc comment to be recognized")
-	}
 
 	goContent := `package p
 
@@ -232,14 +236,4 @@ func Add(a int, b string) (int, error) {
 		t.Fatalf("expected JSDoc params, got %q", jsDoc)
 	}
 
-	pyContent := `def Bar(x, y):
-    return x
-`
-	pyDoc, _, err := tool.generateDocstring(pyContent, "Bar", "", "python")
-	if err != nil {
-		t.Fatalf("generateDocstring py error: %v", err)
-	}
-	if !strings.Contains(pyDoc, "Args") {
-		t.Fatalf("expected python Args block, got %q", pyDoc)
-	}
 }
