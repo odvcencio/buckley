@@ -317,6 +317,7 @@ func pagedSearchSummary(matches, records, start, end int) string {
 type cappedSearchBuffer struct {
 	remaining int
 	buf       bytes.Buffer
+	truncated bool
 }
 
 func newCappedSearchBuffer(limit int) *cappedSearchBuffer {
@@ -325,6 +326,9 @@ func newCappedSearchBuffer(limit int) *cappedSearchBuffer {
 
 func (b *cappedSearchBuffer) Write(p []byte) (int, error) {
 	written := len(p)
+	if b != nil && len(p) > b.remaining {
+		b.truncated = true
+	}
 	if b != nil && b.remaining > 0 {
 		keep := min(len(p), b.remaining)
 		_, _ = b.buf.Write(p[:keep])

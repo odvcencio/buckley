@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,12 +12,17 @@ import (
 // RenameSymbolTool renames a symbol throughout the codebase
 type RenameSymbolTool struct{ workDirAware }
 
+// DefaultRenameSearchBytes bounds file discovery before any rename is applied.
+const DefaultRenameSearchBytes = 64 << 10
+
+const renamePreviewFiles = 20
+
 func (t *RenameSymbolTool) Name() string {
 	return "rename_symbol"
 }
 
 func (t *RenameSymbolTool) Description() string {
-	return "Rename a symbol throughout the codebase with word-boundary matching. Reports files modified and replacement count."
+	return "Rename a symbol throughout the codebase with word-boundary matching and bounded file reads and replacements. Reports modified files, replacement count, and file failures including partial results. Dry runs validate the same budgets without writing. Narrow path/file_pattern if file discovery exceeds its budget."
 }
 
 func (t *RenameSymbolTool) Parameters() ParameterSchema {
@@ -121,10 +127,16 @@ func (t *RenameSymbolTool) Execute(params map[string]any) (*Result, error) {
 	// Perform replacements
 	totalReplacements := 0
 	modifiedFiles := []map[string]any{}
+	failedFiles := []map[string]any{}
+	failedCount := 0
 
 	for _, file := range files {
 		count, err := t.renameInFile(file, oldName, newName, dryRun)
 		if err != nil {
+			failedCount++
+			if len(failedFiles) < renamePreviewFiles {
+				failedFiles = append(failedFiles, map[string]any{"file": file, "error": err.Error()})
+			}
 			continue
 		}
 		if count > 0 {
@@ -146,17 +158,27 @@ func (t *RenameSymbolTool) Execute(params map[string]any) (*Result, error) {
 			"dry_run":            dryRun,
 		},
 	}
+	if failedCount > 0 {
+		result.Success = false
+		result.Error = fmt.Sprintf("failed to rename %d file(s); %d file(s) succeeded; inspect files_failed before retrying", failedCount, len(modifiedFiles))
+		if dryRun {
+			result.Error = fmt.Sprintf("failed to validate rename for %d file(s); %d file(s) passed validation; inspect files_failed before retrying", failedCount, len(modifiedFiles))
+		}
+		result.Data["failed_count"] = failedCount
+		result.Data["files_failed"] = failedFiles
+	}
 
 	// Abridge if many files modified
-	if len(modifiedFiles) > 20 {
+	if len(modifiedFiles) > renamePreviewFiles {
 		result.ShouldAbridge = true
-		result.DisplayData = map[string]any{
-			"old_name":           oldName,
-			"new_name":           newName,
-			"files_modified":     modifiedFiles[:20],
-			"total_replacements": totalReplacements,
-			"dry_run":            dryRun,
-			"summary":            fmt.Sprintf("Renamed '%s' to '%s' in %d files (%d replacements)", oldName, newName, len(modifiedFiles), totalReplacements),
+		result.DisplayData = maps.Clone(result.Data)
+		result.DisplayData["files_modified"] = modifiedFiles[:renamePreviewFiles]
+		result.DisplayData["summary"] = fmt.Sprintf("Renamed '%s' to '%s' in %d files (%d replacements)", oldName, newName, len(modifiedFiles), totalReplacements)
+		if dryRun {
+			result.DisplayData["summary"] = fmt.Sprintf("Would rename '%s' to '%s' in %d files (%d replacements)", oldName, newName, len(modifiedFiles), totalReplacements)
+		}
+		if failedCount > 0 {
+			result.DisplayData["summary"] = result.Error
 		}
 	}
 
@@ -185,20 +207,32 @@ func (t *RenameSymbolTool) findFilesWithSymbol(symbol, searchPath, filePattern s
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
 
-	output, err := cmd.CombinedOutput()
+	limit := DefaultRenameSearchBytes
+	if t.maxOutputBytes > 0 {
+		limit = min(limit, t.maxOutputBytes)
+	}
+	stdout, stderr := newCappedSearchBuffer(limit), newCappedSearchBuffer(limit)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	err := cmd.Run()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("search timed out")
+	}
+	if stdout.truncated || stderr.truncated {
+		return nil, fmt.Errorf("symbol search output exceeds %d bytes; narrow path or file_pattern", limit)
 	}
 	if err != nil {
 		// Exit code 1 means no matches
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return []string{}, nil
 		}
+		if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
+			return nil, fmt.Errorf("%w: %s", err, diagnostic)
+		}
 		return nil, err
 	}
 
 	files := []string{}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	for _, line := range lines {
 		if line != "" {
 			files = append(files, line)
@@ -216,7 +250,7 @@ func (t *RenameSymbolTool) renameInFile(filepath, oldName, newName string, dryRu
 		}
 		filepath = abs
 	}
-	content, err := os.ReadFile(filepath)
+	content, err := t.readMutationFile(filepath)
 	if err != nil {
 		return 0, err
 	}
@@ -225,19 +259,17 @@ func (t *RenameSymbolTool) renameInFile(filepath, oldName, newName string, dryRu
 	pattern := fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(oldName))
 	re := regexp.MustCompile(pattern)
 
-	matches := re.FindAllStringIndex(string(content), -1)
-	if len(matches) == 0 {
-		return 0, nil
+	newContent, count, err := replaceRegexpBoundedMode(re, content, newName, 0, t.mutationFileLimit(), dryRun)
+	if err != nil {
+		return 0, err
 	}
-
-	if !dryRun {
-		newContent := re.ReplaceAllString(string(content), newName)
+	if !dryRun && count > 0 {
 		if err := writeMutationFile(filepath, newContent, 0644); err != nil {
 			return 0, err
 		}
 	}
 
-	return len(matches), nil
+	return count, nil
 }
 
 // ExtractFunctionTool extracts code into a new function

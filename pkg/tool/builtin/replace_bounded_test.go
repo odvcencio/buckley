@@ -60,6 +60,10 @@ func TestReplaceRegexpBounded_PreservesReplacementSemantics(t *testing.T) {
 					if err != nil || got != want || gotCount != count {
 						t.Fatalf("pattern=%q input=%q replacement=%q maximum=%d: got=%q/%d error=%v want=%q/%d", pattern, input, replacement, maximum, got, gotCount, err, want, count)
 					}
+					dry, dryCount, err := replaceRegexpBoundedMode(re, input, replacement, maximum, 1<<20, true)
+					if err != nil || dry != input || dryCount != count {
+						t.Fatalf("dry-run pattern=%q input=%q: got=%q/%d error=%v want=%q/%d", pattern, input, dry, dryCount, err, input, count)
+					}
 				}
 			}
 		}
