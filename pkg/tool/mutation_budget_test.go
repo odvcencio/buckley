@@ -2,14 +2,21 @@ package tool
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestRegistry_FileSizePolicyBoundsDispatchedMutations(t *testing.T) {
-	for _, name := range []string{"edit_file", "search_replace"} {
+	for _, name := range []string{"edit_file", "search_replace", "apply_patch"} {
 		t.Run(name, func(t *testing.T) {
+			if name == "apply_patch" {
+				version, err := exec.Command("patch", "--version").CombinedOutput()
+				if err != nil || !strings.Contains(string(version), "GNU patch") {
+					t.Skipf("GNU patch unavailable: %v %s", err, version)
+				}
+			}
 			root := t.TempDir()
 			path := filepath.Join(root, "fixture.txt")
 			if err := os.WriteFile(path, []byte("aaaa"), 0o600); err != nil {
@@ -21,6 +28,8 @@ func TestRegistry_FileSizePolicyBoundsDispatchedMutations(t *testing.T) {
 			params := map[string]any{"path": "fixture.txt"}
 			if name == "edit_file" {
 				params["old_string"], params["new_string"], params["replace_all"] = "a", "bb", true
+			} else if name == "apply_patch" {
+				params = map[string]any{"patch": "--- fixture.txt\n+++ fixture.txt\n@@ -1 +1 @@\n-aaaa\n\\ No newline at end of file\n+bbbbbbbb\n\\ No newline at end of file\n"}
 			} else {
 				params["search"], params["replace"] = "a", "bb"
 			}

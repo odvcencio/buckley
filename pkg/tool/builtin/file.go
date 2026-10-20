@@ -711,14 +711,15 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	files, err := parseUnifiedPatch(rawPatch, t.maxFileSizeBytes > 0)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
+	}
 	if !strings.HasSuffix(rawPatch, "\n") {
-		if _, err := unifiedPatchHeaderPaths(rawPatch); err != nil {
-			return &Result{Success: false, Error: err.Error()}, nil
-		}
 		rawPatch += "\n"
 	}
 
-	strip := inferPatchStrip(rawPatch)
+	strip := inferPatchStrip(files)
 	if v, exists := params["strip"]; exists {
 		var parsedStrip int
 		var err error
@@ -760,11 +761,16 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		}
 		strip = parsedStrip
 	}
-	if err := validatePatchTargets(t.workDir, rawPatch, strip); err != nil {
+	if err := validatePatchTargets(t.workDir, files, strip); err != nil {
 		return &Result{
 			Success: false,
 			Error:   err.Error(),
 		}, nil
+	}
+
+	env := mergeEnv(os.Environ(), t.env)
+	if err := t.checkPatchFileBudget(files, strip, env); err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
 	ctx, cancel := t.execContext()
@@ -792,6 +798,9 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 			"--no-backup-if-mismatch",
 			"-r", rejectFile,
 		}
+		if t.maxFileSizeBytes > 0 {
+			args = append(args, "--get=0")
+		}
 		if dryRun {
 			args = append(args, "--dry-run")
 		}
@@ -800,7 +809,7 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 		if strings.TrimSpace(t.workDir) != "" {
 			cmd.Dir = strings.TrimSpace(t.workDir)
 		}
-		cmd.Env = mergeEnv(cmd.Env, t.env)
+		cmd.Env = env
 		cmd.Stdin = strings.NewReader(rawPatch)
 		return cmd.CombinedOutput()
 	}
@@ -817,6 +826,10 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 			Success: false,
 			Error:   fmt.Sprintf("patch command failed: %v\n%s", err, strings.TrimSpace(string(preflightOutput))),
 		}, nil
+	}
+
+	if err := t.checkPatchFileBudget(files, strip, env); err != nil {
+		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
 	output, err := runPatch(false)
@@ -842,33 +855,27 @@ func (t *PatchFileTool) Execute(params map[string]any) (*Result, error) {
 	}, nil
 }
 
-func inferPatchStrip(rawPatch string) int {
-	if !patchHeadersUseSafeGitPrefixes(rawPatch) {
-		return 0
-	}
-	return 1
-}
-
-func patchHeadersUseSafeGitPrefixes(rawPatch string) bool {
-	paths, err := unifiedPatchHeaderPaths(rawPatch)
-	if err != nil {
-		return false
-	}
+func inferPatchStrip(files []unifiedPatchFile) int {
 	seenPatchPath := false
-	for _, path := range paths {
-		if path == "/dev/null" {
-			continue
-		}
-		seenPatchPath = true
-		if !strings.HasPrefix(path, "a/") && !strings.HasPrefix(path, "b/") {
-			return false
-		}
-		stripped := strings.TrimPrefix(strings.TrimPrefix(path, "a/"), "b/")
-		if !safeRelativePatchPath(stripped) {
-			return false
+	for _, file := range files {
+		for _, path := range []string{file.oldPath, file.newPath} {
+			if path == "/dev/null" {
+				continue
+			}
+			seenPatchPath = true
+			if !strings.HasPrefix(path, "a/") && !strings.HasPrefix(path, "b/") {
+				return 0
+			}
+			stripped := strings.TrimPrefix(strings.TrimPrefix(path, "a/"), "b/")
+			if !safeRelativePatchPath(stripped) {
+				return 0
+			}
 		}
 	}
-	return seenPatchPath
+	if seenPatchPath {
+		return 1
+	}
+	return 0
 }
 
 func safeRelativePatchPath(path string) bool {
@@ -883,7 +890,7 @@ func looksLikeWindowsAbsolutePath(path string) bool {
 	return len(path) >= 2 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':'
 }
 
-func validatePatchTargets(workDir, rawPatch string, strip int) error {
+func validatePatchTargets(workDir string, files []unifiedPatchFile, strip int) error {
 	base := strings.TrimSpace(workDir)
 	if base == "" {
 		var err error
@@ -892,20 +899,18 @@ func validatePatchTargets(workDir, rawPatch string, strip int) error {
 			return fmt.Errorf("resolve patch workdir: %w", err)
 		}
 	}
-	paths, err := unifiedPatchHeaderPaths(rawPatch)
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		if path == "/dev/null" {
-			continue
-		}
-		path, ok := patchPathAfterStrip(path, strip)
-		if !ok {
-			return fmt.Errorf("patch contains an unsafe file path")
-		}
-		if _, err := resolvePath(base, filepath.FromSlash(path)); err != nil {
-			return fmt.Errorf("patch target is outside the workdir: %w", err)
+	for _, file := range files {
+		for _, path := range []string{file.oldPath, file.newPath} {
+			if path == "/dev/null" {
+				continue
+			}
+			path, ok := patchPathAfterStrip(path, strip)
+			if !ok {
+				return fmt.Errorf("patch contains an unsafe file path")
+			}
+			if _, err := resolvePath(base, filepath.FromSlash(path)); err != nil {
+				return fmt.Errorf("patch target is outside the workdir: %w", err)
+			}
 		}
 	}
 	return nil
@@ -923,7 +928,7 @@ func patchPathAfterStrip(path string, strip int) (string, bool) {
 	if !safeRelativePatchPath(stripped) {
 		return "", false
 	}
-	return pathpkg.Clean(stripped), true
+	return stripped, true
 }
 
 // FindFilesTool finds files matching a pattern
