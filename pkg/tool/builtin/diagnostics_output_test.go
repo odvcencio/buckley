@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,7 +77,7 @@ func TestPostEditDiagnostics_PreservesMainPackageFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := postEditDiagnostics(path)
+			got := postEditDiagnostics(context.Background(), path)
 			if tc.broken {
 				if !strings.Contains(got, "missingValue") {
 					t.Fatalf("compiler error lost: %q", got)

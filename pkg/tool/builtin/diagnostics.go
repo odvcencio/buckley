@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -30,7 +31,7 @@ func attachPostEditDiagnostics(result *Result, absPath string) {
 	if result == nil || !result.Success {
 		return
 	}
-	diagnostics := postEditDiagnostics(absPath)
+	diagnostics := postEditDiagnostics(context.Background(), absPath)
 	if diagnostics == "" {
 		return
 	}
@@ -48,7 +49,7 @@ func attachPostEditDiagnostics(result *Result, absPath string) {
 // postEditDiagnostics returns bounded `go build` failure output for the
 // package containing absPath, or "" when the build is clean or the probe
 // does not apply.
-func postEditDiagnostics(absPath string) string {
+func postEditDiagnostics(parent context.Context, absPath string) string {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv(postEditDiagnosticsEnv)), "off") {
 		return ""
 	}
@@ -63,24 +64,46 @@ func postEditDiagnostics(absPath string) string {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), postEditDiagnosticsTimeout)
+	ctx, cancel := context.WithTimeout(parent, postEditDiagnosticsTimeout)
 	defer cancel()
+	scratch, err := os.MkdirTemp(os.Getenv("GOTMPDIR"), "buckley-diagnostics-")
+	if err != nil {
+		text := fmt.Sprintf("diagnostics probe unavailable: create scratch directory: %v", err)
+		return boundDiagnostics(text, int64(len(text)))
+	}
+	defer os.RemoveAll(scratch)
+	scratch, err = filepath.Abs(scratch)
+	if err != nil {
+		text := fmt.Sprintf("diagnostics probe unavailable: resolve scratch directory: %v", err)
+		return boundDiagnostics(text, int64(len(text)))
+	}
 
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", os.DevNull, ".")
 	cmd.Dir = packageDir
-	output, err := cmd.CombinedOutput()
+	cmd.Env = mergeEnv(nil, map[string]string{"GOTMPDIR": scratch, "TMPDIR": scratch, "TMP": scratch, "TEMP": scratch})
+	configureCommandCancellation(cmd)
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Cancel()
+		}
+	}()
+	output := newLimitedBuffer(postEditDiagnosticsMaxBytes)
+	cmd.Stdout, cmd.Stderr = output, output
+	err = cmd.Run()
 	if err == nil {
 		return ""
 	}
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Sprintf("diagnostics probe timed out after %s", postEditDiagnosticsTimeout)
+	if ctx.Err() != nil {
+		return "diagnostics probe canceled: " + ctx.Err().Error()
 	}
 
-	text := strings.TrimSpace(string(output))
+	text := strings.TrimSpace(output.String())
+	total := output.TotalBytes()
 	if text == "" {
 		text = err.Error()
+		total = max(total, int64(len(text)))
 	}
-	return boundDiagnostics(text)
+	return boundDiagnostics(text, total)
 }
 
 // findGoModDir walks up from dir looking for the nearest go.mod, returning
@@ -99,14 +122,15 @@ func findGoModDir(dir string) string {
 	}
 }
 
-func boundDiagnostics(text string) string {
-	if len(text) <= postEditDiagnosticsMaxBytes {
+func boundDiagnostics(text string, total int64) string {
+	text = strings.ToValidUTF8(text, "�")
+	if total <= postEditDiagnosticsMaxBytes && len(text) <= postEditDiagnosticsMaxBytes {
 		return text
 	}
-	marker := fmt.Sprintf("\n... (truncated, %d bytes total)", len(text))
-	keep := postEditDiagnosticsMaxBytes - len(marker)
-	if keep < 0 {
-		keep = 0
+	marker := fmt.Sprintf("\n... (truncated, %d bytes total)", total)
+	keep := min(len(text), postEditDiagnosticsMaxBytes-len(marker))
+	for keep > 0 && !utf8.ValidString(text[:keep]) {
+		keep--
 	}
 	return text[:keep] + marker
 }
