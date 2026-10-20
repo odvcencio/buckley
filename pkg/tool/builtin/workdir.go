@@ -89,7 +89,10 @@ func (w *workDirAware) ResolvePath(raw string) (string, error) {
 }
 
 func resolvePath(workDir, raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
+	return resolveLiteralPath(workDir, strings.TrimSpace(raw))
+}
+
+func resolveLiteralPath(workDir, raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("path cannot be empty")
 	}
