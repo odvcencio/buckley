@@ -5,19 +5,21 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/encoding/toon"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
-var resultCodec = toon.New(true)
+var useJSONResults atomic.Bool
 
 const DefaultModelOutputBytes = 24 * 1024
 
 // SetResultEncoding toggles whether tool outputs use TOON or JSON encoding.
+// Each encoding call keeps the format selected when it started.
 func SetResultEncoding(useToon bool) {
-	resultCodec = toon.New(useToon)
+	useJSONResults.Store(!useToon)
 }
 
 // Tool represents a tool that can be called by the LLM
@@ -44,7 +46,7 @@ func ToOpenAIFunction(t Tool) map[string]any {
 
 // ToJSON converts a result to JSON
 func ToJSON(r *builtin.Result) (string, error) {
-	data, err := resultCodec.Marshal(r)
+	data, err := toon.New(!useJSONResults.Load()).Marshal(r)
 	if err != nil {
 		return "", err
 	}
@@ -65,6 +67,7 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 	if r == nil {
 		return "", nil
 	}
+	codec := toon.New(!useJSONResults.Load())
 	data := r.Data
 	if r.ShouldAbridge && len(r.DisplayData) > 0 {
 		data = r.DisplayData
@@ -101,7 +104,7 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 	if len(data) > 0 {
 		payload["data"] = data
 	}
-	encoded, err := resultCodec.Marshal(payload)
+	encoded, err := codec.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +128,7 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 		if r.Error != "" {
 			compact["error"] = modelOutputPrefix(r.Error, 512)
 		}
-		encoded, err = resultCodec.Marshal(compact)
+		encoded, err = codec.Marshal(compact)
 		if err != nil {
 			return "", err
 		}
