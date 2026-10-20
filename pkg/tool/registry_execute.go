@@ -138,9 +138,12 @@ func (r *Registry) executeTool(ctx *ExecutionContext, tool Tool, params map[stri
 			return nil, err
 		}
 	}
-	if r.containerExecute && r.containerCompose != "" {
+	r.mu.RLock()
+	containerEnabled, composePath, workDir, outputLimit := r.containerExecute, r.containerCompose, r.containerWorkDir, r.maxOutputBytes
+	r.mu.RUnlock()
+	if containerEnabled && composePath != "" {
 		service := containerexec.GetServiceForTool(strings.TrimSpace(ctx.ToolName))
-		runner := containerexec.NewContainerRunner(r.containerCompose, service, r.containerWorkDir, tool)
+		runner := containerexec.NewContainerRunner(composePath, service, workDir, tool, containerexec.WithOutputLimit(outputLimit))
 		return runner.ExecuteWithContext(ctx.Context, params)
 	}
 	if tool == nil {
