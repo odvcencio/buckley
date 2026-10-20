@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -74,7 +75,7 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	}
 
 	// Read file
-	content, err := os.ReadFile(file)
+	content, err := t.readMutationFile(file)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -86,7 +87,7 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	language := t.detectLanguage(file)
 
 	// Find function and generate docstring
-	docstring, lineNum, err := t.generateDocstring(string(content), functionName, description, language)
+	docstring, lineNum, err := t.generateDocstring(content, functionName, description, language)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -94,38 +95,26 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 		}, nil
 	}
 
-	// Insert docstring into file
-	lines := strings.Split(string(content), "\n")
-	if lineNum <= 0 || lineNum > len(lines) {
-		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("invalid line number: %d", lineNum),
-		}, nil
-	}
-
-	// Check if documentation already exists
+	insert := mutationLineOffset(content, lineNum)
 	if lineNum > 1 {
-		prevLine := strings.TrimSpace(lines[lineNum-2])
+		previous := mutationLineOffset(content, lineNum-1)
+		prevLine := strings.TrimSpace(content[previous:insert])
 		if t.isDocComment(prevLine, language) {
-			return &Result{
-				Success: true,
-				Data: map[string]any{
-					"file":          file,
-					"function_name": functionName,
-					"message":       "Function already has documentation",
-					"existing_doc":  prevLine,
-				},
-			}, nil
+			return &Result{Success: true, Data: map[string]any{
+				"file": file, "function_name": functionName, "message": "Function already has documentation", "existing_doc": prevLine,
+			}}, nil
 		}
 	}
-
-	// Insert docstring before function
-	newLines := make([]string, 0, len(lines)+strings.Count(docstring, "\n")+1)
-	newLines = append(newLines, lines[:lineNum-1]...)
-	newLines = append(newLines, docstring)
-	newLines = append(newLines, lines[lineNum-1:]...)
-
-	newContent := strings.Join(newLines, "\n")
+	if err := t.checkReplacementGrowth(len(content), 0, len(docstring)+1, 1); err != nil {
+		return &Result{Error: err.Error()}, nil
+	}
+	var output strings.Builder
+	output.Grow(len(content) + len(docstring) + 1)
+	output.WriteString(content[:insert])
+	output.WriteString(docstring)
+	output.WriteByte('\n')
+	output.WriteString(content[insert:])
+	newContent := output.String()
 
 	// Write file
 	if err := writeMutationFile(file, newContent, 0644); err != nil {
@@ -183,19 +172,27 @@ func (t *GenerateDocstringTool) isDocComment(line, language string) bool {
 }
 
 func (t *GenerateDocstringTool) generateDocstring(content, functionName, description, language string) (string, int, error) {
+	if int64(len(functionName)) > t.mutationFileLimit() || int64(len(description)) > t.mutationFileLimit() {
+		return "", 0, mutationBudgetError(t.mutationFileLimit())
+	}
 	// Find the function
-	var pattern *regexp.Regexp
+	var expression string
+	name := regexp.QuoteMeta(functionName)
 	switch language {
 	case "go":
-		pattern = regexp.MustCompile(fmt.Sprintf(`(?m)^func\s+(?:\(\w+\s+\*?\w+\)\s+)?%s\s*\([^)]*\)`, functionName))
+		expression = fmt.Sprintf(`(?m)^func\s+(?:\(\w+\s+\*?\w+\)\s+)?%s\s*\([^)]*\)`, name)
 	case "javascript":
-		pattern = regexp.MustCompile(fmt.Sprintf(`(?m)^(?:export\s+)?(?:async\s+)?function\s+%s\s*\(`, functionName))
+		expression = fmt.Sprintf(`(?m)^(?:export\s+)?(?:async\s+)?function\s+%s\s*\(`, name)
 	case "python":
-		pattern = regexp.MustCompile(fmt.Sprintf(`(?m)^def\s+%s\s*\(`, functionName))
+		expression = fmt.Sprintf(`(?m)^def\s+%s\s*\(`, name)
 	default:
 		return "", 0, fmt.Errorf("unsupported language: %s", language)
 	}
 
+	pattern, err := regexp.Compile(expression)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid function name: %w", err)
+	}
 	match := pattern.FindStringIndex(content)
 	if match == nil {
 		return "", 0, fmt.Errorf("function %s not found", functionName)
@@ -205,177 +202,125 @@ func (t *GenerateDocstringTool) generateDocstring(content, functionName, descrip
 	lineNum := strings.Count(content[:match[0]], "\n") + 1
 
 	// Extract function signature
-	lines := strings.Split(content, "\n")
-	signature := lines[lineNum-1]
+	signature, _, _ := strings.Cut(content[match[0]:], "\n")
 
 	// Generate appropriate docstring
 	var docstring string
 	switch language {
 	case "go":
-		docstring = t.generateGoDoc(functionName, signature, description)
+		docstring, err = t.generateGoDoc(functionName, signature, description)
 	case "javascript":
-		docstring = t.generateJSDoc(functionName, signature, description)
+		docstring, err = t.generateJSDoc(functionName, signature, description)
 	case "python":
-		docstring = t.generatePythonDoc(functionName, signature, description)
+		docstring, err = t.generatePythonDoc(functionName, signature, description)
 	}
 
-	return docstring, lineNum, nil
+	return docstring, lineNum, err
 }
 
-func (t *GenerateDocstringTool) generateGoDoc(functionName, signature, description string) string {
+func (t *GenerateDocstringTool) generateGoDoc(functionName, signature, description string) (string, error) {
 	if description == "" {
 		description = fmt.Sprintf("%s TODO: add description", functionName)
 	}
-
-	// Extract parameters
-	params := t.extractGoParams(signature)
-	returnType := t.extractGoReturnType(signature)
-
-	doc := fmt.Sprintf("// %s\n", description)
-
-	if len(params) > 0 {
-		doc += "//\n"
-		for _, param := range params {
-			doc += fmt.Sprintf("// %s: TODO: describe parameter\n", param)
+	doc := generatedText{limit: t.mutationFileLimit()}
+	doc.append("// ", description, "\n")
+	first := true
+	for param := range docParameters(signature, "go") {
+		if first {
+			doc.append("//\n")
+			first = false
+		}
+		if !doc.append("// ", param, ": TODO: describe parameter\n") {
+			return doc.result()
 		}
 	}
-
-	if returnType != "" {
-		doc += "//\n"
-		doc += "// Returns: TODO: describe return value\n"
+	if t.extractGoReturnType(signature) != "" {
+		doc.append("//\n// Returns: TODO: describe return value\n")
 	}
-
-	return strings.TrimRight(doc, "\n")
+	text, err := doc.result()
+	return strings.TrimRight(text, "\n"), err
 }
 
-func (t *GenerateDocstringTool) generateJSDoc(functionName, signature, description string) string {
+func (t *GenerateDocstringTool) generateJSDoc(functionName, signature, description string) (string, error) {
 	if description == "" {
 		description = "TODO: add description"
 	}
-
-	params := t.extractJSParams(signature)
-
-	doc := "/**\n"
-	doc += fmt.Sprintf(" * %s\n", description)
-
-	if len(params) > 0 {
-		doc += " *\n"
-		for _, param := range params {
-			doc += fmt.Sprintf(" * @param {*} %s - TODO: describe parameter\n", param)
+	doc := generatedText{limit: t.mutationFileLimit()}
+	doc.append("/**\n * ", description, "\n")
+	first := true
+	for param := range docParameters(signature, "javascript") {
+		if first {
+			doc.append(" *\n")
+			first = false
+		}
+		if !doc.append(" * @param {*} ", param, " - TODO: describe parameter\n") {
+			return doc.result()
 		}
 	}
-
-	doc += " * @returns {*} TODO: describe return value\n"
-	doc += " */"
-
-	return doc
+	doc.append(" * @returns {*} TODO: describe return value\n */")
+	return doc.result()
 }
 
-func (t *GenerateDocstringTool) generatePythonDoc(functionName, signature, description string) string {
+func (t *GenerateDocstringTool) generatePythonDoc(functionName, signature, description string) (string, error) {
 	if description == "" {
 		description = "TODO: add description"
 	}
-
-	params := t.extractPythonParams(signature)
-
-	// Get indentation from signature
-	indent := ""
-	for _, ch := range signature {
-		if ch == ' ' || ch == '\t' {
-			indent += string(ch)
-		} else {
-			break
+	indent := signature[:len(signature)-len(strings.TrimLeft(signature, " \t"))]
+	doc := generatedText{limit: t.mutationFileLimit()}
+	doc.append(indent, "\"\"\"\n", indent, description, "\n")
+	first := true
+	for param := range docParameters(signature, "python") {
+		if first {
+			doc.append(indent, "\n", indent, "Args:\n")
+			first = false
+		}
+		if !doc.append(indent, "    ", param, ": TODO: describe parameter\n") {
+			return doc.result()
 		}
 	}
-
-	doc := indent + "\"\"\"\n"
-	doc += indent + description + "\n"
-
-	if len(params) > 0 {
-		doc += indent + "\n"
-		doc += indent + "Args:\n"
-		for _, param := range params {
-			doc += indent + fmt.Sprintf("    %s: TODO: describe parameter\n", param)
-		}
-	}
-
-	doc += indent + "\n"
-	doc += indent + "Returns:\n"
-	doc += indent + "    TODO: describe return value\n"
-	doc += indent + "\"\"\""
-
-	return doc
-}
-
-func (t *GenerateDocstringTool) extractGoParams(signature string) []string {
-	matches := parensContentRe.FindStringSubmatch(signature)
-	if len(matches) < 2 {
-		return []string{}
-	}
-
-	params := []string{}
-	for param := range strings.SplitSeq(matches[1], ",") {
-		param = strings.TrimSpace(param)
-		if param != "" {
-			// Extract param name (before type)
-			parts := strings.Fields(param)
-			if len(parts) > 0 {
-				params = append(params, parts[0])
-			}
-		}
-	}
-
-	return params
+	doc.append(indent, "\n", indent, "Returns:\n", indent, "    TODO: describe return value\n", indent, "\"\"\"")
+	return doc.result()
 }
 
 func (t *GenerateDocstringTool) extractGoReturnType(signature string) string {
 	if _, after, ok := strings.Cut(signature, ")"); ok {
-		returnType := strings.TrimSpace(after)
-		if returnType != "" && returnType != "{" {
-			return returnType
+		result := strings.TrimSpace(after)
+		if result != "" && result != "{" {
+			return result
 		}
 	}
 	return ""
 }
 
-func (t *GenerateDocstringTool) extractJSParams(signature string) []string {
-	matches := parensContentRe.FindStringSubmatch(signature)
-	if len(matches) < 2 {
-		return []string{}
-	}
-
-	params := []string{}
-	for param := range strings.SplitSeq(matches[1], ",") {
-		param = strings.TrimSpace(param)
-		if param != "" {
-			// Remove default values and type annotations
-			param, _, _ = strings.Cut(param, "=")
-			param, _, _ = strings.Cut(param, ":")
-			params = append(params, strings.TrimSpace(param))
+func docParameters(signature, language string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		matches := parensContentRe.FindStringSubmatch(signature)
+		if len(matches) < 2 {
+			return
+		}
+		for param := range strings.SplitSeq(matches[1], ",") {
+			param = strings.TrimSpace(param)
+			if param == "" || (language == "python" && (param == "self" || param == "cls")) {
+				continue
+			}
+			switch language {
+			case "go":
+				for field := range strings.FieldsSeq(param) {
+					param = field
+					break
+				}
+			case "javascript":
+				param, _, _ = strings.Cut(param, "=")
+				param, _, _ = strings.Cut(param, ":")
+			case "python":
+				param, _, _ = strings.Cut(param, ":")
+				param, _, _ = strings.Cut(param, "=")
+			}
+			if !yield(strings.TrimSpace(param)) {
+				return
+			}
 		}
 	}
-
-	return params
-}
-
-func (t *GenerateDocstringTool) extractPythonParams(signature string) []string {
-	matches := parensContentRe.FindStringSubmatch(signature)
-	if len(matches) < 2 {
-		return []string{}
-	}
-
-	params := []string{}
-	for param := range strings.SplitSeq(matches[1], ",") {
-		param = strings.TrimSpace(param)
-		if param != "" && param != "self" && param != "cls" {
-			// Remove type hints and default values
-			param, _, _ = strings.Cut(param, ":")
-			param, _, _ = strings.Cut(param, "=")
-			params = append(params, strings.TrimSpace(param))
-		}
-	}
-
-	return params
 }
 
 // ExplainCodeTool explains what a code snippet does

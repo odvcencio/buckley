@@ -558,13 +558,6 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 			return &Result{Success: false, Error: err.Error()}, nil
 		}
 		sourceFile = abs
-		if testFile != "" {
-			abs, err := resolvePath(t.workDir, testFile)
-			if err != nil {
-				return &Result{Success: false, Error: err.Error()}, nil
-			}
-			testFile = abs
-		}
 	}
 
 	// Auto-generate test file path if not specified
@@ -572,8 +565,25 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 		testFile = t.generateTestFilePath(sourceFile)
 	}
 
+	if strings.TrimSpace(t.workDir) != "" {
+		resolved, err := resolvePath(t.workDir, testFile)
+		if err != nil {
+			return &Result{Error: err.Error()}, nil
+		}
+		testFile = resolved
+	}
+
 	// Detect language
 	language := t.detectLanguage(sourceFile)
+
+	// Named templates interpolate the function name three times.
+	if int64(len(functionName)) > t.mutationFileLimit()/3 {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
+	}
+
+	if language != "go" && int64(len(filepath.Base(sourceFile))) > t.mutationFileLimit()-int64(len(functionName))*3 {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
+	}
 
 	// Generate test content
 	testContent, err := t.generateTestContent(sourceFile, functionName, language)
@@ -582,6 +592,10 @@ func (t *GenerateTestTool) Execute(params map[string]any) (*Result, error) {
 			Success: false,
 			Error:   fmt.Sprintf("failed to generate test: %v", err),
 		}, nil
+	}
+
+	if int64(len(testContent)) > t.mutationFileLimit() {
+		return &Result{Error: mutationBudgetError(t.mutationFileLimit()).Error()}, nil
 	}
 
 	// Write test file
@@ -626,7 +640,7 @@ func (t *GenerateTestTool) generateTestFilePath(sourceFile string) string {
 	case ".ts":
 		return base + ".test.ts"
 	case ".py":
-		return "test_" + filepath.Base(sourceFile)
+		return filepath.Join(filepath.Dir(sourceFile), "test_"+filepath.Base(sourceFile))
 	default:
 		return base + "_test" + ext
 	}
@@ -647,6 +661,19 @@ func (t *GenerateTestTool) detectLanguage(file string) string {
 }
 
 func (t *GenerateTestTool) generateTestContent(sourceFile, functionName, language string) (string, error) {
+	if language == "javascript" || language == "python" {
+		info, err := os.Stat(sourceFile)
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%s is not a regular file", sourceFile)
+		}
+		if info.Size() > t.mutationFileLimit() {
+			return "", mutationBudgetError(t.mutationFileLimit())
+		}
+	}
+
 	switch language {
 	case "go":
 		return t.generateGoTest(sourceFile, functionName)
@@ -661,12 +688,12 @@ func (t *GenerateTestTool) generateTestContent(sourceFile, functionName, languag
 
 func (t *GenerateTestTool) generateGoTest(sourceFile, functionName string) (string, error) {
 	// Read source to get package name
-	content, err := os.ReadFile(sourceFile)
+	content, err := t.readMutationFile(sourceFile)
 	if err != nil {
 		return "", err
 	}
 
-	matches := goPackageRe.FindStringSubmatch(string(content))
+	matches := goPackageRe.FindStringSubmatch(content)
 	packageName := "main"
 	if len(matches) > 1 {
 		packageName = matches[1]
