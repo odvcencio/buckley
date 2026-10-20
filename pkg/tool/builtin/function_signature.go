@@ -251,30 +251,8 @@ func signatureTreeFunction(ctx context.Context, root *gotreesitter.Node, languag
 	var selected, declaration *gotreesitter.Node
 	qualified := ""
 	leaf := target[strings.LastIndexByte(target, '.')+1:]
-	var visit func(*gotreesitter.Node, int) error
-	visit = func(node *gotreesitter.Node, depth int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if depth > 512 {
-			return fmt.Errorf("function syntax depth exceeds 512")
-		}
-		if node.IsMissing() || node.IsError() {
-			return fmt.Errorf("invalid function syntax at line %d", node.StartPoint().Row+1)
-		}
+	err := walkDeclarationTree(ctx, root, language, python, func(node *gotreesitter.Node) error {
 		kind := node.Type(language)
-		if python && kind == "block" {
-			hasStatement := false
-			for i := 0; i < node.NamedChildCount(); i++ {
-				if node.NamedChild(i).Type(language) != "comment" {
-					hasStatement = true
-					break
-				}
-			}
-			if !hasStatement {
-				return fmt.Errorf("empty Python suite at line %d", node.StartPoint().Row+1)
-			}
-		}
 		signature := isJSSignature(node, language)
 		if signature || complexityTreeFunction(kind) {
 			candidate := treeFunctionName(node, language, source)
@@ -301,14 +279,9 @@ func signatureTreeFunction(ctx context.Context, root *gotreesitter.Node, languag
 				}
 			}
 		}
-		for i := 0; i < node.ChildCount(); i++ {
-			if err := visit(node.Child(i), depth+1); err != nil {
-				return err
-			}
-		}
 		return nil
-	}
-	if err := visit(root, 0); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	if selected != nil {
