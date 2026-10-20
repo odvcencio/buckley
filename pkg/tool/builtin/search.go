@@ -476,7 +476,7 @@ func (t *SearchReplaceTool) Execute(params map[string]any) (*Result, error) {
 	if err != nil {
 		return &Result{Success: false, Error: fmt.Sprintf("failed to stat file: %v", err)}, nil
 	}
-	if err := os.WriteFile(absPath, []byte(replaced), info.Mode().Perm()); err != nil {
+	if err := writeMutationFile(absPath, replaced, info.Mode().Perm()); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

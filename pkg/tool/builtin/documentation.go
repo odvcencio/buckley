@@ -128,7 +128,7 @@ func (t *GenerateDocstringTool) Execute(params map[string]any) (*Result, error) 
 	newContent := strings.Join(newLines, "\n")
 
 	// Write file
-	if err := os.WriteFile(file, []byte(newContent), 0644); err != nil {
+	if err := writeMutationFile(file, newContent, 0644); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),

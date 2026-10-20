@@ -232,7 +232,7 @@ func (t *RenameSymbolTool) renameInFile(filepath, oldName, newName string, dryRu
 
 	if !dryRun {
 		newContent := re.ReplaceAllString(string(content), newName)
-		if err := os.WriteFile(filepath, []byte(newContent), 0644); err != nil {
+		if err := writeMutationFile(filepath, newContent, 0644); err != nil {
 			return 0, err
 		}
 	}
@@ -389,7 +389,7 @@ func (t *ExtractFunctionTool) Execute(params map[string]any) (*Result, error) {
 	newContent := strings.Join(newLines, "\n")
 
 	// Write the modified file
-	if err := os.WriteFile(filepath, []byte(newContent), 0644); err != nil {
+	if err := writeMutationFile(filepath, newContent, 0644); err != nil {
 		return &Result{
 			Success: false,
 			Error:   fmt.Sprintf("failed to write file: %v", err),
