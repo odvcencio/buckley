@@ -95,6 +95,9 @@ func commentPlacement(content string, offset int, edit *documentationEdit) (stri
 
 func (t *GenerateDocstringTool) jsDocstringEdit(p *gotreesitter.Parser, language *gotreesitter.Language, content, name, description string) (documentationEdit, error) {
 	edit := documentationEdit{}
+	if existing, ok := existingPreambleDocumentation(p, language, content, name); ok {
+		return existing, nil
+	}
 	tree, err := parseFunctionTree(p, content)
 	if err != nil {
 		return edit, err
