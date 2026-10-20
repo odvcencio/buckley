@@ -8,7 +8,6 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -312,34 +311,6 @@ func complexityTreeFunction(kind string) bool {
 	return false
 }
 
-func complexityTreeName(node *gotreesitter.Node, language *gotreesitter.Language, source string) (string, error) {
-	parts := []string{}
-	length := 0
-	for current := node; current != nil; current = current.Parent() {
-		kind := current.Type(language)
-		if current != node && !complexityTreeFunction(kind) {
-			switch kind {
-			case "class_definition", "class_declaration", "abstract_class_declaration", "class", "object", "internal_module":
-			default:
-				continue
-			}
-		}
-		name := treeFunctionName(current, language, source)
-		if name == "" && current == node {
-			name = "<anonymous>"
-		}
-		if name != "" {
-			length += len(name) + 1
-			if length > DefaultComplexityOutputBytes {
-				return "", fmt.Errorf("qualified function name exceeds %d-byte output budget", DefaultComplexityOutputBytes)
-			}
-			parts = append(parts, name)
-		}
-	}
-	slices.Reverse(parts)
-	return strings.Join(parts, "."), nil
-}
-
 func (a *complexityAnalysis) treeFile(path, source, grammar string) error {
 	language := grammars.DetectLanguage(grammar).Language()
 	tree, err := parseFunctionTree(newFunctionParser(language), source)
@@ -376,7 +347,7 @@ func (a *complexityAnalysis) treeFile(path, source, grammar string) error {
 			if body == nil {
 				return fmt.Errorf("parse %s: missing function body at line %d", path, node.StartPoint().Row+1)
 			}
-			name, err := complexityTreeName(node, language, source)
+			name, err := boundedTreeFunctionName(node, language, source)
 			if err != nil {
 				return err
 			}
