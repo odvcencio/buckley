@@ -627,6 +627,9 @@ func TestCommitSubjectsBetween_OldestFirst(t *testing.T) {
 func TestCommitSubjectsBetween_CondensesLongRanges(t *testing.T) {
 	repo := t.TempDir()
 	runGitIn(t, repo, "init", "-q", "-b", "main")
+	// Keep detached maintenance from racing temporary repository cleanup.
+	runGitIn(t, repo, "config", "maintenance.auto", "false")
+	runGitIn(t, repo, "config", "gc.auto", "0")
 	runGitIn(t, repo, "config", "user.email", "test@example.com")
 	runGitIn(t, repo, "config", "user.name", "Test User")
 	writeFile(t, repo, "f.txt", "0\n")
