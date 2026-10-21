@@ -162,10 +162,11 @@ func TestMCPInputSchemaToParameters_NestedObject(t *testing.T) {
 }
 
 func TestFlattenMCPContent_TextOnly(t *testing.T) {
-	text, blocks := flattenMCPContent([]sdkmcp.Content{
+	summary := flattenMCPContent([]sdkmcp.Content{
 		&sdkmcp.TextContent{Text: "line one"},
 		&sdkmcp.TextContent{Text: "line two"},
 	})
+	text, blocks := summary.text, summary.blocks
 	if text != "line one\nline two" {
 		t.Fatalf("unexpected joined text: %q", text)
 	}
@@ -175,11 +176,12 @@ func TestFlattenMCPContent_TextOnly(t *testing.T) {
 }
 
 func TestFlattenMCPContent_ImageAndResourceSummarized(t *testing.T) {
-	text, blocks := flattenMCPContent([]sdkmcp.Content{
+	summary := flattenMCPContent([]sdkmcp.Content{
 		&sdkmcp.TextContent{Text: "caption"},
 		&sdkmcp.ImageContent{Data: []byte{1, 2, 3, 4}, MIMEType: "image/png"},
 		&sdkmcp.EmbeddedResource{Resource: &sdkmcp.ResourceContents{URI: "file:///tmp/x.txt"}},
 	})
+	text, blocks := summary.text, summary.blocks
 	if text != "caption" {
 		t.Fatalf("expected only the text block in output, got %q", text)
 	}
@@ -227,6 +229,9 @@ func TestMCPTool_ExecuteWithContext_CallsThroughManager(t *testing.T) {
 	}
 	if res.Data["output"] != "hello" {
 		t.Fatalf("expected output=hello, got %+v", res.Data)
+	}
+	if _, ok := res.Data["truncated"]; ok {
+		t.Fatal("small response marked truncated")
 	}
 }
 

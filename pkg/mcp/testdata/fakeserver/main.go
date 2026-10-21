@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "normal", "normal, crash, or malformed")
+	mode := flag.String("mode", "normal", "normal, large, crash, or malformed")
 	toolCount := flag.Int("tools", 2, "number of synthetic tools to register in normal mode")
 	flag.Parse()
 
@@ -27,8 +27,10 @@ func main() {
 		runMalformed()
 	case "crash":
 		runCrash()
+	case "large":
+		runNormal(*toolCount, true)
 	default:
-		runNormal(*toolCount)
+		runNormal(*toolCount, false)
 	}
 }
 
@@ -125,7 +127,7 @@ func runCrash() {
 // runNormal serves a handful of well-formed tools for handshake/list/call
 // coverage, including tools whose results exercise text, image, and
 // resource content blocks.
-func runNormal(toolCount int) {
+func runNormal(toolCount int, large bool) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "fake-normal", Version: "0.0.1"}, nil)
 
 	server.AddTool(&mcp.Tool{
@@ -139,6 +141,9 @@ func runNormal(toolCount int) {
 			"required": []string{"text"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if large {
+			return &mcp.CallToolResult{Content: largeContent()}, nil
+		}
 		var args struct {
 			Text string `json:"text"`
 		}
@@ -151,6 +156,9 @@ func runNormal(toolCount int) {
 		Description: "Always returns a tool-level error.",
 		InputSchema: map[string]any{"type": "object"},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if large {
+			return &mcp.CallToolResult{IsError: true, Content: largeContent()}, nil
+		}
 		return &mcp.CallToolResult{
 			IsError: true,
 			Content: []mcp.Content{&mcp.TextContent{Text: "synthetic tool failure"}},
@@ -185,6 +193,21 @@ func runNormal(toolCount int) {
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		os.Exit(1)
 	}
+}
+
+func largeContent() []mcp.Content {
+	content := make([]mcp.Content, 32)
+	for i := range content {
+		text := strings.Repeat("x", 128<<10)
+		if i == 0 {
+			text = "FIRST_EVIDENCE: fixture-start\n" + text
+		}
+		if i == len(content)-1 {
+			text += "\nFINAL_EVIDENCE: expected 37, got 36"
+		}
+		content[i] = &mcp.TextContent{Text: text}
+	}
+	return content
 }
 
 const longFiller = "Padding padding padding padding padding padding padding padding padding padding."
