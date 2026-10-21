@@ -38,17 +38,24 @@ func TestCanopyGraphBatch_SelectSeedPreservesScopeDepthAndOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		reverse bool
+		line    int
 		nodes   []string
 		edges   []string
 	}{
-		{"forward", false, []string{"a", "a2", "m", "l", "x"}, []string{"a>m", "m>l", "m>a", "a2>x", "x>l"}},
-		{"reverse", true, []string{"a", "a2", "b", "m", "c"}, []string{"a>m", "m>a", "c>a", "b>c"}},
+		{"first_forward", false, 1, []string{"a", "m", "l"}, []string{"a>m", "m>l", "m>a"}},
+		{"first_reverse", true, 1, []string{"a", "b", "m", "c"}, []string{"a>m", "m>a", "c>a", "b>c"}},
+		{"second_forward", false, 20, []string{"a2", "l", "x"}, []string{"a2>x", "x>l"}},
+		{"second_reverse", true, 20, []string{"a2"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			batch := newCanopyGraphBatch(report, tc.reverse)
-			got, ok := batch.selectSeed(canopyProjectSeed{Name: "Foo", File: "./a.go", StartLine: 20})
-			if !ok || !reflect.DeepEqual(got.Roots, []canopyGraphSymbol{a, a2}) {
-				t.Fatalf("same-file overloads or root order lost: %+v", got.Roots)
+			got, ok := batch.selectSeed(canopyProjectSeed{Name: "Foo", File: "./a.go", StartLine: tc.line})
+			root := a
+			if tc.line == 20 {
+				root = a2
+			}
+			if !ok || !reflect.DeepEqual(got.Roots, []canopyGraphSymbol{root}) {
+				t.Fatalf("graph root did not match the indexed definition: %+v", got.Roots)
 			}
 			var nodes, edges []string
 			for _, node := range got.Nodes {
@@ -60,11 +67,16 @@ func TestCanopyGraphBatch_SelectSeedPreservesScopeDepthAndOrder(t *testing.T) {
 			if !reflect.DeepEqual(nodes, tc.nodes) || !reflect.DeepEqual(edges, tc.edges) {
 				t.Fatalf("scope/depth/order changed: nodes=%v edges=%v", nodes, edges)
 			}
-			if !reflect.DeepEqual(got.Edges[0], report.Edges[0]) {
+			if tc.line == 1 && !reflect.DeepEqual(got.Edges[0], report.Edges[0]) {
 				t.Fatal("edge counts, resolution, or samples changed")
 			}
 			if _, ok := batch.selectSeed(canopyProjectSeed{Name: "Foo", File: "missing.go"}); ok {
 				t.Fatal("same-name roots from another file satisfied a missing seed")
+			}
+			for _, line := range []int{0, 99} {
+				if _, ok := batch.selectSeed(canopyProjectSeed{Name: "Foo", File: "a.go", StartLine: line}); ok {
+					t.Fatal("an ambiguous or missing definition was replaced by a same-name root")
+				}
 			}
 		})
 	}
@@ -187,7 +199,7 @@ esac
 				t.Fatalf("coverage=%+v", toc.Coverage)
 			}
 			for _, flow := range toc.ImportantFlows {
-				if flow.ReachableNodes != 3 || flow.GraphEdges != 2 || len(flow.Callers) != 1 || len(flow.Callees) != 1 {
+				if flow.ReachableNodes == nil || *flow.ReachableNodes != 3 || flow.GraphEdges == nil || *flow.GraphEdges != 2 || flow.GraphDirection != "callees" || len(flow.Callers) != 1 || len(flow.Callees) != 1 {
 					t.Fatalf("flow scope changed: %+v", flow)
 				}
 			}

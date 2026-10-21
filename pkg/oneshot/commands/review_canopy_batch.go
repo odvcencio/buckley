@@ -18,6 +18,21 @@ type canopyGraphBatch struct {
 	edgesByNode map[string][]int
 }
 
+func (graphs canopyProjectGraphs) collectSeed(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed, reverse bool) (canopyGraphReport, bool) {
+	batch := graphs.forward
+	if reverse {
+		batch = graphs.reverse
+	}
+	if report, ok := batch.selectSeed(seed); ok {
+		return report, true
+	}
+	report, err := runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, reverse)
+	if err != nil {
+		return canopyGraphReport{}, false
+	}
+	return newCanopyGraphBatch(report, reverse).selectSeed(seed)
+}
+
 func collectCanopyProjectGraphs(ctx context.Context, executable, repoRoot, cachePath string, seeds []canopyProjectSeed) canopyProjectGraphs {
 	names := make([]string, 0, len(seeds))
 	for _, seed := range seeds {
@@ -77,11 +92,14 @@ func (b *canopyGraphBatch) selectSeed(seed canopyProjectSeed) (canopyGraphReport
 		if root.Name != seed.Name || filepath.ToSlash(filepath.Clean(root.File)) != filepath.ToSlash(filepath.Clean(seed.File)) {
 			continue
 		}
+		if seed.StartLine > 0 && root.StartLine != seed.StartLine {
+			continue
+		}
 		selected.Roots = append(selected.Roots, root)
 		seen[root.ID] = true
 		frontier = append(frontier, root.ID)
 	}
-	if len(frontier) == 0 {
+	if len(frontier) != 1 {
 		return canopyGraphReport{}, false
 	}
 	edges := make(map[int]bool)

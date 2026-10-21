@@ -182,8 +182,9 @@ type canopyTOCFlow struct {
 	Cognitive      *int              `json:"cognitive,omitempty"`
 	Callers        []canopyTOCEdge   `json:"callers,omitempty"`
 	Callees        []canopyTOCEdge   `json:"callees,omitempty"`
-	ReachableNodes int               `json:"reachable_nodes"`
-	GraphEdges     int               `json:"graph_edges"`
+	ReachableNodes *int              `json:"reachable_nodes,omitempty"`
+	GraphEdges     *int              `json:"graph_edges,omitempty"`
+	GraphDirection string            `json:"graph_direction,omitempty"`
 	Status         string            `json:"status"`
 }
 
@@ -658,37 +659,26 @@ func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePa
 		Status:     "unavailable",
 	}
 
-	forward, forwardCached := graphs.forward.selectSeed(seed)
-	var forwardErr error
-	if !forwardCached {
-		forward, forwardErr = runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, false)
+	forward, forwardOK := graphs.collectSeed(ctx, executable, repoRoot, cachePath, seed, false)
+	reverse, reverseOK := graphs.collectSeed(ctx, executable, repoRoot, cachePath, seed, true)
+	if forwardOK && reverseOK && !sameCanopyGraphSymbol(forward.Roots[0], reverse.Roots[0]) {
+		forwardOK, reverseOK = false, false
 	}
-	reverse, reverseCached := graphs.reverse.selectSeed(seed)
-	var reverseErr error
-	if !reverseCached {
-		reverse, reverseErr = runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, true)
-	}
-	forwardOK := forwardErr == nil && len(forward.Roots) > 0
-	reverseOK := reverseErr == nil && len(reverse.Roots) > 0
-	if forwardOK {
-		if len(forward.Roots) > 0 {
-			flow.Root = forward.Roots[0]
+	if forwardOK || reverseOK {
+		report, direction := forward, "callees"
+		if !forwardOK {
+			report, direction = reverse, "callers"
 		}
+		flow.Root = report.Roots[0]
+		nodes, edges := len(report.Nodes), len(report.Edges)
+		flow.ReachableNodes, flow.GraphEdges = &nodes, &edges
+		flow.GraphDirection = direction
+	}
+	if forwardOK {
 		flow.Callees = compactCanopyGraphEdges(forward, flow.Root, true)
-		flow.ReachableNodes = len(forward.Nodes)
-		flow.GraphEdges = len(forward.Edges)
 	}
 	if reverseOK {
-		if len(reverse.Roots) > 0 && flow.Root.File == "" {
-			flow.Root = reverse.Roots[0]
-		}
 		flow.Callers = compactCanopyGraphEdges(reverse, flow.Root, false)
-		if flow.ReachableNodes == 0 {
-			flow.ReachableNodes = len(reverse.Nodes)
-		}
-		if flow.GraphEdges == 0 {
-			flow.GraphEdges = len(reverse.Edges)
-		}
 	}
 	switch {
 	case forwardOK && reverseOK:
