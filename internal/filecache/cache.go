@@ -41,13 +41,7 @@ func New(dir, prefix string, limits Limits) *Cache {
 		return cache
 	}
 	_ = os.MkdirAll(dir, 0755)
-	if lock, err := cache.lock(); err == nil {
-		if err := cache.prepare(); err == nil {
-			_ = cache.finishIndex()
-		}
-		filelock.Unlock(lock)
-		_ = lock.Close()
-	}
+	_ = cache.Trim(limits.Bytes, limits.Entries)
 	return cache
 }
 
@@ -140,7 +134,7 @@ func (c *Cache) Set(key string, data []byte) error {
 	if err := c.prepare(); err != nil {
 		return err
 	}
-	if err := c.evict(int64(len(data)), 1); err != nil {
+	if err := c.evictTo(c.limits.Bytes-int64(len(data)), c.limits.Entries-1); err != nil {
 		return err
 	}
 	file, err := os.CreateTemp(c.dir, "."+c.prefix+"tmp-")
@@ -170,7 +164,8 @@ func (c *Cache) Set(key string, data []byte) error {
 	return c.finishIndex()
 }
 
-func (c *Cache) Clear() error {
+// Trim removes oldest writes until both targets fit. Zero targets clear the namespace.
+func (c *Cache) Trim(maxBytes int64, maxEntries int) error {
 	if c.dir == "" {
 		return nil
 	}
@@ -185,18 +180,21 @@ func (c *Cache) Clear() error {
 	if err := c.prepare(); err != nil {
 		return err
 	}
-	err = c.walk(func(entry os.DirEntry) error {
-		if !entry.IsDir() && (c.owns(entry.Name()) || strings.HasPrefix(entry.Name(), "."+c.prefix+"tmp-")) {
-			return os.Remove(filepath.Join(c.dir, entry.Name()))
-		}
-		return nil
-	})
-	if err == nil {
-		c.entries = make(map[string]cacheEntry)
-		c.bytes = 0
-		return c.finishIndex()
+	if err := c.evictTo(maxBytes, maxEntries); err != nil {
+		return err
 	}
-	return err
+	if maxBytes == 0 && maxEntries == 0 {
+		if err := c.walk(func(entry os.DirEntry) error {
+			if !entry.IsDir() && (c.owns(entry.Name()) || strings.HasPrefix(entry.Name(), "."+c.prefix+"tmp-")) {
+				return os.Remove(filepath.Join(c.dir, entry.Name()))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		c.entries = make(map[string]cacheEntry)
+	}
+	return c.finishIndex()
 }
 
 // The generation is changed under the writer lock before modifying entries.
@@ -244,8 +242,8 @@ func (c *Cache) finishIndex() error {
 	return nil
 }
 
-func (c *Cache) evict(reservedBytes int64, reservedEntries int) error {
-	for len(c.entries)+reservedEntries > c.limits.Entries || c.bytes+reservedBytes > c.limits.Bytes {
+func (c *Cache) evictTo(maxBytes int64, maxEntries int) error {
+	for len(c.entries) > maxEntries || c.bytes > maxBytes {
 		var oldest cacheEntry
 		for _, entry := range c.entries {
 			if oldest.name == "" || entry.modified.Before(oldest.modified) || entry.modified.Equal(oldest.modified) && entry.name < oldest.name {

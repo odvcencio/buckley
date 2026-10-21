@@ -50,7 +50,7 @@ func TestCache_BudgetsAndLegacyCleanup(t *testing.T) {
 			t.Fatal("foreign file deleted")
 		}
 	}
-	if err := cache.Clear(); err != nil {
+	if err := cache.Trim(0, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"hunt-foreign.json", "unrelated.json", ".emb-lock"} {
@@ -114,7 +114,7 @@ func TestCache_EmptyDirectoryDisablesWrites(t *testing.T) {
 	if _, hit := cache.Get("key"); hit {
 		t.Fatal("disabled cache hit")
 	}
-	if err := cache.Clear(); err != nil {
+	if err := cache.Trim(0, 0); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -245,7 +245,7 @@ func TestCache_ContentionAndConcurrentInstances(t *testing.T) {
 	if _, hit := other.Get("skipped"); hit {
 		t.Fatal("contended write bypassed process lock")
 	}
-	if err := other.Clear(); !errors.Is(err, ErrBusy) {
+	if err := other.Trim(0, 0); !errors.Is(err, ErrBusy) {
 		t.Fatal("Clear hid contention")
 	}
 	lock.Close()
@@ -303,7 +303,7 @@ func TestCache_PeerMutationAndProcessCrashInvalidateIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := New(dir, "emb-", limits)
-	if err := peer.Clear(); err != nil {
+	if err := peer.Trim(0, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := cache.Set("after-clear", bytes.Repeat([]byte("c"), 200)); err != nil {

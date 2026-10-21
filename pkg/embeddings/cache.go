@@ -49,5 +49,5 @@ func (c *Cache) Set(key string, embedding []float64) error {
 
 // Clear removes all cached embeddings
 func (c *Cache) Clear() error {
-	return c.files.Clear()
+	return c.files.Trim(0, 0)
 }
