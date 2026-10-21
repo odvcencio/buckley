@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,6 +21,9 @@ import (
 
 // ErrNotFound is returned when a requested evidence object does not exist.
 var ErrNotFound = errors.New("evidence: not found")
+
+// ErrIntegrity reports that stored evidence no longer matches its content record.
+var ErrIntegrity = errors.New("evidence: stored content integrity check failed")
 
 // Query selects evidence objects for listing. Zero-valued fields are not
 // applied as filters. SessionID, RunID, TaskID, Path, and EntityID match
@@ -222,6 +226,8 @@ func (s *SQLiteStore) Blobs() *BlobStore {
 // media type (see the doc comment on ComputeContentID for why the ID
 // formula and the dedup index disagree on that point, and how this method
 // resolves it).
+// Returned InlineBody bytes may share obj.InlineBody; changing them never
+// changes the persisted content.
 func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
 	var stored Object
 	var pendingBlob string
@@ -280,7 +286,7 @@ func (s *SQLiteStore) put(ctx context.Context, conn *sql.Conn, obj Object, pendi
 	content := obj.InlineBody
 	sha := ContentSHA256Hex(content)
 
-	if existing, err := s.getByKindHash(ctx, conn, obj.Kind, sha); err == nil {
+	if existing, err := s.reuseByKindHash(ctx, conn, obj.Kind, sha, content); err == nil {
 		return existing, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return Object{}, err
@@ -340,7 +346,7 @@ func (s *SQLiteStore) put(ctx context.Context, conn *sql.Conn, obj Object, pendi
 		if isUniqueConstraintError(err) {
 			// A concurrent writer won the race for this (kind, content)
 			// pair between our dedup check and this insert; defer to it.
-			return s.getByKindHash(ctx, conn, obj.Kind, sha)
+			return s.reuseByKindHash(ctx, conn, obj.Kind, sha, content)
 		}
 		return Object{}, fmt.Errorf("evidence: insert object: %w", err)
 	}
@@ -373,12 +379,28 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (Object, error) {
 	return s.materialize(obj)
 }
 
-func (s *SQLiteStore) getByKindHash(ctx context.Context, conn *sql.Conn, kind Kind, sha256Hex string) (Object, error) {
+func (s *SQLiteStore) reuseByKindHash(ctx context.Context, conn *sql.Conn, kind Kind, sha256Hex string, content []byte) (Object, error) {
 	obj, err := s.scanObject(conn.QueryRowContext(ctx, objectSelectColumns+" WHERE kind = ? AND content_sha256 = ?", string(kind), sha256Hex))
 	if err != nil {
 		return Object{}, err
 	}
-	return s.materialize(obj)
+	if obj.ByteCount != int64(len(content)) {
+		return Object{}, fmt.Errorf("%w: byte count for %s", ErrIntegrity, obj.ID)
+	}
+	switch obj.Storage {
+	case StorageBlob:
+		if err := s.blobs.verify(ctx, obj.BlobPath, content); err != nil {
+			return Object{}, fmt.Errorf("evidence: verify existing blob for %s: %w", obj.ID, err)
+		}
+	case StorageInline:
+		if !bytes.Equal(obj.InlineBody, content) {
+			return Object{}, fmt.Errorf("%w: inline body for %s", ErrIntegrity, obj.ID)
+		}
+	default:
+		return Object{}, fmt.Errorf("%w: storage kind for %s", ErrIntegrity, obj.ID)
+	}
+	obj.InlineBody = content
+	return obj, nil
 }
 
 func (s *SQLiteStore) materialize(obj Object) (Object, error) {
