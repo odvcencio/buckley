@@ -341,7 +341,7 @@ func runCompleteMerge(opts commitCommandOptions, state repoOpState) error {
 // package's dependency-injection style (commitRunner is already an
 // interface for this purpose; see frameworkCommitRunner in commit.go).
 func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, runner commitRunner, ledger *transparency.CostLedger, source, target string) error {
-	result, err := runCommitGeneration(ctx, runner)
+	result, err := runCommitGeneration(ctx, runner, opts)
 	if err != nil {
 		return err
 	}

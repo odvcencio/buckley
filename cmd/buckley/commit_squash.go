@@ -182,7 +182,7 @@ func runSquashCommand(opts commitCommandOptions) error {
 // (workingTreeClean, isProtectedBranch, the reflog-recoverable reset)
 // independently of message generation.
 func completeSquashWithRunner(opts commitCommandOptions, ctx context.Context, runner commitRunner, ledger *transparency.CostLedger, branch string) error {
-	result, err := runCommitGeneration(ctx, runner)
+	result, err := runCommitGeneration(ctx, runner, opts)
 	if err != nil {
 		return err
 	}
