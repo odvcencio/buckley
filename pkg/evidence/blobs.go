@@ -353,22 +353,39 @@ func decompressZstd(compressed io.Reader) ([]byte, error) {
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
-	initial := 512
+	initial := 0
 	var header zstd.Header
-	if header.Decode(prefix) == nil && header.HasFCS && header.FrameContentSize <= maxBlobReadPrealloc {
-		initial = int(header.FrameContentSize)
+	if header.Decode(prefix) == nil && header.HasFCS {
+		initial = int(min(header.FrameContentSize, maxBlobReadPrealloc))
 	}
 	dec, err := zstd.NewReader(reader, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
 	if err != nil {
 		return nil, err
 	}
 	defer dec.Close()
-	out := bytes.NewBuffer(make([]byte, 0, initial))
-	_, decodeErr := dec.WriteTo(out)
+	out := blobReadOutput{hint: initial}
+	_, decodeErr := dec.WriteTo(&out)
 	if err := errors.Join(decodeErr, source.err); err != nil {
 		return nil, err
 	}
-	return out.Bytes(), nil
+	if out.buffer.Len() == 0 {
+		return []byte{}, nil
+	}
+	return out.buffer.Bytes(), nil
+}
+
+// Reserve the bounded hint only once the decoder produces actual content.
+// Bad/empty frames then require no speculative body buffer.
+type blobReadOutput struct {
+	buffer bytes.Buffer
+	hint   int
+}
+
+func (w *blobReadOutput) Write(p []byte) (int, error) {
+	if len(p) > 0 && w.buffer.Cap() == 0 {
+		w.buffer.Grow(w.hint)
+	}
+	return w.buffer.Write(p)
 }
 
 // The decoder can normalize an underlying ErrUnexpectedEOF after a complete

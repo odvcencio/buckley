@@ -106,17 +106,24 @@ func TestDecompressZstd_RejectsFailuresWithoutPartialBody(t *testing.T) {
 func TestDecompressZstd_HugeDeclaredSizeDoesNotPreallocateIt(t *testing.T) {
 	// A streaming frame with a 1 KiB window and a 1 TiB declared content size,
 	// followed by an empty final block. It must fail with bounded scratch space.
-	frame := []byte{0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x00}
-	frame = binary.LittleEndian.AppendUint64(frame, 1<<40)
-	frame = append(frame, 0x01, 0x00, 0x00)
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	got, err := decompressZstd(bytes.NewReader(frame))
-	runtime.ReadMemStats(&after)
-	allocated := after.TotalAlloc - before.TotalAlloc
-	if err == nil || got != nil || allocated > 16<<20 {
-		t.Fatalf("oversized hint: err=%v allocated=%d", err, allocated)
+	for _, tc := range []struct {
+		name string
+		size uint64
+	}{{"64MiB", 64 << 20}, {"1TiB", 1 << 40}} {
+		t.Run(tc.name, func(t *testing.T) {
+			frame := []byte{0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x00}
+			frame = binary.LittleEndian.AppendUint64(frame, tc.size)
+			frame = append(frame, 0x01, 0x00, 0x00)
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := decompressZstd(bytes.NewReader(frame))
+			runtime.ReadMemStats(&after)
+			allocated := after.TotalAlloc - before.TotalAlloc
+			if err == nil || got != nil || allocated > 16<<20 {
+				t.Fatalf("oversized hint: err=%v allocated=%d", err, allocated)
+			}
+			t.Logf("declared_bytes=%d allocated_bytes=%d rejected=true", tc.size, allocated)
+		})
 	}
-	t.Logf("declared_bytes=%d allocated_bytes=%d rejected=true", uint64(1<<40), allocated)
 }
