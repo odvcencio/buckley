@@ -44,8 +44,8 @@ func TestProviderError_AllocationProfile(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				logging = &LoggingTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) { return resp, nil }), logFile: file, enabled: true}
-				t.Cleanup(func() { _ = logging.Close() })
+				logging = &LoggingTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) { return resp, nil }), logPath: file.Name(), enabled: true}
+				t.Cleanup(func() { _ = logging.Close(); _ = file.Close() })
 				request, _ = http.NewRequest("GET", "http://fixture.invalid/models", nil)
 			}
 			runtime.GC()
