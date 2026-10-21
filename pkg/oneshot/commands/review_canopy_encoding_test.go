@@ -18,6 +18,7 @@ func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing
 		{"oversized_flows_still_trimmed", strings.Repeat("Argument", maxCanopyProjectBytes/4), 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			fanIn, cyclomatic, cognitive := 6, 4, 5
 			toc := canopyProjectTOC{
 				Version: 1,
 				Source:  canopyProjectTOCSource{Tool: "canopy", IndexScope: "repository", RuntimeMS: 12},
@@ -25,7 +26,7 @@ func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing
 					Files:       canopyProjectFiles{Total: 20, ByLanguage: map[string]int{"go": 20}},
 					ParseErrors: canopyProjectParseErrors{Count: 1},
 				},
-				MajorCallSites: []canopyTOCCallSite{{File: "cmd/main.go", Name: "Start", StartLine: 10, FanIn: 6}},
+				MajorCallSites: []canopyTOCCallSite{{File: "cmd/main.go", Name: "Start", StartLine: 10, FanIn: &fanIn}},
 				Coverage: canopyProjectTOCCoverage{Summary: "available", FlowSeeds: 6, FlowsCollected: 6, CallGraphsComplete: true,
 					Notes: []string{"one parse error requires source inspection"}},
 			}
@@ -36,7 +37,7 @@ func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing
 				flow := canopyTOCFlow{
 					Root: canopyGraphSymbol{ID: "start", File: "pkg/session/review.go", Package: "session", Kind: "function_definition",
 						Name: "Start", Signature: tc.signature, StartLine: 10, EndLine: 15, Callable: true},
-					Signal: "fan-in", FanIn: 6, Cyclomatic: 4, Cognitive: 5, ReachableNodes: 13, GraphEdges: 12, Status: "available",
+					Signal: "fan-in", FanIn: &fanIn, Cyclomatic: &cyclomatic, Cognitive: &cognitive, ReachableNodes: 13, GraphEdges: 12, Status: "available",
 				}
 				for j := 0; j < 6; j++ {
 					flow.Callers = append(flow.Callers, edge)

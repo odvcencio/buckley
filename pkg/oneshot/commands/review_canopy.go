@@ -127,10 +127,10 @@ type canopySummaryMetric struct {
 	Name       string `json:"name"`
 	StartLine  int    `json:"start_line"`
 	EndLine    int    `json:"end_line,omitempty"`
-	Value      int    `json:"value,omitempty"`
-	Cyclomatic int    `json:"cyclomatic,omitempty"`
-	Cognitive  int    `json:"cognitive,omitempty"`
-	Lines      int    `json:"lines,omitempty"`
+	Value      *int   `json:"value,omitempty"`
+	Cyclomatic *int   `json:"cyclomatic,omitempty"`
+	Cognitive  *int   `json:"cognitive,omitempty"`
+	Lines      *int   `json:"lines,omitempty"`
 }
 
 type canopyProjectTOC struct {
@@ -154,16 +154,16 @@ type canopyTOCCallSite struct {
 	File      string `json:"file"`
 	Name      string `json:"name"`
 	StartLine int    `json:"start_line"`
-	FanIn     int    `json:"fan_in"`
+	FanIn     *int   `json:"fan_in,omitempty"`
 }
 
 type canopyTOCHotspot struct {
 	File       string `json:"file"`
 	Name       string `json:"name"`
 	StartLine  int    `json:"start_line"`
-	Cyclomatic int    `json:"cyclomatic"`
-	Cognitive  int    `json:"cognitive"`
-	Lines      int    `json:"lines"`
+	Cyclomatic *int   `json:"cyclomatic,omitempty"`
+	Cognitive  *int   `json:"cognitive,omitempty"`
+	Lines      *int   `json:"lines,omitempty"`
 }
 
 type canopyProjectTOCCoverage struct {
@@ -177,9 +177,9 @@ type canopyProjectTOCCoverage struct {
 type canopyTOCFlow struct {
 	Root           canopyGraphSymbol `json:"root"`
 	Signal         string            `json:"signal"`
-	FanIn          int               `json:"fan_in,omitempty"`
-	Cyclomatic     int               `json:"cyclomatic,omitempty"`
-	Cognitive      int               `json:"cognitive,omitempty"`
+	FanIn          *int              `json:"fan_in,omitempty"`
+	Cyclomatic     *int              `json:"cyclomatic,omitempty"`
+	Cognitive      *int              `json:"cognitive,omitempty"`
 	Callers        []canopyTOCEdge   `json:"callers,omitempty"`
 	Callees        []canopyTOCEdge   `json:"callees,omitempty"`
 	ReachableNodes int               `json:"reachable_nodes"`
@@ -447,11 +447,15 @@ func collectCanopyProjectSummary(parent context.Context, repoRoot string) (strin
 		if strings.TrimSpace(metric.File) == "" || strings.TrimSpace(metric.Name) == "" {
 			continue
 		}
+		cyclomatic := metric.Cyclomatic
+		if cyclomatic == nil {
+			cyclomatic = metric.Value
+		}
 		toc.ComplexityHotspots = append(toc.ComplexityHotspots, canopyTOCHotspot{
 			File:       filepath.ToSlash(metric.File),
 			Name:       metric.Name,
 			StartLine:  metric.StartLine,
-			Cyclomatic: metric.Cyclomatic,
+			Cyclomatic: cyclomatic,
 			Cognitive:  metric.Cognitive,
 			Lines:      metric.Lines,
 		})
@@ -583,14 +587,14 @@ type canopyProjectSeed struct {
 	Name       string
 	StartLine  int
 	Signal     string
-	FanIn      int
-	Cyclomatic int
-	Cognitive  int
+	FanIn      *int
+	Cyclomatic *int
+	Cognitive  *int
 }
 
 func selectCanopyProjectSeeds(summary canopyProjectSummary) []canopyProjectSeed {
 	seeds := make([]canopyProjectSeed, 0, maxCanopyProjectSeeds)
-	seen := make(map[string]struct{}, maxCanopyProjectSeeds)
+	seen := make(map[string]int, maxCanopyProjectSeeds)
 	add := func(metric canopySummaryMetric, signal string) {
 		file := filepath.ToSlash(strings.TrimSpace(metric.File))
 		name := strings.TrimSpace(metric.Name)
@@ -598,19 +602,36 @@ func selectCanopyProjectSeeds(summary canopyProjectSummary) []canopyProjectSeed 
 			return
 		}
 		key := fmt.Sprintf("%s\x00%s\x00%d", file, name, metric.StartLine)
-		if _, exists := seen[key]; exists || len(seeds) >= maxCanopyProjectSeeds {
-			return
-		}
-		seen[key] = struct{}{}
-		seeds = append(seeds, canopyProjectSeed{
+		seed := canopyProjectSeed{
 			File:       file,
 			Name:       name,
 			StartLine:  metric.StartLine,
 			Signal:     signal,
-			FanIn:      metric.Value,
 			Cyclomatic: metric.Cyclomatic,
 			Cognitive:  metric.Cognitive,
-		})
+		}
+		if signal == "high-fan-in" {
+			seed.FanIn = metric.Value
+		} else if seed.Cyclomatic == nil {
+			seed.Cyclomatic = metric.Value
+		}
+		if i, exists := seen[key]; exists {
+			if seeds[i].FanIn == nil {
+				seeds[i].FanIn = seed.FanIn
+			}
+			if seeds[i].Cyclomatic == nil {
+				seeds[i].Cyclomatic = seed.Cyclomatic
+			}
+			if seeds[i].Cognitive == nil {
+				seeds[i].Cognitive = seed.Cognitive
+			}
+			return
+		}
+		if len(seeds) >= maxCanopyProjectSeeds {
+			return
+		}
+		seen[key] = len(seeds)
+		seeds = append(seeds, seed)
 	}
 	// Fan-in roots expose the most important call sites. Complexity roots then
 	// add risky flows that may not be popular enough to appear in fan-in.
