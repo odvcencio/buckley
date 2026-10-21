@@ -215,8 +215,12 @@ type canopyGraphEdge struct {
 
 type canopyGraphReport struct {
 	Roots []canopyGraphSymbol `json:"roots"`
-	Nodes []canopyGraphSymbol `json:"nodes"`
+	Nodes []canopyGraphNode   `json:"nodes"`
 	Edges []canopyGraphEdge   `json:"edges"`
+}
+
+type canopyGraphNode struct {
+	ID string `json:"id"`
 }
 
 type canopyTOCEdge struct {
@@ -462,6 +466,10 @@ func collectCanopyProjectSummary(parent context.Context, repoRoot string) (strin
 	if indexErr != nil {
 		status = "available; structural flow graph partial"
 	}
+	var graphs canopyProjectGraphs
+	if indexErr == nil && len(seeds) > 1 {
+		graphs = collectCanopyProjectGraphs(ctx, executable, repoRoot, cachePath, seeds)
+	}
 	for _, seed := range seeds {
 		if indexErr != nil {
 			toc.ImportantFlows = append(toc.ImportantFlows, canopyTOCFlow{
@@ -477,7 +485,7 @@ func collectCanopyProjectSummary(parent context.Context, repoRoot string) (strin
 				fmt.Sprintf("call graph skipped for %s:%d because the structural index could not be refreshed", seed.File, seed.StartLine))
 			continue
 		}
-		flow := collectCanopyProjectFlow(ctx, executable, repoRoot, cachePath, seed)
+		flow := collectCanopyProjectFlow(ctx, executable, repoRoot, cachePath, seed, graphs)
 		if flow.Status != "available" {
 			status = "available; structural flow graph partial"
 		}
@@ -615,7 +623,7 @@ func selectCanopyProjectSeeds(summary canopyProjectSummary) []canopyProjectSeed 
 	return seeds
 }
 
-func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed) canopyTOCFlow {
+func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed, graphs canopyProjectGraphs) canopyTOCFlow {
 	flow := canopyTOCFlow{
 		Root: canopyGraphSymbol{
 			File:      seed.File,
@@ -629,8 +637,16 @@ func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePa
 		Status:     "unavailable",
 	}
 
-	forward, forwardErr := runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, false)
-	reverse, reverseErr := runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, true)
+	forward, forwardCached := graphs.forward.selectSeed(seed)
+	var forwardErr error
+	if !forwardCached {
+		forward, forwardErr = runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, false)
+	}
+	reverse, reverseCached := graphs.reverse.selectSeed(seed)
+	var reverseErr error
+	if !reverseCached {
+		reverse, reverseErr = runCanopyGraph(ctx, executable, repoRoot, cachePath, seed, true)
+	}
 	forwardOK := forwardErr == nil && len(forward.Roots) > 0
 	reverseOK := reverseErr == nil && len(reverse.Roots) > 0
 	if forwardOK {
@@ -662,7 +678,7 @@ func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePa
 	return flow
 }
 
-func runCanopyGraph(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed, reverse bool) (canopyGraphReport, error) {
+func runCanopyGraph(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed, reverse bool, extraArgs ...string) (canopyGraphReport, error) {
 	args := []string{
 		"graph", "calls", seed.Name, ".",
 		"--json",
@@ -677,6 +693,7 @@ func runCanopyGraph(ctx context.Context, executable, repoRoot, cachePath string,
 	} else {
 		args = append(args, "--no-cache")
 	}
+	args = append(args, extraArgs...)
 	output, err := runCanopyJSON(ctx, executable, repoRoot, args...)
 	if err != nil {
 		return canopyGraphReport{}, err
