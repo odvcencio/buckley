@@ -100,7 +100,7 @@ func (t *DiscoveryTool) Parameters() builtin.ParameterSchema {
 	return builtin.ParameterSchema{
 		Type: "object",
 		Properties: map[string]builtin.PropertySchema{
-			"query": {Type: "string", Description: "Capability to find, such as git history, browser, refactor, or delegation"},
+			"query": {Type: "string", Description: "Capability to find, such as file outline, git history, browser, refactor, or delegation"},
 			"names": {Type: "array", Description: "Exact tool names to enable", Items: &builtin.PropertySchema{Type: "string", Description: "Tool name"}},
 			"limit": {Type: "integer", Description: "Maximum search matches to enable", Default: 5},
 		},
