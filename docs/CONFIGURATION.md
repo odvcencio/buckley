@@ -552,7 +552,8 @@ Debugging and logging controls.
 
 ```yaml
 diagnostics:
-  # Log LLM provider HTTP requests/responses to network.jsonl under BUCKLEY_LOG_DIR (default: .buckley/logs/network.jsonl).
+  # Log provider metadata and up to 10,000 bytes of each consumed body under BUCKLEY_LOG_DIR (default: .buckley/logs/network.jsonl).
+  # The file resets at 8 MiB; older diagnostics are discarded. Response bodies are logged on EOF/close; SSE bodies are omitted.
   # WARNING: This can capture prompts and code; keep disabled unless debugging.
   network_logs_enabled: false
 ```

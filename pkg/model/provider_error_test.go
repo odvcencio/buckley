@@ -52,10 +52,10 @@ func TestProviderError_NetworkLoggingPreservesBodyAndClose(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			transport := &LoggingTransport{enabled: true, logFile: log, base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			transport := &LoggingTransport{enabled: true, logPath: log.Name(), base: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: 503, Header: make(http.Header), Body: original}, nil
 			})}
-			t.Cleanup(func() { _ = transport.Close() })
+			t.Cleanup(func() { _ = transport.Close(); _ = log.Close() })
 			req, _ := http.NewRequest("GET", "http://fixture.invalid/models", nil)
 			response, err := transport.RoundTrip(req)
 			if err != nil || original.closed {
