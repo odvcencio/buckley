@@ -5,13 +5,143 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
+	"m31labs.dev/buckley/pkg/evidence"
 )
+
+func TestAttachments_CurrentReadsThroughWriter(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%t", shared), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "attachments.db")
+			var store *SQLiteStore
+			var err error
+			if shared {
+				backing, openErr := evidence.New(path)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				t.Cleanup(func() { _ = backing.Close() })
+				store, err = NewWithDB(backing.DB())
+			} else {
+				store, err = New(path)
+				if err == nil {
+					t.Cleanup(func() { _ = store.Close() })
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			seedMailboxRun(t, store, "session-reader", "run-reader")
+			lease, err := store.Attach(ctx, agentcoord.AttachmentRequest{
+				SessionID: "session-reader", RunID: "run-reader", PID: 41, LeaseDuration: time.Minute,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			locker, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(0)&_txlock=immediate")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = locker.Close() })
+			writer, err := locker.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Rollback()
+			if _, err := writer.Exec(`UPDATE agent_run_attempts SET pid = 999 WHERE attempt_id = ?`, lease.AttemptID); err != nil {
+				t.Fatal(err)
+			}
+			readCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			current, readErr := store.Current(readCtx, lease.SessionID, lease.RunID)
+			elapsed := time.Since(started)
+			if readErr != nil || current.AttemptID != lease.AttemptID || current.LeaseGeneration != lease.LeaseGeneration || current.PID != 41 {
+				t.Errorf("committed lease while writer held: lease=%+v err=%v", current, readErr)
+			}
+			if err := writer.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			current, err = store.Current(ctx, lease.SessionID, lease.RunID)
+			if err != nil || current.PID != 999 || current.AttemptID != lease.AttemptID {
+				t.Fatalf("committed update not visible: %+v, %v", current, err)
+			}
+			if _, err := store.Heartbeat(ctx, agentcoord.AttachmentHeartbeatRequest{
+				SessionID: lease.SessionID, RunID: lease.RunID, AttemptID: lease.AttemptID,
+				LeaseGeneration: lease.LeaseGeneration, LeaseDuration: time.Minute,
+			}); err != nil {
+				t.Fatalf("heartbeat after ownership read: %v", err)
+			}
+			t.Logf("shared=%t held_writer_read_ok=%t elapsed_us=%d committed_pid=41 post_commit_pid=%d heartbeat_ok=true", shared, readErr == nil, elapsed.Microseconds(), current.PID)
+		})
+	}
+}
+
+func TestAttachments_CurrentHealthyReadOnly(t *testing.T) {
+	store := newMailboxTestStore(t)
+	ctx := context.Background()
+	seedMailboxRun(t, store, "session-read-only", "run-read-only")
+	lease, err := store.Attach(ctx, agentcoord.AttachmentRequest{
+		SessionID: "session-read-only", RunID: "run-read-only", LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.db.SetMaxOpenConns(1)
+	if _, err := store.db.Exec(`PRAGMA query_only = ON`); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Current(ctx, lease.SessionID, lease.RunID)
+	if err != nil || current.AttemptID != lease.AttemptID || current.LeaseGeneration != lease.LeaseGeneration {
+		t.Fatalf("healthy lease lookup attempted a write: %+v, %v", current, err)
+	}
+	t.Logf("query_only=true current_attempt_matches=true generation=%d", current.LeaseGeneration)
+}
+
+func TestAttachments_CurrentExpiryMaterializes(t *testing.T) {
+	store := newMailboxTestStore(t)
+	ctx := context.Background()
+	seedMailboxRun(t, store, "session-expiry", "run-expiry")
+	lease, err := store.Attach(ctx, agentcoord.AttachmentRequest{
+		SessionID: "session-expiry", RunID: "run-expiry", LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	now, err := sqliteDBTime(ctx, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_run_attempts SET lease_expires_at = ? WHERE attempt_id = ?`, sqliteLeaseTimestamp(now), lease.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Current(ctx, lease.SessionID, lease.RunID); !errors.Is(err, ErrAttachmentExpired) {
+		t.Fatalf("expired attachment returned as healthy: %v", err)
+	}
+	var state string
+	if err := store.db.QueryRowContext(ctx, `SELECT state FROM agent_run_attempts WHERE attempt_id = ?`, lease.AttemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(agentcoord.AttachmentExpired) {
+		t.Fatalf("expiration not materialized: state=%q", state)
+	}
+	t.Logf("database_clock_expiry=true current_returns_expired=true persisted_state=%s", state)
+}
 
 func TestNormalizeAttachmentHeartbeatContextError(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
