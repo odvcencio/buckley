@@ -232,7 +232,7 @@ func TestCollectCanopyReviewBoundsInheritedPipeWait(t *testing.T) {
 	if status != "timed out" {
 		t.Fatalf("status = %q, want timed out", status)
 	}
-	if elapsed := time.Since(started); elapsed > canopyPipeWaitDelay+time.Second {
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("collectCanopyReview returned after %s", elapsed)
 	}
 }
