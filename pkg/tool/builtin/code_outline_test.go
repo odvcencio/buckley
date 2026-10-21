@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/encoding/toon"
 )
 
 func outlineReply() string {
@@ -61,6 +63,7 @@ func TestCodeOutlineTool_ProtocolFailures(t *testing.T) {
 	for _, tc := range []struct{ name, script, want string }{
 		{"invalid_json", "#!/bin/sh\nprintf 'not json'\n", "invalid outline JSON"},
 		{"old_format", "#!/bin/sh\nprintf '{\"format_version\":2,\"symbols\":[]}'\n", "unsupported Canopy outline format"},
+		{"invalid_row", "#!/bin/sh\nprintf '{\"format_version\":1,\"symbols\":[3]}'\n", "invalid symbol row"},
 		{"missing_rows", "#!/bin/sh\nprintf '{\"format_version\":1}'\n", "missing symbol rows"},
 		{"unsupported_cli", "#!/bin/sh\nprintf 'unknown command outline' >&2\nexit 1\n", "update the Canopy CLI"},
 		{"oversized", "#!/bin/sh\nhead -c 20000 /dev/zero | tr '\\000' x\n", "exceeded the capture budget"},
@@ -86,4 +89,39 @@ func TestCodeOutlineTool_ContextCancellation(t *testing.T) {
 	if err != nil || result.Success || !strings.Contains(result.Error, "context canceled") {
 		t.Fatalf("cancellation lost: %+v %v", result, err)
 	}
+}
+
+func TestCodeOutlineTool_UniformOptionalColumnsPackAsTable(t *testing.T) {
+	var reply map[string]any
+	if err := json.Unmarshal([]byte(outlineReply()), &reply); err != nil {
+		t.Fatal(err)
+	}
+	first := reply["symbols"].([]any)[0].(map[string]any)
+	first["owner"] = "Service"
+	second := map[string]any{}
+	for key, value := range first {
+		if key != "owner" {
+			second[key] = value
+		}
+	}
+	second["name"] = "Other"
+	reply["symbols"] = []any{first, second}
+	reply["total_symbols"] = 2
+	raw, _ := json.Marshal(reply)
+	newCanopyStub(t, "#!/bin/sh\ncat <<'REPLY'\n"+string(raw)+"\nREPLY\n")
+	operation := &CodeOutlineTool{}
+	operation.SetWorkDir(t.TempDir())
+	result, err := operation.Execute(map[string]any{"path": "source.go"})
+	if err != nil || !result.Success {
+		t.Fatalf("outline: %+v %v", result, err)
+	}
+	rows := result.Data["symbols"].([]any)
+	if rows[0].(map[string]any)["owner"] != "Service" || rows[1].(map[string]any)["owner"] != "" {
+		t.Fatal("owner semantics changed")
+	}
+	encoded, err := toon.New(true).MarshalString(result)
+	if err != nil || !strings.Contains(encoded, "symbols[2]{") {
+		t.Fatalf("symbol rows did not pack as a table: %q %v", encoded, err)
+	}
+	t.Logf("mixed_owner_rows=2 tabular_toon=true owner_semantics_preserved=true encoded_bytes=%d", len(encoded))
 }

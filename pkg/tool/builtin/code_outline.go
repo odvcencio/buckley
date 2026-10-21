@@ -73,8 +73,31 @@ func (t *CodeOutlineTool) ExecuteWithContext(ctx context.Context, params map[str
 	if data["format_version"] != float64(1) {
 		return &Result{Error: "unsupported Canopy outline format; update the Canopy CLI"}, nil
 	}
-	if _, ok := data["symbols"].([]any); !ok {
+	rows, ok := data["symbols"].([]any)
+	if !ok {
 		return &Result{Error: "Canopy outline response is missing symbol rows"}, nil
+	}
+	// Uniform optional columns let TOON encode the symbols as a compact table.
+	defaults := map[string]any{"owner": "", "name_truncated": false, "owner_truncated": false}
+	columns := map[string]bool{}
+	for _, value := range rows {
+		row, ok := value.(map[string]any)
+		if !ok {
+			return &Result{Error: "Canopy outline response contains an invalid symbol row"}, nil
+		}
+		for key := range defaults {
+			if _, present := row[key]; present {
+				columns[key] = true
+			}
+		}
+	}
+	for _, value := range rows {
+		row := value.(map[string]any)
+		for key := range columns {
+			if _, present := row[key]; !present {
+				row[key] = defaults[key]
+			}
+		}
 	}
 	return &Result{Success: true, Data: data}, nil
 }
