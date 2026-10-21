@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"m31labs.dev/buckley/internal/filelock"
 	"m31labs.dev/buckley/pkg/paths"
 )
 
@@ -226,11 +227,11 @@ func appendNetworkLog(path string, record []byte) error {
 		return err
 	}
 	defer lock.Close()
-	locked, err := tryLockNetworkLog(lock)
+	locked, err := filelock.TryLock(lock)
 	if err != nil || !locked {
 		return err
 	}
-	defer unlockNetworkLog(lock)
+	defer filelock.Unlock(lock)
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return fmt.Errorf("network log is not a regular file")
 	} else if err != nil && !os.IsNotExist(err) {

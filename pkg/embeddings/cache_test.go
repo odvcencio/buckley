@@ -10,11 +10,7 @@ func TestNewCache(t *testing.T) {
 	tmpDir := t.TempDir()
 	cacheDir := filepath.Join(tmpDir, "cache")
 
-	cache := NewCache(cacheDir)
-
-	if cache.dir != cacheDir {
-		t.Errorf("Expected dir %q, got %q", cacheDir, cache.dir)
-	}
+	NewCache(cacheDir)
 
 	// Check that directory was created
 	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {

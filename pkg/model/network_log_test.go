@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"m31labs.dev/buckley/internal/filelock"
 )
 
 func TestLoggingTransport_DoesNotReadResponseBeforeCaller(t *testing.T) {
@@ -80,7 +82,7 @@ func TestLoggingTransport_LockContentionDropsOnlyDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = lock.Close() })
-	if locked, err := tryLockNetworkLog(lock); err != nil || !locked {
+	if locked, err := filelock.TryLock(lock); err != nil || !locked {
 		t.Fatalf("lock fixture: %v", err)
 	}
 	done := make(chan struct{})
@@ -88,10 +90,10 @@ func TestLoggingTransport_LockContentionDropsOnlyDiagnostics(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		unlockNetworkLog(lock)
+		filelock.Unlock(lock)
 		t.Fatal("diagnostic lock blocked a writer")
 	}
-	unlockNetworkLog(lock)
+	filelock.Unlock(lock)
 	transport.log(NetworkLogEntry{URL: "retained"})
 	_ = transport.Close()
 	transport.log(NetworkLogEntry{URL: "after-close"})

@@ -4,27 +4,31 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
+
+	"m31labs.dev/buckley/internal/filecache"
+)
+
+const (
+	DefaultCacheMaxBytes      = 8 << 20
+	DefaultCacheMaxEntries    = 256
+	DefaultCacheMaxEntryBytes = 256 << 10
 )
 
 // Cache provides disk-based caching for hunt results
 type Cache struct {
-	dir string
+	files *filecache.Cache
 }
 
 // NewCache creates a new cache instance
 func NewCache(dir string) *Cache {
-	_ = os.MkdirAll(dir, 0755) // Best-effort directory creation
-	return &Cache{dir: dir}
+	return &Cache{files: filecache.New(dir, "hunt-", filecache.Limits{Bytes: DefaultCacheMaxBytes, Entries: DefaultCacheMaxEntries, EntryBytes: DefaultCacheMaxEntryBytes})}
 }
 
 // Get retrieves cached suggestions for a commit SHA
 func (c *Cache) Get(commitSHA string) ([]ImprovementSuggestion, bool) {
-	path := filepath.Join(c.dir, "hunt-"+commitSHA+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := c.files.Get(commitSHA)
+	if !ok {
 		return nil, false
 	}
 
@@ -38,13 +42,12 @@ func (c *Cache) Get(commitSHA string) ([]ImprovementSuggestion, bool) {
 
 // Set stores suggestions for a commit SHA
 func (c *Cache) Set(commitSHA string, suggestions []ImprovementSuggestion) error {
-	path := filepath.Join(c.dir, "hunt-"+commitSHA+".json")
 	data, err := json.Marshal(suggestions)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return c.files.Set(commitSHA, data)
 }
 
 // getCurrentCommit gets the current git commit SHA

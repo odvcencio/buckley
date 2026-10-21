@@ -22,6 +22,9 @@ case "${1:-}" in
       exit 0
     fi
     printf '%s\n' 'm31labs.dev/buckley/pkg/fake'
+    if [[ "$*" == *'./internal/...'* ]]; then
+      printf '%s\n' 'm31labs.dev/buckley/internal/fake'
+    fi
     if [[ "$*" == *'./cmd/buckley'* || "$*" == *'./...'* ]]; then
       printf '%s\n' 'm31labs.dev/buckley/cmd/buckley'
     fi
@@ -134,11 +137,11 @@ fi
 
 >"$FAKE_GO_LOG"
 run_test_script GO_TEST_DISABLE_CACHE=1 GO_TEST_TIMEOUT=7s -run '^$' >"$stdout" 2>"$stderr"
-if ! grep -q 'list:list ./pkg/... ./cmd/buckley' "$FAKE_GO_LOG"; then
+if ! grep -q 'list:list ./internal/... ./pkg/... ./cmd/buckley' "$FAKE_GO_LOG"; then
 	printf '%s\n' 'scripts/test.sh did not use default package selection' >&2
   exit 1
 fi
-if ! grep -q 'test:CGO_ENABLED=0 args=test -run \^\$ -timeout 7s m31labs.dev/buckley/pkg/fake m31labs.dev/buckley/cmd/buckley' "$FAKE_GO_LOG"; then
+if ! grep -q 'test:CGO_ENABLED=0 args=test -run \^\$ -timeout 7s m31labs.dev/buckley/pkg/fake m31labs.dev/buckley/internal/fake m31labs.dev/buckley/cmd/buckley' "$FAKE_GO_LOG"; then
   printf '%s\n' 'scripts/test.sh did not preserve explicit flags/default CGO/package args' >&2
   cat "$FAKE_GO_LOG" >&2
   exit 1

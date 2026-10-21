@@ -54,9 +54,7 @@ func (d *Detector) Detect() (*EnvironmentProfile, error) {
 	}
 
 	// Cache result
-	if err := d.cache.Set(cacheKey, profile); err != nil {
-		return nil, err
-	}
+	_ = d.cache.Set(cacheKey, profile)
 
 	return profile, nil
 }
