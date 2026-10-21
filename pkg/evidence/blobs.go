@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -201,6 +202,70 @@ func (b *BlobStore) Read(path string) ([]byte, error) {
 		return nil, fmt.Errorf("evidence: read blob: %w", err)
 	}
 	return decompressZstd(raw)
+}
+
+// verify checks a deduplicated body without materializing a second copy. The
+// caller already has the matching payload. Check both the persisted bytes and
+// the record before reusing it, including the decoder's final checksum.
+func (b *BlobStore) verify(ctx context.Context, path string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	confined, err := b.confinePath(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(confined)
+	if err != nil {
+		return fmt.Errorf("evidence: stat blob: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: blob is not a regular file", ErrIntegrity)
+	}
+	file, err := os.Open(confined)
+	if err != nil {
+		return fmt.Errorf("evidence: open blob: %w", err)
+	}
+	defer file.Close()
+	// Current writes use a 1 MiB window; older default encoders used 8 MiB.
+	// Keep room for legacy frames while bounding a corrupted frame's window.
+	dec, err := zstd.NewReader(file, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(64<<20))
+	if err != nil {
+		return fmt.Errorf("%w: decode blob: %w", ErrIntegrity, err)
+	}
+	defer dec.Close()
+	return verifyBody(ctx, io.LimitReader(dec, int64(len(content))+1), content)
+}
+
+func verifyBody(ctx context.Context, reader io.Reader, content []byte) error {
+	buffer := make([]byte, 32<<10)
+	count := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := reader.Read(buffer)
+		if n > len(content)-count {
+			return fmt.Errorf("%w: blob exceeds recorded byte count", ErrIntegrity)
+		}
+		if !bytes.Equal(buffer[:n], content[count:count+n]) {
+			return fmt.Errorf("%w: blob content", ErrIntegrity)
+		}
+		count += n
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("%w: read blob: %w", ErrIntegrity, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if count != len(content) {
+		return fmt.Errorf("%w: blob byte count", ErrIntegrity)
+	}
+	return nil
 }
 
 // Delete removes the blob file at path. Deleting a file that does not exist
