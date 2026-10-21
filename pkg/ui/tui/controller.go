@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+	"m31labs.dev/buckley/internal/gitdiff"
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/config"
 	projectcontext "m31labs.dev/buckley/pkg/context"
@@ -1719,13 +1720,13 @@ func (c *Controller) handleReview() {
 		return
 	}
 
-	if strings.TrimSpace(diff) == "" {
+	if len(diff.Files) == 0 {
 		c.app.AddMessage("No changes to review. Stage some changes or make modifications first.", "system")
 		return
 	}
 
 	// Shape through diffsignal: low-signal noise summarised, budget enforced.
-	diff = shapeDiff(diff, diffsignal.ReviewDiffBudget)
+	shaped := shapeDiff(diff, diffsignal.ReviewDiffBudget)
 
 	// Build review prompt
 	prompt := fmt.Sprintf(`Please review the following code changes and provide feedback:
@@ -1739,7 +1740,7 @@ Focus on:
 4. **Style** - Naming, conventions, readability
 5. **Architecture** - Design concerns, coupling, abstractions
 
-Be specific with file:line references. Flag critical issues first.`, "```diff\n"+diff+"\n```")
+Be specific with file:line references. Flag critical issues first.`, "```diff\n"+shaped+"\n```")
 
 	c.startSessionPrompt("/review", prompt)
 }
@@ -1753,13 +1754,13 @@ func (c *Controller) handleCommit() {
 		return
 	}
 
-	if strings.TrimSpace(diff) == "" {
+	if len(diff.Files) == 0 {
 		c.app.AddMessage("No staged changes. Use `git add` to stage files first.", "system")
 		return
 	}
 
 	// Shape through diffsignal: low-signal noise summarised, budget enforced.
-	diff = shapeDiff(diff, diffsignal.CommitDiffBudget)
+	shaped := shapeDiff(diff, diffsignal.CommitDiffBudget)
 
 	// Get recent commit messages for style reference
 	recentCommits := c.getRecentCommits(5)
@@ -1779,7 +1780,7 @@ Requirements:
 - Be specific about what changed and why
 - Add body if changes are complex
 
-Output ONLY the commit message, nothing else.`, "```diff\n"+diff+"\n```", recentCommits)
+Output ONLY the commit message, nothing else.`, "```diff\n"+shaped+"\n```", recentCommits)
 
 	c.startSessionPrompt("/commit", prompt)
 }
@@ -1880,30 +1881,22 @@ func formatSkillActivationResult(name string, result *builtin.Result) (string, b
 }
 
 // getGitDiff returns the combined staged and unstaged diff.
-func (c *Controller) getGitDiff() (string, error) {
-	// Get unstaged changes
-	cmd := exec.Command("git", "diff")
-	cmd.Dir = c.workDir
-	unstaged, _ := cmd.Output()
-
-	// Get staged changes
-	cmd = exec.Command("git", "diff", "--cached")
-	cmd.Dir = c.workDir
-	staged, _ := cmd.Output()
-
-	combined := string(staged) + string(unstaged)
-	return combined, nil
+func (c *Controller) getGitDiff() (*diffsignal.Diff, error) {
+	staged, err := c.getGitDiffStaged()
+	if err != nil {
+		return nil, err
+	}
+	unstaged, err := gitdiff.Capture(context.Background(), c.workDir, "diff", "--no-ext-diff", "--no-textconv", "--no-color")
+	if err != nil {
+		return nil, err
+	}
+	staged.Files = append(staged.Files, unstaged.Files...)
+	return staged, nil
 }
 
 // getGitDiffStaged returns only staged changes.
-func (c *Controller) getGitDiffStaged() (string, error) {
-	cmd := exec.Command("git", "diff", "--cached")
-	cmd.Dir = c.workDir
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return string(output), nil
+func (c *Controller) getGitDiffStaged() (*diffsignal.Diff, error) {
+	return gitdiff.Capture(context.Background(), c.workDir, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color")
 }
 
 // getRecentCommits returns recent commit messages for style reference.

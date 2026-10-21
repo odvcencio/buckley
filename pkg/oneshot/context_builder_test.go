@@ -166,6 +166,25 @@ func TestBuildContextGitDiffBeyondMaxParseBytesStillSummarizesTailFile(t *testin
 		t.Errorf("file beyond MaxParseBytes vanished with no summary line at all:\n...tail:\n%.2000s",
 			diff[max(0, len(diff)-2000):])
 	}
+	if !strings.Contains(diff, "func RealChange() int { return 7 }") {
+		t.Error("source hunk after the oversized file was lost")
+	}
+}
+
+func TestGatherGitDiff_WorkDirAndGeneratedAttrs(t *testing.T) {
+	root := t.TempDir()
+	gitIn(t, root, "init", "-q")
+	for name, body := range map[string]string{".gitattributes": "custom.txt linguist-generated\n", "custom.txt": "generated payload\n", "source.go": "package p\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, root, "add", ".")
+	t.Chdir(t.TempDir())
+	context, stats, err := gatherGitDiffStats(map[string]string{"staged": "true"}, ContextOpts{WorkDir: root, MaxDiffBytes: 80000})
+	if err != nil || len(stats.GeneratedPaths) != 1 || stats.GeneratedPaths[0] != "custom.txt" || strings.Contains(context, "+generated payload") || !strings.Contains(context, "+package p") {
+		t.Fatalf("workdir/attributes lost: %s %+v %v", context, stats, err)
+	}
 }
 
 // TestGatherGitDiffIgnoresConfiguredExternalDiffTool guards against a

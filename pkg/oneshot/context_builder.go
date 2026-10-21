@@ -1,6 +1,8 @@
 package oneshot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"m31labs.dev/buckley/internal/gitdiff"
 	"m31labs.dev/buckley/pkg/diffsignal"
 )
 
@@ -139,7 +142,7 @@ func gatherSourceText(src ContextSource, opts ContextOpts) (string, error) {
 //     injects ANSI escape sequences that diffsignal's literal "diff --git "
 //     boundary matching does not expect.
 func diffSafetyArgs() []string {
-	return []string{"--no-ext-diff", "--no-color"}
+	return []string{"--no-ext-diff", "--no-textconv", "--no-color"}
 }
 
 // gatherGitDiff runs git diff with appropriate flags.
@@ -176,24 +179,18 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 		args = append(args, pathsArgs...)
 	}
 
-	// The raw git output is captured in full here (no size limit): Prioritize
-	// itself enforces diffsignal.MaxParseBytes on its raw input, and unlike a
-	// blind byte-cut at capture time, it does so at file boundaries and stub-
-	// summarizes every file beyond that cutoff (scanBoundariesBeyond) instead
-	// of silently discarding them. Capping raw capture here duplicated that
-	// cutoff at a point before Prioritize ever saw the tail files, so they
-	// vanished with no summary line at all (Important-2).
-	output, _, err := contextGitOutputLimited(0, contextPathArgs(params, args)...)
+	diff, err := gitdiff.Capture(context.Background(), opts.WorkDir, contextPathArgs(params, args)...)
 	if err != nil {
 		// Retry without ...HEAD for base diff
-		if base := params["base"]; base != "" {
+		var exit *exec.ExitError
+		if base := params["base"]; base != "" && errors.As(err, &exit) && exit.ExitCode() == 128 {
 			args = append([]string{"diff"}, diffSafetyArgs()...)
 			args = append(args, base)
 			if len(pathsArgs) > 0 {
 				args = append(args, "--")
 				args = append(args, pathsArgs...)
 			}
-			output, _, err = contextGitOutputLimited(0, contextPathArgs(params, args)...)
+			diff, err = gitdiff.Capture(context.Background(), opts.WorkDir, contextPathArgs(params, args)...)
 		}
 		if err != nil {
 			return "", stats, err
@@ -208,15 +205,18 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 		budget -= len(truncMarker)
 	}
 	var paths []string
-	for _, fd := range diffsignal.Split(output) {
+	for _, fd := range diff.Files {
 		paths = append(paths, fd.Path)
 	}
-	isGenerated := generatedByAttrs(paths, params["staged"] == "true")
-	stats = StatsForDiff(output, isGenerated)
-	res := diffsignal.PrioritizeWith(output, budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
-	output = res.Context
+	isGenerated := generatedByAttrs(paths, params["staged"] == "true", opts.WorkDir)
+	stats = statsForFiles(diff.Files, isGenerated)
+	res := diff.Prioritize(budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
+	output := res.Context
 	if res.Truncated {
 		output += truncMarker
+		if opts.MaxDiffBytes > 0 && len(output) > opts.MaxDiffBytes {
+			output = output[:opts.MaxDiffBytes]
+		}
 	}
 	return output, stats, nil
 }
@@ -439,25 +439,6 @@ func contextGitOutput(args ...string) (string, error) {
 	return strings.TrimSuffix(string(output), "\n"), nil
 }
 
-// contextGitOutputLimited runs a git command, optionally capping output at
-// maxBytes. maxBytes <= 0 means no limit: the full stdout is returned and
-// truncated is always false. Callers that need a byte ceiling AND
-// boundary-aware stub summaries for what falls past it (rather than a blind
-// mid-content cut) should apply that ceiling downstream, e.g. via
-// diffsignal.Prioritize's own MaxParseBytes handling, not here.
-func contextGitOutputLimited(maxBytes int, args ...string) (string, bool, error) {
-	cmd := exec.Command("git", append([]string{"--no-pager"}, args...)...)
-	output, err := cmd.Output()
-	if err != nil {
-		return "", false, err
-	}
-
-	if maxBytes > 0 && len(output) > maxBytes {
-		return string(output[:maxBytes]), true, nil
-	}
-	return strings.TrimSuffix(string(output), "\n"), false, nil
-}
-
 // contextReadFileLimited reads up to maxBytes from a file.
 func contextReadFileLimited(path string, maxBytes int) (string, error) {
 	cmd := exec.Command("head", "-c", strconv.Itoa(maxBytes), path)
@@ -479,8 +460,15 @@ func contextEstimateTokens(s string) int {
 // StatsForDiff classifies every file in a unified diff. generated marks paths
 // that gitattributes call generated; nil means path and content rules only.
 func StatsForDiff(raw string, generated func(path string) bool) DiffStats {
+	return statsForFiles(diffsignal.SplitWith(raw, generated), nil)
+}
+
+func statsForFiles(files []diffsignal.FileDiff, generated func(string) bool) DiffStats {
 	var stats DiffStats
-	for _, fd := range diffsignal.SplitWith(raw, generated) {
+	for _, fd := range files {
+		if generated != nil && generated(fd.Path) {
+			fd.Reason = diffsignal.ReasonGeneratedAttr
+		}
 		stats.Files++
 		if fd.LowSignal() {
 			stats.LowSignal++
