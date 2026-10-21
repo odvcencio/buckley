@@ -65,3 +65,11 @@ func TestRepairHeader_RepeatedPrefixes(t *testing.T) {
 		t.Fatalf("scope=%q subject=%q repairs=%v", scope, subject, repairs)
 	}
 }
+
+func TestRepairHeader_ConflictingRecoveredScope(t *testing.T) {
+	original := "fix(api): fix(other): keep the text"
+	scope, subject, repairs := RepairHeader("fix", "", original, HeaderLimit)
+	if scope != "" || subject != original || len(repairs) != 0 {
+		t.Fatalf("scope=%q subject=%q repairs=%v", scope, subject, repairs)
+	}
+}

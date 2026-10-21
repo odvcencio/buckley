@@ -50,6 +50,9 @@ func TestPRValidationRepairEchoesPreviousArgumentsAndMissingField(t *testing.T) 
 	if err != nil || result == nil || len(invoker.prompts) != 2 {
 		t.Fatalf("result=%+v err=%v calls=%d", result, err, len(invoker.prompts))
 	}
+	if got := result.Value.(*PRResult).Header(); got != "add(api): widen retry budget" {
+		t.Fatalf("repaired title=%q", got)
+	}
 
 	repairPrompt := invoker.prompts[1]
 	if !strings.Contains(repairPrompt, "action is required") {

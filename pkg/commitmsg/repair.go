@@ -68,8 +68,12 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 	for prefix := nestedHeaderPrefix(subject); prefix != nil; prefix = nestedHeaderPrefix(subject) {
 		remainder := strings.TrimSpace(subject[len(prefix[0]):])
 		if NormalizeAction(prefix[1]) != NormalizeAction(action) ||
-			(prefix[2] != "" && prefix[2] != scope) || prefix[3] != "" || remainder == "" {
+			(scope != "" && prefix[2] != "" && prefix[2] != scope) || prefix[3] != "" || remainder == "" {
 			return originalScope, originalSubject, nil
+		}
+		if scope == "" && prefix[2] != "" {
+			scope = prefix[2]
+			repairs = append(repairs, "recovered scope from header prefix")
 		}
 		subject = remainder
 		removedPrefix = true

@@ -12,17 +12,25 @@ import (
 
 func TestHeaderRepair_RepeatedPrefix(t *testing.T) {
 	for _, def := range []oneshot.Definition{CommitDefinition{}, PRDefinition{}} {
-		for _, subject := range []string{
-			"fix(clamp): clamp negative values to zero",
-			"fix: clamp negative values to zero",
-			"FIX(clamp): clamp negative values to zero",
-			"fix(clamp): fix: clamp negative values to zero",
+		for _, tt := range []struct {
+			name, scope, subject string
+			omitScope            bool
+		}{
+			{"scoped", "clamp", "fix(clamp): clamp negative values to zero", false},
+			{"unscoped prefix", "clamp", "fix: clamp negative values to zero", false},
+			{"uppercase prefix", "clamp", "FIX(clamp): clamp negative values to zero", false},
+			{"multiple prefixes", "clamp", "fix(clamp): fix: clamp negative values to zero", false},
+			{"omitted scope", "", "fix(clamp): clamp negative values to zero", true},
+			{"empty scope", "", "fix(clamp): clamp negative values to zero", false},
 		} {
-			t.Run(def.Name()+"/"+subject, func(t *testing.T) {
-				fields := map[string]any{"action": "fix", "scope": "clamp", "subject": subject, "title": subject,
+			t.Run(def.Name()+"/"+tt.name, func(t *testing.T) {
+				fields := map[string]any{"action": "fix", "scope": tt.scope, "subject": tt.subject, "title": tt.subject,
 					"body": []string{"Clamp negative inputs to zero."}, "summary": "Keep values in range.",
 					"changes": []string{"Clamp negative inputs to zero."}, "breaking": true,
 					"breaking_reason": "Keep the declared compatibility impact.", "issues": []string{"0012"}}
+				if tt.omitScope {
+					delete(fields, "scope")
+				}
 				raw, _ := json.Marshal(fields)
 				if err := def.Validate(raw); err == nil {
 					t.Fatal("accepted a nested header prefix")
@@ -39,7 +47,7 @@ func TestHeaderRepair_RepeatedPrefix(t *testing.T) {
 				_ = json.Unmarshal(raw, &before)
 				_ = json.Unmarshal(repaired, &after)
 				for name, value := range before {
-					if name != key && !reflect.DeepEqual(value, after[name]) {
+					if name != key && name != "scope" && !reflect.DeepEqual(value, after[name]) {
 						t.Fatalf("changed %s: %s -> %s", name, value, after[name])
 					}
 				}
@@ -47,6 +55,11 @@ func TestHeaderRepair_RepeatedPrefix(t *testing.T) {
 				_ = json.Unmarshal(after[key], &fixedSubject)
 				if fixedSubject != "clamp negative values to zero" {
 					t.Fatalf("subject=%q", fixedSubject)
+				}
+				var scope string
+				_ = json.Unmarshal(after["scope"], &scope)
+				if scope != "clamp" {
+					t.Fatalf("scope=%q", scope)
 				}
 				again, more := def.(oneshot.RepairableDefinition).Repair(repaired)
 				if string(again) != string(repaired) || len(more) != 0 {
