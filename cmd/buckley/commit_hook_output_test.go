@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"m31labs.dev/buckley/pkg/terminal"
+	"m31labs.dev/buckley/internal/commandoutput"
 )
 
 func TestCreateCommit_BoundedHookDiagnostics(t *testing.T) {
@@ -37,7 +37,7 @@ func TestCreateCommit_BoundedHookDiagnostics(t *testing.T) {
 			}
 			err = createCommit("add: selected fixture", true, false, []string{"selected.txt"})
 			if exit != 0 {
-				if err == nil || len(err.Error()) > terminal.DefaultCaptureBytes+128 || !strings.Contains(err.Error(), "hook diagnostics begin") || !strings.Contains(err.Error(), "fatal: fixture hook declined") || !strings.Contains(err.Error(), "output omitted") {
+				if err == nil || len(err.Error()) > commandoutput.DefaultCaptureBytes+128 || !strings.Contains(err.Error(), "hook diagnostics begin") || !strings.Contains(err.Error(), "fatal: fixture hook declined") || !strings.Contains(err.Error(), "output omitted") {
 					text := ""
 					if err != nil {
 						text = err.Error()

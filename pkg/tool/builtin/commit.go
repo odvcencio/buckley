@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"m31labs.dev/buckley/pkg/terminal"
+	"m31labs.dev/buckley/internal/commandoutput"
 )
 
 // CommitChangesTool creates a governed git commit through Buckley's own
@@ -84,8 +84,8 @@ func (t *CommitChangesTool) Execute(params map[string]any) (*Result, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
-	stdout := terminal.NewCapture(t.outputLimit())
-	stderr := terminal.NewCapture(t.outputLimit())
+	stdout := commandoutput.NewCapture(t.outputLimit())
+	stderr := commandoutput.NewCapture(t.outputLimit())
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -142,7 +142,7 @@ func (t *CommitChangesTool) Execute(params map[string]any) (*Result, error) {
 }
 
 // defaultCommitMaxOutputBytes bounds each stream; stricter configured limits win.
-const defaultCommitMaxOutputBytes = terminal.DefaultCaptureBytes
+const defaultCommitMaxOutputBytes = commandoutput.DefaultCaptureBytes
 
 func (t *CommitChangesTool) outputLimit() int {
 	if t.maxOutputBytes > 0 {
