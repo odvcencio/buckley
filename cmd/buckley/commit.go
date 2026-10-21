@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -17,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"m31labs.dev/buckley/internal/commandoutput"
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/oneshot"
@@ -818,8 +818,8 @@ func stageFiles(files []string, useGraft bool, compactOutput bool) error {
 	gitArgs := append([]string{"--literal-pathspecs", "add", "--"}, files...)
 	gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 	gitCmd.Stdout = io.Discard
-	var gitStderr bytes.Buffer
-	gitCmd.Stderr = &gitStderr
+	gitStderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
+	gitCmd.Stderr = gitStderr
 	if err := gitCmd.Run(); err != nil {
 		if msg := strings.TrimSpace(gitStderr.String()); msg != "" {
 			return fmt.Errorf("git add: %w: %s", err, msg)
@@ -942,9 +942,9 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 		cmd.Env = commitEnv
 	}
 	if compactOutput {
-		var stderr bytes.Buffer
+		stderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
 		cmd.Stdout = io.Discard
-		cmd.Stderr = &stderr
+		cmd.Stderr = stderr
 		if err := cmd.Run(); err != nil {
 			detail := strings.TrimSpace(stderr.String())
 			if detail != "" {
@@ -1022,8 +1022,8 @@ func collectStagedChangeMetadataWithEnv(paths []string, env []string) (commitmsg
 	cmd.Env = env
 	hash := sha256.New()
 	cmd.Stdout = hash
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
@@ -1140,9 +1140,9 @@ func pushChanges(compactOutput bool, useGraft bool) error {
 		cmd = exec.CommandContext(pushCtx, "git", "push", "-u", remote, branchName)
 	}
 	if compactOutput {
-		var stderr bytes.Buffer
+		stderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
 		cmd.Stdout = io.Discard
-		cmd.Stderr = &stderr
+		cmd.Stderr = stderr
 		if err := cmd.Run(); err != nil {
 			detail := strings.TrimSpace(stderr.String())
 			if detail != "" {

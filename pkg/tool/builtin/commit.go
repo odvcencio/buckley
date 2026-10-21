@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"m31labs.dev/buckley/internal/commandoutput"
 )
 
 // CommitChangesTool creates a governed git commit through Buckley's own
@@ -38,7 +40,8 @@ func (t *CommitChangesTool) Name() string {
 func (t *CommitChangesTool) Description() string {
 	return "Create a governed git commit through Buckley's own commit runtime using the configured default commit model. " +
 		"Commits only the explicitly provided paths; refuses to commit while unrelated staged files exist (--exclusive), " +
-		"never pushes, and returns the new HEAD."
+		"never pushes, and returns the new HEAD. stdout and stderr contain bounded beginning/latest previews; " +
+		"*_bytes report original stream sizes and *_truncated mark omitted output."
 }
 
 func (t *CommitChangesTool) Parameters() ParameterSchema {
@@ -81,8 +84,8 @@ func (t *CommitChangesTool) Execute(params map[string]any) (*Result, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeEnv(cmd.Env, t.env)
-	stdout := newLimitedBuffer(t.outputLimit())
-	stderr := newLimitedBuffer(t.outputLimit())
+	stdout := commandoutput.NewCapture(t.outputLimit())
+	stderr := commandoutput.NewCapture(t.outputLimit())
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -95,25 +98,33 @@ func (t *CommitChangesTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
+	stdoutText, stdoutTruncated := stdout.Finish()
+	stderrText, stderrTruncated := stderr.Finish()
 	data := map[string]any{
-		"paths":  paths,
-		"stdout": stdout.String(),
-		"stderr": stderr.String(),
+		"paths":        paths,
+		"stdout":       stdoutText,
+		"stderr":       stderrText,
+		"stdout_bytes": stdout.TotalBytes(),
+		"stderr_bytes": stderr.TotalBytes(),
 	}
-	if stdout.Truncated() {
+	if stdoutTruncated {
 		data["stdout_truncated"] = true
 	}
-	if stderr.Truncated() {
+	if stderrTruncated {
 		data["stderr_truncated"] = true
 	}
 
 	if runErr != nil {
-		detail := strings.TrimSpace(stderr.String())
+		detail := strings.TrimSpace(stderrText)
+		stream := "stderr"
 		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
+			detail = strings.TrimSpace(stdoutText)
+			stream = "stdout"
 		}
 		message := fmt.Sprintf("buckley commit failed: %v", runErr)
-		if detail != "" {
+		if len(detail) > 512 {
+			message += "; see " + stream + " for bounded diagnostic output"
+		} else if detail != "" {
 			message += ": " + detail
 		}
 		data["head"] = ""
@@ -124,26 +135,18 @@ func (t *CommitChangesTool) Execute(params map[string]any) (*Result, error) {
 	data["head"] = head
 
 	result := &Result{Success: true, Data: data}
-	if stdout.Truncated() || stderr.Truncated() {
+	if stdoutTruncated || stderrTruncated {
 		result.ShouldAbridge = true
-		result.DisplayData = data
 	}
 	return result, nil
 }
 
-// defaultCommitMaxOutputBytes bounds each of stdout and stderr when no
-// registry maximum is configured (SetMaxOutputBytes(0) means "unset", and
-// newLimitedBuffer treats zero as unbounded). Without this floor a commit
-// runtime that keeps talking could balloon the result payload indefinitely.
-// It matches the 100KB per-stream default used by the TUI and headless
-// frontends; an explicitly configured maximum still wins when stricter.
-const defaultCommitMaxOutputBytes = 100_000
+// defaultCommitMaxOutputBytes bounds each stream; stricter configured limits win.
+const defaultCommitMaxOutputBytes = commandoutput.DefaultCaptureBytes
 
-// outputLimit returns the effective per-stream capture bound: the stricter
-// configured maximum when one is set, otherwise the finite package default.
 func (t *CommitChangesTool) outputLimit() int {
 	if t.maxOutputBytes > 0 {
-		return t.maxOutputBytes
+		return min(t.maxOutputBytes, defaultCommitMaxOutputBytes)
 	}
 	return defaultCommitMaxOutputBytes
 }
