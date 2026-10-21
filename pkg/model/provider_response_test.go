@@ -15,14 +15,14 @@ import (
 func TestProviderResponse_ReaderBoundaries(t *testing.T) {
 	for _, size := range []int{0, 7, 8, 9, 100} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
-			reader := &providerResponseReader{source: strings.NewReader(strings.Repeat("x", size)), remaining: 8}
+			reader := &providerResponseReader{source: strings.NewReader(strings.Repeat("x", size)), remaining: 8, limitErr: ErrProviderResponseTooLarge}
 			data, err := io.ReadAll(reader)
 			if len(data) != min(size, 8) || errors.Is(err, ErrProviderResponseTooLarge) != (size > 8) {
 				t.Fatalf("boundary changed bytes or error: data=%d err=%v", len(data), err)
 			}
 		})
 	}
-	reader := &providerResponseReader{source: &trackedProviderErrorBody{Reader: strings.NewReader("prefix"), terminalErr: io.ErrUnexpectedEOF}, remaining: 8}
+	reader := &providerResponseReader{source: &trackedProviderErrorBody{Reader: strings.NewReader("prefix"), terminalErr: io.ErrUnexpectedEOF}, remaining: 8, limitErr: ErrProviderResponseTooLarge}
 	data, err := io.ReadAll(reader)
 	if string(data) != "prefix" || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatal("response guard lost the original read error")
