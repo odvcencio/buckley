@@ -10,37 +10,6 @@ import (
 	"m31labs.dev/buckley/pkg/encoding/toon"
 )
 
-func TestCommitOutput_ChunkingAndUTF8(t *testing.T) {
-	for _, limit := range []int{1, 2, 3, 24, 25, 128, 2048} {
-		for _, input := range []string{"", "short", strings.Repeat("界", 1000) + "final", strings.Repeat("\xff\xfe", 1000) + "final"} {
-			t.Run(fmt.Sprintf("limit_%d/bytes_%d", limit, len(input)), func(t *testing.T) {
-				var reference string
-				for _, chunk := range []int{1, 7, 8192} {
-					capture := &commitOutput{max: limit}
-					for offset := 0; offset < len(input); offset += chunk {
-						part := input[offset:min(offset+chunk, len(input))]
-						if n, err := capture.Write([]byte(part)); n != len(part) || err != nil {
-							t.Fatalf("write=%d, %v", n, err)
-						}
-					}
-					text, truncated := capture.finish()
-					if len(text) > limit || !utf8.ValidString(text) || capture.total != int64(len(input)) || (len(input) > limit && !truncated) {
-						t.Fatalf("limit=%d bytes=%d valid=%t total=%d truncated=%t", limit, len(text), utf8.ValidString(text), capture.total, truncated)
-					}
-					if len(input) <= limit && utf8.ValidString(input) && (text != input || truncated) {
-						t.Fatalf("small output changed: %q", text)
-					}
-					if chunk == 1 {
-						reference = text
-					} else if text != reference {
-						t.Fatal("output depends on write chunking")
-					}
-				}
-			})
-		}
-	}
-}
-
 func TestCommitChangesTool_OutputBudget(t *testing.T) {
 	helper := newFakeCommitHelper(t)
 	for _, mode := range []string{"spam", "spam-fail", "spam-invalid"} {
@@ -61,7 +30,7 @@ func TestCommitChangesTool_OutputBudget(t *testing.T) {
 				stdout := result.Data["stdout"].(string)
 				stderr := result.Data["stderr"].(string)
 				if len(stdout) > limit || len(stderr) > limit || !utf8.ValidString(stdout+stderr) || result.Data["stdout_truncated"] != true || result.Data["stderr_truncated"] != true {
-					t.Fatalf("invalid previews: stdout=%d stderr=%d data=%v", len(stdout), len(stderr), result.Data)
+					t.Fatalf("invalid previews: stdout=%d stderr=%d stdout_truncated=%v stderr_truncated=%v", len(stdout), len(stderr), result.Data["stdout_truncated"], result.Data["stderr_truncated"])
 				}
 				if !strings.HasPrefix(stdout, "generated commit subject\n") || !strings.HasSuffix(stdout, "COMMIT_COMPLETE\n") || !strings.HasPrefix(stderr, "hook diagnostics begin\n") || !strings.HasSuffix(stderr, "fatal: fixture hook rejected commit\n") {
 					t.Fatalf("lost initial or final diagnostic: stdout=%q stderr=%q", stdout, stderr)
