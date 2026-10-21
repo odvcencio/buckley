@@ -26,16 +26,27 @@ func main() {
 		os.Exit(3)
 	case "hang":
 		time.Sleep(2 * time.Minute)
-	case "spam":
+	case "spam", "spam-fail", "spam-invalid":
 		blob := make([]byte, 8192)
 		for i := range blob {
 			blob[i] = 'x'
 		}
+		fmt.Println("generated commit subject")
+		fmt.Fprintln(os.Stderr, "hook diagnostics begin")
 		// Emit roughly 1MiB per stream so tests can prove truncation under
 		// both configured limits and the finite default bound.
 		for i := 0; i < 128; i++ {
 			fmt.Println(string(blob))
 			fmt.Fprintln(os.Stderr, string(blob))
+		}
+		if os.Getenv("BUCKLEY_FAKE_COMMIT_MODE") == "spam-invalid" {
+			_, _ = os.Stdout.Write([]byte{255, 254, 128})
+			_, _ = os.Stderr.Write([]byte{255, 254, 128})
+		}
+		fmt.Println("COMMIT_COMPLETE")
+		fmt.Fprintln(os.Stderr, "fatal: fixture hook rejected commit")
+		if os.Getenv("BUCKLEY_FAKE_COMMIT_MODE") == "spam-fail" {
+			os.Exit(3)
 		}
 	default:
 		if record := os.Getenv("BUCKLEY_FAKE_COMMIT_RECORD"); record != "" {
@@ -49,7 +60,7 @@ func main() {
 
 // newFakeCommitHelper builds a tiny standalone binary that stands in for the
 // Buckley executable. Behavior is selected through BUCKLEY_FAKE_COMMIT_MODE.
-func newFakeCommitHelper(t *testing.T) string {
+func newFakeCommitHelper(t testing.TB) string {
 	t.Helper()
 
 	goBinary, err := exec.LookPath("go")
