@@ -28,11 +28,9 @@ type Diff struct {
 // Rendering does not mutate the captured inventory or its classification.
 func (d *Diff) Prioritize(maxBytes int, opts Options) Result {
 	if len(d.Files) == 0 {
-		raw := strings.TrimSpace(d.preamble)
-		if maxBytes > 0 && len(raw) > maxBytes {
-			return Result{Context: cutAtLineBoundary(raw, maxBytes), Truncated: true}
-		}
-		return Result{Context: raw, Truncated: d.truncated}
+		result := PrioritizeWith(d.preamble, maxBytes, opts)
+		result.Truncated = result.Truncated || d.truncated
+		return result
 	}
 	files := slices.Clone(d.Files)
 	for i := range files {
