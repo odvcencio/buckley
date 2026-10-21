@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -257,7 +256,14 @@ func (t *ProviderTransport) DoStream(ctx context.Context, httpClient *http.Clien
 				return apiErr
 			}
 
-			result = resp.Body
+			if resp.ContentLength > MaxProviderStreamBytes {
+				_ = resp.Body.Close()
+				return ErrProviderStreamTooLarge
+			}
+			result = struct {
+				io.Reader
+				io.Closer
+			}{newProviderStreamReader(resp.Body), resp.Body}
 			return nil
 		}
 	}
@@ -424,8 +430,7 @@ func ParseSSEStream(ctx context.Context, r io.Reader, chunkChan chan<- StreamChu
 // reports how many events were delivered. A stream without [DONE] ended
 // incompletely even when its connection reached EOF without a scanner error.
 func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan chan<- StreamChunk) (int, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	scanner := newProviderStreamScanner(r)
 	events := 0
 
 	for scanner.Scan() {
@@ -435,21 +440,21 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 		default:
 		}
 
-		line := scanner.Text()
-		if line == "" || strings.HasPrefix(line, ":") {
+		line := scanner.Bytes()
+		if len(line) == 0 || line[0] == ':' {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
+		data := line[len("data: "):]
+		if bytes.Equal(data, []byte("[DONE]")) {
 			return events, nil
 		}
 
 		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		if err := json.Unmarshal(data, &chunk); err != nil {
 			return events, fmt.Errorf("decoding chunk: %w", err)
 		}
 		if chunk.Error != nil {

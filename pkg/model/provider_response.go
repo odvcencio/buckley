@@ -16,11 +16,12 @@ var ErrProviderResponseTooLarge = fmt.Errorf("model: provider response exceeds %
 type providerResponseReader struct {
 	source    io.Reader
 	remaining int64
+	limitErr  error
 }
 
 func (r *providerResponseReader) Read(dst []byte) (int, error) {
 	if r.remaining < 0 {
-		return 0, ErrProviderResponseTooLarge
+		return 0, r.limitErr
 	}
 	if len(dst) == 0 {
 		return 0, nil
@@ -30,7 +31,7 @@ func (r *providerResponseReader) Read(dst []byte) (int, error) {
 	if int64(n) > r.remaining {
 		n = int(r.remaining)
 		r.remaining = -1
-		return n, ErrProviderResponseTooLarge
+		return n, r.limitErr
 	}
 	r.remaining -= int64(n)
 	return n, err
@@ -40,7 +41,7 @@ func newProviderResponseReader(response *http.Response) (*providerResponseReader
 	if response.ContentLength > MaxProviderResponseBytes {
 		return nil, ErrProviderResponseTooLarge
 	}
-	return &providerResponseReader{source: response.Body, remaining: MaxProviderResponseBytes}, nil
+	return &providerResponseReader{source: response.Body, remaining: MaxProviderResponseBytes, limitErr: ErrProviderResponseTooLarge}, nil
 }
 
 func decodeProviderResponse(response *http.Response, target any) error {

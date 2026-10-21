@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -196,30 +195,22 @@ func (p *OllamaProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 		return fmt.Errorf("ollama stream: %w", parseProviderError(resp))
 	}
 
-	reader := bufio.NewReader(resp.Body)
-	for {
+	scanner := newProviderStreamScanner(resp.Body)
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 		}
 
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-
-		line = bytes.TrimSpace(line)
+		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
 
 		var chunkResp ollamaChatResponse
 		if err := json.Unmarshal(line, &chunkResp); err != nil {
-			continue
+			return fmt.Errorf("decode ollama stream: %w", err)
 		}
 
 		delta := MessageDelta{
@@ -256,13 +247,26 @@ func (p *OllamaProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 			usage := usageFromOllama(chunkResp.PromptEvalCount, chunkResp.EvalCount)
 			stream.Usage = &usage
 		}
+		if err := validateStreamingToolCallIndices(stream); err != nil {
+			return err
+		}
 
 		select {
 		case chunkChan <- stream:
 		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if chunkResp.Done {
 			return nil
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read ollama stream: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return io.ErrUnexpectedEOF
 }
 
 // SetTimeout updates the Ollama client timeout (0 disables timeout).

@@ -30,7 +30,7 @@ func DefaultRetryConfig() RetryConfig {
 
 // isRetryableError checks if an error is retryable based on status code.
 func isRetryableError(err error) bool {
-	if err == nil || errors.Is(err, ErrProviderResponseTooLarge) {
+	if err == nil || errors.Is(err, ErrProviderResponseTooLarge) || errors.Is(err, ErrProviderStreamTooLarge) || errors.Is(err, ErrProviderStreamFrameTooLarge) {
 		return false
 	}
 	var apiErr *APIError
