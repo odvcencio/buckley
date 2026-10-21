@@ -332,47 +332,47 @@ func (t *ProviderTransport) Stream(ctx context.Context, httpClient *http.Client,
 	return t.runWithBreaker(call)
 }
 
-// parseProviderError mirrors Client.parseError: it reads and classifies a
-// non-200 response into a structured *APIError, tolerating both OpenRouter's
-// error envelope and the plainer {"error":{"message":...}} shape most direct
-// vendor APIs use.
+// parseProviderError shares bounded HTTP failure diagnostics across providers.
 func parseProviderError(resp *http.Response) *APIError {
 	provider := strings.TrimSpace(resp.Header.Get("X-Provider-Name"))
 	requestID := firstNonEmptyHeader(resp.Header, "X-Request-ID", "X-Generation-ID", "Request-Id")
 	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 
-	const maxErrorResponseSize = 50 * 1024 * 1024 // 50MB
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseSize))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProviderErrorBodyBytes+1))
+	truncated := len(body) > maxProviderErrorBodyBytes
+	if truncated {
+		body = body[:maxProviderErrorBodyBytes]
+	}
 	if readErr != nil {
-		return &APIError{
+		return boundProviderError(&APIError{
 			StatusCode: resp.StatusCode,
 			Message:    resp.Status,
 			Provider:   provider,
 			RequestID:  requestID,
 			Retryable:  retryable,
 			RetryAfter: retryAfter,
-		}
+		})
 	}
 
 	var errResp ErrorResponse
-	if err := json.Unmarshal(body, &errResp); err != nil {
-		rawBody := string(body)
-		if len(rawBody) > 500 {
-			rawBody = rawBody[:500] + "..."
-		}
-		message := resp.Status
+	if err := json.Unmarshal(body, &errResp); err != nil || truncated {
+		rawBody := boundErrorText(string(body), 500)
+		message := boundErrorText(resp.Status, maxProviderErrorLabelBytes)
 		if rawBody != "" {
-			message = fmt.Sprintf("%s (raw: %s)", resp.Status, rawBody)
+			message = fmt.Sprintf("%s (raw: %s)", message, rawBody)
 		}
-		return &APIError{
+		if truncated {
+			message += fmt.Sprintf(" [error body truncated at %d bytes]", maxProviderErrorBodyBytes)
+		}
+		return boundProviderError(&APIError{
 			StatusCode: resp.StatusCode,
 			Message:    message,
 			Provider:   provider,
 			RequestID:  requestID,
 			Retryable:  retryable,
 			RetryAfter: retryAfter,
-		}
+		})
 	}
 
 	message := errResp.Error.Message
@@ -382,11 +382,20 @@ func parseProviderError(resp *http.Response) *APIError {
 		message = resp.Status
 	}
 	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
+	if len(errResp.OpenRouterMetadata) > 0 && !bytes.Equal(bytes.TrimSpace(errResp.OpenRouterMetadata), []byte("null")) {
+		metadata := boundedErrorDetail(string(errResp.OpenRouterMetadata))
+		if metadata != "" {
+			if details != "" {
+				details += "; "
+			}
+			details += "openrouter_metadata: " + metadata
+		}
+	}
 	if provider == "" {
 		provider = metadataProvider
 	}
 
-	return &APIError{
+	return boundProviderError(&APIError{
 		StatusCode:  resp.StatusCode,
 		Message:     message,
 		Type:        errResp.Error.Type,
@@ -397,7 +406,7 @@ func parseProviderError(resp *http.Response) *APIError {
 		Retryable:   retryable,
 		RetryAfter:  retryAfter,
 		LimitSource: errResp.LimitSource,
-	}
+	})
 }
 
 // ParseSSEStream parses a Server-Sent Events stream into StreamChunk values
@@ -462,7 +471,7 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 				statusCode = http.StatusTooManyRequests
 				retryable = true
 			}
-			return events, &APIError{
+			return events, boundProviderError(&APIError{
 				StatusCode: statusCode,
 				Message:    message,
 				Type:       chunk.Error.Type,
@@ -470,7 +479,7 @@ func ParseSSEStreamWithEventCount(ctx context.Context, r io.Reader, chunkChan ch
 				Provider:   provider,
 				Details:    details,
 				Retryable:  retryable,
-			}
+			})
 		}
 		if err := validateStreamingToolCallIndices(chunk); err != nil {
 			return events, err

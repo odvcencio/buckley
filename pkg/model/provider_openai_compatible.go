@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -187,8 +186,7 @@ func (p *OpenAICompatibleProvider) fetchModelInfo() ([]ModelInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("model info returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("model info: %w", parseProviderError(resp))
 	}
 
 	var result struct {
@@ -263,8 +261,7 @@ func (p *OpenAICompatibleProvider) fetchModels() ([]ModelInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("models returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("models: %w", parseProviderError(resp))
 	}
 
 	var result struct {

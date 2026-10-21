@@ -415,13 +415,13 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				if message == "" {
 					message = "provider returned an error response"
 				}
-				apiErr := &APIError{
+				apiErr := boundProviderError(&APIError{
 					StatusCode: resp.StatusCode,
 					Message:    message,
 					Type:       chatResp.Error.Type,
 					Code:       chatResp.Error.Code,
 					Retryable:  false,
-				}
+				})
 				if looksLikeTransientProviderError(chatResp.Error) {
 					// The provider committed an HTTP 200 status line and
 					// still reported a transient (usually rate-limit)
@@ -598,83 +598,7 @@ func (c *Client) setHeaders(req *http.Request) {
 
 // parseError parses an error response and wraps it with additional context
 func (c *Client) parseError(resp *http.Response) error {
-	provider := strings.TrimSpace(resp.Header.Get("X-Provider-Name"))
-	requestID := firstNonEmptyHeader(resp.Header, "X-Request-ID", "X-Generation-ID")
-	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
-	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-
-	// Read the body for debugging
-	const maxErrorResponseSize = 50 * 1024 * 1024 // 50MB
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseSize))
-	if readErr != nil {
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    resp.Status,
-			Provider:   provider,
-			RequestID:  requestID,
-			Retryable:  retryable,
-			RetryAfter: retryAfter,
-		}
-	}
-
-	var errResp ErrorResponse
-	if err := json.Unmarshal(body, &errResp); err != nil {
-		// Include raw body in error message for debugging
-		rawBody := string(body)
-		if len(rawBody) > 500 {
-			rawBody = rawBody[:500] + "..."
-		}
-		message := resp.Status
-		if rawBody != "" {
-			message = fmt.Sprintf("%s (raw: %s)", resp.Status, rawBody)
-		}
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    message,
-			Provider:   provider,
-			RequestID:  requestID,
-			Retryable:  retryable,
-			RetryAfter: retryAfter,
-		}
-	}
-
-	// Use parsed error message if available, fallback to status. OpenRouter's
-	// non-standard shared-pool 429 body carries no "error" envelope at all
-	// (just {"limit_source":"upstream_provider_shared_pool"}), so an empty
-	// message with a populated LimitSource still gets a message that names
-	// the actual condition instead of a bare status line.
-	message := errResp.Error.Message
-	if message == "" && errResp.LimitSource != "" {
-		message = fmt.Sprintf("upstream provider rate limit (limit_source: %s)", errResp.LimitSource)
-	} else if message == "" {
-		message = resp.Status
-	}
-	metadataProvider, details := providerErrorMetadata(errResp.Error.Metadata)
-	if len(errResp.OpenRouterMetadata) > 0 && !bytes.Equal(bytes.TrimSpace(errResp.OpenRouterMetadata), []byte("null")) {
-		metadata := boundedErrorDetail(string(errResp.OpenRouterMetadata))
-		if metadata != "" {
-			if details != "" {
-				details += "; "
-			}
-			details += "openrouter_metadata: " + metadata
-		}
-	}
-	if provider == "" {
-		provider = metadataProvider
-	}
-
-	return &APIError{
-		StatusCode:  resp.StatusCode,
-		Message:     message,
-		Type:        errResp.Error.Type,
-		Code:        errResp.Error.Code,
-		Provider:    provider,
-		Details:     details,
-		RequestID:   requestID,
-		Retryable:   retryable,
-		RetryAfter:  retryAfter,
-		LimitSource: errResp.LimitSource,
-	}
+	return parseProviderError(resp)
 }
 
 func firstNonEmptyHeader(header http.Header, names ...string) string {
@@ -734,10 +658,7 @@ func providerRawErrorDetail(raw json.RawMessage) string {
 func boundedErrorDetail(detail string) string {
 	const maxDetailBytes = 1000
 	detail = strings.Join(strings.Fields(detail), " ")
-	if len(detail) <= maxDetailBytes {
-		return detail
-	}
-	return detail[:maxDetailBytes] + "..."
+	return boundErrorText(detail, maxDetailBytes)
 }
 
 // parseRetryAfter parses the Retry-After header

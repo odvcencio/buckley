@@ -410,7 +410,7 @@ func (p *OpenAIProvider) invokeResponse(ctx context.Context, req openAIResponses
 		return nil, fmt.Errorf("decoding openai responses response: %w", err)
 	}
 	if response.Error != nil {
-		return nil, fmt.Errorf("openai responses request failed: %s", response.Error.Message)
+		return nil, fmt.Errorf("openai responses request failed: %s", boundErrorText(response.Error.Message, maxProviderErrorMessageBytes))
 	}
 	return &response, nil
 }
