@@ -126,6 +126,7 @@ type FileDiff struct {
 	Binary      bool
 	Unavailable bool // segment contains UnavailableMarker
 	Reason      Reason
+	truncated   bool // captured segment is a bounded prefix
 }
 
 // Generated reports whether the file is build output: a generated or vendored
@@ -256,6 +257,10 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 	// appear as summary lines.
 	files = append(files, overBudgetFiles...)
 
+	return prioritizeFiles(preamble, files, truncated, maxBytes, perFileCap, rank)
+}
+
+func prioritizeFiles(preamble string, files []FileDiff, truncated bool, maxBytes, perFileCap int, rank func([]FileDiff, []int) []int) Result {
 	// Partition while preserving git's emission order within each class.
 	var normal []int
 	summarized := 0
@@ -279,35 +284,51 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 		}
 	}
 
-	// exactSummaryReserve computes the byte cost of the summary section for
-	// the given set of file indices.  It uses actual rendered line lengths,
-	// not an estimate.
+	summaryBytes := 0
+	for _, size := range summaryLineSize {
+		summaryBytes += size
+	}
 	exactSummaryBytes := func() int {
-		n := 0
-		for i, f := range files {
-			if f.LowSignal() {
-				n += summaryLineSize[i]
-			}
-		}
-		if n == 0 {
+		if summaryBytes == 0 {
 			return 0
 		}
-		return len(summaryHeader) + 2 + n // header + "\n\n" prefix
+		return len(summaryHeader) + 2 + summaryBytes
 	}
 
 	// Assemble high-signal content first, demoting whole files to summary
 	// lines once the budget (minus exact space for the summary section) runs
 	// out. Per-file caps bound the demotion granularity.
 	var content strings.Builder
+	if maxBytes > 0 && len(preamble) > maxBytes {
+		preamble = cutAtLineBoundary(preamble, maxBytes)
+		truncated = true
+	}
 	content.WriteString(preamble)
 	used := len(preamble)
 
 	for _, idx := range normal {
 		f := files[idx]
 		seg := f.Segment
-		if len(seg) > perFileCap {
-			seg = cutAtLineBoundary(seg, perFileCap) +
-				fmt.Sprintf("\n[... %s: diff truncated at %d bytes ...]\n", f.Path, perFileCap)
+		if f.truncated && seg == "" {
+			files[idx].Reason = ReasonOverBudget
+			summaryLineSize[idx] = len(summaryLine(files[idx])) + 1
+			summaryBytes += summaryLineSize[idx]
+			summarized++
+			truncated = true
+			continue
+		}
+		if len(seg) > perFileCap || f.truncated {
+			limit := perFileCap
+			if f.truncated {
+				limit = min(limit, len(seg))
+			}
+			if f.truncated && len(seg) <= perFileCap {
+				if end := strings.LastIndexByte(seg, '\n'); end > 0 {
+					seg = seg[:end]
+				}
+			}
+			seg = cutAtLineBoundary(seg, limit) +
+				fmt.Sprintf("\n[... %s: diff truncated at %d bytes ...]\n", f.Path, limit)
 			truncated = true
 		}
 		if maxBytes > 0 {
@@ -317,6 +338,7 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 				// they fall through to summaries too if they don't fit.
 				files[idx].Reason = ReasonOverBudget
 				summaryLineSize[idx] = len(summaryLine(files[idx])) + 1
+				summaryBytes += summaryLineSize[idx]
 				summarized++
 				truncated = true
 				continue
@@ -337,42 +359,32 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 		if sb.Len() > 0 {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(summaryHeader)
-		sb.WriteString("\n")
-
-		// Write summary lines, but respect the budget. If the summary section
-		// itself overflows (pathological long-path case), stop and append an
-		// explicit "... and N more" line rather than silently cutting.
-		remaining := maxBytes
-		if remaining > 0 {
-			remaining -= sb.Len()
+		header := summaryHeader + "\n"
+		remaining := maxBytes - sb.Len()
+		if maxBytes > 0 && len(header) > remaining {
+			// Even the header cannot fit. Keep the byte ceiling and make the
+			// incomplete inventory explicit in the caller's truncation receipt.
+			return Result{Context: cutAtLineBoundary(sb.String()+header, maxBytes), Truncated: true, LowSignal: summarized}
 		}
-		skipped := 0
+		sb.WriteString(header)
+		remaining -= len(header)
+		left, summaryRemaining := summarized, summaryBytes
 		for _, f := range files {
 			if !f.LowSignal() {
 				continue
 			}
 			line := summaryLine(f) + "\n"
-			if maxBytes > 0 && remaining > 0 && len(line) > remaining {
-				// Budget exhausted mid-summary: count remaining low-signal
-				// files and emit a single "N more" line instead.
-				skipped++
-				continue
-			}
-			if skipped > 0 {
-				// A prior line already didn't fit; skip the rest too.
-				skipped++
-				continue
+			more := fmt.Sprintf("... and %d more changed files (truncated)\n", left-1)
+			if maxBytes > 0 && summaryRemaining > remaining && (left == 1 || len(line)+len(more) > remaining) {
+				more = fmt.Sprintf("... and %d more changed files (truncated)\n", left)
+				sb.WriteString(more[:min(len(more), max(0, remaining))])
+				truncated = true
+				break
 			}
 			sb.WriteString(line)
-			if maxBytes > 0 {
-				remaining -= len(line)
-			}
-		}
-		if skipped > 0 {
-			more := fmt.Sprintf("... and %d more changed files (truncated)\n", skipped)
-			sb.WriteString(more)
-			truncated = true
+			remaining -= len(line)
+			summaryRemaining -= len(line)
+			left--
 		}
 		out = sb.String()
 	}
@@ -920,6 +932,10 @@ func unescapeGitPath(s string) string {
 // (or gitattributes -diff suppression) > generated/built path > minified
 // content heuristics.
 func classify(fd *FileDiff, generated func(string) bool) {
+	classifyBody(fd, generated, isMinifiedBody(hunkBody(fd.Segment)))
+}
+
+func classifyBody(fd *FileDiff, generated func(string) bool, minified bool) {
 	switch {
 	case generated != nil && generated(fd.Path):
 		// First: -diff makes git report "Binary files differ", and the
@@ -931,7 +947,7 @@ func classify(fd *FileDiff, generated func(string) bool) {
 		fd.Reason = ReasonUnavailable
 	case isGeneratedPath(fd.Path) || (fd.OldPath != "" && isGeneratedPath(fd.OldPath)):
 		fd.Reason = ReasonGeneratedPath
-	case isMinifiedBody(hunkBody(fd.Segment)):
+	case minified:
 		fd.Reason = ReasonMinified
 	}
 }

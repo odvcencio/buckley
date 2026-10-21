@@ -10,7 +10,7 @@ import (
 // linguist-generated set (or true), or diff unset (-diff). With cached it reads
 // attributes from the index, so a staged .gitattributes takes effect. It returns
 // nil when git cannot answer, which leaves the path-based classification alone.
-func generatedByAttrs(paths []string, cached bool) func(string) bool {
+func generatedByAttrs(paths []string, cached bool, workDir string) func(string) bool {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -20,6 +20,7 @@ func generatedByAttrs(paths []string, cached bool) func(string) bool {
 	}
 	args = append(args, "-z", "--stdin", "linguist-generated", "diff")
 	cmd := exec.Command("git", args...)
+	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
 	out, err := cmd.Output()
 	if err != nil {

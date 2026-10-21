@@ -42,7 +42,7 @@ func TestShapeDiff_LowSignalSummarized(t *testing.T) {
 	raw := minifiedSegment("client/js/bundle.js", 30_000) +
 		sourceSegment("pkg/handler.go", "real change sentinel")
 
-	out := shapeDiff(strings.TrimSpace(raw), diffsignal.CommitDiffBudget)
+	out := shapeRawDiff(strings.TrimSpace(raw), diffsignal.CommitDiffBudget)
 
 	if !strings.Contains(out, "real change sentinel") {
 		t.Errorf("source change missing from shaped output")
@@ -63,7 +63,7 @@ func TestShapeDiff_BudgetRespected(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		raw.WriteString(sourceSegment(fmt.Sprintf("pkg/file%d.go", i), strings.Repeat("x", 2_000)))
 	}
-	out := shapeDiff(strings.TrimSpace(raw.String()), budget)
+	out := shapeRawDiff(strings.TrimSpace(raw.String()), budget)
 	if len(out) > budget {
 		t.Errorf("shaped output len %d exceeds budget %d", len(out), budget)
 	}
@@ -89,7 +89,7 @@ func TestShapeDiff_TruncationMarkerPresent(t *testing.T) {
 		fmt.Fprintf(&rawBuf, "+func Helper%d() int { return %d }\n", rawBuf.Len(), rawBuf.Len())
 	}
 
-	out := shapeDiff(strings.TrimSpace(rawBuf.String()), budget)
+	out := shapeRawDiff(strings.TrimSpace(rawBuf.String()), budget)
 
 	if !strings.Contains(out, "... (truncated)") {
 		t.Errorf("truncation marker missing when per-file cap fires")
@@ -101,8 +101,20 @@ func TestShapeDiff_TruncationMarkerPresent(t *testing.T) {
 
 // TestShapeDiff_EmptyInput returns empty string for empty input.
 func TestShapeDiff_EmptyInput(t *testing.T) {
-	out := shapeDiff("", diffsignal.CommitDiffBudget)
+	out := shapeRawDiff("", diffsignal.CommitDiffBudget)
 	if out != "" {
 		t.Errorf("got %q, want empty", out)
 	}
+}
+
+func shapeRawDiff(raw string, budget int) string {
+	var capture diffsignal.Capture
+	if _, err := capture.Write([]byte(raw)); err != nil {
+		panic(err)
+	}
+	diff, err := capture.Finish()
+	if err != nil {
+		panic(err)
+	}
+	return shapeDiff(diff, budget)
 }
