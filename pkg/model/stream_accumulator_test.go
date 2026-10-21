@@ -1,9 +1,40 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestStreamAccumulator_InterleavedToolStringsSurviveGrowthAndReset(t *testing.T) {
+	acc := NewStreamAccumulator()
+	add := func(index int, id, name, args string) {
+		acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{ToolCalls: []ToolCallDelta{{
+			Index: index, ID: id, Function: &FunctionCallDelta{Name: name, Arguments: args},
+		}}}}}})
+	}
+	add(0, "call_", "record_", `{"text":"`)
+	first := acc.ToolCalls()[0]
+	for i := 1; i < 32; i++ {
+		add(i, fmt.Sprintf("call_%d", i), "record_note", `{"text":"other"}`)
+	}
+	add(0, "zero", "note", "λ🙂\"}")
+	message := acc.Message()
+	if len(message.ToolCalls) != 32 || message.ToolCalls[0].ID != "call_zero" || message.ToolCalls[0].Function.Name != "record_note" || message.ToolCalls[0].Function.Arguments != `{"text":"λ🙂"}` {
+		t.Fatal("interleaved tool deltas changed output")
+	}
+	if first.ID != "call_" || first.Function.Name != "record_" || first.Function.Arguments != `{"text":"` {
+		t.Fatal("adding deltas changed prior string values")
+	}
+	acc.Reset()
+	add(0, "next", "different", `{}`)
+	if message.ToolCalls[0].ID != "call_zero" || message.ToolCalls[0].Function.Name != "record_note" || message.ToolCalls[0].Function.Arguments != `{"text":"λ🙂"}` {
+		t.Fatal("reset/reuse changed the returned tool message")
+	}
+	if acc.ToolCalls()[0].Function.Arguments != `{}` {
+		t.Fatal("next response inherited previous arguments")
+	}
+}
 
 func TestStreamAccumulator_TextContent(t *testing.T) {
 	acc := NewStreamAccumulator()

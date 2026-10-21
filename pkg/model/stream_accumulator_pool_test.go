@@ -60,10 +60,7 @@ func TestReleaseStreamAccumulator_Nil(t *testing.T) {
 	ReleaseStreamAccumulator(nil)
 }
 
-// TestStreamAccumulator_ResetPreservesBufferCapacity proves Reset truncates
-// the content/reasoning buffers (buf[:0]) instead of discarding them, so
-// their allocated capacity survives across Acquire/Release cycles instead of
-// being reallocated from scratch on every reuse.
+// Ordinary response buffers stay reusable across turns.
 func TestStreamAccumulator_ResetPreservesBufferCapacity(t *testing.T) {
 	a := &StreamAccumulator{}
 	large := strings.Repeat("x", 4096)
@@ -118,5 +115,37 @@ func TestStreamAccumulator_PoolReuse(t *testing.T) {
 	})
 	if a2.Content() != "new content" {
 		t.Errorf("expected 'new content', got %q", a2.Content())
+	}
+}
+
+func TestStreamAccumulator_ResetBoundsRetainedCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		content, reasoning int
+	}{
+		{"small", 4096, 4096},
+		{"at_limit", 64 << 10, 64 << 10},
+		{"both_large", 1 << 20, 1 << 20},
+		{"large_text", 1 << 20, 4096},
+		{"large_reasoning", 4096, 1 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := NewStreamAccumulator()
+			text, reasoning := strings.Repeat("x", tc.content), strings.Repeat("r", tc.reasoning)
+			acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Content: text, Reasoning: reasoning}}}})
+			message := acc.Message()
+			textCap, reasoningCap := cap(acc.content), cap(acc.reasoning)
+			acc.Reset()
+			if cap(acc.content) > 64<<10 || cap(acc.reasoning) > 64<<10 {
+				t.Fatal("reset retained oversized response storage")
+			}
+			if textCap <= 64<<10 && cap(acc.content) != textCap || reasoningCap <= 64<<10 && cap(acc.reasoning) != reasoningCap {
+				t.Fatal("reset discarded reusable ordinary response storage")
+			}
+			acc.Add(StreamChunk{Choices: []StreamChoice{{Delta: MessageDelta{Content: "next", Reasoning: "new"}}}})
+			if message.Content != text || message.Reasoning != reasoning || acc.Content() != "next" || acc.Reasoning() != "new" {
+				t.Fatal("reset/reuse changed the returned message or next response")
+			}
+		})
 	}
 }

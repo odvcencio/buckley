@@ -8,9 +8,9 @@ import (
 	"unicode/utf8"
 )
 
-// streamAccumulatorPool recycles StreamAccumulator instances, including their
-// content/reasoning buffer capacity (see Reset), to reduce GC pressure during
-// streaming operations.
+const maxRetainedStreamBufferBytes = 64 << 10
+
+// streamAccumulatorPool reuses ordinary response buffers; Reset drops oversized ones.
 var streamAccumulatorPool = sync.Pool{
 	New: func() any {
 		return &StreamAccumulator{}
@@ -42,9 +42,17 @@ type StreamAccumulator struct {
 	reasoningContent bool
 	reasoningDetails []ReasoningDetail
 	toolCalls        []ToolCall
+	toolCallBuffers  []*streamToolCallBuffers
 	usage            *Usage
 	role             string
 	identity         *ExecutionIdentity
+}
+
+// Builders have stable addresses because a live strings.Builder must not be copied.
+type streamToolCallBuffers struct {
+	id        strings.Builder
+	name      strings.Builder
+	arguments strings.Builder
 }
 
 // NewStreamAccumulator creates a new accumulator for streaming responses.
@@ -107,13 +115,16 @@ func (a *StreamAccumulator) accumulateToolCall(delta ToolCallDelta) {
 				Arguments: "",
 			},
 		})
+		a.toolCallBuffers = append(a.toolCallBuffers, &streamToolCallBuffers{})
 	}
 
 	tc := &a.toolCalls[delta.Index]
+	buffers := a.toolCallBuffers[delta.Index]
 
 	// Accumulate ID (usually comes in first chunk for this index)
 	if delta.ID != "" {
-		tc.ID += delta.ID
+		buffers.id.WriteString(delta.ID)
+		tc.ID = buffers.id.String()
 	}
 
 	// Accumulate type
@@ -124,10 +135,12 @@ func (a *StreamAccumulator) accumulateToolCall(delta ToolCallDelta) {
 	// Accumulate function name and arguments
 	if delta.Function != nil {
 		if delta.Function.Name != "" {
-			tc.Function.Name += delta.Function.Name
+			buffers.name.WriteString(delta.Function.Name)
+			tc.Function.Name = buffers.name.String()
 		}
 		if delta.Function.Arguments != "" {
-			tc.Function.Arguments += delta.Function.Arguments
+			buffers.arguments.WriteString(delta.Function.Arguments)
+			tc.Function.Arguments = buffers.arguments.String()
 		}
 	}
 }
@@ -313,16 +326,23 @@ func (a *StreamAccumulator) Usage() *Usage {
 	return a.usage
 }
 
-// Reset clears the accumulator for reuse. The content and reasoning buffers
-// are truncated (buf[:0]), not replaced, so their backing arrays -- and
-// therefore their allocated capacity -- carry over to the next turn instead
-// of being discarded and reallocated from scratch.
+// Reset clears the response and retains at most 64 KiB each for text and reasoning.
+// Tool builders are discarded so previously returned message strings remain stable.
 func (a *StreamAccumulator) Reset() {
-	a.content = a.content[:0]
-	a.reasoning = a.reasoning[:0]
+	if cap(a.content) > maxRetainedStreamBufferBytes {
+		a.content = nil
+	} else {
+		a.content = a.content[:0]
+	}
+	if cap(a.reasoning) > maxRetainedStreamBufferBytes {
+		a.reasoning = nil
+	} else {
+		a.reasoning = a.reasoning[:0]
+	}
 	a.reasoningContent = false
 	a.reasoningDetails = nil
 	a.toolCalls = nil
+	a.toolCallBuffers = nil
 	a.usage = nil
 	a.role = ""
 	a.identity = nil
