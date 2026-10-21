@@ -35,6 +35,7 @@ func ManagerFromConfig(ctx context.Context, cfg config.MCPConfig) (*Manager, err
 			Env:             config.ExpandMCPEnv(srv.Env),
 			Timeout:         srv.Timeout,
 			MaxMessageBytes: srv.MaxMessageBytes,
+			MaxTools:        cfg.MaxToolsOrDefault(),
 		})
 		configured++
 	}

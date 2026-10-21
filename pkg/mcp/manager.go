@@ -61,6 +61,7 @@ type ServerStatus struct {
 	Version      string
 	Protocol     string
 	ToolCount    int
+	Catalog      ToolCatalogStatus
 	RestartCount int
 	LastError    string
 }
@@ -400,6 +401,7 @@ func (m *Manager) ServerStatus() []ServerStatus {
 			}
 			status.Protocol = client.ProtocolVersion()
 			status.ToolCount = len(client.Tools())
+			status.Catalog = client.CatalogStatus()
 		}
 		statuses = append(statuses, status)
 	}
@@ -509,7 +511,7 @@ func (m *Manager) checkServerHealth(ctx context.Context, serverName string) erro
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if _, err := client.ListTools(checkCtx); err != nil {
+	if err := client.CheckHealth(checkCtx); err != nil {
 		return fmt.Errorf("mcp: health check failed: %w", err)
 	}
 	return nil
@@ -564,7 +566,7 @@ func (m *Manager) HealthCheck(ctx context.Context, timeout time.Duration) map[st
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, timeout)
-		_, err := client.ListTools(checkCtx)
+		err := client.CheckHealth(checkCtx)
 		cancel()
 		results[name] = err == nil
 	}

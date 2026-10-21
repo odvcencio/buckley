@@ -25,6 +25,22 @@ func TestMCPConfig_MessageBudget(t *testing.T) {
 	}
 }
 
+func TestMCPConfig_ToolBudget(t *testing.T) {
+	for _, limit := range []int{-1, 0, 1, MaxMCPTools, MaxMCPTools + 1} {
+		resolved, err := ResolveMCPToolLimit(limit)
+		wantErr := limit < 0 || limit > MaxMCPTools
+		if (err != nil) != wantErr {
+			t.Fatalf("limit=%d error=%v", limit, err)
+		}
+		if limit == 0 && resolved != DefaultMCPMaxTools {
+			t.Fatal("wrong default")
+		}
+		if err := (MCPConfig{MaxTools: limit}).Validate(); (err != nil) != wantErr {
+			t.Fatalf("config validation mismatch: %v", err)
+		}
+	}
+}
+
 func TestMCPConfig_Validate_EmptyName(t *testing.T) {
 	cfg := MCPConfig{Servers: []MCPServerConfig{{Name: ""}}}
 	if err := cfg.Validate(); err == nil {

@@ -28,9 +28,13 @@ func main() {
 	responseBytes := flag.Int("response-bytes", 4<<20, "text payload bytes in large mode")
 	pidFile := flag.String("pid-file", "", "process fixture PID output")
 	callLog := flag.String("call-log", "", "tool invocation log for recovery fixtures")
+	catalogMode := flag.String("catalog-mode", "normal", "normal, cycle, empty, or bytes")
+	legacy := flag.Bool("legacy", false, "negotiate the legacy protocol in catalog mode")
 	flag.Parse()
 
 	switch *mode {
+	case "catalog":
+		runCatalog(*toolCount, *catalogMode, *callLog, *legacy)
 	case "shutdown":
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		if _, err := fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","id":1,"result":{"cleanup":true}}`); err != nil {

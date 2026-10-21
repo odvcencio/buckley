@@ -13,7 +13,20 @@ const (
 	DefaultMCPMaxMessageBytes = 8 << 20
 	// MaxMCPMessageBytes is the largest supported per-server message budget.
 	MaxMCPMessageBytes = 64 << 20
+	// MaxMCPTools bounds the configured per-server catalog size.
+	MaxMCPTools = 1024
 )
+
+// ResolveMCPToolLimit applies the existing default and enforces a hard ceiling.
+func ResolveMCPToolLimit(limit int) (int, error) {
+	if limit < 0 || limit > MaxMCPTools {
+		return 0, fmt.Errorf("mcp.max_tools must be between 0 and %d", MaxMCPTools)
+	}
+	if limit == 0 {
+		return DefaultMCPMaxTools, nil
+	}
+	return limit, nil
+}
 
 // ResolveMCPMessageLimit applies the default while rejecting unbounded settings.
 func ResolveMCPMessageLimit(bytes int) (int, error) {
@@ -31,8 +44,8 @@ func ResolveMCPMessageLimit(bytes int) (int, error) {
 // non-negative. Disabled servers are not launched, so their command is not
 // required to resolve (it may reference a tool not yet installed).
 func (c MCPConfig) Validate() error {
-	if c.MaxTools < 0 {
-		return fmt.Errorf("mcp.max_tools must be >= 0")
+	if _, err := ResolveMCPToolLimit(c.MaxTools); err != nil {
+		return err
 	}
 	seen := make(map[string]bool, len(c.Servers))
 	for i, srv := range c.Servers {

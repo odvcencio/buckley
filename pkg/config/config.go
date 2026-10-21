@@ -979,6 +979,7 @@ type MCPConfig struct {
 	// registry. Servers offering more than MaxTools tools have the excess
 	// dropped, with a log message naming the server and the drop count.
 	// Zero uses DefaultMCPMaxTools.
+	// Values above MaxMCPTools are rejected during validation.
 	MaxTools int `yaml:"max_tools"`
 }
 
@@ -1003,7 +1004,7 @@ type MCPServerConfig struct {
 	Args    []string          `yaml:"args"`
 	Env     map[string]string `yaml:"env"`
 	Timeout time.Duration     `yaml:"timeout"`
-	// MaxMessageBytes defaults to 8 MiB and cannot exceed 64 MiB.
+	// MaxMessageBytes bounds incoming JSON and retained catalog JSON (default 8 MiB, maximum 64 MiB).
 	MaxMessageBytes int `yaml:"max_message_bytes"`
 	// Enabled gates whether Buckley connects to this server. Defaults to
 	// false (zero value) so a server config must opt in explicitly, matching
