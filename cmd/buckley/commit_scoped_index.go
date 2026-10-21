@@ -63,15 +63,16 @@ func prepareScopedCommitIndex(ctx context.Context, paths []string) (env []string
 		return nil, nil, fmt.Errorf("close scoped index: %w", closeErr)
 	}
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_INDEX_FILE=") && !strings.HasPrefix(entry, "GIT_LITERAL_PATHSPECS=") {
+		if !strings.HasPrefix(entry, "GIT_INDEX_FILE=") && !strings.HasPrefix(entry, "GIT_LITERAL_PATHSPECS=") &&
+			!strings.HasPrefix(entry, "GIT_GLOB_PATHSPECS=") && !strings.HasPrefix(entry, "GIT_NOGLOB_PATHSPECS=") && !strings.HasPrefix(entry, "GIT_ICASE_PATHSPECS=") {
 			env = append(env, entry)
 		}
 	}
-	env = append(env, "GIT_INDEX_FILE="+snapshotPath, "GIT_LITERAL_PATHSPECS=1")
-	run := func(input []byte, args ...string) ([]byte, error) {
+	env = append(env, "GIT_INDEX_FILE="+snapshotPath, "GIT_LITERAL_PATHSPECS=1", "GIT_GLOB_PATHSPECS=0", "GIT_NOGLOB_PATHSPECS=0", "GIT_ICASE_PATHSPECS=0")
+	run := func(input io.Reader, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Env = env
-		cmd.Stdin = bytes.NewReader(input)
+		cmd.Stdin = input
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, runErr := cmd.Output()
@@ -80,38 +81,31 @@ func prepareScopedCommitIndex(ctx context.Context, paths []string) (env []string
 		}
 		return out, nil
 	}
-	// Include intent-to-add names so even their empty index entries are excluded
-	// when they are outside the requested scope.
-	names, err := run(nil, "diff", "--cached", "--ita-visible-in-index", "--name-only", "--no-renames", "-z")
-	if err != nil {
-		return nil, nil, err
+	head := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "HEAD")
+	head.Env = env
+	headOutput, headErr := head.Output()
+	base := strings.TrimSuffix(string(headOutput), "\n")
+	if headErr != nil {
+		exitErr, ok := headErr.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			return nil, nil, fmt.Errorf("resolve scoped commit base: %w", headErr)
+		}
+		empty, treeErr := run(nil, "mktree")
+		if treeErr != nil {
+			return nil, nil, treeErr
+		}
+		base = strings.TrimSuffix(string(empty), "\n")
 	}
-	var outside bytes.Buffer
-	for _, name := range bytes.Split(names, []byte{0}) {
-		if len(name) > 0 && !fileMatchesPaths(string(name), paths) {
-			outside.Write(name)
-			outside.WriteByte(0)
-		}
+	// Reset only the private index outside literal scopes. The positive root
+	// includes outside additions and intent-to-add entries; excludes stay
+	// relative to the caller's directory, including when it is a subdirectory.
+	patterns := make([]io.Reader, 0, len(paths)+1)
+	patterns = append(patterns, strings.NewReader(":/\x00"))
+	for _, path := range paths {
+		patterns = append(patterns, strings.NewReader(":(exclude,literal)"+path+"\x00"))
 	}
-	if outside.Len() > 0 {
-		head := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "HEAD")
-		head.Env = env
-		headOutput, headErr := head.Output()
-		base := strings.TrimSuffix(string(headOutput), "\n")
-		if headErr != nil {
-			exitErr, ok := headErr.(*exec.ExitError)
-			if !ok || exitErr.ExitCode() != 1 {
-				return nil, nil, fmt.Errorf("resolve scoped commit base: %w", headErr)
-			}
-			empty, treeErr := run(nil, "mktree")
-			if treeErr != nil {
-				return nil, nil, treeErr
-			}
-			base = strings.TrimSuffix(string(empty), "\n")
-		}
-		if _, err = run(outside.Bytes(), "restore", "--staged", "--source="+base, "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-			return nil, nil, err
-		}
+	if _, err = run(io.MultiReader(patterns...), "-c", "core.splitIndex=false", "--no-literal-pathspecs", "--noglob-pathspecs", "reset", "--quiet", "--no-refresh", base, "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+		return nil, nil, fmt.Errorf("filter scoped index: %w", err)
 	}
 	return env, release, nil
 }
