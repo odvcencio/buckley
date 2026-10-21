@@ -289,7 +289,7 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 		ComplexityHotspots: selectCanopyHotspots(report.ComplexityDelta),
 		Capabilities:       selectCredibleCanopyCapabilities(report.NewCapabilities),
 	}
-	output, err = json.MarshalIndent(compact, "", "  ")
+	output, err = json.Marshal(compact)
 	if err != nil {
 		return canopyReviewEvidence{Status: "could not compact evidence", Runtime: elapsed}
 	}
@@ -763,7 +763,7 @@ func sameCanopyGraphSymbol(left, right canopyGraphSymbol) bool {
 }
 
 func marshalCanopyProjectTOC(toc *canopyProjectTOC) ([]byte, error) {
-	encoded, err := json.MarshalIndent(toc, "", "  ")
+	encoded, err := json.Marshal(toc)
 	if err != nil {
 		return nil, err
 	}
@@ -776,21 +776,21 @@ func marshalCanopyProjectTOC(toc *canopyProjectTOC) ([]byte, error) {
 	toc.Truncated = true
 	for len(encoded) > maxCanopyProjectBytes && len(toc.ImportantFlows) > 0 {
 		toc.ImportantFlows = toc.ImportantFlows[:len(toc.ImportantFlows)-1]
-		encoded, err = json.MarshalIndent(toc, "", "  ")
+		encoded, err = json.Marshal(toc)
 		if err != nil {
 			return nil, err
 		}
 	}
 	for len(encoded) > maxCanopyProjectBytes && len(toc.ComplexityHotspots) > 0 {
 		toc.ComplexityHotspots = toc.ComplexityHotspots[:len(toc.ComplexityHotspots)-1]
-		encoded, err = json.MarshalIndent(toc, "", "  ")
+		encoded, err = json.Marshal(toc)
 		if err != nil {
 			return nil, err
 		}
 	}
 	for len(encoded) > maxCanopyProjectBytes && len(toc.MajorCallSites) > 0 {
 		toc.MajorCallSites = toc.MajorCallSites[:len(toc.MajorCallSites)-1]
-		encoded, err = json.MarshalIndent(toc, "", "  ")
+		encoded, err = json.Marshal(toc)
 		if err != nil {
 			return nil, err
 		}
@@ -800,7 +800,7 @@ func marshalCanopyProjectTOC(toc *canopyProjectTOC) ([]byte, error) {
 		// be large in a polyglot repository. Keep the navigation contract valid.
 		toc.Summary.TopComplex = nil
 		toc.Summary.TopFanIn = nil
-		encoded, err = json.MarshalIndent(toc, "", "  ")
+		encoded, err = json.Marshal(toc)
 	}
 	return encoded, err
 }

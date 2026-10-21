@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -121,18 +122,20 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	if evidence.Runtime <= 0 {
 		t.Fatalf("runtime = %s, want a measured duration", evidence.Runtime)
 	}
-	if !strings.Contains(evidence.Output, `"blast_radius": 2`) {
-		t.Fatalf("output = %q", evidence.Output)
+	var compact compactCanopyReview
+	if err := json.Unmarshal([]byte(evidence.Output), &compact); err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{`"complexity_hotspots"`, `"name": "hot"`, `"credible_capabilities"`, `"name": "High signal"`} {
-		if !strings.Contains(evidence.Output, want) {
-			t.Errorf("compact evidence missing %q:\n%s", want, evidence.Output)
-		}
+	wantCompact := compactCanopyReview{
+		Base: "base-sha", ChangedFiles: 1, IndexScope: "changed", IndexScopeSource: "Canopy report", BlastRadius: 2,
+		ComplexityHotspots: []canopyComplexityHotspot{{File: "a.go", Name: "hot", Cyclomatic: 12, Cognitive: 18, Lines: 80}},
+		Capabilities:       []canopyReviewCapability{{Name: "High signal", Category: "execution", Confidence: "high", AttackID: "T1001"}},
 	}
-	for _, unwanted := range []string{`"name": "small"`, `"name": "Medium signal"`, `"files"`} {
-		if strings.Contains(evidence.Output, unwanted) {
-			t.Errorf("compact evidence contains %q:\n%s", unwanted, evidence.Output)
-		}
+	if !reflect.DeepEqual(compact, wantCompact) {
+		t.Fatalf("review evidence changed: got %+v, want %+v", compact, wantCompact)
+	}
+	if strings.Contains(evidence.Output, `"files"`) {
+		t.Fatal("raw provider file inventory leaked into compact evidence")
 	}
 	args, err := os.ReadFile(argsFile)
 	if err != nil {
@@ -178,16 +181,16 @@ printf '{"base":"base-sha","changed_files":15,"blast_radius":1733,"complexity_de
 	if evidence.BlastRadius != 1733 {
 		t.Fatalf("blast radius = %d, want 1733", evidence.BlastRadius)
 	}
-	for _, want := range []string{
-		`"changed_files": 15`,
-		`"index_scope": "repository"`,
-		`"index_scope_source": "repository-root invocation"`,
-		`"blast_radius": 1733`,
-		`"name": "parse"`,
-	} {
-		if !strings.Contains(evidence.Output, want) {
-			t.Errorf("compact evidence missing %q:\n%s", want, evidence.Output)
-		}
+	var compact compactCanopyReview
+	if err := json.Unmarshal([]byte(evidence.Output), &compact); err != nil {
+		t.Fatal(err)
+	}
+	want := compactCanopyReview{
+		Base: "base-sha", ChangedFiles: 15, IndexScope: "repository", IndexScopeSource: "repository-root invocation", BlastRadius: 1733,
+		ComplexityHotspots: []canopyComplexityHotspot{{File: "parser.go", Name: "parse", Cyclomatic: 31, Cognitive: 39, Lines: 98}},
+	}
+	if !reflect.DeepEqual(compact, want) {
+		t.Fatalf("legacy review evidence changed: got %+v, want %+v", compact, want)
 	}
 }
 
