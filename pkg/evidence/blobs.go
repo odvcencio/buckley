@@ -1,8 +1,10 @@
 package evidence
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -197,11 +199,12 @@ func (b *BlobStore) Read(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(confined)
+	file, err := os.Open(confined)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: read blob: %w", err)
 	}
-	return decompressZstd(raw)
+	defer file.Close()
+	return decompressZstd(file)
 }
 
 // verify checks a deduplicated body without materializing a second copy. The
@@ -339,15 +342,63 @@ func compressZstd(content []byte) ([]byte, error) {
 	return enc.EncodeAll(content, make([]byte, 0, len(content))), nil
 }
 
-func decompressZstd(compressed []byte) ([]byte, error) {
-	dec, err := zstd.NewReader(bytes.NewReader(compressed), zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+// Allocation hints are untrusted. Larger or unknown-size frames still decode
+// completely, growing the output only as their bytes arrive.
+const maxBlobReadPrealloc = 64 << 20
+
+func decompressZstd(compressed io.Reader) ([]byte, error) {
+	source := &blobReadSource{reader: compressed}
+	reader := bufio.NewReader(source)
+	prefix, err := reader.Peek(zstd.HeaderMaxSize)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	initial := 0
+	var header zstd.Header
+	if header.Decode(prefix) == nil && header.HasFCS {
+		initial = int(min(header.FrameContentSize, maxBlobReadPrealloc))
+	}
+	dec, err := zstd.NewReader(reader, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
 	if err != nil {
 		return nil, err
 	}
 	defer dec.Close()
-	out, err := io.ReadAll(dec)
-	if err != nil {
+	out := blobReadOutput{hint: initial}
+	_, decodeErr := dec.WriteTo(&out)
+	if err := errors.Join(decodeErr, source.err); err != nil {
 		return nil, err
 	}
-	return out, nil
+	if out.buffer.Len() == 0 {
+		return []byte{}, nil
+	}
+	return out.buffer.Bytes(), nil
+}
+
+// Reserve the bounded hint only once the decoder produces actual content.
+// Bad/empty frames then require no speculative body buffer.
+type blobReadOutput struct {
+	buffer bytes.Buffer
+	hint   int
+}
+
+func (w *blobReadOutput) Write(p []byte) (int, error) {
+	if len(p) > 0 && w.buffer.Cap() == 0 {
+		w.buffer.Grow(w.hint)
+	}
+	return w.buffer.Write(p)
+}
+
+// The decoder can normalize an underlying ErrUnexpectedEOF after a complete
+// frame to EOF. Preserve physical read failures independently of frame parsing.
+type blobReadSource struct {
+	reader io.Reader
+	err    error
+}
+
+func (r *blobReadSource) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && err != io.EOF {
+		r.err = err
+	}
+	return n, err
 }
