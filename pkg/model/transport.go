@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -35,6 +36,21 @@ type LoggingTransport struct {
 	mu      sync.Mutex
 	enabled bool
 }
+
+type loggedErrorBody struct {
+	reader   *bufio.Reader
+	original io.ReadCloser
+	readErr  error
+}
+
+func (b *loggedErrorBody) Read(dst []byte) (int, error) {
+	if b.reader.Buffered() == 0 && b.readErr != nil {
+		return 0, b.readErr
+	}
+	return b.reader.Read(dst)
+}
+
+func (b *loggedErrorBody) Close() error { return b.original.Close() }
 
 // networkLogDir is the directory for network logs
 var networkLogDir = paths.BuckleyLogsBaseDir()
@@ -136,11 +152,21 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// Skip response body capture for streaming requests - this would block
 	// until the entire stream completes, defeating the purpose of streaming
 	if !isStreaming && resp.Body != nil {
-		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
-		if readErr == nil {
-			entry.ResponseBody = truncateBody(string(bodyBytes))
-			// Restore the body for the caller
-			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		if resp.StatusCode != http.StatusOK {
+			// Peek keeps the diagnostic prefix and terminal read error available
+			// to the provider parser, without consuming an unbounded error body.
+			original := resp.Body
+			reader := bufio.NewReaderSize(original, maxProviderErrorBodyBytes+1)
+			prefix, readErr := reader.Peek(maxProviderErrorBodyBytes + 1)
+			entry.ResponseBody = truncateBody(string(prefix))
+			resp.Body = &loggedErrorBody{reader: reader, original: original, readErr: readErr}
+		} else {
+			bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+			if readErr == nil {
+				entry.ResponseBody = truncateBody(string(bodyBytes))
+				// Restore the body for the caller
+				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
 		}
 	} else if isStreaming {
 		entry.ResponseBody = "[streaming - body not captured]"
