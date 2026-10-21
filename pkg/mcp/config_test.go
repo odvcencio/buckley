@@ -50,7 +50,7 @@ func TestManagerFromConfig_ConnectsEnabledServers(t *testing.T) {
 	cfg := config.MCPConfig{
 		Enabled: true,
 		Servers: []config.MCPServerConfig{
-			{Name: "fake", Command: fakeServerBin, Args: []string{"-mode=normal", "-tools=0"}, Enabled: true},
+			{Name: "fake", Command: fakeServerBin, Args: []string{"-mode=normal", "-tools=0"}, Enabled: true, MaxMessageBytes: 64 << 10},
 			{Name: "off", Command: fakeServerBin, Args: []string{"-mode=normal"}, Enabled: false},
 		},
 	}
@@ -62,6 +62,10 @@ func TestManagerFromConfig_ConnectsEnabledServers(t *testing.T) {
 		t.Fatal("expected a non-nil manager")
 	}
 	t.Cleanup(func() { m.Close() })
+	client, ok := m.GetClient("fake")
+	if !ok || client.transport.limit != 64<<10 {
+		t.Fatal("message budget not wired to client")
+	}
 
 	connected := m.ListConnectedServers()
 	if len(connected) != 1 || connected[0] != "fake" {

@@ -1,9 +1,29 @@
 package config
 
 import (
+	"fmt"
 	"os/exec"
 	"testing"
 )
+
+func TestMCPConfig_MessageBudget(t *testing.T) {
+	for _, limit := range []int{-1, 0, 1, DefaultMCPMaxMessageBytes, MaxMCPMessageBytes, MaxMCPMessageBytes + 1} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			wantErr := limit < 0 || limit > MaxMCPMessageBytes
+			resolved, err := ResolveMCPMessageLimit(limit)
+			if (err != nil) != wantErr {
+				t.Fatalf("limit=%d err=%v", limit, err)
+			}
+			if limit == 0 && resolved != DefaultMCPMaxMessageBytes {
+				t.Fatalf("default=%d", resolved)
+			}
+			cfg := MCPConfig{Servers: []MCPServerConfig{{Name: "server", MaxMessageBytes: limit}}}
+			if err := cfg.Validate(); (err != nil) != wantErr {
+				t.Fatalf("validation disagrees: %v", err)
+			}
+		})
+	}
+}
 
 func TestMCPConfig_Validate_EmptyName(t *testing.T) {
 	cfg := MCPConfig{Servers: []MCPServerConfig{{Name: ""}}}

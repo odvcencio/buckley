@@ -29,11 +29,12 @@ func ManagerFromConfig(ctx context.Context, cfg config.MCPConfig) (*Manager, err
 			continue
 		}
 		manager.AddServer(Config{
-			Name:    strings.TrimSpace(srv.Name),
-			Command: strings.TrimSpace(srv.Command),
-			Args:    srv.Args,
-			Env:     config.ExpandMCPEnv(srv.Env),
-			Timeout: srv.Timeout,
+			Name:            strings.TrimSpace(srv.Name),
+			Command:         strings.TrimSpace(srv.Command),
+			Args:            srv.Args,
+			Env:             config.ExpandMCPEnv(srv.Env),
+			Timeout:         srv.Timeout,
+			MaxMessageBytes: srv.MaxMessageBytes,
 		})
 		configured++
 	}

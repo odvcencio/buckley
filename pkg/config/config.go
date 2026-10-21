@@ -1003,6 +1003,8 @@ type MCPServerConfig struct {
 	Args    []string          `yaml:"args"`
 	Env     map[string]string `yaml:"env"`
 	Timeout time.Duration     `yaml:"timeout"`
+	// MaxMessageBytes defaults to 8 MiB and cannot exceed 64 MiB.
+	MaxMessageBytes int `yaml:"max_message_bytes"`
 	// Enabled gates whether Buckley connects to this server. Defaults to
 	// false (zero value) so a server config must opt in explicitly, matching
 	// the conservative posture toward external, untrusted tool servers.

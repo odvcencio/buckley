@@ -16,6 +16,8 @@ import (
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"m31labs.dev/buckley/pkg/config"
 )
 
 // buckleyClientVersion is reported to MCP servers during the initialize
@@ -42,6 +44,8 @@ type Config struct {
 	Env map[string]string
 	// Timeout bounds the initialize handshake and health checks.
 	Timeout time.Duration
+	// MaxMessageBytes bounds encoded incoming JSON (default 8 MiB, maximum 64 MiB).
+	MaxMessageBytes int
 }
 
 // Client wraps a single MCP server connection over stdio.
@@ -49,10 +53,10 @@ type Client struct {
 	cfg Config
 	sdk *sdkmcp.Client
 
-	mu      sync.RWMutex
-	cmd     *exec.Cmd
-	session *sdkmcp.ClientSession
-	tools   []*sdkmcp.Tool
+	mu        sync.RWMutex
+	transport *commandTransport
+	session   *sdkmcp.ClientSession
+	tools     []*sdkmcp.Tool
 }
 
 // NewClient starts the configured server process and performs the MCP
@@ -62,6 +66,10 @@ type Client struct {
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
 		return nil, fmt.Errorf("mcp: command is required")
+	}
+	limit, err := config.ResolveMCPMessageLimit(cfg.MaxMessageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: %w", err)
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
@@ -83,12 +91,14 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
-	session, err := sdk.Connect(connectCtx, &sdkmcp.CommandTransport{Command: cmd}, nil)
+	transport := &commandTransport{command: cmd, limit: limit}
+	session, err := sdk.Connect(connectCtx, transport, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: connect to server %q: %w", cfg.Name, err)
+		transport.close()
+		return nil, fmt.Errorf("mcp: connect to server %q: %w", cfg.Name, transport.connectionError(err))
 	}
 
-	return &Client{cfg: cfg, sdk: sdk, cmd: cmd, session: session}, nil
+	return &Client{cfg: cfg, sdk: sdk, transport: transport, session: session}, nil
 }
 
 // envSlice renders a map of environment variables as KEY=VALUE entries.
@@ -117,7 +127,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*sdkmcp.Tool, error) {
 	for {
 		res, err := session.ListTools(ctx, &sdkmcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			return nil, fmt.Errorf("mcp: tools/list failed: %w", err)
+			return nil, fmt.Errorf("mcp: tools/list failed: %w", c.transport.connectionError(err))
 		}
 		all = append(all, res.Tools...)
 		if res.NextCursor == "" {
@@ -149,7 +159,7 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 		Arguments: arguments,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("mcp: tools/call %q failed: %w", name, err)
+		return nil, fmt.Errorf("mcp: tools/call %q failed: %w", name, c.transport.connectionError(err))
 	}
 	return res, nil
 }
@@ -216,12 +226,11 @@ func (c *Client) Wait() error {
 	if session == nil {
 		return fmt.Errorf("mcp: not connected")
 	}
-	return session.Wait()
+	return c.transport.connectionError(session.Wait())
 }
 
 // Close terminates the MCP session and, if the server process has not
-// exited, sends SIGTERM after a grace period (handled by the SDK's
-// CommandTransport).
+// exited, escalates from graceful EOF to process termination and forced cleanup.
 func (c *Client) Close() error {
 	if c == nil {
 		return nil
