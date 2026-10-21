@@ -309,7 +309,7 @@ func (c *Client) fetchCatalog(force bool) (*ModelCatalog, error) {
 	}
 
 	var catalog ModelCatalog
-	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+	if err := decodeProviderResponse(resp, &catalog); err != nil {
 		return nil, fmt.Errorf("decoding catalog: %w", err)
 	}
 
@@ -407,7 +407,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			defer resp.Body.Close()
 
 			var chatResp ChatResponse
-			if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+			if err := decodeProviderResponse(resp, &chatResp); err != nil {
 				return fmt.Errorf("decoding response: %w", err)
 			}
 			if chatResp.Error != nil {
