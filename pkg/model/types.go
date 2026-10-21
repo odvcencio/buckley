@@ -1258,7 +1258,7 @@ type ModelCatalog struct {
 }
 
 func (c *ModelCatalog) UnmarshalJSON(data []byte) error {
-	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+	if _, err := decodeCatalogObjectFields(data); err != nil {
 		return err
 	}
 	type modelCatalogAlias ModelCatalog
@@ -1308,17 +1308,14 @@ type ModelInfo struct {
 // UnmarshalJSON accepts the common top-level catalog shape and OpenRouter's
 // nested top_provider.max_completion_tokens capability in one place.
 func (m *ModelInfo) UnmarshalJSON(data []byte) error {
-	if err := rejectDuplicateTopLevelJSONKeys(data); err != nil {
+	fields, err := decodeCatalogObjectFields(data)
+	if err != nil {
 		return err
 	}
 	// Decode every ordinary field without invoking ModelPricing's strict
 	// numeric parser. Provider catalogs have historically carried null, future,
 	// and occasionally non-standard pricing values; those must not make an
 	// otherwise usable model record unreadable.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
 	rawPricing, pricingPresent := fields["pricing"]
 	rawSupportedParameters, supportedParametersPresent := fields["supported_parameters"]
 	rawComplete, completePresent := fields["x_buckley_supported_parameters_complete"]
@@ -1329,12 +1326,36 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 	delete(fields, "x_buckley_supported_parameter_evidence")
 	type modelInfoAlias ModelInfo
 	var base modelInfoAlias
-	baseData, err := json.Marshal(fields)
-	if err != nil {
-		return err
+	direct := true
+	for name := range fields {
+		for i := range name {
+			if name[i] >= 0x80 || (name[i] >= 'A' && name[i] <= 'Z') {
+				direct = false
+				break
+			}
+		}
+		if !direct {
+			break
+		}
 	}
-	if err := json.Unmarshal(baseData, &base); err != nil {
-		return err
+	if direct {
+		wire := struct {
+			*modelInfoAlias
+			Pricing             ignoredCatalogValue `json:"pricing"`
+			SupportedParameters ignoredCatalogValue `json:"supported_parameters"`
+		}{modelInfoAlias: &base}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+	} else {
+		// Preserve the map round-trip's sorted spelling precedence for case aliases.
+		baseData, err := json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(baseData, &base); err != nil {
+			return err
+		}
 	}
 	var capabilities struct {
 		TopProvider struct {
@@ -1391,6 +1412,11 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// These compatibility fields are decoded from their raw values separately.
+type ignoredCatalogValue struct{}
+
+func (ignoredCatalogValue) UnmarshalJSON([]byte) error { return nil }
+
 func decodeSupportedParameterStrings(data []byte) ([]string, bool) {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -1435,36 +1461,36 @@ func (m ModelInfo) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire)
 }
 
-func rejectDuplicateTopLevelJSONKeys(data []byte) error {
+func decodeCatalogObjectFields(data []byte) (map[string]json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
-		return fmt.Errorf("model catalog object is invalid")
+		return nil, fmt.Errorf("model catalog object is invalid")
 	}
-	seen := make(map[string]struct{})
+	fields := make(map[string]json.RawMessage)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
 		if err != nil || !ok {
-			return fmt.Errorf("model catalog object is invalid")
+			return nil, fmt.Errorf("model catalog object is invalid")
 		}
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("model catalog object contains duplicate top-level field %q", key)
+		if _, exists := fields[key]; exists {
+			return nil, fmt.Errorf("model catalog object contains duplicate top-level field %q", key)
 		}
-		seen[key] = struct{}{}
 		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
-			return fmt.Errorf("model catalog object is invalid")
+			return nil, fmt.Errorf("model catalog object is invalid")
 		}
+		fields[key] = value
 	}
 	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
-		return fmt.Errorf("model catalog object is invalid")
+		return nil, fmt.Errorf("model catalog object is invalid")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return fmt.Errorf("model catalog object has trailing data")
+		return nil, fmt.Errorf("model catalog object has trailing data")
 	}
-	return nil
+	return fields, nil
 }
 
 // Architecture contains model architecture details
