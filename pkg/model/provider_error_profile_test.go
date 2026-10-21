@@ -3,6 +3,8 @@ package model
 import (
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -27,7 +29,7 @@ func (r *providerErrorFlood) Read(dst []byte) (int, error) {
 }
 
 func TestProviderError_AllocationProfile(t *testing.T) {
-	for _, mode := range []string{"openrouter", "direct"} {
+	for _, mode := range []string{"openrouter", "direct", "logged"} {
 		t.Run(mode, func(t *testing.T) {
 			flood := &providerErrorFlood{remaining: 8 << 20}
 			body := io.MultiReader(strings.NewReader(`{"error":{"message":"temporarily overloaded: `), flood,
@@ -35,9 +37,27 @@ func TestProviderError_AllocationProfile(t *testing.T) {
 			resp := &http.Response{StatusCode: 503, Status: "503 Service Unavailable", Body: io.NopCloser(body), Header: http.Header{
 				"X-Request-Id": {"req-profile"}, "Retry-After": {"1"},
 			}}
+			var logging *LoggingTransport
+			var request *http.Request
+			if mode == "logged" {
+				file, err := os.Create(filepath.Join(t.TempDir(), "network.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				logging = &LoggingTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) { return resp, nil }), logFile: file, enabled: true}
+				t.Cleanup(func() { _ = logging.Close() })
+				request, _ = http.NewRequest("GET", "http://fixture.invalid/models", nil)
+			}
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
+			if logging != nil {
+				var err error
+				resp, err = logging.RoundTrip(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			var apiErr *APIError
 			if mode == "openrouter" {
 				apiErr = (&Client{}).parseError(resp).(*APIError)

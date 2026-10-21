@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,61 @@ import (
 
 	"m31labs.dev/buckley/pkg/config"
 )
+
+type trackedProviderErrorBody struct {
+	io.Reader
+	closed      bool
+	terminalErr error
+}
+
+func (r *trackedProviderErrorBody) Read(dst []byte) (int, error) {
+	n, err := r.Reader.Read(dst)
+	if err == io.EOF && r.terminalErr != nil {
+		err, r.terminalErr = r.terminalErr, nil
+	}
+	return n, err
+}
+
+func (r *trackedProviderErrorBody) Close() error { r.closed = true; return nil }
+
+func TestProviderError_NetworkLoggingPreservesBodyAndClose(t *testing.T) {
+	for _, mode := range []string{"small", "oversized", "read_error"} {
+		t.Run(mode, func(t *testing.T) {
+			payload := `{"error":{"message":"capacity limited"}}`
+			if mode == "oversized" {
+				payload += strings.Repeat(" ", 1<<20)
+			}
+			var input io.Reader = strings.NewReader(payload)
+			original := &trackedProviderErrorBody{Reader: input}
+			if mode == "read_error" {
+				original.terminalErr = io.ErrUnexpectedEOF
+			}
+			log, err := os.Create(filepath.Join(t.TempDir(), "network.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := &LoggingTransport{enabled: true, logFile: log, base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 503, Header: make(http.Header), Body: original}, nil
+			})}
+			t.Cleanup(func() { _ = transport.Close() })
+			req, _ := http.NewRequest("GET", "http://fixture.invalid/models", nil)
+			response, err := transport.RoundTrip(req)
+			if err != nil || original.closed {
+				t.Fatalf("logging consumed response ownership: %v", err)
+			}
+			body, err := io.ReadAll(response.Body)
+			if string(body) != payload || (mode == "read_error") != errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatal("logging changed the body or terminal read error")
+			}
+			if err := response.Body.Close(); err != nil || !original.closed {
+				t.Fatal("closing the logged response did not close its original body")
+			}
+			if info, err := log.Stat(); err != nil || info.Size() > 12<<10 {
+				t.Fatal("network error log entry exceeded its diagnostic budget")
+			}
+		})
+	}
+}
 
 func TestProviderError_BodyBoundaryAndReadFailure(t *testing.T) {
 	for _, size := range []int{64 << 10, (64 << 10) + 1} {
