@@ -635,6 +635,13 @@ var migrations = []storage.SQLiteMigration{
 	{Version: 1, Name: "evidence_objects", Apply: createEvidenceObjectsTable},
 	{Version: 2, Name: "evidence_pins", Apply: createEvidencePinsTable},
 	{Version: 3, Name: "evidence_storage_bytes", Apply: migrateEvidenceStorageBytes},
+	{Version: 4, Name: "evidence_blob_paths", Apply: createEvidenceBlobPathIndex},
+}
+
+func createEvidenceBlobPathIndex(db storage.MigrationDB) error {
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_evidence_blob_path
+		ON evidence_objects(blob_path) WHERE blob_path IS NOT NULL`)
+	return err
 }
 
 func migrateEvidenceStorageBytes(db storage.MigrationDB) error {

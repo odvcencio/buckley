@@ -88,7 +88,7 @@ func TestSQLiteStore_StorageByteMigrationMeasuresLegacyCompressedBlobs(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec(`DELETE FROM evidence_schema_migrations WHERE version=3; ALTER TABLE evidence_objects DROP COLUMN stored_byte_count`); err != nil {
+	if _, err := s.DB().Exec(`DELETE FROM evidence_schema_migrations WHERE version>=3; ALTER TABLE evidence_objects DROP COLUMN stored_byte_count`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := NewWithDB(s.DB(), s.Blobs().root); err != nil {
