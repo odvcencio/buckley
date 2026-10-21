@@ -1534,6 +1534,25 @@ var migrations = []storage.SQLiteMigration{
 	{Version: 20, Name: "agent_run_monitor_indexes", Apply: addAgentRunMonitorIndexes},
 	{Version: 21, Name: "launch_envelopes", Apply: createLaunchEnvelopesTable},
 	{Version: 22, Name: "launch_model_reservations", Apply: createLaunchReservationTables},
+	{Version: 23, Name: "evidence_reference_indexes", Apply: addEvidenceReferenceIndexes},
+}
+
+func addEvidenceReferenceIndexes(db storage.MigrationDB) error {
+	_, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_execution_steps_output_evidence
+			ON execution_steps(output_evidence_id) WHERE output_evidence_id IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_context_receipts_bundle_evidence
+			ON context_receipts(bundle_evidence_id);
+		CREATE INDEX IF NOT EXISTS idx_context_receipts_manifest_evidence
+			ON context_receipts(manifest_evidence_id);
+		CREATE INDEX IF NOT EXISTS idx_task_checkpoints_markdown_evidence
+			ON task_checkpoints(markdown_evidence_id);
+		CREATE INDEX IF NOT EXISTS idx_agent_run_contracts_task_evidence
+			ON agent_run_contracts(task_evidence_id);
+		CREATE INDEX IF NOT EXISTS idx_agent_mailbox_content_ref
+			ON agent_mailbox(content_ref);
+	`)
+	return err
 }
 
 func addAgentRunMonitorIndexes(db storage.MigrationDB) error {
