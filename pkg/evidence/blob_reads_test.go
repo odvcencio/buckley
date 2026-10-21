@@ -15,7 +15,7 @@ import (
 func TestBlobStore_Read_CompleteFrameVariants(t *testing.T) {
 	encode := func(body []byte) []byte {
 		t.Helper()
-		encoded, err := compressZstd(body)
+		encoded, err := compressZstdBytes(body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +74,7 @@ func (r oneByteReader) Read(p []byte) (int, error) { return r.reader.Read(p[:min
 
 func TestDecompressZstd_RejectsFailuresWithoutPartialBody(t *testing.T) {
 	body := bytes.Repeat([]byte("retained evidence\n"), 4096)
-	encoded, err := compressZstd(body)
+	encoded, err := compressZstdBytes(body)
 	if err != nil {
 		t.Fatal(err)
 	}

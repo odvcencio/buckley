@@ -15,8 +15,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// EncodeAll is concurrency-safe; a single reusable worker bounds scratch
-// memory across stores instead of allocating GOMAXPROCS workers per blob.
+// Reuse one streaming encoder to bound scratch memory across stores. Reset
+// changes its writer, so the encoder is locked until each frame is complete.
+var blobEncoderMu sync.Mutex
+
 var blobEncoder = sync.OnceValues(func() (*zstd.Encoder, error) {
 	return zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20))
 })
@@ -119,7 +121,7 @@ func (b *BlobStore) write(sha256Hex string, content []byte, admit func(int64) er
 		return "", 0, fmt.Errorf("evidence: compress blob: %w", err)
 	}
 	if admit != nil {
-		if err := admit(int64(len(compressed))); err != nil {
+		if err := admit(compressed.size); err != nil {
 			return "", 0, err
 		}
 	}
@@ -144,9 +146,11 @@ func (b *BlobStore) write(sha256Hex string, content []byte, admit func(int64) er
 		_ = tmp.Close()
 		return "", 0, fmt.Errorf("evidence: chmod temp blob: %w", err)
 	}
-	if _, err := tmp.Write(compressed); err != nil {
-		_ = tmp.Close()
-		return "", 0, fmt.Errorf("evidence: write temp blob: %w", err)
+	for _, chunk := range compressed.chunks {
+		if _, err := tmp.Write(chunk); err != nil {
+			_ = tmp.Close()
+			return "", 0, fmt.Errorf("evidence: write temp blob: %w", err)
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
@@ -161,7 +165,7 @@ func (b *BlobStore) write(sha256Hex string, content []byte, admit func(int64) er
 	}
 	cleanupTmp = false
 
-	return finalPath, int64(len(compressed)), nil
+	return finalPath, compressed.size, nil
 }
 
 // confinePath resolves path and rejects anything that escapes the blob
@@ -334,12 +338,48 @@ func (b *BlobStore) walk(fn func(string) error, afterDir func(string) error) err
 	return visit(b.writeRoot())
 }
 
-func compressZstd(content []byte) ([]byte, error) {
+const blobCompressionPageBytes = 64 << 10
+
+// Compressed pages avoid reserving the input size or reallocating/copying a
+// large output slice. Admission still sees the exact size before file creation.
+type compressedBlob struct {
+	chunks    [][]byte
+	size      int64
+	chunkSize int
+}
+
+func (b *compressedBlob) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		if len(b.chunks) == 0 || len(b.chunks[len(b.chunks)-1]) == cap(b.chunks[len(b.chunks)-1]) {
+			b.chunks = append(b.chunks, make([]byte, 0, b.chunkSize))
+		}
+		last := len(b.chunks) - 1
+		keep := min(len(p), cap(b.chunks[last])-len(b.chunks[last]))
+		b.chunks[last] = append(b.chunks[last], p[:keep]...)
+		b.size += int64(keep)
+		p = p[keep:]
+	}
+	return n, nil
+}
+
+func compressZstd(content []byte) (compressedBlob, error) {
 	enc, err := blobEncoder()
 	if err != nil {
-		return nil, err
+		return compressedBlob{}, err
 	}
-	return enc.EncodeAll(content, make([]byte, 0, len(content))), nil
+	blobEncoderMu.Lock()
+	defer blobEncoderMu.Unlock()
+	compressed := compressedBlob{chunkSize: min(enc.MaxEncodedSize(len(content)), blobCompressionPageBytes)}
+	enc.ResetContentSize(&compressed, int64(len(content)))
+	_, writeErr := enc.Write(content)
+	closeErr := enc.Close()
+	// Detach the returned pages from the long-lived encoder state.
+	enc.Reset(nil)
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return compressedBlob{}, err
+	}
+	return compressed, nil
 }
 
 // Allocation hints are untrusted. Larger or unknown-size frames still decode
