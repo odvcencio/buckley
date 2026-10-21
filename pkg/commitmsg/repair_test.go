@@ -18,6 +18,9 @@ func TestRepairHeader_Format(t *testing.T) {
 		{"conjunction", "", "keep " + strings.Repeat("x", 54) + " and another component", "", "keep " + strings.Repeat("x", 54)},
 		{"spaced period", "", "Keep the text .", "", "keep the text"},
 		{"format", " project\t", "  Keep\t the   text. ", "project", "keep the text"},
+		{"repeated prefix", "project", "fix(project): keep the text", "project", "keep the text"},
+		{"prefix before length", "project", "fix(project): keep " + strings.Repeat("x", 53), "project", "keep " + strings.Repeat("x", 53)},
+		{"colon in prose", "", "http: keep parsing", "", "http: keep parsing"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,5 +56,12 @@ func TestRepairHeader_NonMechanical(t *testing.T) {
 				t.Fatal("accepted missing or invalid semantic content")
 			}
 		})
+	}
+}
+
+func TestRepairHeader_RepeatedPrefixes(t *testing.T) {
+	scope, subject, repairs := RepairHeader("fix", "api", strings.Repeat("fix(api): ", 4096)+"keep the text", HeaderLimit)
+	if scope != "api" || subject != "keep the text" || len(repairs) != 1 {
+		t.Fatalf("scope=%q subject=%q repairs=%v", scope, subject, repairs)
 	}
 }

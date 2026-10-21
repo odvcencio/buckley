@@ -100,7 +100,7 @@ func (CommitDefinition) Tool() tools.Definition {
 				),
 				"subject": {
 					Type:        "string",
-					Description: "Lowercase imperative summary, no period. Full header including action and scope: at most 72 characters.",
+					Description: "Lowercase imperative summary only; omit action/scope prefix and trailing period. Full rendered header: at most 72 characters.",
 					MaxLength:   72,
 				},
 				"body": tools.ArrayProperty(

@@ -2,10 +2,13 @@ package commitmsg
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
+
+var nestedHeaderRE = regexp.MustCompile(`^([A-Za-z]+)(?:\(([^()\r\n]*)\))?(!)?:[ \t]*`)
 
 // ValidateHeader checks the shared commit and PR header format.
 func ValidateHeader(action, scope, subject string, limit int) error {
@@ -14,6 +17,9 @@ func ValidateHeader(action, scope, subject string, limit int) error {
 	}
 	if strings.TrimSpace(subject) == "" {
 		return fmt.Errorf("subject is required")
+	}
+	if nestedHeaderPrefix(subject) != nil {
+		return fmt.Errorf("subject contains a header prefix; supply only the summary after the colon")
 	}
 	header := composeHeader(action, scope, subject)
 	if n := utf8.RuneCountInString(header); n > limit {
@@ -50,6 +56,7 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 			return scope, subject, nil
 		}
 	}
+	originalScope, originalSubject := scope, subject
 	var repairs []string
 	cleanScope := strings.Join(strings.Fields(scope), " ")
 	cleanSubject := strings.Join(strings.Fields(subject), " ")
@@ -57,6 +64,20 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 		repairs = append(repairs, "normalized whitespace")
 	}
 	scope, subject = cleanScope, cleanSubject
+	removedPrefix := false
+	for prefix := nestedHeaderPrefix(subject); prefix != nil; prefix = nestedHeaderPrefix(subject) {
+		remainder := strings.TrimSpace(subject[len(prefix[0]):])
+		if NormalizeAction(prefix[1]) != NormalizeAction(action) ||
+			(prefix[2] != "" && prefix[2] != scope) || prefix[3] != "" || remainder == "" {
+			return originalScope, originalSubject, nil
+		}
+		subject = remainder
+		removedPrefix = true
+	}
+	if removedPrefix {
+		repairs = append(repairs, "removed repeated header prefix")
+		cleanSubject = subject
+	}
 	if trimmed := strings.TrimRight(subject, " ."); trimmed != subject && trimmed != "" {
 		subject = trimmed
 		repairs = append(repairs, "removed trailing period")
@@ -122,4 +143,12 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 	subject = strings.TrimRight(subject, " .")
 	repairs = append(repairs, "shortened subject")
 	return scope, subject, repairs
+}
+
+func nestedHeaderPrefix(subject string) []string {
+	prefix := nestedHeaderRE.FindStringSubmatch(subject)
+	if prefix != nil && IsAllowedAction(prefix[1]) {
+		return prefix
+	}
+	return nil
 }
