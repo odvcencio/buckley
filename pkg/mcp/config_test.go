@@ -53,6 +53,7 @@ func TestManagerFromConfig_ConnectsEnabledServers(t *testing.T) {
 			{Name: "fake", Command: fakeServerBin, Args: []string{"-mode=normal", "-tools=0"}, Enabled: true, MaxMessageBytes: 64 << 10},
 			{Name: "off", Command: fakeServerBin, Args: []string{"-mode=normal"}, Enabled: false},
 		},
+		MaxTools: 2,
 	}
 	m, err := ManagerFromConfig(context.Background(), cfg)
 	if err != nil {
@@ -65,6 +66,9 @@ func TestManagerFromConfig_ConnectsEnabledServers(t *testing.T) {
 	client, ok := m.GetClient("fake")
 	if !ok || client.transport.limit != 64<<10 {
 		t.Fatal("message budget not wired to client")
+	}
+	if len(client.Tools()) != 2 || !client.CatalogStatus().Truncated {
+		t.Fatal("tool budget not applied during discovery")
 	}
 
 	connected := m.ListConnectedServers()

@@ -42,10 +42,12 @@ type Config struct {
 	// Env supplies additional environment variables for the server
 	// process, merged over the ambient environment.
 	Env map[string]string
-	// Timeout bounds the initialize handshake and health checks.
+	// Timeout bounds the initialize handshake and a complete discovery operation.
 	Timeout time.Duration
-	// MaxMessageBytes bounds encoded incoming JSON (default 8 MiB, maximum 64 MiB).
+	// MaxMessageBytes bounds encoded messages and retained catalog JSON (default 8 MiB, maximum 64 MiB).
 	MaxMessageBytes int
+	// MaxTools defaults to 20; the hard per-server ceiling is 1024.
+	MaxTools int
 }
 
 // Client wraps a single MCP server connection over stdio.
@@ -57,6 +59,7 @@ type Client struct {
 	transport *commandTransport
 	session   *sdkmcp.ClientSession
 	tools     []*sdkmcp.Tool
+	catalog   ToolCatalogStatus
 }
 
 // NewClient starts the configured server process and performs the MCP
@@ -70,6 +73,11 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	limit, err := config.ResolveMCPMessageLimit(cfg.MaxMessageBytes)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: %w", err)
+	}
+	cfg.MaxMessageBytes = limit
+	cfg.MaxTools, err = config.ResolveMCPToolLimit(cfg.MaxTools)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
@@ -87,6 +95,9 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 		Name:    "buckley",
 		Version: buckleyClientVersion,
 	}, nil)
+	if err := installDiscoveryMethods(sdk); err != nil {
+		return nil, err
+	}
 
 	connectCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
@@ -108,38 +119,6 @@ func envSlice(env map[string]string) []string {
 		out = append(out, fmt.Sprintf("%s=%s", k, v))
 	}
 	return out
-}
-
-// ListTools fetches the current tool list from the server and caches it.
-func (c *Client) ListTools(ctx context.Context) ([]*sdkmcp.Tool, error) {
-	if c == nil {
-		return nil, fmt.Errorf("mcp: nil client")
-	}
-	c.mu.RLock()
-	session := c.session
-	c.mu.RUnlock()
-	if session == nil {
-		return nil, fmt.Errorf("mcp: not connected")
-	}
-
-	var all []*sdkmcp.Tool
-	cursor := ""
-	for {
-		res, err := session.ListTools(ctx, &sdkmcp.ListToolsParams{Cursor: cursor})
-		if err != nil {
-			return nil, fmt.Errorf("mcp: tools/list failed: %w", c.transport.connectionError(err))
-		}
-		all = append(all, res.Tools...)
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-
-	c.mu.Lock()
-	c.tools = all
-	c.mu.Unlock()
-	return all, nil
 }
 
 // CallTool invokes a tool on the connected server.
