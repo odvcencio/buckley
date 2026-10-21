@@ -208,6 +208,23 @@ func (s *SQLiteStore) currentOnce(ctx context.Context, sessionID, runID string) 
 	if err := validateAttachmentIdentifiers(sessionID, runID); err != nil {
 		return agentcoord.AttachmentLease{}, err
 	}
+	// Healthy ownership reads must not contend with heartbeats for SQLite's
+	// writer lock. Materialize expiration only on the transactional path below.
+	lease, err := scanAttachment(s.db.QueryRowContext(ctx, `
+		SELECT attempt_id, session_id, run_id, parent_run_id, task_id, turn_id,
+			lease_generation, pid, state, attached_at, heartbeat_at,
+			lease_expires_at, detached_at
+		FROM agent_run_attempts
+		WHERE session_id = ? AND run_id = ? AND state = ?
+			AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now')
+		ORDER BY lease_generation DESC LIMIT 1
+	`, sessionID, runID, agentcoord.AttachmentAttached))
+	if err == nil {
+		return lease, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return agentcoord.AttachmentLease{}, fmt.Errorf("runledger: read current attachment: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return agentcoord.AttachmentLease{}, fmt.Errorf("runledger: begin current attachment: %w", err)
@@ -223,7 +240,7 @@ func (s *SQLiteStore) currentOnce(ctx context.Context, sessionID, runID string) 
 	`, agentcoord.AttachmentExpired, sessionID, runID, agentcoord.AttachmentAttached, sqliteLeaseTimestamp(now)); err != nil {
 		return agentcoord.AttachmentLease{}, fmt.Errorf("runledger: expire current attachment: %w", err)
 	}
-	lease, err := scanAttachment(tx.QueryRowContext(ctx, `
+	lease, err = scanAttachment(tx.QueryRowContext(ctx, `
 		SELECT attempt_id, session_id, run_id, parent_run_id, task_id, turn_id,
 			lease_generation, pid, state, attached_at, heartbeat_at,
 			lease_expires_at, detached_at
