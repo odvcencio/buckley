@@ -74,6 +74,13 @@ esac
 	if len(toc.ImportantFlows) != 3 {
 		t.Fatalf("important flows = %d, want 3", len(toc.ImportantFlows))
 	}
+	hotspot := toc.ComplexityHotspots[0]
+	if hotspot.Cyclomatic == nil || *hotspot.Cyclomatic != 18 || hotspot.Cognitive == nil || *hotspot.Cognitive != 27 || hotspot.Lines == nil || *hotspot.Lines != 88 {
+		t.Fatalf("enriched hotspot metrics were not preserved: %+v", hotspot)
+	}
+	if toc.ImportantFlows[2].FanIn != nil || toc.ImportantFlows[2].Cyclomatic == nil || *toc.ImportantFlows[2].Cyclomatic != 18 {
+		t.Fatalf("complexity-only seed confused fan-in and complexity: %+v", toc.ImportantFlows[2])
+	}
 	flow := toc.ImportantFlows[0]
 	if flow.Status != "available" || len(flow.Callers) != 1 || len(flow.Callees) != 1 {
 		t.Fatalf("first flow = %#v", flow)
