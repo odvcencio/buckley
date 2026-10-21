@@ -88,36 +88,34 @@ func (CommitDefinition) Name() string { return "commit" }
 func (CommitDefinition) Tool() tools.Definition {
 	return tools.Definition{
 		Name:        "generate_commit",
-		Description: "Generate a structured git commit message based on staged changes. Returns action-style commit with header and body bullets.",
+		Description: "Generate a commit message from the supplied staged changes.",
 		Parameters: tools.ObjectSchema(
 			map[string]tools.Property{
 				"action": tools.StringEnumProperty(
-					"The action verb describing what this commit does",
+					"Action verb",
 					commitActions...,
 				),
 				"scope": tools.StringProperty(
-					"The component, package, or area affected (optional)",
+					"Affected component; omit if unclear. Never use a filesystem marker such as '.'.",
 				),
 				"subject": {
 					Type:        "string",
-					Description: "Short summary of the change, imperative mood, no period; keep the full header within 72 characters",
+					Description: "Lowercase imperative summary, no period. Full header including action and scope: at most 72 characters.",
 					MaxLength:   72,
 				},
 				"body": tools.ArrayProperty(
-					"Bullet points explaining WHAT changed and WHY (not how)",
-					tools.StringProperty("A single bullet point"),
+					"1–5 bullets explaining what changed and why; at most 20 words each.",
+					tools.StringProperty(""),
 				),
 				"breaking": tools.BoolProperty(
-					"Whether this commit introduces a breaking change",
+					"Introduces a breaking change",
 				),
 				"breaking_reason": tools.StringProperty(
-					"If breaking is true, briefly describe the compatibility impact without naming removed or renamed identifiers",
+					"Compatibility impact when breaking; do not name removed or renamed identifiers",
 				),
 				"issues": tools.ArrayProperty(
-					"Issue numbers this change RELATES TO, without # prefix. Rendered as "+
-						"references ('Refs #N'), never as close directives — this does not close "+
-						"any issue. Do not add a number just because it appears in the diff text.",
-					tools.StringProperty("Issue number"),
+					"Related issue numbers without '#'. References only ('Refs #N'), never closing issues. Do not infer from numbers in the diff.",
+					tools.StringProperty(""),
 				),
 			},
 			"action", "subject", "body",
@@ -133,25 +131,12 @@ func (CommitDefinition) ContextSources() []oneshot.ContextSource {
 	}
 }
 
-const commitSystemPrompt = `You are a git commit message generator. Analyze the staged changes and generate a clear, informative commit message.
-
-Use the generate_commit tool to produce your response. The tool expects:
-- action: The verb describing what this commit does (add, fix, update, refactor, etc.)
-- scope: Optional component/area (e.g., "api", "ui", "config")
-- subject: Short summary, imperative mood, no period, ~50 chars
-- body: Bullet points explaining WHAT changed and WHY
-- breaking_reason: If breaking is true, briefly explain the compatibility impact
-
-Guidelines:
-- Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name"
-- Start the subject with a lowercase word; do not repeat the action verb in it ("fix(x): fix ..." is rejected)
-- Write at most 5 bullets, each at most 20 words
-- Focus on the "what" and "why", not the "how"
-- Be specific but concise; use durable high-level wording and do not copy secrets, tokens, private URLs, or user data
-- Match body detail to change size
-- Group related changes into single bullets
-- Use imperative mood ("Add feature" not "Added feature")
-- If breaking is true, include a useful breaking_reason instead of repeating the subject`
+const commitSystemPrompt = `Use the generate_commit tool to describe the staged changes, following its schema.
+Prefer the human-authored change over generated artifacts. Match detail to change size; group related changes.
+Describe intent and effect. Never name removed or renamed identifiers, people, or organizations; say "the old name".
+Do not repeat the action verb in the subject ("fix(x): fix ..." is rejected).
+Do not copy secrets, tokens, private URLs, or user data.
+For breaking changes, explain the compatibility impact rather than repeating the subject.`
 
 func (CommitDefinition) SystemPrompt() string {
 	return prompts.CommitToolPrompt(
