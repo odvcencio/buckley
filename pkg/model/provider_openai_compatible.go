@@ -205,7 +205,7 @@ func (p *OpenAICompatibleProvider) fetchModelInfo() ([]ModelInfo, error) {
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeProviderResponse(resp, &result); err != nil {
 		return nil, err
 	}
 
@@ -267,7 +267,7 @@ func (p *OpenAICompatibleProvider) fetchModels() ([]ModelInfo, error) {
 	var result struct {
 		Data []openAICompatibleFetchedModel `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeProviderResponse(resp, &result); err != nil {
 		return nil, err
 	}
 

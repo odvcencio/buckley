@@ -192,7 +192,7 @@ func (t *ProviderTransport) Do(ctx context.Context, httpClient *http.Client, met
 				return apiErr
 			}
 
-			data, err := io.ReadAll(resp.Body)
+			data, err := readProviderResponse(resp)
 			resp.Body.Close()
 			if err != nil {
 				return fmt.Errorf("reading response body: %w", err)

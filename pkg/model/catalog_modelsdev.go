@@ -121,7 +121,7 @@ func FetchModelsDevCatalog(ctx context.Context, httpClient *http.Client, url str
 	}
 
 	var catalog ModelsDevCatalog
-	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+	if err := decodeProviderResponse(resp, &catalog); err != nil {
 		return nil, fmt.Errorf("models.dev: decode catalog: %w", err)
 	}
 	return catalog, nil

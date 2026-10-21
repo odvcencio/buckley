@@ -17,7 +17,7 @@ import (
 
 const (
 	// These bounds apply only to the trusted launch-admission observation. The
-	// ordinary catalog path retains its existing compatibility behavior.
+	// ordinary catalog path uses the shared non-streaming response bound.
 	MaxOfficialCatalogResponseBytes = 16 << 20
 	MaxOfficialCatalogModels        = 16_384
 	MaxOfficialCatalogModelBytes    = 1 << 20

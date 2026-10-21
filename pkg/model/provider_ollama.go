@@ -51,8 +51,7 @@ func (p *OllamaProvider) FetchCatalog() (*ModelCatalog, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama list models failed (%d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("ollama list models: %w", parseProviderError(resp))
 	}
 
 	var result struct {
@@ -60,7 +59,7 @@ func (p *OllamaProvider) FetchCatalog() (*ModelCatalog, error) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeProviderResponse(resp, &result); err != nil {
 		return nil, fmt.Errorf("decode ollama catalog: %w", err)
 	}
 
@@ -128,12 +127,11 @@ func (p *OllamaProvider) ChatCompletion(ctx context.Context, req ChatRequest) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama chat failed (%d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("ollama chat: %w", parseProviderError(resp))
 	}
 
 	var chatResp ollamaChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := decodeProviderResponse(resp, &chatResp); err != nil {
 		return nil, fmt.Errorf("decode ollama response: %w", err)
 	}
 
@@ -195,8 +193,7 @@ func (p *OllamaProvider) invokeStream(ctx context.Context, req ChatRequest, chun
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama stream failed (%d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("ollama stream: %w", parseProviderError(resp))
 	}
 
 	reader := bufio.NewReader(resp.Body)
