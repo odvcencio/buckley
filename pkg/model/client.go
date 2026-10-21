@@ -59,7 +59,8 @@ type Client struct {
 	transport      *LoggingTransport
 	catalog        *ModelCatalog
 	catalogAge     time.Time
-	catalogMu      sync.Mutex
+	catalogMu      sync.RWMutex
+	catalogFetchMu sync.Mutex
 	rateLimiter    *rate.Limiter
 	circuitBreaker *CircuitBreaker
 	retryConfig    RetryConfig
@@ -282,12 +283,19 @@ func (c *Client) RefreshCatalog() (*ModelCatalog, error) {
 }
 
 func (c *Client) fetchCatalog(force bool) (*ModelCatalog, error) {
-	c.catalogMu.Lock()
-	defer c.catalogMu.Unlock()
-
 	// Return cached catalog if less than 24h old
-	if !force && c.catalog != nil && time.Since(c.catalogAge) < 24*time.Hour {
-		return c.catalog, nil
+	if !force {
+		if catalog, age := c.catalogSnapshot(); catalog != nil && time.Since(age) < 24*time.Hour {
+			return catalog, nil
+		}
+	}
+
+	c.catalogFetchMu.Lock()
+	defer c.catalogFetchMu.Unlock()
+	if !force {
+		if catalog, age := c.catalogSnapshot(); catalog != nil && time.Since(age) < 24*time.Hour {
+			return catalog, nil
+		}
 	}
 
 	ctx := context.Background()
@@ -313,21 +321,32 @@ func (c *Client) fetchCatalog(force bool) (*ModelCatalog, error) {
 		return nil, fmt.Errorf("decoding catalog: %w", err)
 	}
 
+	c.catalogMu.Lock()
 	c.catalog = &catalog
 	c.catalogAge = time.Now()
+	c.catalogMu.Unlock()
 
 	return &catalog, nil
 }
 
+func (c *Client) catalogSnapshot() (*ModelCatalog, time.Time) {
+	c.catalogMu.RLock()
+	defer c.catalogMu.RUnlock()
+	return c.catalog, c.catalogAge
+}
+
 // GetModelInfo returns information about a specific model
 func (c *Client) GetModelInfo(modelID string) (*ModelInfo, error) {
-	if c.catalog == nil {
-		if _, err := c.FetchCatalog(); err != nil {
+	catalog, _ := c.catalogSnapshot()
+	if catalog == nil {
+		var err error
+		catalog, err = c.FetchCatalog()
+		if err != nil {
 			return nil, err
 		}
 	}
 
-	for _, model := range c.catalog.Data {
+	for _, model := range catalog.Data {
 		if model.ID == modelID {
 			return &model, nil
 		}
