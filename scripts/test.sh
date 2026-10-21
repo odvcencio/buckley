@@ -7,7 +7,7 @@ cd "$ROOT"
 if [[ "${GO_TEST_TARGET:-}" == "all" ]]; then
   go_list_args=(./...)
 else
-  go_list_args=(./pkg/... ./cmd/buckley)
+  go_list_args=(./internal/... ./pkg/... ./cmd/buckley)
 fi
 
 packages_output=""

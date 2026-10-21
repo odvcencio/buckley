@@ -167,6 +167,12 @@ func TestGoTestScriptIncludesDir_SkipsIgnoredDirectories(t *testing.T) {
 		want bool
 	}{
 		{"pkg/tool/builtin", true},
+		{"internal", true},
+		{"internal/filecache", true},
+		{"internal/testdata/fixture", false},
+		{"internal/_hidden", false},
+		{"internal/.hidden", false},
+		{"internal/vendor/example", false},
 		{"cmd/buckley", true},
 		{"pkg/testdata/fixture", false},
 		{"pkg/_hidden", false},

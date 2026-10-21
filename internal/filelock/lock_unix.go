@@ -1,6 +1,6 @@
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
 
-package model
+package filelock
 
 import (
 	"errors"
@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func tryLockNetworkLog(file *os.File) (bool, error) {
+func TryLock(file *os.File) (bool, error) {
 	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 		return false, nil
@@ -17,4 +17,4 @@ func tryLockNetworkLog(file *os.File) (bool, error) {
 	return err == nil, err
 }
 
-func unlockNetworkLog(file *os.File) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }
+func Unlock(file *os.File) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }

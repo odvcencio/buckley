@@ -6,24 +6,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"m31labs.dev/buckley/internal/filecache"
+)
+
+const (
+	DefaultCacheMaxBytes      = 4 << 20
+	DefaultCacheMaxEntries    = 128
+	DefaultCacheMaxEntryBytes = 256 << 10
 )
 
 // Cache provides disk-based caching for environment profiles
 type Cache struct {
-	dir string
+	files *filecache.Cache
 }
 
 // NewCache creates a new cache instance
 func NewCache(dir string) *Cache {
-	os.MkdirAll(dir, 0755)
-	return &Cache{dir: dir}
+	return &Cache{files: filecache.New(dir, "envdetect-", filecache.Limits{Bytes: DefaultCacheMaxBytes, Entries: DefaultCacheMaxEntries, EntryBytes: DefaultCacheMaxEntryBytes})}
 }
 
 // Get retrieves a cached environment profile
 func (c *Cache) Get(key string) (*EnvironmentProfile, bool) {
-	path := filepath.Join(c.dir, "envdetect-"+key+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := c.files.Get(key)
+	if !ok {
 		return nil, false
 	}
 
@@ -37,13 +43,12 @@ func (c *Cache) Get(key string) (*EnvironmentProfile, bool) {
 
 // Set stores an environment profile in the cache
 func (c *Cache) Set(key string, profile *EnvironmentProfile) error {
-	path := filepath.Join(c.dir, "envdetect-"+key+".json")
 	data, err := json.Marshal(profile)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return c.files.Set(key, data)
 }
 
 // computeCacheKey generates a hash of all lockfiles
