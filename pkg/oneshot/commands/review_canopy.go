@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"m31labs.dev/buckley/internal/commandoutput"
+	"m31labs.dev/buckley/internal/commandrun"
 )
 
 const (
@@ -24,7 +29,6 @@ const (
 	canopyProjectGraphDepth = 2
 	canopyReviewTimeout     = 12 * time.Second
 	canopyProjectTimeout    = 45 * time.Second
-	canopyPipeWaitDelay     = 2 * time.Second
 )
 
 type canopyReviewEvidence struct {
@@ -245,24 +249,20 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 
 	ctx, cancel := context.WithTimeout(nonNilReviewContext(parent), canopyReviewTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, "analyze", "review", "--base", baseCommit, "--json", ".")
-	cmd.Dir = repoRoot
-	cmd.WaitDelay = canopyPipeWaitDelay
 	started := time.Now()
-	output, err := cmd.Output()
+	output, err := runCanopyJSON(ctx, executable, repoRoot, "analyze", "review", "--base", baseCommit, "--json", ".")
 	elapsed := time.Since(started)
 	if ctx.Err() != nil {
 		return canopyReviewEvidence{Status: "timed out", Runtime: elapsed}
 	}
 	if err != nil {
+		if errors.Is(err, errCanopyJSONLimit) {
+			return canopyReviewEvidence{Status: "evidence exceeded input limit", Runtime: elapsed}
+		}
 		return canopyReviewEvidence{Status: "analysis failed", Runtime: elapsed}
 	}
-	output = []byte(strings.TrimSpace(string(output)))
 	if len(output) == 0 {
 		return canopyReviewEvidence{Status: "returned no evidence", Runtime: elapsed}
-	}
-	if len(output) > maxCanopyReviewInput {
-		return canopyReviewEvidence{Status: "evidence exceeded input limit", Runtime: elapsed}
 	}
 	var report canopyReviewReport
 	if err := json.Unmarshal(output, &report); err != nil {
@@ -512,10 +512,11 @@ func buildCanopyProjectIndex(ctx context.Context, executable, repoRoot string) (
 	cachePath := filepath.Join(cacheDir, "index.json")
 	cmd := exec.CommandContext(ctx, executable, "index", "build", ".", "--out", cachePath)
 	cmd.Dir = repoRoot
-	cmd.WaitDelay = canopyPipeWaitDelay
+	commandrun.ConfigureCancellation(cmd)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
+		_ = cmd.Cancel()
 		cleanup()
 		return "", nil, err
 	}
@@ -527,14 +528,46 @@ func buildCanopyProjectIndex(ctx context.Context, executable, repoRoot string) (
 }
 
 func runCanopyJSON(ctx context.Context, executable, repoRoot string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, executable, args...)
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	cmd := exec.CommandContext(runCtx, executable, args...)
 	cmd.Dir = repoRoot
-	cmd.WaitDelay = canopyPipeWaitDelay
-	output, err := cmd.Output()
+	commandrun.ConfigureCancellation(cmd)
+	stdout := &canopyJSONCapture{cancel: cancel}
+	stderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
 	if err != nil {
+		_ = cmd.Cancel()
+	}
+	if cause := context.Cause(runCtx); cause != nil {
+		return nil, cause
+	}
+	if err != nil {
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return nil, fmt.Errorf("canopy command failed: %s: %w", text, err)
+		}
 		return nil, err
 	}
-	return []byte(strings.TrimSpace(string(output))), nil
+	return bytes.TrimSpace(stdout.buffer.Bytes()), nil
+}
+
+var errCanopyJSONLimit = fmt.Errorf("canopy JSON exceeds %d-byte input limit", maxCanopyReviewInput)
+
+type canopyJSONCapture struct {
+	buffer bytes.Buffer
+	cancel context.CancelCauseFunc
+}
+
+func (c *canopyJSONCapture) Write(data []byte) (int, error) {
+	remaining := maxCanopyReviewInput - c.buffer.Len()
+	if len(data) > remaining {
+		n, _ := c.buffer.Write(data[:remaining])
+		c.cancel(errCanopyJSONLimit)
+		return n, errCanopyJSONLimit
+	}
+	return c.buffer.Write(data)
 }
 
 type canopyProjectSeed struct {
