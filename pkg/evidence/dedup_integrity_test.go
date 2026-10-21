@@ -88,7 +88,7 @@ func TestSQLiteStore_PutDuplicate_RejectsCorruptionWithoutPinning(t *testing.T) 
 					changed = body
 				}
 				var encoded []byte
-				encoded, err = compressZstd(changed)
+				encoded, err = compressZstdBytes(changed)
 				if scenario == "checksum" {
 					encoded[len(encoded)-1] ^= 0xff
 				}
