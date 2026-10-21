@@ -34,14 +34,21 @@ case "$1:$2" in
     printf '%s\n' '{"files":{"total":12,"generated":1,"by_language":{"go":11}},"symbols":{"total":40},"references":{"total":90},"parse_errors":{"count":0},"call_graph":{"total_edges":70,"unresolved":4,"resolution_rate":0.94},"complexity":{"avg_cyclomatic":3.2,"max_cyclomatic":18,"p90_cyclomatic":8,"avg_cognitive":4.1,"max_cognitive":27},"top_fan_in":[{"file":"pkg/a.go","name":"Start","start_line":10,"value":21},{"file":"pkg/b.go","name":"Serve","start_line":20,"value":11}],"top_complex":[{"file":"pkg/c.go","name":"Validate","start_line":30,"value":0,"cyclomatic":18,"cognitive":27,"lines":88}]}'
     ;;
   graph:calls)
+    case "$3" in
+      Start) file=pkg/a.go; line=10 ;;
+      Serve) file=pkg/b.go; line=20 ;;
+      Validate) file=pkg/c.go; line=30 ;;
+      *) exit 64 ;;
+    esac
+    root=$(printf '{"id":"root","file":"%s","package":"p","kind":"function_definition","name":"%s","start_line":%s}' "$file" "$3" "$line")
     reverse=false
     for arg in "$@"; do
       if [ "$arg" = "--reverse" ]; then reverse=true; fi
     done
     if $reverse; then
-      printf '%s\n' '{"roots":[{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","signature":"func Start()","start_line":10,"end_line":15}],"nodes":[],"edges":[{"caller":{"id":"caller","file":"pkg/entry.go","package":"p","kind":"function_definition","name":"Main","start_line":3},"callee":{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","start_line":10},"resolution":"package","count":2,"samples":[{"file":"pkg/entry.go","start_line":4}]}]}'
+      printf '{"roots":[%s],"nodes":[{"id":"root"},{"id":"caller"}],"edges":[{"caller":{"id":"caller","file":"pkg/entry.go","package":"p","kind":"function_definition","name":"Main","start_line":3},"callee":%s,"resolution":"package","count":2,"samples":[{"file":"pkg/entry.go","start_line":4}]}]}\n' "$root" "$root"
     else
-      printf '%s\n' '{"roots":[{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","signature":"func Start()","start_line":10,"end_line":15}],"nodes":[],"edges":[{"caller":{"id":"root","file":"pkg/a.go","package":"p","kind":"function_definition","name":"Start","start_line":10},"callee":{"id":"callee","file":"pkg/service.go","package":"p","kind":"function_definition","name":"Run","start_line":44},"resolution":"package","count":1,"samples":[{"file":"pkg/a.go","start_line":12}]}]}'
+      printf '{"roots":[%s],"nodes":[{"id":"root"},{"id":"callee"}],"edges":[{"caller":%s,"callee":{"id":"callee","file":"pkg/service.go","package":"p","kind":"function_definition","name":"Run","start_line":44},"resolution":"package","count":1,"samples":[{"file":"pkg/a.go","start_line":12}]}]}\n' "$root" "$root"
     fi
     ;;
 esac

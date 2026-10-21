@@ -19,6 +19,7 @@ func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fanIn, cyclomatic, cognitive := 6, 4, 5
+			nodes, edges := 13, 12
 			toc := canopyProjectTOC{
 				Version: 1,
 				Source:  canopyProjectTOCSource{Tool: "canopy", IndexScope: "repository", RuntimeMS: 12},
@@ -37,7 +38,7 @@ func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing
 				flow := canopyTOCFlow{
 					Root: canopyGraphSymbol{ID: "start", File: "pkg/session/review.go", Package: "session", Kind: "function_definition",
 						Name: "Start", Signature: tc.signature, StartLine: 10, EndLine: 15, Callable: true},
-					Signal: "fan-in", FanIn: &fanIn, Cyclomatic: &cyclomatic, Cognitive: &cognitive, ReachableNodes: 13, GraphEdges: 12, Status: "available",
+					Signal: "fan-in", FanIn: &fanIn, Cyclomatic: &cyclomatic, Cognitive: &cognitive, ReachableNodes: &nodes, GraphEdges: &edges, GraphDirection: "callees", Status: "available",
 				}
 				for j := 0; j < 6; j++ {
 					flow.Callers = append(flow.Callers, edge)
