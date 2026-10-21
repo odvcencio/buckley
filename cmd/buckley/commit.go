@@ -679,17 +679,30 @@ func oneshotMinimalOutputEnabled() bool {
 	return v == "1" || v == "true"
 }
 
-// listStagedFiles returns the names of all currently staged files.
+// listStagedFiles returns all staged names relative to the working directory,
+// including ../ paths outside it so exclusive scopes cannot hide them.
 func listStagedFiles() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "--no-renames", "-z").Output()
+	prefixOutput, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-prefix").Output()
+	if err != nil {
+		return nil, err
+	}
+	prefix := strings.TrimSuffix(string(prefixOutput), "\n")
+	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "--no-renames", "--no-relative", "-z").Output()
 	if err != nil {
 		return nil, err
 	}
 	var files []string
 	for _, f := range strings.Split(string(out), "\x00") {
 		if f != "" {
+			if prefix != "" {
+				relative, err := filepath.Rel(filepath.FromSlash(prefix), filepath.FromSlash(f))
+				if err != nil {
+					return nil, fmt.Errorf("resolve staged filename: %w", err)
+				}
+				f = filepath.ToSlash(relative)
+			}
 			files = append(files, f)
 		}
 	}
@@ -733,7 +746,7 @@ func stagedFilesOutsidePaths(paths []string) ([]string, error) {
 func fileMatchesPaths(file string, paths []string) bool {
 	for _, p := range paths {
 		p = filepath.ToSlash(filepath.Clean(p))
-		if p == "." || file == p || strings.HasPrefix(file, p+"/") {
+		if (p == "." && file != ".." && !strings.HasPrefix(file, "../")) || file == p || strings.HasPrefix(file, p+"/") {
 			return true
 		}
 	}
@@ -918,7 +931,12 @@ func createCommitWithMetadata(message string, compactOutput bool, useGraft bool,
 	if useGraft {
 		cmd = exec.CommandContext(ctx, "graft", "commit", "-m", message)
 	} else {
-		cmd = exec.CommandContext(ctx, "git", "commit", "-F", tmpPath)
+		args := []string{"commit", "-F", tmpPath}
+		if len(commitEnv) > 0 {
+			// Private snapshots must not leave new shared-index files in the repository.
+			args = append([]string{"-c", "core.splitIndex=false"}, args...)
+		}
+		cmd = exec.CommandContext(ctx, "git", args...)
 		cmd.Env = commitEnv
 	}
 	if compactOutput {
