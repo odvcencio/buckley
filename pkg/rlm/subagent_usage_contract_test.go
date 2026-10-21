@@ -71,7 +71,7 @@ func TestFinalizeSubAgentRawIncludesRichUsageWithoutReasoningText(t *testing.T) 
 		TokensUsed: 10,
 		Usage:      transparency.TokenUsage{Output: 10, ReportedReasoning: &reasoning},
 	}
-	finalizeSubAgentResult(result, time.Now())
+	(&SubAgent{}).finalizeResult(result, time.Now())
 	if len(result.Raw) == 0 {
 		t.Fatal("Raw is empty")
 	}

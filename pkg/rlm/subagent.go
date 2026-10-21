@@ -95,6 +95,7 @@ type SubAgent struct {
 	maxToolCalls         int
 	maxVerificationCalls int
 	maxCostUSD           float64
+	omitRawResult        bool
 	adaptive             bool
 	explorationTimeout   time.Duration
 	synthesisLead        time.Duration
@@ -154,6 +155,9 @@ type SubAgentConfig struct {
 	AllowedTools         []string
 	ReviewSnapshot       *model.ReviewSnapshot
 	ToolTier             string // role_permissions tier for runtime validation
+	// OmitRawResult skips the derived JSON copy for structured-only callers.
+	// Scratchpad capture always retains it, even when this option is set.
+	OmitRawResult bool
 }
 
 // SubAgentDeps provides shared dependencies.
@@ -258,6 +262,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		maxToolCalls:         cfg.MaxToolCalls,
 		maxVerificationCalls: cfg.MaxVerificationCalls,
 		maxCostUSD:           cfg.MaxCostUSD,
+		omitRawResult:        cfg.OmitRawResult && deps.Scratchpad == nil,
 		adaptive:             cfg.Adaptive,
 		explorationTimeout:   cfg.ExplorationTimeout,
 		synthesisLead:        synthesisLead,
@@ -548,14 +553,14 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		History:        history,
 	})
 	if err != nil {
-		finalizeSubAgentResult(result, start)
+		a.finalizeResult(result, start)
 		return result, err
 	}
 
 	var runResult *agentloop.Result
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			finalizeSubAgentResult(result, start)
+			a.finalizeResult(result, start)
 			return result, ctxErr
 		}
 		runResult, err = ctrl.Run(ctx)
@@ -582,7 +587,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 				continue
 			}
 			preserveSubAgentPartialSummary(result, runResult)
-			finalizeSubAgentResult(result, start)
+			a.finalizeResult(result, start)
 			return result, err
 		}
 		break
@@ -591,12 +596,12 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	if err == nil && runResult != nil {
 		if completionErr := runResult.RequireConclusive(); completionErr != nil {
 			preserveSubAgentPartialSummary(result, runResult)
-			finalizeSubAgentResult(result, start)
+			a.finalizeResult(result, start)
 			return result, completionErr
 		}
 		switch runResult.FinishReason {
 		case agentloop.FinishReasonEmptyChoices:
-			finalizeSubAgentResult(result, start)
+			a.finalizeResult(result, start)
 			return result, fmt.Errorf("no response from model")
 		}
 		content, extractErr := model.ExtractTextContent(runResult.Message.Content)
@@ -606,7 +611,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		result.Summary = strings.TrimSpace(content)
 	}
 
-	finalizeSubAgentResult(result, start)
+	a.finalizeResult(result, start)
 	if a.scratchpad != nil {
 		key, writeErr := a.scratchpad.Write(ctx, WriteRequest{
 			Type:      EntryTypeAnalysis,
@@ -897,14 +902,18 @@ func budgetedMaxOutputTokens(pricing model.ModelPricing, estimatedInputTokens in
 	return maxOutputTokens, nil
 }
 
-func finalizeSubAgentResult(result *SubAgentResult, start time.Time) {
+func (a *SubAgent) finalizeResult(result *SubAgentResult, start time.Time) {
 	if result == nil {
 		return
 	}
 	if strings.TrimSpace(result.Summary) == "" {
 		result.Summary = summarizeToolCalls(result.ToolCalls)
 	}
-	result.Raw = marshalSubAgentRaw(result)
+	if a.omitRawResult {
+		result.Raw = nil
+	} else {
+		result.Raw = marshalSubAgentRaw(result)
+	}
 	result.Duration = time.Since(start)
 }
 

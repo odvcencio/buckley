@@ -231,6 +231,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 		SynthesisLead:        opts.SynthesisLead,
 		AllowedTools:         allowedTools,
 		ReviewSnapshot:       opts.ReviewSnapshot,
+		OmitRawResult:        true,
 	}
 
 	// Create sub-agent with full tool access
