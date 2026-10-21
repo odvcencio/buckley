@@ -68,6 +68,7 @@ func (r *Registry) registerBuiltins(cfg registryOptions) {
 	register(&builtin.GetFunctionSignatureTool{})
 
 	// Register canopy structural intelligence tools (call graph, refs, impact)
+	register(&builtin.CodeOutlineTool{})
 	register(&builtin.CodeCallgraphTool{})
 	register(&builtin.CodeRefsTool{})
 	register(&builtin.CodeImpactTool{})
@@ -153,6 +154,7 @@ func defaultToolKinds() map[string]string {
 		"get_function_signature": "read",
 
 		// Canopy structural intelligence
+		"code_outline":   "read",
 		"code_callgraph": "search",
 		"code_refs":      "search",
 		"code_impact":    "read",
