@@ -8,6 +8,24 @@ import (
 	"strings"
 )
 
+const (
+	// DefaultMCPMaxMessageBytes bounds incoming JSON before MCP decoding.
+	DefaultMCPMaxMessageBytes = 8 << 20
+	// MaxMCPMessageBytes is the largest supported per-server message budget.
+	MaxMCPMessageBytes = 64 << 20
+)
+
+// ResolveMCPMessageLimit applies the default while rejecting unbounded settings.
+func ResolveMCPMessageLimit(bytes int) (int, error) {
+	if bytes < 0 || bytes > MaxMCPMessageBytes {
+		return 0, fmt.Errorf("max_message_bytes must be between 0 and %d", MaxMCPMessageBytes)
+	}
+	if bytes == 0 {
+		return DefaultMCPMaxMessageBytes, nil
+	}
+	return bytes, nil
+}
+
 // Validate checks the mcp section: server names are non-empty and unique,
 // enabled servers carry a resolvable command, and numeric settings are
 // non-negative. Disabled servers are not launched, so their command is not
@@ -28,6 +46,9 @@ func (c MCPConfig) Validate() error {
 		seen[name] = true
 		if srv.Timeout < 0 {
 			return fmt.Errorf("mcp.servers[%s].timeout must be >= 0", name)
+		}
+		if _, err := ResolveMCPMessageLimit(srv.MaxMessageBytes); err != nil {
+			return fmt.Errorf("mcp.servers[%s].%w", name, err)
 		}
 		if !srv.Enabled {
 			continue

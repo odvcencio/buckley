@@ -11,8 +11,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -20,17 +25,46 @@ import (
 func main() {
 	mode := flag.String("mode", "normal", "normal, large, crash, or malformed")
 	toolCount := flag.Int("tools", 2, "number of synthetic tools to register in normal mode")
+	responseBytes := flag.Int("response-bytes", 4<<20, "text payload bytes in large mode")
+	pidFile := flag.String("pid-file", "", "process fixture PID output")
+	callLog := flag.String("call-log", "", "tool invocation log for recovery fixtures")
 	flag.Parse()
 
 	switch *mode {
+	case "shutdown":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		if _, err := fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","id":1,"result":{"cleanup":true}}`); err != nil {
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*pidFile, []byte("cleaned"), 0600); err != nil {
+			panic(err)
+		}
+	case "burst":
+		for range 64 {
+			fmt.Fprintln(os.Stdout, `{"jsonrpc":"2.0","id":1,"result":{"evidence":"final-buffered-result"}}`)
+		}
+	case "idle":
+		signal.Ignore(syscall.SIGTERM)
+		time.Sleep(60 * time.Second)
+	case "stubborn":
+		signal.Ignore(syscall.SIGTERM)
+		child := exec.Command(os.Args[0], "-mode=idle")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(*pidFile, []byte(fmt.Sprintf("%d %d", os.Getpid(), child.Process.Pid)), 0600); err != nil {
+			panic(err)
+		}
+		time.Sleep(60 * time.Second)
 	case "malformed":
 		runMalformed()
 	case "crash":
 		runCrash()
 	case "large":
-		runNormal(*toolCount, true)
+		runNormal(*toolCount, *responseBytes, *callLog)
 	default:
-		runNormal(*toolCount, false)
+		runNormal(*toolCount, 0, *callLog)
 	}
 }
 
@@ -127,8 +161,19 @@ func runCrash() {
 // runNormal serves a handful of well-formed tools for handshake/list/call
 // coverage, including tools whose results exercise text, image, and
 // resource content blocks.
-func runNormal(toolCount int, large bool) {
+func runNormal(toolCount int, responseBytes int, callLog string) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "fake-normal", Version: "0.0.1"}, nil)
+	recordCall := func(name string) {
+		if callLog == "" {
+			return
+		}
+		file, err := os.OpenFile(callLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close()
+		fmt.Fprintln(file, name)
+	}
 
 	server.AddTool(&mcp.Tool{
 		Name:        "echo",
@@ -141,8 +186,9 @@ func runNormal(toolCount int, large bool) {
 			"required": []string{"text"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if large {
-			return &mcp.CallToolResult{Content: largeContent()}, nil
+		recordCall("echo")
+		if responseBytes > 0 {
+			return &mcp.CallToolResult{Content: largeContent(responseBytes)}, nil
 		}
 		var args struct {
 			Text string `json:"text"`
@@ -156,8 +202,8 @@ func runNormal(toolCount int, large bool) {
 		Description: "Always returns a tool-level error.",
 		InputSchema: map[string]any{"type": "object"},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if large {
-			return &mcp.CallToolResult{IsError: true, Content: largeContent()}, nil
+		if responseBytes > 0 {
+			return &mcp.CallToolResult{IsError: true, Content: largeContent(responseBytes)}, nil
 		}
 		return &mcp.CallToolResult{
 			IsError: true,
@@ -170,6 +216,7 @@ func runNormal(toolCount int, large bool) {
 		Description: "Returns text, image, and embedded-resource content blocks.",
 		InputSchema: map[string]any{"type": "object"},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		recordCall("mixed_content")
 		return &mcp.CallToolResult{Content: []mcp.Content{
 			&mcp.TextContent{Text: "first line"},
 			&mcp.ImageContent{Data: []byte{0x1, 0x2, 0x3}, MIMEType: "image/png"},
@@ -195,10 +242,10 @@ func runNormal(toolCount int, large bool) {
 	}
 }
 
-func largeContent() []mcp.Content {
+func largeContent(responseBytes int) []mcp.Content {
 	content := make([]mcp.Content, 32)
 	for i := range content {
-		text := strings.Repeat("x", 128<<10)
+		text := strings.Repeat("x", responseBytes/len(content))
 		if i == 0 {
 			text = "FIRST_EVIDENCE: fixture-start\n" + text
 		}
