@@ -39,6 +39,7 @@ func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
+	configureCommandCancellation(cmd)
 	if strings.TrimSpace(r.workDir) != "" {
 		cmd.Dir = strings.TrimSpace(r.workDir)
 	}
@@ -49,8 +50,11 @@ func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, 
 	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", false, fmt.Errorf("canopy command timed out after %s", canopyExecTimeout)
+	if runErr != nil {
+		_ = cmd.Cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, fmt.Errorf("canopy command interrupted: %w", err)
 	}
 	if runErr != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -58,9 +62,9 @@ func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, 
 			msg = strings.TrimSpace(stdout.String())
 		}
 		if msg == "" {
-			msg = runErr.Error()
+			return "", false, fmt.Errorf("canopy command failed: %w", runErr)
 		}
-		return "", false, fmt.Errorf("canopy command failed: %s", msg)
+		return "", false, fmt.Errorf("canopy command failed: %s: %w", msg, runErr)
 	}
 
 	return strings.TrimSpace(stdout.String()), stdout.Truncated(), nil
