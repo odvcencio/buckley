@@ -12,7 +12,7 @@ import (
 
 func TestNewValidator(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	if validator == nil {
 		t.Fatal("NewValidator returned nil")
@@ -24,7 +24,7 @@ func TestNewValidator(t *testing.T) {
 
 func TestValidator_ValidatePreconditions_Basic(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	task := &Task{
 		ID:           "1",
@@ -50,7 +50,7 @@ func TestValidator_ValidatePreconditions_Basic(t *testing.T) {
 
 func TestValidator_ValidatePreconditions_MissingTools(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	task := &Task{
 		ID:            "1",
@@ -192,7 +192,7 @@ func TestValidator_DeclaredToolsResolveFromRegistryOrPath(t *testing.T) {
 
 func TestValidator_ValidatePreconditions_EnvVars(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	task := &Task{
 		ID:          "1",
@@ -214,7 +214,7 @@ func TestValidator_ValidatePreconditions_EnvVars(t *testing.T) {
 
 func TestValidator_RequiredTools(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	tests := []struct {
 		name          string
@@ -548,7 +548,7 @@ func TestVerifier_CollectArtifacts(t *testing.T) {
 
 func TestValidator_MarkdownVerificationSteps(t *testing.T) {
 	registry := tool.NewRegistry()
-	validator := NewValidator(registry, ".")
+	validator := NewValidator(registry, t.TempDir())
 
 	// Simulate a task with markdown-style verification steps
 	// (similar to auto-generated plans)
