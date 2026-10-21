@@ -11,6 +11,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"m31labs.dev/buckley/internal/commandoutput"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/mcp"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -96,30 +97,46 @@ func (t *mcpTool) ExecuteWithContext(ctx context.Context, params map[string]any)
 
 	res, err := t.manager.CallTool(ctx, t.server, t.def.Name, params)
 	if err != nil {
-		return &builtin.Result{
-			Success: false,
-			Error:   fmt.Sprintf("mcp tool call failed: %v", err),
-		}, nil
+		capture := commandoutput.NewCapture(mcpOutputBudgetBytes)
+		_, _ = capture.Write([]byte("mcp tool call failed: "))
+		_, _ = capture.Write([]byte(err.Error()))
+		message, truncated := capture.Finish()
+		result := &builtin.Result{Success: false, Error: message}
+		if truncated {
+			result.Data = map[string]any{"truncated": true, "error_bytes": capture.TotalBytes()}
+		}
+		return result, nil
 	}
 
-	text, blocks := flattenMCPContent(res.Content)
+	summary := flattenMCPContent(res.Content)
+	server, name := truncateBytes(t.server, mcpMetadataBudgetBytes), truncateBytes(t.def.Name, mcpMetadataBudgetBytes)
+	labelsTruncated := server != t.server || name != t.def.Name
+	truncated := summary.outputTruncated || summary.blocksTruncated || labelsTruncated
+	data := map[string]any{"output": summary.text, "server": server, "tool": name, "blocks": summary.blocks}
+	if truncated {
+		data["truncated"] = true
+		data["output_bytes"] = summary.outputBytes
+		data["output_truncated"] = summary.outputTruncated
+		data["blocks_total"] = len(res.Content)
+		data["blocks_omitted"] = len(res.Content) - len(summary.blocks)
+		data["blocks_truncated"] = summary.blocksTruncated
+		if labelsTruncated {
+			data["labels_truncated"] = true
+		}
+	}
 	if res.IsError {
-		msg := strings.TrimSpace(text)
+		msg := strings.TrimSpace(summary.text)
 		if msg == "" {
 			msg = "mcp server reported a tool error"
 		}
-		return &builtin.Result{Success: false, Error: msg}, nil
+		delete(data, "output")
+		if !truncated {
+			data = nil
+		}
+		return &builtin.Result{Success: false, Error: msg, Data: data}, nil
 	}
 
-	return &builtin.Result{
-		Success: true,
-		Data: map[string]any{
-			"output": text,
-			"server": t.server,
-			"tool":   t.def.Name,
-			"blocks": blocks,
-		},
-	}, nil
+	return &builtin.Result{Success: true, Data: data}, nil
 }
 
 // mcpToolNameSanitizer replaces any character that is not safe in a
@@ -156,45 +173,6 @@ func truncateBytes(s string, max int) string {
 		cut--
 	}
 	return s[:cut] + suffix
-}
-
-// flattenMCPContent joins every text content block (in order) into a
-// single string for Data["output"], and returns a parallel slice of short
-// placeholders describing every block (including non-text ones), for
-// Data["blocks"]. Image, audio, and resource content are never inlined:
-// only a bounded summary is returned, since embedding base64 payloads or
-// raw resource bytes in a tool result would blow the schema/output budget.
-func flattenMCPContent(content []sdkmcp.Content) (text string, blocks []string) {
-	var texts []string
-	for _, block := range content {
-		switch b := block.(type) {
-		case *sdkmcp.TextContent:
-			texts = append(texts, b.Text)
-			blocks = append(blocks, fmt.Sprintf("[text: %d bytes]", len(b.Text)))
-		case *sdkmcp.ImageContent:
-			blocks = append(blocks, fmt.Sprintf("[image: %s, %d bytes]", orUnknownMIME(b.MIMEType), len(b.Data)))
-		case *sdkmcp.AudioContent:
-			blocks = append(blocks, fmt.Sprintf("[audio: %s, %d bytes]", orUnknownMIME(b.MIMEType), len(b.Data)))
-		case *sdkmcp.ResourceLink:
-			blocks = append(blocks, fmt.Sprintf("[resource link: %s]", b.URI))
-		case *sdkmcp.EmbeddedResource:
-			uri := ""
-			if b.Resource != nil {
-				uri = b.Resource.URI
-			}
-			blocks = append(blocks, fmt.Sprintf("[embedded resource: %s]", uri))
-		default:
-			blocks = append(blocks, "[unrecognized content block]")
-		}
-	}
-	return strings.Join(texts, "\n"), blocks
-}
-
-func orUnknownMIME(mimeType string) string {
-	if strings.TrimSpace(mimeType) == "" {
-		return "unknown mime type"
-	}
-	return mimeType
 }
 
 // mcpInputSchemaToParameters translates an MCP tool's inputSchema (a JSON
