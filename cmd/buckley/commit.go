@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/oneshot"
@@ -241,7 +243,7 @@ func runCommitCommand(args []string) error {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
-	result, err := runCommitGeneration(ctx, runtime.runner)
+	result, err := runCommitGeneration(ctx, runtime.runner, opts)
 	if err != nil {
 		printStagedIndexOnError()
 		var leak *commitmsg.LeakError
@@ -435,19 +437,26 @@ func commitDefinition(paths []string) oneshot.Definition {
 	return commands.CommitDefinition{}
 }
 
-func runCommitGeneration(ctx context.Context, runner commitRunner) (*commitRunResult, error) {
-	spinner := terminal.NewSpinner("Generating commit message...")
-	spinner.Start()
+func runCommitGeneration(ctx context.Context, runner commitRunner, opts commitCommandOptions) (*commitRunResult, error) {
+	var spinner *terminal.Spinner
+	if !opts.compactOutput && !quietMode && term.IsTerminal(int(os.Stdout.Fd())) {
+		spinner = terminal.NewSpinner("Generating commit message...")
+		spinner.Start()
+	}
 
 	result, err := runner.Run(ctx)
-	if err != nil {
-		spinner.StopWithError(err.Error())
-		return nil, fmt.Errorf("commit generation failed: %w", err)
+	if spinner != nil {
+		switch {
+		case err != nil:
+			spinner.StopWithError(err.Error())
+		case result.Error != nil:
+			spinner.StopWithError(result.Error.Error())
+		default:
+			spinner.StopWithSuccess("Generated commit message")
+		}
 	}
-	if result.Error != nil {
-		spinner.StopWithError(result.Error.Error())
-	} else {
-		spinner.StopWithSuccess("Generated commit message")
+	if err != nil {
+		return nil, fmt.Errorf("commit generation failed: %w", err)
 	}
 	return result, nil
 }
@@ -484,7 +493,7 @@ func confirmCommitMessage(opts commitCommandOptions, message string, runner comm
 	}
 
 	for {
-		action, newMessage := handleCommitPrompt(message, runner, ctx, opts.showCost, ledger, metadata)
+		action, newMessage := handleCommitPrompt(message, runner, ctx, opts, ledger, metadata)
 		switch action {
 		case "commit":
 			return newMessage, nil
@@ -499,7 +508,7 @@ func confirmCommitMessage(opts commitCommandOptions, message string, runner comm
 
 // handleCommitPrompt shows an interactive prompt with options to commit, regenerate, edit, or abort.
 // Returns the action taken and the (possibly modified) message.
-func handleCommitPrompt(message string, runner commitRunner, ctx context.Context, showCost bool, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, string) {
+func handleCommitPrompt(message string, runner commitRunner, ctx context.Context, opts commitCommandOptions, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, string) {
 	fmt.Print("\n[y] Commit  [r] Regenerate  [e] Edit  [n] Abort: ")
 	var response string
 	fmt.Scanln(&response)
@@ -510,22 +519,15 @@ func handleCommitPrompt(message string, runner commitRunner, ctx context.Context
 		return "commit", message
 
 	case "r", "regenerate":
-		// Regenerate the commit message
-		spinner := terminal.NewSpinner("Regenerating commit message...")
-		spinner.Start()
-
-		result, err := runner.Run(ctx)
+		result, err := runCommitGeneration(ctx, runner, opts)
 		if err != nil {
-			spinner.StopWithError(err.Error())
 			termOut.Error("Regeneration failed: %v", err)
 			return "regenerate", message // Keep old message
 		}
 		if result.Error != nil {
-			spinner.StopWithError(result.Error.Error())
 			termOut.Error("Regeneration failed: %v", result.Error)
 			return "regenerate", message
 		}
-		spinner.StopWithSuccess("Regenerated commit message")
 
 		if result.Commit == nil {
 			termOut.Error("No commit generated")
@@ -533,7 +535,7 @@ func handleCommitPrompt(message string, runner commitRunner, ctx context.Context
 		}
 
 		// Show cost if enabled
-		if showCost && result.Trace != nil {
+		if opts.showCost && result.Trace != nil {
 			printCost(result.Trace, ledger)
 		}
 

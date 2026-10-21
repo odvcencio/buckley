@@ -293,7 +293,7 @@ func (d prMergeCommitDefinition) BuildPrompt(*oneshot.Context) string {
 // with runner. Split from generatePRMergeMessage so tests can inject a
 // fake commitRunner instead of a live model backend.
 func renderPRMergeMessageWithRunner(ctx context.Context, runner commitRunner) (subject, body string, err error) {
-	result, err := runCommitGeneration(ctx, runner)
+	result, err := runCommitGeneration(ctx, runner, commitCommandOptions{})
 	if err != nil {
 		return "", "", err
 	}
