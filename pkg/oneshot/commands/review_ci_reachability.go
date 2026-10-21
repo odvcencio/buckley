@@ -20,7 +20,7 @@ import (
 const maxPRGoTestFiles = 32
 
 const (
-	buckleyCITestScriptSHA256 = "689e4d66670f6091f441e9f31095219f602a81c99d79c2662a3f7d76c54a5d74"
+	buckleyCITestScriptSHA256 = "6cc208c89cdbf7af1da6920002f5510b3e97b9eb4484013c9485616489ec2d07"
 	buckleyCIWorkflowSHA256   = "23adb2df663ed34b063916b436a4fb5e681f08a6eae073651bf305cb89fd2754"
 )
 
@@ -337,7 +337,7 @@ func goTestScriptIncludesDir(dir string) bool {
 	if dir == "cmd/buckley" {
 		return true
 	}
-	if dir != "pkg" && !strings.HasPrefix(dir, "pkg/") {
+	if dir != "pkg" && dir != "internal" && !strings.HasPrefix(dir, "pkg/") && !strings.HasPrefix(dir, "internal/") {
 		return false
 	}
 	for _, part := range strings.Split(dir, "/") {
