@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/model"
 )
@@ -142,14 +143,34 @@ func appendAgentToolEvidence(b *strings.Builder, calls []AgentToolCall) {
 
 func boundedAgentEvidenceText(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	runes := []rune(value)
-	if limit <= 0 || len(runes) <= limit {
+	if limit <= 0 {
 		return value
+	}
+	prefixEnd, remaining := len(value), limit
+	for index := range value {
+		if remaining == 0 {
+			prefixEnd = index
+			break
+		}
+		remaining--
+	}
+	if prefixEnd == len(value) {
+		return value
+	}
+	if limit < 64 {
+		return string([]rune(value[:prefixEnd]))
 	}
 	head := (limit - 64) / 2
 	tail := limit - 64 - head
-	if head < 0 || tail < 0 {
-		return string(runes[:limit])
+	headEnd := 0
+	for range head {
+		_, size := utf8.DecodeRuneInString(value[headEnd:])
+		headEnd += size
 	}
-	return string(runes[:head]) + "\n... durable evidence abridged ...\n" + string(runes[len(runes)-tail:])
+	tailStart := len(value)
+	for range tail {
+		_, size := utf8.DecodeLastRuneInString(value[:tailStart])
+		tailStart -= size
+	}
+	return string([]rune(value[:headEnd])) + "\n... durable evidence abridged ...\n" + string([]rune(value[tailStart:]))
 }
