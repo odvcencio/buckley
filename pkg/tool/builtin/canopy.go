@@ -99,11 +99,11 @@ func ResolveCanopyExecutable(configured string) (string, error) {
 }
 
 // scopedPath resolves an optional "path" parameter against the workdir,
-// returning a workdir-relative path safe to pass as a canopy CLI argument.
+// returning a workdir-relative path, or "." for the active workspace root.
 func (r *canopyRunner) scopedPath(params map[string]any) (string, error) {
 	raw := strings.TrimSpace(getStringParam(params, "path"))
 	if raw == "" {
-		return "", nil
+		return ".", nil
 	}
 	if strings.TrimSpace(r.workDir) == "" {
 		return raw, nil
@@ -171,10 +171,7 @@ func (t *CodeCallgraphTool) ExecuteWithContext(ctx context.Context, params map[s
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	args := []string{"graph", "calls", symbol}
-	if pathArg != "" {
-		args = append(args, pathArg)
-	}
+	args := []string{"graph", "calls"}
 	depth := getIntParam(params, "depth", canopyDefaultDepth)
 	if depth > 0 {
 		args = append(args, "--depth", strconv.Itoa(depth))
@@ -182,6 +179,7 @@ func (t *CodeCallgraphTool) ExecuteWithContext(ctx context.Context, params map[s
 	if reverse, ok := params["reverse"].(bool); ok && reverse {
 		args = append(args, "--reverse")
 	}
+	args = append(args, "--", symbol, pathArg)
 
 	output, truncated, err := t.run(ctx, args...)
 	if err != nil {
@@ -226,10 +224,7 @@ func (t *CodeRefsTool) ExecuteWithContext(ctx context.Context, params map[string
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	args := []string{"search", "refs", symbol}
-	if pathArg != "" {
-		args = append(args, pathArg)
-	}
+	args := []string{"search", "refs", "--", symbol, pathArg}
 
 	output, truncated, err := t.run(ctx, args...)
 	if err != nil {
@@ -275,14 +270,13 @@ func (t *CodeImpactTool) ExecuteWithContext(ctx context.Context, params map[stri
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
 
-	args := []string{"graph", "impact", symbol}
-	if pathArg != "" {
-		args = append(args, pathArg)
-	}
+	args := []string{"graph", "impact"}
 	maxDepth := getIntParam(params, "max_depth", canopyDefaultMaxDepth)
 	if maxDepth > 0 && maxDepth != canopyDefaultMaxDepth {
 		args = append(args, "--max-depth", strconv.Itoa(maxDepth))
 	}
+	// An explicit scope keeps Canopy from treating a lone symbol as a path.
+	args = append(args, "--", symbol, pathArg)
 
 	output, truncated, err := t.run(ctx, args...)
 	if err != nil {
