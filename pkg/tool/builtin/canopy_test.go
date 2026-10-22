@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,41 @@ func clearCanopyFromPath(t *testing.T) {
 }
 
 const echoArgsStub = "#!/bin/sh\nprintf 'ARGS:%s' \"$*\"\n"
+
+func TestCanopyTools_LiteralArgumentsAndDefaultScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tool interface {
+			SetWorkDir(string)
+			Execute(map[string]any) (*Result, error)
+		}
+		params map[string]any
+		want   []string
+	}{
+		{"calls_flags", &CodeCallgraphTool{}, map[string]any{"symbol": "-main", "path": "-scope", "depth": 3, "reverse": true}, []string{"graph", "calls", "--depth", "3", "--reverse", "--", "-main", "-scope"}},
+		{"calls_default", &CodeCallgraphTool{}, map[string]any{"symbol": "Caller"}, []string{"graph", "calls", "--depth", "2", "--", "Caller", "."}},
+		{"refs_literal", &CodeRefsTool{}, map[string]any{"symbol": "--help with spaces", "path": "-scope"}, []string{"search", "refs", "--", "--help with spaces", "-scope"}},
+		{"impact_default", &CodeImpactTool{}, map[string]any{"symbol": "Target", "max_depth": 4}, []string{"graph", "impact", "--max-depth", "4", "--", "Target", "."}},
+		{"impact_literal", &CodeImpactTool{}, map[string]any{"symbol": "-main", "path": "-scope"}, []string{"graph", "impact", "--", "-main", "-scope"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newCanopyStub(t, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n")
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "Target"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			tc.tool.SetWorkDir(root)
+			result, err := tc.tool.Execute(tc.params)
+			if err != nil || !result.Success {
+				t.Fatalf("execute: result=%+v err=%v", result, err)
+			}
+			got := strings.Split(strings.TrimSuffix(result.Data["output"].(string), "\x00"), "\x00")
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("argv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestCanopyRunner_BinarySelection(t *testing.T) {
 	for _, tc := range []struct {
@@ -143,7 +179,7 @@ func TestCodeCallgraphTool_Execute_InvokesCanopyWithArgs(t *testing.T) {
 	if !strings.HasPrefix(output, "ARGS:") {
 		t.Fatalf("output = %q, want ARGS: prefix", output)
 	}
-	if !strings.Contains(output, "graph calls NewRegistry pkg/tool") {
+	if !strings.Contains(output, "graph calls --depth 3 -- NewRegistry pkg/tool") {
 		t.Errorf("output = %q, missing expected canopy subcommand/args", output)
 	}
 	if !strings.Contains(output, "--depth 3") {
@@ -180,7 +216,7 @@ func TestCodeRefsTool_Execute_InvokesCanopyWithArgs(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", result.Error)
 	}
 	output, _ := result.Data["output"].(string)
-	if !strings.Contains(output, "search refs Registry") {
+	if !strings.Contains(output, "search refs -- Registry .") {
 		t.Errorf("output = %q, missing expected canopy subcommand/args", output)
 	}
 }
@@ -200,7 +236,7 @@ func TestCodeImpactTool_Execute_InvokesCanopyWithArgs(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", result.Error)
 	}
 	output, _ := result.Data["output"].(string)
-	if !strings.Contains(output, "graph impact Registry") {
+	if !strings.Contains(output, "graph impact --max-depth 4 -- Registry .") {
 		t.Errorf("output = %q, missing expected canopy subcommand/args", output)
 	}
 	if !strings.Contains(output, "--max-depth 4") {
