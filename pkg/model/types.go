@@ -698,19 +698,22 @@ func estimateRequestTokensByMarshal(req ChatRequest) RequestTokenEstimate {
 func jsonStringBytes(s string) int {
 	n := len(s) + 2 // opening and closing quotes
 	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '"' || c == '\\':
-			n++ // one raw byte becomes a two-byte escape
-		case c == '\n' || c == '\r' || c == '\t' || c == '\b' || c == '\f':
-			n++ // one raw byte becomes a two-byte escape
-		case c < 0x20:
-			n += 5 // one raw byte becomes a six-byte \u00XX escape
-		case c == '<' || c == '>' || c == '&':
-			n += 5 // one raw byte becomes a six-byte \uXXXX escape
-		}
+		n += int(jsonEscapeGrowth[s[i]])
 	}
 	return n
 }
+
+// A fixed lookup avoids branching on every byte of a long conversation.
+var jsonEscapeGrowth = func() [256]uint8 {
+	growth := [256]uint8{'"': 1, '\\': 1, '<': 5, '>': 5, '&': 5}
+	for c := 0; c < 0x20; c++ {
+		growth[c] = 5
+	}
+	for _, c := range "\b\t\n\f\r" {
+		growth[c] = 1
+	}
+	return growth
+}()
 
 func jsonNumberBytes(n int) int {
 	if n == 0 {
