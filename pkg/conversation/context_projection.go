@@ -103,6 +103,10 @@ func packProjectionToRequestBudget(messages []model.Message, req model.ChatReque
 	if projectionFitsRequestBudget(projected, req, requestBudget) {
 		return projected
 	}
+	// Only MaxBytes changes during the search. Prepare the history once and
+	// give each squeeze an independent copy so earlier attempts cannot prune
+	// evidence from a later candidate.
+	prepared, protectedReasoning, rootTaskIndex := prepareModelMessages(messages, opts)
 
 	const minimumBytes = 4 * 1024
 	low := minimumBytes
@@ -112,7 +116,7 @@ func packProjectionToRequestBudget(messages []model.Message, req model.ChatReque
 		mid := low + (high-low+1)/2
 		candidateOpts := opts
 		candidateOpts.MaxBytes = mid
-		candidate := CompactModelMessages(messages, candidateOpts)
+		candidate := compactToBudget(cloneProjectionMessages(prepared), candidateOpts, protectedReasoning, rootTaskIndex)
 		if projectionFitsRequestBudget(candidate, req, requestBudget) {
 			best = candidate
 			low = mid + 1

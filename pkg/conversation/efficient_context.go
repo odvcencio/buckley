@@ -84,6 +84,11 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		opts = DefaultEfficientContextOptions()
 		opts.PinnedFromIndex = pinned
 	}
+	result, protectedReasoning, rootTaskIndex := prepareModelMessages(messages, opts)
+	return compactToBudget(result, opts, protectedReasoning, rootTaskIndex)
+}
+
+func prepareModelMessages(messages []model.Message, opts EfficientContextOptions) ([]model.Message, map[int]bool, int) {
 	result := make([]model.Message, len(messages))
 	copy(result, messages)
 	for i := range result {
@@ -167,7 +172,7 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 			}
 		}
 	}
-	return compactToBudget(result, opts, protectedReasoning, rootTaskIndex)
+	return result, protectedReasoning, rootTaskIndex
 }
 
 func firstUserMessageIndex(messages []model.Message) int {
