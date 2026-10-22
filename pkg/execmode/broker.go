@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/netutil"
 )
@@ -37,6 +39,10 @@ const (
 	maxSearchFileBytes = 2 * 1024 * 1024
 	// maxSearchResults bounds one text search.
 	maxSearchResults = 200
+	// Match locations remain complete up to maxSearchResults, but line excerpts
+	// cannot retain whole minified files or dominate the broker response.
+	maxSearchMatchTextBytes = 2 * 1024
+	maxSearchTextBytes      = 64 * 1024
 	// maxListEntries bounds one files.list response. The generated client
 	// transparently follows next_cursor, so programs still receive complete
 	// listings without one oversized broker response.
@@ -547,11 +553,13 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 	}
 	defer root.Close()
 	type match struct {
-		File string `json:"file"`
-		Line int    `json:"line"`
-		Text string `json:"text"`
+		File          string `json:"file"`
+		Line          int    `json:"line"`
+		Text          string `json:"text"`
+		TextTruncated bool   `json:"text_truncated,omitempty"`
 	}
 	var matches []match
+	textBytes := 0
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -603,8 +611,10 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 				}
 			}
 			lineNumber++
-			if bytes.Contains(line, needle) {
-				matches = append(matches, match{File: rel, Line: lineNumber, Text: string(bytes.TrimSpace(line))})
+			if index := bytes.Index(line, needle); index >= 0 {
+				text, truncated := searchTextExcerpt(line, index, min(maxSearchMatchTextBytes, maxSearchTextBytes-textBytes))
+				textBytes += len(text)
+				matches = append(matches, match{File: rel, Line: lineNumber, Text: text, TextTruncated: truncated})
 				if len(matches) >= maxSearchResults {
 					return fs.SkipAll
 				}
@@ -616,6 +626,34 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 		return nil, err
 	}
 	return map[string]any{"matches": matches, "capped": len(matches) >= maxSearchResults}, nil
+}
+
+func searchTextExcerpt(line []byte, matchOffset, limit int) (string, bool) {
+	text := bytes.TrimSpace(line)
+	if len(text) <= limit && utf8.Valid(text) {
+		return string(text), false
+	}
+	if limit == 0 {
+		return "", true
+	}
+	matchOffset -= len(line) - len(bytes.TrimLeftFunc(line, unicode.IsSpace))
+	start := max(0, matchOffset-min(80, limit/4))
+	end := min(len(text), start+limit)
+	for start < end && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	for end > start && end < len(text) && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	excerpt := strings.ToValidUTF8(string(text[start:end]), "\uFFFD")
+	if len(excerpt) > limit {
+		end = limit
+		for end > 0 && !utf8.RuneStart(excerpt[end]) {
+			end--
+		}
+		excerpt = excerpt[:end]
+	}
+	return excerpt, true
 }
 
 // A file size is only an allocation hint: concurrent growth must still fit the
