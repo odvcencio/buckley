@@ -179,14 +179,13 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	// Failed reads of different paths or ranges are distinct attempts. When
 	// the tool reports an error kind, volatile details do not create progress.
 	failureDetail := ""
-	outcomeEvidence := result
+	outcomeKey := exactKey
 	if !success {
 		if kind := outcomeErrorKind(result); kind != "" {
-			outcomeEvidence = kind
+			outcomeKey = digest(actionKey + "\x00false\x00" + kind)
 		}
 		failureDetail = fmt.Sprintf("; arguments=%s; error=%s", truncateIncompleteNoticeText(arguments, 240), truncateIncompleteNoticeText(result, 240))
 	}
-	outcomeKey := digest(actionKey + "\x00" + fmt.Sprintf("%t", success) + "\x00" + outcomeEvidence)
 
 	g.toolCalls++
 	if !success {
