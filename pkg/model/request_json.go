@@ -2,7 +2,9 @@ package model
 
 import "encoding/json"
 
-func marshalChatRequest(req ChatRequest) ([]byte, error) {
+// MarshalChatRequest encodes a request without intermediate per-message JSON
+// copies, preserving the standard request field order and tags.
+func MarshalChatRequest(req ChatRequest) ([]byte, error) {
 	type requestJSON ChatRequest
 	type messageJSON Message
 	var messages []messageJSON

@@ -370,7 +370,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 
 	// Wrap the actual API call with circuit breaker
 	err := c.circuitBreaker.Call(func() error {
-		body, err := marshalChatRequest(req)
+		body, err := MarshalChatRequest(req)
 		if err != nil {
 			return fmt.Errorf("marshaling request: %w", err)
 		}
@@ -513,7 +513,7 @@ func (c *Client) executeStreamRequest(ctx context.Context, req ChatRequest, chun
 		return err
 	}
 
-	body, err := marshalChatRequest(req)
+	body, err := MarshalChatRequest(req)
 	if err != nil {
 		return fmt.Errorf("marshaling request: %w", err)
 	}

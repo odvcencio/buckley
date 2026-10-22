@@ -47,7 +47,7 @@ func TestMarshalChatRequest_MatchesJSON(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := marshalChatRequest(tc.req)
+			got, err := MarshalChatRequest(tc.req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,12 +68,12 @@ func TestMarshalChatRequest_ContentErrors(t *testing.T) {
 		if _, err := json.Marshal(req); err == nil {
 			t.Fatalf("fixture %T must fail ordinary JSON encoding", content)
 		}
-		if _, err := marshalChatRequest(req); err == nil {
+		if _, err := MarshalChatRequest(req); err == nil {
 			t.Fatalf("encoding accepted invalid content %T", content)
 		}
 	}
 	content := &retryBodyContent{err: errors.New("content encoding failed")}
-	_, err := marshalChatRequest(ChatRequest{Messages: []Message{{Role: "user", Content: content}}})
+	_, err := MarshalChatRequest(ChatRequest{Messages: []Message{{Role: "user", Content: content}}})
 	if !errors.Is(err, content.err) || content.calls != 1 {
 		t.Fatalf("content error changed: err=%v encodings=%d", err, content.calls)
 	}
