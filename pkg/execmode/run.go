@@ -19,6 +19,9 @@ const (
 	maxOutputBytes = 128 * 1024
 	// MaxSourceBytes bounds program source supplied by library and CLI callers.
 	MaxSourceBytes = 256 * 1024
+	// DefaultRuntimeScratchBytes bounds allocated file data in the runtime's
+	// ephemeral scratch/tmp filesystem, independently of compilation and heap memory.
+	DefaultRuntimeScratchBytes int64 = 64 << 20
 )
 
 // Result is one program run's outcome.

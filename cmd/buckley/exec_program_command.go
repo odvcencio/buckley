@@ -35,6 +35,7 @@ func runExecProgram(ctx context.Context, args []string, stdout, stderr io.Writer
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: buckley exec-program (--file path.go | --reuse evidence-id) [flags]")
 		fmt.Fprintln(stderr, "Runs an audited read-only sandboxed program without a model. Reuse performs fresh reads.")
+		fmt.Fprintf(stderr, "Runtime scratch and /tmp share a %d MiB file-data limit.\n", execmode.DefaultRuntimeScratchBytes>>20)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

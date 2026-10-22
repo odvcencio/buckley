@@ -94,6 +94,7 @@ func (t *ProgramTool) Description() string {
 	return "Execute a complete Go program (package main) in an OS sandbox against typed workspace capabilities. " +
 		"Compose, filter, and aggregate in code, then print only the result — one program instead of many read/search tool calls. " +
 		"Sandbox: no network, read-only system, no workspace mount (the audited caps client is the only window), writes confined to scratch, standard library only. " +
+		fmt.Sprintf("Scratch and /tmp share a %d MiB file-data limit. ", execmode.DefaultRuntimeScratchBytes>>20) +
 		"On a compile error or a caps error, fix the program and call this tool again in THIS turn; do not end the turn to retry. " +
 		"Set language to \"fw\" for Ferrous Wheel. Pass reuse=<evidence-id> to re-run a previous program verbatim with no new source.\n\n" +
 		execmode.CapsAPICard
