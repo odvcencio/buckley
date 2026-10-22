@@ -458,7 +458,7 @@ func (b *Broker) filesList(ctx context.Context, params map[string]any) (any, err
 				return nil, err
 			}
 			name := entry.name
-			if entry.directory {
+			if entry.mode.IsDir() {
 				name += "/"
 			}
 			names = append(names, name)
@@ -534,27 +534,12 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 	var matches []match
 	textBytes := 0
 	var data []byte
-	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if skipDirName(entry.Name()) {
-				return fs.SkipDir
-			}
+	err = walkDirectory(ctx, root, ".", glob, func() int { return maxDirectoryPrefix }, func(rel string, entry directoryName) error {
+		if entry.mode.IsDir() {
 			return nil
 		}
-		if glob != "" {
-			if ok, _ := filepath.Match(glob, entry.Name()); !ok {
-				return nil
-			}
-		}
-		rel := filepath.FromSlash(path)
 		readName := rel
-		if entry.Type()&os.ModeSymlink != 0 {
+		if entry.mode&os.ModeSymlink != 0 {
 			full, err := b.jail(rel)
 			if err != nil {
 				return nil
@@ -596,7 +581,7 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && err != fs.SkipAll {
 		return nil, err
 	}
 	return map[string]any{"matches": matches, "capped": len(matches) >= maxSearchResults}, nil

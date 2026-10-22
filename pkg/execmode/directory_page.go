@@ -6,7 +6,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"sort"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -17,8 +18,8 @@ const maxDirectoryPrefix = maxListEntries * DefaultCapabilityCallLimit
 var errDirectoryChanged = errors.New("directory changed during listing; retry from the first page")
 
 type directoryName struct {
-	name      string
-	directory bool
+	name string
+	mode os.FileMode
 }
 
 type directoryHeap struct {
@@ -44,7 +45,7 @@ func (h *directoryHeap) Pop() any {
 	return last
 }
 
-func scanDirectory(ctx context.Context, root *os.Root, path string, visit func(os.DirEntry)) error {
+func scanDirectory(ctx context.Context, root *os.Root, path string, visit func([]os.DirEntry)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -61,42 +62,55 @@ func scanDirectory(ctx context.Context, root *os.Root, path string, visit func(o
 		if err != nil && err != io.EOF {
 			return err
 		}
-		for _, entry := range entries {
-			visit(entry)
-		}
+		visit(entries)
 		if err == io.EOF {
 			return nil
 		}
 	}
 }
 
-func selectDirectoryNames(ctx context.Context, root *os.Root, path, after string, keep int, largest bool) ([]directoryName, int, error) {
-	h := &directoryHeap{largest: largest}
+func selectDirectoryNames(ctx context.Context, root *os.Root, path, after string, keep int, largest bool, glob string) ([]directoryName, int, error) {
+	var selected []directoryName
+	var h *directoryHeap
 	total := 0
-	err := scanDirectory(ctx, root, path, func(entry os.DirEntry) {
-		total++
-		name := entry.Name()
-		if keep == 0 || name <= after {
-			return
-		}
-		if h.Len() < keep {
-			heap.Push(h, directoryName{name, entry.IsDir()})
-			return
-		}
-		preferred := name < h.entries[0].name
-		if largest {
-			preferred = name > h.entries[0].name
-		}
-		if preferred {
-			h.entries[0] = directoryName{name, entry.IsDir()}
-			heap.Fix(h, 0)
+	err := scanDirectory(ctx, root, path, func(entries []os.DirEntry) {
+		for i, entry := range entries {
+			total++
+			name := entry.Name()
+			if keep == 0 || name <= after {
+				continue
+			}
+			if glob != "" && !entry.IsDir() {
+				if ok, _ := filepath.Match(glob, name); !ok {
+					continue
+				}
+			}
+			if len(selected) < keep {
+				if selected == nil {
+					selected = make([]directoryName, 0, min(keep, len(entries)-i))
+				}
+				selected = append(selected, directoryName{name, entry.Type()})
+				if len(selected) == keep {
+					h = &directoryHeap{entries: selected, largest: largest}
+					heap.Init(h)
+				}
+				continue
+			}
+			preferred := name < h.entries[0].name
+			if largest {
+				preferred = name > h.entries[0].name
+			}
+			if preferred {
+				h.entries[0] = directoryName{name, entry.Type()}
+				heap.Fix(h, 0)
+			}
 		}
 	})
 	if err != nil {
 		return nil, 0, err
 	}
-	sort.Slice(h.entries, func(i, j int) bool { return h.entries[i].name < h.entries[j].name })
-	return h.entries, total, nil
+	slices.SortFunc(selected, func(a, b directoryName) int { return strings.Compare(a.name, b.name) })
+	return selected, total, nil
 }
 
 // Select a byte-lexicographic rank with fixed bucket storage. This slow path
@@ -105,16 +119,18 @@ func directoryNameAtRank(ctx context.Context, root *os.Root, path string, rank i
 	prefix := ""
 	for {
 		var counts [257]int
-		err := scanDirectory(ctx, root, path, func(entry os.DirEntry) {
-			name := entry.Name()
-			if !strings.HasPrefix(name, prefix) {
-				return
+		err := scanDirectory(ctx, root, path, func(entries []os.DirEntry) {
+			for _, entry := range entries {
+				name := entry.Name()
+				if !strings.HasPrefix(name, prefix) {
+					continue
+				}
+				bucket := 0
+				if len(name) > len(prefix) {
+					bucket = int(name[len(prefix)]) + 1
+				}
+				counts[bucket]++
 			}
-			bucket := 0
-			if len(name) > len(prefix) {
-				bucket = int(name[len(prefix)]) + 1
-			}
-			counts[bucket]++
 		})
 		if err != nil {
 			return "", err
@@ -142,7 +158,7 @@ func flatDirectoryPage(ctx context.Context, root *os.Root, path string, cursor i
 	if cursor <= maxDirectoryPrefix {
 		keep = cursor + maxListEntries + 1
 	}
-	entries, total, err := selectDirectoryNames(ctx, root, path, "", keep, false)
+	entries, total, err := selectDirectoryNames(ctx, root, path, "", keep, false, "")
 	if err != nil || cursor >= total {
 		return nil, total, err
 	}
@@ -151,7 +167,7 @@ func flatDirectoryPage(ctx context.Context, root *os.Root, path string, cursor i
 	}
 	remaining := total - cursor
 	if remaining <= maxDirectoryPrefix {
-		entries, count, err := selectDirectoryNames(ctx, root, path, "", remaining, true)
+		entries, count, err := selectDirectoryNames(ctx, root, path, "", remaining, true, "")
 		if err != nil {
 			return nil, 0, err
 		}
@@ -164,7 +180,7 @@ func flatDirectoryPage(ctx context.Context, root *os.Root, path string, cursor i
 	if err != nil {
 		return nil, 0, err
 	}
-	entries, count, err := selectDirectoryNames(ctx, root, path, after, maxListEntries+1, false)
+	entries, count, err := selectDirectoryNames(ctx, root, path, after, maxListEntries+1, false, "")
 	if err != nil {
 		return nil, 0, err
 	}
