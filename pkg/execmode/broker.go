@@ -436,50 +436,18 @@ func (b *Broker) filesList(ctx context.Context, params map[string]any) (any, err
 		names   []string
 		hasMore bool
 	)
+	root, err := os.OpenRoot(b.root)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(b.root, full)
+	if err != nil {
+		return nil, err
+	}
 	if recursive {
-		seen := 0
-		err = filepath.WalkDir(full, func(path string, entry os.DirEntry, walkErr error) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if walkErr != nil {
-				return walkErr
-			}
-			if path == full {
-				return nil
-			}
-			if entry.IsDir() && skipDirName(entry.Name()) {
-				return filepath.SkipDir
-			}
-			if seen < cursor {
-				seen++
-				return nil
-			}
-			if len(names) >= maxListEntries {
-				hasMore = true
-				return fs.SkipAll
-			}
-			rel, relErr := filepath.Rel(b.root, path)
-			if relErr != nil {
-				return nil
-			}
-			if entry.IsDir() {
-				rel += "/"
-			}
-			names = append(names, rel)
-			seen++
-			return nil
-		})
+		names, hasMore, err = recursiveDirectoryPage(ctx, root, rel, cursor)
 	} else {
-		root, err := os.OpenRoot(b.root)
-		if err != nil {
-			return nil, err
-		}
-		defer root.Close()
-		rel, err := filepath.Rel(b.root, full)
-		if err != nil {
-			return nil, err
-		}
 		entries, total, err := flatDirectoryPage(ctx, root, rel, cursor)
 		if err != nil {
 			return nil, err
