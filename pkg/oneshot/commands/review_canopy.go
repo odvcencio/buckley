@@ -17,6 +17,7 @@ import (
 
 	"m31labs.dev/buckley/internal/commandoutput"
 	"m31labs.dev/buckley/internal/commandrun"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 const (
@@ -833,18 +834,15 @@ func compactCanopyStatus(value string, maxLen int) string {
 
 func findCanopyExecutable() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("CANOPY_BIN")); configured != "" {
-		if info, err := os.Stat(configured); err == nil && !info.IsDir() {
-			return configured, nil
-		}
-		return "", fmt.Errorf("CANOPY_BIN is not executable")
+		return builtin.ResolveCanopyExecutable(configured)
 	}
-	if path, err := exec.LookPath("canopy"); err == nil {
+	if path, err := builtin.ResolveCanopyExecutable(""); err == nil {
 		return path, nil
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		candidate := filepath.Join(home, "go", "bin", "canopy")
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
+		if path, err := builtin.ResolveCanopyExecutable(candidate); err == nil {
+			return path, nil
 		}
 	}
 	return "", fmt.Errorf("canopy executable not found")
