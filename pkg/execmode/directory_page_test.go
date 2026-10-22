@@ -98,7 +98,7 @@ func TestDirectorySelection_ByteRanksAndEdges(t *testing.T) {
 		}
 	}
 	for _, largest := range []bool{false, true} {
-		selected, total, err := selectDirectoryNames(context.Background(), root, ".", "", 3, largest)
+		selected, total, err := selectDirectoryNames(context.Background(), root, ".", "", 3, largest, "")
 		if err != nil || total != len(names) || len(selected) != 3 {
 			t.Fatalf("selection length/count: %d %d %v", len(selected), total, err)
 		}
@@ -107,12 +107,12 @@ func TestDirectorySelection_ByteRanksAndEdges(t *testing.T) {
 			want = names[len(names)-3:]
 		}
 		for i, entry := range selected {
-			if entry.name != want[i] || entry.directory {
+			if entry.name != want[i] || entry.mode.IsDir() {
 				t.Fatalf("edge selection: %+v want=%v", selected, want)
 			}
 		}
 	}
-	selected, total, err := selectDirectoryNames(context.Background(), root, ".", names[4], 3, false)
+	selected, total, err := selectDirectoryNames(context.Background(), root, ".", names[4], 3, false, "")
 	if err != nil || total != len(names) || len(selected) != 3 || selected[0].name != names[5] {
 		t.Fatalf("continuation lost total count or ordering: %+v %d %v", selected, total, err)
 	}
