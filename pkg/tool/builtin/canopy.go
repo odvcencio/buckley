@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,9 +30,25 @@ type canopyRunner struct{ workDirAware }
 // to canopyMaxOutputBytes. A missing canopy binary yields a clear install
 // hint instead of a raw "not found" error.
 func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, truncated bool, err error) {
-	binPath, lookErr := exec.LookPath(canopyBinaryName)
+	configured := os.Getenv("CANOPY_BIN")
+	if value, overridden := r.env["CANOPY_BIN"]; overridden {
+		configured = value
+	}
+	configured = strings.TrimSpace(configured)
+	binary := canopyBinaryName
+	if configured != "" {
+		binary = configured
+	}
+	binPath, lookErr := exec.LookPath(binary)
 	if lookErr != nil {
+		if configured != "" {
+			return "", false, fmt.Errorf("CANOPY_BIN %q is not executable: %w", configured, lookErr)
+		}
 		return "", false, errors.New(canopyInstallHint)
+	}
+	binPath, err = filepath.Abs(binPath)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve canopy executable: %w", err)
 	}
 	if ctx == nil {
 		ctx = context.Background()

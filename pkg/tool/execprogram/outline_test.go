@@ -28,6 +28,7 @@ printf '%s\n' '{"format_version":1,"symbols":[{"name":"Value","start_line":2,"en
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CANOPY_BIN", "")
 	ev, err := evidence.New(filepath.Join(t.TempDir(), "evidence.db"))
 	if err != nil {
 		t.Fatal(err)
