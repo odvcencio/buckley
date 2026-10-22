@@ -59,8 +59,20 @@ func NewProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.St
 	if len(capabilities) == 0 {
 		capabilities = execmode.ReadOnlySet
 	}
+	outline := &builtin.CodeOutlineTool{}
+	outline.SetWorkDir(workspaceRoot)
 	runner, err := execmode.NewRunner(workspaceRoot, sink, execmode.DefaultTimeout,
-		execmode.WithCapabilitySet(capabilities...))
+		execmode.WithCapabilitySet(capabilities...),
+		execmode.WithOutlineProvider(func(ctx context.Context, path string, limit int, cursor string) (map[string]any, error) {
+			result, err := outline.ExecuteWithContext(ctx, map[string]any{"path": path, "limit": limit, "cursor": cursor})
+			if err != nil {
+				return nil, err
+			}
+			if !result.Success {
+				return nil, fmt.Errorf("code.outline: %s; use SearchTextGlob and ReadFile if Canopy is unavailable", result.Error)
+			}
+			return result.Data, nil
+		}))
 	if err != nil {
 		return nil, err
 	}
