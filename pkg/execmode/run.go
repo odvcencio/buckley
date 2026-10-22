@@ -113,6 +113,11 @@ func (r *Runner) Isolation() string { return r.isolation }
 // caller passed WithoutIsolation, which downgrades the surface to
 // shell-equivalent risk and is for library and test use only.
 func (r *Runner) Run(ctx context.Context, source string) (result Result, retErr error) {
+	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	if err := runCtx.Err(); err != nil {
+		return Result{ExitCode: -1}, fmt.Errorf("execmode: run interrupted: %w", err)
+	}
 	if len(source) > MaxSourceBytes {
 		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", MaxSourceBytes)
 	}
@@ -144,13 +149,10 @@ func (r *Runner) Run(ctx context.Context, source string) (result Result, retErr 
 	}
 	defer broker.Close()
 
-	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-
 	goCache := sharedGoCache()
 	cache, err := acquireBuildCache(runCtx, goCache, DefaultBuildCacheBytes, DefaultBuildCacheEntries)
 	if err != nil {
-		return Result{}, fmt.Errorf("execmode: acquire build cache: %w", err)
+		return Result{ExitCode: -1}, fmt.Errorf("execmode: acquire build cache: %w", err)
 	}
 	defer func() {
 		if err := cache.Close(); err != nil {
@@ -207,9 +209,12 @@ func (r *Runner) Run(ctx context.Context, source string) (result Result, retErr 
 		StderrTruncated: stderrW.truncated,
 	}
 	if err != nil {
-		if runCtx.Err() == context.DeadlineExceeded {
+		if ctxErr := runCtx.Err(); ctxErr != nil {
 			result.ExitCode = -1
-			return result, fmt.Errorf("execmode: program exceeded the %s timeout", r.timeout)
+			if ctxErr == context.DeadlineExceeded {
+				return result, fmt.Errorf("execmode: program timeout: %w", ctxErr)
+			}
+			return result, fmt.Errorf("execmode: run interrupted: %w", ctxErr)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
@@ -231,7 +236,7 @@ func (r *Runner) RunFW(ctx context.Context, fwSource string) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	if err := runCtx.Err(); err != nil {
-		return Result{}, fmt.Errorf("execmode: fw transpile interrupted: %w", err)
+		return Result{ExitCode: -1}, fmt.Errorf("execmode: fw transpile interrupted: %w", err)
 	}
 	transpiler, err := exec.LookPath("ferrous-wheel")
 	if err != nil {
@@ -258,7 +263,7 @@ func (r *Runner) RunFW(ctx context.Context, fwSource string) (Result, error) {
 		return Result{}, fmt.Errorf("execmode: fw generated Go exceeds %d bytes", MaxSourceBytes)
 	}
 	if runCtx.Err() != nil {
-		return Result{}, fmt.Errorf("execmode: fw transpile interrupted: %w", runCtx.Err())
+		return Result{ExitCode: -1}, fmt.Errorf("execmode: fw transpile interrupted: %w", runCtx.Err())
 	}
 	if err != nil {
 		detail := strings.TrimSpace(stderr.String())

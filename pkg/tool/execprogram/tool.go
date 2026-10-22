@@ -2,6 +2,7 @@ package execprogram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"m31labs.dev/buckley/pkg/runledger"
 	"m31labs.dev/buckley/pkg/tool/builtin"
 )
+
+const finalizationTimeout = 5 * time.Second
 
 // ProgramTool exposes the capability-brokered code-mode runner as one model
 // tool. Programs run in bubblewrap without a workspace mount; the audited caps
@@ -129,6 +132,9 @@ func (t *ProgramTool) Execute(params map[string]any) (*builtin.Result, error) {
 // ExecuteWithContext runs the program with the caller's deadline. Source and
 // output evidence are mandatory so every acknowledged execution is replayable.
 func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*builtin.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("exec_program: %w", err)
+	}
 	source, _ := params["source"].(string)
 	language, _ := params["language"].(string)
 	language = strings.ToLower(strings.TrimSpace(language))
@@ -206,7 +212,10 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		result, err = t.runner.Run(ctx, source)
 	}
 
-	output, evidenceErr := t.evidence.Put(ctx, evidence.Object{
+	// Execution has ended: record its outcome even when the caller stopped it.
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer cancel()
+	output, evidenceErr := t.evidence.Put(finalCtx, evidence.Object{
 		Kind:       evidence.KindToolResult,
 		MediaType:  "text/plain",
 		InlineBody: []byte(fmt.Sprintf("exit=%d\nstdout_truncated=%t\nstderr_truncated=%t\n--- stdout ---\n%s\n--- stderr ---\n%s", result.ExitCode, result.StdoutTruncated, result.StderrTruncated, result.Stdout, result.Stderr)),
@@ -220,7 +229,7 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		},
 	})
 	if evidenceErr != nil {
-		return nil, fmt.Errorf("exec_program: store output evidence: %w", evidenceErr)
+		return nil, errors.Join(err, fmt.Errorf("exec_program: store output evidence: %w", evidenceErr))
 	}
 	data := map[string]any{
 		"execution_id":     executionID,
@@ -248,7 +257,7 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		}
 		message += truncatedMsg
 	}
-	if _, err := t.ledger.Append(ctx, runledger.Event{
+	if _, finishErr := t.ledger.Append(finalCtx, runledger.Event{
 		Type:        "exec_program.finished",
 		SessionID:   t.sessionID,
 		RunID:       t.runID,
@@ -265,8 +274,8 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 			"stdout_truncated": result.StdoutTruncated,
 			"stderr_truncated": result.StderrTruncated,
 		},
-	}); err != nil {
-		return nil, fmt.Errorf("exec_program: append finished event: %w", err)
+	}); finishErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("exec_program: append finished event: %w", finishErr))
 	}
 	return &builtin.Result{Success: message == "", Error: message, Data: data}, nil
 }
