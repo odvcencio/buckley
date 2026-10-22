@@ -121,10 +121,10 @@ func TestDirectorySelection_ByteRanksAndEdges(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := scanDirectory(ctx, root, "missing", func(os.DirEntry) {}); !errors.Is(err, context.Canceled) {
+	if err := scanDirectory(ctx, root, "missing", func([]os.DirEntry) {}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled scan opened the directory: %v", err)
 	}
-	if err := scanDirectory(context.Background(), root, "..", func(os.DirEntry) {}); err == nil {
+	if err := scanDirectory(context.Background(), root, "..", func([]os.DirEntry) {}); err == nil {
 		t.Fatal("directory scan escaped its opened root")
 	}
 }
