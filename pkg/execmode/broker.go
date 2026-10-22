@@ -40,8 +40,8 @@ const (
 	// listings without one oversized broker response.
 	maxListEntries = 500
 	// DefaultCapabilityCallLimit bounds the total broker operations one
-	// exec_program can fan out internally. Program-level composition remains
-	// useful, but it cannot turn one model tool call into unbounded crawling.
+	// exec_program can attempt internally, including rejected requests.
+	// One terminal rejection is audited before the broker closes admission.
 	DefaultCapabilityCallLimit = 32
 )
 
@@ -102,6 +102,7 @@ type Broker struct {
 	callMu            sync.Mutex
 	capabilityCalls   int
 	capabilityCallMax int
+	budgetExhausted   bool
 
 	server   *http.Server
 	socket   string
@@ -132,7 +133,8 @@ func WithTokenTTL(ttl time.Duration) BrokerOption {
 }
 
 // WithCapabilityCallLimit overrides the per-program capability operation
-// budget. Non-positive values retain the safe default.
+// budget, including rejected and malformed attempts. Non-positive values
+// retain the safe default.
 func WithCapabilityCallLimit(limit int) BrokerOption {
 	return func(b *Broker) {
 		if limit > 0 {
@@ -225,38 +227,43 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 
 func (b *Broker) handleContext(method string, capability func(context.Context, map[string]any) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		allowed, terminal := b.consumeCapabilityCall()
+		if !allowed {
+			if !terminal {
+				// Already accepted connections get no further unaudited responses.
+				panic(http.ErrAbortHandler)
+			}
+			if b.listener != nil {
+				_ = b.listener.Close()
+			}
+			w.Header().Set("Connection", "close")
+			detail := fmt.Sprintf("capability call budget exhausted (%d per program)", b.capabilityCallMax)
+			b.deny(w, method, detail, detail, http.StatusTooManyRequests)
+			return
+		}
 		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			b.deny(w, method, "POST only", "POST only", http.StatusMethodNotAllowed)
 			return
 		}
 		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(auth), []byte(b.token)) != 1 {
-			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "bad token", Timestamp: time.Now().UTC()})
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			b.deny(w, method, "bad token", "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if !b.expires.IsZero() && time.Now().After(b.expires) {
-			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "token expired", Timestamp: time.Now().UTC()})
-			http.Error(w, "capability token expired", http.StatusUnauthorized)
+			b.deny(w, method, "token expired", "capability token expired", http.StatusUnauthorized)
 			return
 		}
 		// Grant check sits above the capability itself: a token proves who
 		// is calling, the grant decides what they may call.
 		if !b.granted[method] {
-			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: "capability not granted to this run", Timestamp: time.Now().UTC()})
-			http.Error(w, "capability "+method+" is not granted to this run", http.StatusForbidden)
-			return
-		}
-		if !b.consumeCapabilityCall() {
-			detail := fmt.Sprintf("capability call budget exhausted (%d per program)", b.capabilityCallMax)
-			_ = b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: detail, Timestamp: time.Now().UTC()})
-			http.Error(w, detail, http.StatusTooManyRequests)
+			b.deny(w, method, "capability not granted to this run", "capability "+method+" is not granted to this run", http.StatusForbidden)
 			return
 		}
 
 		var params map[string]any
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&params); err != nil {
-			http.Error(w, "invalid params", http.StatusBadRequest)
+			b.deny(w, method, "invalid params", "invalid params", http.StatusBadRequest)
 			return
 		}
 		paramsJSON, _ := json.Marshal(params)
@@ -280,14 +287,27 @@ func (b *Broker) handleContext(method string, capability func(context.Context, m
 	}
 }
 
-func (b *Broker) consumeCapabilityCall() bool {
+func (b *Broker) deny(w http.ResponseWriter, method, detail, message string, status int) {
+	err := b.audit.Record(AuditRecord{Method: method, Outcome: "denied", Detail: detail, Timestamp: time.Now().UTC()})
+	if err != nil {
+		http.Error(w, "capability call could not be audited: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, message, status)
+}
+
+func (b *Broker) consumeCapabilityCall() (allowed, terminal bool) {
 	b.callMu.Lock()
 	defer b.callMu.Unlock()
-	if b.capabilityCalls >= b.capabilityCallMax {
-		return false
+	if b.capabilityCalls < b.capabilityCallMax {
+		b.capabilityCalls++
+		return true, false
 	}
-	b.capabilityCalls++
-	return true
+	if !b.budgetExhausted {
+		b.budgetExhausted = true
+		return false, true
+	}
+	return false, false
 }
 
 // jail resolves a workspace-relative path and rejects anything that
