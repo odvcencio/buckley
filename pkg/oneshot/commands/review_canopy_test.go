@@ -21,13 +21,7 @@ func TestCollectCanopyProjectSummaryBuildsStructuralTOC(t *testing.T) {
 	script := `#!/bin/sh
 case "$1:$2" in
   index:build)
-    out=""
-    previous=""
-    for arg in "$@"; do
-      if [ "$previous" = "--out" ]; then out="$arg"; fi
-      previous="$arg"
-    done
-    if [ -n "$out" ]; then : > "$out"; fi
+    printf '{}\n'
     exit 0
     ;;
   analyze:summary)

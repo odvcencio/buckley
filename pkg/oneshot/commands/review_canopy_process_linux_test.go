@@ -46,12 +46,13 @@ func TestRunCanopyJSON_CancellationCleansOnlyItsCommandTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sibling.Process.Kill(); _ = sibling.Wait() })
-	for _, mode := range []string{"cancel", "overflow", "exited", "failed", "index_failure"} {
+	for _, mode := range []string{"cancel", "overflow", "exited", "failed", "index_failure", "index_overflow"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
+			scratch := t.TempDir()
+			t.Setenv("TMPDIR", scratch)
 			pidFile := filepath.Join(root, "child.pid")
 			t.Setenv("CANOPY_TEST_CHILD_PID", pidFile)
-			t.Setenv("CANOPY_TEST_INDEX_PATH", filepath.Join(root, "index-path"))
 			script := "#!/bin/sh\nsleep 60 &\necho $! > \"$CANOPY_TEST_CHILD_PID\"\n"
 			switch mode {
 			case "cancel":
@@ -63,7 +64,9 @@ func TestRunCanopyJSON_CancellationCleansOnlyItsCommandTree(t *testing.T) {
 			case "failed":
 				script += "exit 7\n"
 			case "index_failure":
-				script += "previous=''\nfor arg in \"$@\"; do\n  if [ \"$previous\" = '--out' ]; then printf '%s' \"$arg\" > \"$CANOPY_TEST_INDEX_PATH\"; printf '{}' > \"$arg\"; fi\n  previous=\"$arg\"\ndone\nexit 7\n"
+				script += "printf '{}'\nexit 7\n"
+			case "index_overflow":
+				script += "head -c 67108865 /dev/zero\nwait\n"
 			}
 			path := filepath.Join(root, "canopy")
 			if err := os.WriteFile(path, []byte(script), 0755); err != nil {
@@ -74,7 +77,7 @@ func TestRunCanopyJSON_CancellationCleansOnlyItsCommandTree(t *testing.T) {
 			done := make(chan error, 1)
 			started := time.Now()
 			go func() {
-				if mode == "index_failure" {
+				if mode == "index_failure" || mode == "index_overflow" {
 					_, _, err := buildCanopyProjectIndex(ctx, path, root)
 					done <- err
 					return
@@ -103,6 +106,9 @@ func TestRunCanopyJSON_CancellationCleansOnlyItsCommandTree(t *testing.T) {
 			if mode == "overflow" && !errors.Is(err, errCanopyJSONLimit) {
 				t.Fatalf("lost budget cause: %v", err)
 			}
+			if mode == "index_overflow" && !errors.Is(err, errCanopyIndexLimit) {
+				t.Fatalf("lost index budget cause: %v", err)
+			}
 			if mode == "exited" && !errors.Is(err, exec.ErrWaitDelay) {
 				t.Fatalf("lost pipe-wait cause: %v", err)
 			}
@@ -121,13 +127,10 @@ func TestRunCanopyJSON_CancellationCleansOnlyItsCommandTree(t *testing.T) {
 			if !stopped || !siblingAlive {
 				t.Fatalf("process cleanup escaped its scope: child_stopped=%t sibling_alive=%t", stopped, siblingAlive)
 			}
-			if mode == "index_failure" {
-				data, err := os.ReadFile(filepath.Join(root, "index-path"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := os.Stat(filepath.Dir(string(data))); !os.IsNotExist(err) {
-					t.Fatal("failed index build left its temporary directory")
+			if mode == "index_failure" || mode == "index_overflow" {
+				entries, err := os.ReadDir(scratch)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("failed index build left its temporary directory: %v, %v", entries, err)
 				}
 			}
 			t.Logf("mode=%s elapsed_ms=%d descendant_stopped=%t sibling_alive=%t cause=%v", mode, time.Since(started).Milliseconds(), stopped, siblingAlive, err)

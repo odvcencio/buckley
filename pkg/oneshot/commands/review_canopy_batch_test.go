@@ -141,11 +141,7 @@ func TestCollectCanopyProjectSummary_BatchesGraphsAndFallsBack(t *testing.T) {
 	script := `#!/bin/sh
 case "$1:$2" in
   index:build)
-    previous=""
-    for arg in "$@"; do
-      if [ "$previous" = "--out" ]; then : > "$arg"; fi
-      previous="$arg"
-    done
+    printf '{}\n'
     ;;
   analyze:summary)
     printf '%s\n' '{"files":{"total":3},"symbols":{"total":3},"top_fan_in":[{"file":"a.go","name":"Entry","start_line":1,"value":5},{"file":"b.go","name":"Run","start_line":1,"value":4}]}'
