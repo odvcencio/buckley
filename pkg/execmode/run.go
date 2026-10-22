@@ -39,6 +39,7 @@ type Runner struct {
 	isolation        string
 	allowUnsandboxed bool
 	capabilities     []string
+	outline          OutlineFunc
 }
 
 // RunnerOption configures NewRunner.
@@ -127,6 +128,7 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	broker.outline = r.outline
 	if err := broker.Start(filepath.Join(scratch, "caps.sock")); err != nil {
 		return Result{}, err
 	}
@@ -344,6 +346,14 @@ func ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err 
 	return out.Data, out.Truncated, err
 }
 
+// OutlineFile returns one bounded page of Canopy's live structural JSON.
+// Keep coverage warnings and follow next_cursor unchanged; edits invalidate it.
+func OutlineFile(path string, limit int, cursor string) (json.RawMessage, error) {
+	var out json.RawMessage
+	err := call("/v1/code/outline", map[string]any{"path": path, "limit": limit, "cursor": cursor}, &out)
+	return out, err
+}
+
 type listPage struct {
 	Entries    []string ` + "`json:\"entries\"`" + `
 	Capped     bool     ` + "`json:\"capped\"`" + `
@@ -412,6 +422,7 @@ func SearchTextGlob(pattern, glob string) ([]Match, bool, error) {
 // costs a few hundred prompt tokens once; discovering it by trial costs
 // whole model turns (the first live run spent seven).
 const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
+	"  caps.OutlineFile(path string, limit int, cursor string) (json.RawMessage, error) // optional Canopy; 0=40 symbols, max 100; first cursor=\"\"\n" +
 	"  caps.ReadFile(path string) (content string, truncated bool, err error)\n" +
 	"  caps.ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error)\n" +
 	"  caps.ListDir(dir string) (entries []string, err error)        // one level; dirs end in \"/\"\n" +
@@ -419,6 +430,7 @@ const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
 	"  type Match struct { File string; Line int; Text string }\n" +
+	"For unfamiliar source, OutlineFile returns JSON symbols (name, start_line, end_line) and coverage warnings. Decode it and compose targeted source reads in the same program. Follow next_cursor unchanged; every page counts as a broker operation. An outline is navigation, not inspected source or proof of absence. On unavailable/unsupported Canopy, use search/read instead.\n" +
 	"Paths are workspace-relative. One program may make at most 32 broker operations; paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Large files: use ReadFileChunk and continue by advancing offset by int64(len(data)) until truncated is false; every call counts toward the 32-operation budget, so check errors and stop promptly. Chunk reads do not pin a file snapshot. Data is raw bytes, so carry a line split across chunk boundaries when doing line-based extraction. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
 	"import (\n\t\"fmt\"\n\n\t\"execprogram/caps\"\n)\n\n" +

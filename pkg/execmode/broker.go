@@ -8,6 +8,7 @@
 package execmode
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -66,17 +67,17 @@ func (f AuditSinkFunc) Record(record AuditRecord) error { return f(record) }
 // Capability names. A broker serves only the capabilities its grant
 // allows; anything else is denied and audited, even with a valid token.
 const (
-	CapFilesRead  = "files.read"
-	CapFilesList  = "files.list"
-	CapSearchText = "search.text"
+	CapFilesRead   = "files.read"
+	CapFilesList   = "files.list"
+	CapSearchText  = "search.text"
+	CapCodeOutline = "code.outline"
 )
 
 // CapabilitySet is a named grant. ReadOnlySet is everything the surface
-// currently offers; MinimalSet drops whole-tree search, which is the
-// expensive capability on a large repository. Personas and phases pick a
-// set; the broker enforces it below the program.
+// currently offers; MinimalSet keeps file access without search or structural
+// parsing. Personas and phases pick a set; the broker enforces it below the program.
 var (
-	ReadOnlySet = []string{CapFilesRead, CapFilesList, CapSearchText}
+	ReadOnlySet = []string{CapFilesRead, CapFilesList, CapSearchText, CapCodeOutline}
 	MinimalSet  = []string{CapFilesRead, CapFilesList}
 )
 
@@ -87,11 +88,13 @@ const DefaultTokenTTL = 30 * time.Minute
 
 // Broker serves the capability surface for one run.
 type Broker struct {
-	root    string
-	token   string
-	audit   AuditSink
-	granted map[string]bool
-	expires time.Time
+	root        string
+	token       string
+	audit       AuditSink
+	granted     map[string]bool
+	expires     time.Time
+	outline     OutlineFunc
+	outlineSlot chan struct{}
 
 	callMu            sync.Mutex
 	capabilityCalls   int
@@ -155,6 +158,7 @@ func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Br
 		audit:             audit,
 		expires:           time.Now().Add(DefaultTokenTTL),
 		capabilityCallMax: DefaultCapabilityCallLimit,
+		outlineSlot:       make(chan struct{}, 1),
 	}
 	WithCapabilities(ReadOnlySet...)(broker)
 	for _, opt := range opts {
@@ -185,6 +189,7 @@ func (b *Broker) Start(socketPath string) error {
 	mux.HandleFunc("/v1/files/read", b.handle(CapFilesRead, b.filesRead))
 	mux.HandleFunc("/v1/files/list", b.handle(CapFilesList, b.filesList))
 	mux.HandleFunc("/v1/search/text", b.handle(CapSearchText, b.searchText))
+	mux.HandleFunc("/v1/code/outline", b.handleContext(CapCodeOutline, b.codeOutline))
 	b.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = b.server.Serve(listener) }()
 	return nil
@@ -206,6 +211,12 @@ type capabilityFunc func(params map[string]any) (any, error)
 // The audit record is written BEFORE the response; a sink failure turns
 // into a call failure.
 func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFunc {
+	return b.handleContext(method, func(_ context.Context, params map[string]any) (any, error) {
+		return capability(params)
+	})
+}
+
+func (b *Broker) handleContext(method string, capability func(context.Context, map[string]any) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -243,7 +254,7 @@ func (b *Broker) handle(method string, capability capabilityFunc) http.HandlerFu
 		}
 		paramsJSON, _ := json.Marshal(params)
 
-		result, err := capability(params)
+		result, err := capability(r.Context(), params)
 		record := AuditRecord{Method: method, Params: string(paramsJSON), Outcome: "ok", Timestamp: time.Now().UTC()}
 		if err != nil {
 			record.Outcome = "error"
