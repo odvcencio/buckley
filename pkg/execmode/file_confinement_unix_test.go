@@ -115,7 +115,7 @@ func TestBroker_ReadsStayConfinedDuringReplacement(t *testing.T) {
 		if err == nil && result.(map[string]any)["content"] != "needle inside\n" {
 			t.Fatal("direct read escaped workspace")
 		}
-		result, err = broker.searchText(map[string]any{"pattern": "needle", "glob": "entry.txt"})
+		result, err = broker.searchText(context.Background(), map[string]any{"pattern": "needle", "glob": "entry.txt"})
 		if err != nil {
 			t.Fatal(err)
 		}
