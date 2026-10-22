@@ -21,15 +21,16 @@ import (
 )
 
 const (
-	maxCanopyReviewInput    = 4 << 20
-	maxCanopyHotspots       = 8
-	maxCanopyCapabilities   = 8
-	maxCanopyProjectBytes   = 24 << 10
-	maxCanopyProjectSeeds   = 6
-	maxCanopyProjectEdges   = 12
-	canopyProjectGraphDepth = 2
-	canopyReviewTimeout     = 12 * time.Second
-	canopyProjectTimeout    = 45 * time.Second
+	maxCanopyReviewInput       = 4 << 20
+	maxCanopyProjectIndexBytes = 64 << 20
+	maxCanopyHotspots          = 8
+	maxCanopyCapabilities      = 8
+	maxCanopyProjectBytes      = 24 << 10
+	maxCanopyProjectSeeds      = 6
+	maxCanopyProjectEdges      = 12
+	canopyProjectGraphDepth    = 2
+	canopyReviewTimeout        = 12 * time.Second
+	canopyProjectTimeout       = 45 * time.Second
 )
 
 type canopyReviewEvidence struct {
@@ -393,6 +394,9 @@ func collectCanopyProjectSummary(parent context.Context, repoRoot string) (strin
 	if cleanupCache != nil {
 		defer cleanupCache()
 	}
+	if errors.Is(indexErr, errCanopyIndexLimit) {
+		return "", "structural index exceeded 64 MiB disk budget"
+	}
 	summaryArgs := []string{"analyze", "summary", "--json", "."}
 	if indexErr == nil {
 		summaryArgs = append(summaryArgs, "--cache", cachePath)
@@ -524,19 +528,31 @@ func buildCanopyProjectIndex(ctx context.Context, executable, repoRoot string) (
 	}
 	cleanup := func() { _ = os.RemoveAll(cacheDir) }
 	cachePath := filepath.Join(cacheDir, "index.json")
-	cmd := exec.CommandContext(ctx, executable, "index", "build", ".", "--out", cachePath)
-	cmd.Dir = repoRoot
-	commandrun.ConfigureCancellation(cmd)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		_ = cmd.Cancel()
+	file, err := os.OpenFile(cachePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
 		cleanup()
 		return "", nil, err
 	}
-	if _, err := os.Stat(cachePath); err != nil {
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	// Disable Canopy's file output and checkpoints; only this bounded stream
+	// writes the temporary index consumed by subsequent queries.
+	cmd := exec.CommandContext(runCtx, executable, "index", "build", "--json", "--out", "", ".")
+	cmd.Dir = repoRoot
+	commandrun.ConfigureCancellation(cmd)
+	cmd.Stdout = &canopyBoundedWriter{writer: file, remaining: maxCanopyProjectIndexBytes, cancel: cancel, limitErr: errCanopyIndexLimit}
+	cmd.Stderr = io.Discard
+	runErr := cmd.Run()
+	closeErr := file.Close()
+	if runErr != nil {
+		_ = cmd.Cancel()
+	}
+	if cause := context.Cause(runCtx); cause != nil {
+		runErr = cause
+	}
+	if err := errors.Join(runErr, closeErr); err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("canopy index build did not create %s: %w", cachePath, err)
+		return "", nil, err
 	}
 	return cachePath, cleanup, nil
 }
@@ -547,9 +563,9 @@ func runCanopyJSON(ctx context.Context, executable, repoRoot string, args ...str
 	cmd := exec.CommandContext(runCtx, executable, args...)
 	cmd.Dir = repoRoot
 	commandrun.ConfigureCancellation(cmd)
-	stdout := &canopyJSONCapture{cancel: cancel}
+	var stdout bytes.Buffer
 	stderr := commandoutput.NewCapture(commandoutput.DefaultCaptureBytes)
-	cmd.Stdout = stdout
+	cmd.Stdout = &canopyBoundedWriter{writer: &stdout, remaining: maxCanopyReviewInput, cancel: cancel, limitErr: errCanopyJSONLimit}
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	if err != nil {
@@ -564,24 +580,33 @@ func runCanopyJSON(ctx context.Context, executable, repoRoot string, args ...str
 		}
 		return nil, err
 	}
-	return bytes.TrimSpace(stdout.buffer.Bytes()), nil
+	return bytes.TrimSpace(stdout.Bytes()), nil
 }
 
 var errCanopyJSONLimit = fmt.Errorf("canopy JSON exceeds %d-byte input limit", maxCanopyReviewInput)
+var errCanopyIndexLimit = fmt.Errorf("canopy index exceeds %d-byte disk budget", maxCanopyProjectIndexBytes)
 
-type canopyJSONCapture struct {
-	buffer bytes.Buffer
-	cancel context.CancelCauseFunc
+type canopyBoundedWriter struct {
+	writer    io.Writer
+	remaining int
+	cancel    context.CancelCauseFunc
+	limitErr  error
 }
 
-func (c *canopyJSONCapture) Write(data []byte) (int, error) {
-	remaining := maxCanopyReviewInput - c.buffer.Len()
-	if len(data) > remaining {
-		n, _ := c.buffer.Write(data[:remaining])
-		c.cancel(errCanopyJSONLimit)
-		return n, errCanopyJSONLimit
+func (c *canopyBoundedWriter) Write(data []byte) (int, error) {
+	want := min(len(data), c.remaining)
+	n, err := c.writer.Write(data[:want])
+	c.remaining -= n
+	if err == nil && n < want {
+		err = io.ErrShortWrite
 	}
-	return c.buffer.Write(data)
+	if err == nil && len(data) > want {
+		err = c.limitErr
+	}
+	if err != nil {
+		c.cancel(err)
+	}
+	return n, err
 }
 
 type canopyProjectSeed struct {
