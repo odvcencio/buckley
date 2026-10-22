@@ -112,19 +112,29 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 	// bytes; only a repeated operation is safe to replace with its newest
 	// result. Tool messages without a matching assistant call fall back to
 	// output identity for backwards-compatible transcripts.
-	toolCallSignatures := make(map[string]string)
-	for _, msg := range result {
+	type toolResultIdentity struct{ name, body string }
+	identityFor := func(name, body string) toolResultIdentity {
+		// Preserve the old name+NUL+body boundary even for imported NUL names.
+		if at := strings.IndexByte(name, 0); at >= 0 {
+			return toolResultIdentity{name[:at], name[at+1:] + "\x00" + body}
+		}
+		return toolResultIdentity{name, body}
+	}
+	// Borrow the original call metadata: only result's copied calls are compacted.
+	toolCallSignatures := make(map[string]*model.FunctionCall)
+	for _, msg := range messages {
 		if msg.Role != "assistant" {
 			continue
 		}
-		for _, call := range msg.ToolCalls {
+		for i := range msg.ToolCalls {
+			call := &msg.ToolCalls[i]
 			if call.ID == "" {
 				continue
 			}
-			toolCallSignatures[call.ID] = call.Function.Name + "\x00" + call.Function.Arguments
+			toolCallSignatures[call.ID] = &call.Function
 		}
 	}
-	seenToolResults := make(map[[32]byte]int)
+	seenToolResults := make(map[toolResultIdentity]int)
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
 		pinned := opts.PinnedFromIndex > 0 && i < opts.PinnedFromIndex
@@ -132,21 +142,21 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 			msg.Reasoning = ""
 			msg.ReasoningDetails = nil
 		}
-		var toolDigest [32]byte
-		var hasToolDigest bool
+		var identity toolResultIdentity
+		var hasIdentity bool
 		if msg.Role == "tool" {
 			if content, ok := msg.Content.(string); ok && content != "" {
-				identity, matched := toolCallSignatures[msg.ToolCallID]
-				if !matched {
-					identity = msg.Name + "\x00" + content
+				if call, matched := toolCallSignatures[msg.ToolCallID]; matched {
+					identity = identityFor(call.Name, call.Arguments)
+				} else {
+					identity = identityFor(msg.Name, content)
 				}
-				toolDigest = sha256.Sum256([]byte(identity))
-				hasToolDigest = true
+				hasIdentity = true
 			}
 		}
 		if i >= recentStart || pinned {
-			if hasToolDigest {
-				seenToolResults[toolDigest] = i
+			if hasIdentity {
+				seenToolResults[identity] = i
 			}
 			continue
 		}
@@ -156,11 +166,11 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 			if !ok || content == "" {
 				continue
 			}
-			if newer, duplicate := seenToolResults[toolDigest]; duplicate {
+			if newer, duplicate := seenToolResults[identity]; duplicate {
 				msg.Content = fmt.Sprintf("[duplicate %s result omitted; same as later message %d]", toolLabel(msg.Name), newer+1)
 				continue
 			}
-			seenToolResults[toolDigest] = i
+			seenToolResults[identity] = i
 			msg.Content = compactHistoricalContent(content, opts.OldToolBytes, "tool output")
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
