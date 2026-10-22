@@ -109,6 +109,14 @@ func runtimeSandboxFlags() []string {
 	}
 }
 
+func compilerSandboxFlags(scratch string, tempBytes int64) []string {
+	return []string{
+		"--size", fmt.Sprint(tempBytes), "--tmpfs", "/tmp",
+		"--ro-bind", scratch, scratch,
+		"--chdir", scratch,
+	}
+}
+
 // sandboxArgv gives the Go compiler a writable cache, then uses go run's
 // execution hook to launch the binary without that mount. Runtime code
 // sees only its read-only executable, system paths and writable scratch.
@@ -135,10 +143,8 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 	if err := os.WriteFile(wrapperPath, []byte(runtimeWrapper), 0700); err != nil {
 		return nil, fmt.Errorf("execmode: runtime wrapper: %w", err)
 	}
+	argv = append(argv, compilerSandboxFlags(scratch, DefaultCompilerTempBytes)...)
 	argv = append(argv,
-		"--tmpfs", "/tmp",
-		"--bind", scratch, scratch,
-		"--chdir", scratch,
 		"--bind", goCache, goCache,
 		"--ro-bind", argv[0], "/buckley-bwrap",
 		"--ro-bind", argsPath, "/buckley-runtime-args",

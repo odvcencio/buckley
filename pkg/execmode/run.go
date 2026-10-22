@@ -23,6 +23,9 @@ const (
 	// DefaultRuntimeScratchBytes bounds allocated file data in the runtime's
 	// ephemeral scratch/tmp filesystem, independently of compilation and heap memory.
 	DefaultRuntimeScratchBytes int64 = 64 << 20
+	// DefaultCompilerTempBytes bounds allocated data in the sandboxed compiler's
+	// temporary filesystem, separately from its build cache and heap memory.
+	DefaultCompilerTempBytes int64 = 512 << 20
 )
 
 // Result is one program run's outcome.
