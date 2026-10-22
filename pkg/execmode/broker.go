@@ -31,6 +31,8 @@ import (
 const (
 	// maxReadBytes bounds one file read through the broker.
 	maxReadBytes = 256 * 1024
+	// maxSearchFileBytes bounds searched file data, including symlink targets.
+	maxSearchFileBytes = 2 * 1024 * 1024
 	// maxSearchResults bounds one text search.
 	maxSearchResults = 200
 	// maxListEntries bounds one files.list response. The generated client
@@ -145,7 +147,11 @@ func NewBroker(workspaceRoot string, audit AuditSink, opts ...BrokerOption) (*Br
 	if audit == nil {
 		return nil, fmt.Errorf("execmode: an audit sink is required; unaudited capability use is not allowed")
 	}
-	root, err := filepath.EvalSymlinks(workspaceRoot)
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("execmode: resolve workspace root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, fmt.Errorf("execmode: resolve workspace root: %w", err)
 	}
@@ -308,11 +314,28 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(full)
+	root, err := os.OpenRoot(b.root)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(b.root, full)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.OpenFile(rel, brokerReadFlags, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("files.read requires a regular file")
+	}
+	var offset int64
 	// Decimal strings preserve int64 offsets through JSON without rounding.
 	raw, chunk := params["offset"]
 	if chunk {
@@ -327,10 +350,11 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 		if _, err := f.Seek(off, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek to offset %d: %w", off, err)
 		}
+		offset = off
 	}
 	// Read at most one byte past the cap so an exactly maxReadBytes file
 	// still reports truncated=false without pulling the whole file in.
-	data, readErr := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
+	data, readErr := readBoundedFile(f, info.Size()-offset, maxReadBytes+1)
 	if readErr != nil {
 		return nil, readErr
 	}
@@ -470,19 +494,24 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 			return nil, fmt.Errorf("invalid glob %q: %w", glob, err)
 		}
 	}
+	root, err := os.OpenRoot(b.root)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	type match struct {
 		File string `json:"file"`
 		Line int    `json:"line"`
 		Text string `json:"text"`
 	}
 	var matches []match
-	err := filepath.WalkDir(b.root, func(path string, entry os.DirEntry, walkErr error) error {
+	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
 			if skipDirName(entry.Name()) {
-				return filepath.SkipDir
+				return fs.SkipDir
 			}
 			return nil
 		}
@@ -491,15 +520,31 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 				return nil
 			}
 		}
-		info, err := entry.Info()
-		if err != nil || info.Size() > 2*1024*1024 {
+		rel := filepath.FromSlash(path)
+		readName := rel
+		if entry.Type()&os.ModeSymlink != 0 {
+			full, err := b.jail(rel)
+			if err != nil {
+				return nil
+			}
+			readName, err = filepath.Rel(b.root, full)
+			if err != nil {
+				return nil
+			}
+		}
+		f, err := root.OpenFile(readName, brokerReadFlags, 0)
+		if err != nil {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil || bytes.IndexByte(data[:min(len(data), 1024)], 0) >= 0 {
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxSearchFileBytes {
 			return nil
 		}
-		rel, _ := filepath.Rel(b.root, path)
+		data, err := readBoundedFile(f, info.Size(), maxSearchFileBytes+1)
+		if err != nil || len(data) > maxSearchFileBytes || bytes.IndexByte(data[:min(len(data), 1024)], 0) >= 0 {
+			return nil
+		}
 		lineNumber := 0
 		for line := range bytes.SplitSeq(data, []byte{'\n'}) {
 			lineNumber++
@@ -516,4 +561,23 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"matches": matches, "capped": len(matches) >= maxSearchResults}, nil
+}
+
+// A file size is only an allocation hint: concurrent growth must still fit the
+// byte budget, and a shrinking file must not return zero padding.
+func readBoundedFile(r io.Reader, sizeHint int64, limit int) ([]byte, error) {
+	size := min(max(sizeHint, 0), int64(limit-1)) + 1
+	data := make([]byte, size)
+	n, err := io.ReadFull(r, data)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return data[:n], nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == limit {
+		return data, nil
+	}
+	extra, err := io.ReadAll(io.LimitReader(r, int64(limit-len(data))))
+	return append(data, extra...), err
 }
