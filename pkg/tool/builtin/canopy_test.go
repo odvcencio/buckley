@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 // of any real canopy install on the test host.
 func newCanopyStub(t *testing.T, script string) {
 	t.Helper()
+	t.Setenv("CANOPY_BIN", "")
 	dir := t.TempDir()
 	stubPath := filepath.Join(dir, "canopy")
 	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
@@ -24,10 +26,61 @@ func newCanopyStub(t *testing.T, script string) {
 // cannot find any canopy binary, real or stubbed.
 func clearCanopyFromPath(t *testing.T) {
 	t.Helper()
+	t.Setenv("CANOPY_BIN", "")
 	t.Setenv("PATH", t.TempDir())
 }
 
 const echoArgsStub = "#!/bin/sh\nprintf 'ARGS:%s' \"$*\"\n"
+
+func TestCanopyRunner_BinarySelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, global, override, want string
+		setOverride, wantError       bool
+	}{
+		{name: "path_default", want: "path"},
+		{name: "configured", global: "configured", want: "configured"},
+		{name: "relative", global: "relative", want: "configured"},
+		{name: "tool_override", global: "missing", override: "configured", setOverride: true, want: "configured"},
+		{name: "clear_override", global: "missing", setOverride: true, want: "path"},
+		{name: "missing_configured", global: "missing", wantError: true},
+		{name: "missing_override", override: "missing", setOverride: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newCanopyStub(t, "#!/bin/sh\nprintf 'path'\n")
+			host := t.TempDir()
+			t.Chdir(host)
+			workspace := filepath.Join(host, "workspace")
+			if err := os.Mkdir(workspace, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for path, text := range map[string]string{
+				filepath.Join(host, "selected canopy"):      "configured",
+				filepath.Join(workspace, "selected canopy"): "wrong-workspace-binary",
+			} {
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '"+text+"'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			values := map[string]string{"": "", "configured": filepath.Join(host, "selected canopy"), "relative": "./selected canopy", "missing": filepath.Join(host, "missing")}
+			t.Setenv("CANOPY_BIN", values[tc.global])
+			var runner canopyRunner
+			runner.SetWorkDir(workspace)
+			if tc.setOverride {
+				runner.SetEnv(map[string]string{"CANOPY_BIN": values[tc.override]})
+			}
+			output, truncated, err := runner.run(context.Background(), "--version")
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "CANOPY_BIN") || output != "" {
+					t.Fatalf("output=%q err=%v", output, err)
+				}
+				return
+			}
+			if err != nil || truncated || output != tc.want {
+				t.Fatalf("output=%q truncated=%v err=%v", output, truncated, err)
+			}
+		})
+	}
+}
 
 func TestCanopyTools_Metadata(t *testing.T) {
 	tools := []struct {

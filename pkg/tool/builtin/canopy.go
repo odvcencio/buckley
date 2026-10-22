@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,9 +30,13 @@ type canopyRunner struct{ workDirAware }
 // to canopyMaxOutputBytes. A missing canopy binary yields a clear install
 // hint instead of a raw "not found" error.
 func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, truncated bool, err error) {
-	binPath, lookErr := exec.LookPath(canopyBinaryName)
-	if lookErr != nil {
-		return "", false, errors.New(canopyInstallHint)
+	configured := os.Getenv("CANOPY_BIN")
+	if value, overridden := r.env["CANOPY_BIN"]; overridden {
+		configured = value
+	}
+	binPath, err := ResolveCanopyExecutable(configured)
+	if err != nil {
+		return "", false, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -68,6 +74,28 @@ func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, 
 	}
 
 	return strings.TrimSpace(stdout.String()), stdout.Truncated(), nil
+}
+
+// ResolveCanopyExecutable selects a configured binary, or canopy from PATH,
+// and resolves it before callers change the command's working directory.
+func ResolveCanopyExecutable(configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
+	binary := canopyBinaryName
+	if configured != "" {
+		binary = configured
+	}
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		if configured != "" {
+			return "", fmt.Errorf("CANOPY_BIN %q is not executable: %w", configured, err)
+		}
+		return "", errors.New(canopyInstallHint)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve canopy executable: %w", err)
+	}
+	return path, nil
 }
 
 // scopedPath resolves an optional "path" parameter against the workdir,
