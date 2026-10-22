@@ -39,6 +39,7 @@ func (t *ReadFileTool) readLargeFilePage(path string, params map[string]any, siz
 	}
 	defer file.Close()
 	limit := int(min(snapshotLimit, 1<<20))
+	pageLimit := min(limit, DefaultReadFilePageBytes)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, min(4096, limit)), limit)
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
@@ -61,7 +62,7 @@ func (t *ReadFileTool) readLargeFilePage(path string, params map[string]any, siz
 		if line < start {
 			continue
 		}
-		if line > end || (len(lines) > 0 && pageBytes+len(scanner.Bytes())+1 > limit) {
+		if line > end || (len(lines) > 0 && pageBytes+len(scanner.Bytes())+1 > pageLimit) {
 			hasMore = true
 			break
 		}
@@ -92,6 +93,7 @@ func (t *ReadFileTool) readLargeFilePage(path string, params map[string]any, siz
 			lines[i] = fmt.Sprintf("%d: %s", start+i, lines[i])
 		}
 		display["content"] = strings.Join(lines, "\n")
+		display["line_numbers"] = true
 	}
 	return &Result{Success: true, Data: data, DisplayData: display, ShouldAbridge: true}, nil
 }
