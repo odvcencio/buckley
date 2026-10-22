@@ -266,8 +266,8 @@ func TestRunner_TimeoutKillsProgram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
-	_, err = runner.Run(context.Background(), "package main\n\nfunc main() { for {} }\n")
-	if err == nil || !strings.Contains(err.Error(), "timeout") {
+	result, err := runner.Run(context.Background(), "package main\n\nfunc main() { for {} }\n")
+	if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != -1 || !strings.Contains(err.Error(), "timeout") {
 		t.Fatalf("err = %v, want timeout", err)
 	}
 }
