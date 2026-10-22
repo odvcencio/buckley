@@ -53,6 +53,7 @@ func TestCompactCanopyPrompt_PreservesEvidenceAndLabelsFormat(t *testing.T) {
 func TestCompactCanopyPrompt_JSONFallback(t *testing.T) {
 	for _, summary := range []string{
 		"not JSON", "null", "{}", strings.Repeat(`{"a":`, 12) + "1" + strings.Repeat("}", 12),
+		`{"data":[{"name":"f","parameters":{"x":1}},{"name":"g","parameters":{"x":2}}]}`,
 		`{"rows":[{"count":9007199254740993},{"count":9007199254740993}]}`,
 		`{"rows":[{"count":-9007199254740993},{"count":-9007199254740993}]}`,
 		`{"rows":[{"nested":[9007199254740993]},{"nested":[9007199254740993]}]}`,

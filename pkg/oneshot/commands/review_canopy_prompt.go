@@ -16,7 +16,9 @@ func compactCanopyPrompt(summary string, codec *toon.Codec) (string, bool) {
 		return summary, false
 	}
 	encoded, err := codec.MarshalString(data)
-	if err != nil || len(encoded) == 0 || len(encoded) >= len(summary) || json.Valid([]byte(encoded)) {
+	// Small byte savings can still cost more subword tokens. Require at least
+	// 20% byte headroom before changing the representation.
+	if err != nil || len(encoded) == 0 || len(encoded)*5 > len(summary)*4 || json.Valid([]byte(encoded)) {
 		return summary, false
 	}
 	return encoded, true
