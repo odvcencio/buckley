@@ -22,6 +22,11 @@ func SetResultEncoding(useToon bool) {
 	useJSONResults.Store(!useToon)
 }
 
+// NewResultCodec captures the configured model-facing serialization format.
+func NewResultCodec() *toon.Codec {
+	return toon.New(!useJSONResults.Load())
+}
+
 // Tool represents a tool that can be called by the LLM
 //
 //go:generate mockgen -package=tool -destination=mock_tool_test.go github.com/odvcencio/buckley/pkg/tool Tool
@@ -46,7 +51,7 @@ func ToOpenAIFunction(t Tool) map[string]any {
 
 // ToJSON encodes a full result in the configured JSON or TOON format.
 func ToJSON(r *builtin.Result) (string, error) {
-	return toon.New(!useJSONResults.Load()).MarshalString(r)
+	return NewResultCodec().MarshalString(r)
 }
 
 // ToModelOutput encodes only fields that help the model decide its next step.
@@ -63,7 +68,7 @@ func ToModelOutputWithLimit(r *builtin.Result, limit int) (string, error) {
 	if r == nil {
 		return "", nil
 	}
-	codec := toon.New(!useJSONResults.Load())
+	codec := NewResultCodec()
 	data := r.Data
 	if r.ShouldAbridge && len(r.DisplayData) > 0 {
 		data = r.DisplayData
