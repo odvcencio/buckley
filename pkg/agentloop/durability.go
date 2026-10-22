@@ -12,6 +12,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
 )
 
@@ -73,8 +74,23 @@ func StableApprovalID(runID, taskID, turnID, stepID string, round, toolIndex int
 	return "approval_" + hex.EncodeToString(sum[:])
 }
 
+func marshalStepJSON(value any) ([]byte, error) {
+	if req, ok := value.(model.ChatRequest); ok {
+		for _, message := range req.Messages {
+			for _, detail := range message.ReasoningDetails {
+				if len(detail.Extra) > 1 {
+					// Keep the legacy codec for extension maps with unstable key order.
+					return json.Marshal(value)
+				}
+			}
+		}
+		return model.MarshalChatRequest(req)
+	}
+	return json.Marshal(value)
+}
+
 func jsonDigest(value any) (string, error) {
-	encoded, err := json.Marshal(value)
+	encoded, err := marshalStepJSON(value)
 	if err != nil {
 		return "", err
 	}
@@ -86,7 +102,7 @@ func (c *Controller) recordJSONEvidence(ctx context.Context, kind evidence.Kind,
 	if c == nil || c.cfg.Evidence == nil {
 		return "", "", nil
 	}
-	body, err := json.Marshal(value)
+	body, err := marshalStepJSON(value)
 	if err != nil {
 		return "", "", fmt.Errorf("agentloop: marshal %s evidence: %w", kind, err)
 	}
