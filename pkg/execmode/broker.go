@@ -471,26 +471,31 @@ func (b *Broker) filesList(ctx context.Context, params map[string]any) (any, err
 			return nil
 		})
 	} else {
-		var entries []os.DirEntry
-		entries, err = os.ReadDir(full)
-		if cursor > len(entries) {
-			cursor = len(entries)
+		root, err := os.OpenRoot(b.root)
+		if err != nil {
+			return nil, err
 		}
-		end := cursor + maxListEntries
-		if end > len(entries) {
-			end = len(entries)
+		defer root.Close()
+		rel, err := filepath.Rel(b.root, full)
+		if err != nil {
+			return nil, err
 		}
-		for _, entry := range entries[cursor:end] {
+		entries, total, err := flatDirectoryPage(ctx, root, rel, cursor)
+		if err != nil {
+			return nil, err
+		}
+		cursor = min(cursor, total)
+		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			name := entry.Name()
-			if entry.IsDir() {
+			name := entry.name
+			if entry.directory {
 				name += "/"
 			}
 			names = append(names, name)
 		}
-		hasMore = end < len(entries)
+		hasMore = cursor+len(names) < total
 	}
 	if err != nil {
 		return nil, err
