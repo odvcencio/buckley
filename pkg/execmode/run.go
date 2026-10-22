@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -277,6 +278,14 @@ func scaffold(dir, source string) error {
 		"go.mod":       "module execprogram\n\ngo 1.24\n",
 		"main.go":      source,
 		"caps/caps.go": capsClientSource,
+	}
+	// Fresh compiler homes otherwise collect Go counters that every run discards.
+	if runtime.GOOS != "windows" {
+		configDir := ".config"
+		if runtime.GOOS == "darwin" {
+			configDir = filepath.Join("Library", "Application Support")
+		}
+		files[filepath.Join(configDir, "go", "telemetry", "mode")] = "off\n"
 	}
 	for name, content := range files {
 		path := filepath.Join(dir, name)
