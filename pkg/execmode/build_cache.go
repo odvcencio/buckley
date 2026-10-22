@@ -110,16 +110,6 @@ func acquireBuildCache(ctx context.Context, dir string, maxBytes int64, maxEntri
 func (l *buildCacheLease) Close() error {
 	filelock.Unlock(l.users)
 	defer l.users.Close()
-	admission, err := openCacheLock(l.dir, ".admission.lock")
-	if err != nil {
-		return err
-	}
-	defer admission.Close()
-	locked, err := filelock.TryLock(admission)
-	if err != nil || !locked {
-		return err
-	}
-	defer filelock.Unlock(admission)
 	idle, err := filelock.TryLock(l.users)
 	if err != nil || !idle {
 		return err

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"m31labs.dev/buckley/internal/filelock"
 )
 
 func cacheFixtureEntry(t *testing.T, dir string, id int, size int, executable bool) string {
@@ -232,5 +234,47 @@ func TestBuildCacheLease_ConcurrentProcessAndCancellation(t *testing.T) {
 	}
 	if err := lease.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildCacheLease_LastUserTrimsWhileAdmissionBusy(t *testing.T) {
+	if DetectIsolation() != IsolationBwrap {
+		t.Skip("real sandbox and file locks required")
+	}
+	dir := filepath.Join(t.TempDir(), "gocache")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	first, err := acquireBuildCache(ctx, dir, 5, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { first.users.Close() })
+	second, err := acquireBuildCache(ctx, dir, 5, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { second.users.Close() })
+	admission, err := openCacheLock(dir, ".admission.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admission.Close()
+	locked, err := filelock.TryLock(admission)
+	if err != nil || !locked {
+		t.Fatalf("lock admission: %v %v", locked, err)
+	}
+	defer filelock.Unlock(admission)
+	path := cacheFixtureEntry(t, dir, 1, 10, false)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("remaining user lost input", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("idle cache remained oversized: %v", err)
 	}
 }
