@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -26,9 +27,9 @@ var (
 
 // DetectIsolation reports the strongest WORKING isolation mode. Presence
 // of the bwrap binary is not enough: kernels and container hosts can
-// restrict unprivileged user namespaces (observed on GitHub's Ubuntu
-// 24.04 runners via AppArmor), so detection runs one no-op sandbox and
-// believes the outcome. The probe result is cached for the process.
+// restrict unprivileged user namespaces, so detection probes both the
+// compiler sandbox and its nested runtime sandbox. The result is cached
+// for the process.
 func DetectIsolation() string {
 	detectOnce.Do(func() {
 		detected = IsolationNone
@@ -36,8 +37,11 @@ func DetectIsolation() string {
 		if err != nil {
 			return
 		}
-		probe := exec.Command(bwrap, "--unshare-all", "--die-with-parent",
-			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "true")
+		mounts := []string{"--unshare-all", "--die-with-parent",
+			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"}
+		inner := append([]string{bwrap}, mounts...)
+		inner = append(inner, "true")
+		probe := exec.Command(bwrap, append(mounts, inner...)...)
 		if err := probe.Run(); err == nil {
 			detected = IsolationBwrap
 		}
@@ -62,13 +66,9 @@ func resolveGOROOT() string {
 	return gorootPath
 }
 
-// sandboxArgv wraps the program invocation in bwrap. The mount plan is
-// deny-by-default: read-only system directories for the dynamic loader
-// and toolchain, the scratch module and shared build cache read-write,
-// a private /tmp and /proc and /dev — and nothing else. --unshare-all
-// removes network, pid, ipc, and user namespaces; the caps socket keeps
-// working because unix sockets are files and the scratch bind carries it.
-func sandboxArgv(scratch, goCache string) ([]string, error) {
+// sandboxBaseArgv supplies the common compiler/runtime mount plan. The
+// audited caps socket stays reachable through the per-run scratch bind.
+func sandboxBaseArgv(scratch string) ([]string, error) {
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
 		return nil, fmt.Errorf("execmode: bwrap not found: %w", err)
@@ -94,8 +94,39 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 	}
 	argv = append(argv,
 		"--bind", scratch, scratch,
-		"--bind", goCache, goCache,
 		"--chdir", scratch,
 	)
-	return append(argv, "go", "run", "."), nil
+	return argv, nil
 }
+
+// sandboxArgv gives the Go compiler a writable cache, then uses go run's
+// execution hook to launch the binary without that mount. Runtime code
+// sees only its read-only executable, system paths and writable scratch.
+func sandboxArgv(scratch, goCache string) ([]string, error) {
+	argv, err := sandboxBaseArgv(scratch)
+	if err != nil {
+		return nil, err
+	}
+	argsPath := filepath.Join(scratch, ".buckley-runtime-args")
+	// NUL-separated bwrap arguments preserve literal paths without shell parsing.
+	if err := os.WriteFile(argsPath, []byte(strings.Join(argv[1:], "\x00")+"\x00"), 0600); err != nil {
+		return nil, fmt.Errorf("execmode: runtime arguments: %w", err)
+	}
+	wrapperPath := filepath.Join(scratch, ".buckley-runtime")
+	if err := os.WriteFile(wrapperPath, []byte(runtimeWrapper), 0700); err != nil {
+		return nil, fmt.Errorf("execmode: runtime wrapper: %w", err)
+	}
+	argv = append(argv,
+		"--bind", goCache, goCache,
+		"--ro-bind", argv[0], "/buckley-bwrap",
+		"--ro-bind", argsPath, "/buckley-runtime-args",
+		"--ro-bind", wrapperPath, "/buckley-runtime",
+	)
+	return append(argv, "go", "run", "-exec", "/buckley-runtime", "."), nil
+}
+
+const runtimeWrapper = `#!/bin/sh
+buckley_program=$1
+shift
+exec /buckley-bwrap --args 3 --ro-bind "$buckley_program" /buckley-program -- /buckley-program "$@" 3</buckley-runtime-args
+`
