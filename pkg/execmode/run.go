@@ -16,8 +16,8 @@ const (
 	DefaultTimeout = 120 * time.Second
 	// maxOutputBytes bounds captured stdout/stderr each.
 	maxOutputBytes = 128 * 1024
-	// maxSourceBytes bounds the program source.
-	maxSourceBytes = 256 * 1024
+	// MaxSourceBytes bounds program source supplied by library and CLI callers.
+	MaxSourceBytes = 256 * 1024
 )
 
 // Result is one program run's outcome.
@@ -103,8 +103,8 @@ func (r *Runner) Isolation() string { return r.isolation }
 // caller passed WithoutIsolation, which downgrades the surface to
 // shell-equivalent risk and is for library and test use only.
 func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
-	if len(source) > maxSourceBytes {
-		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", maxSourceBytes)
+	if len(source) > MaxSourceBytes {
+		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", MaxSourceBytes)
 	}
 	if !strings.Contains(source, "package main") {
 		return Result{}, fmt.Errorf("execmode: source must be a complete package main program")
