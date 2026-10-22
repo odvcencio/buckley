@@ -2376,7 +2376,7 @@ func (c *Controller) executePreparedModelRoundWithOrdinal(ctx context.Context, r
 	// The durable input is the caller's logical request before the execution
 	// policy applies a spend-dependent output clamp. This lets a completed step
 	// replay without consulting current pricing or creating a second reservation.
-	inputDigest, err := jsonDigest(req)
+	inputDigest, err := c.modelInputDigest(ctx, stepID, req)
 	if err != nil {
 		return nil, fmt.Errorf("agentloop: digest model request: %w", err)
 	}

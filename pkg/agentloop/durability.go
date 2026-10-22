@@ -98,6 +98,81 @@ func jsonDigest(value any) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+const reasoningDigestPrefix = "reasoning-v2:"
+
+func (c *Controller) modelInputDigest(ctx context.Context, stepID string, req model.ChatRequest) (string, error) {
+	unordered := false
+scan:
+	for _, message := range req.Messages {
+		for _, detail := range message.ReasoningDetails {
+			count := len(detail.Extra)
+			if _, ok := detail.Extra["signature"]; ok && detail.Signature != nil {
+				count--
+			}
+			if count > 1 {
+				unordered = true
+				break scan
+			}
+		}
+	}
+	if !unordered {
+		return jsonDigest(req)
+	}
+	if c.cfg.StepJournal != nil {
+		step, err := c.cfg.StepJournal.GetStep(ctx, c.cfg.RunID, stepID)
+		if err != nil && !errors.Is(err, runledger.ErrStepNotFound) {
+			return "", fmt.Errorf("load model digest version for %s: %w", stepID, err)
+		}
+		if err == nil && !strings.HasPrefix(step.InputDigest, reasoningDigestPrefix) {
+			// Retained steps keep their original preimage, including its historical
+			// metadata ordering. Never replace a stored digest to force replay.
+			return jsonDigest(req)
+		}
+	}
+
+	// This copy is only a digest preimage, never provider input or evidence.
+	// Wrap every extension map, including single-key maps, so a provider key
+	// matching the internal marker cannot collide with another detail's wrapper.
+	req.Messages = append([]model.Message(nil), req.Messages...)
+	for i, message := range req.Messages {
+		copied := false
+		for j, detail := range message.ReasoningDetails {
+			if len(detail.Extra) == 0 {
+				continue
+			}
+			extra := make(map[string]json.RawMessage, len(detail.Extra))
+			for key, value := range detail.Extra {
+				if key == "signature" && detail.Signature != nil {
+					continue
+				}
+				if len(value) == 0 {
+					value = json.RawMessage("null")
+				}
+				extra[key] = value
+			}
+			if !copied {
+				req.Messages[i].ReasoningDetails = append([]model.ReasoningDetail(nil), message.ReasoningDetails...)
+				copied = true
+			}
+			if len(extra) == 0 {
+				req.Messages[i].ReasoningDetails[j].Extra = nil
+				continue
+			}
+			// encoding/json sorts these keys without decoding opaque RawMessages.
+			body, err := json.Marshal(extra)
+			if err != nil {
+				return "", err
+			}
+			req.Messages[i].ReasoningDetails[j].Extra = map[string]json.RawMessage{"$buckley.reasoning-extra.v2": body}
+		}
+	}
+	digest, err := jsonDigest(req)
+	if err != nil {
+		return "", err
+	}
+	return reasoningDigestPrefix + digest, nil
+}
+
 func (c *Controller) recordJSONEvidence(ctx context.Context, kind evidence.Kind, value any, stepID string, metadata map[string]any) (string, string, error) {
 	if c == nil || c.cfg.Evidence == nil {
 		return "", "", nil
