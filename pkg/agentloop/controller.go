@@ -2376,9 +2376,14 @@ func (c *Controller) executePreparedModelRoundWithOrdinal(ctx context.Context, r
 	// The durable input is the caller's logical request before the execution
 	// policy applies a spend-dependent output clamp. This lets a completed step
 	// replay without consulting current pricing or creating a second reservation.
-	inputDigest, err := c.modelInputDigest(ctx, stepID, req)
-	if err != nil {
-		return nil, fmt.Errorf("agentloop: digest model request: %w", err)
+	var inputDigest string
+	// Transient controllers have no consumer for a durable request digest.
+	if c.cfg.StepJournal != nil || c.cfg.RunLedger != nil || c.cfg.Evidence != nil || c.cfg.LifecycleObserver != nil {
+		var err error
+		inputDigest, err = c.modelInputDigest(ctx, stepID, req)
+		if err != nil {
+			return nil, fmt.Errorf("agentloop: digest model request: %w", err)
+		}
 	}
 	blockedResult, blocked, err := c.replayBlockedModelStep(ctx, stepID, inputDigest, req.Model, round, stepKind)
 	if blocked {
