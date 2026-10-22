@@ -39,7 +39,12 @@ func readSnapshotString(file *os.File, size, limit int64) (string, bool, error) 
 		buffer.Grow(int(min(size, limit)))
 	}
 	remaining := limit
-	var scratch [4096]byte
+	var small [4096]byte
+	scratch := small[:]
+	if size > int64(len(small)) {
+		var large [32 << 10]byte
+		scratch = large[:]
+	}
 	for remaining > 0 {
 		n, err := file.Read(scratch[:int(min(int64(len(scratch)), remaining))])
 		buffer.Write(scratch[:n])
