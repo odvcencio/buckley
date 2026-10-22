@@ -560,6 +560,7 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 	}
 	var matches []match
 	textBytes := 0
+	var data []byte
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -599,7 +600,7 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 		if err != nil || !info.Mode().IsRegular() || info.Size() > maxSearchFileBytes {
 			return nil
 		}
-		data, err := readBoundedFile(f, info.Size(), maxSearchFileBytes+1)
+		data, err = readBoundedFileInto(f, info.Size(), maxSearchFileBytes+1, data)
 		if err != nil || len(data) > maxSearchFileBytes || bytes.IndexByte(data[:min(len(data), 1024)], 0) >= 0 {
 			return nil
 		}
@@ -659,18 +660,40 @@ func searchTextExcerpt(line []byte, matchOffset, limit int) (string, bool) {
 // A file size is only an allocation hint: concurrent growth must still fit the
 // byte budget, and a shrinking file must not return zero padding.
 func readBoundedFile(r io.Reader, sizeHint int64, limit int) ([]byte, error) {
-	size := min(max(sizeHint, 0), int64(limit-1)) + 1
-	data := make([]byte, size)
-	n, err := io.ReadFull(r, data)
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		return data[:n], nil
-	}
+	data, err := readBoundedFileInto(r, sizeHint, limit, nil)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) == limit {
-		return data, nil
+	return data, nil
+}
+
+// The returned bytes borrow data's storage. Retained results must copy their
+// text before another file reuses the buffer; its capacity never exceeds limit.
+func readBoundedFileInto(r io.Reader, sizeHint int64, limit int, data []byte) ([]byte, error) {
+	data = data[:0:min(cap(data), limit)]
+	size := int(min(max(sizeHint, 0), int64(limit-1))) + 1
+	if cap(data) < size {
+		data = make([]byte, size, min(limit, max(size, 2*cap(data))))
+	} else {
+		data = data[:size]
 	}
-	extra, err := io.ReadAll(io.LimitReader(r, int64(limit-len(data))))
-	return append(data, extra...), err
+	filled := 0
+	for {
+		n, err := io.ReadFull(r, data[filled:])
+		filled += n
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return data[:filled], nil
+		}
+		if err != nil || filled == limit {
+			return data[:filled], err
+		}
+		next := min(limit, max(512, 2*len(data)))
+		if next <= cap(data) {
+			data = data[:next]
+		} else {
+			grown := make([]byte, next)
+			copy(grown, data)
+			data = grown
+		}
+	}
 }
