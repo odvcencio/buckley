@@ -5,5 +5,6 @@ package filelock
 import "os"
 
 // Unsupported platforms skip optional writes rather than write without coordination.
-func TryLock(*os.File) (bool, error) { return false, nil }
-func Unlock(*os.File)                {}
+func TryLock(*os.File) (bool, error)     { return false, nil }
+func TryReadLock(*os.File) (bool, error) { return false, nil }
+func Unlock(*os.File)                    {}

@@ -3,6 +3,7 @@ package execmode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -102,7 +103,7 @@ func (r *Runner) Isolation() string { return r.isolation }
 // Run refuses to execute when that sandbox is unavailable unless the
 // caller passed WithoutIsolation, which downgrades the surface to
 // shell-equivalent risk and is for library and test use only.
-func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
+func (r *Runner) Run(ctx context.Context, source string) (result Result, retErr error) {
 	if len(source) > MaxSourceBytes {
 		return Result{}, fmt.Errorf("execmode: source exceeds %d bytes", MaxSourceBytes)
 	}
@@ -138,6 +139,15 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	defer cancel()
 
 	goCache := sharedGoCache()
+	cache, err := acquireBuildCache(runCtx, goCache, DefaultBuildCacheBytes, DefaultBuildCacheEntries)
+	if err != nil {
+		return Result{}, fmt.Errorf("execmode: acquire build cache: %w", err)
+	}
+	defer func() {
+		if err := cache.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("execmode: trim build cache: %w", err))
+		}
+	}()
 	var cmd *exec.Cmd
 	switch {
 	case r.isolation == IsolationBwrap:
@@ -180,7 +190,7 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 
 	started := time.Now()
 	err = cmd.Run()
-	result := Result{
+	result = Result{
 		Stdout:          stdout.String(),
 		Stderr:          stderr.String(),
 		Duration:        time.Since(started),
@@ -238,8 +248,8 @@ func sharedGoCache() string {
 	if err != nil {
 		base = os.TempDir()
 	}
-	dir := filepath.Join(base, "buckley-execmode", "gocache")
-	_ = os.MkdirAll(dir, 0o755)
+	// Older binaries do not hold leases; keep their live compiler inputs separate.
+	dir := filepath.Join(base, "buckley-execmode", "gocache-v2")
 	return dir
 }
 
