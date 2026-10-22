@@ -404,6 +404,8 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		AgentID:   a.id,
 		ModelUsed: a.model,
 	}
+	// Share equal large captures from fresh reads for this execution only.
+	var readSnapshots map[string]string
 	contextWindow := a.contextLength(route, routeBound)
 	providerID := a.client.ProviderIDForModel(a.model)
 	maxIterations := a.maxIterations
@@ -526,6 +528,20 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		outcomes := make([]agentloop.ToolOutcome, len(toolResults))
 		for i, tr := range toolResults {
+			if tr.Name == "read_file" {
+				content, contentOK := tr.Data["content"].(string)
+				path, _ := tr.Data["path"].(string)
+				if contentOK && len(content) >= 64<<10 && path != "" {
+					if previous, found := readSnapshots[path]; found && previous == content {
+						tr.Data["content"] = previous
+					} else {
+						if readSnapshots == nil {
+							readSnapshots = make(map[string]string)
+						}
+						readSnapshots[path] = content
+					}
+				}
+			}
 			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
 		}
 		return outcomes, nil
