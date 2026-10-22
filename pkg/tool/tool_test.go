@@ -67,6 +67,23 @@ func TestToJSONUsesToonByDefault(t *testing.T) {
 	}
 }
 
+func TestNewResultCodec_CapturesEncodingPreference(t *testing.T) {
+	SetResultEncoding(true)
+	t.Cleanup(func() { SetResultEncoding(true) })
+	compact := NewResultCodec()
+	SetResultEncoding(false)
+	plain := NewResultCodec()
+	data := map[string]any{"count": 2}
+	first, err := compact.MarshalString(data)
+	if err != nil || first != "count: 2" {
+		t.Fatalf("captured codec changed with global preference: %q %v", first, err)
+	}
+	second, err := plain.MarshalString(data)
+	if err != nil || second != `{"count":2}` {
+		t.Fatalf("JSON preference was not captured: %q %v", second, err)
+	}
+}
+
 func TestToModelOutputWithLimit_ReturnsValidBoundedPayload(t *testing.T) {
 	SetResultEncoding(false)
 	t.Cleanup(func() { SetResultEncoding(true) })

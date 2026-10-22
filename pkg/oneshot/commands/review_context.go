@@ -15,6 +15,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/tool"
 	"m31labs.dev/buckley/pkg/transparency"
 )
 
@@ -67,6 +68,7 @@ type ProjectContext struct {
 	RecentLog         string
 	CanopySummary     string
 	CanopyStatus      string
+	CanopySummaryToon bool
 	ContextIncomplete bool
 }
 
@@ -493,6 +495,7 @@ func AssembleProjectContext(opts ProjectContextOptions) (*ProjectContext, *trans
 	if opts.IncludeCanopy {
 		ctx.CanopySummary, ctx.CanopyStatus = collectCanopyProjectSummary(opts.Context, ctx.RepoRoot)
 		if ctx.CanopySummary != "" {
+			ctx.CanopySummary, ctx.CanopySummaryToon = compactCanopyPrompt(ctx.CanopySummary, tool.NewResultCodec())
 			audit.Add("Canopy project summary", reviewEstimateTokens(ctx.CanopySummary))
 		} else {
 			audit.Add("Canopy project summary ("+ctx.CanopyStatus+")", 0)
@@ -678,7 +681,11 @@ func BuildProjectPrompt(ctx *ProjectContext) string {
 		sb.WriteString("## Primary Project Health Map (Canopy)\n\n")
 		sb.WriteString("Use this abridged structural TOC as the repository navigation map: it includes major call sites, direct callers and callees for important flows, complexity hotspots, and structural coverage. Prioritize high-risk paths and boundaries, then expand it into exhaustive repository coverage. It is not a sampling limit and does not replace reading the captured files.\n\n")
 		sb.WriteString("- **Source status**: " + ctx.CanopyStatus + "\n\n")
-		sb.WriteString("```json\n")
+		if ctx.CanopySummaryToon {
+			sb.WriteString("```text\n")
+		} else {
+			sb.WriteString("```json\n")
+		}
 		sb.WriteString(ctx.CanopySummary)
 		sb.WriteString("\n```\n\n")
 	} else if ctx.CanopyStatus != "" {
