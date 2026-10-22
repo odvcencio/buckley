@@ -17,4 +17,12 @@ func TryLock(file *os.File) (bool, error) {
 	return err == nil, err
 }
 
+func TryReadLock(file *os.File) (bool, error) {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func Unlock(file *os.File) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }
