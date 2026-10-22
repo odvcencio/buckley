@@ -370,6 +370,10 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 
 	// Wrap the actual API call with circuit breaker
 	err := c.circuitBreaker.Call(func() error {
+		body, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("marshaling request: %w", err)
+		}
 		var lastErr error
 		for attempt := 0; ; attempt++ {
 			if attempt > 0 {
@@ -380,11 +384,6 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 					return errors.Join(ctx.Err(), lastErr)
 				case <-time.After(delay):
 				}
-			}
-
-			body, err := json.Marshal(req)
-			if err != nil {
-				return fmt.Errorf("marshaling request: %w", err)
 			}
 
 			httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewReader(body))
