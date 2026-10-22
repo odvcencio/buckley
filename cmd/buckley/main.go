@@ -190,8 +190,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// A completion hook must not initialize a workspace or edit ignore files.
-	if len(opts.args) == 0 || opts.args[0] != "completion-check" {
+	// Completion hooks and direct sandboxed programs do not initialize a workspace.
+	if len(opts.args) == 0 || (opts.args[0] != "completion-check" && opts.args[0] != "exec-program") {
 		ensureBuckleyRuntimeIgnored()
 	}
 
@@ -823,6 +823,8 @@ func printHelp() {
 	fmt.Println("  execute <plan-id>                Execute a plan")
 	fmt.Println("  execute-task --plan <id> --task <id>")
 	fmt.Println("                                   Execute single task (CI/batch friendly)")
+	fmt.Println("  exec-program --file <path.go> | --reuse <evidence-id>")
+	fmt.Println("                                   Run an audited sandboxed program without a model")
 	fmt.Println("  commit [--dry-run]               Generate structured commit via tool-use (transparent)")
 	fmt.Println("  commit-check [--file msg] [--strict]  Check a commit message with the same safety and style rules as commit")
 	fmt.Println("  hook install|uninstall|status    Manage the commit-msg hook that runs commit-check")
@@ -1216,7 +1218,7 @@ func printBashCompletion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="plan execute execute-task commit pr review review-pr buckbot experiment eval serve attach goal remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
+    commands="plan execute execute-task exec-program commit pr review review-pr buckbot experiment eval serve attach goal remote batch git-webhook agent skills skill agent-server lsp acp info config doctor completion worktree rules migrate db resume help version"
 
     case "${prev}" in
         buckley)
@@ -1300,6 +1302,7 @@ _buckley() {
         'plan:Generate feature plan'
         'execute:Execute a plan'
         'execute-task:Execute single task'
+        'exec-program:Run or reuse a sandboxed program without a model'
         'commit:Create action-style commit'
         'pr:Create pull request'
         'review:Review local changes with repository context'
@@ -1412,6 +1415,7 @@ complete -c buckley -f
 complete -c buckley -n __fish_use_subcommand -a plan -d 'Generate feature plan'
 complete -c buckley -n __fish_use_subcommand -a execute -d 'Execute a plan'
 complete -c buckley -n __fish_use_subcommand -a execute-task -d 'Execute single task'
+complete -c buckley -n __fish_use_subcommand -a exec-program -d 'Run or reuse a sandboxed program without a model'
 complete -c buckley -n __fish_use_subcommand -a commit -d 'Create action-style commit'
 complete -c buckley -n __fish_use_subcommand -a pr -d 'Create pull request'
 complete -c buckley -n __fish_use_subcommand -a review -d 'Review local changes with repository context'
@@ -1549,6 +1553,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runAgentCommand, args[1:])
 	case "execute-task":
 		return true, runCommand(runExecuteTaskCommand, args[1:])
+	case "exec-program":
+		return true, runCommand(runExecProgramCommand, args[1:])
 	case "commit":
 		return true, runCommand(runCommitCommand, args[1:])
 	case "commit-check":
