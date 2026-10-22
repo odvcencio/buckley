@@ -177,17 +177,20 @@ type canopyProjectTOCCoverage struct {
 }
 
 type canopyTOCFlow struct {
-	Root           canopyGraphSymbol `json:"root"`
-	Signal         string            `json:"signal"`
-	FanIn          *int              `json:"fan_in,omitempty"`
-	Cyclomatic     *int              `json:"cyclomatic,omitempty"`
-	Cognitive      *int              `json:"cognitive,omitempty"`
-	Callers        []canopyTOCEdge   `json:"callers,omitempty"`
-	Callees        []canopyTOCEdge   `json:"callees,omitempty"`
-	ReachableNodes *int              `json:"reachable_nodes,omitempty"`
-	GraphEdges     *int              `json:"graph_edges,omitempty"`
-	GraphDirection string            `json:"graph_direction,omitempty"`
-	Status         string            `json:"status"`
+	Root             canopyGraphSymbol `json:"root"`
+	Signal           string            `json:"signal"`
+	FanIn            *int              `json:"fan_in,omitempty"`
+	Cyclomatic       *int              `json:"cyclomatic,omitempty"`
+	Cognitive        *int              `json:"cognitive,omitempty"`
+	Callers          []canopyTOCEdge   `json:"callers,omitempty"`
+	Callees          []canopyTOCEdge   `json:"callees,omitempty"`
+	CallersTruncated bool              `json:"callers_truncated,omitempty"`
+	CalleesTruncated bool              `json:"callees_truncated,omitempty"`
+	ReachableNodes   *int              `json:"reachable_nodes,omitempty"`
+	GraphEdges       *int              `json:"graph_edges,omitempty"`
+	GraphDirection   string            `json:"graph_direction,omitempty"`
+	GraphDepth       int               `json:"graph_depth,omitempty"`
+	Status           string            `json:"status"`
 }
 
 type canopyGraphSymbol struct {
@@ -699,12 +702,13 @@ func collectCanopyProjectFlow(ctx context.Context, executable, repoRoot, cachePa
 		nodes, edges := len(report.Nodes), len(report.Edges)
 		flow.ReachableNodes, flow.GraphEdges = &nodes, &edges
 		flow.GraphDirection = direction
+		flow.GraphDepth = canopyProjectDepth(!forwardOK)
 	}
 	if forwardOK {
-		flow.Callees = compactCanopyGraphEdges(forward, flow.Root, true)
+		flow.Callees, flow.CalleesTruncated = compactCanopyGraphEdges(forward, flow.Root, true)
 	}
 	if reverseOK {
-		flow.Callers = compactCanopyGraphEdges(reverse, flow.Root, false)
+		flow.Callers, flow.CallersTruncated = compactCanopyGraphEdges(reverse, flow.Root, false)
 	}
 	switch {
 	case forwardOK && reverseOK:
@@ -719,7 +723,7 @@ func runCanopyGraph(ctx context.Context, executable, repoRoot, cachePath string,
 	args := []string{
 		"graph", "calls", seed.Name, ".",
 		"--json",
-		"--depth", strconv.Itoa(canopyProjectGraphDepth),
+		"--depth", strconv.Itoa(canopyProjectDepth(reverse)),
 		"--file", seed.File,
 	}
 	if reverse {
@@ -742,7 +746,7 @@ func runCanopyGraph(ctx context.Context, executable, repoRoot, cachePath string,
 	return report, nil
 }
 
-func compactCanopyGraphEdges(report canopyGraphReport, root canopyGraphSymbol, forward bool) []canopyTOCEdge {
+func compactCanopyGraphEdges(report canopyGraphReport, root canopyGraphSymbol, forward bool) ([]canopyTOCEdge, bool) {
 	result := make([]canopyTOCEdge, 0, maxCanopyProjectEdges)
 	for _, edge := range report.Edges {
 		var source, target canopyGraphSymbol
@@ -785,10 +789,7 @@ func compactCanopyGraphEdges(report canopyGraphReport, root canopyGraphSymbol, f
 		}
 		return result[i].StartLine < result[j].StartLine
 	})
-	if len(result) > maxCanopyProjectEdges {
-		result = result[:maxCanopyProjectEdges]
-	}
-	return result
+	return result[:min(len(result), maxCanopyProjectEdges)], len(result) > maxCanopyProjectEdges
 }
 
 func sameCanopyGraphSymbol(left, right canopyGraphSymbol) bool {
@@ -811,6 +812,32 @@ func marshalCanopyProjectTOC(toc *canopyProjectTOC) ([]byte, error) {
 	// receives the summary and navigation roots even when a very large graph
 	// cannot fit in the prompt budget.
 	toc.Truncated = true
+	// Shorten the largest previews first so each navigation root and its
+	// measured counts survive before an entire flow must be omitted.
+	for len(encoded) > maxCanopyProjectBytes {
+		largest := 0
+		for _, flow := range toc.ImportantFlows {
+			largest = max(largest, len(flow.Callers), len(flow.Callees))
+		}
+		if largest == 0 {
+			break
+		}
+		for i := range toc.ImportantFlows {
+			flow := &toc.ImportantFlows[i]
+			if len(flow.Callers) == largest {
+				flow.Callers = flow.Callers[:largest-1]
+				flow.CallersTruncated = true
+			}
+			if len(flow.Callees) == largest {
+				flow.Callees = flow.Callees[:largest-1]
+				flow.CalleesTruncated = true
+			}
+		}
+		encoded, err = json.Marshal(toc)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for len(encoded) > maxCanopyProjectBytes && len(toc.ImportantFlows) > 0 {
 		toc.ImportantFlows = toc.ImportantFlows[:len(toc.ImportantFlows)-1]
 		encoded, err = json.Marshal(toc)

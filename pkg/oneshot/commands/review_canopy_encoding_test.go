@@ -2,10 +2,51 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestMarshalCanopyProjectTOC_TrimsPreviewsBeforeRoots(t *testing.T) {
+	nodes, edges := 40, 50
+	toc := canopyProjectTOC{Version: 1, Coverage: canopyProjectTOCCoverage{Summary: "available", FlowSeeds: 6, FlowsCollected: 6, CallGraphsComplete: true}}
+	for i := 0; i < 6; i++ {
+		flow := canopyTOCFlow{Root: canopyGraphSymbol{ID: fmt.Sprint(i), File: "a.go", Name: "Root", StartLine: i + 1}, Status: "available", GraphDirection: "callees", GraphDepth: 2, ReachableNodes: &nodes, GraphEdges: &edges}
+		for j := 0; j < 12; j++ {
+			edge := canopyTOCEdge{Name: fmt.Sprint(j), File: "callee.go", StartLine: j + 1, Count: 12 - j, Signature: strings.Repeat("argument ", 64)}
+			flow.Callers = append(flow.Callers, edge)
+			flow.Callees = append(flow.Callees, edge)
+		}
+		toc.ImportantFlows = append(toc.ImportantFlows, flow)
+	}
+	before, _ := json.Marshal(toc)
+	if len(before) <= maxCanopyProjectBytes {
+		t.Fatal("fixture must exceed the context budget")
+	}
+	encoded, err := marshalCanopyProjectTOC(&toc)
+	if err != nil || len(encoded) > maxCanopyProjectBytes || !toc.Truncated || len(toc.ImportantFlows) != 6 {
+		t.Fatalf("compaction lost roots or exceeded budget: bytes=%d flows=%d err=%v", len(encoded), len(toc.ImportantFlows), err)
+	}
+	if !toc.Coverage.CallGraphsComplete || toc.Coverage.FlowsCollected != 6 {
+		t.Fatal("preview compaction changed measured coverage")
+	}
+	for i, flow := range toc.ImportantFlows {
+		if flow.Root.ID != fmt.Sprint(i) || flow.GraphDepth != 2 || flow.GraphDirection != "callees" || *flow.ReachableNodes != nodes || *flow.GraphEdges != edges {
+			t.Fatalf("flow identity or counts changed: %+v", flow)
+		}
+		if !flow.CallersTruncated || !flow.CalleesTruncated || len(flow.Callers) == 0 || len(flow.Callees) == 0 {
+			t.Fatalf("preview omissions were not declared: %+v", flow)
+		}
+		for _, preview := range [][]canopyTOCEdge{flow.Callers, flow.Callees} {
+			for j, edge := range preview {
+				if edge.Name != fmt.Sprint(j) || edge.Count != 12-j {
+					t.Fatal("compaction discarded a higher-ranked edge")
+				}
+			}
+		}
+	}
+}
 
 func TestMarshalCanopyProjectTOC_PreservesEvidenceWithinCompactBudget(t *testing.T) {
 	for _, tc := range []struct {
