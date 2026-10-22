@@ -8,6 +8,7 @@
 package execmode
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -462,6 +463,7 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 	if strings.TrimSpace(pattern) == "" {
 		return nil, fmt.Errorf("pattern is required")
 	}
+	needle := []byte(pattern)
 	glob, _ := params["glob"].(string)
 	if glob != "" {
 		if _, err := filepath.Match(glob, "probe"); err != nil {
@@ -475,7 +477,7 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 	}
 	var matches []match
 	err := filepath.WalkDir(b.root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || len(matches) >= maxSearchResults {
+		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
@@ -494,15 +496,17 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
-		if err != nil || strings.Contains(string(data[:min(len(data), 1024)]), "\x00") {
+		if err != nil || bytes.IndexByte(data[:min(len(data), 1024)], 0) >= 0 {
 			return nil
 		}
 		rel, _ := filepath.Rel(b.root, path)
-		for i, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(line, pattern) {
-				matches = append(matches, match{File: rel, Line: i + 1, Text: strings.TrimSpace(line)})
+		lineNumber := 0
+		for line := range bytes.SplitSeq(data, []byte{'\n'}) {
+			lineNumber++
+			if bytes.Contains(line, needle) {
+				matches = append(matches, match{File: rel, Line: lineNumber, Text: string(bytes.TrimSpace(line))})
 				if len(matches) >= maxSearchResults {
-					break
+					return fs.SkipAll
 				}
 			}
 		}
