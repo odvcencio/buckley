@@ -171,8 +171,8 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	if name == "" {
 		name = "tool"
 	}
-	arguments = canonicalJSON(arguments)
-	result = canonicalEvidence(result)
+	arguments = canonicalToolValue(arguments, "{}")
+	result = canonicalToolValue(result, "<empty>")
 
 	actionKey := digest(name + "\x00" + arguments)
 	exactKey := digest(actionKey + "\x00" + fmt.Sprintf("%t", success) + "\x00" + result)
@@ -415,31 +415,19 @@ func repeatedSuffix(actions []string, maxWidth, repeats int) (int, bool) {
 	return 0, false
 }
 
-func canonicalJSON(raw string) string {
+func canonicalToolValue(raw, empty string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "{}"
+		return empty
 	}
-	var value any
-	if json.Unmarshal([]byte(raw), &value) != nil {
-		return strings.Join(strings.Fields(raw), " ")
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return strings.Join(strings.Fields(raw), " ")
-	}
-	return string(encoded)
-}
-
-func canonicalEvidence(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "<empty>"
-	}
-	var value any
-	if json.Unmarshal([]byte(raw), &value) == nil {
-		if encoded, err := json.Marshal(value); err == nil {
-			return string(encoded)
+	// Reject non-JSON text before copying large tool outputs into a byte slice.
+	switch raw[0] {
+	case '{', '[', '"', 't', 'f', 'n', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		var value any
+		if json.Unmarshal([]byte(raw), &value) == nil {
+			if encoded, err := json.Marshal(value); err == nil {
+				return string(encoded)
+			}
 		}
 	}
 	return strings.Join(strings.Fields(raw), " ")
