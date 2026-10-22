@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/netutil"
 )
 
 const (
@@ -43,6 +45,10 @@ const (
 	// exec_program can attempt internally, including rejected requests.
 	// One terminal rejection is audited before the broker closes admission.
 	DefaultCapabilityCallLimit = 32
+	// Leave room for the terminal rejection when every admitted call has its
+	// own keep-alive connection. Queued sockets stay outside the HTTP server.
+	maxBrokerConnections = DefaultCapabilityCallLimit + 1
+	maxBrokerHeaderBytes = 8 * 1024
 )
 
 // AuditRecord is one capability call's durable trace: what was asked,
@@ -191,6 +197,7 @@ func (b *Broker) Start(socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("execmode: listen on %s: %w", socketPath, err)
 	}
+	listener = netutil.LimitListener(listener, maxBrokerConnections)
 	b.listener = listener
 	b.socket = socketPath
 
@@ -199,7 +206,12 @@ func (b *Broker) Start(socketPath string) error {
 	mux.HandleFunc("/v1/files/list", b.handle(CapFilesList, b.filesList))
 	mux.HandleFunc("/v1/search/text", b.handle(CapSearchText, b.searchText))
 	mux.HandleFunc("/v1/code/outline", b.handleContext(CapCodeOutline, b.codeOutline))
-	b.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	b.server = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       5 * time.Second,
+		MaxHeaderBytes:    maxBrokerHeaderBytes,
+	}
 	go func() { _ = b.server.Serve(listener) }()
 	return nil
 }
