@@ -360,12 +360,12 @@ func TestBroker_GuidanceAndRicherCapabilities(t *testing.T) {
 		t.Fatalf("NewBroker: %v", err)
 	}
 
-	_, err = broker.filesList(map[string]any{"dir": "greeting.txt"})
+	_, err = broker.filesList(context.Background(), map[string]any{"dir": "greeting.txt"})
 	if err == nil || !strings.Contains(err.Error(), "use ReadFile") {
 		t.Fatalf("listing a file returned %v, want ReadFile guidance", err)
 	}
 
-	out, err := broker.filesList(map[string]any{"dir": ".", "recursive": true})
+	out, err := broker.filesList(context.Background(), map[string]any{"dir": ".", "recursive": true})
 	if err != nil {
 		t.Fatalf("recursive list: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestBroker_FilesListPaginatesWithoutSilentTruncation(t *testing.T) {
 		t.Fatalf("NewBroker: %v", err)
 	}
 
-	first, err := broker.filesList(map[string]any{"dir": ".", "recursive": true})
+	first, err := broker.filesList(context.Background(), map[string]any{"dir": ".", "recursive": true})
 	if err != nil {
 		t.Fatalf("first page: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestBroker_FilesListPaginatesWithoutSilentTruncation(t *testing.T) {
 		t.Fatalf("first page next_cursor = %d, want %d", cursor, maxListEntries)
 	}
 
-	second, err := broker.filesList(map[string]any{
+	second, err := broker.filesList(context.Background(), map[string]any{
 		"dir":       ".",
 		"recursive": true,
 		"cursor":    cursor,
@@ -482,7 +482,7 @@ func main() {
 // does not depend on the broker's anonymous result struct.
 func globSearchCount(t *testing.T, broker *Broker, pattern, glob string) int {
 	t.Helper()
-	out, err := broker.searchText(map[string]any{"pattern": pattern, "glob": glob})
+	out, err := broker.searchText(context.Background(), map[string]any{"pattern": pattern, "glob": glob})
 	if err != nil {
 		t.Fatalf("search %q glob %q: %v", pattern, glob, err)
 	}
@@ -585,7 +585,7 @@ func TestBroker_RecursiveDiscoverySkipsManagedWorktrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBroker: %v", err)
 	}
-	result, err := broker.filesList(map[string]any{"dir": ".", "recursive": true, "cursor": 0})
+	result, err := broker.filesList(context.Background(), map[string]any{"dir": ".", "recursive": true, "cursor": 0})
 	if err != nil {
 		t.Fatalf("filesList: %v", err)
 	}

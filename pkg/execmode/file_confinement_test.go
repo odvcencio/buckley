@@ -60,7 +60,7 @@ func TestBrokerSearchText_SymlinkConfinement(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/search/text", strings.NewReader(`{"pattern":"needle","glob":"*.txt"}`))
 			req.Header.Set("Authorization", "Bearer "+broker.Token())
 			response := httptest.NewRecorder()
-			broker.handle(CapSearchText, broker.searchText)(response, req)
+			broker.handleContext(CapSearchText, broker.searchText)(response, req)
 			var result struct {
 				Matches []struct {
 					File string

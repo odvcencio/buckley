@@ -203,8 +203,8 @@ func (b *Broker) Start(socketPath string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/files/read", b.handle(CapFilesRead, b.filesRead))
-	mux.HandleFunc("/v1/files/list", b.handle(CapFilesList, b.filesList))
-	mux.HandleFunc("/v1/search/text", b.handle(CapSearchText, b.searchText))
+	mux.HandleFunc("/v1/files/list", b.handleContext(CapFilesList, b.filesList))
+	mux.HandleFunc("/v1/search/text", b.handleContext(CapSearchText, b.searchText))
 	mux.HandleFunc("/v1/code/outline", b.handleContext(CapCodeOutline, b.codeOutline))
 	b.server = &http.Server{
 		Handler:           mux,
@@ -403,7 +403,10 @@ func (b *Broker) filesRead(params map[string]any) (any, error) {
 // filesList returns one bounded page of a directory listing. Recursive listing
 // lets the generated client fetch a whole tree without model round-trips; the
 // client follows next_cursor transparently and returns workspace-relative paths.
-func (b *Broker) filesList(params map[string]any) (any, error) {
+func (b *Broker) filesList(ctx context.Context, params map[string]any) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir, _ := params["dir"].(string)
 	if dir == "" {
 		dir = "."
@@ -430,6 +433,9 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 	if recursive {
 		seen := 0
 		err = filepath.WalkDir(full, func(path string, entry os.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -469,6 +475,9 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 			end = len(entries)
 		}
 		for _, entry := range entries[cursor:end] {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			name := entry.Name()
 			if entry.IsDir() {
 				name += "/"
@@ -478,6 +487,9 @@ func (b *Broker) filesList(params map[string]any) (any, error) {
 		hasMore = end < len(entries)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	sort.Strings(names)
@@ -514,7 +526,10 @@ func skipDirName(name string) bool {
 // base name matches a glob ("*.go"). The glob filter turns "search then
 // filter in the program" into one call, and keeps the result set inside
 // the cap for large repositories.
-func (b *Broker) searchText(params map[string]any) (any, error) {
+func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pattern, _ := params["pattern"].(string)
 	if strings.TrimSpace(pattern) == "" {
 		return nil, fmt.Errorf("pattern is required")
@@ -538,6 +553,9 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 	}
 	var matches []match
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -579,6 +597,11 @@ func (b *Broker) searchText(params map[string]any) (any, error) {
 		}
 		lineNumber := 0
 		for line := range bytes.SplitSeq(data, []byte{'\n'}) {
+			if lineNumber%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			lineNumber++
 			if bytes.Contains(line, needle) {
 				matches = append(matches, match{File: rel, Line: lineNumber, Text: string(bytes.TrimSpace(line))})

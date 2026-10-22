@@ -1,6 +1,7 @@
 package execmode
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,7 +22,7 @@ func TestBrokerSearchText_LineSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := broker.searchText(map[string]any{"pattern": "needle", "glob": "*.go"})
+	result, err := broker.searchText(context.Background(), map[string]any{"pattern": "needle", "glob": "*.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestBrokerSearchText_StopAtCap(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := broker.searchText(map[string]any{"pattern": "needle"})
+			result, err := broker.searchText(context.Background(), map[string]any{"pattern": "needle"})
 			if tc.fail {
 				if !errors.Is(err, os.ErrPermission) {
 					t.Fatalf("error before cap: %v", err)
@@ -110,7 +111,7 @@ func BenchmarkBrokerSearchText_DenseLines(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := broker.searchText(params); err != nil {
+		if _, err := broker.searchText(context.Background(), params); err != nil {
 			b.Fatal(err)
 		}
 	}
