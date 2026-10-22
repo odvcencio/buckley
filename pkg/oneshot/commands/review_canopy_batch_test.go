@@ -43,7 +43,7 @@ func TestCanopyGraphBatch_SelectSeedPreservesScopeDepthAndOrder(t *testing.T) {
 		edges   []string
 	}{
 		{"first_forward", false, 1, []string{"a", "m", "l"}, []string{"a>m", "m>l", "m>a"}},
-		{"first_reverse", true, 1, []string{"a", "b", "m", "c"}, []string{"a>m", "m>a", "c>a", "b>c"}},
+		{"first_reverse", true, 1, []string{"a", "m", "c"}, []string{"m>a", "c>a"}},
 		{"second_forward", false, 20, []string{"a2", "l", "x"}, []string{"a2>x", "x>l"}},
 		{"second_reverse", true, 20, []string{"a2"}, nil},
 	} {
@@ -67,7 +67,11 @@ func TestCanopyGraphBatch_SelectSeedPreservesScopeDepthAndOrder(t *testing.T) {
 			if !reflect.DeepEqual(nodes, tc.nodes) || !reflect.DeepEqual(edges, tc.edges) {
 				t.Fatalf("scope/depth/order changed: nodes=%v edges=%v", nodes, edges)
 			}
-			if tc.line == 1 && !reflect.DeepEqual(got.Edges[0], report.Edges[0]) {
+			firstEdge := report.Edges[0]
+			if tc.reverse {
+				firstEdge = report.Edges[3]
+			}
+			if tc.line == 1 && !reflect.DeepEqual(got.Edges[0], firstEdge) {
 				t.Fatal("edge counts, resolution, or samples changed")
 			}
 			if _, ok := batch.selectSeed(canopyProjectSeed{Name: "Foo", File: "missing.go"}); ok {
@@ -104,6 +108,35 @@ func TestNewCanopyGraphBatch_RejectsUnusableIdentityData(t *testing.T) {
 	var missing *canopyGraphBatch
 	if _, ok := missing.selectSeed(canopyProjectSeed{}); ok {
 		t.Fatal("missing batch reported a usable graph")
+	}
+}
+
+func TestRunCanopyGraph_RequestsOnlyRetainedCallerDepth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX shell")
+	}
+	root := t.TempDir()
+	helper := filepath.Join(root, "canopy")
+	script := `#!/bin/sh
+depth=''
+previous=''
+reverse=false
+for arg in "$@"; do
+  if [ "$previous" = '--depth' ]; then depth="$arg"; fi
+  if [ "$arg" = '--reverse' ]; then reverse=true; fi
+  previous="$arg"
+done
+if $reverse; then [ "$depth" = 1 ] || exit 63; else [ "$depth" = 2 ] || exit 64; fi
+printf '{"roots":[{"id":"root"}],"nodes":[{"id":"root"}],"edges":[]}'
+`
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, reverse := range []bool{false, true} {
+		report, err := runCanopyGraph(context.Background(), helper, root, "", canopyProjectSeed{Name: "Start"}, reverse)
+		if err != nil || len(report.Roots) != 1 || report.Roots[0].ID != "root" {
+			t.Fatalf("reverse=%v report=%+v err=%v", reverse, report, err)
+		}
 	}
 }
 

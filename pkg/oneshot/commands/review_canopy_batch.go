@@ -18,6 +18,15 @@ type canopyGraphBatch struct {
 	edgesByNode map[string][]int
 }
 
+func canopyProjectDepth(reverse bool) int {
+	// The overview retains only immediate callers. Callee walks also supply
+	// the depth-limited reachable-node and edge counts.
+	if reverse {
+		return 1
+	}
+	return canopyProjectGraphDepth
+}
+
 func (graphs canopyProjectGraphs) collectSeed(ctx context.Context, executable, repoRoot, cachePath string, seed canopyProjectSeed, reverse bool) (canopyGraphReport, bool) {
 	batch := graphs.forward
 	if reverse {
@@ -103,7 +112,7 @@ func (b *canopyGraphBatch) selectSeed(seed canopyProjectSeed) (canopyGraphReport
 		return canopyGraphReport{}, false
 	}
 	edges := make(map[int]bool)
-	for depth := 0; depth < canopyProjectGraphDepth && len(frontier) > 0; depth++ {
+	for depth := 0; depth < canopyProjectDepth(b.reverse) && len(frontier) > 0; depth++ {
 		var next []string
 		for _, id := range frontier {
 			for _, i := range b.edgesByNode[id] {
