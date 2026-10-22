@@ -89,22 +89,35 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 }
 
 func prepareModelMessages(messages []model.Message, opts EfficientContextOptions) ([]model.Message, map[int]bool, int) {
+	recentStart := len(messages) - opts.RecentMessages
+	if recentStart < 0 {
+		recentStart = 0
+	}
+	hasReasoning, hasOldToolResult := false, false
 	result := make([]model.Message, len(messages))
 	copy(result, messages)
 	for i := range result {
 		result[i].ToolCalls = append([]model.ToolCall(nil), messages[i].ToolCalls...)
 		result[i].ReasoningDetails = append([]model.ReasoningDetail(nil), messages[i].ReasoningDetails...)
-	}
-	recentStart := len(result) - opts.RecentMessages
-	if recentStart < 0 {
-		recentStart = 0
+		msg := &result[i]
+		if msg.Role == "assistant" && (msg.Reasoning != "" || len(msg.ReasoningDetails) > 0) {
+			hasReasoning = true
+		}
+		if msg.Role == "tool" && i < recentStart && (opts.PinnedFromIndex <= 0 || i >= opts.PinnedFromIndex) {
+			if content, ok := msg.Content.(string); ok && content != "" {
+				hasOldToolResult = true
+			}
+		}
 	}
 	reasoningStart := len(result) - opts.KeepReasoningRecent
 	if reasoningStart < 0 {
 		reasoningStart = 0
 	}
 
-	protectedReasoning := unansweredToolCallIndices(result)
+	var protectedReasoning map[int]bool
+	if hasReasoning {
+		protectedReasoning = unansweredToolCallIndices(result)
+	}
 	rootTaskIndex := firstUserMessageIndex(result)
 
 	// DCP-style deduplication is keyed by the operation (tool + arguments),
@@ -121,20 +134,24 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 		return toolResultIdentity{name, body}
 	}
 	// Borrow the original call metadata: only result's copied calls are compacted.
-	toolCallSignatures := make(map[string]*model.FunctionCall)
-	for _, msg := range messages {
-		if msg.Role != "assistant" {
-			continue
-		}
-		for i := range msg.ToolCalls {
-			call := &msg.ToolCalls[i]
-			if call.ID == "" {
+	var toolCallSignatures map[string]*model.FunctionCall
+	var seenToolResults map[toolResultIdentity]int
+	if hasOldToolResult {
+		toolCallSignatures = make(map[string]*model.FunctionCall)
+		seenToolResults = make(map[toolResultIdentity]int)
+		for _, msg := range messages {
+			if msg.Role != "assistant" {
 				continue
 			}
-			toolCallSignatures[call.ID] = &call.Function
+			for i := range msg.ToolCalls {
+				call := &msg.ToolCalls[i]
+				if call.ID == "" {
+					continue
+				}
+				toolCallSignatures[call.ID] = &call.Function
+			}
 		}
 	}
-	seenToolResults := make(map[toolResultIdentity]int)
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
 		pinned := opts.PinnedFromIndex > 0 && i < opts.PinnedFromIndex
@@ -144,7 +161,7 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 		}
 		var identity toolResultIdentity
 		var hasIdentity bool
-		if msg.Role == "tool" {
+		if hasOldToolResult && msg.Role == "tool" {
 			if content, ok := msg.Content.(string); ok && content != "" {
 				if call, matched := toolCallSignatures[msg.ToolCallID]; matched {
 					identity = identityFor(call.Name, call.Arguments)
