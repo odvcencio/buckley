@@ -155,11 +155,12 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	// Scrubbed environment: nothing from Buckley's process leaks in.
 	// GOCACHE is a shared, content-addressed warm cache — a cold cache
 	// would recompile the stdlib dependency chain on every run.
+	// Trim scratch paths so identical programs share build artifacts too.
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + scratch,
 		"GOCACHE=" + goCache,
-		"GOFLAGS=-mod=mod",
+		"GOFLAGS=-mod=mod -trimpath",
 		"GOPROXY=off",
 		"BUCKLEY_CAPS_SOCKET=" + broker.SocketPath(),
 		"BUCKLEY_CAPS_TOKEN=" + broker.Token(),
