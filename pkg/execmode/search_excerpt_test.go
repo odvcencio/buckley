@@ -31,6 +31,8 @@ func TestBrokerSearchText_Excerpts(t *testing.T) {
 		{"unicode", strings.Repeat("界", 1000) + "needle" + strings.Repeat("界", 1000), "needle", true},
 		{"whitespace_literal", "\u2003needle-skip" + strings.Repeat("x", 8<<10) + " needle ", " needle ", true},
 		{"long_literal", "head" + strings.Repeat("needle", 1000) + "tail", strings.Repeat("needle", 1000), true},
+		{"invalid_short", strings.Repeat("\xffx", 800) + "needle", "needle", true},
+		{"invalid_long", strings.Repeat("\xffx", 3000) + "needle", "needle", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -67,6 +69,43 @@ func TestBrokerSearchText_Excerpts(t *testing.T) {
 				t.Fatal("excerpt centered on a nonmatching occurrence")
 			}
 		})
+	}
+}
+
+func TestBrokerSearchText_InvalidUTF8Budget(t *testing.T) {
+	root := t.TempDir()
+	line := "needle" + strings.Repeat("\xffx", maxSearchMatchTextBytes)
+	if err := os.WriteFile(filepath.Join(root, "source.txt"), []byte(strings.Repeat(line+"\n", 70)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	broker, err := NewBroker(root, &recordingSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := broker.searchText(context.Background(), map[string]any{"pattern": "needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded excerptSearchResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Capped || len(decoded.Matches) != 70 {
+		t.Fatal("invalid bytes changed match coverage")
+	}
+	total := 0
+	for _, hit := range decoded.Matches {
+		total += len(hit.Text)
+		if !hit.TextTruncated || !utf8.ValidString(hit.Text) || len(hit.Text) > maxSearchMatchTextBytes {
+			t.Fatal("JSON normalization escaped the per-hit text budget")
+		}
+	}
+	if total > maxSearchTextBytes {
+		t.Fatalf("JSON normalization escaped the total text budget: %d", total)
 	}
 }
 

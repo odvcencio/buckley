@@ -630,7 +630,7 @@ func (b *Broker) searchText(ctx context.Context, params map[string]any) (any, er
 
 func searchTextExcerpt(line []byte, matchOffset, limit int) (string, bool) {
 	text := bytes.TrimSpace(line)
-	if len(text) <= limit {
+	if len(text) <= limit && utf8.Valid(text) {
 		return string(text), false
 	}
 	if limit == 0 {
@@ -645,7 +645,15 @@ func searchTextExcerpt(line []byte, matchOffset, limit int) (string, bool) {
 	for end > start && end < len(text) && !utf8.RuneStart(text[end]) {
 		end--
 	}
-	return string(text[start:end]), true
+	excerpt := strings.ToValidUTF8(string(text[start:end]), "\uFFFD")
+	if len(excerpt) > limit {
+		end = limit
+		for end > 0 && !utf8.RuneStart(excerpt[end]) {
+			end--
+		}
+		excerpt = excerpt[:end]
+	}
+	return excerpt, true
 }
 
 // A file size is only an allocation hint: concurrent growth must still fit the
