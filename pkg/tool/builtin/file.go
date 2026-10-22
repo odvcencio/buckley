@@ -142,7 +142,7 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Read file contents in bounded, 1-indexed line pages. Use anchor to start at a unique literal matching line in a known file. Oversized ranges return the first 100 lines; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
+	return "Read file contents in bounded, 1-indexed line pages. Use anchor to start at a unique literal matching line in a known file. Pages stop at the line or byte budget; use next_start_line from the result to continue. The content field is serialized file text: decode string escapes once before editing. Wrapper fields and optional line-number prefixes are not file bytes."
 }
 
 func (t *ReadFileTool) Parameters() ParameterSchema {
@@ -159,7 +159,7 @@ func (t *ReadFileTool) Parameters() ParameterSchema {
 			},
 			"end_line": {
 				Type:        "number",
-				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Larger ranges are capped to 100 lines per page.",
+				Description: "Last requested line (1-indexed, inclusive; defaults to start_line + 99). Pages return at most 100 lines and may stop earlier at the byte budget; follow next_start_line.",
 			},
 			"anchor": {
 				Type:        "string",
@@ -302,6 +302,7 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 	}
 
 	pageLines := make([]string, 0, endLine-startLine+1)
+	pageBytes := 0
 	if endLine >= startLine {
 		lineNumber := 0
 		for line := range strings.SplitSeq(contentStr, "\n") {
@@ -309,7 +310,12 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 			if lineNumber < startLine {
 				continue
 			}
+			if len(pageLines) > 0 && pageBytes+len(line)+1 > DefaultReadFilePageBytes {
+				endLine = lineNumber - 1
+				break
+			}
 			pageLines = append(pageLines, line)
+			pageBytes += len(line) + 1
 			if lineNumber == endLine {
 				break
 			}
@@ -373,6 +379,10 @@ func (t *ReadFileTool) Execute(params map[string]any) (*Result, error) {
 }
 
 const readFilePageLines = 100
+
+// DefaultReadFilePageBytes bounds multi-line pages before model encoding.
+// A single line may exceed this target; shared output and line limits still apply.
+const DefaultReadFilePageBytes = 16 << 10
 
 // normalizeReadFileParams drops placeholder values that models send for unused
 // optional arguments: an empty anchor, zero or negative line numbers, and null
