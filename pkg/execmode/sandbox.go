@@ -39,8 +39,12 @@ func DetectIsolation() string {
 		}
 		mounts := []string{"--unshare-all", "--die-with-parent",
 			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"}
-		inner := append([]string{bwrap}, mounts...)
-		inner = append(inner, "true")
+		inner, err := sandboxBaseArgv()
+		if err != nil {
+			return
+		}
+		inner = append(inner, runtimeSandboxFlags()...)
+		inner = append(inner, "--remount-ro", "/dev", "--remount-ro", "/proc", "--remount-ro", "/", "true")
 		probe := exec.Command(bwrap, append(mounts, inner...)...)
 		if err := probe.Run(); err == nil {
 			detected = IsolationBwrap
@@ -66,9 +70,8 @@ func resolveGOROOT() string {
 	return gorootPath
 }
 
-// sandboxBaseArgv supplies the common compiler/runtime mount plan. The
-// audited caps socket stays reachable through the per-run scratch bind.
-func sandboxBaseArgv(scratch string) ([]string, error) {
+// sandboxBaseArgv supplies common system mounts; each stage adds its own storage.
+func sandboxBaseArgv() ([]string, error) {
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
 		return nil, fmt.Errorf("execmode: bwrap not found: %w", err)
@@ -80,7 +83,6 @@ func sandboxBaseArgv(scratch string) ([]string, error) {
 		"--new-session",
 		"--proc", "/proc",
 		"--dev", "/dev",
-		"--tmpfs", "/tmp",
 	}
 	for _, dir := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives"} {
 		if _, err := os.Stat(dir); err == nil {
@@ -92,24 +94,41 @@ func sandboxBaseArgv(scratch string) ([]string, error) {
 			argv = append(argv, "--ro-bind", goroot, goroot)
 		}
 	}
-	argv = append(argv,
-		"--bind", scratch, scratch,
-		"--chdir", scratch,
-	)
 	return argv, nil
+}
+
+func runtimeSandboxFlags() []string {
+	return []string{
+		"--unshare-user", "--disable-userns",
+		"--size", fmt.Sprint(DefaultRuntimeScratchBytes), "--perms", "0700", "--tmpfs", "/buckley-scratch",
+		"--symlink", "/buckley-scratch", "/tmp",
+		"--setenv", "HOME", "/buckley-scratch",
+		"--setenv", "TMPDIR", "/buckley-scratch",
+		"--setenv", "BUCKLEY_CAPS_SOCKET", "/buckley-scratch/caps.sock",
+		"--chdir", "/buckley-scratch",
+	}
 }
 
 // sandboxArgv gives the Go compiler a writable cache, then uses go run's
 // execution hook to launch the binary without that mount. Runtime code
 // sees only its read-only executable, system paths and writable scratch.
 func sandboxArgv(scratch, goCache string) ([]string, error) {
-	argv, err := sandboxBaseArgv(scratch)
+	argv, err := sandboxBaseArgv()
 	if err != nil {
 		return nil, err
 	}
 	argsPath := filepath.Join(scratch, ".buckley-runtime-args")
+	runtimeArgs := append([]string{}, argv[1:]...)
+	runtimeArgs = append(runtimeArgs, runtimeSandboxFlags()...)
+	runtimeArgs = append(runtimeArgs,
+		"--perms", "0644", "--file", "4", "/buckley-scratch/main.go",
+		"--perms", "0644", "--file", "5", "/buckley-scratch/go.mod",
+		"--dir", "/buckley-scratch/caps",
+		"--perms", "0644", "--file", "6", "/buckley-scratch/caps/caps.go",
+		"--ro-bind", filepath.Join(scratch, "caps.sock"), "/buckley-scratch/caps.sock",
+	)
 	// NUL-separated bwrap arguments preserve literal paths without shell parsing.
-	if err := os.WriteFile(argsPath, []byte(strings.Join(argv[1:], "\x00")+"\x00"), 0600); err != nil {
+	if err := os.WriteFile(argsPath, []byte(strings.Join(runtimeArgs, "\x00")+"\x00"), 0600); err != nil {
 		return nil, fmt.Errorf("execmode: runtime arguments: %w", err)
 	}
 	wrapperPath := filepath.Join(scratch, ".buckley-runtime")
@@ -117,6 +136,9 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 		return nil, fmt.Errorf("execmode: runtime wrapper: %w", err)
 	}
 	argv = append(argv,
+		"--tmpfs", "/tmp",
+		"--bind", scratch, scratch,
+		"--chdir", scratch,
 		"--bind", goCache, goCache,
 		"--ro-bind", argv[0], "/buckley-bwrap",
 		"--ro-bind", argsPath, "/buckley-runtime-args",
@@ -128,5 +150,5 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 const runtimeWrapper = `#!/bin/sh
 buckley_program=$1
 shift
-exec /buckley-bwrap --args 3 --ro-bind "$buckley_program" /buckley-program -- /buckley-program "$@" 3</buckley-runtime-args
+exec /buckley-bwrap --args 3 --ro-bind "$buckley_program" /buckley-program --remount-ro /dev --remount-ro /proc --remount-ro / -- /buckley-program "$@" 3</buckley-runtime-args 4<"$HOME/main.go" 5<"$HOME/go.mod" 6<"$HOME/caps/caps.go"
 `
