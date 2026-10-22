@@ -459,11 +459,12 @@ func WalkDir(dir string) ([]string, error) {
 	return listAll(dir, true)
 }
 
-// Match is one text-search hit.
+// Match is one text-search hit. Text is a bounded excerpt, not the complete line.
 type Match struct {
 	File string ` + "`json:\"file\"`" + `
 	Line int    ` + "`json:\"line\"`" + `
 	Text string ` + "`json:\"text\"`" + `
+	TextTruncated bool ` + "`json:\"text_truncated\"`" + `
 }
 
 // SearchText finds literal-substring matches across the workspace.
@@ -495,7 +496,8 @@ const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.WalkDir(dir string) (entries []string, err error)        // whole tree, workspace-relative paths\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
-	"  type Match struct { File string; Line int; Text string }\n" +
+	"  type Match struct { File string; Line int; Text string; TextTruncated bool }\n" +
+	"Search Text is an excerpt: at most 2 KiB per hit and 64 KiB total. TextTruncated marks clipped or omitted text; File/Line still identify the hit. Use targeted file/chunk reads for complete source. capped reports the match-count limit, independently of text truncation.\n" +
 	"OutlineFile returns a JSON object: {symbols:[{kind,name,start_line,end_line}],coverage:{...},next_cursor?,source_sha256,source_bytes}. Decode coverage as json.RawMessage and print it unchanged; check json.Unmarshal errors. Use symbol ranges for targeted source reads. Follow next_cursor unchanged; pages count as calls and edits invalidate it. An outline is navigation, not inspected source or absence proof. If unavailable, use search/read.\n" +
 	"Paths are workspace-relative. One program may make at most 32 broker operations (rejected attempts count; exhaustion closes the broker); paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Large files: use ReadFileChunk and continue by advancing offset by int64(len(data)) until truncated is false; every call counts toward the 32-operation budget, so check errors and stop promptly. Chunk reads do not pin a file snapshot. Data is raw bytes, so carry a line split across chunk boundaries when doing line-based extraction. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
@@ -507,6 +509,6 @@ const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"\tif limit > 5 {\n\t\tlimit = 5\n\t}\n" +
 	"\tfmt.Printf(\"matches=%d capped=%v\\n\", len(matches), capped)\n" +
 	"\tfor _, match := range matches[:limit] {\n" +
-	"\t\tfmt.Printf(\"%s:%d %s\\n\", match.File, match.Line, match.Text)\n" +
+	"\t\tfmt.Printf(\"%s:%d text_truncated=%v %s\\n\", match.File, match.Line, match.TextTruncated, match.Text)\n" +
 	"\t}\n" +
 	"}"

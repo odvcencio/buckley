@@ -32,9 +32,10 @@ func TestBrokerSearchText_LineSemantics(t *testing.T) {
 	}
 	var got struct {
 		Matches []struct {
-			File string
-			Line int
-			Text string
+			File          string
+			Line          int
+			Text          string
+			TextTruncated bool `json:"text_truncated"`
 		}
 		Capped bool
 	}
@@ -46,8 +47,15 @@ func TestBrokerSearchText_LineSemantics(t *testing.T) {
 		t.Fatalf("capped=%v matches=%d", got.Capped, len(got.Matches))
 	}
 	for i, match := range got.Matches {
-		if match.File != "source.go" || match.Line != i+2 || match.Text != want[i] {
+		if match.File != "source.go" || match.Line != i+2 {
 			t.Fatalf("match %d: file=%q line=%d text_bytes=%d", i, match.File, match.Line, len(match.Text))
+		}
+		if i == 2 {
+			if !match.TextTruncated || len(match.Text) > maxSearchMatchTextBytes || !strings.HasSuffix(match.Text, "needle") {
+				t.Fatal("long-line excerpt lost its match or truncation flag")
+			}
+		} else if match.Text != want[i] || match.TextTruncated {
+			t.Fatalf("short match %d changed", i)
 		}
 	}
 }

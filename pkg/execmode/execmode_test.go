@@ -23,7 +23,7 @@ type recordingSink struct {
 }
 
 func TestCapsAPICard_TeachesBoundedSearchFirstComposition(t *testing.T) {
-	for _, want := range []string{"at most 32 broker operations", "SearchTextGlob", ".worktrees"} {
+	for _, want := range []string{"at most 32 broker operations", "SearchTextGlob", ".worktrees", "TextTruncated", "2 KiB", "64 KiB"} {
 		if !strings.Contains(CapsAPICard, want) {
 			t.Fatalf("CapsAPICard missing %q", want)
 		}
