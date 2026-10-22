@@ -422,11 +422,11 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				}
 				return apiErr
 			}
-			defer resp.Body.Close()
-
 			var chatResp ChatResponse
-			if err := decodeProviderResponse(resp, &chatResp); err != nil {
-				return fmt.Errorf("decoding response: %w", err)
+			decodeErr := decodeProviderResponse(resp, &chatResp)
+			_ = resp.Body.Close()
+			if decodeErr != nil {
+				return fmt.Errorf("decoding response: %w", decodeErr)
 			}
 			if chatResp.Error != nil {
 				message := strings.TrimSpace(chatResp.Error.Message)
