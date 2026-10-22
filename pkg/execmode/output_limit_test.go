@@ -35,3 +35,20 @@ func TestLimitedWriterTruncation(t *testing.T) {
 		})
 	}
 }
+
+func TestLimitedWriter_CustomLimitNotifiesOnce(t *testing.T) {
+	var buffer bytes.Buffer
+	notifications := 0
+	writer := &limitedWriter{buf: &buffer, limit: MaxSourceBytes, onTruncate: func() { notifications++ }}
+	if n, err := writer.Write(bytes.Repeat([]byte("x"), MaxSourceBytes)); err != nil || n != MaxSourceBytes || notifications != 0 {
+		t.Fatalf("exact write=%d notifications=%d err=%v", n, notifications, err)
+	}
+	for _, data := range [][]byte{nil, []byte("overflow"), []byte("again")} {
+		if n, err := writer.Write(data); err != nil || n != len(data) {
+			t.Fatalf("overflow write=%d err=%v", n, err)
+		}
+	}
+	if buffer.Len() != MaxSourceBytes || !writer.truncated || notifications != 1 {
+		t.Fatalf("bytes=%d truncated=%v notifications=%d", buffer.Len(), writer.truncated, notifications)
+	}
+}

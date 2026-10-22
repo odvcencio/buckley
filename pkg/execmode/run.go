@@ -18,6 +18,8 @@ const (
 	DefaultTimeout = 120 * time.Second
 	// maxOutputBytes bounds captured stdout/stderr each.
 	maxOutputBytes = 128 * 1024
+	// maxTranspilerStderrBytes keeps syntax diagnostics compact for callers.
+	maxTranspilerStderrBytes = 8 * 1024
 	// MaxSourceBytes bounds program source supplied by library and CLI callers.
 	MaxSourceBytes = 256 * 1024
 	// DefaultRuntimeScratchBytes bounds allocated file data in the runtime's
@@ -223,6 +225,14 @@ func (r *Runner) Run(ctx context.Context, source string) (result Result, retErr 
 // is a trusted host binary (its output is plain Go compiled in the same
 // sandbox); when it is not installed the dialect is unavailable.
 func (r *Runner) RunFW(ctx context.Context, fwSource string) (Result, error) {
+	if len(fwSource) > MaxSourceBytes {
+		return Result{}, fmt.Errorf("execmode: fw source exceeds %d bytes", MaxSourceBytes)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	if err := runCtx.Err(); err != nil {
+		return Result{}, fmt.Errorf("execmode: fw transpile interrupted: %w", err)
+	}
 	transpiler, err := exec.LookPath("ferrous-wheel")
 	if err != nil {
 		return Result{}, fmt.Errorf("execmode: ferrous-wheel not installed; the fw dialect is unavailable")
@@ -236,15 +246,31 @@ func (r *Runner) RunFW(ctx context.Context, fwSource string) (Result, error) {
 	if err := os.WriteFile(fwPath, []byte(fwSource), 0o644); err != nil {
 		return Result{}, fmt.Errorf("execmode: write fw source: %w", err)
 	}
-	out, err := exec.CommandContext(ctx, transpiler, "emit", fwPath).Output()
+	cmd := exec.CommandContext(runCtx, transpiler, "emit", fwPath)
+	configureProcess(cmd)
+	cmd.WaitDelay = 5 * time.Second
+	var stdout, stderr bytes.Buffer
+	stdoutW := &limitedWriter{buf: &stdout, limit: MaxSourceBytes, onTruncate: cancel}
+	stderrW := &limitedWriter{buf: &stderr, limit: maxTranspilerStderrBytes}
+	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
+	err = cmd.Run()
+	if stdoutW.truncated {
+		return Result{}, fmt.Errorf("execmode: fw generated Go exceeds %d bytes", MaxSourceBytes)
+	}
+	if runCtx.Err() != nil {
+		return Result{}, fmt.Errorf("execmode: fw transpile interrupted: %w", runCtx.Err())
+	}
 	if err != nil {
-		detail := err.Error()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			detail = strings.TrimSpace(string(exitErr.Stderr))
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		if stderrW.truncated {
+			detail += fmt.Sprintf(" [stderr truncated at %d bytes]", maxTranspilerStderrBytes)
 		}
 		return Result{}, fmt.Errorf("execmode: fw transpile failed: %s", detail)
 	}
-	return r.Run(ctx, string(out))
+	return r.Run(runCtx, stdout.String())
 }
 
 // sharedGoCache returns the warm build cache all exec programs share.
@@ -261,14 +287,23 @@ func sharedGoCache() string {
 }
 
 type limitedWriter struct {
-	buf       *bytes.Buffer
-	truncated bool
+	buf        *bytes.Buffer
+	limit      int
+	truncated  bool
+	onTruncate func()
 }
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
-	keep := min(len(p), max(0, maxOutputBytes-w.buf.Len()))
-	if keep < len(p) {
+	limit := w.limit
+	if limit == 0 {
+		limit = maxOutputBytes
+	}
+	keep := min(len(p), max(0, limit-w.buf.Len()))
+	if keep < len(p) && !w.truncated {
 		w.truncated = true
+		if w.onTruncate != nil {
+			w.onTruncate()
+		}
 	}
 	w.buf.Write(p[:keep])
 	return len(p), nil

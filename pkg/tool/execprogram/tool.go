@@ -140,6 +140,9 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		if err != nil {
 			return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: reuse %s: %v", reuse, err)}, nil
 		}
+		if len(obj.InlineBody) > execmode.MaxSourceBytes {
+			return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: source exceeds %d bytes", execmode.MaxSourceBytes)}, nil
+		}
 		source = string(obj.InlineBody)
 		if lang, ok := obj.Metadata["language"].(string); ok {
 			language = strings.ToLower(strings.TrimSpace(lang))
@@ -147,6 +150,9 @@ func (t *ProgramTool) ExecuteWithContext(ctx context.Context, params map[string]
 		if strings.TrimSpace(source) == "" {
 			return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: evidence %s holds no program source", reuse)}, nil
 		}
+	}
+	if len(source) > execmode.MaxSourceBytes {
+		return &builtin.Result{Success: false, Error: fmt.Sprintf("exec_program: source exceeds %d bytes", execmode.MaxSourceBytes)}, nil
 	}
 	if strings.TrimSpace(source) == "" {
 		return &builtin.Result{Success: false, Error: "exec_program: source (or reuse) is required"}, nil
