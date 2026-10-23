@@ -97,6 +97,9 @@ type EvidenceItem struct {
 	Label  string
 	Detail string
 	Paths  []string
+
+	// Derived from the recorded argv; display labels cannot prove a check kind.
+	checkKind string
 }
 
 // VerificationReport is the result of mapping evidence to changed paths.
@@ -151,9 +154,11 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 		if len(matched) == 0 {
 			continue
 		}
+		checkKind, _ := classifyReviewArgv(r.Argv)
 		item := EvidenceItem{
-			Kind:  "receipt",
-			Label: fmt.Sprintf("receipt %s: `%s`", shortID(r.ID), r.Command()),
+			checkKind: checkKind,
+			Kind:      "receipt",
+			Label:     fmt.Sprintf("receipt %s: `%s`", shortID(r.ID), r.Command()),
 			Detail: fmt.Sprintf("%s, exit %d, %s, on %s (%s/%s), %s",
 				r.Status, r.ExitCode, r.StartedAt.UTC().Format(time.RFC3339), r.Env.Hostname, r.Env.OS, r.Env.Arch,
 				time.Duration(r.DurationMS)*time.Millisecond),
@@ -405,7 +410,8 @@ func (r VerificationReport) Markdown() string {
 	b.WriteString("## Verification Evidence\n\n")
 	b.WriteString("The reviewer does not run build or test commands. Evidence below comes from verification receipts bound to the reviewed tree and from CI checks on the reviewed head.\n\n")
 	fmt.Fprintf(&b, "- Policy: `%s` (set by %s)\n", orNone(string(r.Mode)), r.sourceLabel())
-	fmt.Fprintf(&b, "- Verification: **%s**\n\n", r.Qualifier())
+	fmt.Fprintf(&b, "- Verification: **%s**\n", r.Qualifier())
+	fmt.Fprintf(&b, "- Supported review statuses: Build **%s**; Tests **%s**\n\n", r.checkStatus(reviewEvidenceBuild), r.checkStatus(reviewEvidenceTest))
 	if len(r.Covered) > 0 {
 		b.WriteString("### Covered\n\n")
 		for _, c := range r.Covered {
@@ -450,6 +456,7 @@ func orNone(s string) string {
 // ReviewPromptGuidance tells the model how to treat the evidence.
 const ReviewPromptGuidance = `VERIFICATION POLICY:
 - This policy supersedes instructions above to execute verification or require passing tests for approval. You do not run build or test commands, and run_verification is not available.
-- The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only when it reports verified coverage with passing evidence. Report FAIL only with supplied failing evidence. Report UNAVAILABLE when evidence is missing or coverage is incomplete. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
+- Copy the supported Build and Tests statuses from Verification Evidence; they account for command kind and changed-path coverage. A test receipt cannot prove a build-check result, or vice versa. Opaque scripts and CI checks still cover declared paths but do not prove a specific build/test status.
+- Missing check-specific verification is not a defect and does not lower the grade. Keep unsupported statuses UNAVAILABLE and use the report's overall verified/unverified qualifier in the verdict.
 - Failing evidence is a finding: report it, and do not approve while it stands.
 - Cite each receipt or CI check you rely on by its label.`

@@ -53,7 +53,7 @@ func TestFailingEvidenceBlocksApprovalOnly(t *testing.T) {
 	declined := &ReviewAgentResult{Parsed: baseParsedReview(GradeC, false)}
 	failing := &VerificationReport{Failing: []EvidenceItem{{Label: "receipt ev_X: `make test-js`", Detail: "FAIL"}}}
 	approved.Parsed.BuildVerification, approved.Parsed.TestVerification = VerificationUnavailable, VerificationUnavailable
-	declined.Parsed.BuildVerification, declined.Parsed.TestVerification = VerificationFail, VerificationFail
+	declined.Parsed.BuildVerification, declined.Parsed.TestVerification = VerificationUnavailable, VerificationUnavailable
 	if err := (ReviewBranchDef{SuppliedEvidenceOnly: true, Verification: failing}).ValidateAgentExecution(approved, nil); err == nil || !strings.Contains(err.Error(), "make test-js") {
 		t.Fatalf("approval over failing evidence: %v", err)
 	}
