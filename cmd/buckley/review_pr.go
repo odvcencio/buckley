@@ -199,21 +199,54 @@ func reviewPRFlagTakesValue(name string) bool {
 	}
 }
 
-// resolvePostedReviewTimeout applies the posted-review timeout ceiling and
-// reports whether the caller's requested timeout was silently reduced.
-// Posted reviews (opts.post) must stay inside defaultReviewTimeout so the
-// review plus its post-back attempts finish under external caller deadlines
-// (see TestPostedReviewBudgetsStayBelowFiveMinutes). A caller that asks for a
-// longer -timeout while posting gets a non-fatal warning explaining the
-// effective timeout instead of an unexplained deadline-exceeded failure.
-func resolvePostedReviewTimeout(requested time.Duration, post bool) (effective time.Duration, warning string) {
-	if !post || requested <= defaultReviewTimeout {
+// hostedReviewCeiling is the longest a posted review may run when an external
+// caller enforces its own deadline (a hosted CI job or the Buckbot service,
+// which cut a run off near five minutes). Local runs have no such caller, so
+// the ceiling is 0 (none) unless the environment asks for it:
+// BUCKLEY_POSTED_REVIEW_CEILING is a duration, "1" for the default, or "off";
+// GITHUB_ACTIONS=true implies the default.
+func hostedReviewCeiling(getenv func(string) string) time.Duration {
+	switch v := strings.TrimSpace(getenv("BUCKLEY_POSTED_REVIEW_CEILING")); v {
+	case "":
+		if getenv("GITHUB_ACTIONS") == "true" {
+			return defaultReviewTimeout
+		}
+		return 0
+	case "off", "0":
+		return 0
+	case "1", "true":
+		return defaultReviewTimeout
+	default:
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		return defaultReviewTimeout
+	}
+}
+
+// resolvePostedReviewTimeout returns the review deadline for a run that posts
+// its result. The post-back runs on its own completedBuckbotPostBudget after
+// the review, so a local run gives the review the requested timeout minus that
+// budget. Under a hosted ceiling the review is clamped to the ceiling instead,
+// with a warning; the ceiling already leaves room for the post-back. A request
+// too short to spare the budget is used as given.
+func resolvePostedReviewTimeout(requested time.Duration, post bool, ceiling time.Duration) (effective time.Duration, warning string) {
+	if !post {
 		return requested, ""
 	}
-	return defaultReviewTimeout, fmt.Sprintf(
-		"Warning: --timeout %s exceeds the posted-review ceiling; using %s because --post is set (posted reviews must leave room for the post-back attempt budget)",
-		requested, defaultReviewTimeout,
-	)
+	if ceiling > 0 {
+		if requested <= ceiling {
+			return requested, ""
+		}
+		return ceiling, fmt.Sprintf(
+			"Warning: --timeout %s exceeds the hosted posted-review ceiling; using %s because --post is set and BUCKLEY_POSTED_REVIEW_CEILING or GITHUB_ACTIONS applies (posted reviews must leave room for the post-back attempt budget)",
+			requested, ceiling,
+		)
+	}
+	if requested > 2*completedBuckbotPostBudget {
+		return requested - completedBuckbotPostBudget, ""
+	}
+	return requested, ""
 }
 
 func reviewPRUsageError() error {
@@ -229,7 +262,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post)
+	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post, hostedReviewCeiling(os.Getenv))
 	if timeoutWarning != "" {
 		fmt.Fprintln(os.Stderr, timeoutWarning)
 	}

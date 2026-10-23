@@ -368,35 +368,58 @@ func TestPostedReviewBudgetsStayBelowFiveMinutes(t *testing.T) {
 	}
 }
 
-func TestResolvePostedReviewTimeoutWarnsWhenClamped(t *testing.T) {
-	effective, warning := resolvePostedReviewTimeout(20*time.Minute, true)
+func TestResolvePostedReviewTimeoutClampsOnlyUnderAHostedCeiling(t *testing.T) {
+	effective, warning := resolvePostedReviewTimeout(20*time.Minute, true, defaultReviewTimeout)
 	if effective != defaultReviewTimeout {
 		t.Fatalf("effective = %s, want %s", effective, defaultReviewTimeout)
 	}
-	if warning == "" {
-		t.Fatal("warning = \"\", want a message explaining the requested timeout was reduced")
-	}
 	if !strings.Contains(warning, "20m0s") || !strings.Contains(warning, defaultReviewTimeout.String()) {
-		t.Fatalf("warning = %q, want it to mention both the requested and effective timeouts", warning)
+		t.Fatalf("warning = %q, want both the requested and effective timeouts", warning)
+	}
+	effective, warning = resolvePostedReviewTimeout(2*time.Minute, true, defaultReviewTimeout)
+	if effective != 2*time.Minute || warning != "" {
+		t.Fatalf("under the ceiling: effective=%s warning=%q, want 2m0s and none", effective, warning)
 	}
 }
 
-func TestResolvePostedReviewTimeoutNoWarningWhenNotClamped(t *testing.T) {
-	effective, warning := resolvePostedReviewTimeout(2*time.Minute, true)
-	if effective != 2*time.Minute {
-		t.Fatalf("effective = %s, want 2m0s", effective)
+func TestResolvePostedReviewTimeoutLocalRunKeepsRequestMinusPostBudget(t *testing.T) {
+	effective, warning := resolvePostedReviewTimeout(20*time.Minute, true, 0)
+	if want := 20*time.Minute - completedBuckbotPostBudget; effective != want {
+		t.Fatalf("effective = %s, want %s", effective, want)
 	}
 	if warning != "" {
 		t.Fatalf("warning = %q, want none", warning)
+	}
+	// A request too short to spare the reserve is used as given.
+	if effective, _ := resolvePostedReviewTimeout(30*time.Second, true, 0); effective != 30*time.Second {
+		t.Fatalf("short request effective = %s, want 30s", effective)
 	}
 }
 
 func TestResolvePostedReviewTimeoutNoClampWithoutPost(t *testing.T) {
-	effective, warning := resolvePostedReviewTimeout(20*time.Minute, false)
-	if effective != 20*time.Minute {
-		t.Fatalf("effective = %s, want 20m0s", effective)
+	effective, warning := resolvePostedReviewTimeout(20*time.Minute, false, defaultReviewTimeout)
+	if effective != 20*time.Minute || warning != "" {
+		t.Fatalf("effective=%s warning=%q, want 20m0s and none", effective, warning)
 	}
-	if warning != "" {
-		t.Fatalf("warning = %q, want none", warning)
+}
+
+func TestHostedReviewCeiling(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want time.Duration
+	}{
+		{"local run", nil, 0},
+		{"github actions", map[string]string{"GITHUB_ACTIONS": "true"}, defaultReviewTimeout},
+		{"explicit duration", map[string]string{"BUCKLEY_POSTED_REVIEW_CEILING": "3m"}, 3 * time.Minute},
+		{"explicit default", map[string]string{"BUCKLEY_POSTED_REVIEW_CEILING": "1"}, defaultReviewTimeout},
+		{"explicit off beats actions", map[string]string{"BUCKLEY_POSTED_REVIEW_CEILING": "off", "GITHUB_ACTIONS": "true"}, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostedReviewCeiling(func(k string) string { return tc.env[k] }); got != tc.want {
+				t.Fatalf("ceiling = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
