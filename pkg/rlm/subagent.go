@@ -567,6 +567,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		CallModel:      callModel,
 		DispatchTools:  dispatchTools,
 		History:        history,
+		ContextWindow:  func(string) int { return contextWindow },
 	})
 	if err != nil {
 		a.finalizeResult(result, start)
