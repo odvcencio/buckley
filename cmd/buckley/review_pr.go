@@ -787,7 +787,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts), opts.verification)
 	reviewDef := commands.ReviewPRDef{
 		SuppliedEvidenceOnly:        !opts.executeVerification,
-		FailingEvidence:             opts.verification.FailingSummary(),
+		Verification:                opts.verification,
 		ChangedFiles:                prCtx.Files,
 		GeneratedFiles:              prCtx.GeneratedFiles,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
@@ -956,7 +956,7 @@ func runPRReviewSharded(
 		prompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts), opts.verification)
 		reviewDef := commands.ReviewPRDef{
 			SuppliedEvidenceOnly:   !opts.executeVerification,
-			FailingEvidence:        opts.verification.FailingSummary(),
+			Verification:           opts.verification,
 			ChangedFiles:           shard.Files,
 			ContextIncomplete:      prCtx.HasIncompleteContext(),
 			CIStatus:               prCtx.PR.CIStatus,

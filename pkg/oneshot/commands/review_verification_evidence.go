@@ -165,7 +165,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 	if in.Mode != VerifyReceipt && in.ChecksOnHead && len(in.Checks) > 0 {
 		byName := map[string]CICheckState{}
 		for _, c := range in.Checks {
-			if prev, ok := byName[c.Name]; !ok || c.State == CICheckFail || prev == CICheckSkipped {
+			if prev, ok := byName[c.Name]; !ok || c.State == CICheckFail || (prev != CICheckFail && c.State != CICheckPass) {
 				byName[c.Name] = c.State
 			}
 		}
@@ -195,24 +195,8 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 					Detail: "passed on the reviewed head", Paths: matched}, true)
 			}
 		}
-		if !declaredCI {
-			allPass, anyPass := true, false
-			for _, c := range in.Checks {
-				switch c.State {
-				case CICheckPass:
-					anyPass = true
-				case CICheckFail:
-					allPass = false
-					add(EvidenceItem{Kind: "ci", Label: "ci check `" + c.Name + "`", Detail: "failed on the reviewed head (no ci_checks declared, so it is not mapped to paths)", Paths: append([]string(nil), required...)}, false)
-				case CICheckPending:
-					allPass = false
-				}
-			}
-			if allPass && anyPass && len(required) > 0 {
-				add(EvidenceItem{Kind: "ci", Label: fmt.Sprintf("all %d CI checks on the reviewed head", len(in.Checks)),
-					Detail: "default coverage: no ci_checks declared, so every passing check counts as repository build/test coverage",
-					Paths:  append([]string(nil), required...)}, true)
-			}
+		if !declaredCI && len(required) > 0 {
+			rep.Rejected = append(rep.Rejected, "CI checks have no declared path coverage; configure buckbot.verification.declared.ci_checks or record a verification receipt")
 		}
 	}
 
@@ -465,7 +449,7 @@ func orNone(s string) string {
 
 // ReviewPromptGuidance tells the model how to treat the evidence.
 const ReviewPromptGuidance = `VERIFICATION POLICY:
-- You do not run build or test commands, and run_verification is not available.
-- The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only for paths it lists as covered. Report UNAVAILABLE for unverified paths. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
+- This policy supersedes instructions above to execute verification or require passing tests for approval. You do not run build or test commands, and run_verification is not available.
+- The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only when it reports verified coverage with passing evidence. Report FAIL only with supplied failing evidence. Report UNAVAILABLE when evidence is missing or coverage is incomplete. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
 - Failing evidence is a finding: report it, and do not approve while it stands.
 - Cite each receipt or CI check you rely on by its label.`

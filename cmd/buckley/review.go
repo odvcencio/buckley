@@ -686,6 +686,18 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		return nil, err
 	}
 
+	files := make([]string, 0, len(projectCtx.TrackedFiles)+len(projectCtx.UntrackedFiles))
+	files = append(files, projectCtx.TrackedFiles...)
+	files = append(files, projectCtx.UntrackedFiles...)
+	verification, verifyErr := reviewPolicy.resolveVerificationReport(ctx, verificationTarget{
+		Files: files, HeadRev: projectCtx.HeadCommit, LocalChanges: snapshot.HasPatch(),
+	})
+	if verifyErr != nil {
+		spinner.StopWithError("verification evidence check failed")
+		return nil, verifyErr
+	}
+	reviewPolicy.verification = verification
+
 	spinner.SetMessage("Canopy TOC ready; expanding exhaustive repository coverage...")
 	plan := reviewExecutionPlan{
 		sizeClass:          "project",
@@ -708,7 +720,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
-	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
+	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy), reviewPolicy.verification)
 	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{Depth: string(reviewPolicy.depth), SuppliedEvidenceOnly: !reviewPolicy.executeVerification}, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
@@ -736,13 +748,16 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		spinner.StopWithError(runErr.Error())
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
+			partial.reviewText = appendVerificationSection(partial.reviewText, reviewPolicy.verification)
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
 	spinner.StopWithSuccess("Project review complete")
-	return reviewResultFromAgent(fwResult, audit), nil
+	complete := reviewResultFromAgent(fwResult, audit)
+	complete.reviewText = appendVerificationSection(complete.reviewText, reviewPolicy.verification)
+	return complete, nil
 }
 
 func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (result *reviewCommandResult, reviewErr error) {
@@ -802,7 +817,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	verification, verifyErr := reviewPolicy.resolveVerificationReport(ctx, verificationTarget{
 		Files:        reviewChangedFilePaths(branchCtx.Files),
 		HeadRev:      branchCtx.HeadCommit,
-		LocalChanges: reviewScope != commands.ReviewScopeBranch,
+		LocalChanges: snapshot.HasPatch(),
 	})
 	if verifyErr != nil {
 		spinner.StopWithError("verification evidence check failed")
@@ -823,7 +838,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy), reviewPolicy.verification)
 	reviewDef := commands.ReviewBranchDef{
 		SuppliedEvidenceOnly: !reviewPolicy.executeVerification,
-		FailingEvidence:      reviewPolicy.verification.FailingSummary(),
+		Verification:         reviewPolicy.verification,
 		ChangedFiles:         changedFiles,
 		GeneratedFiles:       branchCtx.GeneratedFiles,
 		ContextIncomplete:    branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,

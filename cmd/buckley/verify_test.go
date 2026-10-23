@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"m31labs.dev/buckley/pkg/storage"
+)
 
 func TestGlobsOverlap(t *testing.T) {
 	tests := []struct {
@@ -25,5 +32,24 @@ func TestGlobsOverlap(t *testing.T) {
 				t.Fatalf("globsOverlap(%v, %v) = %v, want %v", tc.requested, tc.declared, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOpenVerifyLedger_UsesConfiguredStorageBudget(t *testing.T) {
+	t.Setenv(envBuckleyDataDir, t.TempDir())
+	old := configPath
+	t.Cleanup(func() { configPath = old })
+	configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("resources:\n  storage_bytes: 16777216\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openVerifyLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	budget, err := storage.ReadStorageBudget(context.Background(), store.DB())
+	if err != nil || budget.LimitBytes != 16<<20 {
+		t.Fatalf("budget=%+v err=%v", budget, err)
 	}
 }

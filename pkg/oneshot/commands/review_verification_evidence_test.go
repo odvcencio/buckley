@@ -103,19 +103,6 @@ func TestEvaluateVerificationCIChecks(t *testing.T) {
 	}
 }
 
-func TestEvaluateVerificationDefaultCICoverageSaysSo(t *testing.T) {
-	in := VerificationInput{Mode: VerifyReceiptOrCI, Files: []string{"a.go", "b.go"}, ChecksOnHead: true,
-		Checks: []CICheck{{"build", CICheckPass}, {"test", CICheckPass}, {"docs", CICheckSkipped}}}
-	rep := EvaluateVerification(in)
-	if len(rep.Covered) != 1 || len(rep.Covered[0].Paths) != 2 || !strings.Contains(rep.Covered[0].Detail, "default coverage") {
-		t.Fatalf("default CI coverage = %+v", rep.Covered)
-	}
-	in.Checks = append(in.Checks, CICheck{"slow", CICheckPending})
-	if rep := EvaluateVerification(in); len(rep.Covered) != 0 {
-		t.Fatalf("a pending check must block default coverage: %+v", rep)
-	}
-}
-
 func TestVerificationGate(t *testing.T) {
 	declared := []DeclaredVerification{{Name: "js", Paths: []string{"client/**"}, Command: []string{"make", "test-js"}}}
 	in := VerificationInput{Mode: VerifyReceipt, Files: []string{"client/js/a.js", "scene/x.go"}, Declared: declared}

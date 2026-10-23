@@ -31,9 +31,8 @@ type ReviewBranchDef struct {
 	// VerificationReport). The zero value keeps the older behavior, where the
 	// review runs verification in its sandbox; Buckbot sets this by default.
 	SuppliedEvidenceOnly bool
-	// FailingEvidence describes failing receipts or CI checks. An approval is
-	// inconsistent with any of them.
-	FailingEvidence []string
+	// Verification binds result claims to the supplied receipts and CI checks.
+	Verification *VerificationReport
 }
 
 func (ReviewBranchDef) Name() string { return "review" }
@@ -85,7 +84,7 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 
 func (d ReviewBranchDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
 	if d.SuppliedEvidenceOnly {
-		return validateNoApprovalOverFailingEvidence(result, d.FailingEvidence)
+		return validateReviewSuppliedEvidence(result, d.Verification)
 	}
 	if err := validateReviewExecutionEvidenceWithCoverage(result, execution, d.ChangedFiles, reviewDepthNeedsVerification(d.Depth)); err != nil {
 		return err
@@ -119,7 +118,11 @@ type ReviewProjectDef struct {
 func (ReviewProjectDef) Name() string { return "review-project" }
 
 func (d ReviewProjectDef) SystemPrompt() string {
-	return appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
+	prompt := appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
+	if d.SuppliedEvidenceOnly {
+		prompt += "\n\n" + ReviewPromptGuidance
+	}
+	return prompt
 }
 
 func (d ReviewProjectDef) AllowedTools() []string {
@@ -193,8 +196,8 @@ type ReviewPRDef struct {
 	// SuppliedEvidenceOnly stops the review from running verification; see
 	// ReviewBranchDef.
 	SuppliedEvidenceOnly bool
-	// FailingEvidence describes failing receipts or CI checks.
-	FailingEvidence []string
+	// Verification binds result claims to the supplied receipts and CI checks.
+	Verification *VerificationReport
 }
 
 func (ReviewPRDef) Name() string { return "review-pr" }
@@ -478,7 +481,7 @@ func reviewFenceMarker(line string) string {
 
 func (d ReviewPRDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
 	if d.SuppliedEvidenceOnly {
-		return validateNoApprovalOverFailingEvidence(result, d.FailingEvidence)
+		return validateReviewSuppliedEvidence(result, d.Verification)
 	}
 	review, ok := result.(*ReviewAgentResult)
 	if ok && review.Parsed != nil && review.Parsed.Approved && d.authoritativeRemoteCIPasses() {

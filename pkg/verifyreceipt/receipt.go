@@ -74,7 +74,7 @@ type Receipt struct {
 }
 
 // Command renders the argv for display.
-func (r Receipt) Command() string { return strings.Join(r.Argv, " ") }
+func (r Receipt) Command() string { return string(evidence.Redact([]byte(strings.Join(r.Argv, " ")))) }
 
 // RecordOptions describes one run to record.
 type RecordOptions struct {
@@ -96,7 +96,7 @@ type RecordOptions struct {
 
 // ErrDirtyTree means the work tree has uncommitted changes, so a receipt could
 // not be tied to one commit.
-var ErrDirtyTree = errors.New("working tree is not clean; commit or stash changes so the receipt matches one tree")
+var ErrDirtyTree = errors.New("working tree is not clean (including changes hidden by index flags); commit or stash changes so the receipt matches one tree")
 
 // Record runs opts.Argv in the real work tree and stores a receipt, with the
 // log, in store. It refuses a dirty tree before the run and refuses to record
@@ -209,8 +209,9 @@ func Record(ctx context.Context, store *evidence.SQLiteStore, opts RecordOptions
 	if err != nil {
 		return Receipt{}, fmt.Errorf("verify: store receipt: %w", err)
 	}
-	_ = store.Pin(ctx, logObj.ID, "verification-receipt:"+obj.ID)
-	_ = store.Pin(ctx, obj.ID, "verification-receipt")
+	if err := store.PinVerificationReceipt(ctx, obj.ID, logObj.ID); err != nil {
+		return Receipt{}, fmt.Errorf("verify: retain receipt and log: %w", err)
+	}
 	receipt.ID = obj.ID
 	return receipt, nil
 }
@@ -232,7 +233,7 @@ func Load(ctx context.Context, store *evidence.SQLiteStore, tree string) (Loaded
 	if store == nil || tree == "" {
 		return out, nil
 	}
-	summaries, err := store.Query(ctx, evidence.Query{Kinds: []evidence.Kind{evidence.KindVerificationReceipt}, Limit: 5000})
+	summaries, err := store.Query(ctx, evidence.Query{Kinds: []evidence.Kind{evidence.KindVerificationReceipt}, Tree: tree, Limit: 5000})
 	if err != nil {
 		return out, err
 	}

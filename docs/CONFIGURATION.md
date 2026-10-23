@@ -500,14 +500,18 @@ buckbot:
   the reviewed head's tree and its log still matches the digest. Receipts are
   not signed (Buckley has no signing facility); the tree hash and digest guard
   against accidental reuse, not against someone who edits the ledger.
+- **Retention.** Verification receipts and their logs expire after the durable
+  evidence retention period (180 days by default). Explicit user and retained-run
+  pins preserve both. Verification recording honors `resources.storage_bytes`
+  (512 MiB by default) and reclaims expired receipts and orphan logs before writing.
 - **Reruns.** When several receipts on a tree share the same command,
   directory and path globs, the newest one counts. A passing rerun replaces an
   earlier failure of the same command on that tree.
 - **CI.** For a PR, check runs reported on the exact head commit count.
   `ci_checks` names the checks that cover a declared glob; a pending, failed,
-  skipped or other-commit check does not cover it. With no `ci_checks`
-  declared, all passing checks on the head count as coverage for repository
-  build and test, and the report says so.
+  skipped or other-commit check does not cover it. Duplicate named checks
+  must all pass. Checks without declared path coverage are reported but do not
+  verify source paths; configure `ci_checks` or record a verification receipt.
 - **Report.** Every review ends with a "Verification Evidence" section listing
   covered paths with the receipt or check that covers them, failing evidence
   (a finding: a review does not approve over it), and unverified paths. A
@@ -522,7 +526,7 @@ buckbot:
   `./.buckley/config.yaml`, then the user config, then `none`. The report names
   the source. Labels: `buckbot:verify-required` (receipt-or-ci),
   `buckbot:verify-receipt`, `buckbot:verify-optional` (none); with several, the
-  strictest wins. `buckley pr --require-verification` (or `--require-receipt`,
+  strictest wins (`receipt` is stricter than `receipt-or-ci`). `buckley pr --require-verification` (or `--require-receipt`,
   `--no-require-verification`) sets the label when it creates or updates a PR,
   creating the label in the repository if it is missing, and removes only the
   other `buckbot:verify-*` labels. `buckley pr label <pr>` with the same flags

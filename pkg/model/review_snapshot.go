@@ -306,6 +306,9 @@ func (s *ReviewSnapshot) Commit() string {
 	return s.commit
 }
 
+// HasPatch reports whether the snapshot includes changes beyond its HEAD commit.
+func (s *ReviewSnapshot) HasPatch() bool { return s != nil && len(s.patch) > 0 }
+
 func (s *ReviewSnapshot) Patch() []byte {
 	if s == nil {
 		return nil

@@ -9,10 +9,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/verifyreceipt"
 )
 
@@ -43,6 +45,10 @@ func runVerifyCommand(args []string) error {
 }
 
 func openVerifyLedger() (*evidence.SQLiteStore, error) {
+	cfg, err := loadConfiguredConfig()
+	if err != nil {
+		return nil, err
+	}
 	path, err := resolveLedgerDBPath()
 	if err != nil {
 		return nil, err
@@ -50,7 +56,23 @@ func openVerifyLedger() (*evidence.SQLiteStore, error) {
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {
 		return nil, fmt.Errorf("prepare ledger directory: %w", err)
 	}
-	return evidence.New(path)
+	store, err := evidence.New(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := store.SweepCount(context.Background(), evidence.DefaultRetentionPolicy(), time.Now()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("clean expired verification evidence: %w", err)
+	}
+	if _, err := store.CleanupOrphanBlobCount(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("clean expired verification logs: %w", err)
+	}
+	if err := storage.ConfigureStorageBudget(context.Background(), store.DB(), cfg.Resources.StorageBytes); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("configure verification storage budget: %w", err)
+	}
+	return store, nil
 }
 
 func dirOf(path string) string {
@@ -88,7 +110,7 @@ func runVerifyRecord(args []string) error {
 	if len(argv) == 0 {
 		return errors.New("verify record needs a command after --\n" + verifyUsage)
 	}
-	cfg, _ := config.Load()
+	cfg, _ := loadConfiguredConfig()
 	if len(paths) == 0 {
 		if cfg != nil {
 			for _, d := range cfg.Review.Verification.Declared {
@@ -135,7 +157,7 @@ func runVerifyRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load()
+	cfg, err := loadConfiguredConfig()
 	if err != nil {
 		return err
 	}
