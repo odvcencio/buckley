@@ -2,14 +2,103 @@ package main
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/experiment"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
 )
+
+func TestRunExperimentReplay_Result(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+		response   string
+		wantStatus experiment.RunStatus
+		wantError  string
+	}{
+		{"completed", http.StatusOK, `{"id":"synthetic-replay","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"fixture-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`, experiment.RunCompleted, ""},
+		{"rejected", http.StatusBadRequest, `{"error":{"message":"synthetic replay rejected","type":"invalid_request_error"}}`, experiment.RunFailed, "synthetic replay rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			repo := initTempGitRepo(t)
+			t.Chdir(repo)
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+					t.Errorf("unexpected provider request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.statusCode)
+				_, _ = io.WriteString(w, tc.response)
+			}))
+			t.Cleanup(server.Close)
+			store, err := storage.New(filepath.Join(t.TempDir(), "replay.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			now := time.Now()
+			if err := store.CreateSession(&storage.Session{ID: "source", Status: storage.SessionStatusPaused, CreatedAt: now, LastActive: now}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SaveMessage(&storage.Message{SessionID: "source", Role: "user", Content: "Reply fixture-ok only.", Timestamp: now}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.Providers.OpenRouter.Enabled = false
+			cfg.Providers.OpenAI.Enabled = true
+			cfg.Providers.OpenAI.APIKey = "synthetic-key"
+			cfg.Providers.OpenAI.BaseURL = server.URL
+			cfg.Models.DefaultProvider = "openai"
+			cfg.Models.Execution = "gpt-4o"
+			cfg.Experiment.Enabled = true
+			cfg.Experiment.WorktreeRoot = t.TempDir()
+			cfg.Experiment.CleanupOnDone = true
+			mgr, err := model.NewManager(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := initDependenciesFn
+			t.Cleanup(func() { initDependenciesFn = original })
+			initDependenciesFn = func() (*config.Config, *model.Manager, *storage.Store, error) {
+				return cfg, mgr, store, nil
+			}
+			err = runExperimentReplay([]string{"source", "--model", "gpt-4o", "--provider", "openai", "--live-tools"})
+			if requests.Load() != 1 {
+				t.Fatalf("provider calls = %d, want one", requests.Load())
+			}
+			experiments := experiment.NewStoreFromStorage(store)
+			stored, loadErr := experiments.ListExperiments(1, "")
+			if loadErr != nil || len(stored) != 1 {
+				t.Fatalf("stored experiments = %+v, error = %v", stored, loadErr)
+			}
+			runs, loadErr := experiments.ListRuns(stored[0].ID)
+			if loadErr != nil || len(runs) != 1 || runs[0].Status != tc.wantStatus {
+				t.Fatalf("stored runs = %+v, error = %v, want %s", runs, loadErr, tc.wantStatus)
+			}
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("replay error = %v, want %q", err, tc.wantError)
+				}
+			} else if err != nil || runs[0].Output != "fixture-ok" {
+				t.Fatalf("replay error = %v, output = %q", err, runs[0].Output)
+			}
+		})
+	}
+}
 
 func TestRunExperimentReplayRejectsWithoutLiveToolsBeforeDependencies(t *testing.T) {
 	original := initDependenciesFn
