@@ -52,23 +52,34 @@ func hasGeneratedHeader(seg string) bool {
 	return false
 }
 
-// markGeneratedSiblings classifies a file as build output when the diff also
-// changes a compressed copy or source map of it that is itself generated.
+// markGeneratedSiblings classifies a file as build output when it sits beside
+// build output the diff also changes: its compressed copy or source map is
+// generated (so it is generated), or it is a compressed copy or source map of
+// a file that is generated. Compressed copies are binary, so they qualify too.
 func markGeneratedSiblings(files []FileDiff) {
-	generated := make(map[string]bool, len(files))
-	for _, f := range files {
-		if f.Generated() {
-			generated[f.Path] = true
-		}
+	byPath := make(map[string]int, len(files))
+	for i, f := range files {
+		byPath[f.Path] = i
 	}
-	for i := range files {
-		if files[i].Reason != ReasonNone {
-			continue
-		}
-		for _, suffix := range siblingSuffixes {
-			if generated[files[i].Path+suffix] {
-				files[i].Reason = ReasonGeneratedSibling
-				break
+	for changed := true; changed; {
+		changed = false
+		for i := range files {
+			if files[i].Reason != ReasonNone && files[i].Reason != ReasonBinary {
+				continue
+			}
+			for _, suffix := range siblingSuffixes {
+				if j, ok := byPath[files[i].Path+suffix]; ok && files[j].Generated() {
+					files[i].Reason, changed = ReasonGeneratedSibling, true
+					break
+				}
+				stem, ok := strings.CutSuffix(files[i].Path, suffix)
+				if !ok {
+					continue
+				}
+				if j, ok := byPath[stem]; ok && files[j].Generated() {
+					files[i].Reason, changed = ReasonGeneratedSibling, true
+					break
+				}
 			}
 		}
 	}

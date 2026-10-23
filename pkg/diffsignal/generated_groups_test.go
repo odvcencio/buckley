@@ -172,3 +172,25 @@ func TestCapture_ClassifiesSiblingsAndHeaders(t *testing.T) {
 		t.Errorf("hint=%q bytes=%d", got["gen/types.go"].GeneratedBy, got["client/patch.js.br"].DiffBytes)
 	}
 }
+
+func TestSplit_CompressedCopiesBesideGeneratedFileAreGenerated(t *testing.T) {
+	binary := func(p string) string {
+		return fmt.Sprintf("diff --git a/%[1]s b/%[1]s\nindex 5555555..6666666 100644\nBinary files a/%[1]s and b/%[1]s differ\n", p)
+	}
+	raw := newFileDiff("client/patch.js", "+export const patch = 1;\n") +
+		binary("client/patch.js.br") + binary("client/patch.js.gz") +
+		newFileDiff("client/patch.js.map", "+{}\n") +
+		binary("assets/logo.png") + binary("assets/orphan.js.gz")
+	got := map[string]Reason{}
+	for _, f := range Split(raw) {
+		got[f.Path] = f.Reason
+	}
+	for _, p := range []string{"client/patch.js", "client/patch.js.br", "client/patch.js.gz", "client/patch.js.map"} {
+		if !(FileDiff{Reason: got[p]}).Generated() {
+			t.Errorf("%s reason = %q, want generated", p, got[p])
+		}
+	}
+	if got["assets/logo.png"] != ReasonBinary || got["assets/orphan.js.gz"] != ReasonBinary {
+		t.Errorf("binaries with no generated neighbour: logo=%q orphan=%q, want binary", got["assets/logo.png"], got["assets/orphan.js.gz"])
+	}
+}
