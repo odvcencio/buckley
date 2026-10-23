@@ -291,6 +291,9 @@ func (r VerificationReport) Gate() (int, string) {
 		for _, p := range limitList(r.Unverified, 20) {
 			fmt.Fprintf(&b, "  - %s\n", p)
 		}
+		for _, reason := range limitList(r.Rejected, 4) {
+			fmt.Fprintf(&b, "Rejected evidence: %s\n", reason)
+		}
 		b.WriteString("Run, from the reviewed commit with a clean tree:\n")
 		for _, c := range r.RecordCommands() {
 			fmt.Fprintf(&b, "  %s\n", c)
@@ -347,13 +350,23 @@ func recordCommand(paths, argv []string) string {
 	var b strings.Builder
 	b.WriteString("buckley verify record")
 	for _, p := range paths {
-		b.WriteString(" --paths '" + p + "'")
+		b.WriteString(" --paths " + quoteVerificationArgument(p))
 	}
 	b.WriteString(" --")
 	for _, a := range argv {
-		b.WriteString(" " + a)
+		b.WriteString(" " + quoteVerificationArgument(a))
 	}
 	return b.String()
+}
+
+// quoteVerificationArgument preserves one argv entry when pasted into a POSIX shell.
+func quoteVerificationArgument(arg string) string {
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_@%+=:,./-", r))
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }
 
 func topDir(file string) string {
@@ -442,6 +455,16 @@ func (r VerificationReport) Markdown() string {
 			fmt.Fprintf(&b, "- %s\n", x)
 		}
 		b.WriteString("\n")
+	}
+	if len(r.Unverified) > 0 {
+		b.WriteString("### Record verification\n\nFrom the reviewed commit with a clean tree, run the applicable commands below, then rerun Buckbot. Replace `<your test command>` with your verification command.\n\n")
+		commands := r.RecordCommands()
+		for _, command := range commands[:min(5, len(commands))] {
+			fmt.Fprintf(&b, "    %s\n\n", strings.ReplaceAll(command, "\n", "\n    "))
+		}
+		if len(commands) > 5 {
+			fmt.Fprintf(&b, "%d more verification commands omitted; `buckley verify run` runs the declared commands.\n\n", len(commands)-5)
+		}
 	}
 	return strings.TrimSpace(b.String()) + "\n"
 }
