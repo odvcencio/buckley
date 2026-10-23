@@ -121,7 +121,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_REVIEW, BUCKLEY_ONESHOT_EFFORT, or config)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout (project reviews default to 20m)")
+	timeout := fs.Duration("timeout", reviewTimeoutDefault(), "total review timeout (project reviews default to 20m)")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
