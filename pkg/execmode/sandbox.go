@@ -125,6 +125,10 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	goroot := resolveGOROOT()
+	if goroot == "" {
+		return nil, fmt.Errorf("execmode: cannot resolve the Go toolchain root")
+	}
 	argsPath := filepath.Join(scratch, ".buckley-runtime-args")
 	runtimeArgs := append([]string{}, argv[1:]...)
 	runtimeArgs = append(runtimeArgs, runtimeSandboxFlags()...)
@@ -150,7 +154,7 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 		"--ro-bind", argsPath, "/buckley-runtime-args",
 		"--ro-bind", wrapperPath, "/buckley-runtime",
 	)
-	return append(argv, "go", "run", "-exec", "/buckley-runtime", "."), nil
+	return append(argv, filepath.Join(goroot, "bin", "go"), "run", "-exec", "/buckley-runtime", "."), nil
 }
 
 const runtimeWrapper = `#!/bin/sh

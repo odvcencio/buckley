@@ -740,7 +740,16 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 	if !ok {
 		return false
 	}
-	return time.Until(deadline) <= a.synthesisLead
+	return time.Until(deadline) <= a.effectiveSynthesisLead(deadline, startedAt)
+}
+
+func (a *SubAgent) effectiveSynthesisLead(deadline, startedAt time.Time) time.Duration {
+	window := deadline.Sub(startedAt)
+	if window > 0 && a.synthesisLead >= window {
+		// Use the original phase window so the cutoff stays fixed across turns.
+		return window / 2
+	}
+	return a.synthesisLead
 }
 
 func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) (context.Context, context.CancelFunc) {
@@ -754,7 +763,7 @@ func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) 
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	toolDeadline := deadline.Add(-a.synthesisLead)
+	toolDeadline := deadline.Add(-a.effectiveSynthesisLead(deadline, startedAt))
 	if a.explorationTimeout > 0 {
 		explorationDeadline := startedAt.Add(a.explorationTimeout)
 		if explorationDeadline.Before(toolDeadline) {
