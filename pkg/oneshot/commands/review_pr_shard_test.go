@@ -333,3 +333,36 @@ func manySourceDiffsForShardTest(n int) (string, []string) {
 	}
 	return string(sb), paths
 }
+
+// The first real failure must be reported. Shards cancelled because of it
+// carry only "context canceled"; naming one of those hid the cause.
+func TestRunPRShardsConcurrently_ReportsTheCauseNotTheCancellation(t *testing.T) {
+	shards := []diffsignal.Shard{{Files: []string{"a.go"}}, {Files: []string{"b.go"}}, {Files: []string{"c.go"}}}
+	run := func(ctx context.Context, shard diffsignal.Shard, index int) (*ParsedReview, error) {
+		if index == 2 {
+			return nil, fmt.Errorf("review validation failed: bad verdict line")
+		}
+		<-ctx.Done()
+		return nil, fmt.Errorf("execute task: %w", ctx.Err())
+	}
+	_, err := RunPRShardsConcurrently(context.Background(), shards, 3, run)
+	if err == nil || !strings.Contains(err.Error(), "bad verdict line") || !strings.Contains(err.Error(), "shard 3 of 3") {
+		t.Fatalf("error = %v, want shard 3's validation failure", err)
+	}
+}
+
+// A secondary shard must be told to use the one decision line the schema
+// defines; "Set Approved to NO" led models to write "NEEDS DISCUSSION
+// (Approved: NO)", which validation rejects.
+func TestBuildPRShardPrompt_SecondaryShardUsesTheRecommendationLine(t *testing.T) {
+	ctx := &PRContext{PR: &PRInfo{Number: 1, Title: "t", HeadSHA: "h", BaseSHA: "b"}}
+	prompt := BuildPRShardPrompt(ctx, diffsignal.Shard{Files: []string{"a.go"}, Context: "diff"}, 1, 2, false)
+	if strings.Contains(prompt, "Set **Approved**") {
+		t.Errorf("secondary shard prompt still asks for an Approved line:\n%s", prompt)
+	}
+	for _, want := range []string{"**Recommendation**", "NEEDS DISCUSSION", "never APPROVE", "no separate **Approved** line"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("secondary shard prompt missing %q", want)
+		}
+	}
+}

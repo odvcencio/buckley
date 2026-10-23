@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -68,7 +69,7 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 	if !primary {
 		sb.WriteString("This is a secondary shard. A separate synthesis step, not you, issues the merge verdict ")
 		sb.WriteString("for the whole pull request. Regardless of what you find:\n\n")
-		sb.WriteString("- Set **Approved** to `NO` in the Verdict section.\n")
+		sb.WriteString("- In the Verdict section write exactly one decision line, **Recommendation**: `NEEDS DISCUSSION` (or `REQUEST CHANGES` when you list a blocker), never APPROVE. Put nothing else on that line, and add no separate **Approved** line.\n")
 		sb.WriteString("- Use Grade `B` or worse; do not use Grade `A`, because Grade `A` implies a mergeable approval that only synthesis can grant.\n")
 		sb.WriteString("- Set the Coverage **Feedback disposition** to `NONE_SUPPLIED`; feedback disposition is handled by the primary shard.\n\n")
 	} else if ctx.HasReviewFeedback() {
@@ -236,10 +237,22 @@ func RunPRShardsConcurrently(ctx context.Context, shards []diffsignal.Shard, con
 	}
 	wg.Wait()
 
+	// Report the first real failure. A shard cancelled because another one
+	// failed carries only the cancellation, which hides the cause.
+	first := -1
 	for i, err := range errs {
-		if err != nil {
+		if err == nil {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		if !errors.Is(err, context.Canceled) {
 			return nil, fmt.Errorf("shard %d of %d failed: %w", i+1, len(shards), err)
 		}
+	}
+	if first >= 0 {
+		return nil, fmt.Errorf("shard %d of %d failed: %w", first+1, len(shards), errs[first])
 	}
 	return results, nil
 }
