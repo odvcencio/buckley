@@ -897,8 +897,21 @@ func TestRegistryStopRacingBlockedInsertRollsBackWithoutHooksOrEvents(t *testing
 		info, err := registry.CreateSession(CreateSessionRequest{Project: root})
 		createDone <- createResult{info: info, err: err}
 	}()
-	waitForRegistryBuilds(t, registry, 1)
-	time.Sleep(100 * time.Millisecond)
+	// An active build may still be preparing its inert runner. Wait until it
+	// has reserved a slot and entered storage before racing Stop with the INSERT.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		registry.mu.RLock()
+		reserved := len(registry.pendingRunners) == 1
+		registry.mu.RUnlock()
+		if reserved && store.DB().Stats().InUse >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session creation did not enter storage with the write lock held")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case result := <-createDone:
 		t.Fatalf("CreateSession escaped held write lock: info=%+v err=%v", result.info, result.err)
