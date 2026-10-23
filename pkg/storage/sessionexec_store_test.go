@@ -746,6 +746,10 @@ func TestSessionExecEffectPermit_QuiesceDrainsAcrossStores(t *testing.T) {
 
 func TestSessionExecEffectPermit_QuiesceTimeoutLeavesGateClosedForExpiryRetry(t *testing.T) {
 	store := newSessionExecStore(t, "session-effect-timeout")
+	// Hold permit time fixed while allowing the database transaction to start;
+	// expiry advances explicitly between the two interrupted drain attempts.
+	nowMillis := time.Now().UnixMilli()
+	store.sessionExecClock = func() int64 { return nowMillis }
 	acceptInput(t, store, "session-effect-timeout", "effect-timeout-command", "run effect")
 	command, err := store.ClaimNext(context.Background(), sessionexec.ClaimRequest{
 		SessionID: "session-effect-timeout", Lane: sessionexec.LaneWork,
@@ -760,7 +764,7 @@ func TestSessionExecEffectPermit_QuiesceTimeoutLeavesGateClosedForExpiryRetry(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	first, err := store.QuiesceSession(ctx, command.SessionID, sessionexec.ExecutionModeDetached, "timeout_test")
 	cancel()
 	if !errors.Is(err, sessionexec.ErrQuiescenceIncomplete) || first.State.Mode != sessionexec.ExecutionModeDetached {
@@ -770,8 +774,9 @@ func TestSessionExecEffectPermit_QuiesceTimeoutLeavesGateClosedForExpiryRetry(t 
 	if err != nil || state.Mode != sessionexec.ExecutionModeDetached {
 		t.Fatalf("closed gate = %+v, %v", state, err)
 	}
-	waitSessionExecDBClockAtLeast(t, store, permit.ExpiresAt.UnixMilli(), "effect permit expiry")
-	retryCtx, retryCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	nowMillis = permit.ExpiresAt.UnixMilli()
+	waitSessionExecDBClockAtLeast(t, store, nowMillis, "effect permit expiry")
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	retry, err := store.QuiesceSession(retryCtx, command.SessionID, sessionexec.ExecutionModeDetached, "timeout_test")
 	retryCancel()
 	if !errors.Is(err, sessionexec.ErrQuiescenceIncomplete) || !retry.Duplicate {

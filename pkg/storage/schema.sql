@@ -63,7 +63,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 
 -- Performance indexes for message retrieval and pagination
--- Supports GetMessagesWithCursor, GetMessagesWithSessions, GetSessionStats
+-- Supports legacy timestamp cursors and GetSessionStats. Append-order reads
+-- use idx_messages_session, whose entries include the INTEGER PRIMARY KEY id.
 CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, timestamp);
 
 -- Performance index for role-based queries
