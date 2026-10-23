@@ -4,11 +4,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -16,7 +18,8 @@ import (
 func mcpProcessRunning(pid int) bool {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return !os.IsNotExist(err)
+		// An opened proc entry can disappear with ESRCH during reaping.
+		return !os.IsNotExist(err) && !errors.Is(err, syscall.ESRCH)
 	}
 	end := strings.LastIndexByte(string(data), ')')
 	return end < 0 || len(data) <= end+2 || (data[end+2] != 'Z' && data[end+2] != 'X')
