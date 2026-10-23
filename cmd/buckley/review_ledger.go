@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -62,6 +64,26 @@ func configuredReviewLedger(cfg *config.Config) orchestrator.ReviewLedger {
 	return newReviewLedger(cfg.Review.Ledger.GCS, filepath.Join(home, ".buckley", "review-ledger", "pending"))
 }
 
+// ledgerWarningOutput is where ledger warnings go. Tests replace it.
+var ledgerWarningOutput io.Writer = os.Stderr
+
+var ledgerCredentialWarning sync.Once
+
+func resetLedgerCredentialWarning() { ledgerCredentialWarning = sync.Once{} }
+
+// warnReviewLedger prints a ledger warning. Missing Google credentials are the
+// normal state on a machine that never set up the archive: say so in one line
+// per process, and keep the queued records for later.
+func warnReviewLedger(prefix string, err error) {
+	if errors.Is(err, reviewledger.ErrNoCredentials) {
+		ledgerCredentialWarning.Do(func() {
+			fmt.Fprintln(ledgerWarningOutput, "Note: review ledger archive skipped: Google credentials unavailable; records stay queued locally until you run gcloud auth application-default login")
+		})
+		return
+	}
+	fmt.Fprintf(ledgerWarningOutput, "Warning: %s: %v\n", prefix, err)
+}
+
 func retryReviewLedger(ledger orchestrator.ReviewLedger) {
 	if ledger == nil {
 		return
@@ -69,7 +91,7 @@ func retryReviewLedger(ledger orchestrator.ReviewLedger) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	if err := ledger.Retry(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: review ledger retry: %v\n", err)
+		warnReviewLedger("review ledger retry", err)
 	}
 }
 
@@ -259,7 +281,7 @@ func finishReviewLedger(ledger orchestrator.ReviewLedger, record orchestrator.Re
 		}
 	}
 	if err := ledger.Record(ctx, record, blobs); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: review ledger: %v\n", err)
+		warnReviewLedger("review ledger", err)
 	}
 }
 

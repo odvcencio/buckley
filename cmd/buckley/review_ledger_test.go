@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +132,33 @@ func TestReviewLedgerIdentity_MetadataFailure(t *testing.T) {
 	localPR := reviewLedgerPRIdentity(time.Now(), "72", "model")
 	if localPR.PRNumber != 72 {
 		t.Fatal("lost requested PR number")
+	}
+}
+
+// Without credentials the ledger keeps queueing locally. It must say so once
+// per process, in one line, not once per queued upload.
+func TestWarnReviewLedger_MissingCredentialsPrintOneLine(t *testing.T) {
+	resetLedgerCredentialWarning()
+	var buf strings.Builder
+	prev := ledgerWarningOutput
+	ledgerWarningOutput = &buf
+	t.Cleanup(func() { ledgerWarningOutput = prev; resetLedgerCredentialWarning() })
+
+	err := errors.Join(
+		fmt.Errorf("retry a.json: %w", reviewledger.ErrNoCredentials),
+		fmt.Errorf("retry b.json: %w", reviewledger.ErrNoCredentials),
+	)
+	warnReviewLedger("review ledger retry", err)
+	warnReviewLedger("review ledger", fmt.Errorf("queued: %w", reviewledger.ErrNoCredentials))
+	out := buf.String()
+	if got := strings.Count(out, "\n"); got != 1 {
+		t.Fatalf("printed %d lines, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "credentials") || strings.Contains(out, "a.json") {
+		t.Fatalf("warning = %q", out)
+	}
+	warnReviewLedger("review ledger", errors.New("HTTP 500"))
+	if !strings.Contains(buf.String(), "HTTP 500") {
+		t.Fatalf("other errors must still print: %q", buf.String())
 	}
 }
