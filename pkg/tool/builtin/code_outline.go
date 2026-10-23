@@ -46,7 +46,10 @@ func (t *CodeOutlineTool) ExecuteWithContext(ctx context.Context, params map[str
 		// A file in a read root outline runs from that file's directory.
 		var readErr error
 		abs, readErr = t.resolveRead(path)
-		if readErr != nil || !t.inReadRoot(abs) {
+		if readErr != nil {
+			return &Result{Error: readErr.Error()}, nil
+		}
+		if !t.inReadRoot(abs) {
 			return &Result{Error: err.Error()}, nil
 		}
 		runDir, relative = filepath.Dir(abs), filepath.Base(abs)
