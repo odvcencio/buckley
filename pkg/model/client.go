@@ -423,10 +423,25 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 				return apiErr
 			}
 			var chatResp ChatResponse
-			decodeErr := decodeProviderResponse(resp, &chatResp)
+			// Read the whole body first: a read error means the connection
+			// broke (transient); a decode error means the provider sent bad
+			// data (permanent).
+			data, readErr := readProviderResponse(resp)
 			_ = resp.Body.Close()
+			decodeErr := readErr
+			if decodeErr == nil {
+				decodeErr = json.Unmarshal(data, &chatResp)
+			}
 			if decodeErr != nil {
-				return fmt.Errorf("decoding response: %w", decodeErr)
+				wrapped := fmt.Errorf("decoding response: %w", decodeErr)
+				if readErr != nil && isTransientBodyReadError(readErr) {
+					lastErr = wrapped
+					if c.canRetryModelRequest(attempt, lastErr, req.RetryMode) {
+						continue
+					}
+					return retryExhaustedError(attempt, lastErr)
+				}
+				return wrapped
 			}
 			if chatResp.Error != nil {
 				message := strings.TrimSpace(chatResp.Error.Message)
