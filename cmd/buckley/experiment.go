@@ -674,7 +674,7 @@ func runExperimentReplay(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = replayer.Replay(context.Background(), experiment.ReplayConfig{
+	run, err := replayer.Replay(context.Background(), experiment.ReplayConfig{
 		SourceSessionID:    sourceSessionID,
 		NewModelID:         modelID,
 		NewProviderID:      providerID,
@@ -683,7 +683,16 @@ func runExperimentReplay(args []string) error {
 		DeterministicTools: *deterministic,
 		AllowLiveTools:     *liveTools,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if run.Status != experiment.RunCompleted {
+		if run.Error != nil && *run.Error != "" {
+			return fmt.Errorf("replay %s (run %s): %s", run.Status, run.ID, *run.Error)
+		}
+		return fmt.Errorf("replay %s (run %s)", run.Status, run.ID)
+	}
+	return nil
 }
 
 func extractExperimentName(args []string) (string, []string) {
