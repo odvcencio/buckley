@@ -1206,11 +1206,16 @@ func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger)
 	termOut.Dim("%s", costLine)
 }
 
+// maxInvalidMenuChoices bounds consecutive unrecognized menu input so a closed
+// or non-interactive stdin cannot keep the review menu prompting forever.
+const maxInvalidMenuChoices = 5
+
 // runReviewMenu displays an interactive menu to fix findings.
 func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID, reasoningEffort string, ledger *transparency.CostLedger, timeout time.Duration) {
 	// Print grade summary
 	printGradeSummary(parsed)
 
+	invalidChoices := 0
 	for {
 		// Build menu items
 		items := buildReviewMenuItems(parsed)
@@ -1223,8 +1228,14 @@ func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *mode
 		choice := termOut.Menu("What would you like to do?", items)
 		if choice == "" {
 			termOut.Warn("Invalid choice")
+			invalidChoices++
+			if invalidChoices >= maxInvalidMenuChoices {
+				termOut.Warn("Too many invalid choices; leaving the menu")
+				return
+			}
 			continue
 		}
+		invalidChoices = 0
 
 		switch choice {
 		case "q":

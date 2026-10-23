@@ -4,6 +4,7 @@
 package terminal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -446,7 +447,16 @@ func (w *Writer) Menu(title string, items []MenuItem) string {
 
 	// Read input
 	var input string
-	fmt.Scanln(&input)
+	if _, err := fmt.Scanln(&input); errors.Is(err, io.EOF) {
+		// Input ended (no terminal, closed stdin). Quit if the menu offers it
+		// so a caller that re-prompts on an invalid choice cannot loop forever.
+		for _, item := range items {
+			if !item.Disabled && strings.EqualFold(item.Key, "q") {
+				return item.Key
+			}
+		}
+		return ""
+	}
 	input = strings.TrimSpace(strings.ToLower(input))
 
 	// Validate input

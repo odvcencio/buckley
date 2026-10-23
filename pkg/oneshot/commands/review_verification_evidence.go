@@ -233,7 +233,9 @@ func newestReceipts(receipts []verifyreceipt.Receipt) []verifyreceipt.Receipt {
 	latest := map[key]verifyreceipt.Receipt{}
 	var order []key
 	for _, r := range receipts {
-		k := key{strings.Join(r.Argv, "\x00"), r.Dir, strings.Join(r.Paths, "\x00")}
+		paths := append([]string(nil), r.Paths...)
+		sort.Strings(paths)
+		k := key{strings.Join(r.Argv, "\x00"), r.Dir, strings.Join(paths, "\x00")}
 		prev, seen := latest[k]
 		if !seen {
 			order = append(order, k)

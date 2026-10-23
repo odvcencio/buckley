@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/oneshot/commands"
+	"m31labs.dev/buckley/pkg/verifyreceipt"
 )
 
 func newVerifyRepo(t *testing.T) string {
@@ -156,4 +158,45 @@ func TestVerifyRecordRefusesDirtyTree(t *testing.T) {
 	if err := recordAndPrint(repo, []string{"true"}, []string{"**"}, "", "record"); err == nil || !strings.Contains(err.Error(), "not clean") {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func TestReviewMenuStopsWhenInputEnds(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+
+	parsed := commands.ParseReview("## Grade: C\n\n## Findings\n### FINDING-001: MAJOR — Example\n- **File**: `a.go:1`\n- **Evidence**: e\n- **Impact**: i\n- **Fix**: f\n")
+	if parsed == nil || len(parsed.Findings) == 0 {
+		t.Skip("review parser produced no findings for the fixture")
+	}
+	done := make(chan struct{})
+	go func() {
+		runReviewMenu(context.Background(), parsed, nil, nil, "", "", nil, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runReviewMenu kept prompting after stdin ended")
+	}
+}
+
+func TestEvaluateVerificationReorderedPathsStillSupersede(t *testing.T) {
+	older := verifyReceiptFixture("ev_OLD", "FAIL", []string{"a/**", "b/**"})
+	newer := verifyReceiptFixture("ev_NEW", "PASS", []string{"b/**", "a/**"})
+	newer.StartedAt = older.StartedAt.Add(time.Minute)
+	rep := commands.EvaluateVerification(commands.VerificationInput{Mode: commands.VerifyReceipt, Files: []string{"a/x.go"}, Receipts: []verifyreceipt.Receipt{older, newer}})
+	if len(rep.Failing) != 0 || len(rep.Covered) != 1 {
+		t.Fatalf("report = %+v", rep)
+	}
+}
+
+func verifyReceiptFixture(id, status string, paths []string) verifyreceipt.Receipt {
+	return verifyreceipt.Receipt{ID: id, Argv: []string{"go", "test"}, Paths: paths, Status: verifyreceipt.Status(status),
+		StartedAt: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
 }
