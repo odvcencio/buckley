@@ -57,6 +57,7 @@ type reviewCommandRuntime struct {
 	ledger          *transparency.CostLedger
 	framework       *oneshot.Framework
 	modelID         string
+	criticModel     string // "" when the critic runs on the primary route
 	reasoningEffort string
 	policy          automatedReviewOptions
 	durableCleanup  func()
@@ -498,6 +499,7 @@ func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model
 		ledger:          ledger,
 		framework:       framework,
 		modelID:         modelID,
+		criticModel:     map[bool]string{true: criticModel, false: ""}[dedicatedCritic],
 		reasoningEffort: reasoningEffort,
 		policy:          policy,
 		durableCleanup:  durableCleanup,
@@ -598,6 +600,41 @@ func printReviewModelSelection(runtime *reviewCommandRuntime) {
 		return
 	}
 	termOut.Dim("Using model: %s", runtime.modelID)
+	for _, line := range reviewRouteLines(runtime.mgr, runtime.modelID, runtime.criticModel) {
+		termOut.Dim("%s", line)
+	}
+}
+
+// routeResolver is the part of model.Manager that names where a model's calls go.
+type routeResolver interface {
+	ResolveModelRoute(modelID string) (model.ModelRoute, error)
+}
+
+// reviewRouteLines names, once per run, the provider and model behind every
+// kind of model call a review makes, so an operator can check that nothing
+// reaches a provider they did not choose. The shards and the primary pass share
+// one route; a critic with no model of its own runs on the primary route; the
+// review makes no other model calls (the ledger archive and the diff
+// classification use no model).
+func reviewRouteLines(resolver routeResolver, primary, critic string) []string {
+	describe := func(modelID string) string {
+		route, err := resolver.ResolveModelRoute(modelID)
+		if err != nil {
+			return fmt.Sprintf("%s (unresolved: %v)", modelID, err)
+		}
+		return fmt.Sprintf("%s via %s", route.SelectedModel, route.ProviderID)
+	}
+	primaryRoute := describe(primary)
+	criticRoute := primaryRoute + " (same as primary)"
+	if critic != "" {
+		criticRoute = describe(critic)
+	}
+	return []string{
+		"Route: primary review: " + primaryRoute,
+		"Route: PR shards: " + primaryRoute,
+		"Route: approval critic: " + criticRoute,
+		"Route: other model calls: none",
+	}
 }
 
 func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, policy automatedReviewOptions) (*reviewCommandResult, error) {
