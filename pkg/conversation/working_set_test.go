@@ -19,7 +19,8 @@ func TestLoadWorkingSet_BoundedResumeAndPartialSavePreserveCanonicalHistory(t *t
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	sid := "paused-large"
-	now := time.Now()
+	// Resuming after a clock rollback must preserve the stored prefix.
+	now := time.Now().Add(time.Hour)
 	if err := store.CreateSession(&storage.Session{ID: sid, Status: storage.SessionStatusPaused, CreatedAt: now, LastActive: now}); err != nil {
 		t.Fatal(err)
 	}

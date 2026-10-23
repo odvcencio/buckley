@@ -32,7 +32,7 @@ func (s *Store) GetMessagesWithEmbeddings(ctx context.Context, sessionID string)
 		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE), embedding
 		FROM messages
 		WHERE session_id = ? AND embedding IS NOT NULL
-		ORDER BY timestamp ASC
+		ORDER BY id ASC
 	`
 	rows, err := s.db.QueryContext(ctx, query, sessionID)
 	if err != nil {
@@ -101,7 +101,7 @@ func (s *Store) GetMessagesMissingEmbeddings(ctx context.Context, sessionID stri
 		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ? AND embedding IS NULL
-		ORDER BY timestamp ASC
+		ORDER BY id ASC
 		LIMIT ?
 	`
 	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)

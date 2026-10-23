@@ -30,11 +30,16 @@ type Message struct {
 	IsTruncated      bool      `json:"isTruncated"` // True if message was interrupted/incomplete
 }
 
-// Cursor represents a pagination cursor for efficient message retrieval.
-// Uses ID and Timestamp for stable pagination even with concurrent writes.
+// MessageCursorVersion identifies append-order pagination. Version zero
+// continues legacy timestamp/ID cursors without changing their traversal.
+const MessageCursorVersion = 1
+
+// Cursor represents a message continuation. Timestamp is retained as metadata
+// and for legacy cursors; new cursors seek by ID so clock changes cannot skip turns.
 type Cursor struct {
 	ID        int64     `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
+	Version   int       `json:"version,omitempty"`
 }
 
 // SessionStats contains aggregated statistics for a session without loading all messages.
@@ -101,11 +106,19 @@ func EncodeCursor(cursor *Cursor) (string, error) {
 	if cursor == nil {
 		return "", nil
 	}
+	if cursor.Version != 0 && cursor.Version != MessageCursorVersion {
+		return "", fmt.Errorf("unsupported message cursor version %d", cursor.Version)
+	}
 	data, err := json.Marshal(cursor)
 	if err != nil {
 		return "", fmt.Errorf("encoding cursor: %w", err)
 	}
-	return base64.URLEncoding.EncodeToString(data), nil
+	encoded := base64.URLEncoding.EncodeToString(data)
+	if cursor.Version == MessageCursorVersion {
+		// Older decoders reject the prefix instead of silently changing order.
+		encoded = "id." + encoded
+	}
+	return encoded, nil
 }
 
 // DecodeCursor decodes a base64 string to a cursor.
@@ -113,6 +126,8 @@ func DecodeCursor(encoded string) (*Cursor, error) {
 	if encoded == "" {
 		return nil, nil
 	}
+	appendOrder := strings.HasPrefix(encoded, "id.")
+	encoded = strings.TrimPrefix(encoded, "id.")
 	data, err := base64.URLEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("decoding cursor: %w", err)
@@ -120,6 +135,13 @@ func DecodeCursor(encoded string) (*Cursor, error) {
 	var cursor Cursor
 	if err := json.Unmarshal(data, &cursor); err != nil {
 		return nil, fmt.Errorf("parsing cursor: %w", err)
+	}
+	if appendOrder {
+		if cursor.Version != MessageCursorVersion {
+			return nil, fmt.Errorf("unsupported append-order cursor version %d", cursor.Version)
+		}
+	} else if cursor.Version != 0 {
+		return nil, fmt.Errorf("message cursor version %d requires append-order encoding", cursor.Version)
 	}
 	return &cursor, nil
 }
@@ -300,18 +322,19 @@ func (s *Store) ReplaceMessagesAfter(sessionID string, beforeID int64, messages 
 	return nil
 }
 
-// GetMessages retrieves messages for a session using limit/offset pagination.
+// GetMessages retrieves the canonical append sequence using limit/offset pagination.
+// Wall-clock timestamps are metadata and may move backward between turns.
 //
 // Recommended indexes for optimal performance:
 //
-//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//	CREATE INDEX idx_messages_session ON messages(session_id);
 //	CREATE INDEX idx_messages_session_role ON messages(session_id, role);
 func (s *Store) GetMessages(sessionID string, limit int, offset int) ([]Message, error) {
 	query := `
 		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id = ?
-		ORDER BY timestamp ASC, id ASC
+		ORDER BY id ASC
 		LIMIT ? OFFSET ?
 	`
 	rows, err := s.db.Query(query, sessionID, limit, offset)
@@ -374,38 +397,35 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 //
 // Recommended indexes for optimal performance:
 //
-//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//	CREATE INDEX idx_messages_session ON messages(session_id);
 func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit int) ([]Message, *Cursor, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	limit = min(limit, 1000) // Cap to prevent excessive memory usage
 
-	var query string
-	var args []any
-
-	if cursor == nil {
-		// First page: no cursor filter
-		query = `
-			SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
-			FROM messages
-			WHERE session_id = ?
-			ORDER BY timestamp ASC, id ASC
-			LIMIT ?
-		`
-		args = []any{sessionID, limit + 1} // Request one extra to detect hasMore
-	} else {
-		// Subsequent pages: filter by cursor (timestamp, id)
-		query = `
-			SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
-			FROM messages
-			WHERE session_id = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
-			ORDER BY timestamp ASC, id ASC
-			LIMIT ?
-		`
-		cursorTimestamp := sqliteTimestamp(cursor.Timestamp)
-		args = []any{sessionID, cursorTimestamp, cursorTimestamp, cursor.ID, limit + 1}
+	version := MessageCursorVersion
+	where, order := "session_id = ?", "id ASC"
+	args := []any{sessionID}
+	if cursor != nil {
+		version = cursor.Version
+		switch version {
+		case 0:
+			where += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+			order = "timestamp ASC, id ASC"
+			stamp := sqliteTimestamp(cursor.Timestamp)
+			args = append(args, stamp, stamp, cursor.ID)
+		case MessageCursorVersion:
+			where += " AND id > ?"
+			args = append(args, cursor.ID)
+		default:
+			return nil, nil, fmt.Errorf("unsupported message cursor version %d", version)
+		}
 	}
+	query := `
+		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
+		FROM messages WHERE ` + where + ` ORDER BY ` + order + ` LIMIT ?`
+	args = append(args, limit+1)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -468,6 +488,7 @@ func (s *Store) GetMessagesWithCursor(sessionID string, cursor *Cursor, limit in
 		nextCursor = &Cursor{
 			ID:        lastReturned.ID,
 			Timestamp: lastReturned.Timestamp,
+			Version:   version,
 		}
 	}
 
@@ -485,7 +506,7 @@ func (s *Store) GetAllMessages(sessionID string) ([]Message, error) {
 //
 // Recommended indexes for optimal performance:
 //
-//	CREATE INDEX idx_messages_session_time ON messages(session_id, timestamp);
+//	CREATE INDEX idx_messages_session ON messages(session_id);
 func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Message, error) {
 	if len(sessionIDs) == 0 {
 		return make(map[string][]Message), nil
@@ -503,7 +524,7 @@ func (s *Store) GetMessagesWithSessions(sessionIDs []string) (map[string][]Messa
 		SELECT id, session_id, role, content, content_json, content_type, tool_calls, tool_call_id, name, reasoning, reasoning_details, timestamp, tokens, is_summary, COALESCE(is_truncated, FALSE)
 		FROM messages
 		WHERE session_id IN (%s)
-		ORDER BY session_id, timestamp ASC
+		ORDER BY session_id, id ASC
 	`, strings.Join(placeholders, ","))
 
 	rows, err := s.db.Query(query, args...)

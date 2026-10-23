@@ -47,7 +47,7 @@ func (s *Store) PrepareStatements() (*PreparedStatements, error) {
 		SELECT id, session_id, role, content, timestamp, tokens, is_summary
 		FROM messages
 		WHERE session_id = ?
-		ORDER BY timestamp ASC
+		ORDER BY id ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare listMessages: %w", err)
