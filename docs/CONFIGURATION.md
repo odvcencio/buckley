@@ -163,6 +163,10 @@ buckbot:
   reasoning: auto
   openrouter_privacy_fallback: zdr_then_data_collection_deny
   per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
+  budget_per_kloc_usd: 0.10 # added to per_review_budget_usd per 1,000 changed lines (see below)
+  max_review_budget_usd: 0  # optional ceiling for the scaled budget; 0 means none
+  host_evidence_timeout_seconds: 0 # cap on host verification before the model runs; 0 = half the time left
+  generated_globs: []       # e.g. ["client/js/bootstrap*.js", "dist/**"]; summarized, not reviewed line by line
   monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
   max_review_iterations: 0 # adaptive
   max_tool_calls: 0         # 0 means unlimited; set for expensive-model experiments
@@ -454,6 +458,21 @@ Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project
 deliberately needs a cap. A caller can set `--budget <USD>` for one capped
 review or `--no-budget` to bypass an existing configured per-review cap.
+
+When a per-review cap is set, it grows with the size of the review:
+`budget = per_review_budget_usd + budget_per_kloc_usd * (changed lines / 1000)`,
+clamped to `max_review_budget_usd` when that is above zero. Changed lines come
+from the prioritized diff, so generated, minified and binary files (including
+files matched by `generated_globs` or marked `linguist-generated` or `-diff` in
+`.gitattributes`) add nothing. With `per_review_budget_usd: 0` a review stays
+uncapped, and a base cap above the ceiling is kept. `--budget` and `--no-budget`
+are never rescaled.
+
+Host verification (the test and build runs Buckbot does before the model)
+runs under its own limit: `--evidence-timeout` or
+`host_evidence_timeout_seconds`. By default it may use half of the time left,
+and the model always keeps at least a quarter, so a slow test suite cannot
+starve the review.
 Reviews also have no per-review tool-call cap by default. Set
 `buckbot.max_tool_calls` to a positive value for an explicit cap, such as when
 experimenting with an expensive model, or pass `--max-tool-calls N` for one

@@ -752,6 +752,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 	})
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	reviewPolicy = reviewPolicy.withSizeScaledBudget(countChangedLines(branchCtx.Diff + "\n" + branchCtx.Unstaged))
 	changedFiles := reviewChangedFilePaths(branchCtx.Files)
 	reviewPolicy = reviewPolicy.withVerificationTargetBudget(changedFiles)
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))

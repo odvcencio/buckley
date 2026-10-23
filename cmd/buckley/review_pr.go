@@ -410,6 +410,12 @@ type automatedReviewOptions struct {
 	// hostEvidenceTimeout caps the whole host verification phase that runs
 	// before the model (--evidence-timeout, buckbot.host_evidence_timeout_seconds).
 	hostEvidenceTimeout time.Duration
+	// budgetPerKlocUSD and maxBudgetUSD scale maxCostUSD with review size (see
+	// withSizeScaledBudget); costOverridden is set by --budget and --no-budget,
+	// which are never rescaled.
+	budgetPerKlocUSD float64
+	maxBudgetUSD     float64
+	costOverridden   bool
 	// verificationTimeoutFloor keeps a configured/derived verification
 	// timeout (see review.verification.runner in config) from being
 	// shrunk back down by withExecutionPlan's rules-engine-derived default.
@@ -518,6 +524,8 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
 		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
 		hostEvidenceTimeout:        time.Duration(max(cfg.Buckbot.HostEvidenceTimeoutSeconds, 0)) * time.Second,
+		budgetPerKlocUSD:           cfg.Buckbot.BudgetPerKlocUSD,
+		maxBudgetUSD:               cfg.Buckbot.MaxReviewBudgetUSD,
 		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
 		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 		depth:                      reviewDepthSpot,
@@ -589,7 +597,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	if overrides.clearCostBudget {
 		defaults.maxCostUSD = 0
 		defaults.criticReserveUSD = 0
+		defaults.costOverridden = true
 	} else if overrides.maxCostUSD > 0 {
+		defaults.costOverridden = true
 		defaults.maxCostUSD = overrides.maxCostUSD
 		if defaults.approvalCritic {
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
@@ -693,6 +703,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	opts = opts.withSizeScaledBudget(countChangedLines(prCtx.Diff))
 	opts = applyReviewDepthGate(ctx, opts, prCtx)
 	opts = opts.withVerificationTargetBudget(prCtx.Files)
 	if opts.contextReady != nil {

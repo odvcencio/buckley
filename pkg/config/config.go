@@ -1126,6 +1126,13 @@ type BuckbotConfig struct {
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.
 	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`
+	// BudgetPerKlocUSD adds this much to PerReviewBudgetUSD for every 1,000
+	// changed lines in the prioritized diff (generated files excluded). It only
+	// applies when a base cap exists; an uncapped review stays uncapped.
+	BudgetPerKlocUSD float64 `yaml:"budget_per_kloc_usd"`
+	// MaxReviewBudgetUSD is an optional ceiling on the scaled budget. Zero
+	// means no ceiling. A base cap above the ceiling still stands.
+	MaxReviewBudgetUSD float64 `yaml:"max_review_budget_usd"`
 	// GeneratedGlobs lists repository-relative globs (for example
 	// "client/js/bootstrap*.js" or "dist/**") for files that reviews treat as
 	// generated: they appear as one-line summaries and take no diff budget.
