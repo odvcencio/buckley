@@ -350,13 +350,13 @@ func retentionReview(path, grade string, approved bool) string {
 Shard coverage is complete.
 
 ## CI Status
-- Build: PASS
-- Tests: PASS
+- Build: UNAVAILABLE
+- Tests: UNAVAILABLE
 
 ## Coverage
 - **File**: %s%s%s - reviewed this shard.
 - **Feedback disposition**: %sNONE_SUPPLIED%s - no prior feedback was supplied.
-- **Verification**: CI.
+- **Verification**: Not supplied; source inspection only.
 - **Completeness**: COMPLETE
 
 ## Invariant Audit
