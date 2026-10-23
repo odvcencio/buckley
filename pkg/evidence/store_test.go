@@ -381,3 +381,83 @@ func TestSQLiteStore_MigrationsRecoverAppliedSchemaWithoutVersionRows(t *testing
 		t.Fatalf("versions=%d objects=%d dedup_indexes=%d, want %d/1/1", versions, objectsTables, dedupIndexes, len(migrations))
 	}
 }
+
+// TestSQLiteStore_OpenCurrentSchemaWhileWriterHoldsLock covers parallel
+// `buckley buckbot` starts: another process can hold the write lock for
+// longer than the 5 s busy timeout (for example, while writing a large blob),
+// and a process that opens a database whose schema is already current must not
+// wait for that lock.
+func TestSQLiteStore_OpenCurrentSchemaWhileWriterHoldsLock(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "held-evidence.db")
+	blobRoot := filepath.Join(dir, "blobs")
+	first, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+
+	holder, err := first.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = holder.ExecContext(context.Background(), `ROLLBACK`) }()
+
+	// Open from a second pool so the open does not share the holder's connection.
+	done := make(chan error, 1)
+	go func() {
+		store, err := New(dbPath, WithBlobRoot(blobRoot))
+		if err == nil {
+			err = store.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("New while another connection holds the write lock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("New waited on the write lock although the schema is current")
+	}
+}
+
+// TestSQLiteStore_FirstOpenWaitsForLongWriter checks that a first open, which
+// must migrate, waits out a writer that outlasts one busy timeout.
+func TestSQLiteStore_FirstOpenWaitsForLongWriter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("holds a lock for more than the 5 s busy timeout")
+	}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "long-writer-evidence.db")
+	blobRoot := filepath.Join(dir, "blobs")
+	seed, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.db.Exec(`DELETE FROM evidence_schema_migrations WHERE version = ?`, len(migrations)); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := seed.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(7 * time.Second)
+		_, _ = holder.ExecContext(context.Background(), `ROLLBACK`)
+	}()
+	store, err := New(dbPath, WithBlobRoot(blobRoot))
+	if err != nil {
+		t.Fatalf("New behind a 7 s writer: %v", err)
+	}
+	_ = store.Close()
+	_ = seed.Close()
+}
