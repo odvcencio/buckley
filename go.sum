@@ -403,8 +403,8 @@ k8s.io/utils v0.0.0-20230726121419-3b25d923346b h1:sgn3ZU783SCgtaSJjpcVVlRqd6GSn
 k8s.io/utils v0.0.0-20230726121419-3b25d923346b/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
 lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
-m31labs.dev/arbiter v1.7.0 h1:98Ekg408Bn9WAPSbLYqau0lKxesc9FlMt57hS1ek/ZM=
-m31labs.dev/arbiter v1.7.0/go.mod h1:VUoRZSRQUYpwsIaOcklySodfQQWVLJCrJ7XmPAVIyY0=
+m31labs.dev/arbiter v1.8.1 h1:rVZGEdgMzWFHFn7rRgvoV7bcdRxaA5LQSbkfEGnfWp8=
+m31labs.dev/arbiter v1.8.1/go.mod h1:BV+yJ4IfYy4orioOU9w2mXk7U5ioPoExfIs92HHjvTw=
 m31labs.dev/eos v0.1.4 h1:05EwqPWc90f9u7ReE7nYi+72AC6ZCkBcPfDWEExE8nw=
 m31labs.dev/eos v0.1.4/go.mod h1:5PuY4szJG+bC1Q6+K/wwBZORBaON4GcOkzy+ZljrOv4=
 m31labs.dev/fluffyui v0.6.3 h1:4m6F3cuO94Rbkelh4auIGrTB/VTyHIXV8R0YNz6DVJI=

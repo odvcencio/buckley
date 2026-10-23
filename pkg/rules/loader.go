@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+//go:generate go test -run=TestCompiledDefaults_MatchSources -update-compiled-rules
+
 //go:embed all:rules
 var defaultRules embed.FS
 

@@ -36,7 +36,7 @@ require (
 	k8s.io/api v0.30.3
 	k8s.io/apimachinery v0.30.3
 	k8s.io/client-go v0.30.3
-	m31labs.dev/arbiter v1.7.0
+	m31labs.dev/arbiter v1.8.1
 	m31labs.dev/fluffyui v0.6.3
 	m31labs.dev/gosx v0.37.1
 	m31labs.dev/mdpp v0.4.7
