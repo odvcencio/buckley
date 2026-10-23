@@ -276,6 +276,7 @@ func (s *SQLiteStore) Put(ctx context.Context, obj Object) (Object, error) {
 	if storage.IsStorageBudgetError(err) && !errors.Is(err, storage.ErrStorageBudget) {
 		err = fmt.Errorf("%w: %w", storage.ErrStorageBudget, err)
 	}
+	err = storage.WithStorageBudgetAdvice(ctx, s.db, err)
 	return stored, err
 }
 
@@ -314,7 +315,7 @@ func (s *SQLiteStore) put(ctx context.Context, conn *sql.Conn, obj Object, pendi
 	if len(content) > InlineThreshold {
 		storageKind = StorageBlob
 		path, bytes, err := s.blobs.write(sha, content, func(bytes int64) error {
-			return storage.CheckStorageBudget(ctx, conn, charge+4*bytes)
+			return storage.CheckStorageBudget(ctx, conn, charge+bytes)
 		})
 		if err != nil {
 			return Object{}, fmt.Errorf("evidence: write blob: %w", err)
