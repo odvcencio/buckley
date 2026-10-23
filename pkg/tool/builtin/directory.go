@@ -97,7 +97,7 @@ func (t *ListDirectoryTool) ExecuteWithContext(parent context.Context, params ma
 	if err := ctx.Err(); err != nil {
 		return &Result{Error: fmt.Sprintf("directory listing canceled: %v", err)}, nil
 	}
-	absPath, err := resolvePath(t.workDir, path)
+	absPath, err := t.resolveRead(path)
 	if err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
@@ -114,6 +114,9 @@ func (t *ListDirectoryTool) ExecuteWithContext(parent context.Context, params ma
 		}
 		batch, err := dir.Readdirnames(directoryReadBatch)
 		for _, name := range batch {
+			if t.readRootEntryHidden(filepath.Join(absPath, name)) {
+				continue
+			}
 			count++
 			if name <= after {
 				continue

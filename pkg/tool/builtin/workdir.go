@@ -11,6 +11,7 @@ import (
 type workDirAware struct {
 	previewMutation  bool
 	workDir          string
+	readRoots        []string
 	env              map[string]string
 	maxFileSizeBytes int64
 	maxOutputBytes   int

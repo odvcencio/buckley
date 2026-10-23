@@ -88,7 +88,7 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	if p, ok := params["path"].(string); ok && strings.TrimSpace(p) != "" {
 		searchPath = p
 	}
-	absSearchPath, effectiveSearchPath, pathErr := resolveRelPath(t.workDir, searchPath)
+	absSearchPath, effectiveSearchPath, pathErr := t.resolveReadRel(searchPath)
 	if pathErr != nil {
 		return &Result{Success: false, Error: pathErr.Error()}, nil
 	}
@@ -217,6 +217,9 @@ func (t *SearchTextTool) Execute(params map[string]any) (*Result, error) {
 	for scanner.Scan() {
 		match, valid := parseSearchLine(scanner.Bytes())
 		if !valid {
+			continue
+		}
+		if t.searchRecordHidden(string(match.path)) {
 			continue
 		}
 		if recordCount >= offset && len(matches) < limit && !pageFull {

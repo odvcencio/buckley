@@ -110,6 +110,20 @@ func (r *Registry) SetWorkDir(workDir string) {
 	}
 }
 
+// SetReadRoots lets read-only file tools read the given absolute paths (each a
+// directory or one file) in addition to the working directory. Write, edit and
+// shell tools ignore them.
+func (r *Registry) SetReadRoots(roots []string) {
+	if r == nil || len(roots) == 0 {
+		return
+	}
+	for _, t := range r.snapshotTools() {
+		if setter, ok := t.(interface{ SetReadRoots([]string) }); ok {
+			setter.SetReadRoots(roots)
+		}
+	}
+}
+
 // SetEnv configures environment variable overrides for tools that support it.
 func (r *Registry) SetEnv(env map[string]string) {
 	if r == nil {

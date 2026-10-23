@@ -60,6 +60,8 @@ var mergeStrategies = map[string]mergeStrategy{
 	"approval.mode":        scopedScalarMerge,
 	"sandbox.mode":         scopedScalarMerge,
 	"sandbox.allow_unsafe": scopedScalarMerge,
+	// Read roots from user and project config combine; neither layer drops the other.
+	"tools.read_roots": mergeStringSliceUnion,
 	// A project cannot expire history belonging to other projects.
 	"retention.enabled":                scopedScalarMerge,
 	"retention.interval":               scopedScalarMerge,
@@ -558,4 +560,24 @@ func mergeWorkspaceVolumeTemplate(ctx mergeCtx, base, override reflect.Value, pa
 	clone := *o
 	clone.AccessModes = append([]string{}, o.AccessModes...)
 	base.Set(reflect.ValueOf(&clone))
+}
+
+// mergeStringSliceUnion appends the override's entries to base without
+// repeating any, when the layer sets the field.
+func mergeStringSliceUnion(ctx mergeCtx, base, override reflect.Value, path []string) {
+	if !boolFieldSet(ctx.raw, path...) {
+		return
+	}
+	seen := map[string]bool{}
+	for i := 0; i < base.Len(); i++ {
+		seen[base.Index(i).String()] = true
+	}
+	merged := base
+	for i := 0; i < override.Len(); i++ {
+		if value := override.Index(i); !seen[value.String()] {
+			seen[value.String()] = true
+			merged = reflect.Append(merged, value)
+		}
+	}
+	base.Set(merged)
 }

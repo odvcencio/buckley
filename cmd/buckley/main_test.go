@@ -296,9 +296,9 @@ func TestApplyOneShotTaskIntentDefaults_ReadOnlyIsBoundedSummary(t *testing.T) {
 	}
 }
 
-func TestOneShotTaskIntentInstruction_ReadOnlySummary(t *testing.T) {
+func TestOneShotTaskIntentInstruction_ReadOnlyDeliverable(t *testing.T) {
 	got := oneShotTaskIntentInstruction(agentloop.ReadOnlyIntent)
-	for _, want := range []string{"relevant", "concise summary", "investigator or orchestrator", "paths", "uncertainty", "do not edit"} {
+	for _, want := range []string{"relevant", "requested answer, spec, or plan", "requested format", "do not substitute a handoff", "paths", "uncertainty", "do not edit", "Reuse evidence"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("read-only instruction missing %q: %q", want, got)
 		}

@@ -754,6 +754,30 @@ approval:
 | `auto` | Full workspace access, approval for external operations |
 | `yolo` | Full autonomy (dangerous, use with caution) |
 
+### tools.read_roots
+
+Let read-only file tools read paths outside the working directory. Each entry is
+a directory or a single file; there are no default roots.
+
+```yaml
+tools:
+  read_roots:
+    - ~/.hyphae/spaces/m31labs-bon-voyage   # a whole Hyphae space
+    - ~/specs/architecture.md               # or exactly one file
+```
+
+User and project (`.buckley/config.yaml`) lists are combined. `buckley --read-root PATH`
+(repeatable) adds roots for one run. `~` and environment variables are expanded, and a
+root that does not exist is an error. Unset or empty environment variables and
+non-regular files (such as devices or named pipes) are rejected. `read_file`, `list_directory`, `find_files`,
+`search_text`, `file_exists` and `code_outline` can read inside a root; write, edit,
+delete, move and shell tools stay in the working directory. A symlink that leaves a
+root is refused. Inside a root these files are never read, listed or searched: `*.key`,
+`*.pem`, `.env*`, `id_*`, `credentials*`, anything under `.catalog/identities/`, and
+files that neither group nor others can read (such as mode 0600). Read roots work at
+every trust level because they are read-only. A one-shot run prints them as `read roots
+(read-only):` next to `workdir:`.
+
 ### resources
 
 Set resource budgets in user config; project config cannot change them.

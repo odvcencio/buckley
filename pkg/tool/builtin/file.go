@@ -33,7 +33,10 @@ func (t *ReadFileTool) SetOutsideWorkDirReads(allowed bool, deniedPaths []string
 
 func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	if !t.outsideWorkDirReads || t.sourceScope != nil {
-		return resolvePath(t.workDir, path)
+		if t.sourceScope != nil {
+			return resolvePath(t.workDir, path)
+		}
+		return t.resolveRead(path)
 	}
 	if path == "" {
 		return "", fmt.Errorf("path cannot be empty")
@@ -908,7 +911,7 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: "limit must be between 1 and 1000"}, nil
 	}
 
-	absBasePath, err := resolvePath(t.workDir, basePath)
+	absBasePath, err := t.resolveRead(basePath)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -947,6 +950,9 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 		}
 
 		relPath = filepath.ToSlash(relPath)
+		if t.readRootEntryHidden(path) {
+			return nil
+		}
 		if matchesFindFilesPattern(patterns, relPath) {
 			// WalkDir visits entries in lexical order, so retain only this page
 			// instead of materializing and sorting the repository-wide corpus.
@@ -1202,7 +1208,7 @@ func (t *FileExistsTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	absPath, err := resolvePath(t.workDir, path)
+	absPath, err := t.resolveRead(path)
 	if err != nil {
 		return &Result{
 			Success: false,
