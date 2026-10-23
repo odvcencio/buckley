@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/model"
@@ -34,11 +35,43 @@ func (f *Framework) collectPlannedAgentEvidence(
 	if !supported {
 		return nil, "", fmt.Errorf("agent runner cannot collect required host evidence for %q", def.Name())
 	}
-	evidence, err := collector.CollectAgentEvidence(ctx, requests, executionOpts)
+	// Host verification gets its own deadline so the model keeps time to
+	// review. When it expires, unfinished calls report INCONCLUSIVE.
+	evidenceCtx, cancelEvidence := hostEvidenceContext(ctx, opts.HostEvidenceTimeout)
+	defer cancelEvidence()
+	evidence, err := collector.CollectAgentEvidence(evidenceCtx, requests, executionOpts)
 	if err != nil {
 		return nil, "", fmt.Errorf("collect required host evidence for %q: %w", def.Name(), err)
 	}
 	return evidence, formatHostAgentEvidence(evidence), nil
+}
+
+// hostEvidenceContext derives the context for the host evidence phase.
+func hostEvidenceContext(ctx context.Context, explicit time.Duration) (context.Context, context.CancelFunc) {
+	deadline, _ := ctx.Deadline()
+	budget := hostEvidenceBudget(time.Now(), deadline, explicit)
+	if budget <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
+// hostEvidenceBudget returns how long host evidence may run, or zero for no
+// extra limit. With a deadline, the default is half of the time left, and no
+// setting may take more than three quarters, so the model keeps a quarter.
+func hostEvidenceBudget(now, deadline time.Time, explicit time.Duration) time.Duration {
+	if deadline.IsZero() {
+		return max(explicit, 0)
+	}
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	budget := remaining / 2
+	if explicit > 0 {
+		budget = min(explicit, remaining*3/4)
+	}
+	return budget
 }
 
 func countAgentEvidenceRequests(requests []AgentEvidenceRequest, toolName string) int {

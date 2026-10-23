@@ -45,6 +45,7 @@ type reviewPRCommandOptions struct {
 	maxTurns             int
 	maxToolCalls         int
 	maxDiff              int
+	evidenceTimeout      time.Duration
 	maxSupportingContext int
 	maxRetries           int
 	forceSinglePass      bool
@@ -69,6 +70,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
@@ -132,6 +134,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		maxTurns:             *maxTurns,
 		maxToolCalls:         *maxToolCalls,
 		maxDiff:              *maxDiff,
+		evidenceTimeout:      *evidenceTimeout,
 		maxSupportingContext: *maxSupportingContext,
 		maxRetries:           *maxRetries,
 		forceSinglePass:      *singlePass,
@@ -277,6 +280,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 		maxToolCallsExplicit:       opts.maxToolCalls > 0,
 		maxRetries:                 opts.maxRetries,
 		maxDiffBytes:               opts.maxDiff,
+		hostEvidenceTimeout:        opts.evidenceTimeout,
 		maxSupportingContextTokens: opts.maxSupportingContext,
 		maxCostUSD:                 opts.budgetUSD,
 		clearCostBudget:            opts.noBudget,
@@ -402,6 +406,9 @@ type automatedReviewOptions struct {
 	criticReserveUSD           float64
 	approvalCritic             bool
 	verificationTimeout        time.Duration
+	// hostEvidenceTimeout caps the whole host verification phase that runs
+	// before the model (--evidence-timeout, buckbot.host_evidence_timeout_seconds).
+	hostEvidenceTimeout time.Duration
 	// verificationTimeoutFloor keeps a configured/derived verification
 	// timeout (see review.verification.runner in config) from being
 	// shrunk back down by withExecutionPlan's rules-engine-derived default.
@@ -509,6 +516,7 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		maxDiffBytes:               cfg.Buckbot.MaxDiffBytes,
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
 		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
+		hostEvidenceTimeout:        time.Duration(max(cfg.Buckbot.HostEvidenceTimeoutSeconds, 0)) * time.Second,
 		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
 		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 		depth:                      reviewDepthSpot,
@@ -570,6 +578,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	}
 	if overrides.maxDiffBytes > 0 {
 		defaults.maxDiffBytes = overrides.maxDiffBytes
+	}
+	if overrides.hostEvidenceTimeout > 0 {
+		defaults.hostEvidenceTimeout = overrides.hostEvidenceTimeout
 	}
 	if overrides.maxSupportingContextTokens > 0 {
 		defaults.maxSupportingContextTokens = overrides.maxSupportingContextTokens
@@ -722,6 +733,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
+		HostEvidenceTimeout:      opts.hostEvidenceTimeout,
 		VerificationWrapper:      opts.verificationWrapper,
 		VerificationCleanup:      opts.verificationCleanup,
 		VerificationParallelism:  opts.verificationParallelism,

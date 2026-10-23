@@ -1126,6 +1126,10 @@ type BuckbotConfig struct {
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.
 	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`
+	// HostEvidenceTimeoutSeconds caps the host-run verification phase that
+	// runs before the model. Zero uses half of the time left. The model always
+	// keeps at least a quarter of the time left.
+	HostEvidenceTimeoutSeconds int `yaml:"host_evidence_timeout_seconds"`
 	// MonthlyBudgetUSD is optional. Zero means no configured monthly ceiling.
 	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
 	MaxReviewIterations int     `yaml:"max_review_iterations"`

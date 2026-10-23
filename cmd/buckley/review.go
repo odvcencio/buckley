@@ -44,6 +44,7 @@ type reviewCommandOptions struct {
 	maxTurns        int
 	maxToolCalls    int
 	maxDiff         int
+	evidenceTimeout time.Duration
 	maxRetries      int
 	depth           reviewDepth
 }
@@ -127,6 +128,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
 	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
@@ -195,6 +197,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 		maxTurns:        *maxTurns,
 		maxToolCalls:    *maxToolCalls,
 		maxDiff:         *maxDiff,
+		evidenceTimeout: *evidenceTimeout,
 		maxRetries:      *maxRetries,
 		depth:           depth,
 	}
@@ -273,6 +276,7 @@ func runReviewCommand(args []string) (returnErr error) {
 		maxToolCallsExplicit:  opts.maxToolCalls > 0,
 		maxRetries:            opts.maxRetries,
 		maxDiffBytes:          opts.maxDiff,
+		hostEvidenceTimeout:   opts.evidenceTimeout,
 		maxCostUSD:            opts.budgetUSD,
 		clearCostBudget:       opts.noBudget,
 		depth:                 opts.depth,
@@ -663,6 +667,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		HostEvidenceTimeout:      reviewPolicy.hostEvidenceTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
 		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
@@ -773,6 +778,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		HostEvidenceTimeout:      reviewPolicy.hostEvidenceTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
 		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
