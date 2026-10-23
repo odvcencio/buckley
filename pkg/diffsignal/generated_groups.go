@@ -85,6 +85,51 @@ func markGeneratedSiblings(files []FileDiff) {
 	}
 }
 
+// Peer rule thresholds: a directory and extension with at least
+// generatedPeerMinFiles changed files, of which at least generatedPeerShare
+// (as a fraction of numerator/denominator) are already generated.
+const (
+	generatedPeerMinFiles = 8
+	generatedPeerShareNum = 3
+	generatedPeerShareDen = 4
+)
+
+// markGeneratedPeers classifies the stragglers of a bulk regeneration. A
+// regenerated fixture directory often holds files too small or too plain for
+// the content rules (a short HTML page among minified ones). When most changed
+// files that share a directory and extension are generated, the rest are too.
+func markGeneratedPeers(files []FileDiff) {
+	type tally struct{ total, generated int }
+	groups := map[string]*tally{}
+	key := func(p string) string {
+		dir, base := path.Split(p)
+		return dir + "*" + path.Ext(base)
+	}
+	for _, f := range files {
+		if path.Ext(f.Path) == "" {
+			continue
+		}
+		t := groups[key(f.Path)]
+		if t == nil {
+			t = &tally{}
+			groups[key(f.Path)] = t
+		}
+		t.total++
+		if f.Generated() {
+			t.generated++
+		}
+	}
+	for i := range files {
+		if files[i].Reason != ReasonNone || path.Ext(files[i].Path) == "" {
+			continue
+		}
+		t := groups[key(files[i].Path)]
+		if t.total >= generatedPeerMinFiles && t.generated*generatedPeerShareDen >= t.total*generatedPeerShareNum {
+			files[i].Reason = ReasonGeneratedPeer
+		}
+	}
+}
+
 // GeneratedGroup is one summary entry for generated files that share a
 // directory and extension.
 type GeneratedGroup struct {

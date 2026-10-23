@@ -194,3 +194,36 @@ func TestSplit_CompressedCopiesBesideGeneratedFileAreGenerated(t *testing.T) {
 		t.Errorf("binaries with no generated neighbour: logo=%q orphan=%q, want binary", got["assets/logo.png"], got["assets/orphan.js.gz"])
 	}
 }
+
+func TestSplit_StragglersOfABulkRegenerationAreGenerated(t *testing.T) {
+	var raw strings.Builder
+	for i := 0; i < 8; i++ {
+		raw.WriteString(minifiedFileDiff(fmt.Sprintf("fx/perf/p%02d.html", i), 5_000))
+	}
+	raw.WriteString(newFileDiff("fx/perf/small1.html", "+<p>1</p>\n"))
+	raw.WriteString(newFileDiff("fx/perf/small2.html", "+<p>2</p>\n"))
+	// Too few changed files, or too few of them generated, to call the rest generated.
+	for i := 0; i < 3; i++ {
+		raw.WriteString(minifiedFileDiff(fmt.Sprintf("few/m%d.html", i), 5_000))
+	}
+	raw.WriteString(newFileDiff("few/plain.html", "+<p>x</p>\n"))
+	for i := 0; i < 4; i++ {
+		raw.WriteString(minifiedFileDiff(fmt.Sprintf("mixed/m%d.html", i), 5_000))
+		raw.WriteString(newFileDiff(fmt.Sprintf("mixed/plain%d.html", i), "+<p>x</p>\n"))
+	}
+	got := map[string]Reason{}
+	for _, f := range Split(raw.String()) {
+		got[f.Path] = f.Reason
+	}
+	for _, p := range []string{"fx/perf/small1.html", "fx/perf/small2.html"} {
+		if got[p] != ReasonGeneratedPeer {
+			t.Errorf("%s reason = %q, want peer of regenerated files", p, got[p])
+		}
+	}
+	if got["few/plain.html"] != ReasonNone {
+		t.Errorf("few/plain.html reason = %q: a group under %d files is not a bulk regeneration", got["few/plain.html"], generatedPeerMinFiles)
+	}
+	if got["mixed/plain0.html"] != ReasonNone {
+		t.Errorf("mixed/plain0.html reason = %q: half the group is hand-written", got["mixed/plain0.html"])
+	}
+}

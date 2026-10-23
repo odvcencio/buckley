@@ -201,5 +201,6 @@ func (c *Capture) Finish() (*Diff, error) {
 	}
 	c.finishFile()
 	markGeneratedSiblings(c.files)
+	markGeneratedPeers(c.files)
 	return &Diff{Files: c.files, preamble: c.prefix.String(), truncated: c.prefixCut}, nil
 }

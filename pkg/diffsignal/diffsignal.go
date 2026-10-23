@@ -90,7 +90,10 @@ const (
 	// ReasonGeneratedSibling marks a file whose compressed copy (.br, .gz) or
 	// source map (.map) changed beside it: the file is build output too.
 	ReasonGeneratedSibling Reason = "generated (build output sibling)"
-	ReasonOverBudget       Reason = "over budget"
+	// ReasonGeneratedPeer marks a file that shares a directory and extension
+	// with a run of generated files: a bulk regeneration touches all of them.
+	ReasonGeneratedPeer Reason = "generated (matches regenerated peers)"
+	ReasonOverBudget    Reason = "over budget"
 
 	// ReasonUnavailable marks a file whose diff content could not be
 	// retrieved from the source at all. For example, GitHub's pull request
@@ -147,7 +150,7 @@ type FileDiff struct {
 // -diff). Plain binary files, such as images, are not generated.
 func (fd FileDiff) Generated() bool {
 	switch fd.Reason {
-	case ReasonGeneratedPath, ReasonMinified, ReasonGeneratedAttr, ReasonGeneratedHeader, ReasonGeneratedSibling:
+	case ReasonGeneratedPath, ReasonMinified, ReasonGeneratedAttr, ReasonGeneratedHeader, ReasonGeneratedSibling, ReasonGeneratedPeer:
 		return true
 	}
 	return false
@@ -791,6 +794,7 @@ func splitWithPreamble(raw string, generated func(string) bool) (string, []FileD
 		classify(&files[i], generated)
 	}
 	markGeneratedSiblings(files)
+	markGeneratedPeers(files)
 	for i := range files {
 		if files[i].Generated() {
 			files[i].GeneratedBy = generatedByHint(files[i].Path, files[i].Segment)
