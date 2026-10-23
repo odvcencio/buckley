@@ -64,15 +64,6 @@ func (c *BranchContext) addGenerated(raw string) {
 	c.GeneratedGroups = diffsignal.GroupGenerated(c.generated)
 }
 
-// LedgerFiles are the changed paths the Coverage ledger must list.
-func (c *BranchContext) LedgerFiles() []string {
-	paths := make([]string, 0, len(c.Files))
-	for _, f := range c.Files {
-		paths = append(paths, f.Path)
-	}
-	return ledgerPaths(paths, c.GeneratedFiles)
-}
-
 // ProjectContext contains context for project review.
 type ProjectContext struct {
 	RepoRoot          string

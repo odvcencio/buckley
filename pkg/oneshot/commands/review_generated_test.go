@@ -133,8 +133,8 @@ func TestBranchContext_GeneratedFilesLeaveTheLedger(t *testing.T) {
 	if err := validateCoverageLedgerExcluding(entries, changed, ctx.GeneratedFiles); err != nil {
 		t.Fatalf("ledger without generated files rejected: %v", err)
 	}
-	if got := ctx.LedgerFiles(); len(got) != 2 {
-		t.Fatalf("LedgerFiles() = %v, want .gitattributes and src/app.go", got)
+	if got := ledgerPaths(changed, ctx.GeneratedFiles); len(got) != 2 {
+		t.Fatalf("ledgerPaths() = %v, want .gitattributes and src/app.go", got)
 	}
 }
 
