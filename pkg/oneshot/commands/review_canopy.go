@@ -72,6 +72,7 @@ type compactCanopyReview struct {
 	IndexScope         string                    `json:"index_scope"`
 	IndexScopeSource   string                    `json:"index_scope_source,omitempty"`
 	BlastRadius        int                       `json:"blast_radius"`
+	BlastRadiusNote    string                    `json:"blast_radius_note,omitempty"`
 	ComplexityHotspots []canopyComplexityHotspot `json:"complexity_hotspots,omitempty"`
 	Capabilities       []canopyReviewCapability  `json:"credible_capabilities,omitempty"`
 }
@@ -294,6 +295,9 @@ func collectCanopyReviewEvidence(parent context.Context, repoRoot, baseCommit st
 		BlastRadius:        report.BlastRadius,
 		ComplexityHotspots: selectCanopyHotspots(report.ComplexityDelta),
 		Capabilities:       selectCredibleCanopyCapabilities(report.NewCapabilities),
+	}
+	if indexScope == "changed" {
+		compact.BlastRadiusNote = "Counts only indexed changed files. Callers in unchanged files are unmeasured; zero does not establish low repository-wide impact."
 	}
 	output, err = json.Marshal(compact)
 	if err != nil {
