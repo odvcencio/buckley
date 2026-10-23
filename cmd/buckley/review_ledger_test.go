@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,3 +191,5 @@ func TestRetryReviewLedger_IsBoundedByItsOwnTimeout(t *testing.T) {
 		t.Fatalf("retryReviewLedger blocked for %s", elapsed)
 	}
 }
+
+func resetLedgerCredentialWarning() { ledgerCredentialWarning = sync.Once{} }

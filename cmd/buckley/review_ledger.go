@@ -69,8 +69,6 @@ var ledgerWarningOutput io.Writer = os.Stderr
 
 var ledgerCredentialWarning sync.Once
 
-func resetLedgerCredentialWarning() { ledgerCredentialWarning = sync.Once{} }
-
 // warnReviewLedger prints a ledger warning. Missing Google credentials are the
 // normal state on a machine that never set up the archive: say so in one line
 // per process, and keep the queued records for later.
