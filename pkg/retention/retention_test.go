@@ -451,3 +451,38 @@ func TestClean_RetainedRunProtectsCheckpointInAnotherSession(t *testing.T) {
 		t.Fatalf("retained checkpoint lost: %v", err)
 	}
 }
+
+// The dry run must name what the real run removes. Evidence is only released
+// once its runs are pruned, so a preview that counts runs alone reports zero.
+func TestClean_DryRunReportsEvidenceReleasedByPrunedRuns(t *testing.T) {
+	store, ledger, ev, cleaner := newRetentionStores(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	old := now.Add(-40 * 24 * time.Hour)
+	for _, id := range []string{"old-a", "old-b"} {
+		addHistory(t, store, ledger, ev, id, "completed", old)
+	}
+	addHistory(t, store, ledger, ev, "recent", "completed", now.Add(-time.Hour))
+
+	preview, err := cleaner.Clean(ctx, testPolicy(), now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objects int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM evidence_objects`).Scan(&objects); err != nil || objects != 3 {
+		t.Fatalf("dry run changed evidence: %d objects, err=%v", objects, err)
+	}
+	real, err := cleaner.Clean(ctx, testPolicy(), now, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real.Evidence != 2 {
+		t.Fatalf("real run removed %d evidence objects, want 2 (fixture is wrong)", real.Evidence)
+	}
+	if preview.Evidence != real.Evidence || preview.Blobs != real.Blobs || preview.Runs != real.Runs || preview.Sessions != real.Sessions {
+		t.Fatalf("preview %+v differs from real run %+v", preview, real)
+	}
+	if preview.EvidenceBytes <= 0 {
+		t.Fatalf("preview reports no bytes freed: %+v", preview)
+	}
+}

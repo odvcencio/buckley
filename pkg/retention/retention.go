@@ -28,6 +28,7 @@ type Report struct {
 	Pins           int64                 `json:"pins"`
 	Evidence       int                   `json:"evidence"`
 	Blobs          int                   `json:"blobs"`
+	EvidenceBytes  int64                 `json:"evidence_bytes"`
 	TemporaryFiles int                   `json:"temporary_files"`
 	DryRun         bool                  `json:"dry_run"`
 	Storage        storage.StorageBudget `json:"storage"`
@@ -195,9 +196,9 @@ func (c *Cleaner) Clean(ctx context.Context, policy Policy, now time.Time, dryRu
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM retention_runs`).Scan(&report.Runs); err != nil {
 			return err
 		}
-		if dryRun {
-			return errPreviewComplete
-		}
+		// The preview runs the same deletions as the real pass inside this
+		// transaction, which is rolled back: evidence is released only once its
+		// runs are gone, so counting before the deletions would report none.
 		// Cross-package relationships without foreign keys need explicit
 		// deletion; the run's own events, steps, mailbox, metrics and claims
 		// cascade. Release run pins only in this same committed transaction.
@@ -247,6 +248,14 @@ func (c *Cleaner) Clean(ctx context.Context, policy Policy, now time.Time, dryRu
 			return err
 		}
 		report.Pins += pins
+		if dryRun {
+			preview, err := c.evidence.PreviewSweep(ctx, conn, policy.Evidence, now)
+			if err != nil {
+				return err
+			}
+			report.Evidence, report.Blobs, report.EvidenceBytes = preview.Objects, preview.Blobs, preview.StoredBytes
+			return errPreviewComplete
+		}
 		return nil
 	})
 	if errors.Is(err, errPreviewComplete) {
