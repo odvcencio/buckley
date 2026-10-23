@@ -366,3 +366,25 @@ func TestBuildPRShardPrompt_SecondaryShardUsesTheRecommendationLine(t *testing.T
 		}
 	}
 }
+
+// Validation rejects an approval when the PR context is incomplete, and the
+// primary shard is validated like a single-pass review. It must be told so.
+func TestBuildPRShardPrompt_PrimaryShardNeverApprovesFromIncompleteContext(t *testing.T) {
+	ctx := &PRContext{
+		PR:            &PRInfo{Number: 1, Title: "t", HeadSHA: "h", BaseSHA: "b"},
+		ContextStatus: []PRContextStatus{{Source: "PR diff", Status: "truncated", Truncated: true}},
+	}
+	if !ctx.HasIncompleteContext() {
+		t.Fatal("fixture context should be incomplete")
+	}
+	prompt := BuildPRShardPrompt(ctx, diffsignal.Shard{Files: []string{"a.go"}, Context: "diff"}, 0, 2, true)
+	for _, want := range []string{"incomplete or truncated", "never APPROVE", "NEEDS DISCUSSION"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("primary shard prompt missing %q", want)
+		}
+	}
+	complete := BuildPRShardPrompt(&PRContext{PR: ctx.PR}, diffsignal.Shard{Files: []string{"a.go"}, Context: "diff"}, 0, 2, true)
+	if strings.Contains(complete, "incomplete or truncated") {
+		t.Error("a complete context must not carry the no-approval notice")
+	}
+}
