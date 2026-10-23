@@ -388,8 +388,12 @@ func subtract(all, remove []string) []string {
 	return out
 }
 
-// FailingSummary lists failing evidence for validation messages.
-func (r VerificationReport) FailingSummary() []string {
+// FailingSummary lists failing evidence for validation messages. A nil report
+// has no failing evidence.
+func (r *VerificationReport) FailingSummary() []string {
+	if r == nil {
+		return nil
+	}
 	var out []string
 	for _, f := range r.Failing {
 		out = append(out, f.Label+" ("+f.Detail+")")
