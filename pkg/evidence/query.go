@@ -7,15 +7,10 @@ import (
 	"strings"
 )
 
-// Query lists ObjectSummary rows matching q. IDs and Kinds are pushed down
-// to SQL; Since is applied via an indexed created_at comparison; SessionID,
-// RunID, TaskID, Path, EntityID, and Text are matched against each
-// candidate's Metadata in Go, because the evidence_objects table (section
-// 14.4) has no dedicated columns for those associations. This keeps the
-// schema exactly as specified without requiring a JSON1 extension, at the
-// cost of scanning more rows in Go for association-heavy queries; full-text
-// search over evidence bodies is out of scope for this package (spec's PR 4
-// lists "FTS/query where enabled" as an optional test).
+// Query lists ObjectSummary rows matching q. IDs, Kinds and the exact Tree
+// metadata value are filtered in SQL; Since uses an indexed time comparison.
+// Other associations are matched against each candidate's Metadata in Go.
+// Listing never materializes blob contents.
 func (s *SQLiteStore) Query(ctx context.Context, q Query) ([]ObjectSummary, error) {
 	clauses := []string{"1 = 1"}
 	args := []any{}
@@ -36,6 +31,11 @@ func (s *SQLiteStore) Query(ctx context.Context, q Query) ([]ObjectSummary, erro
 			args = append(args, string(k))
 		}
 		clauses = append(clauses, fmt.Sprintf("kind IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	if q.Tree != "" {
+		clauses = append(clauses, "json_extract(metadata_json, '$.tree') = ?")
+		args = append(args, q.Tree)
 	}
 
 	if !q.Since.IsZero() {

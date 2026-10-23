@@ -48,7 +48,7 @@ func ResolveVerificationPolicy(in PolicyInputs) (VerificationMode, string, error
 }
 
 func modeFromLabels(labels []string) (VerificationMode, string, bool) {
-	rank := map[string]int{LabelVerifyOptional: 1, LabelVerifyReceipt: 2, LabelVerifyRequired: 3}
+	rank := map[string]int{LabelVerifyOptional: 1, LabelVerifyReceipt: 3, LabelVerifyRequired: 2}
 	best, bestRank := "", 0
 	for _, l := range labels {
 		l = strings.ToLower(strings.TrimSpace(l))

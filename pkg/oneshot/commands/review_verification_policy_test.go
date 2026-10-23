@@ -21,6 +21,8 @@ func TestResolveVerificationPolicyPrecedence(t *testing.T) {
 		{"required label", PolicyInputs{Labels: []string{LabelVerifyRequired}}, VerifyReceiptOrCI, LabelVerifyRequired},
 		{"receipt label", PolicyInputs{Labels: []string{LabelVerifyReceipt}}, VerifyReceipt, LabelVerifyReceipt},
 		{"strictest label wins", PolicyInputs{Labels: []string{LabelVerifyOptional, LabelVerifyRequired}}, VerifyReceiptOrCI, LabelVerifyRequired},
+		{"receipt beats receipt-or-ci", PolicyInputs{Labels: []string{LabelVerifyRequired, LabelVerifyReceipt}}, VerifyReceipt, LabelVerifyReceipt},
+		{"receipt beats receipt-or-ci in reverse order", PolicyInputs{Labels: []string{LabelVerifyReceipt, LabelVerifyRequired, LabelVerifyOptional}}, VerifyReceipt, LabelVerifyReceipt},
 		{"label case ignored", PolicyInputs{Labels: []string{"Buckbot:Verify-Required"}}, VerifyReceiptOrCI, LabelVerifyRequired},
 		{"unrelated labels ignored", PolicyInputs{Labels: []string{"bug"}, RepoConfig: "receipt"}, VerifyReceipt, "repository config"},
 	}

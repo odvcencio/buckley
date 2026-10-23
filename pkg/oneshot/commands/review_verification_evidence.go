@@ -165,7 +165,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 	if in.Mode != VerifyReceipt && in.ChecksOnHead && len(in.Checks) > 0 {
 		byName := map[string]CICheckState{}
 		for _, c := range in.Checks {
-			if prev, ok := byName[c.Name]; !ok || c.State == CICheckFail || prev == CICheckSkipped {
+			if prev, ok := byName[c.Name]; !ok || c.State == CICheckFail || (prev != CICheckFail && c.State != CICheckPass) {
 				byName[c.Name] = c.State
 			}
 		}
@@ -195,24 +195,8 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 					Detail: "passed on the reviewed head", Paths: matched}, true)
 			}
 		}
-		if !declaredCI {
-			allPass, anyPass := true, false
-			for _, c := range in.Checks {
-				switch c.State {
-				case CICheckPass:
-					anyPass = true
-				case CICheckFail:
-					allPass = false
-					add(EvidenceItem{Kind: "ci", Label: "ci check `" + c.Name + "`", Detail: "failed on the reviewed head (no ci_checks declared, so it is not mapped to paths)", Paths: append([]string(nil), required...)}, false)
-				case CICheckPending:
-					allPass = false
-				}
-			}
-			if allPass && anyPass && len(required) > 0 {
-				add(EvidenceItem{Kind: "ci", Label: fmt.Sprintf("all %d CI checks on the reviewed head", len(in.Checks)),
-					Detail: "default coverage: no ci_checks declared, so every passing check counts as repository build/test coverage",
-					Paths:  append([]string(nil), required...)}, true)
-			}
+		if !declaredCI && len(required) > 0 {
+			rep.Rejected = append(rep.Rejected, "CI checks have no declared path coverage; configure buckbot.verification.declared.ci_checks or record a verification receipt")
 		}
 	}
 

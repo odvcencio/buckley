@@ -57,13 +57,20 @@ func StateOf(ctx context.Context, dir string) (State, error) {
 	if err != nil {
 		return State{}, fmt.Errorf("verify: %w", err)
 	}
-	all, err := git(ctx, root, "status", "--porcelain")
+	all, err := git(ctx, root, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return State{}, fmt.Errorf("verify: %w", err)
 	}
-	tracked, err := git(ctx, root, "status", "--porcelain", "--untracked-files=no")
+	tracked, err := git(ctx, root, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none")
 	if err != nil {
 		return State{}, fmt.Errorf("verify: %w", err)
+	}
+	hiddenChanged := false
+	if tracked == "" {
+		hiddenChanged, err = hiddenTrackedChanges(ctx, root)
+		if err != nil {
+			return State{}, err
+		}
 	}
 	repo, err := git(ctx, root, "config", "--get", "remote.origin.url")
 	if err != nil || repo == "" {
@@ -76,7 +83,7 @@ func StateOf(ctx context.Context, dir string) (State, error) {
 	}
 	return State{
 		Root: root, RelDir: filepath.ToSlash(rel), Repo: repo, Commit: commit, Tree: tree,
-		Dirty: all != "", TrackedChanged: tracked != "",
+		Dirty: all != "" || hiddenChanged, TrackedChanged: tracked != "" || hiddenChanged,
 	}, nil
 }
 
