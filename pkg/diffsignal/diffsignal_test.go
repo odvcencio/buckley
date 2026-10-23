@@ -394,7 +394,7 @@ func TestNeverDropSummaryLine_LongPaths(t *testing.T) {
 	// 112-byte reserve — gap of ~85 bytes per file (3440 bytes for 40 files).
 	base := "src/very/long/generated/path/monorepo/packages/feature/"
 	suffix := ".go"
-	padding := strings.Repeat("x", 155-len(base)-len(suffix)-2) // -2 for 2-digit index
+	padding := strings.Repeat("x", 155-len(base)-len(suffix)-4) // -2 for the index, -2 for "/f"
 
 	src1 := sourceFileDiff("pkg/real/handler.go", "real-sentinel")
 	// budget chosen so that the underestimated reserve admits src2 but the
@@ -407,7 +407,9 @@ func TestNeverDropSummaryLine_LongPaths(t *testing.T) {
 	raw.WriteString(sourceFileDiff("pkg/sneaky/file.go", "small-sneaky-content-1234567890abcdef"))
 	paths := make([]string, nSummary)
 	for i := 0; i < nSummary; i++ {
-		path := fmt.Sprintf("%s%s%02d%s", base, padding, i, suffix)
+		// One directory per file keeps each path a separate summary entry:
+		// generated files in a shared directory collapse into one group line.
+		path := fmt.Sprintf("%s%s%02d/f%s", base, padding, i, suffix)
 		paths[i] = path
 		raw.WriteString(minifiedFileDiff(path, 5_000))
 	}

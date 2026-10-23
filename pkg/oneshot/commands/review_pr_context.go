@@ -44,6 +44,12 @@ type PRInfo struct {
 	ChangedFiles   int
 }
 
+// LedgerFiles are the changed paths the Coverage ledger must list: every
+// changed path except the generated ones.
+func (c *PRContext) LedgerFiles() []string {
+	return append([]string(nil), ledgerPaths(c.Files, c.GeneratedFiles)...)
+}
+
 // ChecksOnHead reports whether Checks were read for the pull request head
 // commit itself, not the base commit.
 func (c *PRContext) ChecksOnHead() bool { return c != nil && c.CIProvenance == prCISourceHead }
@@ -65,6 +71,11 @@ type PRContext struct {
 	// produces exactly one shard, identical in content to Diff; a caller
 	// only needs the multi-pass path when len(Shards.Shards) > 1.
 	Shards diffsignal.ShardResult
+
+	// GeneratedFiles are the changed paths classified as generated. They are
+	// collapsed into GeneratedGroups and excluded from the Coverage ledger.
+	GeneratedFiles  []string
+	GeneratedGroups []diffsignal.GeneratedGroup
 
 	Comments                []PRComment
 	Reviews                 []PRReview
@@ -328,6 +339,8 @@ func assemblePRContextWithOptions(prRef string, deps prContextDependencies, opts
 	prCtx.Diff = diff.Text
 	prCtx.RawDiff = diff.Raw
 	prCtx.Shards = diffsignal.PrioritizeShards(diff.Raw, opts.MaxDiffBytes)
+	prCtx.GeneratedFiles = diffsignal.GeneratedFiles(prCtx.Shards.LowSignal)
+	prCtx.GeneratedGroups = diffsignal.GroupGenerated(prCtx.Shards.LowSignal)
 	diffAuditSource := "PR diff"
 	if diff.LocalFallback {
 		diffAuditSource += " (immutable local fallback)"
@@ -476,13 +489,15 @@ func BuildPRPrompt(ctx *PRContext) string {
 		sb.WriteString("\n")
 	}
 
-	if len(ctx.Files) > 0 {
+	ledgerFiles := ledgerPaths(ctx.Files, ctx.GeneratedFiles)
+	if len(ledgerFiles) > 0 {
 		sb.WriteString("## Changed Files\n\n")
-		for _, f := range ctx.Files {
+		for _, f := range ledgerFiles {
 			sb.WriteString(fmt.Sprintf("- %s\n", f))
 		}
 		sb.WriteString("\n")
 	}
+	sb.WriteString(generatedPromptSection(ctx.GeneratedGroups))
 	appendReviewVerificationTargets(&sb, ctx.Files, ctx.AgentsMD)
 
 	if len(ctx.Comments) > 0 {
@@ -565,12 +580,12 @@ func BuildPRPrompt(ctx *PRContext) string {
 	sb.WriteString("```diff\n")
 	sb.WriteString(ctx.Diff)
 	sb.WriteString("\n```\n")
-	if len(ctx.Files) > 0 {
+	if len(ledgerFiles) > 0 {
 		sb.WriteString("\n## Final Coverage Checklist\n\n")
 		sb.WriteString("Before returning, reconcile the final ## Coverage ledger against every exact changed path below. ")
 		sb.WriteString("Include one **File** entry with concrete evidence per path, no unrelated paths, ")
 		sb.WriteString("an explicit **Feedback disposition**, and a **Verification** line.\n\n")
-		for _, file := range ctx.Files {
+		for _, file := range ledgerFiles {
 			fmt.Fprintf(&sb, "- `%s`\n", file)
 		}
 	}

@@ -162,8 +162,9 @@ func TestCapture_RenderDoesNotMutateInventory(t *testing.T) {
 
 func TestPrioritize_SummaryAndPreambleStayWithinBudget(t *testing.T) {
 	var raw strings.Builder
-	for i := 0; i < 100; i++ {
-		fmt.Fprintf(&raw, "diff --git a/f%d.min.js b/f%d.min.js\n@@ -0,0 +1 @@\n+generated\n", i, i)
+	for i := 0; i < 400; i++ {
+		// Binary files stay one summary line each; generated files would collapse.
+		fmt.Fprintf(&raw, "diff --git a/f%d.png b/f%d.png\nBinary files /dev/null and b/f%d.png differ\n", i, i, i)
 	}
 	for _, prefix := range []string{"", strings.Repeat("preamble\n", 100)} {
 		for _, budget := range []int{1, 16, 50, 100, 4096} {

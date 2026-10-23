@@ -788,6 +788,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		SuppliedEvidenceOnly: !reviewPolicy.executeVerification,
 		FailingEvidence:      reviewPolicy.verification.FailingSummary(),
 		ChangedFiles:         changedFiles,
+		GeneratedFiles:       branchCtx.GeneratedFiles,
 		ContextIncomplete:    branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 		ApprovalCritic:       reviewPolicy.approvalCritic,
 		Depth:                string(reviewPolicy.depth),
@@ -825,6 +826,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
 			partial.reviewText = appendVerificationSection(partial.reviewText, reviewPolicy.verification)
+			partial.reviewText = commands.AppendGeneratedSummary(partial.reviewText, branchCtx.GeneratedGroups, reviewPolicy.verification)
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
@@ -833,6 +835,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 	spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
 	complete := reviewResultFromAgent(fwResult, audit)
 	complete.reviewText = appendVerificationSection(complete.reviewText, reviewPolicy.verification)
+	complete.reviewText = commands.AppendGeneratedSummary(complete.reviewText, branchCtx.GeneratedGroups, reviewPolicy.verification)
 	return complete, nil
 }
 

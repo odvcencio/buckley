@@ -756,6 +756,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		SuppliedEvidenceOnly:        !opts.executeVerification,
 		FailingEvidence:             opts.verification.FailingSummary(),
 		ChangedFiles:                prCtx.Files,
+		GeneratedFiles:              prCtx.GeneratedFiles,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
 		CIProvenance:                prCtx.CIProvenance,
@@ -804,6 +805,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
 			partial.reviewText = appendVerificationSection(partial.reviewText, opts.verification)
+			partial.reviewText = commands.AppendGeneratedSummary(partial.reviewText, prCtx.GeneratedGroups, opts.verification)
 			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
@@ -823,6 +825,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	spinner.StopWithSuccess("PR review complete")
 	complete := reviewResultFromAgent(fwResult, audit)
 	complete.reviewText = appendVerificationSection(complete.reviewText, opts.verification)
+	complete.reviewText = commands.AppendGeneratedSummary(complete.reviewText, prCtx.GeneratedGroups, opts.verification)
 	return complete, prCtx.PR, nil
 }
 
@@ -844,7 +847,7 @@ func effectivePRShards(prCtx *commands.PRContext, opts automatedReviewOptions) d
 	switch {
 	case opts.forceSinglePass:
 		return diffsignal.ShardResult{
-			Shards:          []diffsignal.Shard{{Context: prCtx.Diff, Files: append([]string(nil), prCtx.Files...)}},
+			Shards:          []diffsignal.Shard{{Context: prCtx.Diff, Files: prCtx.LedgerFiles()}},
 			LowSignal:       prCtx.Shards.LowSignal,
 			Summary:         prCtx.Shards.Summary,
 			HighSignalBytes: prCtx.Shards.HighSignalBytes,
@@ -976,6 +979,7 @@ func runPRReviewSharded(
 
 	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
 	rendered = appendVerificationSection(rendered, opts.verification)
+	rendered = commands.AppendGeneratedSummary(rendered, prCtx.GeneratedGroups, opts.verification)
 
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())

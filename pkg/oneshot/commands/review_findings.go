@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
@@ -213,7 +214,10 @@ func ParseReview(review string) *ParsedReview {
 // ReviewValidationOptions describes evidence that a structured review must
 // account for before the CLI can present it as a valid result.
 type ReviewValidationOptions struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups. The
+	// Coverage ledger need not list them.
+	GeneratedFiles              []string
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -279,7 +283,7 @@ func parsedReviewValidationProblems(parsed *ParsedReview, opts ReviewValidationO
 		problems = append(problems, err.Error())
 	}
 	if strings.TrimSpace(parsed.Coverage) != "" {
-		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
+		if err := validateCoverageLedgerExcluding(parsed.CoverageEntries, opts.ChangedFiles, opts.GeneratedFiles); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -901,11 +905,31 @@ func trimCoverageSeparator(value string) string {
 }
 
 func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) error {
+	return validateCoverageLedgerExcluding(entries, changedFiles, nil)
+}
+
+// validateCoverageLedgerExcluding is validateCoverageLedger for a review whose
+// generated files are summarized by the host rather than ledgered one by one.
+// Generated files are not expected, and an entry that names only generated
+// files (a path, a glob such as "dir/*.html", or "dir/**") is ignored instead
+// of being rejected as unexpected.
+func validateCoverageLedgerExcluding(entries []CoverageEntry, changedFiles, generatedFiles []string) error {
+	generated := make(map[string]struct{}, len(generatedFiles))
+	for _, p := range generatedFiles {
+		if normalized := normalizeCoveragePath(p); normalized != "" {
+			generated[normalized] = struct{}{}
+		}
+	}
 	expected := make(map[string]struct{}, len(changedFiles))
 	for _, changedFile := range changedFiles {
-		if normalized := normalizeCoveragePath(changedFile); normalized != "" {
-			expected[normalized] = struct{}{}
+		normalized := normalizeCoveragePath(changedFile)
+		if normalized == "" {
+			continue
 		}
+		if _, skip := generated[normalized]; skip {
+			continue
+		}
+		expected[normalized] = struct{}{}
 	}
 
 	actual := make(map[string]struct{}, len(entries))
@@ -918,6 +942,9 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 			continue
 		}
 		covered := coverageEntryPaths(normalized, expected)
+		if len(covered) == 0 && entryNamesOnlyGenerated(normalized, generated) {
+			continue
+		}
 		if len(covered) == 0 {
 			unexpected = append(unexpected, normalized)
 		} else {
@@ -962,6 +989,28 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// entryNamesOnlyGenerated reports whether a ledger entry refers to generated
+// files and nothing else: an exact generated path, or a glob that matches at
+// least one generated path.
+func entryNamesOnlyGenerated(entry string, generated map[string]struct{}) bool {
+	if _, ok := generated[entry]; ok {
+		return true
+	}
+	if !strings.ContainsAny(entry, "*?") {
+		return false
+	}
+	match := diffsignal.GlobMatcher([]string{entry})
+	if match == nil {
+		return false
+	}
+	for p := range generated {
+		if match(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // coverageEntryPaths expands an exact path or a directory coverage group to

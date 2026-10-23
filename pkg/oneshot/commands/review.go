@@ -19,7 +19,10 @@ import (
 // inside an OS-enforced read-only-source sandbox.
 // The agent produces free-form markdown which is parsed into structured data.
 type ReviewBranchDef struct {
-	ChangedFiles      []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups; the
+	// Coverage ledger need not list them.
+	GeneratedFiles    []string
 	ContextIncomplete bool
 	ApprovalCritic    bool
 	Depth             string
@@ -74,6 +77,7 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:            d.ChangedFiles,
+		GeneratedFiles:          d.GeneratedFiles,
 		ContextIncomplete:       d.ContextIncomplete,
 		AllowUnverifiedApproval: d.SuppliedEvidenceOnly,
 	})
@@ -172,7 +176,10 @@ func (d ReviewProjectDef) ValidateAgentExecution(_ any, execution *oneshot.Agent
 
 // ReviewPRDef implements oneshot.AgentDefinition for PR review.
 type ReviewPRDef struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups; the
+	// Coverage ledger need not list them.
+	GeneratedFiles              []string
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -269,6 +276,7 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:                d.ChangedFiles,
+		GeneratedFiles:              d.GeneratedFiles,
 		ContextIncomplete:           d.ContextIncomplete,
 		CIStatus:                    d.CIStatus,
 		CIProvenance:                d.CIProvenance,

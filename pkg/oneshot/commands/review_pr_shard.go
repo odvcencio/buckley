@@ -449,6 +449,17 @@ func injectNotReviewedEntries(merged *ParsedReview, lowSignal []diffsignal.FileD
 			reasonByPath[key] = string(f.Reason)
 		}
 	}
+	// Generated files get one entry per group, not one per file.
+	for _, g := range diffsignal.GroupGenerated(lowSignal) {
+		for _, p := range g.Files {
+			accounted[normalizeCoveragePath(p)] = true
+		}
+		evidence := "not reviewed: " + reasonByPath[normalizeCoveragePath(g.Files[0])]
+		if len(g.Files) > 1 {
+			evidence = fmt.Sprintf("not reviewed: generated, %d files, %s changed", len(g.Files), diffsignal.FormatBytes(g.Bytes))
+		}
+		merged.CoverageEntries = append(merged.CoverageEntries, CoverageEntry{Path: g.Pattern, Evidence: evidence})
+	}
 	for _, changed := range allChangedFiles {
 		key := normalizeCoveragePath(changed)
 		if key == "" || accounted[key] {

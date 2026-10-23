@@ -84,7 +84,13 @@ const (
 	ReasonGeneratedPath Reason = "generated path"
 	ReasonMinified      Reason = "minified"
 	ReasonGeneratedAttr Reason = "generated (gitattributes)"
-	ReasonOverBudget    Reason = "over budget"
+	// ReasonGeneratedHeader marks a file that opens with the standard
+	// "Code generated ... DO NOT EDIT." line.
+	ReasonGeneratedHeader Reason = "generated (header)"
+	// ReasonGeneratedSibling marks a file whose compressed copy (.br, .gz) or
+	// source map (.map) changed beside it: the file is build output too.
+	ReasonGeneratedSibling Reason = "generated (build output sibling)"
+	ReasonOverBudget       Reason = "over budget"
 
 	// ReasonUnavailable marks a file whose diff content could not be
 	// retrieved from the source at all. For example, GitHub's pull request
@@ -134,7 +140,7 @@ type FileDiff struct {
 // -diff). Plain binary files, such as images, are not generated.
 func (fd FileDiff) Generated() bool {
 	switch fd.Reason {
-	case ReasonGeneratedPath, ReasonMinified, ReasonGeneratedAttr:
+	case ReasonGeneratedPath, ReasonMinified, ReasonGeneratedAttr, ReasonGeneratedHeader, ReasonGeneratedSibling:
 		return true
 	}
 	return false
@@ -255,6 +261,7 @@ func prioritizeCore(raw string, maxBytes int, perFileCap int, rank func(files []
 
 	// Append stub entries for files that were beyond MaxParseBytes so they
 	// appear as summary lines.
+	classifyStubs(overBudgetFiles, generated)
 	files = append(files, overBudgetFiles...)
 
 	return prioritizeFiles(preamble, files, truncated, maxBytes, perFileCap, rank)
@@ -277,14 +284,20 @@ func prioritizeFiles(preamble string, files []FileDiff, truncated bool, maxBytes
 
 	// Compute exact summary line sizes upfront so budget accounting is precise.
 	// summaryLineSize[i] is the byte length of summaryLine(files[i])+"\n".
+	// Generated files collapse into one line per group, so they carry no
+	// per-file summary line of their own.
 	summaryLineSize := make([]int, len(files))
 	for i, f := range files {
-		if f.LowSignal() {
+		if f.LowSignal() && !f.Generated() {
 			summaryLineSize[i] = len(summaryLine(f)) + 1 // +1 for '\n'
 		}
 	}
 
+	groups := GroupGenerated(files)
 	summaryBytes := 0
+	for _, g := range groups {
+		summaryBytes += len(g.Line()) + 1
+	}
 	for _, size := range summaryLineSize {
 		summaryBytes += size
 	}
@@ -368,12 +381,9 @@ func prioritizeFiles(preamble string, files []FileDiff, truncated bool, maxBytes
 		}
 		sb.WriteString(header)
 		remaining -= len(header)
-		left, summaryRemaining := summarized, summaryBytes
-		for _, f := range files {
-			if !f.LowSignal() {
-				continue
-			}
-			line := summaryLine(f) + "\n"
+		entries := summaryEntries(files, groups)
+		left, summaryRemaining := len(entries), summaryBytes
+		for _, line := range entries {
 			more := fmt.Sprintf("... and %d more changed files (truncated)\n", left-1)
 			if maxBytes > 0 && summaryRemaining > remaining && (left == 1 || len(line)+len(more) > remaining) {
 				more = fmt.Sprintf("... and %d more changed files (truncated)\n", left)
@@ -509,6 +519,7 @@ func splitForShardPrioritization(raw string) (preamble string, files []FileDiff,
 		return "", nil, truncated
 	}
 	preamble, files = splitWithPreamble(raw, nil)
+	classifyStubs(overBudgetFiles, nil)
 	files = append(files, overBudgetFiles...)
 	return preamble, files, truncated
 }
@@ -660,9 +671,8 @@ func renderLowSignalSummary(lowSignal []FileDiff) string {
 	var sb strings.Builder
 	sb.WriteString(summaryHeader)
 	sb.WriteString("\n")
-	for _, f := range lowSignal {
-		sb.WriteString(summaryLine(f))
-		sb.WriteString("\n")
+	for _, entry := range summaryEntries(lowSignal, GroupGenerated(lowSignal)) {
+		sb.WriteString(entry)
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -773,6 +783,7 @@ func splitWithPreamble(raw string, generated func(string) bool) (string, []FileD
 	for i := range files {
 		classify(&files[i], generated)
 	}
+	markGeneratedSiblings(files)
 	return raw[:starts[0]], files
 }
 
@@ -955,6 +966,8 @@ func classifyBody(fd *FileDiff, generated func(string) bool, minified bool) {
 		fd.Reason = ReasonUnavailable
 	case isGeneratedPath(fd.Path) || (fd.OldPath != "" && isGeneratedPath(fd.OldPath)):
 		fd.Reason = ReasonGeneratedPath
+	case hasGeneratedHeader(fd.Segment):
+		fd.Reason = ReasonGeneratedHeader
 	case minified:
 		fd.Reason = ReasonMinified
 	}
@@ -1025,4 +1038,32 @@ func cutAtLineBoundary(s string, n int) string {
 		return cut[:i]
 	}
 	return cut
+}
+
+// summaryEntries returns the summary lines in original file order: one line
+// per suppressed file, except that each generated group renders once, where
+// its first file appeared.
+func summaryEntries(files []FileDiff, groups []GeneratedGroup) []string {
+	byFile := make(map[string]GeneratedGroup, len(files))
+	for _, g := range groups {
+		for _, p := range g.Files {
+			byFile[p] = g
+		}
+	}
+	emitted := map[string]bool{}
+	var entries []string
+	for _, f := range files {
+		switch {
+		case !f.LowSignal():
+		case f.Generated():
+			g := byFile[f.Path]
+			if !emitted[g.Pattern] {
+				emitted[g.Pattern] = true
+				entries = append(entries, g.Line()+"\n")
+			}
+		default:
+			entries = append(entries, summaryLine(f)+"\n")
+		}
+	}
+	return entries
 }

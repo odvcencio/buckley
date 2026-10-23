@@ -39,6 +39,11 @@ type BranchContext struct {
 	UntrackedFiles    []string
 	ExcludedUntracked []string
 	Files             []FileChange
+	// GeneratedFiles are the changed paths classified as generated. They are
+	// collapsed into GeneratedGroups and excluded from the Coverage ledger.
+	GeneratedFiles    []string
+	GeneratedGroups   []diffsignal.GeneratedGroup
+	generated         []diffsignal.FileDiff
 	Stats             DiffStats
 	Diff              string
 	Unstaged          string
@@ -49,6 +54,23 @@ type BranchContext struct {
 	AgentsMD          string
 	CanopyReview      string
 	CanopyStatus      string
+}
+
+// addGenerated records the generated files that raw (a diff the review reads)
+// changes.
+func (c *BranchContext) addGenerated(raw string) {
+	c.generated = mergeGeneratedFiles(c.generated, raw)
+	c.GeneratedFiles = diffsignal.GeneratedFiles(c.generated)
+	c.GeneratedGroups = diffsignal.GroupGenerated(c.generated)
+}
+
+// LedgerFiles are the changed paths the Coverage ledger must list.
+func (c *BranchContext) LedgerFiles() []string {
+	paths := make([]string, 0, len(c.Files))
+	for _, f := range c.Files {
+		paths = append(paths, f.Path)
+	}
+	return ledgerPaths(paths, c.GeneratedFiles)
 }
 
 // ProjectContext contains context for project review.
@@ -268,6 +290,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 			return nil, nil, fmt.Errorf("failed to get local diff: %w", err)
 		}
 		diff = appendReviewUntrackedDiff(diff, untracked)
+		ctx.addGenerated(diff)
 		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
 		ctx.Diff = diffRes.Context
 		ctx.DiffTruncated = rawTruncated || diffRes.Truncated
@@ -301,6 +324,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get diff: %w", err)
 		}
+		ctx.addGenerated(diff)
 		diffRes := diffsignal.Prioritize(diff, opts.MaxDiffBytes)
 		ctx.Diff = diffRes.Context
 		ctx.DiffTruncated = rawTruncated || diffRes.Truncated
@@ -354,6 +378,7 @@ func AssembleBranchContext(opts BranchContextOptions) (*BranchContext, *transpar
 				if unstagedBudget > len(truncMarker) {
 					unstagedBudget -= len(truncMarker)
 				}
+				ctx.addGenerated(localChanges)
 				unstagedRes := diffsignal.Prioritize(localChanges, unstagedBudget)
 				ctx.Unstaged = unstagedRes.Context
 				ctx.UnstagedTruncated = localRawTrunc || unstagedRes.Truncated
@@ -546,11 +571,19 @@ func BuildBranchPrompt(ctx *BranchContext) string {
 	sb.WriteString(fmt.Sprintf("**Summary**: %d files, +%d/-%d lines\n\n",
 		ctx.Stats.Files, ctx.Stats.Insertions, ctx.Stats.Deletions))
 
+	generatedPaths := make(map[string]struct{}, len(ctx.GeneratedFiles))
+	for _, p := range ctx.GeneratedFiles {
+		generatedPaths[p] = struct{}{}
+	}
 	sb.WriteString("```\n")
 	for _, f := range ctx.Files {
+		if _, generated := generatedPaths[f.Path]; generated {
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("%s\t%s\n", f.Status, f.Path))
 	}
 	sb.WriteString("```\n\n")
+	sb.WriteString(generatedPromptSection(ctx.GeneratedGroups))
 	changedPaths := make([]string, 0, len(ctx.Files))
 	for _, file := range ctx.Files {
 		changedPaths = append(changedPaths, file.Path)
