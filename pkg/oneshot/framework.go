@@ -456,7 +456,7 @@ type AgentRunOpts struct {
 	ApprovalCriticReserveUSD float64
 
 	// ApprovalCriticReserve protects command time for an independent approval
-	// critic. It is unused when the review does not enable a critic.
+	// critic, capped at half the time remaining so the primary can run.
 	ApprovalCriticReserve time.Duration
 
 	// CriticMaxIterations bounds the approval critic's model turns.
@@ -740,6 +740,11 @@ func contextWithReservedTime(ctx context.Context, reserve time.Duration) (contex
 	if !ok {
 		return context.WithCancel(ctx)
 	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(ctx)
+	}
+	reserve = min(reserve, remaining/2)
 	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
