@@ -496,7 +496,7 @@ func PrepareReviewWorkspace(ctx context.Context, descriptor *ReviewSnapshot) (st
 		}
 	}
 
-	patch := descriptor.Patch()
+	patch := descriptor.patch
 	if len(patch) > 0 {
 		// Stage the materialized patch so new tracked files remain visible to a
 		// later `git diff HEAD` integrity check. The disposable workspace does
@@ -750,7 +750,8 @@ func verifyCodexReviewWorkspace(ctx context.Context, workDir string, descriptor 
 	if err != nil {
 		return fmt.Errorf("read materialized tracked patch: %w", err)
 	}
-	if !bytes.Equal(canonicalReviewSnapshotPatch(patch), canonicalReviewSnapshotPatch(descriptor.Patch())) {
+	if !bytes.Equal(patch, descriptor.patch) &&
+		!bytes.Equal(canonicalReviewSnapshotPatch(patch), canonicalReviewSnapshotPatch(descriptor.patch)) {
 		return fmt.Errorf("tracked source differs from immutable snapshot %s", descriptor.ID())
 	}
 	return nil
