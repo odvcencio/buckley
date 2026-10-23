@@ -136,6 +136,7 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	}
 	wantCompact := compactCanopyReview{
 		Base: "base-sha", ChangedFiles: 1, IndexScope: "changed", IndexScopeSource: "Canopy report", BlastRadius: 2,
+		BlastRadiusNote:    "Counts only indexed changed files. Callers in unchanged files are unmeasured; zero does not establish low repository-wide impact.",
 		ComplexityHotspots: []canopyComplexityHotspot{{File: "a.go", Name: "hot", Cyclomatic: 12, Cognitive: 18, Lines: 80}},
 		Capabilities:       []canopyReviewCapability{{Name: "High signal", Category: "execution", Confidence: "high", AttackID: "T1001"}},
 	}
@@ -159,6 +160,53 @@ printf '{"base":"base-sha","changed_files":1,"files":["a.go"],"index_scope":"cha
 	}
 	if string(count) != "run\n" {
 		t.Fatalf("invocations = %q, want one", count)
+	}
+}
+
+func TestCollectCanopyReviewEvidence_QualifiesPartialBlastRadius(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell script")
+	}
+	for _, tt := range []struct {
+		name, scope string
+		count       int
+		partial     bool
+	}{
+		{"changed zero", "changed", 0, true},
+		{"changed positive", "changed", 3, true},
+		{"repository zero", "repository", 0, false},
+		{"repository positive", "repository", 3, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			helper := filepath.Join(root, "canopy")
+			report, err := json.Marshal(map[string]any{"base": "base-sha", "index_scope": tt.scope, "changed_files": 1, "blast_radius": tt.count})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' '"+string(report)+"'\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CANOPY_BIN", helper)
+			evidence := collectCanopyReviewEvidence(context.Background(), root, "base-sha")
+			if evidence.Status != "available" || evidence.BlastRadius != tt.count {
+				t.Fatalf("count or availability changed: %+v", evidence)
+			}
+			var compact map[string]any
+			if err := json.Unmarshal([]byte(evidence.Output), &compact); err != nil {
+				t.Fatal(err)
+			}
+			if compact["blast_radius"] != float64(tt.count) || compact["index_scope"] != tt.scope {
+				t.Fatalf("scope or count lost: %s", evidence.Output)
+			}
+			note, exists := compact["blast_radius_note"]
+			if exists != tt.partial {
+				t.Fatalf("partial qualifier present=%t, want %t: %s", exists, tt.partial, evidence.Output)
+			}
+			if tt.partial && (!strings.Contains(note.(string), "unchanged files are unmeasured") || !strings.Contains(note.(string), "zero does not establish low")) {
+				t.Fatalf("partial result does not explain missing callers: %s", evidence.Output)
+			}
+		})
 	}
 }
 
