@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sync"
 
@@ -10,7 +11,7 @@ import (
 	"m31labs.dev/arbiter/vm"
 )
 
-// Engine compiles all .arb domains at startup and provides typed evaluation.
+// Engine loads compiled defaults and provides typed evaluation of .arb domains.
 type Engine struct {
 	compiled map[string]*arbiter.Program
 	loader   *Loader
@@ -29,7 +30,7 @@ func WithUserOverrides(dir string) Option {
 	return func(o *engineOpts) { o.overrideDir = dir }
 }
 
-// NewEngine compiles all rule domains and returns a ready engine.
+// NewEngine loads compiled defaults and compiles changed user overrides.
 func NewEngine(opts ...Option) (*Engine, error) {
 	o := &engineOpts{}
 	for _, fn := range opts {
@@ -42,13 +43,23 @@ func NewEngine(opts ...Option) (*Engine, error) {
 		return nil, fmt.Errorf("listing rule domains: %w", err)
 	}
 
+	defaults, err := loadCompiledDefaults()
+	if err != nil {
+		return nil, fmt.Errorf("loading compiled rule defaults: %w", err)
+	}
+
 	compiled := make(map[string]*arbiter.Program, len(domains))
 	for _, domain := range domains {
 		src, err := loader.Load(domain)
 		if err != nil {
 			return nil, fmt.Errorf("loading domain %q: %w", domain, err)
 		}
-		prog, err := arbiter.Compile(src)
+		var prog *arbiter.Program
+		if cached, ok := defaults[domain]; ok && cached.SourceSHA256 == fmt.Sprintf("%x", sha256.Sum256(src)) {
+			prog, err = cached.program()
+		} else {
+			prog, err = arbiter.Compile(src)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("compiling domain %q: %w", domain, err)
 		}
