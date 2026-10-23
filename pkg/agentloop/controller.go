@@ -3307,12 +3307,14 @@ func (c *Controller) recordEvent(ctx context.Context, eventType string, payload 
 }
 
 func (c *Controller) recordEventWithEvidence(ctx context.Context, eventType string, payload map[string]any, evidenceIDs []string) {
-	if c == nil {
+	if c == nil || (c.cfg.RunLedger == nil && c.cfg.LifecycleObserver == nil) {
 		return
 	}
 	payload = normalizedDurableEventPayload(payload)
 	timestamp := time.Now().UTC()
-	c.emitLifecycle(lifecycleEventFromLedger(c, eventType, timestamp, payload, evidenceIDs))
+	if c.cfg.LifecycleObserver != nil {
+		c.emitLifecycle(lifecycleEventFromLedger(c, eventType, timestamp, payload, evidenceIDs))
+	}
 	if c.cfg.RunLedger == nil {
 		return
 	}
