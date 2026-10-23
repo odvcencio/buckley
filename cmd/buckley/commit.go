@@ -289,6 +289,10 @@ func (r fixedCommitRunner) Run(context.Context) (*commitRunResult, error) {
 	return &commitRunResult{Commit: r.commit}, nil
 }
 
+// loadCommitGeneratedConfig loads the configuration that supplies
+// buckbot.generated_globs. Tests replace it.
+var loadCommitGeneratedConfig = loadConfiguredConfig
+
 // generatedCommitRuntime inspects the staged diff. When it holds generated files
 // only, it returns a runtime that writes the fixed regenerate message without
 // calling a model. When it mixes generated and source files, it warns. It
@@ -296,6 +300,11 @@ func (r fixedCommitRunner) Run(context.Context) (*commitRunResult, error) {
 func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commitCommandRuntime {
 	if state.Kind != opNone {
 		return nil
+	}
+	// Staged attributes are read per diff; the configured globs apply here
+	// exactly as they do in reviews.
+	if cfg, err := loadCommitGeneratedConfig(); err == nil {
+		installReviewGeneratedResolver(cfg, false)
 	}
 	stats, err := oneshot.StagedDiffStats(opts.paths)
 	if err != nil {
