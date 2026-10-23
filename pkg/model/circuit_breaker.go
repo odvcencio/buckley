@@ -244,7 +244,11 @@ func (cb *CircuitBreaker) finishCall(generation uint64, ownsHalfOpenProbe bool, 
 	} else {
 		transition, resetFailureCount = cb.recordSuccessLocked()
 	}
+	failures := cb.failureCount
 	cb.mu.Unlock()
+	if err != nil {
+		slog.Warn("circuit breaker counted a failure", "error", err, "consecutive_failures", failures)
+	}
 
 	if transition != nil {
 		transition.log()
