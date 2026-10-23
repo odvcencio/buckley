@@ -761,9 +761,17 @@ func splitWithPreamble(raw string, generated func(string) bool) (string, []FileD
 		if k+1 < len(starts) {
 			end = starts[k+1]
 		}
-		fd := parseSegment(raw[s:end])
-		classify(&fd, generated)
-		files = append(files, fd)
+		files = append(files, parseSegment(raw[s:end]))
+	}
+	if generated == nil {
+		paths := make([]string, len(files))
+		for i := range files {
+			paths[i] = files[i].Path
+		}
+		generated = resolveDefaultGenerated(paths)
+	}
+	for i := range files {
+		classify(&files[i], generated)
 	}
 	return raw[:starts[0]], files
 }

@@ -249,6 +249,7 @@ func runReviewCommand(args []string) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	installReviewGeneratedResolver(cfg, true)
 	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store, opts.effort)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
