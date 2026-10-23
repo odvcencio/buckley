@@ -162,3 +162,31 @@ func TestWarnReviewLedger_MissingCredentialsPrintOneLine(t *testing.T) {
 		t.Fatalf("other errors must still print: %q", buf.String())
 	}
 }
+
+type blockingRetryLedger struct{ orchestrator.ReviewLedger }
+
+func (blockingRetryLedger) Retry(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// The retry runs inside the review's own deadline, so a slow archive must not
+// be able to spend more than a few seconds of it.
+func TestRetryReviewLedger_IsBoundedByItsOwnTimeout(t *testing.T) {
+	if reviewLedgerRetryTimeout > 15*time.Second {
+		t.Fatalf("retry timeout = %s; it is taken from the review budget and must stay short", reviewLedgerRetryTimeout)
+	}
+	prev := reviewLedgerRetryTimeout
+	reviewLedgerRetryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { reviewLedgerRetryTimeout = prev })
+	var out strings.Builder
+	prevOut := ledgerWarningOutput
+	ledgerWarningOutput = &out
+	t.Cleanup(func() { ledgerWarningOutput = prevOut })
+
+	start := time.Now()
+	retryReviewLedger(blockingRetryLedger{})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("retryReviewLedger blocked for %s", elapsed)
+	}
+}

@@ -84,11 +84,16 @@ func warnReviewLedger(prefix string, err error) {
 	fmt.Fprintf(ledgerWarningOutput, "Warning: %s: %v\n", prefix, err)
 }
 
+// reviewLedgerRetryTimeout bounds the queued-upload retry that runs at the
+// start of a review. The review deadline is already running, so a slow archive
+// must not take a minute of it; uploads left over wait for the next run.
+var reviewLedgerRetryTimeout = 10 * time.Second
+
 func retryReviewLedger(ledger orchestrator.ReviewLedger) {
 	if ledger == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), reviewLedgerRetryTimeout)
 	defer cancel()
 	if err := ledger.Retry(ctx); err != nil {
 		warnReviewLedger("review ledger retry", err)
