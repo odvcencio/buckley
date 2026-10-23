@@ -1,12 +1,96 @@
 package commands
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"m31labs.dev/buckley/pkg/verifyreceipt"
 )
+
+func TestRecordCommands_PreservesShellArguments(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("POSIX shell unavailable")
+	}
+	marker := filepath.Join(t.TempDir(), "expanded")
+	tests := []struct {
+		name  string
+		paths []string
+		argv  []string
+	}{
+		{"simple", []string{"client/**"}, []string{"make", "test-js"}},
+		{"test filter", []string{"pkg/**"}, []string{"go", "test", "-run", "TestA|TestB", "./..."}},
+		{"shell script", []string{"src with spaces/**"}, []string{"sh", "-c", `printf '%s' "$1"; exit 0`, "test", "a b"}},
+		{"literal values", []string{"it's here/**", "$(printf injected > '" + marker + "')/**"}, []string{"check", "", "*", "$HOME", "`id`", "a\\b", "-x;y", "line one\n```\nline two"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := VerificationReport{Unverified: []string{"file.go"}}
+			// Use matching globs so the report selects the declared command.
+			report.Unverified = []string{strings.TrimSuffix(tt.paths[0], "**") + "file.go"}
+			report.Declared = []DeclaredVerification{{Paths: tt.paths, Command: tt.argv}}
+			commands := report.RecordCommands()
+			if len(commands) != 1 {
+				t.Fatalf("commands = %v", commands)
+			}
+			// Intercept the suggested Buckley invocation without running its check.
+			out, err := exec.Command("sh", "-c", "buckley() { printf '%s\\000' \"$@\"; }\n"+commands[0]).CombinedOutput()
+			if err != nil {
+				t.Fatalf("suggested command: %v\n%s", err, out)
+			}
+			want := []string{"verify", "record"}
+			for _, path := range tt.paths {
+				want = append(want, "--paths", path)
+			}
+			want = append(append(want, "--"), tt.argv...)
+			got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("shell argv = %#v, want %#v\ncommand: %s", got, want, commands[0])
+			}
+		})
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("shell expanded a suggested argument: %v", err)
+	}
+}
+
+func TestVerificationReport_ActionableBoundedGuidance(t *testing.T) {
+	report := VerificationReport{Mode: VerifyReceipt, Rejected: []string{"the reviewed tree has uncommitted changes"}}
+	for i := range 7 {
+		path := fmt.Sprintf("pkg%d/**", i)
+		report.Unverified = append(report.Unverified, fmt.Sprintf("pkg%d/file.go", i))
+		report.Declared = append(report.Declared, DeclaredVerification{Paths: []string{path}, Command: []string{"go", "test", fmt.Sprintf("./pkg%d/...", i)}})
+	}
+	code, gate := report.Gate()
+	if code != VerificationGateMissing || !strings.Contains(gate, report.Rejected[0]) {
+		t.Fatalf("missing evidence gate lost the rejection reason: %d %s", code, gate)
+	}
+	markdown := report.Markdown()
+	for _, want := range []string{"### Record verification", "clean tree", "rerun Buckbot", "    buckley verify record --paths 'pkg0/**' -- go test ./pkg0/...", "2 more verification commands omitted"} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("guidance missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Count(markdown, "    buckley verify record") != 5 {
+		t.Fatalf("next-step commands were not bounded:\n%s", markdown)
+	}
+	report.Unverified = nil
+	if strings.Contains(report.Markdown(), "### Record verification") {
+		t.Fatal("verified report suggests unnecessary verification")
+	}
+}
+
+func TestVerificationReport_UnknownCommandTemplate(t *testing.T) {
+	report := VerificationReport{Unverified: []string{"custom/file.ext"}}
+	if got := report.RecordCommands(); len(got) != 1 || got[0] != "buckley verify record --paths 'custom/**' -- '<your test command>'" {
+		t.Fatalf("template = %v", got)
+	}
+}
 
 func receipt(id string, status verifyreceipt.Status, exit int, paths ...string) verifyreceipt.Receipt {
 	return verifyreceipt.Receipt{
