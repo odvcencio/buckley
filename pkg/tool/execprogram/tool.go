@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -19,11 +20,12 @@ const finalizationTimeout = 5 * time.Second
 // tool. Programs run in bubblewrap without a workspace mount; the audited caps
 // client is their only view of the repository.
 type ProgramTool struct {
-	runner    *execmode.Runner
-	evidence  evidence.Store
-	ledger    runledger.Store
-	runID     string
-	sessionID string
+	runner      *execmode.Runner
+	evidence    evidence.Store
+	ledger      runledger.Store
+	runID       string
+	sessionID   string
+	fwAvailable bool
 }
 
 // NewProgramTool constructs an audited, evidence-backed exec_program tool.
@@ -82,28 +84,41 @@ func NewProgramTool(workspaceRoot string, ledger runledger.Store, ev evidence.St
 	if runner.Isolation() != execmode.IsolationBwrap {
 		return nil, fmt.Errorf("exec_program requires OS isolation (install bubblewrap); it never runs unsandboxed")
 	}
+	if !execmode.CompilerAvailable() {
+		return nil, fmt.Errorf("exec_program requires an available Go compiler")
+	}
+	_, fwErr := exec.LookPath("ferrous-wheel")
 	return &ProgramTool{
-		runner:    runner,
-		evidence:  ev,
-		ledger:    ledger,
-		runID:     runID,
-		sessionID: sessionID,
+		runner:      runner,
+		evidence:    ev,
+		ledger:      ledger,
+		runID:       runID,
+		sessionID:   sessionID,
+		fwAvailable: fwErr == nil,
 	}, nil
 }
 
 func (t *ProgramTool) Name() string { return "exec_program" }
 
 func (t *ProgramTool) Description() string {
+	var dialect string
+	if t.fwAvailable {
+		dialect = "Set language to \"fw\" for Ferrous Wheel. "
+	}
 	return "Execute a complete Go program (package main) in an OS sandbox against typed workspace capabilities. " +
 		"Compose, filter, and aggregate in code, then print only the result — one program instead of many read/search tool calls. " +
 		"Sandbox: no network, read-only system, no workspace mount (the audited caps client is the only window), writes confined to scratch, standard library only. " +
 		fmt.Sprintf("Scratch and /tmp share a %d MiB file-data limit; compiler /tmp has %d MiB. ", execmode.DefaultRuntimeScratchBytes>>20, execmode.DefaultCompilerTempBytes>>20) +
 		"On a compile error or a caps error, fix the program and call this tool again in THIS turn; do not end the turn to retry. " +
-		"Set language to \"fw\" for Ferrous Wheel. Pass reuse=<evidence-id> to re-run a previous program verbatim with no new source.\n\n" +
+		dialect + "Pass reuse=<evidence-id> to re-run a previous program verbatim with no new source.\n\n" +
 		execmode.CapsAPICard
 }
 
 func (t *ProgramTool) Parameters() builtin.ParameterSchema {
+	languages := []string{"go"}
+	if t.fwAvailable {
+		languages = append(languages, "fw")
+	}
 	return builtin.ParameterSchema{
 		Type: "object",
 		Properties: map[string]builtin.PropertySchema{
@@ -114,7 +129,7 @@ func (t *ProgramTool) Parameters() builtin.ParameterSchema {
 			"language": {
 				Type:        "string",
 				Description: "Source dialect",
-				Enum:        []string{"go", "fw"},
+				Enum:        languages,
 			},
 			"reuse": {
 				Type:        "string",

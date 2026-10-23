@@ -70,6 +70,17 @@ func resolveGOROOT() string {
 	return gorootPath
 }
 
+// CompilerAvailable reports whether the resolved toolchain can supply the
+// executable mounted by the compiler sandbox.
+func CompilerAvailable() bool {
+	root := resolveGOROOT()
+	if root == "" {
+		return false
+	}
+	_, err := exec.LookPath(filepath.Join(root, "bin", "go"))
+	return err == nil
+}
+
 // sandboxBaseArgv supplies common system mounts; each stage adds its own storage.
 func sandboxBaseArgv() ([]string, error) {
 	bwrap, err := exec.LookPath("bwrap")

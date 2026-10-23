@@ -182,7 +182,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			if err != nil {
 				return nil, err
 			}
-			if reviewToolAllowed(allowedTools, "exec_program") && r.runLedger != nil && r.evidence != nil && execmode.DetectIsolation() == execmode.IsolationBwrap {
+			if reviewToolAllowed(allowedTools, "exec_program") && r.runLedger != nil && r.evidence != nil && execmode.DetectIsolation() == execmode.IsolationBwrap && execmode.CompilerAvailable() {
 				reviewCodeModeRunID, err = registerReviewCodeModeTool(ctx, agentRegistry, snapshotRoot, r.runLedger, r.evidence, traceID, modelToUse, providerID)
 				if err != nil {
 					_ = agentRegistry.Close()
@@ -204,6 +204,9 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 	}
 	if _, codeModeEnabled := agentRegistry.Get("exec_program"); codeModeEnabled {
 		systemPrompt = strings.TrimSpace(systemPrompt) + "\n\n" + prompts.CodeModeSystemPrompt
+		if opts.ReviewSnapshot != nil {
+			systemPrompt += "\nFor this snapshot review, use exec_program for all file reads, listings, and searches mentioned above; those standalone inspection tools are not advertised."
+		}
 	}
 
 	// Create sub-agent configuration
@@ -408,6 +411,9 @@ func registerReviewCodeModeTool(ctx context.Context, registry *tool.Registry, ro
 	}
 	registry.Register(program)
 	registry.SetToolKind(program.Name(), "execute")
+	for _, name := range []string{"read_file", "find_files", "search_text"} {
+		registry.Remove(name)
+	}
 	return run.RunID, nil
 }
 
