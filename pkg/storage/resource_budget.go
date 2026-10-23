@@ -11,6 +11,11 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+// storageCostVersion is embedded in every accounting trigger. A database whose
+// triggers carry another version is re-accounted the next time its budget is
+// configured. v2 charges an evidence blob once, at its stored size.
+const storageCostVersion = "/*cost:v2*/"
+
 const storageBudgetError = "storage byte budget exceeded"
 
 var ErrStorageBudget = errors.New(storageBudgetError)
@@ -183,6 +188,7 @@ func storageRowCost(ctx context.Context, conn *sql.Conn, table, prefix string) (
 	}
 	defer rows.Close()
 	var terms []string
+	blobTerm := ""
 	for rows.Next() {
 		var cid, notNull, pk int
 		var name, typ string
@@ -192,9 +198,10 @@ func storageRowCost(ctx context.Context, conn *sql.Conn, table, prefix string) (
 		}
 		column := `COALESCE(` + prefix + quoteSQLiteIdentifier(name) + `, '')`
 		if table == "evidence_objects" && name == "stored_byte_count" {
-			// Four times the physical blob bytes leaves space for the database,
-			// WAL and atomic blob writes. Legacy rows use their raw size.
-			terms = append(terms, `2 * CASE WHEN `+column+` > 0 THEN `+column+` ELSE COALESCE(`+prefix+`"byte_count", 0) END`)
+			// The blob file holds exactly these bytes, so they are charged once.
+			// Legacy rows without a measured size use their raw size. SQLite
+			// allocation and WAL limits bound the rest of the physical overhead.
+			blobTerm = `CASE WHEN ` + column + ` > 0 THEN ` + column + ` ELSE COALESCE(` + prefix + `"byte_count", 0) END`
 		} else if strings.Contains(strings.ToUpper(typ), "INT") || strings.Contains(strings.ToUpper(typ), "REAL") || strings.Contains(strings.ToUpper(typ), "BOOL") {
 			terms = append(terms, `CASE WHEN typeof(`+column+`) IN ('integer', 'real') THEN 8 ELSE MAX(8, length(CAST(`+column+` AS BLOB))) END`)
 		} else {
@@ -204,7 +211,11 @@ func storageRowCost(ctx context.Context, conn *sql.Conn, table, prefix string) (
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	return "1024 + 2 * (" + strings.Join(terms, " + ") + ")", nil
+	cost := storageCostVersion + " 1024 + 2 * (" + strings.Join(terms, " + ") + ")"
+	if blobTerm != "" {
+		cost += " + " + blobTerm
+	}
+	return cost, nil
 }
 
 // RefreshStorageBudget covers tables introduced by a newly composed adapter.
@@ -229,6 +240,7 @@ func storageBudgetNeedsRefresh(ctx context.Context, db budgetReader) (bool, erro
 		AND tables.name <> 'storage_budget' AND tables.name NOT LIKE '%schema_migrations'
 		AND NOT EXISTS (SELECT 1 FROM sqlite_master AS triggers WHERE triggers.type = 'trigger'
 			AND triggers.name = 'storage_budget_' || tables.name || '_' || operations.op
+			AND instr(triggers.sql, '`+storageCostVersion+`') > 0
 			AND NOT EXISTS (SELECT 1 FROM pragma_table_info(tables.name) AS columns
 				WHERE instr(triggers.sql, '"' || replace(columns.name, '"', '""') || '"') = 0)))`).Scan(&missing)
 	return missing, err
@@ -283,14 +295,30 @@ func CheckStorageHeadroom(ctx context.Context, db budgetReader, additionalBytes 
 		return err
 	}
 	if freeBytes < min(int64(16<<20), budget.LimitBytes/16) {
-		return fmt.Errorf("%w: SQLite allocation has %d bytes of headroom; raise resources.storage_bytes or prune completed history", ErrStorageBudget, freeBytes)
+		return fmt.Errorf("%w: SQLite allocation has %d bytes of headroom; %s", ErrStorageBudget, freeBytes, storageBudgetAdvice)
 	}
 	return checkStorageBudget(budget, additionalBytes)
 }
 
 func checkStorageBudget(budget StorageBudget, additionalBytes int64) error {
 	if additionalBytes > budget.LimitBytes || budget.UsedBytes > budget.LimitBytes-additionalBytes {
-		return fmt.Errorf("%w: %d of %d bytes used; %d bytes required; raise resources.storage_bytes or prune completed history", ErrStorageBudget, budget.UsedBytes, budget.LimitBytes, additionalBytes)
+		return fmt.Errorf("%w: %d of %d bytes used; %d bytes required; %s", ErrStorageBudget, budget.UsedBytes, budget.LimitBytes, additionalBytes, storageBudgetAdvice)
 	}
 	return nil
+}
+
+const storageBudgetAdvice = "run `buckley db cleanup --dry-run` to see what can be pruned, then `buckley db cleanup`, or raise resources.storage_bytes in the Buckley config"
+
+// WithStorageBudgetAdvice adds the current usage and what to do to a storage
+// budget error raised by a database trigger, which cannot carry them itself.
+// Other errors, and errors that already carry the advice, pass through.
+func WithStorageBudgetAdvice(ctx context.Context, db budgetReader, err error) error {
+	if err == nil || !IsStorageBudgetError(err) || strings.Contains(err.Error(), "buckley db cleanup") {
+		return err
+	}
+	budget, readErr := readStorageBudget(ctx, db)
+	if readErr != nil || budget.LimitBytes == 0 {
+		return fmt.Errorf("%w; %s", err, storageBudgetAdvice)
+	}
+	return fmt.Errorf("%w; %d of %d bytes used; %s", err, budget.UsedBytes, budget.LimitBytes, storageBudgetAdvice)
 }

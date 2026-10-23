@@ -77,7 +77,7 @@ func (s *SQLiteStore) SweepCount(ctx context.Context, policy RetentionPolicy, no
 }
 
 func (s *SQLiteStore) sweep(ctx context.Context, policy RetentionPolicy, now time.Time, removed func(string)) error {
-	guards, err := s.retainedReferenceGuards(ctx)
+	guards, err := s.retainedReferenceGuards(ctx, s.db)
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,9 @@ func (s *SQLiteStore) deleteUnpinnedObjects(ctx context.Context, ids []string, g
 
 // Ledger references predating lifetime pins still protect their evidence. These
 // tables are optional: an evidence store can be used without a run ledger.
-func (s *SQLiteStore) retainedReferenceGuards(ctx context.Context) (string, error) {
+func (s *SQLiteStore) retainedReferenceGuards(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (string, error) {
 	guard := ""
 	for _, reference := range []struct{ table, predicate string }{
 		{"execution_steps", "output_evidence_id = evidence_objects.evidence_id"},
@@ -208,7 +210,7 @@ func (s *SQLiteStore) retainedReferenceGuards(ctx context.Context) (string, erro
 		{"run_events", ""},
 	} {
 		var exists bool
-		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, reference.table).Scan(&exists); err != nil {
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, reference.table).Scan(&exists); err != nil {
 			return "", err
 		}
 		if exists {
@@ -312,4 +314,66 @@ func (s *SQLiteStore) CleanupStaleTemps(ctx context.Context, cutoff time.Time) (
 		})
 	})
 	return removed, err
+}
+
+// SweepPreview is what Sweep and the orphan-blob pass would remove.
+type SweepPreview struct {
+	Objects     int
+	Blobs       int
+	StoredBytes int64
+}
+
+// PreviewSweep reports, without deleting anything, which objects Sweep would
+// remove and how many blob files and bytes that frees. It reads through conn,
+// so a caller that has already deleted run history inside an open transaction
+// sees the evidence those runs released.
+func (s *SQLiteStore) PreviewSweep(ctx context.Context, conn *sql.Conn, policy RetentionPolicy, now time.Time) (SweepPreview, error) {
+	var preview SweepPreview
+	guards, err := s.retainedReferenceGuards(ctx, conn)
+	if err != nil {
+		return preview, err
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS sweep_preview (evidence_id TEXT PRIMARY KEY)`); err != nil {
+		return preview, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(cleanup, `DROP TABLE IF EXISTS temp.sweep_preview`)
+	}()
+	if _, err := conn.ExecContext(ctx, `DELETE FROM sweep_preview`); err != nil {
+		return preview, err
+	}
+	for _, class := range []struct {
+		kinds []Kind
+		ttl   time.Duration
+	}{
+		{ephemeralKinds, policy.EphemeralTTL}, {durableKinds, policy.DurableTTL}, {otherKinds, policy.OtherTTL},
+	} {
+		if class.ttl <= 0 {
+			continue
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(class.kinds)), ",")
+		args := make([]any, 0, len(class.kinds)+1)
+		for _, k := range class.kinds {
+			args = append(args, string(k))
+		}
+		args = append(args, sqliteTimestamp(now.Add(-class.ttl)))
+		if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO sweep_preview
+			SELECT evidence_id FROM evidence_objects
+			WHERE kind IN (`+placeholders+`) AND created_at < ?
+			  AND evidence_id NOT IN (SELECT evidence_id FROM evidence_pins)`+guards, args...); err != nil {
+			return preview, fmt.Errorf("evidence: preview sweep: %w", err)
+		}
+	}
+	err = conn.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM sweep_preview),
+		(SELECT COUNT(DISTINCT blob_path) FROM evidence_objects
+			WHERE evidence_id IN (SELECT evidence_id FROM sweep_preview) AND blob_path IS NOT NULL AND blob_path <> ''
+			AND blob_path NOT IN (SELECT blob_path FROM evidence_objects
+				WHERE evidence_id NOT IN (SELECT evidence_id FROM sweep_preview) AND blob_path IS NOT NULL)),
+		(SELECT COALESCE(SUM(CASE WHEN stored_byte_count > 0 THEN stored_byte_count ELSE byte_count END), 0)
+			FROM evidence_objects WHERE evidence_id IN (SELECT evidence_id FROM sweep_preview))`).
+		Scan(&preview.Objects, &preview.Blobs, &preview.StoredBytes)
+	return preview, err
 }

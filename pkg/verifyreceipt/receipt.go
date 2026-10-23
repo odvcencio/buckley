@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 // Schema names the receipt format.
@@ -92,6 +93,10 @@ type RecordOptions struct {
 	Output io.Writer
 	// Now overrides the clock in tests.
 	Now func() time.Time
+	// Relieve is called when the storage budget refuses to store the log or the
+	// receipt, after the command has run. If it frees space and returns true,
+	// the store is tried once more.
+	Relieve func(context.Context) bool
 }
 
 // ErrDirtyTree means the work tree has uncommitted changes, so a receipt could
@@ -158,7 +163,14 @@ func Record(ctx context.Context, store *evidence.SQLiteStore, opts RecordOptions
 
 	logBody := log.Bytes()
 	sum := sha256.Sum256(logBody)
-	logObj, err := store.Put(ctx, evidence.Object{
+	put := func(obj evidence.Object) (evidence.Object, error) {
+		stored, err := store.Put(ctx, obj)
+		if err != nil && opts.Relieve != nil && storage.IsStorageBudgetError(err) && opts.Relieve(ctx) {
+			return store.Put(ctx, obj)
+		}
+		return stored, err
+	}
+	logObj, err := put(evidence.Object{
 		Kind:       evidence.KindTestOutput,
 		MediaType:  "text/plain",
 		InlineBody: logBody,
@@ -195,7 +207,7 @@ func Record(ctx context.Context, store *evidence.SQLiteStore, opts RecordOptions
 	if err != nil {
 		return Receipt{}, err
 	}
-	obj, err := store.Put(ctx, evidence.Object{
+	obj, err := put(evidence.Object{
 		Kind:       evidence.KindVerificationReceipt,
 		MediaType:  "application/json",
 		InlineBody: body,

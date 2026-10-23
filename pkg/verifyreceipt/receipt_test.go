@@ -2,6 +2,7 @@ package verifyreceipt
 
 import (
 	"context"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func newRepo(t *testing.T) string {
@@ -116,5 +118,36 @@ func TestRecordRequiresCoveredPaths(t *testing.T) {
 	repo, store := newRepo(t), newStore(t)
 	if _, err := Record(context.Background(), store, RecordOptions{Dir: repo, Argv: []string{"true"}}); err == nil {
 		t.Fatal("receipt without covered paths accepted")
+	}
+}
+
+// The command has already run when the receipt is stored. A budget refusal at
+// that point must be relieved and retried once, not lose the run.
+func TestRecordRetriesStoreOnceAfterBudgetRelief(t *testing.T) {
+	repo, store, ctx := newRepo(t), newStore(t), context.Background()
+	if err := storage.ConfigureStorageBudget(ctx, store.DB(), 16<<20); err != nil {
+		t.Fatal(err)
+	}
+	filler := make([]byte, 15<<20)
+	_, _ = rand.New(rand.NewSource(1)).Read(filler)
+	if _, err := store.Put(ctx, evidence.Object{Kind: evidence.KindToolResult, InlineBody: filler}); err != nil {
+		t.Fatal(err)
+	}
+	opts := RecordOptions{Dir: repo, Argv: []string{"sh", "-c", "head -c 3000000 /dev/urandom | base64"}, Paths: []string{"**"}, Recorder: "record"}
+
+	_, err := Record(ctx, store, opts)
+	if !storage.IsStorageBudgetError(err) {
+		t.Fatalf("without relief the store is full, got %v", err)
+	}
+
+	calls := 0
+	opts.Relieve = func(context.Context) bool {
+		calls++
+		_, delErr := store.DB().Exec(`DELETE FROM evidence_objects WHERE kind = ?`, string(evidence.KindToolResult))
+		return delErr == nil
+	}
+	receipt, err := Record(ctx, store, opts)
+	if err != nil || receipt.ID == "" || calls != 1 {
+		t.Fatalf("receipt=%q err=%v relief calls=%d", receipt.ID, err, calls)
 	}
 }

@@ -4,7 +4,9 @@ import "fmt"
 
 const (
 	DefaultSessionMemoryBytes = 8 << 20
-	DefaultStorageBytes       = 512 << 20
+	// DefaultStorageBytes was sized from a busy store: 486 MB on disk measured
+	// 637 MB of accounted use, so 512 MiB blocked receipts within a day.
+	DefaultStorageBytes = 2 << 30
 )
 
 // ResourceConfig bounds retained working history per session and accounted
