@@ -77,9 +77,11 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 		sb.WriteString("using its exact Feedback ID.\n\n")
 	}
 
+	sb.WriteString("Completeness for a shard means complete for the files listed above. End your Coverage section with the exact line `- **Completeness**: COMPLETE` when you have ledgered every listed file; never write PARTIAL or INCOMPLETE there, because the other shards cover the rest of the pull request.\n\n")
+
 	if primary && ctx.HasIncompleteContext() {
 		sb.WriteString("The review context for this pull request is incomplete or truncated, and validation rejects an approval from incomplete context. ")
-		sb.WriteString("In the Verdict section write **Recommendation**: `NEEDS DISCUSSION` (or `REQUEST CHANGES` with a blocker), never APPROVE, and declare the incomplete context under Completeness.\n\n")
+		sb.WriteString("In the Verdict section write **Recommendation**: `NEEDS DISCUSSION` (or `REQUEST CHANGES` with a blocker), never APPROVE. Note the incomplete context in Remarks.\n\n")
 	}
 
 	appendPRContextCurationNotice(&sb, ctx.ContextCuration)
