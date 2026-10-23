@@ -22,13 +22,21 @@ type RetentionConfig struct {
 	MaxCompletedRuns     int           `yaml:"max_completed_runs"`
 	EphemeralEvidenceTTL time.Duration `yaml:"ephemeral_evidence_ttl"`
 	DurableEvidenceTTL   time.Duration `yaml:"durable_evidence_ttl"`
+	// PressureAge is how old completed runs and unreferenced evidence must be
+	// to be pruned early, once a store passes 80% of resources.storage_bytes.
+	// Zero turns pressure pruning off.
+	PressureAge time.Duration `yaml:"pressure_age"`
 }
+
+// DefaultPressureAge is the history and evidence age pruned early under storage pressure.
+const DefaultPressureAge = 14 * 24 * time.Hour
 
 func defaultRetentionConfig() RetentionConfig {
 	return RetentionConfig{
 		Enabled: true, Interval: DefaultRetentionInterval, HistoryTTL: DefaultHistoryRetention,
 		MaxCompletedSessions: DefaultMaxCompletedSessions, MaxCompletedRuns: DefaultMaxCompletedRuns,
 		EphemeralEvidenceTTL: 30 * 24 * time.Hour, DurableEvidenceTTL: 180 * 24 * time.Hour,
+		PressureAge: DefaultPressureAge,
 	}
 }
 
@@ -37,7 +45,7 @@ func validateRetention(c *Config) error {
 	if r.Enabled && r.Interval <= 0 {
 		return fmt.Errorf("retention.interval must be positive when enabled")
 	}
-	if r.Interval < 0 || r.HistoryTTL < 0 || r.MaxCompletedSessions < 0 || r.MaxCompletedRuns < 0 || r.EphemeralEvidenceTTL < 0 || r.DurableEvidenceTTL < 0 {
+	if r.Interval < 0 || r.HistoryTTL < 0 || r.MaxCompletedSessions < 0 || r.MaxCompletedRuns < 0 || r.EphemeralEvidenceTTL < 0 || r.DurableEvidenceTTL < 0 || r.PressureAge < 0 {
 		return fmt.Errorf("retention limits must be nonnegative")
 	}
 	return nil
