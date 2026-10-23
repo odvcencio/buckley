@@ -267,12 +267,12 @@ func TestReplay_RejectsMissingBlankOrTruncatedFirstUserPrompt(t *testing.T) {
 		},
 		{
 			name:     "blank user prompt",
-			messages: []storage.Message{{Role: "user", Content: " \n\t "}},
+			messages: []storage.Message{{Role: "user", Content: " \n\t "}, {Role: "user", Content: "later valid prompt"}},
 			want:     "first user prompt is blank and cannot be replayed",
 		},
 		{
 			name:     "truncated user prompt",
-			messages: []storage.Message{{Role: "user", Content: "partial", IsTruncated: true}},
+			messages: []storage.Message{{Role: "user", Content: "partial", IsTruncated: true}, {Role: "user", Content: "later valid prompt"}},
 			want:     "first user prompt is truncated and cannot be replayed",
 		},
 	}
