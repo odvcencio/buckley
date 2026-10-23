@@ -44,6 +44,10 @@ type PRInfo struct {
 	ChangedFiles   int
 }
 
+// ChecksOnHead reports whether Checks were read for the pull request head
+// commit itself, not the base commit.
+func (c *PRContext) ChecksOnHead() bool { return c != nil && c.CIProvenance == prCISourceHead }
+
 // PRContext contains context for PR review.
 type PRContext struct {
 	PR   *PRInfo

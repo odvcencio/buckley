@@ -39,6 +39,9 @@ type prCommandOptions struct {
 	contextFiles []string
 	noUpdate     bool
 	draft        bool
+	// verificationLabel is the requirement to set on the PR after it is
+	// created or updated; empty leaves labels alone.
+	verificationLabel commands.VerificationMode
 }
 
 type prCommandRuntime struct {
@@ -72,6 +75,9 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable); content is treated as data, not instructions")
 	noUpdate := fs.Bool("no-update", false, "fail instead of silently overwriting an existing open PR's title/body")
 	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
+	requireVerification := fs.Bool("require-verification", false, "label the PR buckbot:verify-required so Buckbot needs a receipt or passing CI before it reviews")
+	requireReceipt := fs.Bool("require-receipt", false, "label the PR buckbot:verify-receipt (receipt only)")
+	noRequireVerification := fs.Bool("no-require-verification", false, "label the PR buckbot:verify-optional")
 
 	if err := fs.Parse(args); err != nil {
 		return prCommandOptions{}, err
@@ -84,21 +90,26 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	if err != nil {
 		return prCommandOptions{}, err
 	}
+	verificationLabel, err := verificationFlagMode(*requireVerification, *requireReceipt, *noRequireVerification)
+	if err != nil {
+		return prCommandOptions{}, err
+	}
 	return prCommandOptions{
-		dryRun:       *dryRun,
-		yes:          *yes,
-		push:         *pushFlag,
-		verbose:      *verbose,
-		showCost:     *showCost,
-		base:         *baseFlag,
-		model:        *modelFlag,
-		effort:       effort,
-		backend:      backend,
-		timeout:      *timeout,
-		diffBudget:   *diffBudget,
-		contextFiles: append([]string(nil), contextFileFlag...),
-		noUpdate:     *noUpdate,
-		draft:        *draft,
+		verificationLabel: verificationLabel,
+		dryRun:            *dryRun,
+		yes:               *yes,
+		push:              *pushFlag,
+		verbose:           *verbose,
+		showCost:          *showCost,
+		base:              *baseFlag,
+		model:             *modelFlag,
+		effort:            effort,
+		backend:           backend,
+		timeout:           *timeout,
+		diffBudget:        *diffBudget,
+		contextFiles:      append([]string(nil), contextFileFlag...),
+		noUpdate:          *noUpdate,
+		draft:             *draft,
 	}, nil
 }
 
@@ -162,6 +173,9 @@ func runPRCommand(args []string) error {
 	if len(args) > 0 && args[0] == "merge" {
 		return runPRMergeCommand(args[1:])
 	}
+	if len(args) > 0 && args[0] == "label" {
+		return runPRLabelCommand(args[1:])
+	}
 
 	opts, err := parsePRCommandOptions(args)
 	if err != nil {
@@ -211,6 +225,16 @@ func runPRCommand(args []string) error {
 
 	if err := createPR(pr, baseBranch, opts.noUpdate, opts.draft); err != nil {
 		return err
+	}
+	if opts.verificationLabel != "" {
+		if prURL, found := openPRForBranch(); found {
+			ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
+			defer cancel()
+			if _, _, err := setVerificationLabel(ctx, ghLabelClient{}, prURL, opts.verificationLabel); err != nil {
+				return err
+			}
+			termOut.Dim("Verification policy label set: %s", opts.verificationLabel)
+		}
 	}
 
 	return nil

@@ -46,6 +46,8 @@ type reviewPRCommandOptions struct {
 	maxToolCalls         int
 	maxDiff              int
 	evidenceTimeout      time.Duration
+	requireVerification  string
+	runVerification      bool
 	maxSupportingContext int
 	maxRetries           int
 	forceSinglePass      bool
@@ -70,6 +72,8 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	requireVerification := fs.String("require-verification", "", "evidence required before the review starts: none, receipt, or receipt-or-ci (overrides PR labels and config)")
+	runVerification := fs.Bool("run-verification", false, "let the review run build and test commands in its sandbox (off by default, not recommended: record receipts with `buckley verify record` instead)")
 	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
@@ -135,6 +139,8 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		maxToolCalls:         *maxToolCalls,
 		maxDiff:              *maxDiff,
 		evidenceTimeout:      *evidenceTimeout,
+		requireVerification:  *requireVerification,
+		runVerification:      *runVerification,
 		maxSupportingContext: *maxSupportingContext,
 		maxRetries:           *maxRetries,
 		forceSinglePass:      *singlePass,
@@ -282,6 +288,8 @@ func runReviewPRCommand(args []string) (returnErr error) {
 		maxRetries:                 opts.maxRetries,
 		maxDiffBytes:               opts.maxDiff,
 		hostEvidenceTimeout:        opts.evidenceTimeout,
+		requireVerification:        opts.requireVerification,
+		executeVerification:        opts.runVerification,
 		maxSupportingContextTokens: opts.maxSupportingContext,
 		maxCostUSD:                 opts.budgetUSD,
 		clearCostBudget:            opts.noBudget,
@@ -413,6 +421,16 @@ type automatedReviewOptions struct {
 	// budgetPerKlocUSD and maxBudgetUSD scale maxCostUSD with review size (see
 	// withSizeScaledBudget); costOverridden is set by --budget and --no-budget,
 	// which are never rescaled.
+	// requireVerification is the --require-verification flag value. The
+	// configured policy fields come from buckbot.verification and
+	// review.verification.declared.
+	requireVerification     string
+	userVerificationRequire string
+	executeVerification     bool
+	declaredVerification    []commands.DeclaredVerification
+	// verification is the evidence report for the reviewed head, set before
+	// any model call.
+	verification     *commands.VerificationReport
 	budgetPerKlocUSD float64
 	maxBudgetUSD     float64
 	costOverridden   bool
@@ -524,6 +542,9 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
 		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
 		hostEvidenceTimeout:        time.Duration(max(cfg.Buckbot.HostEvidenceTimeoutSeconds, 0)) * time.Second,
+		userVerificationRequire:    cfg.Buckbot.Verification.Require,
+		executeVerification:        cfg.Buckbot.Verification.Execute,
+		declaredVerification:       declaredVerifications(cfg),
 		budgetPerKlocUSD:           cfg.Buckbot.BudgetPerKlocUSD,
 		maxBudgetUSD:               cfg.Buckbot.MaxReviewBudgetUSD,
 		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
@@ -590,6 +611,12 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	}
 	if overrides.hostEvidenceTimeout > 0 {
 		defaults.hostEvidenceTimeout = overrides.hostEvidenceTimeout
+	}
+	if strings.TrimSpace(overrides.requireVerification) != "" {
+		defaults.requireVerification = overrides.requireVerification
+	}
+	if overrides.executeVerification {
+		defaults.executeVerification = true
 	}
 	if overrides.maxSupportingContextTokens > 0 {
 		defaults.maxSupportingContextTokens = overrides.maxSupportingContextTokens
@@ -679,6 +706,17 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	// Resolve verification evidence before any model call. A required policy
+	// with missing or failing evidence stops here and costs no tokens.
+	verification, verifyErr := opts.resolveVerificationReport(ctx, verificationTarget{
+		Files: prCtx.Files, Labels: prCtx.PR.Labels, HeadRev: prCtx.PR.HeadSHA,
+		Checks: prCtx.Checks, ChecksOnHead: prCtx.ChecksOnHead(),
+	})
+	if verifyErr != nil {
+		spinner.StopWithError("verification evidence check failed")
+		return nil, prCtx.PR, verifyErr
+	}
+	opts.verification = verification
 	spinner.SetMessage("Reviewing immutable PR head...")
 
 	if willPost {
@@ -713,8 +751,10 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		}
 	}
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(opts.depth), opts.sizeClass, opts.reasoningEffort))
-	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
+	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts), opts.verification)
 	reviewDef := commands.ReviewPRDef{
+		SuppliedEvidenceOnly:        !opts.executeVerification,
+		FailingEvidence:             opts.verification.FailingSummary(),
 		ChangedFiles:                prCtx.Files,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
@@ -763,6 +803,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(runErr.Error())
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
+			partial.reviewText = appendVerificationSection(partial.reviewText, opts.verification)
 			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
@@ -780,7 +821,9 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 
 	spinner.StopWithSuccess("PR review complete")
-	return reviewResultFromAgent(fwResult, audit), prCtx.PR, nil
+	complete := reviewResultFromAgent(fwResult, audit)
+	complete.reviewText = appendVerificationSection(complete.reviewText, opts.verification)
+	return complete, prCtx.PR, nil
 }
 
 func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef) automatedReviewOptions {
@@ -874,8 +917,10 @@ func runPRReviewSharded(
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
 		shardOpts := opts.withVerificationTargetBudget(shard.Files)
-		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts)
+		prompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts), opts.verification)
 		reviewDef := commands.ReviewPRDef{
+			SuppliedEvidenceOnly:   !opts.executeVerification,
+			FailingEvidence:        opts.verification.FailingSummary(),
 			ChangedFiles:           shard.Files,
 			ContextIncomplete:      prCtx.HasIncompleteContext(),
 			CIStatus:               prCtx.PR.CIStatus,
@@ -930,6 +975,7 @@ func runPRReviewSharded(
 	}
 
 	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
+	rendered = appendVerificationSection(rendered, opts.verification)
 
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())

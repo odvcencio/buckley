@@ -1541,6 +1541,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runAttachCommand, args[1:])
 	case "goal":
 		return true, runCommand(runGoalCommand, args[1:])
+	case "verify":
+		return true, runCommand(runVerifyCommand, args[1:])
 	case "completion-check":
 		return true, runCommand(runCompletionCheckCommand, args[1:])
 	case "batch":

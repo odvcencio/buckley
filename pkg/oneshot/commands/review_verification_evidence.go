@@ -438,4 +438,3 @@ const ReviewPromptGuidance = `VERIFICATION POLICY:
 - The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only for paths it lists as covered. Report UNAVAILABLE for unverified paths. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
 - Failing evidence is a finding: report it, and do not approve while it stands.
 - Cite each receipt or CI check you rely on by its label.`
-

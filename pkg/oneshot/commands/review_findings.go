@@ -222,6 +222,10 @@ type ReviewValidationOptions struct {
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	RequirePassingRemoteCI      bool
+	// AllowUnverifiedApproval lets a review approve with Build or Tests
+	// UNAVAILABLE or NOT_APPLICABLE, because the reviewer does not run
+	// verification. FAIL still blocks an approval.
+	AllowUnverifiedApproval bool
 }
 
 // ValidateParsedReview rejects incomplete or internally inconsistent review
@@ -387,6 +391,12 @@ func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions
 	if opts.ContextIncomplete {
 		return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
 	}
+	if opts.AllowUnverifiedApproval {
+		if parsed.BuildVerification == VerificationFail || parsed.TestVerification == VerificationFail {
+			return fmt.Errorf("an approval is inconsistent with failing verification (Build %s, Tests %s)", parsed.BuildVerification, parsed.TestVerification)
+		}
+		return nil
+	}
 	if parsed.BuildVerification != VerificationPass {
 		err := fmt.Errorf(
 			"an approval requires Build status PASS, got %s",
@@ -414,7 +424,7 @@ func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions
 }
 
 func validateApprovalRemoteCI(opts ReviewValidationOptions) error {
-	if !opts.RequirePassingRemoteCI {
+	if opts.AllowUnverifiedApproval || !opts.RequirePassingRemoteCI {
 		return nil
 	}
 	ciState := parseRemoteCIState(opts.CIStatus)
