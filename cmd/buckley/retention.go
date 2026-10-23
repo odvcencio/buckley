@@ -67,3 +67,42 @@ func startHistoryMaintenance(ctx context.Context, cfg *config.Config, store *evi
 	}()
 	return func() { cancel(); <-done }, nil
 }
+
+// pressureThreshold is the share of resources.storage_bytes past which a store
+// is pruned early.
+const pressureThresholdPercent = 80
+
+// prunePastBudgetThreshold prunes completed runs and unreferenced evidence
+// older than retention.pressure_age when the store has used at least 80% of its
+// storage budget (or always when force is set). It reports whether it ran. A
+// database without run history tables prunes evidence only.
+func prunePastBudgetThreshold(ctx context.Context, cfg *config.Config, store *evidence.SQLiteStore, now time.Time, force bool) (retention.Report, bool, error) {
+	age := cfg.Retention.PressureAge
+	if age <= 0 {
+		return retention.Report{}, false, nil
+	}
+	budget, err := storage.ReadStorageBudget(ctx, store.DB())
+	if err != nil || budget.LimitBytes == 0 {
+		return retention.Report{}, false, err
+	}
+	if !force && budget.UsedBytes*100 < budget.LimitBytes*pressureThresholdPercent {
+		return retention.Report{}, false, nil
+	}
+	policy := historyRetentionPolicy(cfg.Retention)
+	policy.HistoryTTL = age
+	policy.Evidence.EphemeralTTL, policy.Evidence.OtherTTL = age, age
+	var hasRuns bool
+	if err := store.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs')`).Scan(&hasRuns); err != nil {
+		return retention.Report{}, false, err
+	}
+	if !hasRuns {
+		n, err := store.SweepCount(ctx, policy.Evidence, now)
+		return retention.Report{Evidence: n}, n > 0, err
+	}
+	cleaner, err := retention.New(store.DB(), store)
+	if err != nil {
+		return retention.Report{}, false, err
+	}
+	report, err := cleaner.Clean(ctx, policy, now, false)
+	return report, err == nil, err
+}

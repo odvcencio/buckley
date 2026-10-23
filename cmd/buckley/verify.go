@@ -72,6 +72,14 @@ func openVerifyLedger() (*evidence.SQLiteStore, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("configure verification storage budget: %w", err)
 	}
+	// Past 80% of the budget, drop old completed history now rather than let a
+	// receipt hit the limit. A failed prune never blocks the command.
+	if report, pruned, err := prunePastBudgetThreshold(context.Background(), cfg, store, time.Now(), false); err != nil {
+		fmt.Fprintf(os.Stderr, "Note: storage pruning skipped: %v\n", err)
+	} else if pruned {
+		fmt.Fprintf(os.Stderr, "Note: storage was past 80%% of its budget; pruned %d runs and %d evidence objects older than %s\n",
+			report.Runs, report.Evidence, cfg.Retention.PressureAge)
+	}
 	return store, nil
 }
 
@@ -135,8 +143,22 @@ func recordAndPrint(dir string, argv, paths []string, name, recorder string) err
 	defer store.Close()
 	ctx, stop := verifyContext()
 	defer stop()
+	cfg, err := loadConfiguredConfig()
+	if err != nil {
+		return err
+	}
 	receipt, err := verifyreceipt.Record(ctx, store, verifyreceipt.RecordOptions{
 		Dir: dir, Argv: argv, Paths: paths, Name: name, Recorder: recorder, Output: os.Stderr,
+		// The command has run; if the budget refuses the receipt, prune old
+		// history and store it once more.
+		Relieve: func(ctx context.Context) bool {
+			report, pruned, err := prunePastBudgetThreshold(ctx, cfg, store, time.Now(), true)
+			if pruned && err == nil {
+				fmt.Fprintf(os.Stderr, "Note: storage budget reached; pruned %d runs and %d evidence objects older than %s\n",
+					report.Runs, report.Evidence, cfg.Retention.PressureAge)
+			}
+			return pruned && err == nil
+		},
 	})
 	if err != nil {
 		return err
