@@ -75,33 +75,25 @@ func (r *Replayer) Replay(ctx context.Context, cfg ReplayConfig) (*Run, error) {
 		return nil, fmt.Errorf("session not found: %s", sourceID)
 	}
 
-	messages, err := r.store.GetAllMessages(sourceID)
+	firstPrompt, err := r.store.GetFirstMessageByRole(sourceID, "user")
 	if err != nil {
-		return nil, fmt.Errorf("load messages: %w", err)
+		return nil, fmt.Errorf("load first user prompt: %w", err)
 	}
-
-	var prompt string
-	for _, msg := range messages {
-		if msg.Role == "user" {
-			if msg.IsTruncated {
-				return nil, errors.New("first user prompt is truncated and cannot be replayed")
-			}
-			if strings.TrimSpace(msg.Content) == "" {
-				return nil, errors.New("first user prompt is blank and cannot be replayed")
-			}
-			prompt = msg.Content
-			break
-		}
-	}
-	if prompt == "" {
+	if firstPrompt == nil {
 		return nil, errors.New("no user prompts found in session")
+	}
+	if firstPrompt.IsTruncated {
+		return nil, errors.New("first user prompt is truncated and cannot be replayed")
+	}
+	if strings.TrimSpace(firstPrompt.Content) == "" {
+		return nil, errors.New("first user prompt is blank and cannot be replayed")
 	}
 
 	exp := &Experiment{
 		ID:   ulid.Make().String(),
 		Name: fmt.Sprintf("Live replay %s with %s", shortReplaySourceID(sourceID), modelID),
 		Task: Task{
-			Prompt: prompt,
+			Prompt: firstPrompt.Content,
 			Context: map[string]string{
 				"source_session_id": sourceID,
 			},

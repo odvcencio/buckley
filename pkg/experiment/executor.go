@@ -156,6 +156,9 @@ func (e *experimentExecutor) buildRegistry(task *parallel.AgentTask, wtPath stri
 		delegator := agent.NewDelegator(e.modelManager, registry, e.projectContext.SubAgents)
 		registry.Register(newDelegateTaskTool(delegator))
 	}
+	if len(allowedSet) == 0 {
+		registry.EnableDynamicDiscovery(nil)
+	}
 
 	return registry
 }
@@ -179,6 +182,9 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 	systemPrompt := "You are Buckley, an AI development assistant. Use the available tools to implement tasks. Run commands with run_shell, read/write files with file tools, and check git status when needed.\n\n" +
 		"For analysis tasks: run the commands and report results (no file changes needed).\n" +
 		"For implementation tasks: after running any necessary commands, provide code in markdown blocks with filepath: headers."
+	if _, ok := registry.Get("discover_tools"); ok {
+		systemPrompt += "\nUse discover_tools to find and enable specialized tools when their schemas are not available."
+	}
 	systemOverride = strings.TrimSpace(systemOverride)
 	if systemOverride != "" {
 		systemPrompt += "\n\nAdditional system prompt:\n" + systemOverride
@@ -194,14 +200,7 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 
 	offerTools := e.modelManager.OfferToolsForRoute(route)
 	toolsCatalogConfirmedUnavailable := e.modelManager.ToolsCatalogConfirmedUnavailableForRoute(route)
-	tools := []map[string]any(nil)
-	toolChoice := ""
-	if offerTools {
-		tools = registry.ToOpenAIFunctions()
-		if len(tools) > 0 {
-			toolChoice = "auto"
-		}
-	} else if toolsCatalogConfirmedUnavailable {
+	if !offerTools && toolsCatalogConfirmedUnavailable {
 		messages = append(messages, model.Message{
 			Role:    "system",
 			Content: "No local tools are available in this request. Do not claim to have inspected, changed, or verified external state unless it is already present in the conversation.",
@@ -212,8 +211,14 @@ func (e *experimentExecutor) runConversation(ctx context.Context, modelID string
 	lastRequestHadToolSchemas := false
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
-		requestTools := tools
-		requestToolChoice := toolChoice
+		var requestTools []map[string]any
+		requestToolChoice := ""
+		if offerTools {
+			requestTools = registry.ToOpenAIFunctionsGoverned(nil, "", "", nil, 0)
+			if len(requestTools) > 0 {
+				requestToolChoice = "auto"
+			}
+		}
 		lastRequestHadToolSchemas = len(requestTools) > 0
 		req := model.ChatRequest{
 			Model:       route.RequestedModel,
