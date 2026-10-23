@@ -2,6 +2,7 @@ package commands
 
 import (
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/verifyreceipt"
 	"testing"
 )
 
@@ -25,17 +26,28 @@ func TestSuppliedEvidence_CannotInventVerificationResults(t *testing.T) {
 }
 
 func TestSuppliedEvidence_ClaimsMatchReport(t *testing.T) {
+	paired := func(status verifyreceipt.Status) *VerificationReport {
+		build, tests := receipt("ev_build", status, 0, "**"), receipt("ev_tests", status, 0, "**")
+		build.Argv, tests.Argv = []string{"go", "build", "./..."}, []string{"go", "test", "./..."}
+		if status == verifyreceipt.StatusFail {
+			build.ExitCode, tests.ExitCode = 1, 1
+		}
+		report := EvaluateVerification(VerificationInput{Mode: VerifyNone, Files: []string{"a.go"}, Receipts: []verifyreceipt.Receipt{build, tests}})
+		return &report
+	}
+	partial := paired(verifyreceipt.StatusPass)
+	partial.Unverified = []string{"other.go"}
 	for _, tc := range []struct {
 		name    string
 		report  *VerificationReport
 		state   VerificationState
 		wantErr bool
 	}{
-		{"passing", &VerificationReport{Covered: []EvidenceItem{{Label: "go test ./..."}}}, VerificationPass, false},
-		{"partial", &VerificationReport{Covered: []EvidenceItem{{Label: "go test ./..."}}, Unverified: []string{"other.go"}}, VerificationPass, true},
+		{"passing", paired(verifyreceipt.StatusPass), VerificationPass, false},
+		{"partial", partial, VerificationPass, true},
 		{"documentation only", &VerificationReport{NotRequired: []string{"README.md"}}, VerificationPass, true},
-		{"failing", &VerificationReport{Failing: []EvidenceItem{{Label: "go test ./..."}}}, VerificationFail, false},
-		{"passing cannot claim failure", &VerificationReport{Covered: []EvidenceItem{{Label: "go test ./..."}}}, VerificationFail, true},
+		{"failing", paired(verifyreceipt.StatusFail), VerificationFail, false},
+		{"passing cannot claim failure", paired(verifyreceipt.StatusPass), VerificationFail, true},
 		{"unavailable", nil, VerificationUnavailable, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
