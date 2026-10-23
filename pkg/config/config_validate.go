@@ -36,6 +36,7 @@ var configValidators = []func(*Config) error{
 	func(c *Config) error { return c.Hooks.Validate() },
 	validateMemoryLimits,
 	validateAgentCostLimits,
+	validateBuckbotVerification,
 	validateBuckbotPrivacyFallback,
 	validateOpenRouterBYOKProviders,
 	validateOneshotDataPolicy,
@@ -333,6 +334,23 @@ func validateMemoryLimits(c *Config) error {
 	}
 	if c.Memory.RetrievalMaxTokens < 0 {
 		return fmt.Errorf("retrieval_max_tokens must be >= 0, got %d", c.Memory.RetrievalMaxTokens)
+	}
+	return nil
+}
+
+func validateBuckbotVerification(c *Config) error {
+	switch strings.ToLower(strings.TrimSpace(c.Buckbot.Verification.Require)) {
+	case "", "none", "receipt", "receipt-or-ci":
+	default:
+		return fmt.Errorf("buckbot.verification.require must be none, receipt or receipt-or-ci, got %q", c.Buckbot.Verification.Require)
+	}
+	for i, d := range c.Review.Verification.Declared {
+		if len(d.Paths) == 0 {
+			return fmt.Errorf("review.verification.declared[%d] needs at least one path glob", i)
+		}
+		if len(d.Command) == 0 && len(d.CIChecks) == 0 {
+			return fmt.Errorf("review.verification.declared[%d] needs a command or ci_checks", i)
+		}
 	}
 	return nil
 }

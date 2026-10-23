@@ -1126,6 +1126,8 @@ type BuckbotConfig struct {
 	// PerReviewBudgetUSD is an optional explicit cap. Zero lets a review run
 	// without a dollar ceiling, subject to its normal time and safety controls.
 	PerReviewBudgetUSD float64 `yaml:"per_review_budget_usd"`
+	// Verification sets the evidence policy (see BuckbotVerificationConfig).
+	Verification BuckbotVerificationConfig `yaml:"verification"`
 	// BudgetPerKlocUSD adds this much to PerReviewBudgetUSD for every 1,000
 	// changed lines in the prioritized diff (generated files excluded). It only
 	// applies when a base cap exists; an uncapped review stays uncapped.
@@ -1191,6 +1193,42 @@ type ReviewLedgerGCSConfig struct {
 // verification commands against an immutable review snapshot.
 type ReviewVerificationConfig struct {
 	Runner ReviewVerificationRunnerConfig `yaml:"runner"`
+	// Declared maps path globs to the commands that verify them. Receipts
+	// recorded with `buckley verify run` use these commands and globs, and
+	// Buckbot uses them to decide which changed paths a receipt or CI check
+	// covers. Nothing here makes a review execute a command.
+	//
+	//	review:
+	//	  verification:
+	//	    declared:
+	//	      - name: js
+	//	        paths: ["client/**"]
+	//	        command: ["make", "test-js"]
+	//	        ci_checks: ["js-tests"]
+	Declared []DeclaredVerification `yaml:"declared"`
+}
+
+// DeclaredVerification is one repository-declared verification.
+type DeclaredVerification struct {
+	Name string `yaml:"name"`
+	// Paths are repository-relative globs ("*", "?", "**") the verification
+	// covers.
+	Paths []string `yaml:"paths"`
+	// Command is the argv `buckley verify run` executes.
+	Command []string `yaml:"command"`
+	// CIChecks names the CI check runs that cover Paths on a pull request.
+	CIChecks []string `yaml:"ci_checks"`
+}
+
+// BuckbotVerificationConfig sets how Buckbot treats verification evidence.
+type BuckbotVerificationConfig struct {
+	// Require is none, receipt or receipt-or-ci. With receipt or
+	// receipt-or-ci, a review stops before any model call when changed paths
+	// have no covering evidence. Default none.
+	Require string `yaml:"require"`
+	// Execute makes the review run verification itself in its sandbox. Off by
+	// default and not recommended: record receipts instead.
+	Execute bool `yaml:"execute"`
 }
 
 // ReviewVerificationRunnerConfig configures the review verification harness:

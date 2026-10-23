@@ -36,6 +36,9 @@ const (
 	KindSubagentReport  Kind = "subagent_report"
 	KindSubagentMessage Kind = "subagent_message"
 	KindMemoryRecall    Kind = "memory_recall"
+	// KindVerificationReceipt records one verification command run against one
+	// git tree (see pkg/verifyreceipt).
+	KindVerificationReceipt Kind = "verification_receipt"
 )
 
 // Sensitivity classifies how restricted an evidence object's content is.
