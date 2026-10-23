@@ -74,7 +74,7 @@ type Receipt struct {
 }
 
 // Command renders the argv for display.
-func (r Receipt) Command() string { return strings.Join(r.Argv, " ") }
+func (r Receipt) Command() string { return string(evidence.Redact([]byte(strings.Join(r.Argv, " ")))) }
 
 // RecordOptions describes one run to record.
 type RecordOptions struct {

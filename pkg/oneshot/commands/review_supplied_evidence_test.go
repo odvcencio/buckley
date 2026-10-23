@@ -18,7 +18,7 @@ func TestSuppliedEvidenceDefsNeverRunVerification(t *testing.T) {
 	if len(branch.AgentEvidenceRequests()) != 0 || len(pr.AgentEvidenceRequests()) != 0 {
 		t.Error("supplied-evidence reviews planned host verification")
 	}
-	for name, prompt := range map[string]string{"branch": branch.SystemPrompt(), "pr": pr.SystemPrompt()} {
+	for name, prompt := range map[string]string{"branch": branch.SystemPrompt(), "pr": pr.SystemPrompt(), "project": project.SystemPrompt()} {
 		if !strings.Contains(prompt, "You do not run build or test commands") {
 			t.Errorf("%s prompt lacks the verification policy", name)
 		}
@@ -51,11 +51,13 @@ func TestSuppliedEvidenceApprovalDoesNotNeedPassingTests(t *testing.T) {
 func TestFailingEvidenceBlocksApprovalOnly(t *testing.T) {
 	approved := &ReviewAgentResult{Parsed: baseParsedReview(GradeA, true)}
 	declined := &ReviewAgentResult{Parsed: baseParsedReview(GradeC, false)}
-	failing := []string{"receipt ev_X: `make test-js` (FAIL)"}
-	if err := (ReviewBranchDef{SuppliedEvidenceOnly: true, FailingEvidence: failing}).ValidateAgentExecution(approved, nil); err == nil || !strings.Contains(err.Error(), "make test-js") {
+	failing := &VerificationReport{Failing: []EvidenceItem{{Label: "receipt ev_X: `make test-js`", Detail: "FAIL"}}}
+	approved.Parsed.BuildVerification, approved.Parsed.TestVerification = VerificationUnavailable, VerificationUnavailable
+	declined.Parsed.BuildVerification, declined.Parsed.TestVerification = VerificationFail, VerificationFail
+	if err := (ReviewBranchDef{SuppliedEvidenceOnly: true, Verification: failing}).ValidateAgentExecution(approved, nil); err == nil || !strings.Contains(err.Error(), "make test-js") {
 		t.Fatalf("approval over failing evidence: %v", err)
 	}
-	if err := (ReviewBranchDef{SuppliedEvidenceOnly: true, FailingEvidence: failing}).ValidateAgentExecution(declined, nil); err != nil {
+	if err := (ReviewBranchDef{SuppliedEvidenceOnly: true, Verification: failing}).ValidateAgentExecution(declined, nil); err != nil {
 		t.Fatalf("a non-approval must complete: %v", err)
 	}
 	if err := (ReviewPRDef{SuppliedEvidenceOnly: true}).ValidateAgentExecution(approved, nil); err != nil {

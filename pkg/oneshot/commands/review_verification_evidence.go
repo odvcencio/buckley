@@ -449,7 +449,7 @@ func orNone(s string) string {
 
 // ReviewPromptGuidance tells the model how to treat the evidence.
 const ReviewPromptGuidance = `VERIFICATION POLICY:
-- You do not run build or test commands, and run_verification is not available.
-- The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only for paths it lists as covered. Report UNAVAILABLE for unverified paths. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
+- This policy supersedes instructions above to execute verification or require passing tests for approval. You do not run build or test commands, and run_verification is not available.
+- The Verification Evidence section lists receipts and CI checks that cover changed paths. Report Build and Tests as PASS only when it reports verified coverage with passing evidence. Report FAIL only with supplied failing evidence. Report UNAVAILABLE when evidence is missing or coverage is incomplete. Missing verification is not a defect and does not lower the grade; say "unverified" in the verdict instead of withholding it.
 - Failing evidence is a finding: report it, and do not approve while it stands.
 - Cite each receipt or CI check you rely on by its label.`
