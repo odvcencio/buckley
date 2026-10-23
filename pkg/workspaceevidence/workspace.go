@@ -150,9 +150,9 @@ func appendDirectoryEntries(ctx context.Context, root *os.Root, path string, man
 	if err != nil {
 		return err
 	}
+	// The context is checked between ReadDir calls, each of which is bounded.
+	// Closing dir from another goroutine while ReadDir runs panics.
 	defer dir.Close()
-	stopClose := context.AfterFunc(ctx, func() { _ = dir.Close() })
-	defer stopClose()
 	opened, err := dir.Stat()
 	if err != nil {
 		return err

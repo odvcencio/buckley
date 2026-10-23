@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 
 const (
 	defaultReviewTimeout = 4*time.Minute + 25*time.Second
+	// defaultLocalReviewTimeout applies when no hosted ceiling is set.
+	defaultLocalReviewTimeout = 10 * time.Minute
 	// Project reviews default to a longer wall-clock window because their
 	// contract is exhaustive repository coverage rather than a small diff
 	// sample. Callers can still choose an explicit --timeout.
@@ -589,4 +592,13 @@ func validReviewReasoningEffort(value string) bool {
 	default:
 		return false
 	}
+}
+
+// reviewTimeoutDefault is the --timeout default: the short hosted-caller
+// budget when a hosted ceiling applies, a longer one for local runs.
+func reviewTimeoutDefault() time.Duration {
+	if hostedReviewCeiling(os.Getenv) > 0 {
+		return defaultReviewTimeout
+	}
+	return defaultLocalReviewTimeout
 }

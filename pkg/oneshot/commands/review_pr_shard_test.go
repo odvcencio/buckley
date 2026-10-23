@@ -383,6 +383,14 @@ func TestBuildPRShardPrompt_PrimaryShardNeverApprovesFromIncompleteContext(t *te
 			t.Errorf("primary shard prompt missing %q", want)
 		}
 	}
+	if strings.Contains(prompt, "declare the incomplete context under Completeness") {
+		t.Error("prompt tells the model to mark Completeness incomplete, which BALANCED validation rejects")
+	}
+	for _, want := range []string{"- **Completeness**: COMPLETE", "never write PARTIAL or INCOMPLETE"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("primary shard prompt missing %q", want)
+		}
+	}
 	complete := BuildPRShardPrompt(&PRContext{PR: ctx.PR}, diffsignal.Shard{Files: []string{"a.go"}, Context: "diff"}, 0, 2, true)
 	if strings.Contains(complete, "incomplete or truncated") {
 		t.Error("a complete context must not carry the no-approval notice")

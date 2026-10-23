@@ -318,7 +318,30 @@ func TestResolveReviewCriticRuntimeSeparatesPinnedCriticFromAdaptivePrimary(t *t
 	})
 }
 
+// The 4m25s default fits a hosted caller that cuts runs off near five minutes.
+// A local run has no such caller, and a balanced review that needs about 200s
+// loses 90s to the approval-critic reserve under it, so local runs default to
+// longer.
+func TestReviewTimeoutDefaultDependsOnWhereItRuns(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("BUCKLEY_POSTED_REVIEW_CEILING", "")
+	local, err := parseReviewCommandOptions(nil)
+	if err != nil || local.timeout != defaultLocalReviewTimeout {
+		t.Fatalf("local default = %s (err %v), want %s", local.timeout, err, defaultLocalReviewTimeout)
+	}
+	localPR, err := parseReviewPRCommandOptions([]string{"123"})
+	if err != nil || localPR.timeout != defaultLocalReviewTimeout {
+		t.Fatalf("local PR default = %s (err %v), want %s", localPR.timeout, err, defaultLocalReviewTimeout)
+	}
+	t.Setenv("GITHUB_ACTIONS", "true")
+	hosted, err := parseReviewCommandOptions(nil)
+	if err != nil || hosted.timeout != defaultReviewTimeout {
+		t.Fatalf("hosted default = %s (err %v), want %s", hosted.timeout, err, defaultReviewTimeout)
+	}
+}
+
 func TestReviewCommandsReserveEnoughTimeByDefault(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "true")
 	branch, err := parseReviewCommandOptions(nil)
 	if err != nil {
 		t.Fatalf("parseReviewCommandOptions() error = %v", err)
