@@ -137,6 +137,7 @@ func DefaultConfig() *Config {
 			MaxToolCalls:               0,
 			MaxValidationAttempts:      2,
 			MaxDiffBytes:               240_000,
+			BudgetPerKlocUSD:           0.10,
 			MaxSupportingContextTokens: 12_000,
 			PostingCoreAssociations:    []string{"OWNER", "MEMBER", "COLLABORATOR"},
 			PostingAllowlist:           nil,

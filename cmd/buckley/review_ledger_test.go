@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,3 +135,61 @@ func TestReviewLedgerIdentity_MetadataFailure(t *testing.T) {
 		t.Fatal("lost requested PR number")
 	}
 }
+
+// Without credentials the ledger keeps queueing locally. It must say so once
+// per process, in one line, not once per queued upload.
+func TestWarnReviewLedger_MissingCredentialsPrintOneLine(t *testing.T) {
+	resetLedgerCredentialWarning()
+	var buf strings.Builder
+	prev := ledgerWarningOutput
+	ledgerWarningOutput = &buf
+	t.Cleanup(func() { ledgerWarningOutput = prev; resetLedgerCredentialWarning() })
+
+	err := errors.Join(
+		fmt.Errorf("retry a.json: %w", reviewledger.ErrNoCredentials),
+		fmt.Errorf("retry b.json: %w", reviewledger.ErrNoCredentials),
+	)
+	warnReviewLedger("review ledger retry", err)
+	warnReviewLedger("review ledger", fmt.Errorf("queued: %w", reviewledger.ErrNoCredentials))
+	out := buf.String()
+	if got := strings.Count(out, "\n"); got != 1 {
+		t.Fatalf("printed %d lines, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "credentials") || strings.Contains(out, "a.json") {
+		t.Fatalf("warning = %q", out)
+	}
+	warnReviewLedger("review ledger", errors.New("HTTP 500"))
+	if !strings.Contains(buf.String(), "HTTP 500") {
+		t.Fatalf("other errors must still print: %q", buf.String())
+	}
+}
+
+type blockingRetryLedger struct{ orchestrator.ReviewLedger }
+
+func (blockingRetryLedger) Retry(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// The retry runs inside the review's own deadline, so a slow archive must not
+// be able to spend more than a few seconds of it.
+func TestRetryReviewLedger_IsBoundedByItsOwnTimeout(t *testing.T) {
+	if reviewLedgerRetryTimeout > 15*time.Second {
+		t.Fatalf("retry timeout = %s; it is taken from the review budget and must stay short", reviewLedgerRetryTimeout)
+	}
+	prev := reviewLedgerRetryTimeout
+	reviewLedgerRetryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { reviewLedgerRetryTimeout = prev })
+	var out strings.Builder
+	prevOut := ledgerWarningOutput
+	ledgerWarningOutput = &out
+	t.Cleanup(func() { ledgerWarningOutput = prevOut })
+
+	start := time.Now()
+	retryReviewLedger(blockingRetryLedger{})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("retryReviewLedger blocked for %s", elapsed)
+	}
+}
+
+func resetLedgerCredentialWarning() { ledgerCredentialWarning = sync.Once{} }

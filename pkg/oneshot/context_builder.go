@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -208,7 +209,10 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 	for _, fd := range diff.Files {
 		paths = append(paths, fd.Path)
 	}
-	isGenerated := generatedByAttrs(paths, params["staged"] == "true", opts.WorkDir)
+	isGenerated := anyGenerated(
+		generatedByAttrs(paths, params["staged"] == "true", opts.WorkDir),
+		diffsignal.DefaultGenerated(paths),
+	)
 	stats = statsForFiles(diff.Files, isGenerated)
 	res := diff.Prioritize(budget, diffsignal.Options{ForPR: opts.RankDiffForPR, Generated: isGenerated})
 	output := res.Context
@@ -475,9 +479,37 @@ func statsForFiles(files []diffsignal.FileDiff, generated func(string) bool) Dif
 		}
 		if fd.Generated() {
 			stats.GeneratedPaths = append(stats.GeneratedPaths, fd.Path)
+			if fd.GeneratedBy != "" && !slices.Contains(stats.GeneratedBy, fd.GeneratedBy) {
+				stats.GeneratedBy = append(stats.GeneratedBy, fd.GeneratedBy)
+			}
 		} else {
 			stats.SourcePaths = append(stats.SourcePaths, fd.Path)
 		}
 	}
 	return stats
+}
+
+// anyGenerated combines predicates: a path is generated when any says so. Nil
+// predicates are skipped, and the result is nil when none remain.
+func anyGenerated(predicates ...func(string) bool) func(string) bool {
+	var live []func(string) bool
+	for _, p := range predicates {
+		if p != nil {
+			live = append(live, p)
+		}
+	}
+	switch len(live) {
+	case 0:
+		return nil
+	case 1:
+		return live[0]
+	}
+	return func(path string) bool {
+		for _, p := range live {
+			if p(path) {
+				return true
+			}
+		}
+		return false
+	}
 }

@@ -1541,6 +1541,8 @@ func dispatchSubcommand(args []string) (bool, int) {
 		return true, runCommand(runAttachCommand, args[1:])
 	case "goal":
 		return true, runCommand(runGoalCommand, args[1:])
+	case "verify":
+		return true, runCommand(runVerifyCommand, args[1:])
 	case "completion-check":
 		return true, runCommand(runCompletionCheckCommand, args[1:])
 	case "batch":
@@ -1640,11 +1642,16 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	state := startupFlagState{}
 	filtered := make([]string, 0, len(raw))
 
-	for _, arg := range raw {
+	for i, arg := range raw {
 		if consumed, err := state.consumePending(opts, arg); err != nil {
 			return nil, err
 		} else if consumed {
 			continue
+		}
+
+		if arg == "--" {
+			filtered = append(filtered, raw[i:]...)
+			break
 		}
 
 		if consumed, err := state.consumeStartupFlag(opts, arg, len(filtered) == 0); err != nil {

@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -256,5 +257,23 @@ func TestGetTerminalWidth(t *testing.T) {
 	width := getTerminalWidth()
 	if width < 40 || width > 500 {
 		t.Errorf("getTerminalWidth() = %d, expected 40-500 range", width)
+	}
+}
+
+func TestMenuReturnsQuitOnEndOfInput(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close() // stdin at EOF, as in a background or CI run
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+
+	var out bytes.Buffer
+	writer := NewWithOutput(&out)
+	got := writer.Menu("Pick", []MenuItem{{Key: "1", Label: "one"}, {Key: "q", Label: "Done"}})
+	if got != "q" {
+		t.Fatalf("Menu at EOF = %q, want q so callers stop instead of looping", got)
 	}
 }

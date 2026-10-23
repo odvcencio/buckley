@@ -39,6 +39,7 @@ type Query struct {
 	Path      string
 	EntityID  string
 	Text      string
+	Tree      string
 	Since     time.Time
 	Limit     int
 }

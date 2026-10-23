@@ -220,6 +220,10 @@ func (l *Ledger) Retry(ctx context.Context) error {
 		if err == nil {
 			err = removePending(filename)
 		}
+		if errors.Is(err, ErrNoCredentials) {
+			// Every remaining upload would fail the same way.
+			return fmt.Errorf("%w; queued uploads stay in %s", ErrNoCredentials, l.queue)
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("retry %s: %w", entry.Name(), err))
 		}

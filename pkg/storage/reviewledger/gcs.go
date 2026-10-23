@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,11 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+// ErrNoCredentials reports that no Google credentials (application default
+// credentials or a gcloud login) are available. It is final for the process:
+// the lookup runs once and later uploads fail at once with the same error.
+var ErrNoCredentials = errors.New("GCS credentials unavailable: set application default credentials or run gcloud auth login")
+
 type GCS struct {
 	client           *http.Client
 	endpoint, bucket string
@@ -27,9 +33,10 @@ func NewGCS(bucket string) *GCS {
 }
 
 type gcsAuthTransport struct {
-	mu     sync.Mutex
-	source oauth2.TokenSource
-	token  *oauth2.Token
+	mu      sync.Mutex
+	source  oauth2.TokenSource
+	token   *oauth2.Token
+	authErr error
 }
 
 func (t *gcsAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -45,6 +52,9 @@ func (t *gcsAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 func (t *gcsAuthTransport) accessToken(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.authErr != nil {
+		return "", t.authErr
+	}
 	if t.token.Valid() {
 		return t.token.AccessToken, nil
 	}
@@ -67,7 +77,12 @@ func (t *gcsAuthTransport) accessToken(ctx context.Context) (string, error) {
 	// Never attach the command's output to an error or diagnostic.
 	output, err := exec.CommandContext(tokenCtx, "gcloud", "auth", "print-access-token", "--quiet").Output()
 	if err != nil {
-		return "", fmt.Errorf("GCS authentication requires application default credentials or a gcloud login")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The caller gave up; that says nothing about the credentials.
+			return "", ctxErr
+		}
+		t.authErr = ErrNoCredentials
+		return "", t.authErr
 	}
 	value := strings.TrimSpace(string(output))
 	if value == "" {

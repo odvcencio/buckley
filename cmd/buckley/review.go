@@ -26,26 +26,29 @@ import (
 )
 
 type reviewCommandOptions struct {
-	projectMode     bool
-	scope           string
-	baseBranch      string
-	includeUnstaged bool
-	untrackedPaths  []string
-	verbose         bool
-	showCost        bool
-	model           string
-	effort          string
-	criticModel     string
-	timeout         time.Duration
-	outputFile      string
-	interactive     bool
-	budgetUSD       float64
-	noBudget        bool
-	maxTurns        int
-	maxToolCalls    int
-	maxDiff         int
-	maxRetries      int
-	depth           reviewDepth
+	projectMode         bool
+	scope               string
+	baseBranch          string
+	includeUnstaged     bool
+	untrackedPaths      []string
+	verbose             bool
+	showCost            bool
+	model               string
+	effort              string
+	criticModel         string
+	timeout             time.Duration
+	outputFile          string
+	interactive         bool
+	budgetUSD           float64
+	noBudget            bool
+	maxTurns            int
+	maxToolCalls        int
+	maxDiff             int
+	evidenceTimeout     time.Duration
+	requireVerification string
+	runVerification     bool
+	maxRetries          int
+	depth               reviewDepth
 }
 
 type reviewCommandRuntime struct {
@@ -54,6 +57,7 @@ type reviewCommandRuntime struct {
 	ledger          *transparency.CostLedger
 	framework       *oneshot.Framework
 	modelID         string
+	criticModel     string // "" when the critic runs on the primary route
 	reasoningEffort string
 	policy          automatedReviewOptions
 	durableCleanup  func()
@@ -118,7 +122,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_REVIEW, BUCKLEY_ONESHOT_EFFORT, or config)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout (project reviews default to 20m)")
+	timeout := fs.Duration("timeout", reviewTimeoutDefault(), "total review timeout (project reviews default to 20m)")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
@@ -127,6 +131,9 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	requireVerification := fs.String("require-verification", "", "evidence required before the review starts: none, receipt, or receipt-or-ci (overrides config)")
+	runVerification := fs.Bool("run-verification", false, "let the review run build and test commands in its sandbox (off by default, not recommended: record receipts with `buckley verify record` instead)")
+	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
 	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
@@ -177,26 +184,29 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	}
 
 	opts := reviewCommandOptions{
-		projectMode:     *projectMode,
-		scope:           *scope,
-		baseBranch:      *baseBranch,
-		includeUnstaged: *includeUnstaged,
-		untrackedPaths:  append([]string(nil), untrackedPaths...),
-		verbose:         *verbose,
-		showCost:        *showCost,
-		model:           *modelFlag,
-		effort:          effort,
-		criticModel:     *criticModel,
-		timeout:         *timeout,
-		outputFile:      *outputFile,
-		interactive:     *interactive,
-		budgetUSD:       *budgetUSD,
-		noBudget:        *noBudget,
-		maxTurns:        *maxTurns,
-		maxToolCalls:    *maxToolCalls,
-		maxDiff:         *maxDiff,
-		maxRetries:      *maxRetries,
-		depth:           depth,
+		projectMode:         *projectMode,
+		scope:               *scope,
+		baseBranch:          *baseBranch,
+		includeUnstaged:     *includeUnstaged,
+		untrackedPaths:      append([]string(nil), untrackedPaths...),
+		verbose:             *verbose,
+		showCost:            *showCost,
+		model:               *modelFlag,
+		effort:              effort,
+		criticModel:         *criticModel,
+		timeout:             *timeout,
+		outputFile:          *outputFile,
+		interactive:         *interactive,
+		budgetUSD:           *budgetUSD,
+		noBudget:            *noBudget,
+		maxTurns:            *maxTurns,
+		maxToolCalls:        *maxToolCalls,
+		maxDiff:             *maxDiff,
+		evidenceTimeout:     *evidenceTimeout,
+		requireVerification: *requireVerification,
+		runVerification:     *runVerification,
+		maxRetries:          *maxRetries,
+		depth:               depth,
 	}
 	if *noInteractive {
 		opts.interactive = false
@@ -246,6 +256,7 @@ func runReviewCommand(args []string) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	installReviewGeneratedResolver(cfg, true)
 	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store, opts.effort)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
@@ -273,6 +284,9 @@ func runReviewCommand(args []string) (returnErr error) {
 		maxToolCallsExplicit:  opts.maxToolCalls > 0,
 		maxRetries:            opts.maxRetries,
 		maxDiffBytes:          opts.maxDiff,
+		hostEvidenceTimeout:   opts.evidenceTimeout,
+		requireVerification:   opts.requireVerification,
+		executeVerification:   opts.runVerification,
 		maxCostUSD:            opts.budgetUSD,
 		clearCostBudget:       opts.noBudget,
 		depth:                 opts.depth,
@@ -341,7 +355,15 @@ func salvageIncompleteReview(outputFile string, reviewErr error, result *reviewC
 	if err := writeReviewOutput(outputFile, result.reviewText); err != nil {
 		return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
 	}
-	return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(outputFile))
+	reason := strings.TrimSpace(result.incompleteWhy)
+	if reason == "" && reviewErr != nil {
+		reason = reviewErr.Error()
+	}
+	kind, code := classifyReviewStop(reason)
+	return withExitCode(
+		fmt.Errorf("%w; incomplete review salvaged%s (stop reason: %s, exit %d)", reviewErr, reviewSalvageDestination(outputFile), kind, code),
+		code,
+	)
 }
 
 // reviewCommandFailure keeps incomplete model output out of the review
@@ -477,6 +499,7 @@ func newReviewCommandRuntime(ctx context.Context, cfg *config.Config, mgr *model
 		ledger:          ledger,
 		framework:       framework,
 		modelID:         modelID,
+		criticModel:     map[bool]string{true: criticModel, false: ""}[dedicatedCritic],
 		reasoningEffort: reasoningEffort,
 		policy:          policy,
 		durableCleanup:  durableCleanup,
@@ -577,6 +600,41 @@ func printReviewModelSelection(runtime *reviewCommandRuntime) {
 		return
 	}
 	termOut.Dim("Using model: %s", runtime.modelID)
+	for _, line := range reviewRouteLines(runtime.mgr, runtime.modelID, runtime.criticModel) {
+		termOut.Dim("%s", line)
+	}
+}
+
+// routeResolver is the part of model.Manager that names where a model's calls go.
+type routeResolver interface {
+	ResolveModelRoute(modelID string) (model.ModelRoute, error)
+}
+
+// reviewRouteLines names, once per run, the provider and model behind every
+// kind of model call a review makes, so an operator can check that nothing
+// reaches a provider they did not choose. The shards and the primary pass share
+// one route; a critic with no model of its own runs on the primary route; the
+// review makes no other model calls (the ledger archive and the diff
+// classification use no model).
+func reviewRouteLines(resolver routeResolver, primary, critic string) []string {
+	describe := func(modelID string) string {
+		route, err := resolver.ResolveModelRoute(modelID)
+		if err != nil {
+			return fmt.Sprintf("%s (unresolved: %v)", modelID, err)
+		}
+		return fmt.Sprintf("%s via %s", route.SelectedModel, route.ProviderID)
+	}
+	primaryRoute := describe(primary)
+	criticRoute := primaryRoute + " (same as primary)"
+	if critic != "" {
+		criticRoute = describe(critic)
+	}
+	return []string{
+		"Route: primary review: " + primaryRoute,
+		"Route: PR shards: " + primaryRoute,
+		"Route: approval critic: " + criticRoute,
+		"Route: other model calls: none",
+	}
 }
 
 func runReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, policy automatedReviewOptions) (*reviewCommandResult, error) {
@@ -628,6 +686,18 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		return nil, err
 	}
 
+	files := make([]string, 0, len(projectCtx.TrackedFiles)+len(projectCtx.UntrackedFiles))
+	files = append(files, projectCtx.TrackedFiles...)
+	files = append(files, projectCtx.UntrackedFiles...)
+	verification, verifyErr := reviewPolicy.resolveVerificationReport(ctx, verificationTarget{
+		Files: files, HeadRev: projectCtx.HeadCommit, LocalChanges: snapshot.HasPatch(),
+	})
+	if verifyErr != nil {
+		spinner.StopWithError("verification evidence check failed")
+		return nil, verifyErr
+	}
+	reviewPolicy.verification = verification
+
 	spinner.SetMessage("Canopy TOC ready; expanding exhaustive repository coverage...")
 	plan := reviewExecutionPlan{
 		sizeClass:          "project",
@@ -650,8 +720,8 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 	}
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
-	userPrompt := appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy)
-	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{Depth: string(reviewPolicy.depth)}, oneshot.AgentRunOpts{
+	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildProjectPrompt(projectCtx), reviewPolicy), reviewPolicy.verification)
+	fwResult, runErr := framework.RunAgent(ctx, commands.ReviewProjectDef{Depth: string(reviewPolicy.depth), SuppliedEvidenceOnly: !reviewPolicy.executeVerification}, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
 		Audit:                    audit,
 		MaxRetries:               reviewPolicy.maxRetries,
@@ -663,6 +733,7 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		HostEvidenceTimeout:      reviewPolicy.hostEvidenceTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
 		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
@@ -677,13 +748,16 @@ func runProjectReviewWithPolicy(ctx context.Context, framework *oneshot.Framewor
 		spinner.StopWithError(runErr.Error())
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
+			partial.reviewText = appendVerificationSection(partial.reviewText, reviewPolicy.verification)
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
 	spinner.StopWithSuccess("Project review complete")
-	return reviewResultFromAgent(fwResult, audit), nil
+	complete := reviewResultFromAgent(fwResult, audit)
+	complete.reviewText = appendVerificationSection(complete.reviewText, reviewPolicy.verification)
+	return complete, nil
 }
 
 func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, framework *oneshot.Framework, reviewPolicy automatedReviewOptions) (result *reviewCommandResult, reviewErr error) {
@@ -740,21 +814,36 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		return nil, fmt.Errorf("revalidate branch review context: %w", err)
 	}
 
+	verification, verifyErr := reviewPolicy.resolveVerificationReport(ctx, verificationTarget{
+		Files:        reviewChangedFilePaths(branchCtx.Files),
+		HeadRev:      branchCtx.HeadCommit,
+		LocalChanges: snapshot.HasPatch(),
+	})
+	if verifyErr != nil {
+		spinner.StopWithError("verification evidence check failed")
+		return nil, verifyErr
+	}
+	reviewPolicy.verification = verification
+
 	plan := resolveReviewExecutionPlan(reviewPolicy.engine, rules.ReviewPlanFacts{
 		FileCount:         len(branchCtx.Files),
 		DiffBytes:         len(branchCtx.Diff) + len(branchCtx.Unstaged),
 		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
 	})
 	reviewPolicy = reviewPolicy.withExecutionPlan(plan)
+	reviewPolicy = reviewPolicy.withSizeScaledBudget(countChangedLines(branchCtx.Diff + "\n" + branchCtx.Unstaged))
 	changedFiles := reviewChangedFilePaths(branchCtx.Files)
 	reviewPolicy = reviewPolicy.withVerificationTargetBudget(changedFiles)
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(reviewPolicy.depth), reviewPolicy.sizeClass, reviewPolicy.reasoningEffort))
-	userPrompt := appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy)
+	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildBranchPrompt(branchCtx), reviewPolicy), reviewPolicy.verification)
 	reviewDef := commands.ReviewBranchDef{
-		ChangedFiles:      changedFiles,
-		ContextIncomplete: branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
-		ApprovalCritic:    reviewPolicy.approvalCritic,
-		Depth:             string(reviewPolicy.depth),
+		SuppliedEvidenceOnly: !reviewPolicy.executeVerification,
+		Verification:         reviewPolicy.verification,
+		ChangedFiles:         changedFiles,
+		GeneratedFiles:       branchCtx.GeneratedFiles,
+		ContextIncomplete:    branchCtx.DiffTruncated || branchCtx.UnstagedTruncated || branchCtx.ContextIncomplete,
+		ApprovalCritic:       reviewPolicy.approvalCritic,
+		Depth:                string(reviewPolicy.depth),
 	}
 	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
@@ -773,6 +862,7 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		ExplorationTimeout:       reviewPolicy.explorationTimeout,
 		SynthesisLead:            reviewPolicy.synthesisLead,
 		VerificationTimeout:      reviewPolicy.verificationTimeout,
+		HostEvidenceTimeout:      reviewPolicy.hostEvidenceTimeout,
 		VerificationWrapper:      reviewPolicy.verificationWrapper,
 		VerificationCleanup:      reviewPolicy.verificationCleanup,
 		VerificationParallelism:  reviewPolicy.verificationParallelism,
@@ -787,13 +877,18 @@ func runBranchReviewWithPolicy(ctx context.Context, opts reviewCommandOptions, f
 		spinner.StopWithError(runErr.Error())
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
+			partial.reviewText = appendVerificationSection(partial.reviewText, reviewPolicy.verification)
+			partial.reviewText = commands.AppendGeneratedSummary(partial.reviewText, branchCtx.GeneratedGroups, reviewPolicy.verification)
 			return partial, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, fmt.Errorf("review failed: %w", runErr)
 	}
 
 	spinner.StopWithSuccess(fmt.Sprintf("%s review complete", titleReviewScope(reviewScope)))
-	return reviewResultFromAgent(fwResult, audit), nil
+	complete := reviewResultFromAgent(fwResult, audit)
+	complete.reviewText = appendVerificationSection(complete.reviewText, reviewPolicy.verification)
+	complete.reviewText = commands.AppendGeneratedSummary(complete.reviewText, branchCtx.GeneratedGroups, reviewPolicy.verification)
+	return complete, nil
 }
 
 func branchReviewSnapshotPolicy(scope string, includeUnstaged bool, untrackedPaths []string) model.ReviewSnapshotPolicy {
@@ -1017,11 +1112,13 @@ func markIncompleteReview(review, reason string) string {
 	if strings.Contains(review, "**Incomplete review") {
 		return review + "\n"
 	}
+	kind, _ := classifyReviewStop(reason)
 	if strings.TrimSpace(reason) == "" {
-		reason = "the review run ended before validation completed"
+		reason = "the review run ended before validation completed (no cause was reported)"
 	}
 	return fmt.Sprintf(
-		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Cause: %s\n\n%s\n",
+		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Stop reason: %s\n> Cause: %s\n\n%s\n",
+		kind,
 		reason,
 		review,
 	)
@@ -1164,11 +1261,16 @@ func printReviewCost(trace *transparency.Trace, ledger *transparency.CostLedger)
 	termOut.Dim("%s", costLine)
 }
 
+// maxInvalidMenuChoices bounds consecutive unrecognized menu input so a closed
+// or non-interactive stdin cannot keep the review menu prompting forever.
+const maxInvalidMenuChoices = 5
+
 // runReviewMenu displays an interactive menu to fix findings.
 func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *model.Manager, registry *tool.Registry, modelID, reasoningEffort string, ledger *transparency.CostLedger, timeout time.Duration) {
 	// Print grade summary
 	printGradeSummary(parsed)
 
+	invalidChoices := 0
 	for {
 		// Build menu items
 		items := buildReviewMenuItems(parsed)
@@ -1181,8 +1283,14 @@ func runReviewMenu(ctx context.Context, parsed *commands.ParsedReview, mgr *mode
 		choice := termOut.Menu("What would you like to do?", items)
 		if choice == "" {
 			termOut.Warn("Invalid choice")
+			invalidChoices++
+			if invalidChoices >= maxInvalidMenuChoices {
+				termOut.Warn("Too many invalid choices; leaving the menu")
+				return
+			}
 			continue
 		}
+		invalidChoices = 0
 
 		switch choice {
 		case "q":

@@ -14,9 +14,6 @@ cmd/buckley/doctor.go runDoctorChatCommandWithResolver
 cmd/buckley/doctor.go runDoctorChatRunShowCommand
 cmd/buckley/doctor.go runDoctorChatRunShowCommandWithResolver
 cmd/buckley/doctor.go runDoctorChatRunsCommandWithResolver
-cmd/buckley/main.go executeOneShot
-cmd/buckley/main.go executeOneShotWithStepCap
-cmd/buckley/main.go executeOneShotWithStepCapAndOutputSchema
 cmd/buckley/main.go sanitizeTerminalInput
 cmd/buckley/oneshot_backend.go resolveOneshotRequestProfile
 cmd/buckley/review_pr.go reviewContextProvidersForModel
@@ -170,7 +167,6 @@ pkg/evidence/redaction.go SummarizeForTelemetry
 pkg/evidence/redaction.go itoa
 pkg/evidence/retention.go DefaultRetentionPolicy
 pkg/evidence/store.go SQLiteStore.isPinned
-pkg/evidence/store.go WithBlobRoot
 pkg/execmode/broker.go Broker.Granted
 pkg/execmode/broker.go WithCapabilityCallLimit
 pkg/execmode/run.go WithoutIsolation

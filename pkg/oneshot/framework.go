@@ -480,6 +480,12 @@ type AgentRunOpts struct {
 	// VerificationTimeout caps each snapshot verification command.
 	VerificationTimeout time.Duration
 
+	// HostEvidenceTimeout caps the whole host-run evidence phase that runs
+	// before the model. Zero uses half of the time left on the context. In
+	// every case the model keeps at least a quarter of the time left, so a
+	// slow test suite cannot starve the review.
+	HostEvidenceTimeout time.Duration
+
 	// VerificationWrapper is a shell-style argv prefix that routes each
 	// snapshot verification command through a remote wrapper instead of the
 	// local sandbox. Empty keeps verification local.

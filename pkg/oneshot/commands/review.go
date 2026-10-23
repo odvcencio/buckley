@@ -19,23 +19,43 @@ import (
 // inside an OS-enforced read-only-source sandbox.
 // The agent produces free-form markdown which is parsed into structured data.
 type ReviewBranchDef struct {
-	ChangedFiles      []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups; the
+	// Coverage ledger need not list them.
+	GeneratedFiles    []string
 	ContextIncomplete bool
 	ApprovalCritic    bool
 	Depth             string
+	// SuppliedEvidenceOnly stops the review from running build and test
+	// commands: it reads verification receipts and CI results instead (see
+	// VerificationReport). The zero value keeps the older behavior, where the
+	// review runs verification in its sandbox; Buckbot sets this by default.
+	SuppliedEvidenceOnly bool
+	// Verification binds result claims to the supplied receipts and CI checks.
+	Verification *VerificationReport
 }
 
 func (ReviewBranchDef) Name() string { return "review" }
 
 func (d ReviewBranchDef) SystemPrompt() string {
-	return appendReviewDepthSections(prompts.ReviewBranchWithToolsPrompt(time.Now()), d.Depth)
+	prompt := appendReviewDepthSections(prompts.ReviewBranchWithToolsPrompt(time.Now()), d.Depth)
+	if d.SuppliedEvidenceOnly {
+		prompt += "\n\n" + ReviewPromptGuidance
+	}
+	return prompt
 }
 
-func (ReviewBranchDef) AllowedTools() []string {
+func (d ReviewBranchDef) AllowedTools() []string {
+	if d.SuppliedEvidenceOnly {
+		return reviewInspectionTools()
+	}
 	return reviewAllowedTools()
 }
 
 func (d ReviewBranchDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
+	if d.SuppliedEvidenceOnly {
+		return nil
+	}
 	return reviewVerificationEvidenceRequests(d.ChangedFiles)
 }
 
@@ -55,12 +75,17 @@ func (d ReviewBranchDef) ValidateResult(result any) error {
 		return err
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
-		ChangedFiles:      d.ChangedFiles,
-		ContextIncomplete: d.ContextIncomplete,
+		ChangedFiles:            d.ChangedFiles,
+		GeneratedFiles:          d.GeneratedFiles,
+		ContextIncomplete:       d.ContextIncomplete,
+		AllowUnverifiedApproval: d.SuppliedEvidenceOnly,
 	})
 }
 
 func (d ReviewBranchDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
+	if d.SuppliedEvidenceOnly {
+		return validateReviewSuppliedEvidence(result, d.Verification)
+	}
 	if err := validateReviewExecutionEvidenceWithCoverage(result, execution, d.ChangedFiles, reviewDepthNeedsVerification(d.Depth)); err != nil {
 		return err
 	}
@@ -85,17 +110,24 @@ func (d ReviewBranchDef) BuildApprovalCriticPrompt(originalPrompt string, primar
 // the Canopy TOC into complete repository coverage.
 type ReviewProjectDef struct {
 	Depth string
+	// SuppliedEvidenceOnly stops the review from running verification; see
+	// ReviewBranchDef.
+	SuppliedEvidenceOnly bool
 }
 
 func (ReviewProjectDef) Name() string { return "review-project" }
 
 func (d ReviewProjectDef) SystemPrompt() string {
-	return appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
+	prompt := appendReviewDepthSections(prompts.ReviewProjectPrompt(time.Now()), d.Depth)
+	if d.SuppliedEvidenceOnly {
+		prompt += "\n\n" + ReviewPromptGuidance
+	}
+	return prompt
 }
 
 func (d ReviewProjectDef) AllowedTools() []string {
 	tools := reviewInspectionTools()
-	if reviewDepthNeedsVerification(d.Depth) {
+	if !d.SuppliedEvidenceOnly && reviewDepthNeedsVerification(d.Depth) {
 		tools = append(tools, "run_verification")
 	}
 	return tools
@@ -139,12 +171,18 @@ func (d ReviewProjectDef) ValidateResult(result any) error {
 }
 
 func (d ReviewProjectDef) ValidateAgentExecution(_ any, execution *oneshot.AgentResult) error {
+	if d.SuppliedEvidenceOnly {
+		return nil
+	}
 	return requireReviewDepthVerification(d.Depth, execution)
 }
 
 // ReviewPRDef implements oneshot.AgentDefinition for PR review.
 type ReviewPRDef struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups; the
+	// Coverage ledger need not list them.
+	GeneratedFiles              []string
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -155,6 +193,11 @@ type ReviewPRDef struct {
 	MaxIterations               int
 	ApprovalCritic              bool
 	Depth                       string
+	// SuppliedEvidenceOnly stops the review from running verification; see
+	// ReviewBranchDef.
+	SuppliedEvidenceOnly bool
+	// Verification binds result claims to the supplied receipts and CI checks.
+	Verification *VerificationReport
 }
 
 func (ReviewPRDef) Name() string { return "review-pr" }
@@ -163,6 +206,9 @@ func (d ReviewPRDef) MaxAgentIterations() int { return d.MaxIterations }
 
 func (d ReviewPRDef) SystemPrompt() string {
 	prompt := appendReviewDepthSections(prompts.ReviewPRPrompt(time.Now()), d.Depth)
+	if d.SuppliedEvidenceOnly {
+		return prompt + "\n\n" + ReviewPromptGuidance
+	}
 	if d.authoritativeRemoteCIPasses() {
 		prompt += `
 
@@ -176,6 +222,9 @@ REMOTE CI EXECUTION POLICY:
 }
 
 func (d ReviewPRDef) AllowedTools() []string {
+	if d.SuppliedEvidenceOnly {
+		return reviewInspectionTools()
+	}
 	allowed := reviewAllowedTools()
 	if !d.authoritativeRemoteCIPasses() {
 		return allowed
@@ -184,7 +233,7 @@ func (d ReviewPRDef) AllowedTools() []string {
 }
 
 func (d ReviewPRDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
-	if d.authoritativeRemoteCIPasses() {
+	if d.SuppliedEvidenceOnly || d.authoritativeRemoteCIPasses() {
 		return nil
 	}
 	return reviewVerificationEvidenceRequests(d.ChangedFiles)
@@ -230,6 +279,7 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 	}
 	return ValidateParsedReview(review.Parsed, ReviewValidationOptions{
 		ChangedFiles:                d.ChangedFiles,
+		GeneratedFiles:              d.GeneratedFiles,
 		ContextIncomplete:           d.ContextIncomplete,
 		CIStatus:                    d.CIStatus,
 		CIProvenance:                d.CIProvenance,
@@ -238,6 +288,7 @@ func (d ReviewPRDef) ValidateResult(result any) error {
 		RequiresFeedbackDisposition: d.RequiresFeedbackDisposition,
 		RequiredFeedbackIDs:         d.RequiredFeedbackIDs,
 		RequirePassingRemoteCI:      true,
+		AllowUnverifiedApproval:     d.SuppliedEvidenceOnly,
 	})
 }
 
@@ -246,7 +297,7 @@ var (
 	finalReviewSummaryHeadingRE  = regexp.MustCompile(`^##[ \t]+Summary[ \t]*$`)
 	finalReviewLevelTwoHeadingRE = regexp.MustCompile(`^##(?:[ \t]+.*)?[ \t]*$`)
 	finalReviewATXHeadingRE      = regexp.MustCompile(`^#{1,6}(?:[ \t]+.*)?[ \t]*$`)
-	reviewCompletenessMarkerRE   = regexp.MustCompile(`(?im)^\s*(?:[-*]\s+)?(?:(?:#{2,6})\s+)?(?:\*\*)?Completeness(?:\*\*)?\s*:\s*(COMPLETE|PARTIAL)\b`)
+	reviewCompletenessMarkerRE   = regexp.MustCompile(`(?im)^\s*(?:[-*]\s+)?(?:(?:#{2,6})\s+)?(?:\*\*)?Completeness(?:\*\*)?(?:\s*:\s*|[ \t]*\n\s*)(COMPLETE|PARTIAL)\b`)
 )
 
 func parseFinalReviewResult(response string) (*ReviewAgentResult, error) {
@@ -429,6 +480,9 @@ func reviewFenceMarker(line string) string {
 }
 
 func (d ReviewPRDef) ValidateAgentExecution(result any, execution *oneshot.AgentResult) error {
+	if d.SuppliedEvidenceOnly {
+		return validateReviewSuppliedEvidence(result, d.Verification)
+	}
 	review, ok := result.(*ReviewAgentResult)
 	if ok && review.Parsed != nil && review.Parsed.Approved && d.authoritativeRemoteCIPasses() {
 		return nil

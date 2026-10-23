@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -224,6 +225,13 @@ func (cb *CircuitBreaker) finishCall(generation uint64, ownsHalfOpenProbe bool, 
 		return
 	}
 
+	// A client error (4xx other than 408 and 429) shows the service answered
+	// and rejected this request. It says nothing against service health, so it
+	// counts like a success.
+	if isClientRequestError(err) {
+		err = nil
+	}
+
 	var transition *circuitBreakerTransition
 	var resetFailureCount bool
 	if cb.state == CircuitHalfOpen {
@@ -244,7 +252,11 @@ func (cb *CircuitBreaker) finishCall(generation uint64, ownsHalfOpenProbe bool, 
 	} else {
 		transition, resetFailureCount = cb.recordSuccessLocked()
 	}
+	failures := cb.failureCount
 	cb.mu.Unlock()
+	if err != nil {
+		slog.Warn("circuit breaker counted a failure", "error", err, "consecutive_failures", failures)
+	}
 
 	if transition != nil {
 		transition.log()
@@ -328,4 +340,15 @@ func (cb *CircuitBreaker) LastFailureTime() time.Time {
 	cb.mu.RLock()
 	defer cb.mu.RUnlock()
 	return cb.lastFailureTime
+}
+
+// isClientRequestError reports a provider rejection caused by the request, not
+// by the service: HTTP 4xx except 408 (timeout) and 429 (rate limit).
+func isClientRequestError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := apiErr.StatusCode
+	return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
 }

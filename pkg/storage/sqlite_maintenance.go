@@ -38,7 +38,25 @@ func WithSQLiteWriteTransaction(ctx context.Context, db *sql.DB, fn func(conn *s
 
 // EnableSQLiteIncrementalVacuum enables bounded reclamation for new databases.
 // Existing databases with auto_vacuum=NONE need an explicit VACUUM to adopt it.
+//
+// The pragma takes the write lock even when it changes nothing, so a process
+// that opens an existing database would wait behind any other writer. SQLite
+// only honors the setting before the first page is written, so a database that
+// already has pages, or already uses incremental mode, is left alone.
 func EnableSQLiteIncrementalVacuum(db *sql.DB) error {
+	var mode, pages int
+	if err := db.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil {
+		return err
+	}
+	if mode == 2 {
+		return nil
+	}
+	if err := db.QueryRow("PRAGMA page_count").Scan(&pages); err != nil {
+		return err
+	}
+	if pages > 0 {
+		return nil
+	}
 	_, err := db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
 	return err
 }

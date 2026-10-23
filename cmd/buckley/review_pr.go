@@ -45,6 +45,9 @@ type reviewPRCommandOptions struct {
 	maxTurns             int
 	maxToolCalls         int
 	maxDiff              int
+	evidenceTimeout      time.Duration
+	requireVerification  string
+	runVerification      bool
 	maxSupportingContext int
 	maxRetries           int
 	forceSinglePass      bool
@@ -62,13 +65,16 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	modelFlag := fs.String("model", "", "model to use; codex/auto scales Luna to Terra to Sol")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_REVIEW, BUCKLEY_ONESHOT_EFFORT, or config)")
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
-	timeout := fs.Duration("timeout", defaultReviewTimeout, "total review timeout")
+	timeout := fs.Duration("timeout", reviewTimeoutDefault(), "total review timeout")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
 	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
 	maxTurns := fs.Int("max-turns", 0, "hard model turn limit per review pass (0 = adaptive)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum inspection/verification tool calls per review pass (0 = unlimited)")
 	maxDiff := fs.Int("max-diff-bytes", 0, "maximum prioritized diff bytes (0 = Buckbot default)")
+	requireVerification := fs.String("require-verification", "", "evidence required before the review starts: none, receipt, or receipt-or-ci (overrides PR labels and config)")
+	runVerification := fs.Bool("run-verification", false, "let the review run build and test commands in its sandbox (off by default, not recommended: record receipts with `buckley verify record` instead)")
+	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
@@ -132,6 +138,9 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		maxTurns:             *maxTurns,
 		maxToolCalls:         *maxToolCalls,
 		maxDiff:              *maxDiff,
+		evidenceTimeout:      *evidenceTimeout,
+		requireVerification:  *requireVerification,
+		runVerification:      *runVerification,
 		maxSupportingContext: *maxSupportingContext,
 		maxRetries:           *maxRetries,
 		forceSinglePass:      *singlePass,
@@ -190,21 +199,54 @@ func reviewPRFlagTakesValue(name string) bool {
 	}
 }
 
-// resolvePostedReviewTimeout applies the posted-review timeout ceiling and
-// reports whether the caller's requested timeout was silently reduced.
-// Posted reviews (opts.post) must stay inside defaultReviewTimeout so the
-// review plus its post-back attempts finish under external caller deadlines
-// (see TestPostedReviewBudgetsStayBelowFiveMinutes). A caller that asks for a
-// longer -timeout while posting gets a non-fatal warning explaining the
-// effective timeout instead of an unexplained deadline-exceeded failure.
-func resolvePostedReviewTimeout(requested time.Duration, post bool) (effective time.Duration, warning string) {
-	if !post || requested <= defaultReviewTimeout {
+// hostedReviewCeiling is the longest a posted review may run when an external
+// caller enforces its own deadline (a hosted CI job or the Buckbot service,
+// which cut a run off near five minutes). Local runs have no such caller, so
+// the ceiling is 0 (none) unless the environment asks for it:
+// BUCKLEY_POSTED_REVIEW_CEILING is a duration, "1" for the default, or "off";
+// GITHUB_ACTIONS=true implies the default.
+func hostedReviewCeiling(getenv func(string) string) time.Duration {
+	switch v := strings.TrimSpace(getenv("BUCKLEY_POSTED_REVIEW_CEILING")); v {
+	case "":
+		if getenv("GITHUB_ACTIONS") == "true" {
+			return defaultReviewTimeout
+		}
+		return 0
+	case "off", "0":
+		return 0
+	case "1", "true":
+		return defaultReviewTimeout
+	default:
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		return defaultReviewTimeout
+	}
+}
+
+// resolvePostedReviewTimeout returns the review deadline for a run that posts
+// its result. The post-back runs on its own completedBuckbotPostBudget after
+// the review, so a local run gives the review the requested timeout minus that
+// budget. Under a hosted ceiling the review is clamped to the ceiling instead,
+// with a warning; the ceiling already leaves room for the post-back. A request
+// too short to spare the budget is used as given.
+func resolvePostedReviewTimeout(requested time.Duration, post bool, ceiling time.Duration) (effective time.Duration, warning string) {
+	if !post {
 		return requested, ""
 	}
-	return defaultReviewTimeout, fmt.Sprintf(
-		"Warning: --timeout %s exceeds the posted-review ceiling; using %s because --post is set (posted reviews must leave room for the post-back attempt budget)",
-		requested, defaultReviewTimeout,
-	)
+	if ceiling > 0 {
+		if requested <= ceiling {
+			return requested, ""
+		}
+		return ceiling, fmt.Sprintf(
+			"Warning: --timeout %s exceeds the hosted posted-review ceiling; using %s because --post is set and BUCKLEY_POSTED_REVIEW_CEILING or GITHUB_ACTIONS applies (posted reviews must leave room for the post-back attempt budget)",
+			requested, ceiling,
+		)
+	}
+	if requested > 2*completedBuckbotPostBudget {
+		return requested - completedBuckbotPostBudget, ""
+	}
+	return requested, ""
 }
 
 func reviewPRUsageError() error {
@@ -220,7 +262,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post)
+	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post, hostedReviewCeiling(os.Getenv))
 	if timeoutWarning != "" {
 		fmt.Fprintln(os.Stderr, timeoutWarning)
 	}
@@ -249,6 +291,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("init dependencies: %w", err)
 	}
+	installReviewGeneratedResolver(cfg, false)
 	runtime, err := newReviewCommandRuntime(ctx, cfg, mgr, store, opts.effort)
 	if err != nil {
 		return fmt.Errorf("initialize review runtime: %w", err)
@@ -277,6 +320,9 @@ func runReviewPRCommand(args []string) (returnErr error) {
 		maxToolCallsExplicit:       opts.maxToolCalls > 0,
 		maxRetries:                 opts.maxRetries,
 		maxDiffBytes:               opts.maxDiff,
+		hostEvidenceTimeout:        opts.evidenceTimeout,
+		requireVerification:        opts.requireVerification,
+		executeVerification:        opts.runVerification,
 		maxSupportingContextTokens: opts.maxSupportingContext,
 		maxCostUSD:                 opts.budgetUSD,
 		clearCostBudget:            opts.noBudget,
@@ -402,6 +448,25 @@ type automatedReviewOptions struct {
 	criticReserveUSD           float64
 	approvalCritic             bool
 	verificationTimeout        time.Duration
+	// hostEvidenceTimeout caps the whole host verification phase that runs
+	// before the model (--evidence-timeout, buckbot.host_evidence_timeout_seconds).
+	hostEvidenceTimeout time.Duration
+	// budgetPerKlocUSD and maxBudgetUSD scale maxCostUSD with review size (see
+	// withSizeScaledBudget); costOverridden is set by --budget and --no-budget,
+	// which are never rescaled.
+	// requireVerification is the --require-verification flag value. The
+	// configured policy fields come from buckbot.verification and
+	// review.verification.declared.
+	requireVerification     string
+	userVerificationRequire string
+	executeVerification     bool
+	declaredVerification    []commands.DeclaredVerification
+	// verification is the evidence report for the reviewed head, set before
+	// any model call.
+	verification     *commands.VerificationReport
+	budgetPerKlocUSD float64
+	maxBudgetUSD     float64
+	costOverridden   bool
 	// verificationTimeoutFloor keeps a configured/derived verification
 	// timeout (see review.verification.runner in config) from being
 	// shrunk back down by withExecutionPlan's rules-engine-derived default.
@@ -509,6 +574,12 @@ func defaultAutomatedReviewOptions(cfg *config.Config) automatedReviewOptions {
 		maxDiffBytes:               cfg.Buckbot.MaxDiffBytes,
 		maxSupportingContextTokens: cfg.Buckbot.MaxSupportingContextTokens,
 		maxCostUSD:                 cfg.Buckbot.PerReviewBudgetUSD,
+		hostEvidenceTimeout:        time.Duration(max(cfg.Buckbot.HostEvidenceTimeoutSeconds, 0)) * time.Second,
+		userVerificationRequire:    cfg.Buckbot.Verification.Require,
+		executeVerification:        cfg.Buckbot.Verification.Execute,
+		declaredVerification:       declaredVerifications(cfg),
+		budgetPerKlocUSD:           cfg.Buckbot.BudgetPerKlocUSD,
+		maxBudgetUSD:               cfg.Buckbot.MaxReviewBudgetUSD,
 		reasoningEffort:            resolveConfiguredReviewReasoning(cfg),
 		adaptiveReasoning:          reviewReasoningIsAdaptive(cfg, reviewReasoningOverride()),
 		depth:                      reviewDepthSpot,
@@ -571,13 +642,24 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 	if overrides.maxDiffBytes > 0 {
 		defaults.maxDiffBytes = overrides.maxDiffBytes
 	}
+	if overrides.hostEvidenceTimeout > 0 {
+		defaults.hostEvidenceTimeout = overrides.hostEvidenceTimeout
+	}
+	if strings.TrimSpace(overrides.requireVerification) != "" {
+		defaults.requireVerification = overrides.requireVerification
+	}
+	if overrides.executeVerification {
+		defaults.executeVerification = true
+	}
 	if overrides.maxSupportingContextTokens > 0 {
 		defaults.maxSupportingContextTokens = overrides.maxSupportingContextTokens
 	}
 	if overrides.clearCostBudget {
 		defaults.maxCostUSD = 0
 		defaults.criticReserveUSD = 0
+		defaults.costOverridden = true
 	} else if overrides.maxCostUSD > 0 {
+		defaults.costOverridden = true
 		defaults.maxCostUSD = overrides.maxCostUSD
 		if defaults.approvalCritic {
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
@@ -657,6 +739,17 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(err.Error())
 		return nil, nil, fmt.Errorf("assemble PR context: %w", err)
 	}
+	// Resolve verification evidence before any model call. A required policy
+	// with missing or failing evidence stops here and costs no tokens.
+	verification, verifyErr := opts.resolveVerificationReport(ctx, verificationTarget{
+		Files: prCtx.Files, Labels: prCtx.PR.Labels, HeadRev: prCtx.PR.HeadSHA,
+		Checks: prCtx.Checks, ChecksOnHead: prCtx.ChecksOnHead(),
+	})
+	if verifyErr != nil {
+		spinner.StopWithError("verification evidence check failed")
+		return nil, prCtx.PR, verifyErr
+	}
+	opts.verification = verification
 	spinner.SetMessage("Reviewing immutable PR head...")
 
 	if willPost {
@@ -681,6 +774,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		HasFeedback:       prCtx.HasReviewFeedback(),
 	})
 	opts = opts.withExecutionPlan(plan)
+	opts = opts.withSizeScaledBudget(countChangedLines(prCtx.Diff))
 	opts = applyReviewDepthGate(ctx, opts, prCtx)
 	opts = opts.withVerificationTargetBudget(prCtx.Files)
 	if opts.contextReady != nil {
@@ -690,9 +784,12 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		}
 	}
 	spinner.SetMessage(fmt.Sprintf("Running %s %s review with %s reasoning...", reviewDepthLabel(opts.depth), opts.sizeClass, opts.reasoningEffort))
-	userPrompt := appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts)
+	userPrompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRPrompt(prCtx), opts), opts.verification)
 	reviewDef := commands.ReviewPRDef{
+		SuppliedEvidenceOnly:        !opts.executeVerification,
+		Verification:                opts.verification,
 		ChangedFiles:                prCtx.Files,
+		GeneratedFiles:              prCtx.GeneratedFiles,
 		ContextIncomplete:           prCtx.HasIncompleteContext(),
 		CIStatus:                    prCtx.PR.CIStatus,
 		CIProvenance:                prCtx.CIProvenance,
@@ -722,6 +819,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		ExplorationTimeout:       opts.explorationTimeout,
 		SynthesisLead:            opts.synthesisLead,
 		VerificationTimeout:      opts.verificationTimeout,
+		HostEvidenceTimeout:      opts.hostEvidenceTimeout,
 		VerificationWrapper:      opts.verificationWrapper,
 		VerificationCleanup:      opts.verificationCleanup,
 		VerificationParallelism:  opts.verificationParallelism,
@@ -739,6 +837,8 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 		spinner.StopWithError(runErr.Error())
 		partial := reviewResultFromAgent(fwResult, audit)
 		if strings.TrimSpace(partial.reviewText) != "" {
+			partial.reviewText = appendVerificationSection(partial.reviewText, opts.verification)
+			partial.reviewText = commands.AppendGeneratedSummary(partial.reviewText, prCtx.GeneratedGroups, opts.verification)
 			return partial, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
 		}
 		return nil, prCtx.PR, fmt.Errorf("review failed: %w", runErr)
@@ -756,7 +856,10 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	}
 
 	spinner.StopWithSuccess("PR review complete")
-	return reviewResultFromAgent(fwResult, audit), prCtx.PR, nil
+	complete := reviewResultFromAgent(fwResult, audit)
+	complete.reviewText = appendVerificationSection(complete.reviewText, opts.verification)
+	complete.reviewText = commands.AppendGeneratedSummary(complete.reviewText, prCtx.GeneratedGroups, opts.verification)
+	return complete, prCtx.PR, nil
 }
 
 func boundPRApprovalCritic(opts automatedReviewOptions, def commands.ReviewPRDef) automatedReviewOptions {
@@ -777,7 +880,7 @@ func effectivePRShards(prCtx *commands.PRContext, opts automatedReviewOptions) d
 	switch {
 	case opts.forceSinglePass:
 		return diffsignal.ShardResult{
-			Shards:          []diffsignal.Shard{{Context: prCtx.Diff, Files: append([]string(nil), prCtx.Files...)}},
+			Shards:          []diffsignal.Shard{{Context: prCtx.Diff, Files: prCtx.LedgerFiles()}},
 			LowSignal:       prCtx.Shards.LowSignal,
 			Summary:         prCtx.Shards.Summary,
 			HighSignalBytes: prCtx.Shards.HighSignalBytes,
@@ -850,8 +953,10 @@ func runPRReviewSharded(
 	run := func(shardCtx context.Context, shard diffsignal.Shard, index int) (*commands.ParsedReview, error) {
 		primary := index == 0
 		shardOpts := opts.withVerificationTargetBudget(shard.Files)
-		prompt := appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts)
+		prompt := withVerificationPrompt(appendReviewExecutionPlan(commands.BuildPRShardPrompt(prCtx, shard, index, len(shards.Shards), primary), shardOpts), opts.verification)
 		reviewDef := commands.ReviewPRDef{
+			SuppliedEvidenceOnly:   !opts.executeVerification,
+			Verification:           opts.verification,
 			ChangedFiles:           shard.Files,
 			ContextIncomplete:      prCtx.HasIncompleteContext(),
 			CIStatus:               prCtx.PR.CIStatus,
@@ -906,6 +1011,8 @@ func runPRReviewSharded(
 	}
 
 	merged, rendered := commands.MergeShardedPRReview(shardReviews, shards.LowSignal, prCtx.Files, commands.DefaultSynthesisFanIn)
+	rendered = appendVerificationSection(rendered, opts.verification)
+	rendered = commands.AppendGeneratedSummary(rendered, prCtx.GeneratedGroups, opts.verification)
 
 	if err := commands.RevalidatePRContext(prCtx); err != nil {
 		spinner.StopWithError(err.Error())

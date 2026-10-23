@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/reviewpolicy"
 )
@@ -206,6 +207,7 @@ func ParseReview(review string) *ParsedReview {
 	parsed.Findings = extractFindings(review)
 	parsed.Remarks = extractRemarks(review)
 	parsed.Approved, parsed.Blockers, parsed.Suggestions = extractVerdict(review)
+	inferMissingFindingSeverity(parsed)
 
 	return parsed
 }
@@ -213,7 +215,10 @@ func ParseReview(review string) *ParsedReview {
 // ReviewValidationOptions describes evidence that a structured review must
 // account for before the CLI can present it as a valid result.
 type ReviewValidationOptions struct {
-	ChangedFiles                []string
+	ChangedFiles []string
+	// GeneratedFiles are changed paths the host summarizes in groups. The
+	// Coverage ledger need not list them.
+	GeneratedFiles              []string
 	ContextIncomplete           bool
 	CIStatus                    string
 	CIProvenance                string
@@ -222,6 +227,10 @@ type ReviewValidationOptions struct {
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	RequirePassingRemoteCI      bool
+	// AllowUnverifiedApproval lets a review approve with Build or Tests
+	// UNAVAILABLE or NOT_APPLICABLE, because the reviewer does not run
+	// verification. FAIL still blocks an approval.
+	AllowUnverifiedApproval bool
 }
 
 // ValidateParsedReview rejects incomplete or internally inconsistent review
@@ -275,7 +284,7 @@ func parsedReviewValidationProblems(parsed *ParsedReview, opts ReviewValidationO
 		problems = append(problems, err.Error())
 	}
 	if strings.TrimSpace(parsed.Coverage) != "" {
-		if err := validateCoverageLedger(parsed.CoverageEntries, opts.ChangedFiles); err != nil {
+		if err := validateCoverageLedgerExcluding(parsed.CoverageEntries, opts.ChangedFiles, opts.GeneratedFiles); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -387,6 +396,12 @@ func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions
 	if opts.ContextIncomplete {
 		return fmt.Errorf("an approval cannot be issued from incomplete or truncated review context")
 	}
+	if opts.AllowUnverifiedApproval {
+		if parsed.BuildVerification == VerificationFail || parsed.TestVerification == VerificationFail {
+			return fmt.Errorf("an approval is inconsistent with failing verification (Build %s, Tests %s)", parsed.BuildVerification, parsed.TestVerification)
+		}
+		return nil
+	}
 	if parsed.BuildVerification != VerificationPass {
 		err := fmt.Errorf(
 			"an approval requires Build status PASS, got %s",
@@ -414,7 +429,7 @@ func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions
 }
 
 func validateApprovalRemoteCI(opts ReviewValidationOptions) error {
-	if !opts.RequirePassingRemoteCI {
+	if opts.AllowUnverifiedApproval || !opts.RequirePassingRemoteCI {
 		return nil
 	}
 	ciState := parseRemoteCIState(opts.CIStatus)
@@ -515,6 +530,17 @@ func reviewVerdictValueIsNone(value string) bool {
 	}
 }
 
+// unknownFindingError reports a Blockers or Suggestions entry that names no
+// parsed finding. When the review does have a heading for that ID but without
+// a severity, the heading is the problem and the message says so.
+func unknownFindingError(list, id, raw string) error {
+	heading := regexp.MustCompile(`(?m)^#{2,4}\s+` + regexp.QuoteMeta(id) + `\b`)
+	if heading.MatchString(raw) {
+		return fmt.Errorf("%s references %s, but its heading has no severity; write `### %s: [CRITICAL|MAJOR|MINOR] Title`", list, id, id)
+	}
+	return fmt.Errorf("%s references unknown finding %s", list, id)
+}
+
 func validateFindingDisposition(parsed *ParsedReview) error {
 	findings := make(map[string]Finding, len(parsed.Findings))
 	for _, finding := range parsed.Findings {
@@ -527,7 +553,7 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	blockers := make(map[string]struct{}, len(parsed.Blockers))
 	for _, id := range parsed.Blockers {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("blockers references unknown finding %s", id)
+			return unknownFindingError("blockers", id, parsed.RawReview)
 		}
 		if _, exists := blockers[id]; exists {
 			return fmt.Errorf("blockers repeats finding %s", id)
@@ -538,7 +564,7 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	suggestions := make(map[string]struct{}, len(parsed.Suggestions))
 	for _, id := range parsed.Suggestions {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("suggestions references unknown finding %s", id)
+			return unknownFindingError("suggestions", id, parsed.RawReview)
 		}
 		if _, exists := suggestions[id]; exists {
 			return fmt.Errorf("suggestions repeats finding %s", id)
@@ -891,11 +917,31 @@ func trimCoverageSeparator(value string) string {
 }
 
 func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) error {
+	return validateCoverageLedgerExcluding(entries, changedFiles, nil)
+}
+
+// validateCoverageLedgerExcluding is validateCoverageLedger for a review whose
+// generated files are summarized by the host rather than ledgered one by one.
+// Generated files are not expected, and an entry that names only generated
+// files (a path, a glob such as "dir/*.html", or "dir/**") is ignored instead
+// of being rejected as unexpected.
+func validateCoverageLedgerExcluding(entries []CoverageEntry, changedFiles, generatedFiles []string) error {
+	generated := make(map[string]struct{}, len(generatedFiles))
+	for _, p := range generatedFiles {
+		if normalized := normalizeCoveragePath(p); normalized != "" {
+			generated[normalized] = struct{}{}
+		}
+	}
 	expected := make(map[string]struct{}, len(changedFiles))
 	for _, changedFile := range changedFiles {
-		if normalized := normalizeCoveragePath(changedFile); normalized != "" {
-			expected[normalized] = struct{}{}
+		normalized := normalizeCoveragePath(changedFile)
+		if normalized == "" {
+			continue
 		}
+		if _, skip := generated[normalized]; skip {
+			continue
+		}
+		expected[normalized] = struct{}{}
 	}
 
 	actual := make(map[string]struct{}, len(entries))
@@ -908,6 +954,9 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 			continue
 		}
 		covered := coverageEntryPaths(normalized, expected)
+		if len(covered) == 0 && entryNamesOnlyGenerated(normalized, generated) {
+			continue
+		}
 		if len(covered) == 0 {
 			unexpected = append(unexpected, normalized)
 		} else {
@@ -952,6 +1001,28 @@ func validateCoverageLedger(entries []CoverageEntry, changedFiles []string) erro
 		return fmt.Errorf("coverage ledger does not exactly match changed files: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// entryNamesOnlyGenerated reports whether a ledger entry refers to generated
+// files and nothing else: an exact generated path, or a glob that matches at
+// least one generated path.
+func entryNamesOnlyGenerated(entry string, generated map[string]struct{}) bool {
+	if _, ok := generated[entry]; ok {
+		return true
+	}
+	if !strings.ContainsAny(entry, "*?") {
+		return false
+	}
+	match := diffsignal.GlobMatcher([]string{entry})
+	if match == nil {
+		return false
+	}
+	for p := range generated {
+		if match(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // coverageEntryPaths expands an exact path or a directory coverage group to
@@ -1112,7 +1183,9 @@ func parseStatusSection(section string) (build, test string) {
 	return
 }
 
-var findingHeaderRE = regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*\[?(CRITICAL|MAJOR|MINOR)\]?\s+(.+)$`)
+// findingHeaderRE matches a finding heading. The severity is optional: models
+// sometimes omit it, and ParseReview then infers one from the Verdict lists.
+var findingHeaderRE = regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*(?:\[?(CRITICAL|MAJOR|MINOR)\]?\s+)?(\S.*)$`)
 
 func extractFindings(review string) []Finding {
 	var findings []Finding
@@ -1125,9 +1198,11 @@ func extractFindings(review string) []Finding {
 		}
 
 		finding := Finding{
-			ID:       review[match[2]:match[3]],
-			Severity: Severity(review[match[4]:match[5]]),
-			Title:    strings.TrimSpace(review[match[6]:match[7]]),
+			ID:    review[match[2]:match[3]],
+			Title: strings.TrimSpace(review[match[6]:match[7]]),
+		}
+		if match[4] >= 0 {
+			finding.Severity = Severity(review[match[4]:match[5]])
 		}
 
 		start := match[1]
@@ -1372,4 +1447,23 @@ func (p *ParsedReview) FindingByID(id string) *Finding {
 		}
 	}
 	return nil
+}
+
+// inferMissingFindingSeverity gives a finding whose heading lacks a severity
+// the one the Verdict implies: MAJOR when it is listed as a blocker, else MINOR.
+func inferMissingFindingSeverity(parsed *ParsedReview) {
+	blockers := make(map[string]bool, len(parsed.Blockers))
+	for _, id := range parsed.Blockers {
+		blockers[id] = true
+	}
+	for i := range parsed.Findings {
+		if parsed.Findings[i].Severity != "" {
+			continue
+		}
+		if blockers[parsed.Findings[i].ID] {
+			parsed.Findings[i].Severity = SeverityMajor
+		} else {
+			parsed.Findings[i].Severity = SeverityMinor
+		}
+	}
 }

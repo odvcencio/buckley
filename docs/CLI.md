@@ -427,6 +427,21 @@ ledger. `--in-depth` is a shorthand for `--depth in-depth`; `standard`,
 No-test gates are typed as not applicable; required unavailable evidence fails
 the pass instead of being silently counted as passing evidence.
 
+Verification: `buckley verify run|record|list` manage receipts, and
+`buckley buckbot ... --require-verification=none|receipt|receipt-or-ci` sets
+the evidence a review needs before it starts (exit 16 when missing, 17 when
+failing, no tokens spent). See `docs/CONFIGURATION.md`, "Verification evidence".
+
+A review that ends early prints `Stop reason: <kind>` and `Cause: <detail>` in its
+"Incomplete review" banner and exits with a status for that kind: 10 budget
+(the cause shows spent and limit), 11 timeout, 12 turn limit, 13 tool-call
+limit, 14 provider error, 15 validation failure, 1 unclassified. The salvaged
+text is not a merge verdict. With `--run-verification`, `--evidence-timeout <duration>` caps the host
+verification that runs before the model (default: half of the time left; the
+model keeps at least a quarter). See `docs/CONFIGURATION.md` for
+`buckbot.budget_per_kloc_usd`, `buckbot.max_review_budget_usd` and
+`buckbot.generated_globs`.
+
 Buckbot is uncapped by default: a model is allowed to finish its review rather
 than being truncated by an automatic dollar ceiling. Use `--budget <USD>` only
 when a run needs an explicit spending limit. If an older project configuration

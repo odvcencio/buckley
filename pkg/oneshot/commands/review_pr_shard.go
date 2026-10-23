@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -68,12 +69,19 @@ func BuildPRShardPrompt(ctx *PRContext, shard diffsignal.Shard, index, total int
 	if !primary {
 		sb.WriteString("This is a secondary shard. A separate synthesis step, not you, issues the merge verdict ")
 		sb.WriteString("for the whole pull request. Regardless of what you find:\n\n")
-		sb.WriteString("- Set **Approved** to `NO` in the Verdict section.\n")
+		sb.WriteString("- In the Verdict section write exactly one decision line, **Recommendation**: `NEEDS DISCUSSION` (or `REQUEST CHANGES` when you list a blocker), never APPROVE. Put nothing else on that line, and add no separate **Approved** line.\n")
 		sb.WriteString("- Use Grade `B` or worse; do not use Grade `A`, because Grade `A` implies a mergeable approval that only synthesis can grant.\n")
 		sb.WriteString("- Set the Coverage **Feedback disposition** to `NONE_SUPPLIED`; feedback disposition is handled by the primary shard.\n\n")
 	} else if ctx.HasReviewFeedback() {
 		sb.WriteString("You are the primary shard. In addition to reviewing your files, disposition every supplied feedback item below ")
 		sb.WriteString("using its exact Feedback ID.\n\n")
+	}
+
+	sb.WriteString("Completeness for a shard means complete for the files listed above. End your Coverage section with the exact line `- **Completeness**: COMPLETE` when you have ledgered every listed file; never write PARTIAL or INCOMPLETE there, because the other shards cover the rest of the pull request.\n\n")
+
+	if primary && ctx.HasIncompleteContext() {
+		sb.WriteString("The review context for this pull request is incomplete or truncated, and validation rejects an approval from incomplete context. ")
+		sb.WriteString("In the Verdict section write **Recommendation**: `NEEDS DISCUSSION` (or `REQUEST CHANGES` with a blocker), never APPROVE. Note the incomplete context in Remarks.\n\n")
 	}
 
 	appendPRContextCurationNotice(&sb, ctx.ContextCuration)
@@ -236,10 +244,22 @@ func RunPRShardsConcurrently(ctx context.Context, shards []diffsignal.Shard, con
 	}
 	wg.Wait()
 
+	// Report the first real failure. A shard cancelled because another one
+	// failed carries only the cancellation, which hides the cause.
+	first := -1
 	for i, err := range errs {
-		if err != nil {
+		if err == nil {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		if !errors.Is(err, context.Canceled) {
 			return nil, fmt.Errorf("shard %d of %d failed: %w", i+1, len(shards), err)
 		}
+	}
+	if first >= 0 {
+		return nil, fmt.Errorf("shard %d of %d failed: %w", first+1, len(shards), errs[first])
 	}
 	return results, nil
 }
@@ -448,6 +468,17 @@ func injectNotReviewedEntries(merged *ParsedReview, lowSignal []diffsignal.FileD
 		if key := normalizeCoveragePath(f.Path); key != "" {
 			reasonByPath[key] = string(f.Reason)
 		}
+	}
+	// Generated files get one entry per group, not one per file.
+	for _, g := range diffsignal.GroupGenerated(lowSignal) {
+		for _, p := range g.Files {
+			accounted[normalizeCoveragePath(p)] = true
+		}
+		evidence := "not reviewed: " + reasonByPath[normalizeCoveragePath(g.Files[0])]
+		if len(g.Files) > 1 {
+			evidence = fmt.Sprintf("not reviewed: generated, %d files, %s changed", len(g.Files), diffsignal.FormatBytes(g.Bytes))
+		}
+		merged.CoverageEntries = append(merged.CoverageEntries, CoverageEntry{Path: g.Pattern, Evidence: evidence})
 	}
 	for _, changed := range allChangedFiles {
 		key := normalizeCoveragePath(changed)

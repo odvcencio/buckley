@@ -173,6 +173,10 @@ func (c *Capture) finishFile() {
 	fd.truncated = c.fileBytes > len(fd.Segment)
 	classifyBody(&fd, nil, c.longest > MaxSignalLineLen ||
 		(c.bodyBytes >= MinifiedRatioMinBytes && c.bodyLines > 0 && c.bodyBytes/c.bodyLines > MinifiedAvgBytesPerLine))
+	fd.DiffBytes = c.fileBytes
+	if fd.Generated() {
+		fd.GeneratedBy = generatedByHint(fd.Path, fd.Segment)
+	}
 	if fd.LowSignal() {
 		c.retained -= len(fd.Segment)
 		fd.Segment = ""
@@ -196,5 +200,7 @@ func (c *Capture) Finish() (*Diff, error) {
 		}
 	}
 	c.finishFile()
+	markGeneratedSiblings(c.files)
+	markGeneratedPeers(c.files)
 	return &Diff{Files: c.files, preamble: c.prefix.String(), truncated: c.prefixCut}, nil
 }

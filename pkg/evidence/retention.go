@@ -55,14 +55,14 @@ var ephemeralKinds = []Kind{
 	KindTestOutput,
 }
 
-var durableKinds = []Kind{KindCheckpoint, KindReview, KindCommitProposal}
+var durableKinds = []Kind{KindCheckpoint, KindReview, KindCommitProposal, KindVerificationReceipt}
 
 var otherKinds = []Kind{KindSource, KindProjection, KindContextBundle, KindContextManifest,
 	KindDiff, KindSubagentTask, KindSubagentReport, KindSubagentMessage, KindMemoryRecall}
 
 // Sweep deletes unpinned objects older than their class's TTL and returns
-// the IDs it removed. It never deletes an object with an active pin
-// (section 13.5: "User-pinned evidence: indefinite").
+// the IDs it removed. User and run pins always protect their objects. Automatic verification
+// receipt pins expire with the receipt after DurableTTL.
 func (s *SQLiteStore) Sweep(ctx context.Context, policy RetentionPolicy, now time.Time) ([]string, error) {
 	var removed []string
 	err := s.sweep(ctx, policy, now, func(id string) { removed = append(removed, id) })
@@ -80,6 +80,20 @@ func (s *SQLiteStore) sweep(ctx context.Context, policy RetentionPolicy, now tim
 	guards, err := s.retainedReferenceGuards(ctx)
 	if err != nil {
 		return err
+	}
+	if policy.DurableTTL > 0 {
+		for {
+			ids, err := s.expireVerificationReceipts(ctx, now.Add(-policy.DurableTTL), guards)
+			if err != nil {
+				return err
+			}
+			if len(ids) == 0 {
+				break
+			}
+			for _, id := range ids {
+				removed(id)
+			}
+		}
 	}
 	for _, class := range []struct {
 		kinds []Kind

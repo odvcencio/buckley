@@ -163,6 +163,10 @@ buckbot:
   reasoning: auto
   openrouter_privacy_fallback: zdr_then_data_collection_deny
   per_review_budget_usd: 0 # 0 means no automatic per-review dollar ceiling
+  budget_per_kloc_usd: 0.10 # added to per_review_budget_usd per 1,000 changed lines (see below)
+  max_review_budget_usd: 0  # optional ceiling for the scaled budget; 0 means none
+  host_evidence_timeout_seconds: 0 # cap on host verification before the model runs; 0 = half the time left
+  generated_globs: []       # e.g. ["client/js/bootstrap*.js", "dist/**"]; summarized, not reviewed line by line
   monthly_budget_usd: 0    # 0 means no configured monthly dollar ceiling
   max_review_iterations: 0 # adaptive
   max_tool_calls: 0         # 0 means unlimited; set for expensive-model experiments
@@ -454,6 +458,89 @@ Cost handling is completion-first by default, regardless of the chosen model.
 Set `per_review_budget_usd` to a positive amount only when a project
 deliberately needs a cap. A caller can set `--budget <USD>` for one capped
 review or `--no-budget` to bypass an existing configured per-review cap.
+
+When a per-review cap is set, it grows with the size of the review:
+`budget = per_review_budget_usd + budget_per_kloc_usd * (changed lines / 1000)`,
+clamped to `max_review_budget_usd` when that is above zero. Changed lines come
+from the prioritized diff, so generated, minified and binary files (including
+files matched by `generated_globs` or marked `linguist-generated` or `-diff` in
+`.gitattributes`) add nothing. With `per_review_budget_usd: 0` a review stays
+uncapped, and a base cap above the ceiling is kept. `--budget` and `--no-budget`
+are never rescaled.
+
+### Verification evidence
+
+Buckbot does not run your tests. It reads proof that you ran them: verification
+receipts bound to the reviewed tree, and CI checks on the reviewed head.
+
+```yaml
+review:
+  verification:
+    declared:                      # path globs -> the command and CI checks that cover them
+      - name: js
+        paths: ["client/**"]
+        command: ["make", "test-js"]
+        ci_checks: ["js-tests", "js-tests-b"]
+      - name: go
+        paths: ["**/*.go", "go.mod", "go.sum"]
+        command: ["go", "test", "-p", "4", "./..."]
+buckbot:
+  verification:
+    require: none                  # none | receipt | receipt-or-ci
+    execute: false                 # let the review run verification in its sandbox (not recommended)
+```
+
+- **Receipts.** `buckley verify run` runs the declared commands in your real
+  work tree and records a receipt for each; `buckley verify record -- <command>`
+  wraps a run you are doing anyway. Both refuse a dirty tree. A receipt holds
+  the repository, commit, tree hash, command, directory, exit status, start and
+  duration, a digest of the combined log (the log is kept in the evidence
+  store, in `ledger.db`), and the environment (OS, architecture, Go and Node
+  versions, hostname). A review accepts a receipt only if its tree hash equals
+  the reviewed head's tree and its log still matches the digest. Receipts are
+  not signed (Buckley has no signing facility); the tree hash and digest guard
+  against accidental reuse, not against someone who edits the ledger.
+- **Retention.** Verification receipts and their logs expire after the durable
+  evidence retention period (180 days by default). Explicit user and retained-run
+  pins preserve both. Verification recording honors `resources.storage_bytes`
+  (512 MiB by default) and reclaims expired receipts and orphan logs before writing.
+- **Reruns.** When several receipts on a tree share the same command,
+  directory and path globs, the newest one counts. A passing rerun replaces an
+  earlier failure of the same command on that tree.
+- **CI.** For a PR, check runs reported on the exact head commit count.
+  `ci_checks` names the checks that cover a declared glob; a pending, failed,
+  skipped or other-commit check does not cover it. Duplicate named checks
+  must all pass. Checks without declared path coverage are reported but do not
+  verify source paths; configure `ci_checks` or record a verification receipt.
+- **Report.** Every review ends with a "Verification Evidence" section listing
+  covered paths with the receipt or check that covers them, failing evidence
+  (a finding: a review does not approve over it), and unverified paths. A
+  review with unverified paths still completes; its verification line reads
+  "unverified".
+- **Requiring evidence.** With `require: receipt` or `receipt-or-ci`, Buckbot
+  checks coverage before any model call or snapshot work. Missing coverage exits
+  with status 16 and lists the uncovered paths and the `buckley verify record`
+  commands that would cover them; failing evidence exits with status 17. No
+  tokens are spent. Documentation-only paths need no evidence.
+- **Precedence.** `--require-verification=<mode>` flag, then the PR label, then
+  `./.buckley/config.yaml`, then the user config, then `none`. The report names
+  the source. Labels: `buckbot:verify-required` (receipt-or-ci),
+  `buckbot:verify-receipt`, `buckbot:verify-optional` (none); with several, the
+  strictest wins (`receipt` is stricter than `receipt-or-ci`). `buckley pr --require-verification` (or `--require-receipt`,
+  `--no-require-verification`) sets the label when it creates or updates a PR,
+  creating the label in the repository if it is missing, and removes only the
+  other `buckbot:verify-*` labels. `buckley pr label <pr>` with the same flags
+  sets the label on an existing PR without regenerating its title or body.
+- **Running verification in the review (not recommended).** `--run-verification`
+  or `buckbot.verification.execute: true` restores the old behavior: the review
+  runs build and test commands in its offline sandbox and may fail validation
+  when they cannot run. With that on, the limit below applies.
+
+Host verification (the test and build runs Buckbot does before the model, only
+with `--run-verification`) runs under its own limit: `--evidence-timeout` or
+`host_evidence_timeout_seconds`. By default it may use half of the time left,
+and the model always keeps at least a quarter, so a slow test suite cannot
+starve the review.
 Reviews also have no per-review tool-call cap by default. Set
 `buckbot.max_tool_calls` to a positive value for an explicit cap, such as when
 experimenting with an expensive model, or pass `--max-tool-calls N` for one

@@ -7,8 +7,38 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 )
 
+// Repair fixes mechanical errors in a generate_commit call without another
+// model call: header format, bullets over the word limit and bullets over the
+// count limit. It returns the original arguments unless the result validates.
 func (d CommitDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {
-	return repairHeaderArguments(raw, "subject", commitmsg.HeaderLimit, d.Validate)
+	body, bodyRepairs := repairBodyArguments(raw)
+	header, headerRepairs := repairHeaderArguments(body, "subject", commitmsg.HeaderLimit, d.Validate)
+	repairs := append(bodyRepairs, headerRepairs...)
+	if len(repairs) == 0 || d.Validate(header) != nil {
+		return raw, nil
+	}
+	return header, repairs
+}
+
+func repairBodyArguments(raw json.RawMessage) (json.RawMessage, []string) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields["body"] == nil {
+		return raw, nil
+	}
+	var body StringList
+	if json.Unmarshal(fields["body"], &body) != nil {
+		return raw, nil
+	}
+	repaired, repairs := commitmsg.RepairBody(body)
+	if len(repairs) == 0 {
+		return raw, nil
+	}
+	fields["body"], _ = json.Marshal(repaired)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw, nil
+	}
+	return out, repairs
 }
 
 func (d PRDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {

@@ -3,8 +3,11 @@ package model
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
+	"net"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -123,4 +126,22 @@ func (c RetryConfig) retryDelay(attempt int, lastErr error) time.Duration {
 		delay += rand.Float64() * delay * 0.2
 	}
 	return min(time.Duration(delay), c.MaxInterval)
+}
+
+// isTransientBodyReadError reports whether decoding a response body failed
+// because the connection broke (reset, closed early, timed out) rather than
+// because the provider sent bad or oversized data.
+func isTransientBodyReadError(err error) bool {
+	if err == nil || errors.Is(err, ErrProviderResponseTooLarge) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection reset") || strings.Contains(msg, "unexpected eof") || strings.Contains(msg, "broken pipe")
 }

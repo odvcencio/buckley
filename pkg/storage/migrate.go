@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Migration is the legacy non-transaction-bound migration shape. SQLite
@@ -89,7 +90,15 @@ func MigrateSQLiteWithSetup(db *sql.DB, table string, migrations []SQLiteMigrati
 	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 5000`); err != nil {
 		return fmt.Errorf("configure migration busy timeout: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	// With no setup phase, a current schema needs no write lock. Checking it
+	// first keeps parallel starts from queueing behind a long writer.
+	if setup == nil {
+		current, err := schemaCurrent(ctx, conn, table, migrations)
+		if err == nil && current {
+			return nil
+		}
+	}
+	if err := beginImmediateWithRetry(ctx, conn); err != nil {
 		return fmt.Errorf("begin migration transaction: %w", err)
 	}
 	committed := false
@@ -136,6 +145,44 @@ func MigrateSQLiteWithSetup(db *sql.DB, table string, migrations []SQLiteMigrati
 	}
 	committed = true
 	return nil
+}
+
+// schemaCurrent reports whether every migration is already recorded. Any
+// error (for example a missing table) means "not known to be current".
+func schemaCurrent(ctx context.Context, conn *sql.Conn, table string, migrations []SQLiteMigration) (bool, error) {
+	var current int
+	if err := conn.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(version), 0) FROM %s`, table)).Scan(&current); err != nil {
+		return false, err
+	}
+	for _, m := range migrations {
+		if m.Version > current {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+const (
+	migrationBeginAttempts = 6 // with the 5 s busy timeout, waits up to about 30 s
+	migrationRetryDelay    = 50 * time.Millisecond
+)
+
+// beginImmediateWithRetry takes the write lock, retrying after each busy
+// timeout so a writer that holds the lock longer than one timeout does not
+// fail a process that is only starting up.
+func beginImmediateWithRetry(ctx context.Context, conn *sql.Conn) error {
+	var err error
+	for attempt := 0; attempt < migrationBeginAttempts; attempt++ {
+		if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err == nil || !IsSQLiteBusyError(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(migrationRetryDelay):
+		}
+	}
+	return err
 }
 
 type migrationConn struct {
