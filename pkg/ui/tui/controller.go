@@ -1495,6 +1495,7 @@ func buildRegistry(cfg *config.Config, store *storage.Store, workDir string, hub
 	if workDir != "" {
 		registry.SetWorkDir(workDir)
 		if cfg != nil {
+			registry.SetDeniedReadPaths(append(append([]string(nil), cfg.Approval.DeniedPaths...), cfg.Sandbox.DeniedPaths...))
 			if roots, err := config.ResolveReadRoots(workDir, cfg.Tools.ReadRoots); err == nil {
 				registry.SetReadRoots(roots)
 			}

@@ -952,6 +952,7 @@ func (r *Registry) buildToolRegistry(sessionID string, project string, ledger ru
 	if strings.TrimSpace(project) != "" {
 		tools.SetWorkDir(project)
 		if r.config != nil {
+			tools.SetDeniedReadPaths(append(append([]string(nil), r.config.Approval.DeniedPaths...), r.config.Sandbox.DeniedPaths...))
 			// Roots come from user and project config only; a bad entry is
 			// skipped rather than stopping the session.
 			if roots, err := config.ResolveReadRoots(project, r.config.Tools.ReadRoots); err == nil {

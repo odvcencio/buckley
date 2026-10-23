@@ -46,6 +46,9 @@ func (w *workDirAware) ReadRoots() []string {
 func (w *workDirAware) resolveRead(raw string) (string, error) {
 	abs, workErr := resolvePath(w.workDir, raw)
 	if workErr == nil {
+		if err := w.readDeniedError(abs); err != nil {
+			return "", err
+		}
 		return abs, nil
 	}
 	if len(w.readRoots) == 0 || !filepath.IsAbs(raw) {
@@ -58,6 +61,9 @@ func (w *workDirAware) resolveRead(raw string) (string, error) {
 		}
 		if !isWithinDir(evalSymlinksFallback(root), evalSymlinksFallbackForTarget(candidate)) {
 			return "", fmt.Errorf("path %q escapes read root %q via symlink", raw, root)
+		}
+		if err := w.readDeniedError(candidate); err != nil {
+			return "", err
 		}
 		if err := readRootSecretError(candidate); err != nil {
 			return "", err
@@ -115,9 +121,13 @@ func secretPathName(path string) bool {
 }
 
 // readRootEntryHidden reports whether a directory entry in a read root must be
-// left out of listings and searches. Entries in the workdir are never hidden.
+// left out of listings and searches, including explicitly denied workspace entries.
 func (w *workDirAware) readRootEntryHidden(abs string) bool {
-	return w.inReadRoot(abs) && readRootSecretError(abs) != nil
+	if len(w.readRoots) == 0 && len(w.deniedReadPaths) == 0 {
+		return false
+	}
+	_, err := w.resolveRead(abs)
+	return err != nil
 }
 
 // resolveReadRel is resolveRead for tools that run a command in the workdir: it
@@ -145,11 +155,49 @@ func (w *workDirAware) resolveReadRel(raw string) (string, string, error) {
 // searchRecordHidden reports whether a search hit (path as the search command
 // printed it, relative to the workdir) is a secret file in a read root.
 func (w *workDirAware) searchRecordHidden(path string) bool {
-	if len(w.readRoots) == 0 || path == "" {
+	if (len(w.readRoots) == 0 && len(w.deniedReadPaths) == 0) || path == "" {
 		return false
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(w.workDir, path)
 	}
 	return w.readRootEntryHidden(filepath.Clean(path))
+}
+
+// SetDeniedReadPaths preserves explicit denied paths when additional read roots
+// are granted. A nil list clears the previous denials.
+func (w *workDirAware) SetDeniedReadPaths(paths []string) {
+	if w != nil {
+		w.deniedReadPaths = append([]string(nil), paths...)
+	}
+}
+
+func (w *workDirAware) readDeniedError(abs string) error {
+	if len(w.deniedReadPaths) == 0 {
+		return nil
+	}
+	resolvedTarget := evalSymlinksFallbackForTarget(abs)
+	for _, denied := range w.deniedReadPaths {
+		if denied == "" {
+			continue
+		}
+		if denied == "~" || strings.HasPrefix(denied, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve denied home path: %w", err)
+			}
+			denied = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(denied, "~"), "/"))
+		}
+		if !filepath.IsAbs(denied) {
+			denied = filepath.Join(w.workDir, denied)
+		}
+		denied, err := filepath.Abs(denied)
+		if err != nil {
+			return fmt.Errorf("invalid denied path: %w", err)
+		}
+		if isWithinDir(denied, abs) || isWithinDir(evalSymlinksFallback(denied), resolvedTarget) {
+			return fmt.Errorf("path %q is denied", abs)
+		}
+	}
+	return nil
 }

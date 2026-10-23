@@ -146,6 +146,7 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	registry.SetDeniedReadPaths(append(append([]string(nil), cfg.Approval.DeniedPaths...), cfg.Sandbox.DeniedPaths...))
 	registry.SetReadRoots(readRoots)
 	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
 		removeImplicitSubagentDelegation(registry, opts.AgentProfile, opts.AllowedTools)

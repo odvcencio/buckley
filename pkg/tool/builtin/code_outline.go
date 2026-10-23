@@ -41,14 +41,18 @@ func (t *CodeOutlineTool) ExecuteWithContext(ctx context.Context, params map[str
 		}
 	}
 	runDir := root
-	_, relative, err := resolveRelPath(root, path)
+	abs, relative, err := resolveRelPath(root, path)
 	if err != nil {
 		// A file in a read root outline runs from that file's directory.
-		abs, readErr := t.resolveRead(path)
+		var readErr error
+		abs, readErr = t.resolveRead(path)
 		if readErr != nil || !t.inReadRoot(abs) {
 			return &Result{Error: err.Error()}, nil
 		}
 		runDir, relative = filepath.Dir(abs), filepath.Base(abs)
+	}
+	if err := t.readDeniedError(abs); err != nil {
+		return &Result{Error: err.Error()}, nil
 	}
 	limit := getIntParam(params, "limit", 40)
 	if limit < 1 {

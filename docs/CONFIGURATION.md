@@ -772,7 +772,9 @@ root that does not exist is an error. Unset or empty environment variables and
 non-regular files (such as devices or named pipes) are rejected. `read_file`, `list_directory`, `find_files`,
 `search_text`, `file_exists` and `code_outline` can read inside a root. Write, edit,
 delete, move and shell tools do not inherit read roots; their existing permissions
-and sandbox policies still apply. A symlink that leaves a root is refused. Inside a root these files are never read, listed or searched: `*.key`,
+and sandbox policies still apply. Explicit `approval.denied_paths` and
+`sandbox.denied_paths` take precedence over read roots, including resolved symlink
+targets and entries returned by listings and searches. A symlink that leaves a root is refused. Inside a root these files are never read, listed or searched: `*.key`,
 `*.pem`, `.env*`, `id_*`, `credentials*`, anything under `.catalog/identities/`, and
 files that neither group nor others can read (such as mode 0600). Read roots work at
 every trust level because they are read-only. A one-shot run prints them as `read roots

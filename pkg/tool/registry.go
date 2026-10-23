@@ -124,6 +124,18 @@ func (r *Registry) SetReadRoots(roots []string) {
 	}
 }
 
+// SetDeniedReadPaths keeps operator denials in force across read-only tools.
+func (r *Registry) SetDeniedReadPaths(paths []string) {
+	if r == nil {
+		return
+	}
+	for _, candidate := range r.snapshotTools() {
+		if setter, ok := candidate.(interface{ SetDeniedReadPaths([]string) }); ok {
+			setter.SetDeniedReadPaths(paths)
+		}
+	}
+}
+
 // SetEnv configures environment variable overrides for tools that support it.
 func (r *Registry) SetEnv(env map[string]string) {
 	if r == nil {

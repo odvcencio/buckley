@@ -517,6 +517,7 @@ func getACPSessionState(
 	if workDir != "" {
 		registry.ConfigureContainers(cfg, workDir)
 		registry.SetWorkDir(workDir)
+		registry.SetDeniedReadPaths(append(append([]string(nil), cfg.Approval.DeniedPaths...), cfg.Sandbox.DeniedPaths...))
 		if roots, err := config.ResolveReadRoots(workDir, cfg.Tools.ReadRoots); err != nil {
 			if logf != nil {
 				logf("read roots ignored: %v", err)
