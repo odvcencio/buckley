@@ -250,18 +250,34 @@ func TestBuildPRPrompt_GeneratedFilesLeaveTheChecklist(t *testing.T) {
 	}
 }
 
-// A finding heading without a severity is not parsed as a finding. The error
-// must say that, so the retry can fix the heading instead of guessing.
-func TestValidateFindingDisposition_NamesAHeadingWithoutSeverity(t *testing.T) {
-	review := "## Findings\n### FINDING-001: Unmapped CI checks satisfy verification\n- **File**: `a.go:1`\n\n## Verdict\n- **Recommendation**: REQUEST CHANGES\n- **Blockers**: FINDING-001\n"
+// A finding heading without a severity is still a finding: the Verdict lists
+// say how serious it is, and rejecting the review over a missing bracket cost
+// whole shard runs.
+func TestParseReview_FindingHeadingWithoutSeverity(t *testing.T) {
+	review := "## Findings\n### FINDING-001: Unmapped CI checks satisfy verification\n- **File**: `a.go:1`\n\n### FINDING-002: Naming nit\n- **File**: `b.go:2`\n\n### FINDING-003: [MINOR] Bracketed\n- **File**: `c.go:3`\n\n## Verdict\n- **Recommendation**: REQUEST CHANGES\n- **Blockers**: FINDING-001\n- **Suggestions**: FINDING-002, FINDING-003\n"
 	parsed := ParseReview(review)
-	err := validateFindingDisposition(parsed)
-	if err == nil {
-		t.Fatal("blocker with no parsed finding validated")
+	got := map[string]Severity{}
+	titles := map[string]string{}
+	for _, f := range parsed.Findings {
+		got[f.ID], titles[f.ID] = f.Severity, f.Title
 	}
-	for _, want := range []string{"FINDING-001", "severity", "[CRITICAL|MAJOR|MINOR]"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q lacks %q", err, want)
-		}
+	if got["FINDING-001"] != SeverityMajor || got["FINDING-002"] != SeverityMinor || got["FINDING-003"] != SeverityMinor {
+		t.Fatalf("severities = %v, want blocker MAJOR, others MINOR", got)
+	}
+	if titles["FINDING-001"] != "Unmapped CI checks satisfy verification" || titles["FINDING-003"] != "Bracketed" {
+		t.Fatalf("titles = %v", titles)
+	}
+	if err := validateFindingDisposition(parsed); err != nil {
+		t.Fatalf("validateFindingDisposition() = %v", err)
+	}
+}
+
+func TestUnknownFindingError_NamesAHeadingWithoutSeverity(t *testing.T) {
+	err := unknownFindingError("blockers", "FINDING-007", "## Findings\n### FINDING-007\n")
+	if !strings.Contains(err.Error(), "no severity") {
+		t.Fatalf("error = %v", err)
+	}
+	if err := unknownFindingError("blockers", "FINDING-009", "nothing here"); !strings.Contains(err.Error(), "unknown finding") {
+		t.Fatalf("error = %v", err)
 	}
 }

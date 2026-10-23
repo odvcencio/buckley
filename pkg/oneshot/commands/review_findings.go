@@ -207,6 +207,7 @@ func ParseReview(review string) *ParsedReview {
 	parsed.Findings = extractFindings(review)
 	parsed.Remarks = extractRemarks(review)
 	parsed.Approved, parsed.Blockers, parsed.Suggestions = extractVerdict(review)
+	inferMissingFindingSeverity(parsed)
 
 	return parsed
 }
@@ -1182,7 +1183,9 @@ func parseStatusSection(section string) (build, test string) {
 	return
 }
 
-var findingHeaderRE = regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*\[?(CRITICAL|MAJOR|MINOR)\]?\s+(.+)$`)
+// findingHeaderRE matches a finding heading. The severity is optional: models
+// sometimes omit it, and ParseReview then infers one from the Verdict lists.
+var findingHeaderRE = regexp.MustCompile(`(?m)^###\s+(FINDING-\d+):\s*(?:\[?(CRITICAL|MAJOR|MINOR)\]?\s+)?(\S.*)$`)
 
 func extractFindings(review string) []Finding {
 	var findings []Finding
@@ -1195,9 +1198,11 @@ func extractFindings(review string) []Finding {
 		}
 
 		finding := Finding{
-			ID:       review[match[2]:match[3]],
-			Severity: Severity(review[match[4]:match[5]]),
-			Title:    strings.TrimSpace(review[match[6]:match[7]]),
+			ID:    review[match[2]:match[3]],
+			Title: strings.TrimSpace(review[match[6]:match[7]]),
+		}
+		if match[4] >= 0 {
+			finding.Severity = Severity(review[match[4]:match[5]])
 		}
 
 		start := match[1]
@@ -1442,4 +1447,23 @@ func (p *ParsedReview) FindingByID(id string) *Finding {
 		}
 	}
 	return nil
+}
+
+// inferMissingFindingSeverity gives a finding whose heading lacks a severity
+// the one the Verdict implies: MAJOR when it is listed as a blocker, else MINOR.
+func inferMissingFindingSeverity(parsed *ParsedReview) {
+	blockers := make(map[string]bool, len(parsed.Blockers))
+	for _, id := range parsed.Blockers {
+		blockers[id] = true
+	}
+	for i := range parsed.Findings {
+		if parsed.Findings[i].Severity != "" {
+			continue
+		}
+		if blockers[parsed.Findings[i].ID] {
+			parsed.Findings[i].Severity = SeverityMajor
+		} else {
+			parsed.Findings[i].Severity = SeverityMinor
+		}
+	}
 }
