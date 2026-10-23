@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/diffsignal"
 	"m31labs.dev/buckley/pkg/evidence"
 	"m31labs.dev/buckley/pkg/verifyreceipt"
 )
@@ -169,17 +170,30 @@ func runVerifyRun(args []string) error {
 	return nil
 }
 
-// globsOverlap reports whether any requested glob equals or contains a
-// declared glob's literal prefix, so `--paths client/**` selects `client/**`.
+// globsOverlap reports whether any requested glob and any declared glob cover
+// a common path: they are equal, one is a directory glob ("dir/**") holding the
+// other's literal prefix, or one matches the other as a path. So `--paths
+// client/**` selects `client/**`, and `--paths pkg/sub/**` selects `pkg/**`.
 func globsOverlap(requested, declared []string) bool {
 	for _, r := range requested {
 		for _, d := range declared {
-			if r == d || strings.HasPrefix(strings.TrimSuffix(d, "**"), strings.TrimSuffix(r, "**")) && strings.HasSuffix(r, "**") {
+			if strings.TrimSpace(r) == "" || strings.TrimSpace(d) == "" {
+				continue
+			}
+			if r == d || globContains(r, d) || globContains(d, r) ||
+				diffsignal.GlobMatcher([]string{d})(r) || diffsignal.GlobMatcher([]string{r})(d) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// globContains reports whether outer is a directory glob ("dir/**") whose
+// directory holds inner's literal prefix.
+func globContains(outer, inner string) bool {
+	dir, ok := strings.CutSuffix(outer, "**")
+	return ok && strings.HasPrefix(strings.TrimSuffix(inner, "**"), dir)
 }
 
 func runVerifyList(args []string) error {
