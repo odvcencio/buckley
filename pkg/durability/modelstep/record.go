@@ -74,11 +74,18 @@ func NormalizeError(err error) string {
 // NormalizeErrorText redacts known credentials and bounds durable text.
 func NormalizeErrorText(text string) string {
 	text = strings.TrimSpace(string(evidence.Redact([]byte(text))))
-	runes := []rune(text)
-	if len(runes) <= MaxPersistedErrorRunes {
-		return text
+	count, end := 0, 0
+	for i := range text {
+		if count == MaxPersistedErrorRunes-1 {
+			end = i
+		}
+		if count == MaxPersistedErrorRunes {
+			// Retain the per-byte replacement of invalid UTF-8 in clipped errors.
+			return string([]rune(text[:end])) + "…"
+		}
+		count++
 	}
-	return string(runes[:MaxPersistedErrorRunes-1]) + "…"
+	return text
 }
 
 // EncodeResponse validates and marshals the current response envelope.
