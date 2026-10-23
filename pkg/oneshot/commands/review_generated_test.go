@@ -249,3 +249,19 @@ func TestBuildPRPrompt_GeneratedFilesLeaveTheChecklist(t *testing.T) {
 		t.Errorf("LedgerFiles() = %v", got)
 	}
 }
+
+// A finding heading without a severity is not parsed as a finding. The error
+// must say that, so the retry can fix the heading instead of guessing.
+func TestValidateFindingDisposition_NamesAHeadingWithoutSeverity(t *testing.T) {
+	review := "## Findings\n### FINDING-001: Unmapped CI checks satisfy verification\n- **File**: `a.go:1`\n\n## Verdict\n- **Recommendation**: REQUEST CHANGES\n- **Blockers**: FINDING-001\n"
+	parsed := ParseReview(review)
+	err := validateFindingDisposition(parsed)
+	if err == nil {
+		t.Fatal("blocker with no parsed finding validated")
+	}
+	for _, want := range []string{"FINDING-001", "severity", "[CRITICAL|MAJOR|MINOR]"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}

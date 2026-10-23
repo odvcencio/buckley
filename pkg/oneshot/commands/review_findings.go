@@ -529,6 +529,17 @@ func reviewVerdictValueIsNone(value string) bool {
 	}
 }
 
+// unknownFindingError reports a Blockers or Suggestions entry that names no
+// parsed finding. When the review does have a heading for that ID but without
+// a severity, the heading is the problem and the message says so.
+func unknownFindingError(list, id, raw string) error {
+	heading := regexp.MustCompile(`(?m)^#{2,4}\s+` + regexp.QuoteMeta(id) + `\b`)
+	if heading.MatchString(raw) {
+		return fmt.Errorf("%s references %s, but its heading has no severity; write `### %s: [CRITICAL|MAJOR|MINOR] Title`", list, id, id)
+	}
+	return fmt.Errorf("%s references unknown finding %s", list, id)
+}
+
 func validateFindingDisposition(parsed *ParsedReview) error {
 	findings := make(map[string]Finding, len(parsed.Findings))
 	for _, finding := range parsed.Findings {
@@ -541,7 +552,7 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	blockers := make(map[string]struct{}, len(parsed.Blockers))
 	for _, id := range parsed.Blockers {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("blockers references unknown finding %s", id)
+			return unknownFindingError("blockers", id, parsed.RawReview)
 		}
 		if _, exists := blockers[id]; exists {
 			return fmt.Errorf("blockers repeats finding %s", id)
@@ -552,7 +563,7 @@ func validateFindingDisposition(parsed *ParsedReview) error {
 	suggestions := make(map[string]struct{}, len(parsed.Suggestions))
 	for _, id := range parsed.Suggestions {
 		if _, exists := findings[id]; !exists {
-			return fmt.Errorf("suggestions references unknown finding %s", id)
+			return unknownFindingError("suggestions", id, parsed.RawReview)
 		}
 		if _, exists := suggestions[id]; exists {
 			return fmt.Errorf("suggestions repeats finding %s", id)
