@@ -30,6 +30,11 @@ type canopyRunner struct{ workDirAware }
 // to canopyMaxOutputBytes. A missing canopy binary yields a clear install
 // hint instead of a raw "not found" error.
 func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, truncated bool, err error) {
+	return r.runIn(ctx, r.workDir, args...)
+}
+
+// runIn is run from dir instead of the workdir.
+func (r *canopyRunner) runIn(ctx context.Context, dir string, args ...string) (output string, truncated bool, err error) {
 	configured := os.Getenv("CANOPY_BIN")
 	if value, overridden := r.env["CANOPY_BIN"]; overridden {
 		configured = value
@@ -46,8 +51,8 @@ func (r *canopyRunner) run(ctx context.Context, args ...string) (output string, 
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	configureCommandCancellation(cmd)
-	if strings.TrimSpace(r.workDir) != "" {
-		cmd.Dir = strings.TrimSpace(r.workDir)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = strings.TrimSpace(dir)
 	}
 	cmd.Env = mergeEnv(cmd.Env, r.env)
 	stdout := newLimitedBuffer(canopyMaxOutputBytes)

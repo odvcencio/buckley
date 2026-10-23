@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -39,8 +40,21 @@ func (t *CodeOutlineTool) ExecuteWithContext(ctx context.Context, params map[str
 			return &Result{Error: err.Error()}, nil
 		}
 	}
-	_, relative, err := resolveRelPath(root, path)
+	runDir := root
+	abs, relative, err := resolveRelPath(root, path)
 	if err != nil {
+		// A file in a read root outline runs from that file's directory.
+		var readErr error
+		abs, readErr = t.resolveRead(path)
+		if readErr != nil {
+			return &Result{Error: readErr.Error()}, nil
+		}
+		if !t.inReadRoot(abs) {
+			return &Result{Error: err.Error()}, nil
+		}
+		runDir, relative = filepath.Dir(abs), filepath.Base(abs)
+	}
+	if err := t.readDeniedError(abs); err != nil {
 		return &Result{Error: err.Error()}, nil
 	}
 	limit := getIntParam(params, "limit", 40)
@@ -56,7 +70,7 @@ func (t *CodeOutlineTool) ExecuteWithContext(ctx context.Context, params map[str
 		args = append(args, "--cursor", cursor)
 	}
 	args = append(args, "--", relative)
-	output, truncated, err := t.run(ctx, args...)
+	output, truncated, err := t.runIn(ctx, runDir, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown command") {
 			err = fmt.Errorf("code_outline requires Canopy with search outline support; update the Canopy CLI: %w", err)

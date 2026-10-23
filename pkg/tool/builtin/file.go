@@ -21,7 +21,6 @@ type ReadFileTool struct {
 	workDirAware
 	sourceScope         *agentcoord.SourceScope
 	outsideWorkDirReads bool
-	deniedReadPaths     []string
 }
 
 // SetOutsideWorkDirReads enables host reads for an explicitly unrestricted
@@ -33,7 +32,17 @@ func (t *ReadFileTool) SetOutsideWorkDirReads(allowed bool, deniedPaths []string
 
 func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	if !t.outsideWorkDirReads || t.sourceScope != nil {
-		return resolvePath(t.workDir, path)
+		if t.sourceScope != nil {
+			abs, err := resolvePath(t.workDir, path)
+			if err == nil {
+				err = t.readDeniedError(abs)
+			}
+			if err != nil {
+				return "", err
+			}
+			return abs, nil
+		}
+		return t.resolveRead(path)
 	}
 	if path == "" {
 		return "", fmt.Errorf("path cannot be empty")
@@ -45,28 +54,8 @@ func (t *ReadFileTool) resolveReadPath(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
-	resolvedTarget := evalSymlinksFallbackForTarget(abs)
-	for _, denied := range t.deniedReadPaths {
-		if denied == "" {
-			continue
-		}
-		if denied == "~" || strings.HasPrefix(denied, "~/") {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("resolve denied home path: %w", err)
-			}
-			denied = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(denied, "~"), "/"))
-		}
-		if !filepath.IsAbs(denied) {
-			denied = filepath.Join(t.workDir, denied)
-		}
-		denied, err = filepath.Abs(denied)
-		if err != nil {
-			return "", fmt.Errorf("invalid denied path: %w", err)
-		}
-		if isWithinDir(denied, abs) || isWithinDir(evalSymlinksFallback(denied), resolvedTarget) {
-			return "", fmt.Errorf("path %q is denied", path)
-		}
+	if err := t.readDeniedError(abs); err != nil {
+		return "", err
 	}
 	return abs, nil
 }
@@ -908,7 +897,7 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 		return &Result{Success: false, Error: "limit must be between 1 and 1000"}, nil
 	}
 
-	absBasePath, err := resolvePath(t.workDir, basePath)
+	absBasePath, err := t.resolveRead(basePath)
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -933,6 +922,12 @@ func (t *FindFilesTool) Execute(params map[string]any) (*Result, error) {
 	err = filepath.WalkDir(absBasePath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if t.readRootEntryHidden(path) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() {
 			if shouldSkipFindFilesDir(path, absBasePath) {
@@ -1202,7 +1197,7 @@ func (t *FileExistsTool) Execute(params map[string]any) (*Result, error) {
 		}, nil
 	}
 
-	absPath, err := resolvePath(t.workDir, path)
+	absPath, err := t.resolveRead(path)
 	if err != nil {
 		return &Result{
 			Success: false,

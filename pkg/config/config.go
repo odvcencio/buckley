@@ -933,6 +933,14 @@ type ToolsConfig struct {
 	// resolves one (evaluator is nil or its lookup fails). Valid values:
 	// "full" (all tools, default), "standard", "read_only", "simple".
 	DefaultPoolMode string `yaml:"default_pool_mode"`
+
+	// ReadRoots lists extra paths, each a directory or a single file, that
+	// read-only file tools (read_file, list_directory, find_files, search_text,
+	// file_exists, code_outline) may read besides the working directory. User
+	// and project config lists are combined. There are no default roots, a root
+	// that does not exist is an error, and write and shell tools never use them.
+	// "~" and environment variables are expanded.
+	ReadRoots []string `yaml:"read_roots"`
 }
 
 // PluginHooksConfig gates the plugin hook contract (pkg/tool/external's

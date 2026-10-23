@@ -29,6 +29,7 @@ type oneShotOptions struct {
 	AgentProfile  *agentspec.RuntimeProfile
 	ModelOverride string
 	AllowedTools  []string
+	ReadRoots     []string // --read-root paths, added to tools.read_roots
 	CodeMode      bool
 	Limits        acpLoopLimits
 	OutputSchema  string
@@ -90,8 +91,16 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		return 1
 	}
 
+	readRoots, err := config.ResolveReadRoots(cwd, cfg.Tools.ReadRoots, opts.ReadRoots)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
 	if !quietMode {
 		fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
+		if len(readRoots) > 0 {
+			fmt.Fprintf(os.Stderr, "read roots (read-only): %s\n", strings.Join(readRoots, ", "))
+		}
 		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
 	}
 	if mgr != nil {
@@ -137,6 +146,8 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	}
 	registry.ConfigureContainers(cfg, cwd)
 	registry.SetWorkDir(cwd)
+	registry.SetDeniedReadPaths(append(append([]string(nil), cfg.Approval.DeniedPaths...), cfg.Sandbox.DeniedPaths...))
+	registry.SetReadRoots(readRoots)
 	if limits.allowHostTools && limits.TaskIntent == agentloop.MutationIntent {
 		removeImplicitSubagentDelegation(registry, opts.AgentProfile, opts.AllowedTools)
 	}
@@ -265,6 +276,8 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(opts.AgentProfile), knowledge)
 	if limits.SourceScope != nil {
 		systemPrompt += "\n\n" + sourceScopeInstruction(limits.SourceScope)
+	} else if instruction := oneShotReadRootsInstruction(readRoots); instruction != "" {
+		systemPrompt += "\n\n" + instruction
 	}
 	if _, enabled := registry.Get("exec_program"); enabled {
 		systemPrompt += "\n\n" + prompts.CodeModeSystemPrompt
@@ -394,7 +407,20 @@ func oneShotTaskIntentInstruction(intent agentloop.TaskIntent) string {
 	if intent != agentloop.ReadOnlyIntent {
 		return ""
 	}
-	return "Read-only context contract: gather only evidence relevant to the request, then finish with a concise summary for the next investigator or orchestrator. Include paths, symbols, or commands that support the summary, call out uncertainty, and do not edit or claim checks you did not run."
+	return "Read-only task contract: gather only evidence relevant to the request, then deliver the requested answer, spec, or plan in the requested format and level of detail. Summarize only when requested; do not substitute a handoff for the deliverable. Include supporting paths, symbols, or commands, distinguish proposals from verified behavior, call out uncertainty, and do not edit or claim checks you did not run. Reuse evidence already gathered and stop investigating once it is sufficient to answer."
+}
+
+func oneShotReadRootsInstruction(roots []string) string {
+	if len(roots) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Additional read-only source paths (use absolute paths with file read/search tools):")
+	for _, root := range roots {
+		fmt.Fprintf(&b, "\n- %q", root)
+	}
+	b.WriteString("\nThese paths grant no write or shell access. Secret-file restrictions still apply. Read relevant sources directly; if access is denied, report the missing evidence rather than retrying through alternate tools.")
+	return b.String()
 }
 
 func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequired bool) []string {

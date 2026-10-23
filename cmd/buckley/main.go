@@ -151,6 +151,7 @@ type startupOptions struct {
 	agentPath        string
 	tools            []string
 	toolsSet         bool
+	readRoots        []string // --read-root paths, repeatable
 	taskIntent       agentloop.TaskIntent
 	taskIntentSet    bool
 	persist          bool
@@ -169,6 +170,7 @@ const (
 	startupPendingModel
 	startupPendingAgent
 	startupPendingTools
+	startupPendingReadRoot
 	startupPendingTaskIntent
 )
 
@@ -325,6 +327,7 @@ func main() {
 		AgentProfile:  agentProfile,
 		ModelOverride: modelOverrideFlag,
 		AllowedTools:  opts.tools,
+		ReadRoots:     opts.readRoots,
 		CodeMode:      opts.codeMode,
 		Limits:        acpLoopLimits{TaskIntent: opts.taskIntent, Persist: opts.persist},
 	}
@@ -894,6 +897,7 @@ func printHelp() {
 	fmt.Println("  --persist                       Continue one-shot mutation work until complete or blocked")
 	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
 	fmt.Println("  --tools <names>                  Limit one-shot model tools (comma-separated, repeatable)")
+	fmt.Println("  --read-root <path>               Let read-only tools read this directory or file (repeatable; also tools.read_roots)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
@@ -1701,6 +1705,11 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (boo
 		if err := opts.addTools(arg); err != nil {
 			return true, err
 		}
+	case startupPendingReadRoot:
+		if strings.TrimSpace(arg) == "" {
+			return true, fmt.Errorf("--read-root requires a path")
+		}
+		opts.readRoots = append(opts.readRoots, strings.TrimSpace(arg))
 	case startupPendingTaskIntent:
 		if strings.TrimSpace(arg) == "" {
 			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
@@ -1779,6 +1788,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 			return false, nil
 		}
 		s.pending = startupPendingTools
+	case "--read-root":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending = startupPendingReadRoot
 	case "--task-intent":
 		if !beforeCommand {
 			return false, nil
@@ -1803,6 +1817,13 @@ func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg str
 	if strings.HasPrefix(arg, "--agent=") && beforeCommand {
 		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
 		s.agentFlagSeen = true
+		return true, nil
+	}
+	if strings.HasPrefix(arg, "--read-root=") && beforeCommand {
+		if strings.TrimSpace(strings.TrimPrefix(arg, "--read-root=")) == "" {
+			return true, fmt.Errorf("--read-root requires a path")
+		}
+		opts.readRoots = append(opts.readRoots, strings.TrimSpace(strings.TrimPrefix(arg, "--read-root=")))
 		return true, nil
 	}
 	if strings.HasPrefix(arg, "--tools=") && beforeCommand {
@@ -1838,6 +1859,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("--agent requires a path")
 	case startupPendingTools:
 		return fmt.Errorf("--tools requires comma-separated tool names")
+	case startupPendingReadRoot:
+		return fmt.Errorf("--read-root requires a path")
 	case startupPendingTaskIntent:
 		return fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
 	}

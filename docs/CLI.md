@@ -52,6 +52,50 @@ buckley -p "Generate a commit message for the staged changes" --quiet
 echo "Explain this error" | buckley --plain
 ```
 
+### Focused one-shot tasks
+
+Choose the task contract explicitly and provide a small source list. For a spec or
+plan returned on stdout, use `--task-intent read_only` and restrict tools to file
+inspection. Give the required sections, target length, acceptance criteria, and
+exact files in the prompt. Approved external sources need `--read-root` (repeatable)
+or `tools.read_roots`; requesting a path in prose does not grant access.
+
+```bash
+buckley --task-intent read_only \
+  --tools read_file,search_text,find_files \
+  --read-root ~/specs/architecture.md \
+  -p "Read AGENTS.md and ~/specs/architecture.md. Return a 700-word implementation plan with acceptance criteria. Distinguish existing behavior from proposals. Do not edit files." \
+  > plan.md
+```
+
+Read-only one-shots default to 16 tool calls, 180 seconds, and 4,096 output tokens
+per request. These are small-task defaults, not a suitable budget for a 6,000-word
+spec. For longer work, `buckley agent run` accepts `--max-tool-calls`,
+`--max-elapsed-seconds`, and `--max-output-tokens` with a configured agent spec.
+Use its `--dry-run --json` preview to inspect resolved limits before spending a
+model call. Profile and protocol limits can narrow the requested budget. Output
+tokens include any provider reasoning allowance; a word target is not a token cap.
+Do not solve an undersized budget by removing the read-only contract.
+
+For a code change, use `--task-intent mutation`, name the files or behavior to
+change and the relevant checks, and request a final account of changes and test
+results. Keep repository verification requirements active. For committing already
+prepared code, use the dedicated staged-diff helper instead of asking a general
+agent to rediscover the repository:
+
+```bash
+git diff --cached --check
+git diff --cached
+buckley commit --yes --min --push=false
+```
+
+Stage only intended changes first. The commit helper binds its message to the
+staged diff and checks that the diff has not changed; it does not substitute for
+the project's tests. Push separately when authorized. Scripts should check the
+exit code as well as the output: an incomplete answer is a failed run, even if a
+partial draft was printed. Keep stderr as the diagnostic trace and stdout as the
+deliverable. Successful exit does not establish the factual quality of a spec.
+
 ### TUI chat shortcuts
 
 | Shortcut | Action |
