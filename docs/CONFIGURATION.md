@@ -500,6 +500,9 @@ buckbot:
   the reviewed head's tree and its log still matches the digest. Receipts are
   not signed (Buckley has no signing facility); the tree hash and digest guard
   against accidental reuse, not against someone who edits the ledger.
+- **Reruns.** When several receipts on a tree share the same command,
+  directory and path globs, the newest one counts. A passing rerun replaces an
+  earlier failure of the same command on that tree.
 - **CI.** For a PR, check runs reported on the exact head commit count.
   `ci_checks` names the checks that cover a declared glob; a pending, failed,
   skipped or other-commit check does not cover it. With no `ci_checks`

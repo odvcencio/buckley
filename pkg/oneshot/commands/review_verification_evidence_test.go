@@ -158,3 +158,22 @@ func TestVerificationMarkdownListsCoveredFailingAndUnverified(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateVerificationNewestReceiptForACommandWins(t *testing.T) {
+	older := receipt("ev_OLDFAIL", verifyreceipt.StatusFail, 2, "client/**")
+	newer := receipt("ev_NEWPASS", verifyreceipt.StatusPass, 0, "client/**")
+	newer.StartedAt = older.StartedAt.Add(time.Hour)
+	for _, order := range [][]verifyreceipt.Receipt{{older, newer}, {newer, older}} {
+		rep := EvaluateVerification(VerificationInput{Mode: VerifyReceipt, Files: []string{"client/a.js"}, Receipts: order})
+		if len(rep.Failing) != 0 || len(rep.Covered) != 1 || !strings.Contains(rep.Covered[0].Label, "NEWPASS") {
+			t.Fatalf("report = %+v", rep)
+		}
+	}
+	// A different command is not superseded.
+	other := receipt("ev_OTHER", verifyreceipt.StatusFail, 1, "client/**")
+	other.Argv = []string{"npm", "test"}
+	rep := EvaluateVerification(VerificationInput{Mode: VerifyReceipt, Files: []string{"client/a.js"}, Receipts: []verifyreceipt.Receipt{newer, other}})
+	if len(rep.Failing) != 1 || len(rep.Covered) != 1 {
+		t.Fatalf("report = %+v", rep)
+	}
+}

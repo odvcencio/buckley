@@ -146,7 +146,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 		}
 	}
 
-	for _, r := range in.Receipts {
+	for _, r := range newestReceipts(in.Receipts) {
 		matched := matchFiles(required, r.Paths)
 		if len(matched) == 0 {
 			continue
@@ -224,6 +224,31 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 	return rep
 }
 
+// newestReceipts keeps only the latest receipt for each distinct command,
+// directory and path set on the tree. A rerun that passes after an earlier
+// failure on the same tree (a flaky test, a fixed environment) supersedes it,
+// and the reverse also holds: the newest result is the one that counts.
+func newestReceipts(receipts []verifyreceipt.Receipt) []verifyreceipt.Receipt {
+	type key struct{ argv, dir, paths string }
+	latest := map[key]verifyreceipt.Receipt{}
+	var order []key
+	for _, r := range receipts {
+		k := key{strings.Join(r.Argv, "\x00"), r.Dir, strings.Join(r.Paths, "\x00")}
+		prev, seen := latest[k]
+		if !seen {
+			order = append(order, k)
+		}
+		if !seen || r.StartedAt.After(prev.StartedAt) {
+			latest[k] = r
+		}
+	}
+	out := make([]verifyreceipt.Receipt, 0, len(order))
+	for _, k := range order {
+		out = append(out, latest[k])
+	}
+	return out
+}
+
 func matchFiles(files, globs []string) []string {
 	match := diffsignal.GlobMatcher(globs)
 	if match == nil {
@@ -265,7 +290,7 @@ func (r VerificationReport) Gate() (int, string) {
 	if len(r.Failing) > 0 {
 		fmt.Fprintf(&b, "Verification evidence is failing (policy %s, set by %s). No model call was made.\n", r.Mode, r.sourceLabel())
 		for _, f := range r.Failing {
-			fmt.Fprintf(&b, "  - %s: %s; paths: %s\n", f.Label, f.Detail, strings.Join(f.Paths, ", "))
+			fmt.Fprintf(&b, "  - %s: %s; paths (%d): %s\n", f.Label, f.Detail, len(f.Paths), strings.Join(limitList(f.Paths, 4), ", "))
 		}
 		return VerificationGateFailing, strings.TrimRight(b.String(), "\n")
 	}
