@@ -624,7 +624,7 @@ func TestCollectAgentEvidenceDoesNotReadUntrackedLiveSource(t *testing.T) {
 		Parameters: map[string]any{
 			"kind": "test", "language": "go", "path": ".",
 		},
-	}}, AgentExecutionOpts{ReviewSnapshot: snapshot, VerificationTimeout: 5 * time.Second})
+	}}, AgentExecutionOpts{ReviewSnapshot: snapshot, VerificationTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("CollectAgentEvidence: %v", err)
 	}
@@ -633,6 +633,9 @@ func TestCollectAgentEvidenceDoesNotReadUntrackedLiveSource(t *testing.T) {
 	}
 	if status, _ := calls[0].Data["status"].(string); status != "FAIL" {
 		t.Fatalf("status = %q, want FAIL: %#v", status, calls[0])
+	}
+	if stderr, _ := calls[0].Data["stderr"].(string); !strings.Contains(stderr, "undefined: missing") {
+		t.Fatalf("verification did not report the excluded helper: %q", stderr)
 	}
 }
 

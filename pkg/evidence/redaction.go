@@ -54,9 +54,11 @@ func classifySensitivity(kind Kind, content []byte) Sensitivity {
 // analytics (section 13.3) — any surface where raw evidence content must
 // never appear.
 func Redact(content []byte) []byte {
-	out := content
+	out := append([]byte(nil), content...)
 	for _, pattern := range secretPatterns {
-		out = pattern.ReplaceAll(out, []byte("[REDACTED]"))
+		if pattern.Match(out) {
+			out = pattern.ReplaceAll(out, []byte("[REDACTED]"))
+		}
 	}
 	return out
 }

@@ -1,9 +1,53 @@
 package evidence
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
+
+func TestRedact_LegacyOutputAndOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"plain", []byte("diagnostic without credentials")},
+		{"invalid UTF-8", []byte("before\xff\xfe after")},
+		{"aws access", []byte("AKIAIOSFODNN7EXAMPLE")},
+		{"aws secret", []byte("AWS_SECRET_ACCESS_KEY = " + strings.Repeat("a", 32))},
+		{"private key", []byte("-----BEGIN OPENSSH PRIVATE KEY-----")},
+		{"github classic", []byte("ghp_" + strings.Repeat("a", 36))},
+		{"github other", []byte("gho_" + strings.Repeat("b", 24))},
+		{"openai", []byte("sk-proj-" + strings.Repeat("c", 24))},
+		{"slack", []byte("xoxb-" + strings.Repeat("d", 24))},
+		{"bearer", []byte("BEARER " + strings.Repeat("e", 24) + "==")},
+		{"overlapping patterns", []byte("bearer sk-" + strings.Repeat("a", 30) + " ghp_" + strings.Repeat("b", 36))},
+		{"repeated secrets", []byte(strings.Repeat("sk-"+strings.Repeat("a", 30)+"\n", 400))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := bytes.Clone(tc.content)
+			want := tc.content
+			for _, pattern := range secretPatterns {
+				want = pattern.ReplaceAll(want, []byte("[REDACTED]"))
+			}
+			got := Redact(tc.content)
+			if !bytes.Equal(got, want) || (got == nil) != (want == nil) {
+				t.Fatal("redaction changed legacy output")
+			}
+			if !bytes.Equal(tc.content, original) {
+				t.Fatal("redaction mutated input")
+			}
+			if len(got) > 0 {
+				got[0] ^= 0xff
+				if !bytes.Equal(tc.content, original) {
+					t.Fatal("redacted output aliases input")
+				}
+			}
+		})
+	}
+}
 
 func TestDetectSecret(t *testing.T) {
 	cases := []struct {

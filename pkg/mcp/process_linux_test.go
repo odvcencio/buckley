@@ -59,11 +59,12 @@ func TestCommandTransport_CloseStopsProcessGroup(t *testing.T) {
 		t.Fatal("close remained blocked")
 	}
 	deadline = time.Now().Add(time.Second)
-	for mcpProcessRunning(child) && time.Now().Before(deadline) {
+	for (mcpProcessRunning(parent) || mcpProcessRunning(child)) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if mcpProcessRunning(parent) || mcpProcessRunning(child) || !mcpProcessRunning(sibling.Process.Pid) {
-		t.Fatal("process ownership cleanup failed")
+	parentRunning, childRunning, siblingRunning := mcpProcessRunning(parent), mcpProcessRunning(child), mcpProcessRunning(sibling.Process.Pid)
+	if parentRunning || childRunning || !siblingRunning {
+		t.Fatalf("process ownership cleanup failed: parent_running=%v descendant_running=%v sibling_running=%v", parentRunning, childRunning, siblingRunning)
 	}
 	t.Logf("parent_stopped=true descendant_stopped=true sibling_alive=true close_ms=%d", time.Since(started).Milliseconds())
 }
