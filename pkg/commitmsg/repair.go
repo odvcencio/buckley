@@ -156,3 +156,83 @@ func nestedHeaderPrefix(subject string) []string {
 	}
 	return nil
 }
+
+// danglingWords cannot end a bullet: a cut that leaves one reads as broken.
+var danglingWords = map[string]bool{
+	"and": true, "or": true, "but": true, "so": true, "then": true, "the": true, "a": true, "an": true,
+	"to": true, "of": true, "for": true, "with": true, "in": true, "on": true, "by": true,
+	"that": true, "which": true, "because": true, "as": true, "from": true, "into": true,
+}
+
+// RepairBody fixes the two body limits without another model call. It shortens
+// a bullet of more than MaxBulletWords words at its last sentence end, else its
+// last clause break, else at the word limit; it never rewords what it keeps. It
+// drops bullets beyond MaxBullets, last first. Blank bullets stay as they are.
+// Callers must validate the complete result before use.
+func RepairBody(body []string) ([]string, []string) {
+	out := make([]string, len(body))
+	copy(out, body)
+	var repairs []string
+	shortened := false
+	for i, bullet := range out {
+		normalized := NormalizeBullet(bullet)
+		if len(strings.Fields(normalized)) <= MaxBulletWords {
+			continue
+		}
+		out[i] = shortenBullet(normalized)
+		shortened = true
+	}
+	if shortened {
+		repairs = append(repairs, "shortened long bullets")
+	}
+	kept, nonEmpty := 0, 0
+	for _, bullet := range out {
+		if NormalizeBullet(bullet) != "" {
+			nonEmpty++
+		}
+	}
+	if nonEmpty > MaxBullets {
+		trimmed := out[:0:0]
+		for _, bullet := range out {
+			if NormalizeBullet(bullet) == "" {
+				trimmed = append(trimmed, bullet)
+				continue
+			}
+			if kept < MaxBullets {
+				trimmed = append(trimmed, bullet)
+				kept++
+			}
+		}
+		out = trimmed
+		repairs = append(repairs, "dropped extra bullets")
+	}
+	return out, repairs
+}
+
+// shortenBullet cuts a bullet of more than MaxBulletWords words.
+func shortenBullet(bullet string) string {
+	words := strings.Fields(bullet)[:MaxBulletWords]
+	cut := func(minWords int, ends func(word string) bool) int {
+		for n := len(words); n >= minWords; n-- {
+			if ends(words[n-1]) {
+				return n
+			}
+		}
+		return 0
+	}
+	n := cut(4, func(w string) bool {
+		return strings.HasSuffix(w, ".") || strings.HasSuffix(w, "!") || strings.HasSuffix(w, "?")
+	})
+	if n == 0 {
+		n = cut(8, func(w string) bool {
+			return strings.HasSuffix(w, ",") || strings.HasSuffix(w, ";") || strings.HasSuffix(w, ":") || strings.HasSuffix(w, "\u2014")
+		})
+	}
+	if n == 0 {
+		n = len(words)
+		for n > 1 && danglingWords[strings.ToLower(strings.Trim(words[n-1], ",;:."))] {
+			n--
+		}
+	}
+	return strings.TrimRight(strings.Join(words[:n], " "), ",;: .")
+}

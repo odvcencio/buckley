@@ -1,6 +1,7 @@
 package commitmsg
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -71,5 +72,37 @@ func TestRepairHeader_ConflictingRecoveredScope(t *testing.T) {
 	scope, subject, repairs := RepairHeader("fix", "", original, HeaderLimit)
 	if scope != "" || subject != original || len(repairs) != 0 {
 		t.Fatalf("scope=%q subject=%q repairs=%v", scope, subject, repairs)
+	}
+}
+
+func TestRepairBody(t *testing.T) {
+	long := func(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
+	tests := []struct {
+		name    string
+		body    []string
+		want    []string
+		repairs int
+	}{
+		{"within limits", []string{"Short bullet", "Another"}, []string{"Short bullet", "Another"}, 0},
+		{"cuts at a sentence end", []string{"Group generated files by directory. Then skip them in the ledger because every reviewer already sees the summary line for each group"},
+			[]string{"Group generated files by directory"}, 1},
+		{"cuts at a clause break", []string{"Detect generated files from headers and build output siblings, then collapse them into grouped summaries so reviewers see one line per group"},
+			[]string{"Detect generated files from headers and build output siblings"}, 1},
+		{"cuts at the limit and drops a dangling word", []string{long(19) + " and then more words follow here"}, []string{long(19)}, 1},
+		{"drops extra bullets", []string{"a", "b", "c", "d", "e", "f"}, []string{"a", "b", "c", "d", "e"}, 1},
+		{"keeps blank bullets out of the count", []string{"a", "", "b", "c", "d", "e"}, []string{"a", "", "b", "c", "d", "e"}, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, repairs := RepairBody(tc.body)
+			if !reflect.DeepEqual(got, tc.want) || len(repairs) != tc.repairs {
+				t.Fatalf("RepairBody() = %q, %v; want %q with %d repairs", got, repairs, tc.want, tc.repairs)
+			}
+			for _, b := range got {
+				if n := len(strings.Fields(b)); n > MaxBulletWords {
+					t.Fatalf("bullet %q has %d words", b, n)
+				}
+			}
+		})
 	}
 }
