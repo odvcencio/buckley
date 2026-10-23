@@ -209,6 +209,7 @@ func (b *Broker) Start(socketPath string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/files/read", b.handle(CapFilesRead, b.filesRead))
+	mux.HandleFunc("/v1/files/read-lines", b.handleContext(CapFilesRead, b.filesReadLines))
 	mux.HandleFunc("/v1/files/list", b.handleContext(CapFilesList, b.filesList))
 	mux.HandleFunc("/v1/search/text", b.handleContext(CapSearchText, b.searchText))
 	mux.HandleFunc("/v1/code/outline", b.handleContext(CapCodeOutline, b.codeOutline))
@@ -346,33 +347,43 @@ func (b *Broker) jail(rel string) (string, error) {
 	return resolved, nil
 }
 
-func (b *Broker) filesRead(params map[string]any) (any, error) {
-	path, _ := params["path"].(string)
+func (b *Broker) openReadFile(path string) (*os.File, fs.FileInfo, error) {
 	full, err := b.jail(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root, err := os.OpenRoot(b.root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer root.Close()
 	rel, err := filepath.Rel(b.root, full)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	f, err := root.OpenFile(rel, brokerReadFlags, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("files.read requires a regular file")
+	}
+	return f, info, nil
+}
+
+func (b *Broker) filesRead(params map[string]any) (any, error) {
+	path, _ := params["path"].(string)
+	f, info, err := b.openReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("files.read requires a regular file")
-	}
 	var offset int64
 	// Decimal strings preserve int64 offsets through JSON without rounding.
 	raw, chunk := params["offset"]

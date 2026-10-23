@@ -412,6 +412,19 @@ func ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err 
 	return out.Data, out.Truncated, err
 }
 
+// ReadFileLines returns a page of whole lines in the inclusive, 1-indexed range.
+// Continue at nextLine until it is zero. Bytes, including CRLF, are preserved.
+// Each call scans at most 8 MiB and returns at most 256 KiB; use ReadFileChunk
+// for oversized lines or ranges beyond the scan budget. Reads do not pin a snapshot.
+func ReadFileLines(path string, startLine, endLine int) (data []byte, nextLine int, err error) {
+	var out struct {
+		Data     []byte ` + "`json:\"data\"`" + `
+		NextLine int    ` + "`json:\"next_line\"`" + `
+	}
+	err = call("/v1/files/read-lines", map[string]any{"path": path, "start_line": strconv.Itoa(startLine), "end_line": strconv.Itoa(endLine)}, &out)
+	return out.Data, out.NextLine, err
+}
+
 // OutlineFile returns one bounded page of Canopy's live structural JSON.
 // Keep coverage warnings and follow next_cursor unchanged; edits invalidate it.
 func OutlineFile(path string, limit int, cursor string) (json.RawMessage, error) {
@@ -492,13 +505,14 @@ const CapsAPICard = "API (import \"execprogram/caps\"):\n" +
 	"  caps.OutlineFile(path string, limit int, cursor string) (json.RawMessage, error) // optional Canopy; 0=40 symbols, max 100; first cursor=\"\"\n" +
 	"  caps.ReadFile(path string) (content string, truncated bool, err error)\n" +
 	"  caps.ReadFileChunk(path string, offset int64) (data []byte, truncated bool, err error)\n" +
+	"  caps.ReadFileLines(path string, startLine, endLine int) (data []byte, nextLine int, err error) // inclusive 1-indexed range; nextLine=0 when complete\n" +
 	"  caps.ListDir(dir string) (entries []string, err error)        // one level; dirs end in \"/\"\n" +
 	"  caps.WalkDir(dir string) (entries []string, err error)        // whole tree, workspace-relative paths\n" +
 	"  caps.SearchText(pattern string) (m []caps.Match, capped bool, err error)\n" +
 	"  caps.SearchTextGlob(pattern, glob string) (m []caps.Match, capped bool, err error)\n" +
 	"  type Match struct { File string; Line int; Text string; TextTruncated bool }\n" +
 	"Search Text is an excerpt: at most 2 KiB per hit and 64 KiB total. TextTruncated marks clipped, normalized, or omitted text; File/Line still identify the hit. Use targeted file/chunk reads for complete source. capped reports the match-count limit, independently of text truncation.\n" +
-	"OutlineFile returns a JSON object: {symbols:[{kind,name,start_line,end_line}],coverage:{...},next_cursor?,source_sha256,source_bytes}. Decode coverage as json.RawMessage and print it unchanged; check json.Unmarshal errors. Use symbol ranges for targeted source reads. Follow next_cursor unchanged; pages count as calls and edits invalidate it. An outline is navigation, not inspected source or absence proof. If unavailable, use search/read.\n" +
+	"OutlineFile returns a JSON object: {symbols:[{kind,name,start_line,end_line}],coverage:{...},next_cursor?,source_sha256,source_bytes}. Decode coverage as json.RawMessage and print it unchanged; check json.Unmarshal errors. Use ReadFileLines with symbol ranges or search hit lines; continue at nextLine until zero. Line pages preserve bytes and whole lines, return at most 256 KiB, and scan at most 8 MiB per call; use ReadFileChunk for oversized lines or a scan-budget error. Follow next_cursor unchanged; pages count as calls and edits invalidate it. An outline is navigation, not inspected source or absence proof. If unavailable, use search/read.\n" +
 	"Paths are workspace-relative. One program may make at most 32 broker operations (rejected attempts count; exhaustion closes the broker); paginated WalkDir calls count, so prefer targeted ListDir/SearchTextGlob and read only selected files. Large files: use ReadFileChunk and continue by advancing offset by int64(len(data)) until truncated is false; every call counts toward the 32-operation budget, so check errors and stop promptly. Chunk reads do not pin a file snapshot. Data is raw bytes, so carry a line split across chunk boundaries when doing line-based extraction. Managed .git/.worktrees, node_modules, and vendor directories are omitted from recursive discovery. Example:\n" +
 	"package main\n\n" +
 	"import (\n\t\"fmt\"\n\n\t\"execprogram/caps\"\n)\n\n" +
