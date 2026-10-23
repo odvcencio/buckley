@@ -346,7 +346,15 @@ func salvageIncompleteReview(outputFile string, reviewErr error, result *reviewC
 	if err := writeReviewOutput(outputFile, result.reviewText); err != nil {
 		return fmt.Errorf("%w; also failed to write salvaged review: %v", reviewErr, err)
 	}
-	return fmt.Errorf("%w; incomplete review salvaged%s", reviewErr, reviewSalvageDestination(outputFile))
+	reason := strings.TrimSpace(result.incompleteWhy)
+	if reason == "" && reviewErr != nil {
+		reason = reviewErr.Error()
+	}
+	kind, code := classifyReviewStop(reason)
+	return withExitCode(
+		fmt.Errorf("%w; incomplete review salvaged%s (stop reason: %s, exit %d)", reviewErr, reviewSalvageDestination(outputFile), kind, code),
+		code,
+	)
 }
 
 // reviewCommandFailure keeps incomplete model output out of the review
@@ -1025,11 +1033,13 @@ func markIncompleteReview(review, reason string) string {
 	if strings.Contains(review, "**Incomplete review") {
 		return review + "\n"
 	}
+	kind, _ := classifyReviewStop(reason)
 	if strings.TrimSpace(reason) == "" {
-		reason = "the review run ended before validation completed"
+		reason = "the review run ended before validation completed (no cause was reported)"
 	}
 	return fmt.Sprintf(
-		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Cause: %s\n\n%s\n",
+		"> [!WARNING]\n> **Incomplete review — salvaged from completed work.**\n> This artifact is not a merge verdict and must not be used as an approval.\n> Stop reason: %s\n> Cause: %s\n\n%s\n",
+		kind,
 		reason,
 		review,
 	)
