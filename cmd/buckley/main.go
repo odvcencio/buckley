@@ -1642,11 +1642,16 @@ func parseStartupOptions(raw []string) (*startupOptions, error) {
 	state := startupFlagState{}
 	filtered := make([]string, 0, len(raw))
 
-	for _, arg := range raw {
+	for i, arg := range raw {
 		if consumed, err := state.consumePending(opts, arg); err != nil {
 			return nil, err
 		} else if consumed {
 			continue
+		}
+
+		if arg == "--" {
+			filtered = append(filtered, raw[i:]...)
+			break
 		}
 
 		if consumed, err := state.consumeStartupFlag(opts, arg, len(filtered) == 0); err != nil {
