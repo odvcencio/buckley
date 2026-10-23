@@ -47,3 +47,27 @@ func TestGCS_MissingCredentialsFailOnceAndTyped(t *testing.T) {
 		t.Fatalf("gcloud ran %d times, want 1", n)
 	}
 }
+
+// A lookup cut short by the caller's cancelled context says nothing about
+// whether credentials exist, so it must not be remembered.
+func TestGCS_CancelledLookupIsNotCached(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gcloud"), []byte("#!/bin/sh\nsleep 5\necho token\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":/usr/bin:/bin")
+	t.Setenv("HOME", dir)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(dir, "missing.json"))
+	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1")
+	t.Setenv("CLOUDSDK_CONFIG", dir)
+
+	transport := &gcsAuthTransport{}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := transport.accessToken(cancelled); err == nil {
+		t.Fatal("cancelled lookup succeeded")
+	}
+	if transport.authErr != nil {
+		t.Fatalf("cancelled lookup was cached as %v", transport.authErr)
+	}
+}

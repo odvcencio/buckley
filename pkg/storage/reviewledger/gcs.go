@@ -77,6 +77,10 @@ func (t *gcsAuthTransport) accessToken(ctx context.Context) (string, error) {
 	// Never attach the command's output to an error or diagnostic.
 	output, err := exec.CommandContext(tokenCtx, "gcloud", "auth", "print-access-token", "--quiet").Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The caller gave up; that says nothing about the credentials.
+			return "", ctxErr
+		}
 		t.authErr = ErrNoCredentials
 		return "", t.authErr
 	}
