@@ -417,6 +417,8 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	finalToolRepairUsed := false
 	currentSynthesizing := false
 	lastExploring := false
+	var modelStartedAt time.Time
+	var lastInspectionDuration time.Duration
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		iteration := round - 1
@@ -440,7 +442,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		}
 		requestMessages := messages
 		synthesizing := false
-		if a.shouldSynthesize(ctx, iteration, maxIterations, start) || a.toolBudgetExhausted(result) {
+		if a.shouldSynthesize(ctx, iteration, maxIterations, start) || a.shouldSynthesizeForLatency(ctx, start, lastInspectionDuration) || a.toolBudgetExhausted(result) {
 			req.Tools = nil
 			req.ToolChoice = "none"
 			requestMessages = finalSynthesisMessages(messages)
@@ -468,6 +470,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 	}
 
 	callModel := agentloop.ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+		modelStartedAt = time.Now()
 		exploring := len(req.Tools) > 0
 		lastExploring = exploring
 		requestCtx, cancelRequest := context.WithCancel(ctx)
@@ -544,6 +547,7 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			}
 			outcomes[i] = agentloop.ToolOutcome{Content: tr.Result, Success: tr.Success, Error: tr.Error, Stderr: tr.Stderr}
 		}
+		lastInspectionDuration = time.Since(modelStartedAt)
 		return outcomes, nil
 	})
 
@@ -756,12 +760,28 @@ func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !a.adaptive || a.synthesisLead <= 0 {
+	deadline, ok := a.explorationDeadline(ctx, startedAt)
+	if !ok {
 		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline)
+}
+
+func (a *SubAgent) shouldSynthesizeForLatency(ctx context.Context, startedAt time.Time, previousCycle time.Duration) bool {
+	if previousCycle <= 0 {
+		return false
+	}
+	deadline, ok := a.explorationDeadline(ctx, startedAt)
+	return ok && time.Until(deadline) <= previousCycle
+}
+
+func (a *SubAgent) explorationDeadline(ctx context.Context, startedAt time.Time) (time.Time, bool) {
+	if !a.adaptive || a.synthesisLead <= 0 {
+		return time.Time{}, false
 	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return context.WithCancel(ctx)
+		return time.Time{}, false
 	}
 	toolDeadline := deadline.Add(-a.effectiveSynthesisLead(deadline, startedAt))
 	if a.explorationTimeout > 0 {
@@ -770,7 +790,7 @@ func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) 
 			toolDeadline = explorationDeadline
 		}
 	}
-	return context.WithDeadline(ctx, toolDeadline)
+	return toolDeadline, true
 }
 
 type chatCompletionResult struct {
