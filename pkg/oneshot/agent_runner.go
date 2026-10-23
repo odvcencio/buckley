@@ -156,6 +156,9 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 			// Codex uses its native shell in a separately materialized workspace;
 			// never expose the live API-tool registry alongside it.
 			agentRegistry = tool.NewEmptyRegistry()
+		} else if opts.MaxIterations == 1 {
+			// A single turn is final synthesis: no API tools can run.
+			agentRegistry = tool.NewEmptyRegistry()
 		} else {
 			var err error
 			snapshotWorkDir, cleanupSnapshot, err = model.PrepareReviewWorkspace(ctx, opts.ReviewSnapshot)
