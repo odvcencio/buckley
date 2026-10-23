@@ -281,3 +281,26 @@ func TestUnknownFindingError_NamesAHeadingWithoutSeverity(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// Models sometimes write the completeness declaration as its own heading
+// followed by the state. That is the same declaration.
+func TestValidateReviewDepthOutput_AcceptsCompletenessHeading(t *testing.T) {
+	base := "## Structural Impact\nx\n## Evidence Collected\nx\n## Verification Ledger\nx\n## Coverage\n- **File**: `a.go` — x\n\n"
+	for name, tail := range map[string]string{
+		"line":    "- **Completeness**: COMPLETE\n",
+		"heading": "## Completeness\nCOMPLETE for this shard's listed files.\n",
+	} {
+		if err := validateReviewDepthOutput(base+tail, "balanced", false); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, tail := range map[string]string{
+		"partial heading": "## Completeness\nPARTIAL: shard 2 was not reviewed.\n",
+		"missing":         "",
+		"prose only":      "The review is complete.\n",
+	} {
+		if err := validateReviewDepthOutput(base+tail, "balanced", false); err == nil {
+			t.Errorf("%s: accepted a review that does not declare COMPLETE", name)
+		}
+	}
+}

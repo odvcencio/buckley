@@ -294,7 +294,7 @@ var (
 	finalReviewSummaryHeadingRE  = regexp.MustCompile(`^##[ \t]+Summary[ \t]*$`)
 	finalReviewLevelTwoHeadingRE = regexp.MustCompile(`^##(?:[ \t]+.*)?[ \t]*$`)
 	finalReviewATXHeadingRE      = regexp.MustCompile(`^#{1,6}(?:[ \t]+.*)?[ \t]*$`)
-	reviewCompletenessMarkerRE   = regexp.MustCompile(`(?im)^\s*(?:[-*]\s+)?(?:(?:#{2,6})\s+)?(?:\*\*)?Completeness(?:\*\*)?\s*:\s*(COMPLETE|PARTIAL)\b`)
+	reviewCompletenessMarkerRE   = regexp.MustCompile(`(?im)^\s*(?:[-*]\s+)?(?:(?:#{2,6})\s+)?(?:\*\*)?Completeness(?:\*\*)?(?:\s*:\s*|[ \t]*\n\s*)(COMPLETE|PARTIAL)\b`)
 )
 
 func parseFinalReviewResult(response string) (*ReviewAgentResult, error) {
