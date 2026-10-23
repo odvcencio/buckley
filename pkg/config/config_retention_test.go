@@ -69,3 +69,22 @@ func TestRetentionConfig_ProjectCannotOverrideGlobalHistoryPolicy(t *testing.T) 
 		t.Fatalf("user override=%+v", cfg.Retention)
 	}
 }
+
+func TestRetentionConfig_PressureAgeDefaultsAndOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Retention.PressureAge != 14*24*time.Hour {
+		t.Fatalf("default pressure age = %s, want 14 days", cfg.Retention.PressureAge)
+	}
+	if cfg.Resources.StorageBytes != 2<<30 {
+		t.Fatalf("default storage budget = %d, want 2 GiB", cfg.Resources.StorageBytes)
+	}
+	if err := validateRetention(&Config{Retention: RetentionConfig{PressureAge: -time.Second}}); err == nil {
+		t.Fatal("negative pressure age accepted")
+	}
+	if err := mergeConfigData(cfg, []byte("retention:\n  pressure_age: 48h\n"), "user config", false); err != nil || cfg.Retention.PressureAge != 48*time.Hour {
+		t.Fatalf("user override: %v %s", err, cfg.Retention.PressureAge)
+	}
+	if err := mergeConfigData(cfg, []byte("retention:\n  pressure_age: 1s\n"), "project config", true); err != nil || cfg.Retention.PressureAge != 48*time.Hour {
+		t.Fatalf("project override changed pressure age: %v %s", err, cfg.Retention.PressureAge)
+	}
+}

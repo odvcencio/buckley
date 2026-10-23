@@ -4,7 +4,7 @@ import "testing"
 
 func TestResourceConfig_DefaultsAndUserOnlyOverrides(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Resources.SessionMemoryBytes != 8<<20 || cfg.Resources.StorageBytes != 512<<20 {
+	if cfg.Resources.SessionMemoryBytes != 8<<20 || cfg.Resources.StorageBytes != 2<<30 {
 		t.Fatalf("defaults = %+v", cfg.Resources)
 	}
 	before := cfg.Resources

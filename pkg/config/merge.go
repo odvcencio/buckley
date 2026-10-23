@@ -68,6 +68,7 @@ var mergeStrategies = map[string]mergeStrategy{
 	"retention.max_completed_runs":     scopedScalarMerge,
 	"retention.ephemeral_evidence_ttl": scopedScalarMerge,
 	"retention.durable_evidence_ttl":   scopedScalarMerge,
+	"retention.pressure_age":           scopedScalarMerge,
 	"resources.storage_bytes":          scopedScalarMerge,
 	"resources.session_memory_bytes":   scopedScalarMerge,
 

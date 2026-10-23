@@ -165,7 +165,6 @@ pkg/errors/types.go Wrap
 pkg/errors/types.go captureStack
 pkg/evidence/redaction.go SummarizeForTelemetry
 pkg/evidence/redaction.go itoa
-pkg/evidence/retention.go DefaultRetentionPolicy
 pkg/evidence/store.go SQLiteStore.isPinned
 pkg/execmode/broker.go Broker.Granted
 pkg/execmode/broker.go WithCapabilityCallLimit

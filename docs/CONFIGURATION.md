@@ -761,7 +761,7 @@ Set resource budgets in user config; project config cannot change them.
 ```yaml
 resources:
   session_memory_bytes: 8388608 # 8 MiB of retained working state per session
-  storage_bytes: 536870912      # 512 MiB per database, including owned evidence
+  storage_bytes: 2147483648     # 2 GiB per database; evidence blobs count at their stored size
 ```
 
 Headless and TUI session memory accounting bounds retained conversation history
@@ -803,12 +803,16 @@ retention:
   max_completed_runs: 1000
   ephemeral_evidence_ttl: 720h
   durable_evidence_ttl: 4320h
+  pressure_age: 336h            # prune older completed runs early past 80% of storage_bytes
 ```
 
 Set retention in user config. A zero TTL or count disables that rule. Preview
 cleanup with `buckley db cleanup --dry-run`, then run `buckley db cleanup` to
 apply it. Use `--db path` for one database, or `--vacuum` to reclaim free space
-in a legacy database; full vacuum needs temporary disk space.
+in a legacy database; full vacuum needs temporary disk space. When a store passes
+80% of `resources.storage_bytes`, `buckley verify` prunes completed runs and
+unreferenced evidence older than `pressure_age` before recording, and retries once
+if the budget still blocks the write. A zero `pressure_age` turns this off.
 
 ### memory
 
