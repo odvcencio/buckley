@@ -190,15 +190,29 @@ func TestController_PartialTurnDeadlineStaysTerminalOnReplay(t *testing.T) {
 	}
 	deadline, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	t.Cleanup(cancel)
-	for _, ctx := range []context.Context{deadline, t.Context()} {
+	for attempt, ctx := range []context.Context{deadline, t.Context()} {
 		controller, err := NewController(config)
 		if err != nil {
 			t.Fatal(err)
 		}
 		result, err := controller.Run(ctx)
-		if err == nil || !result.Partial || result.Content != "preserved draft" || calls != 1 {
+		if err == nil || result.CompletionStatus != CompletionIncomplete || calls != 1 {
 			t.Fatalf("expired response was lost or retried: result=%+v error=%v calls=%d", result, err, calls)
 		}
+		if attempt == 0 && (!result.Partial || result.Content != "preserved draft") {
+			t.Fatalf("provider draft was lost: %+v", result)
+		}
+	}
+	config.RunLedger, config.Evidence, config.StepJournal = nil, nil, nil
+	controller, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, cancel = context.WithTimeout(t.Context(), 20*time.Millisecond)
+	t.Cleanup(cancel)
+	round, _, err := controller.executeModelRound(deadline, &Result{}, 1)
+	if !errors.Is(err, context.DeadlineExceeded) || round == nil || !round.partial || round.partialRetryable {
+		t.Fatalf("expired response was classified as retryable: round=%+v error=%v", round, err)
 	}
 }
 
