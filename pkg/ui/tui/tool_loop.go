@@ -403,6 +403,7 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		CallModel:          callModel,
 		DispatchTools:      dispatch,
 		History:            history,
+		OnModelRetry:       func(notice string) { c.persistAndRenderIncompleteNotice(sess, notice) },
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0

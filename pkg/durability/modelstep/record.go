@@ -30,6 +30,7 @@ type ResponseEnvelope struct {
 	CostRecorded         bool                `json:"cost_recorded"`
 	PricingError         string              `json:"pricing_error,omitempty"`
 	Partial              bool                `json:"partial,omitempty"`
+	PartialRetryable     bool                `json:"partial_retryable,omitempty"`
 	ProviderError        string              `json:"provider_error,omitempty"`
 }
 
@@ -53,6 +54,7 @@ type DecodedResponse struct {
 	CostRecorded         bool
 	PricingError         string
 	Partial              bool
+	PartialRetryable     bool
 	ProviderError        string
 	Legacy               bool
 }
@@ -134,6 +136,7 @@ func DecodeResponse(body []byte) (DecodedResponse, error) {
 		CostRecorded:         envelope.CostRecorded,
 		PricingError:         envelope.PricingError,
 		Partial:              envelope.Partial,
+		PartialRetryable:     envelope.PartialRetryable,
 		ProviderError:        envelope.ProviderError,
 	}, nil
 }
@@ -279,6 +282,9 @@ func validateResponseEnvelope(envelope ResponseEnvelope) error {
 	}
 	if envelope.PricingError != "" && NormalizeErrorText(envelope.PricingError) != envelope.PricingError {
 		return fmt.Errorf("model response evidence pricing error is not normalized")
+	}
+	if envelope.PartialRetryable && !envelope.Partial {
+		return fmt.Errorf("only partial model responses can be retryable")
 	}
 	if envelope.Partial {
 		if strings.TrimSpace(envelope.ProviderError) == "" || NormalizeErrorText(envelope.ProviderError) != envelope.ProviderError {

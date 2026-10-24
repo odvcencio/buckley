@@ -67,7 +67,7 @@ func assertTerminalPartialRenderedAndPersisted(t *testing.T, app *WidgetApp, ses
 		case AddMessageMsg:
 			if v.Source == "system" && strings.Contains(v.Content, "Incomplete result:") {
 				renderedNotice++
-				if strings.Contains(v.Content, "maximum context length") || strings.Contains(v.Content, terminalPartialPrivateSentinel) {
+				if strings.Contains(v.Content, terminalPartialPrivateSentinel) {
 					t.Fatalf("system notice leaked raw terminal/private detail: %q", v.Content)
 				}
 			}
@@ -181,6 +181,9 @@ func TestStreamResponseRetainsTerminalProviderPartial(t *testing.T) {
 
 	if got := atomic.LoadInt32(&requests); got != 1 {
 		t.Fatalf("provider requests = %d, want 1 no-rebuy terminal partial", got)
+	}
+	if !conversationHasSystemContaining(sess.Conversation.Messages, "maximum context length exceeded after partial") {
+		t.Fatal("terminal partial response lost its provider error")
 	}
 	assertTerminalPartialRenderedAndPersisted(t, app, sess, draft, 17)
 	assertTerminalPartialIdentityTelemetry(t, events, "partial-provider")

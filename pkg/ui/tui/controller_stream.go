@@ -181,7 +181,9 @@ func (c *Controller) renderIncompleteStreamResponse(sess *SessionState, result t
 }
 
 func (c *Controller) persistAndRenderIncompleteNotice(sess *SessionState, content string) {
-	c.app.AddMessage(content, "system")
+	if c.app != nil {
+		c.app.AddMessage(content, "system")
+	}
 	if sess == nil || sess.Conversation == nil {
 		return
 	}

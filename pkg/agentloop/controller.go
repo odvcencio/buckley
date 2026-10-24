@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"math/rand"
+	"net"
 	"reflect"
 	"strings"
 	"sync"
@@ -580,6 +583,8 @@ type ControllerConfig struct {
 	ObserveToolOutcome ToolOutcomeObserver
 	// History is optional.
 	History HistorySink
+	// OnModelRetry observes a bounded, redacted recovery notice. It must not retry the turn.
+	OnModelRetry func(string)
 
 	// ContextWindow resolves the model's context length for projection.
 	// Optional; nil or a non-positive result falls back to the byte-budget
@@ -838,6 +843,15 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			return result, errors.Join(roundErr, accountingErr)
 		}
 		if providerPartial {
+			if roundResult.partialRetryable && ctx.Err() == nil && transportTerminalRetries < maxTransportRetries {
+				transportTerminalRetries++
+				c.recordPartialResponseRetry(ctx, roundResult, transportTerminalRetries)
+				if waitErr := transportRetrySleep(ctx, transportTerminalRetries); waitErr == nil {
+					continue
+				} else {
+					roundErr = errors.Join(roundErr, waitErr)
+				}
+			}
 			c.capturePartialResponse(result, roundResult.response)
 			result.CompletionStatus = CompletionIncomplete
 			reason := "the provider failed after returning a partial response"
@@ -1355,12 +1369,13 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 		providerPartial := roundResult != nil && roundResult.partial
 		providerError := ""
 		if providerPartial {
-			c.capturePartialResponse(result, response)
-			result.CompletionStatus = CompletionIncomplete
 			providerError = strings.TrimSpace(roundResult.providerError)
-			result.Termination.ProviderError = providerError
 		}
 		if accountingErr != nil {
+			if providerPartial {
+				c.capturePartialResponse(result, response)
+				result.Termination.ProviderError = providerError
+			}
 			failure := errors.Join(roundErr, accountingErr)
 			failed, incompleteErr := c.failFinalization(ctx, result, failure)
 			if roundErr != nil {
@@ -1369,6 +1384,19 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 			return failed, incompleteErr
 		}
 		if providerPartial {
+			if roundResult.partialRetryable && ctx.Err() == nil && transportRetries < maxTransportRetries {
+				transportRetries++
+				c.recordPartialResponseRetry(ctx, roundResult, transportRetries)
+				if waitErr := transportRetrySleep(ctx, transportRetries); waitErr == nil {
+					finalizationOrdinal++
+					attempt--
+					continue
+				} else {
+					roundErr = errors.Join(roundErr, waitErr)
+				}
+			}
+			c.capturePartialResponse(result, response)
+			result.Termination.ProviderError = providerError
 			if roundErr == nil {
 				if providerError != "" {
 					roundErr = errors.New(providerError)
@@ -1545,6 +1573,33 @@ var transportRetrySleep = func(ctx context.Context, attempt int) error {
 		return ctx.Err()
 	case <-timer.C:
 		return nil
+	}
+}
+
+// transientPartialResponseError excludes permanent API and resource-limit failures.
+func transientPartialResponseError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, model.ErrProviderResponseTooLarge) || errors.Is(err, model.ErrProviderStreamTooLarge) || errors.Is(err, model.ErrProviderStreamFrameTooLarge) {
+		return false
+	}
+	var apiErr *model.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Retryable || apiErr.IsSharedPoolRateLimit()
+	}
+	var networkErr net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &networkErr)
+}
+
+func (c *Controller) recordPartialResponseRetry(ctx context.Context, round *modelRoundResult, attempt int) {
+	pending := 0
+	if choice := firstResponseChoice(round.response); choice != nil {
+		pending = len(choice.Message.ToolCalls)
+	}
+	detail := modelstep.NormalizeErrorText(round.providerError)
+	notice := fmt.Sprintf("Partial model response interrupted: %s. Retrying model request (%d/%d) from completed tool results; %d incomplete tool calls were not executed.", detail, attempt, maxTransportRetries, pending)
+	slog.Warn("retrying partial model response", "attempt", attempt, "pending_tool_calls", pending, "provider_error", detail)
+	c.recordEvent(ctx, runledger.EventControllerDecision, map[string]any{"kind": "partial_response_retry", "decision": "partial_response_retry", "reason": notice, "provider_error": detail, "attempt": attempt, "pending_tool_calls": pending})
+	if c.cfg.OnModelRetry != nil {
+		c.cfg.OnModelRetry(notice)
 	}
 }
 
@@ -1815,13 +1870,14 @@ type modelCostReservation struct {
 }
 
 type modelRoundResult struct {
-	response       *model.ChatResponse
-	chargedCostUSD float64
-	costRecorded   bool
-	pricingError   string
-	partial        bool
-	providerError  string
-	identity       *model.ExecutionIdentity
+	response         *model.ChatResponse
+	chargedCostUSD   float64
+	costRecorded     bool
+	pricingError     string
+	partial          bool
+	partialRetryable bool
+	providerError    string
+	identity         *model.ExecutionIdentity
 	// responseToolOffer is the tool-offer decision for the exact provider
 	// request that produced response. It is persisted with the response so
 	// replay cannot widen a no-tools retry back into a dispatchable call.
@@ -2643,6 +2699,7 @@ func (c *Controller) replayModelStep(ctx context.Context, stepID string, step ru
 		costRecorded:           decoded.CostRecorded,
 		pricingError:           decoded.PricingError,
 		partial:                decoded.Partial,
+		partialRetryable:       decoded.PartialRetryable,
 		providerError:          decoded.ProviderError,
 		identity:               identity,
 		responseToolOfferKnown: decoded.ResponseToolsOffered != nil,
@@ -2727,6 +2784,7 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 		CostRecorded:         costRecorded,
 		PricingError:         pricingError,
 		Partial:              callErr != nil,
+		PartialRetryable:     transientPartialResponseError(callErr),
 	}
 	if callErr != nil {
 		responseEnvelope.ProviderError = persistedProviderError
@@ -2773,6 +2831,7 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 		blockErr := c.blockModelStepRetry(ctx, step, persistedProviderError, err, responseEvidenceID, outputDigest)
 		return roundResult, errors.Join(callErr, err, blockErr)
 	}
+	roundResult.partialRetryable = responseEnvelope.PartialRetryable
 	completed := modelStepPayload(step.StepID, step.Attempt, inputDigest, req.Model, round, "")
 	completed["phase"] = stepKind
 	completed["prompt_tokens"] = response.Usage.PromptTokens
