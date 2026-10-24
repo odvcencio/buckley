@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -28,12 +29,13 @@ type Config struct {
 	WarnOnSuccessfulRepeats bool
 }
 
-// DefaultConfig is deliberately generous for productive agent work while
-// preventing an unattended harness from spending indefinitely.
+// DefaultConfig sets no round or tool-call ceiling: a zero MaxRounds or
+// MaxToolCalls means unlimited, and a caller opts in to a cap by setting one
+// (the --max-tool-calls flag, oneshot.max_tool_calls, or the emergency fuse).
+// The repeat and cycle detectors stay on: they stop a loop that makes no
+// progress, which is a safety property and not a budget.
 func DefaultConfig() Config {
 	return Config{
-		MaxRounds:          32,
-		MaxToolCalls:       96,
 		ExactRepeatLimit:   3,
 		OutcomeRepeatLimit: 5,
 		CycleMaxLength:     4,
@@ -153,10 +155,10 @@ func (g *Governor) BeginRound() Decision {
 		return Decision{}
 	}
 	g.rounds++
-	if g.rounds <= g.config.MaxRounds {
+	if g.config.MaxRounds <= 0 || g.rounds <= g.config.MaxRounds {
 		return Decision{}
 	}
-	reason := fmt.Sprintf("tool loop exceeded the %d-round harness limit", g.config.MaxRounds)
+	reason := fmt.Sprintf("tool loop exceeded the %d-round harness limit; raise it with the emergency fuse (agent_controller.emergency_fuse.model_requests) or remove it by setting 0", g.config.MaxRounds)
 	return stopDecision("round_limit", reason, g.rounds)
 }
 
@@ -204,8 +206,8 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	// evidence changes is progress; repeating the same action/evidence sequence is not.
 	g.appendAction(exactKey)
 
-	if g.toolCalls >= g.config.MaxToolCalls {
-		reason := fmt.Sprintf("tool loop reached the %d-call harness limit", g.config.MaxToolCalls)
+	if g.config.MaxToolCalls > 0 && g.toolCalls >= g.config.MaxToolCalls {
+		reason := fmt.Sprintf("tool loop reached the %d-call harness limit; raise it with --max-tool-calls, oneshot.max_tool_calls or agent_controller.emergency_fuse.tool_executions, or remove it by setting 0", g.config.MaxToolCalls)
 		return stopDecision("tool_call_limit", reason, g.toolCalls)
 	}
 
@@ -267,6 +269,9 @@ func (g *Governor) RemainingToolCalls() int {
 	if g == nil {
 		return 0
 	}
+	if g.config.MaxToolCalls <= 0 {
+		return math.MaxInt
+	}
 	return max(g.config.MaxToolCalls-g.toolCalls, 0)
 }
 
@@ -324,12 +329,8 @@ func (g *Governor) ActionRequired() bool {
 
 func normalizedConfig(config Config) Config {
 	defaults := DefaultConfig()
-	if config.MaxRounds <= 0 {
-		config.MaxRounds = defaults.MaxRounds
-	}
-	if config.MaxToolCalls <= 0 {
-		config.MaxToolCalls = defaults.MaxToolCalls
-	}
+	config.MaxRounds = max(config.MaxRounds, 0)
+	config.MaxToolCalls = max(config.MaxToolCalls, 0)
 	if config.MaxReadOnlyCalls > 0 {
 		if config.ReadOnlyWarningAt <= 0 {
 			config.ReadOnlyWarningAt = max(config.MaxReadOnlyCalls/2, 1)
