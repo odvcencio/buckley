@@ -138,7 +138,7 @@ func TestController_PartialCancellationDoesNotRetry(t *testing.T) {
 	}
 }
 
-func TestController_PartialNativeExecutionDoesNotRetry(t *testing.T) {
+func TestController_PartialNativeOrAdapterRecoveryDoesNotRetry(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string
 		model    string
@@ -150,6 +150,7 @@ func TestController_PartialNativeExecutionDoesNotRetry(t *testing.T) {
 		{name: "routed native provider", model: "alias", provider: func(string) string { return "codex" }, response: textResponse("native draft", model.Usage{})},
 		{name: "observed native provider", model: "alias", response: &model.ChatResponse{ExecutionIdentity: &model.ExecutionIdentity{ProviderID: "codex"}}},
 		{name: "provider execution evidence", model: "test-model", response: &model.ChatResponse{ExecutionEvidence: []model.CommandExecutionEvidence{{Command: "write completed", Status: "completed"}}}},
+		{name: "adapter attempt evidence", model: "test-model", response: &model.ChatResponse{AttemptEvidence: []model.ModelAttemptEvidence{{}}}},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			calls := 0
