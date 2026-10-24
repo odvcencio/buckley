@@ -843,7 +843,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			return result, errors.Join(roundErr, accountingErr)
 		}
 		if providerPartial {
-			if roundResult.partialRetryable && ctx.Err() == nil && transportTerminalRetries < maxTransportRetries {
+			if roundResult.partialRetryable && ctx.Err() == nil && transportTerminalRetries < maxTransportRetries && (c.cfg.MaxModelRequests <= 0 || result.ModelRequests < c.cfg.MaxModelRequests) {
 				transportTerminalRetries++
 				c.recordPartialResponseRetry(ctx, roundResult, transportTerminalRetries)
 				if waitErr := transportRetrySleep(ctx, transportTerminalRetries); waitErr == nil {
@@ -1384,7 +1384,7 @@ func (c *Controller) finalizeStoppedTurn(ctx context.Context, result *Result, ro
 			return failed, incompleteErr
 		}
 		if providerPartial {
-			if roundResult.partialRetryable && ctx.Err() == nil && transportRetries < maxTransportRetries {
+			if roundResult.partialRetryable && ctx.Err() == nil && transportRetries < maxTransportRetries && (c.cfg.MaxModelRequests <= 0 || result.ModelRequests < c.cfg.MaxModelRequests) {
 				transportRetries++
 				c.recordPartialResponseRetry(ctx, roundResult, transportRetries)
 				if waitErr := transportRetrySleep(ctx, transportRetries); waitErr == nil {

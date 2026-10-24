@@ -262,6 +262,40 @@ func TestController_PartialFinalizationRetriesAndReplays(t *testing.T) {
 	}
 }
 
+func TestController_PartialRequestLimitKeepsDraftWithoutRetry(t *testing.T) {
+	withoutTransportBackoff(t)
+	for _, finalization := range []bool{false, true} {
+		t.Run(fmt.Sprintf("finalization=%v", finalization), func(t *testing.T) {
+			calls := 0
+			config := ControllerConfig{
+				MaxModelRequests: 1,
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return model.ChatRequest{Model: "test-model"}, nil
+				},
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					calls++
+					return textResponse("last partial draft", model.Usage{TotalTokens: 1}), io.ErrUnexpectedEOF
+				}),
+				OnModelRetry: func(string) { t.Error("retry announced after the request budget was exhausted") },
+			}
+			controller, err := NewController(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result *Result
+			if finalization {
+				controller.cfg.FinalizeOnStop = true
+				result, err = controller.finalizeStoppedTurn(t.Context(), &Result{CompletionStatus: CompletionIncomplete, Termination: Termination{Kind: "round_limit"}}, 1)
+			} else {
+				result, err = controller.Run(t.Context())
+			}
+			if err == nil || !result.Partial || result.Content != "last partial draft" || calls != 1 || result.ModelRequests != 1 {
+				t.Fatalf("partial request budget lost evidence: result=%+v error=%v calls=%d", result, err, calls)
+			}
+		})
+	}
+}
+
 func TestTransientPartialResponseError_Classification(t *testing.T) {
 	for _, scenario := range []struct {
 		name  string
