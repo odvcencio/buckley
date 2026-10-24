@@ -3,6 +3,7 @@ package rlm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
@@ -315,34 +315,33 @@ func TestSubAgentExecute_TruncatedResponsePreservesDraftAndIdentity(t *testing.T
 	}
 }
 
-type partialDeadlineModelClient struct {
+type partialFailureModelClient struct {
 	calls    int
 	sawTools bool
 	resp     *model.ChatResponse
 }
 
-func (c *partialDeadlineModelClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+func (c *partialFailureModelClient) ChatCompletion(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
 	c.calls++
 	c.sawTools = len(req.Tools) > 0
-	<-ctx.Done()
-	return c.resp, ctx.Err()
+	return c.resp, &model.APIError{StatusCode: 400, Message: "maximum context length exceeded"}
 }
 
-func (c *partialDeadlineModelClient) GetContextLength(string) (int, error) { return 8192, nil }
+func (c *partialFailureModelClient) GetContextLength(string) (int, error) { return 8192, nil }
 
-func (c *partialDeadlineModelClient) ProviderIDForModel(string) string { return "fake-provider" }
+func (c *partialFailureModelClient) ProviderIDForModel(string) string { return "fake-provider" }
 
-func (c *partialDeadlineModelClient) GetPricing(string) (*model.ModelPricing, error) {
+func (c *partialFailureModelClient) GetPricing(string) (*model.ModelPricing, error) {
 	return nil, fmt.Errorf("no pricing")
 }
 
-func (c *partialDeadlineModelClient) CalculateCostFromTokens(string, int, int) (float64, error) {
+func (c *partialFailureModelClient) CalculateCostFromTokens(string, int, int) (float64, error) {
 	return 0, fmt.Errorf("no pricing")
 }
 
-func TestSubAgentExecute_PartialTurnDeadlineKeepsDraftIdentityAndDoesNotRetry(t *testing.T) {
+func TestSubAgentExecute_PermanentPartialFailureKeepsDraftIdentityAndDoesNotRetry(t *testing.T) {
 	private := "private-reasoning-sentinel"
-	fake := &partialDeadlineModelClient{
+	fake := &partialFailureModelClient{
 		resp: &model.ChatResponse{
 			ID:    "partial-response-id",
 			Model: "provider-model",
@@ -379,17 +378,19 @@ func TestSubAgentExecute_PartialTurnDeadlineKeepsDraftIdentityAndDoesNotRetry(t 
 		t.Fatalf("NewSubAgent: %v", err)
 	}
 	agent.client = fake
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	t.Cleanup(cancel)
-	result, err := agent.Execute(ctx, "partial")
+	result, err := agent.Execute(t.Context(), "partial")
 	if err == nil {
-		t.Fatal("Execute() error = nil, want partial deadline error")
+		t.Fatal("Execute() error = nil, want permanent partial provider error")
+	}
+	var providerError *model.APIError
+	if !errors.As(err, &providerError) || providerError.StatusCode != 400 {
+		t.Fatalf("provider cause lost: %v", err)
 	}
 	if fake.calls != 1 {
-		t.Fatalf("model calls = %d, want no retry after partial deadline response", fake.calls)
+		t.Fatalf("model calls = %d, want no retry after permanent partial response", fake.calls)
 	}
 	if !fake.sawTools {
-		t.Fatal("fake model request had no tools; test did not exercise exploration deadline branch")
+		t.Fatal("fake model request had no tools; test did not exercise partial provider failure branch")
 	}
 	if readTool.calls != 0 {
 		t.Fatalf("tool executions = %d, want partial provider response to stop before dispatch", readTool.calls)
