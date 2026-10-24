@@ -498,6 +498,9 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 			recordSubAgentModelResponse(result, resp)
 		}
 		if err != nil {
+			if providerID != "codex" && resp == nil {
+				result.Usage.UsageEvidenceMissing = true
+			}
 			return resp, err
 		}
 		return resp, nil

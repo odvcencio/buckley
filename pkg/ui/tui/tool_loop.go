@@ -403,6 +403,7 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		CallModel:          callModel,
 		DispatchTools:      dispatch,
 		History:            history,
+		OnModelRetry:       func(notice string) { c.persistAndRenderIncompleteNotice(sess, notice) },
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0
@@ -541,9 +542,8 @@ func (c *Controller) callToolLoopTurn(ctx context.Context, sess *SessionState, m
 		return resp, nil
 	}
 	if resp != nil {
-		// Do not retry a continuation that returned billable material with
-		// an error; the shared Controller will preserve/account that partial
-		// response and mark the logical turn incomplete.
+		// The shared Controller owns accounting, preservation and safe recovery
+		// of a continuation that returned billable material with an error.
 		return resp, err
 	}
 

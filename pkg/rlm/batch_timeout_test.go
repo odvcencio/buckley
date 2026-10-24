@@ -63,7 +63,7 @@ func TestBatchDispatcherTaskTimeoutRetainsPartialAndDoesNotRetry(t *testing.T) {
 	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Name != "read_file" {
 		t.Fatalf("tool calls = %+v, want retained completed tool", got.ToolCalls)
 	}
-	wantUsage := transparency.TokenUsage{Input: 5, Output: 1, ReportedTotal: 6, UsageEvidencePresent: true}
+	wantUsage := transparency.TokenUsage{Input: 5, Output: 1, ReportedTotal: 6, UsageEvidencePresent: true, UsageEvidenceMissing: true}
 	if !reflect.DeepEqual(got.Usage, wantUsage) || got.TokensUsed != 6 || got.InputTokens != 5 || got.OutputTokens != 1 {
 		t.Fatalf("usage = %+v legacy=%d/%d/%d, want retained first response usage", got.Usage, got.TokensUsed, got.InputTokens, got.OutputTokens)
 	}

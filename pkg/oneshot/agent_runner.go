@@ -636,6 +636,9 @@ func agentRunnerInvocationCostDetail(models *model.Manager, providerID, modelID 
 	if providerID == "codex" {
 		return 0, false, false
 	}
+	if tokens.ProviderCostKnown && tokens.UsageEvidenceMissing {
+		return tokens.ProviderCostUSD, true, false
+	}
 	// A BYOK response that reports $0 has not reported the upstream charge, so
 	// only a positive provider figure counts as reported; zero falls through to
 	// the catalog estimate.

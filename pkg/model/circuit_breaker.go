@@ -9,6 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"m31labs.dev/buckley/pkg/evidence"
+	"m31labs.dev/buckley/pkg/telemetry"
 )
 
 // CircuitState represents the state of the circuit breaker
@@ -255,7 +258,8 @@ func (cb *CircuitBreaker) finishCall(generation uint64, ownsHalfOpenProbe bool, 
 	failures := cb.failureCount
 	cb.mu.Unlock()
 	if err != nil {
-		slog.Warn("circuit breaker counted a failure", "error", err, "consecutive_failures", failures)
+		detail := telemetry.SanitizeText(string(evidence.Redact([]byte(err.Error()))), 2048)
+		slog.Warn("circuit breaker counted a failure", "error", detail, "consecutive_failures", failures)
 	}
 
 	if transition != nil {
