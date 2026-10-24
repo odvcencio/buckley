@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -30,13 +31,60 @@ type oneShotOptions struct {
 	ModelOverride string
 	AllowedTools  []string
 	ReadRoots     []string // --read-root paths, added to tools.read_roots
+	Caps          oneShotCaps
 	CodeMode      bool
 	Limits        acpLoopLimits
 	OutputSchema  string
 }
 
+// oneShotCaps are the optional run caps from flags. A zero field falls back to
+// the matching oneshot.* config key, and zero there means no cap.
+type oneShotCaps struct {
+	MaxToolCalls    int
+	MaxElapsed      time.Duration
+	MaxOutputTokens int
+	BudgetUSD       float64
+}
+
+// applyOneShotCaps sets limits from flags, then config. It never adds a cap
+// of its own.
+func applyOneShotCaps(limits acpLoopLimits, cfg *config.Config, caps oneShotCaps) acpLoopLimits {
+	var fromConfig config.OneshotModeConfig
+	if cfg != nil {
+		fromConfig = cfg.Oneshot
+	}
+	pickInt := func(flag, key int) int {
+		if flag > 0 {
+			return flag
+		}
+		return max(key, 0)
+	}
+	if limits.MaxToolCalls <= 0 {
+		limits.MaxToolCalls = pickInt(caps.MaxToolCalls, fromConfig.MaxToolCalls)
+	}
+	if limits.MaxOutputTokens <= 0 {
+		limits.MaxOutputTokens = pickInt(caps.MaxOutputTokens, fromConfig.MaxOutputTokens)
+	}
+	if limits.MaxElapsedSeconds <= 0 {
+		elapsed := caps.MaxElapsed
+		if elapsed <= 0 {
+			elapsed = fromConfig.MaxElapsed
+		}
+		if elapsed > 0 {
+			limits.MaxElapsedSeconds = int((elapsed + time.Second - 1) / time.Second)
+		}
+	}
+	if limits.MaxCostUSD <= 0 {
+		limits.MaxCostUSD = caps.BudgetUSD
+		if limits.MaxCostUSD <= 0 && fromConfig.BudgetUSD > 0 {
+			limits.MaxCostUSD = fromConfig.BudgetUSD
+		}
+	}
+	return limits
+}
+
 func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, opts oneShotOptions) int {
-	limits := opts.Limits
+	limits := applyOneShotCaps(opts.Limits, cfg, opts.Caps)
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	stopReason := ""
@@ -325,6 +373,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr, cwd), limits)
 	if err != nil {
 		codeModeFailure = err
+		if hint := oneShotCapHint(err, limits); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 		if outputSchema == artifactv1.SchemaVersion {
 			return printOneShotArtifactFailure(artifactSubmission, err, limits.RequiredSourceText...)
 		}
@@ -371,28 +422,13 @@ func oneShotHostToolsAllowed(cfg *config.Config) bool {
 		cfg.Sandbox.AllowUnsafe && strings.EqualFold(strings.TrimSpace(cfg.Sandbox.Mode), "disabled")
 }
 
-const (
-	// Read-only one-shot work is primarily context gathering for a later
-	// investigator/orchestrator. Keep its envelope large enough to synthesize
-	// a real summary, but bounded enough that a model which keeps rereading
-	// cannot occupy the process indefinitely.
-	defaultReadOnlyToolCalls      = 16
-	defaultReadOnlyElapsedSeconds = 180
-	defaultReadOnlyOutputTokens   = 4096
-)
-
+// applyOneShotTaskIntentDefaults shapes a read-only run without capping it:
+// there is no implicit tool-call, elapsed-time or output-token limit. Models
+// that read widely and think long need the room, and a cap is opted into with
+// --max-tool-calls, --max-elapsed and --max-output-tokens.
 func applyOneShotTaskIntentDefaults(limits acpLoopLimits) acpLoopLimits {
 	if limits.TaskIntent != agentloop.ReadOnlyIntent {
 		return limits
-	}
-	if limits.MaxToolCalls <= 0 {
-		limits.MaxToolCalls = defaultReadOnlyToolCalls
-	}
-	if limits.MaxElapsedSeconds <= 0 {
-		limits.MaxElapsedSeconds = defaultReadOnlyElapsedSeconds
-	}
-	if limits.MaxOutputTokens <= 0 {
-		limits.MaxOutputTokens = defaultReadOnlyOutputTokens
 	}
 	// Read-only work ends by reporting evidence. It must not be redirected
 	// into an edit window merely because a generic coding protocol supplied
@@ -435,4 +471,21 @@ func ensureRequiredOneShotTools(filter []string, artifactRequired, codeModeRequi
 		tools = append(tools, "exec_program")
 	}
 	return cleanToolNames(tools)
+}
+
+// oneShotCapHint names the explicit cap a failed run hit and how to raise it.
+// It returns "" when the failure is not an explicit cap.
+func oneShotCapHint(err error, limits acpLoopLimits) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case limits.MaxElapsedSeconds > 0 && errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("Stopped at the %s elapsed-time cap (--max-elapsed or oneshot.max_elapsed). Raise it, or set 0 to remove it.", time.Duration(limits.MaxElapsedSeconds)*time.Second)
+	case limits.MaxCostUSD > 0 && strings.Contains(err.Error(), "limit"):
+		if strings.Contains(err.Error(), "spend") || strings.Contains(err.Error(), "cost") {
+			return fmt.Sprintf("Stopped at the $%.4f spend cap (--budget or oneshot.budget_usd). Raise it, or set 0 to remove it.", limits.MaxCostUSD)
+		}
+	}
+	return ""
 }

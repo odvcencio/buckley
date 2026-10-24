@@ -506,6 +506,14 @@ type OneshotModeConfig struct {
 	// (force non-ZDR retention with provider.data_collection=deny). See
 	// DefaultOneshotDataPolicy.
 	DataPolicy string `yaml:"data_policy" env:"BUCKLEY_ONESHOT_DATA_POLICY"`
+
+	// Optional caps for one-shot runs. Zero (the default) means no cap. The
+	// matching flags --max-tool-calls, --max-elapsed, --max-output-tokens and
+	// --budget override them for one run.
+	MaxToolCalls    int           `yaml:"max_tool_calls"`
+	MaxElapsed      time.Duration `yaml:"max_elapsed"`
+	MaxOutputTokens int           `yaml:"max_output_tokens"`
+	BudgetUSD       float64       `yaml:"budget_usd"`
 }
 
 // RLMConfig controls Buckley's coordinator–worker runtime. The historical

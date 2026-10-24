@@ -81,6 +81,9 @@ func validateExecutionModes(c *Config) error {
 	if mode := strings.ToLower(strings.TrimSpace(c.Oneshot.Mode)); mode != "" && mode != ExecutionModeClassic {
 		return fmt.Errorf("invalid oneshot mode: %s (valid: classic; coordinated execution (legacy mode key: rlm) is only an execution mode)", c.Oneshot.Mode)
 	}
+	if c.Oneshot.MaxToolCalls < 0 || c.Oneshot.MaxElapsed < 0 || c.Oneshot.MaxOutputTokens < 0 || c.Oneshot.BudgetUSD < 0 {
+		return fmt.Errorf("oneshot caps must be zero (no cap) or positive")
+	}
 	validBackends := map[string]bool{
 		DurableBackendLocal: true,
 		DurableBackendDapr:  true,
