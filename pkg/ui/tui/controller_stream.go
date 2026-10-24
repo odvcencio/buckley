@@ -9,6 +9,7 @@ import (
 
 	"m31labs.dev/buckley/pkg/agentloop"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/durability/modelstep"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/telemetry"
 )
@@ -172,6 +173,13 @@ func (c *Controller) renderStreamResponse(result toolLoopResult) {
 func (c *Controller) renderIncompleteStreamResponse(sess *SessionState, result toolLoopResult, err error) {
 	notice := agentloop.PresentIncompleteResult(err)
 	detail := notice.Message
+	var incomplete *agentloop.IncompleteTurnError
+	if errors.As(err, &incomplete) {
+		cause := strings.Join(strings.Fields(modelstep.NormalizeErrorText(incomplete.ProviderError)), " ")
+		if cause != "" && !strings.Contains(detail, cause) {
+			detail += " Provider error: " + cause
+		}
+	}
 	text := strings.TrimSpace(result.Text)
 	c.persistAndRenderIncompleteNotice(sess, detail)
 	if text == "" {

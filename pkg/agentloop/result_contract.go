@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"m31labs.dev/buckley/pkg/durability/modelstep"
 )
 
 // TaskIntent classifies a task by its execution model and expected outcomes.
@@ -90,11 +88,10 @@ func (e *CompletionContractError) Error() string {
 }
 
 type IncompleteResultNotice struct {
-	Code          string
-	Reason        string
-	NextAction    string
-	Message       string
-	ProviderError string
+	Code       string
+	Reason     string
+	NextAction string
+	Message    string
 }
 
 func PresentIncompleteResult(err error) IncompleteResultNotice {
@@ -116,11 +113,8 @@ func PresentIncompleteResult(err error) IncompleteResultNotice {
 		if detail := strings.TrimSpace(incomplete.FinalizationError); detail != "" {
 			notice.Reason = detail
 		}
-		if detail := modelstep.NormalizeErrorText(incomplete.ProviderError); detail != "" {
-			notice.ProviderError = sanitizeIncompleteNoticeText(detail, modelstep.MaxPersistedErrorRunes)
-			if notice.Reason == "the turn stopped before a conclusive answer was produced" {
-				notice.Reason = notice.ProviderError
-			}
+		if detail := strings.TrimSpace(incomplete.ProviderError); detail != "" && notice.Reason == "the turn stopped before a conclusive answer was produced" {
+			notice.Reason = detail
 		}
 	}
 	var contractErr *CompletionContractError
@@ -146,9 +140,6 @@ func PresentIncompleteResult(err error) IncompleteResultNotice {
 		notice.NextAction = "Inspect and reconcile the actual workspace state before retrying or continuing."
 	}
 	notice.Message = "Incomplete result: " + strings.TrimSuffix(notice.Reason, ".") + ". Next: " + notice.NextAction
-	if notice.ProviderError != "" && notice.ProviderError != notice.Reason {
-		notice.Message += " Provider error: " + notice.ProviderError
-	}
 	return notice
 }
 

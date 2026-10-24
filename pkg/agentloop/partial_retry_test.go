@@ -106,8 +106,11 @@ func TestController_PartialRetryIsBoundedAndRedacted(t *testing.T) {
 		t.Fatalf("result=%+v error=%v calls=%d notices=%d dispatches=%d", result, runErr, calls, notices, dispatches)
 	}
 	notice := PresentIncompleteResult(runErr)
-	if !strings.Contains(notice.Message, "Provider error:") || !strings.Contains(notice.Message, "HTTP 503") || strings.Contains(notice.Message, secret) {
-		t.Fatal(notice.Message)
+	if strings.Contains(notice.Message, "upstream overloaded") || strings.Contains(notice.Message, secret) {
+		t.Fatal("provider details leaked into the public incomplete notice")
+	}
+	if !strings.Contains(result.Termination.ProviderError, "HTTP 503") || strings.Contains(result.Termination.ProviderError, secret) {
+		t.Fatal("local provider cause lost or unredacted")
 	}
 }
 
