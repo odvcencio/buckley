@@ -53,9 +53,9 @@ type TokenUsage struct {
 	// evidence, even when the reported counts were explicitly zero.
 	UsageEvidencePresent bool `json:"usage_evidence_present,omitempty"`
 
-	// UsageEvidenceMissing records that a real model response was observed but
-	// did not carry provider usage evidence. Counts remain as reported/absent;
-	// cost inference must not treat the response as a known free invocation.
+	// UsageEvidenceMissing records a model response or failed API attempt
+	// without provider usage evidence. Counts remain as reported/absent;
+	// later responses must not make the aggregate cost look fully accounted for.
 	UsageEvidenceMissing bool `json:"usage_evidence_missing,omitempty"`
 
 	// ProviderCostUSD is the provider's own authoritative cost for this
