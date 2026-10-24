@@ -2776,6 +2776,15 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 			}
 		}
 	}
+	// Native agents may have performed effects inside the provider call.
+	// Only retry API responses whose incomplete tools have not been dispatched.
+	partialRetryable := transientPartialResponseError(callErr) && len(response.ExecutionEvidence) == 0 && req.Model != "codex" && !strings.HasPrefix(req.Model, "codex/")
+	if c.cfg.ProviderID != nil && c.cfg.ProviderID(req.Model) == "codex" {
+		partialRetryable = false
+	}
+	if response.ExecutionIdentity != nil && response.ExecutionIdentity.ProviderID == "codex" {
+		partialRetryable = false
+	}
 	responseEnvelope := modelResponseEvidenceEnvelope{
 		Version:              modelResponseEvidenceVersion,
 		Response:             response,
@@ -2784,7 +2793,7 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 		CostRecorded:         costRecorded,
 		PricingError:         pricingError,
 		Partial:              callErr != nil,
-		PartialRetryable:     transientPartialResponseError(callErr),
+		PartialRetryable:     partialRetryable,
 	}
 	if callErr != nil {
 		responseEnvelope.ProviderError = persistedProviderError

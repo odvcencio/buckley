@@ -10,6 +10,7 @@ import (
 )
 
 func TestController_PartialCancellationRetainsEvidenceAndStopReason(t *testing.T) {
+	withoutTransportBackoff(t)
 	for _, kind := range []string{"cancelled", "deadline_exceeded", "provider_timeout"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -49,16 +50,18 @@ func TestController_PartialCancellationRetainsEvidenceAndStopReason(t *testing.T
 			result, err := ctrl.Run(ctx)
 			var incomplete *IncompleteTurnError
 			wantCause, wantKind := error(context.DeadlineExceeded), kind
+			wantRequests := 1
 			if kind == "cancelled" {
 				wantCause = context.Canceled
 			} else if kind == "provider_timeout" {
 				wantKind = FinishReasonModelError
+				wantRequests = maxTransportRetries + 1
 			}
 			if !errors.Is(err, wantCause) || !errors.As(err, &incomplete) {
 				t.Fatalf("lost cancellation or incomplete error: %v", err)
 			}
-			if requests != 1 || result.Content != "partial evidence" || result.Usage.TotalTokens != 123 || result.CompletionStatus != CompletionIncomplete {
-				t.Fatalf("partial response was lost or retried: requests=%d result=%+v", requests, result)
+			if requests != wantRequests || result.Content != "partial evidence" || result.Usage.TotalTokens != 123*wantRequests || result.CompletionStatus != CompletionIncomplete {
+				t.Fatalf("partial response was lost or retry count was incorrect: requests=%d result=%+v", requests, result)
 			}
 			if result.Termination.Kind != wantKind || stopped.Kind != wantKind || incomplete.StopReason != wantKind {
 				t.Fatalf("inconsistent stop classification: result=%+v stop=%+v error=%+v", result.Termination, stopped, incomplete)

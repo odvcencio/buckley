@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/runledger"
 )
 
 func TestController_PartialRetryKeepsCompletedWorkAndReplays(t *testing.T) {
@@ -130,6 +131,85 @@ func TestController_PartialCancellationDoesNotRetry(t *testing.T) {
 	result, err := controller.Run(ctx)
 	if !errors.Is(err, context.Canceled) || calls != 1 || !result.Partial {
 		t.Fatalf("result=%+v error=%v calls=%d", result, err, calls)
+	}
+}
+
+func TestController_PartialNativeExecutionDoesNotRetry(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		model    string
+		provider func(string) string
+		response *model.ChatResponse
+	}{
+		{name: "native model", model: "codex", response: textResponse("native draft", model.Usage{})},
+		{name: "native model alias", model: "codex/gpt-6", response: textResponse("native draft", model.Usage{})},
+		{name: "routed native provider", model: "alias", provider: func(string) string { return "codex" }, response: textResponse("native draft", model.Usage{})},
+		{name: "observed native provider", model: "alias", response: &model.ChatResponse{ExecutionIdentity: &model.ExecutionIdentity{ProviderID: "codex"}}},
+		{name: "provider execution evidence", model: "test-model", response: &model.ChatResponse{ExecutionEvidence: []model.CommandExecutionEvidence{{Command: "write completed", Status: "completed"}}}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			calls := 0
+			controller, err := NewController(ControllerConfig{
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					return model.ChatRequest{Model: scenario.model}, nil
+				},
+				ProviderID: scenario.provider,
+				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
+					calls++
+					return scenario.response, io.ErrUnexpectedEOF
+				}),
+				OnModelRetry: func(string) { t.Error("native execution retried") },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := controller.Run(t.Context())
+			if !errors.Is(err, io.ErrUnexpectedEOF) || calls != 1 || !result.Partial {
+				t.Fatalf("result=%+v error=%v calls=%d", result, err, calls)
+			}
+		})
+	}
+}
+
+func TestController_PartialFinalizationRetriesAndReplays(t *testing.T) {
+	withoutTransportBackoff(t)
+	ledger, ev, runID := newDurableControllerStores(t)
+	calls, dispatches := 0, 0
+	for _, replay := range []bool{false, true} {
+		controller := newFinalizationOrdinalController(t, ledger, ev, runID, "partial-finalization", "turn", &recordingHistory{},
+			func(_ context.Context, call ModelDispatchCall) (*model.ChatResponse, error) {
+				calls++
+				switch calls {
+				case 1:
+					return toolCallResponse("completed-write", "write_file", `{}`, model.Usage{TotalTokens: 1}), nil
+				case 2:
+					if len(call.Request.Tools) != 0 {
+						t.Fatal("finalization enabled tools")
+					}
+					return textResponse("incomplete final", model.Usage{TotalTokens: 2}), io.ErrUnexpectedEOF
+				case 3:
+					if call.StepID != StableStepID(runID, "partial-finalization", "turn", 1, "finalize", 1) || len(call.Request.Tools) != 0 {
+						t.Fatalf("retry did not advance durable ordinal safely: %+v", call)
+					}
+					return textResponse("verified final answer", model.Usage{TotalTokens: 3}), nil
+				default:
+					t.Fatal("replay called provider")
+					return nil, nil
+				}
+			}, func(context.Context, []model.ToolCall) ([]ToolOutcome, error) {
+				dispatches++
+				return []ToolOutcome{{Content: "write completed", Success: true}}, nil
+			})
+		result, err := controller.Run(t.Context())
+		if err != nil || result.CompletionStatus != CompletionConclusive || result.Partial || result.Content != "verified final answer" || result.Usage.TotalTokens != 6 || calls != 3 || dispatches != 1 {
+			t.Fatalf("replay=%v result=%+v error=%v calls=%d dispatches=%d", replay, result, err, calls, dispatches)
+		}
+	}
+	for _, ordinal := range []int{0, 1} {
+		step, err := ledger.GetStep(t.Context(), runID, StableStepID(runID, "partial-finalization", "turn", 1, "finalize", ordinal))
+		if err != nil || step.Status != runledger.StepCompleted {
+			t.Fatalf("partial finalization step not replayable: %+v %v", step, err)
+		}
 	}
 }
 
