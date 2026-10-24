@@ -506,6 +506,11 @@ type OneshotModeConfig struct {
 	// (force non-ZDR retention with provider.data_collection=deny). See
 	// DefaultOneshotDataPolicy.
 	DataPolicy string `yaml:"data_policy" env:"BUCKLEY_ONESHOT_DATA_POLICY"`
+
+	// AllowShell offers run_shell to a one-shot mutation run in a trusted
+	// project even when --tools does not name it. Sandbox, approval rules and
+	// approval.denied_tools still apply. Off by default.
+	AllowShell bool `yaml:"allow_shell"`
 }
 
 // RLMConfig controls Buckley's coordinator–worker runtime. The historical

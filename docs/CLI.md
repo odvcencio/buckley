@@ -77,6 +77,15 @@ model call. Profile and protocol limits can narrow the requested budget. Output
 tokens include any provider reasoning allowance; a word target is not a token cap.
 Do not solve an undersized budget by removing the read-only contract.
 
+One-shot runs have no approver, so by default they are not offered `run_shell` or other
+destructive tools. A trusted project can opt in to shell for a mutation run by naming
+`run_shell` in `--tools`, passing `--allow-shell`, or setting `oneshot.allow_shell: true`.
+Shell is granted only with `--task-intent mutation` in a project marked trusted
+(`buckley trust allow`); the sandbox, the approval rules and `approval.denied_tools`
+still apply to every command. A request that cannot be granted does not stop the run: the
+trace header prints `dropped from --tools: run_shell (...)` with the reason and, for an
+untrusted project, how to enable it.
+
 For a code change, use `--task-intent mutation`, name the files or behavior to
 change and the relevant checks, and request a final account of changes and test
 results. Keep repository verification requirements active. For committing already

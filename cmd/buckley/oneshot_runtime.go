@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,7 @@ type oneShotOptions struct {
 	ModelOverride string
 	AllowedTools  []string
 	ReadRoots     []string // --read-root paths, added to tools.read_roots
+	AllowShell    bool     // --allow-shell
 	CodeMode      bool
 	Limits        acpLoopLimits
 	OutputSchema  string
@@ -91,6 +93,15 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		return 1
 	}
 
+	trust, _, _, trustErr := projectTrustStatusForPath(cwd)
+	if trustErr != nil {
+		trust = projectTrustUnknown
+	}
+	shell := decideOneShotShell(oneShotShellRequest{
+		Flag: opts.AllowShell, ConfigAllow: cfg.Oneshot.AllowShell, Tools: opts.AllowedTools,
+		Intent: limits.TaskIntent, Trust: trust, DeniedTools: cfg.Approval.DeniedTools, HostTools: limits.allowHostTools,
+	})
+	limits.allowShell = shell.Allow && !limits.allowHostTools
 	readRoots, err := config.ResolveReadRoots(cwd, cfg.Tools.ReadRoots, opts.ReadRoots)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -100,6 +111,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
 		if len(readRoots) > 0 {
 			fmt.Fprintf(os.Stderr, "read roots (read-only): %s\n", strings.Join(readRoots, ", "))
+		}
+		if limits.allowShell {
+			fmt.Fprintf(os.Stderr, "shell: run_shell enabled (trusted project; requested by %s; sandbox and approval rules apply)\n", shell.Source)
 		}
 		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
 	}
@@ -256,6 +270,20 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		toolFilter = ensureHostMutationTools(toolFilter, registry)
 		if callerTools != nil {
 			toolFilter = intersectAgentRunTools(toolFilter, callerTools)
+		}
+	}
+	if limits.allowShell {
+		// A restricted filter must still carry the granted shell. A nil filter
+		// already exposes every tool.
+		for _, filter := range []*[]string{&toolFilter, &callerTools} {
+			if *filter != nil && !slices.Contains(*filter, "run_shell") {
+				*filter = append(*filter, "run_shell")
+			}
+		}
+	}
+	if !quietMode {
+		if line := formatDroppedTools(droppedRequestedTools(registry, opts.AllowedTools, shell, limits.allowHostTools)); line != "" {
+			fmt.Fprintln(os.Stderr, line)
 		}
 	}
 	toolFilter = ensureRequiredOneShotTools(toolFilter, artifactSubmission != nil, codeRuntime != nil)

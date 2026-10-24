@@ -152,6 +152,7 @@ type startupOptions struct {
 	tools            []string
 	toolsSet         bool
 	readRoots        []string // --read-root paths, repeatable
+	allowShell       bool     // --allow-shell
 	taskIntent       agentloop.TaskIntent
 	taskIntentSet    bool
 	persist          bool
@@ -328,6 +329,7 @@ func main() {
 		ModelOverride: modelOverrideFlag,
 		AllowedTools:  opts.tools,
 		ReadRoots:     opts.readRoots,
+		AllowShell:    opts.allowShell,
 		CodeMode:      opts.codeMode,
 		Limits:        acpLoopLimits{TaskIntent: opts.taskIntent, Persist: opts.persist},
 	}
@@ -897,6 +899,7 @@ func printHelp() {
 	fmt.Println("  --persist                       Continue one-shot mutation work until complete or blocked")
 	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
 	fmt.Println("  --tools <names>                  Limit one-shot model tools (comma-separated, repeatable)")
+	fmt.Println("  --allow-shell                    Offer run_shell to a one-shot mutation run in a trusted project (or name it in --tools)")
 	fmt.Println("  --read-root <path>               Let read-only tools read this directory or file (repeatable; also tools.read_roots)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
 	fmt.Println("  --encoding json|toon             Set serialization format")
@@ -1788,6 +1791,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 			return false, nil
 		}
 		s.pending = startupPendingTools
+	case "--allow-shell":
+		if !beforeCommand {
+			return false, nil
+		}
+		opts.allowShell = true
 	case "--read-root":
 		if !beforeCommand {
 			return false, nil
