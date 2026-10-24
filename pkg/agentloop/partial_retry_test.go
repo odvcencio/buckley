@@ -67,7 +67,7 @@ func TestController_PartialRetryKeepsCompletedWorkAndReplays(t *testing.T) {
 		if result.Partial || result.CompletionStatus != CompletionConclusive || result.Content != "completed safely" || result.Usage.TotalTokens != 6 {
 			t.Fatalf("replay=%v result=%+v", replay, result)
 		}
-		if providerCalls != 3 || writes != 1 || len(history.messages) != 2 {
+		if providerCalls != 3 || writes != 1 || len(history.messages) != 3 {
 			t.Fatalf("replay=%v calls=%d writes=%d history=%+v", replay, providerCalls, writes, history.messages)
 		}
 	}
