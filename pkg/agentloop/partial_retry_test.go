@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/runledger"
@@ -168,6 +169,36 @@ func TestController_PartialNativeExecutionDoesNotRetry(t *testing.T) {
 				t.Fatalf("result=%+v error=%v calls=%d", result, err, calls)
 			}
 		})
+	}
+}
+
+func TestController_PartialTurnDeadlineStaysTerminalOnReplay(t *testing.T) {
+	ledger, ev, runID := newDurableControllerStores(t)
+	calls := 0
+	config := ControllerConfig{
+		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+			return model.ChatRequest{Model: "test-model"}, nil
+		},
+		CallModel: ModelCallerFunc(func(ctx context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+			calls++
+			<-ctx.Done()
+			return textResponse("preserved draft", model.Usage{TotalTokens: 1}), ctx.Err()
+		}),
+		OnModelRetry: func(string) { t.Error("expired turn retried") },
+		RunLedger:    ledger, Evidence: ev, StepJournal: ledger, RunID: runID,
+		SessionID: "deadline-session", TaskID: "deadline-task", TurnID: "deadline-turn",
+	}
+	deadline, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	t.Cleanup(cancel)
+	for _, ctx := range []context.Context{deadline, t.Context()} {
+		controller, err := NewController(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := controller.Run(ctx)
+		if err == nil || !result.Partial || result.Content != "preserved draft" || calls != 1 {
+			t.Fatalf("expired response was lost or retried: result=%+v error=%v calls=%d", result, err, calls)
+		}
 	}
 }
 

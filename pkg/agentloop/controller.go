@@ -2778,7 +2778,7 @@ func (c *Controller) callAndRecordModelStep(ctx context.Context, req model.ChatR
 	}
 	// Native agents may have performed effects inside the provider call.
 	// Only retry API responses whose incomplete tools have not been dispatched.
-	partialRetryable := transientPartialResponseError(callErr) && len(response.ExecutionEvidence) == 0 && req.Model != "codex" && !strings.HasPrefix(req.Model, "codex/")
+	partialRetryable := ctx.Err() == nil && transientPartialResponseError(callErr) && len(response.ExecutionEvidence) == 0 && req.Model != "codex" && !strings.HasPrefix(req.Model, "codex/")
 	if c.cfg.ProviderID != nil && c.cfg.ProviderID(req.Model) == "codex" {
 		partialRetryable = false
 	}
