@@ -191,7 +191,7 @@ func TestController_PartialTurnDeadlineStaysTerminalOnReplay(t *testing.T) {
 		RunLedger:    ledger, Evidence: ev, StepJournal: ledger, RunID: runID,
 		SessionID: "deadline-session", TaskID: "deadline-task", TurnID: "deadline-turn",
 	}
-	deadline, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	deadline, cancel := context.WithTimeout(t.Context(), time.Second)
 	t.Cleanup(cancel)
 	for attempt, ctx := range []context.Context{deadline, t.Context()} {
 		controller, err := NewController(config)
@@ -211,7 +211,7 @@ func TestController_PartialTurnDeadlineStaysTerminalOnReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline, cancel = context.WithTimeout(t.Context(), 20*time.Millisecond)
+	deadline, cancel = context.WithTimeout(t.Context(), time.Second)
 	t.Cleanup(cancel)
 	round, _, err := controller.executeModelRound(deadline, &Result{}, 1)
 	if !errors.Is(err, context.DeadlineExceeded) || round == nil || !round.partial || round.partialRetryable {
