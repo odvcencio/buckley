@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
@@ -320,10 +321,11 @@ type partialDeadlineModelClient struct {
 	resp     *model.ChatResponse
 }
 
-func (c *partialDeadlineModelClient) ChatCompletion(_ context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+func (c *partialDeadlineModelClient) ChatCompletion(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
 	c.calls++
 	c.sawTools = len(req.Tools) > 0
-	return c.resp, context.DeadlineExceeded
+	<-ctx.Done()
+	return c.resp, ctx.Err()
 }
 
 func (c *partialDeadlineModelClient) GetContextLength(string) (int, error) { return 8192, nil }
@@ -338,7 +340,7 @@ func (c *partialDeadlineModelClient) CalculateCostFromTokens(string, int, int) (
 	return 0, fmt.Errorf("no pricing")
 }
 
-func TestSubAgentExecute_PartialDeadlineKeepsDraftIdentityAndDoesNotRetry(t *testing.T) {
+func TestSubAgentExecute_PartialTurnDeadlineKeepsDraftIdentityAndDoesNotRetry(t *testing.T) {
 	private := "private-reasoning-sentinel"
 	fake := &partialDeadlineModelClient{
 		resp: &model.ChatResponse{
@@ -377,7 +379,9 @@ func TestSubAgentExecute_PartialDeadlineKeepsDraftIdentityAndDoesNotRetry(t *tes
 		t.Fatalf("NewSubAgent: %v", err)
 	}
 	agent.client = fake
-	result, err := agent.Execute(context.Background(), "partial")
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	t.Cleanup(cancel)
+	result, err := agent.Execute(ctx, "partial")
 	if err == nil {
 		t.Fatal("Execute() error = nil, want partial deadline error")
 	}
