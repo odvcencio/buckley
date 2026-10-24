@@ -84,7 +84,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	concurrency := fs.Int("concurrency", defaultShardConcurrency, "maximum number of shards reviewed at once")
 	fullDepth := fs.Bool("full-depth", false, "disable the review-depth Decisions gate and always run at full configured reasoning")
 
-	if err := fs.Parse(interspersedReviewPRArgs(args)); err != nil {
+	if err := fs.Parse(interspersedReviewPRArgs(fs, args)); err != nil {
 		return reviewPRCommandOptions{}, err
 	}
 	effort, err := resolveOneshotEffort("review", *effortFlag)
@@ -156,7 +156,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 // flag as an ignored positional argument. The standard flag package stops at
 // the first positional argument, so move the one PR reference behind the
 // command's flags before parsing.
-func interspersedReviewPRArgs(args []string) []string {
+func interspersedReviewPRArgs(fs *flag.FlagSet, args []string) []string {
 	flags := make([]string, 0, len(args))
 	positionals := make([]string, 0, 1)
 	for i := 0; i < len(args); i++ {
@@ -172,7 +172,11 @@ func interspersedReviewPRArgs(args []string) []string {
 
 		flags = append(flags, arg)
 		name, hasInlineValue := reviewPRFlagName(arg)
-		if hasInlineValue || !reviewPRFlagTakesValue(name) || i+1 >= len(args) {
+		defined := fs.Lookup(name)
+		if hasInlineValue || defined == nil || i+1 >= len(args) {
+			continue
+		}
+		if boolean, ok := defined.Value.(interface{ IsBoolFlag() bool }); ok && boolean.IsBoolFlag() {
 			continue
 		}
 		flags = append(flags, args[i+1])
@@ -187,16 +191,6 @@ func reviewPRFlagName(arg string) (string, bool) {
 		return before, true
 	}
 	return name, false
-}
-
-func reviewPRFlagTakesValue(name string) bool {
-	switch name {
-	case "model", "effort", "critic-model", "timeout", "output", "budget", "max-turns", "max-tool-calls", "max-diff-bytes", "max-context-tokens", "max-validation-attempts", "depth",
-		"shards", "concurrency":
-		return true
-	default:
-		return false
-	}
 }
 
 // hostedReviewCeiling is the longest a posted review may run when an external
