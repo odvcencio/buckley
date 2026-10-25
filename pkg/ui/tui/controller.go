@@ -533,6 +533,7 @@ func (c *Controller) Run() error {
 		c.telemetryBridge.Start(context.Background())
 	}
 	defer func() {
+		c.closeUndoStores()
 		for _, sess := range c.sessions {
 			if sess == nil {
 				continue
@@ -1730,6 +1731,7 @@ func (c *Controller) Stop() {
 		}
 	}
 	c.mu.Unlock()
+	c.closeUndoStores()
 	c.app.Quit()
 }
 
