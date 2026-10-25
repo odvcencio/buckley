@@ -154,7 +154,7 @@ func (a *WidgetApp) handleAltShortcut(m KeyMsg, key terminal.Key) bool {
 
 func (a *WidgetApp) dispatchRuntimeKey(m KeyMsg, key terminal.Key) bool {
 	runtimeMsg := runtimeKeyMsg(m, key)
-	if a.handleFocusedInputNavigation(key, runtimeMsg) {
+	if a.handleFocusedInputKey(runtimeMsg) {
 		return true
 	}
 
@@ -173,8 +173,8 @@ func runtimeKeyMsg(m KeyMsg, key terminal.Key) runtime.KeyMsg {
 	}
 }
 
-func (a *WidgetApp) handleFocusedInputNavigation(key terminal.Key, msg runtime.KeyMsg) bool {
-	if !a.inputArea.IsFocused() || !isInputNavigationKey(key) {
+func (a *WidgetApp) handleFocusedInputKey(msg runtime.KeyMsg) bool {
+	if a.screen.OverlayCount() > 0 || !a.inputArea.IsFocused() {
 		return false
 	}
 
@@ -185,15 +185,6 @@ func (a *WidgetApp) handleFocusedInputNavigation(key terminal.Key, msg runtime.K
 
 	a.handleRuntimeCommands(result.Commands)
 	return true
-}
-
-func isInputNavigationKey(key terminal.Key) bool {
-	switch key {
-	case terminal.KeyUp, terminal.KeyDown, terminal.KeyHome, terminal.KeyEnd:
-		return true
-	default:
-		return false
-	}
 }
 
 func (a *WidgetApp) handleRuntimeCommands(commands []runtime.Command) {
