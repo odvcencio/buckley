@@ -175,8 +175,8 @@ func renderMDPPInline(node *mdpp.Node) string {
 
 func renderMDPPList(list *mdpp.Node, depth int) string {
 	ordered := list.Attr("ordered") == "true"
-	start, _ := strconv.Atoi(list.Attr("start"))
-	if start < 1 {
+	start, err := strconv.Atoi(list.Attr("start"))
+	if err != nil || start < 0 {
 		start = 1
 	}
 	var lines []string
