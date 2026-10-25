@@ -1170,14 +1170,36 @@ func extractSection(review, heading string) string {
 }
 
 func parseStatusSection(section string) (build, test string) {
-	lines := strings.Split(section, "\n")
-	for _, line := range lines {
+	var seenBuild, seenTests bool
+	for _, line := range strings.Split(section, "\n") {
 		line = strings.TrimSpace(line)
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "- build:") || strings.HasPrefix(lower, "build:") {
-			build = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-		} else if strings.HasPrefix(lower, "- tests:") || strings.HasPrefix(lower, "tests:") {
-			test = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		if len(line) >= 2 && (line[0] == '-' || line[0] == '*') && (line[1] == ' ' || line[1] == '\t') {
+			line = strings.TrimSpace(line[2:])
+		}
+		label, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		label = strings.TrimSpace(label)
+		if len(label) > 4 && strings.HasPrefix(label, "**") && strings.HasSuffix(label, "**") {
+			label = label[2 : len(label)-2]
+		}
+		value = strings.TrimSpace(value)
+		switch {
+		case strings.EqualFold(label, "Build"):
+			if !seenBuild {
+				build = value
+			} else {
+				build = ""
+			}
+			seenBuild = true
+		case strings.EqualFold(label, "Tests"):
+			if !seenTests {
+				test = value
+			} else {
+				test = ""
+			}
+			seenTests = true
 		}
 	}
 	return
