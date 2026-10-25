@@ -82,6 +82,11 @@ func TestRetainTrees_ReleasesDiscardedTreesAndIsolatesHandles(t *testing.T) {
 	if err := b.RetainTrees(ctx, trees[1:2]); err != nil {
 		t.Fatal(err)
 	}
+	// Unretained staging was collected; recapture the current latest worktree.
+	latest, err := a.WriteTree(ctx)
+	if err != nil || latest != trees[2] {
+		t.Fatalf("recaptured latest snapshot: %s %v", latest, err)
+	}
 	if err := a.RetainTrees(ctx, []string{trees[2], trees[2]}); err != nil {
 		t.Fatal(err)
 	}
