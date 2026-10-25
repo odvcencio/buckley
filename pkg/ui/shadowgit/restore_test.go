@@ -133,9 +133,19 @@ func TestApply_RefusesObstructingIgnoredFilesBeforeEdits(t *testing.T) {
 			}
 			// Make a target in which node is tracked, then a source in which it
 			// is ignored. The real index remains unrelated to either snapshot.
-			retentionGit(t, repo, "add", "-f", "node")
-			target := retentionGit(t, repo, "write-tree")
-			retentionGit(t, repo, "rm", "--cached", "--", "node")
+			index, cleanup, err := temporaryIndex()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			env := []string{"GIT_INDEX_FILE=" + index}
+			if _, err := store.run(context.Background(), env, "add", "-f", "node"); err != nil {
+				t.Fatal(err)
+			}
+			target, err := store.run(context.Background(), env, "write-tree")
+			if err != nil {
+				t.Fatal(err)
+			}
 			writeFile(t, repo, "a.txt", "changed")
 			if directory {
 				if err := os.Remove(filepath.Join(repo, "node")); err != nil {
@@ -146,6 +156,9 @@ func TestApply_RefusesObstructingIgnoredFilesBeforeEdits(t *testing.T) {
 				writeFile(t, repo, "node", "keep ignored work")
 			}
 			source := restoreTree(t, store)
+			if err := store.RetainTrees(context.Background(), []string{source, target}); err != nil {
+				t.Fatal(err)
+			}
 			err = store.Apply(context.Background(), source, target)
 			if err == nil || !strings.Contains(err.Error(), "untracked path") {
 				t.Fatalf("expected obstruction error, got %v", err)
@@ -218,9 +231,25 @@ func TestApply_RejectsChangedSubmoduleBeforeEdits(t *testing.T) {
 	}
 	before := restoreTree(t, store)
 	writeFile(t, repo, "a.txt", "changed")
-	retentionGit(t, repo, "add", ".")
-	retentionGit(t, repo, "update-index", "--add", "--cacheinfo", "160000", commit, "module")
-	after := retentionGit(t, repo, "write-tree")
+	index, cleanup, err := temporaryIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	env := []string{"GIT_INDEX_FILE=" + index}
+	if _, err := store.run(context.Background(), env, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.run(context.Background(), env, "update-index", "--add", "--cacheinfo", "160000", commit, "module"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.run(context.Background(), env, "write-tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetainTrees(context.Background(), []string{before, after}); err != nil {
+		t.Fatal(err)
+	}
 	err = store.Apply(context.Background(), after, before)
 	if err == nil || !strings.Contains(err.Error(), "submodule") {
 		t.Fatalf("expected explicit submodule refusal, got %v", err)

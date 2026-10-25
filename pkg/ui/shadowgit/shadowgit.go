@@ -1,10 +1,7 @@
-// Package shadowgit snapshots a git worktree into a hidden ref namespace
-// (refs/worktree/buckley/undo-live/<session>/<handle>) so the TUI can revert and restore file
-// changes turn by turn, without creating visible branches or touching the
-// caller's git index. It is the file-side twin of Buckley's conversation
-// history: every operation here is plain git plumbing (write-tree,
-// commit-tree, update-ref, diff, cat-file) run against a temporary index
-// file, never the repository's real one.
+// Package shadowgit snapshots worktree files into a live handle's private Git
+// objects and retention ref. Capture and restore preserve repository settings
+// through temporary indexes; collection uses only the owned bare repository.
+// The user's branches, object database and real index remain untouched.
 package shadowgit
 
 import (
@@ -126,7 +123,7 @@ func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 }
 
 // Close releases only this handle's ref and prevents late turns from repinning it.
-// Other handles, legacy refs, branches, the index and Git objects are untouched.
+// It removes the owned cache without changing other handles or the user's Git data.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
