@@ -4,11 +4,11 @@ import "testing"
 
 func TestResourceConfig_DefaultsAndUserOnlyOverrides(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Resources.SessionMemoryBytes != 8<<20 || cfg.Resources.StorageBytes != 2<<30 {
+	if cfg.Resources.SessionMemoryBytes != 8<<20 || cfg.Resources.StorageBytes != 2<<30 || cfg.Resources.UndoStorageBytes != 128<<20 {
 		t.Fatalf("defaults = %+v", cfg.Resources)
 	}
 	before := cfg.Resources
-	data := []byte("resources:\n  session_memory_bytes: 0\n  storage_bytes: 0\n")
+	data := []byte("resources:\n  session_memory_bytes: 0\n  storage_bytes: 0\n  undo_storage_bytes: 0\n")
 	if err := mergeConfigData(cfg, data, "project config", true); err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +30,13 @@ func TestValidateResources_RejectsUnusableBudgets(t *testing.T) {
 		invalid bool
 	}{
 		{"disabled", ResourceConfig{}, false},
-		{"minimum", ResourceConfig{64 << 10, 16 << 20}, false},
-		{"negative memory", ResourceConfig{-1, 0}, true},
-		{"negative disk", ResourceConfig{0, -1}, true},
-		{"tiny memory", ResourceConfig{1024, 0}, true},
-		{"tiny disk", ResourceConfig{0, 1 << 20}, true},
+		{"minimum", ResourceConfig{SessionMemoryBytes: 64 << 10, StorageBytes: 16 << 20, UndoStorageBytes: 1 << 20}, false},
+		{"negative memory", ResourceConfig{SessionMemoryBytes: -1}, true},
+		{"negative disk", ResourceConfig{StorageBytes: -1}, true},
+		{"negative undo disk", ResourceConfig{UndoStorageBytes: -1}, true},
+		{"tiny memory", ResourceConfig{SessionMemoryBytes: 1024}, true},
+		{"tiny disk", ResourceConfig{StorageBytes: 1 << 20}, true},
+		{"tiny undo disk", ResourceConfig{UndoStorageBytes: 1 << 10}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateResources(&Config{Resources: tc.limits})

@@ -50,15 +50,16 @@ func SanitizeRefComponent(sessionID string) string {
 
 // Store owns one live handle's private snapshot objects and retention ref.
 type Store struct {
-	repoDir   string
-	gitDir    string
-	commonDir string
-	workTree  string
-	pending   []string
-	removed   bool
-	ref       string
-	mu        sync.Mutex
-	closed    bool
+	repoDir          string
+	gitDir           string
+	commonDir        string
+	workTree         string
+	pending          []string
+	removed          bool
+	ref              string
+	mu               sync.Mutex
+	closed           bool
+	collectionNeeded bool
 }
 
 // New returns a Store rooted at repoDir for sessionID. It returns
@@ -80,23 +81,37 @@ func New(repoDir, sessionID string) (*Store, error) {
 // parentless root does not retain discarded turns or another handle's history.
 // Expired private objects are collected without touching the user's object database.
 func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
+	committed, err := s.RetainTreesWithinLimit(ctx, trees, 0)
+	if committed && err != nil {
+		slog.WarnContext(ctx, "Could not collect released undo snapshots", "error", err)
+		return nil
+	}
+	return err
+}
+
+// RetainTreesWithinLimit refuses a nonempty retention root that exceeds limit.
+// Zero disables admission accounting. The committed result distinguishes an
+// unchanged root from cleanup errors after publication; callers must publish
+// their new records whenever committed is true. Snapshot capture is temporary
+// staging and can exceed this retained-storage budget.
+func (s *Store) RetainTreesWithinLimit(ctx context.Context, trees []string, limit int64) (committed bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return fmt.Errorf("shadowgit: retain trees: %w", os.ErrClosed)
+		return false, fmt.Errorf("shadowgit: retain trees: %w", os.ErrClosed)
+	}
+	if limit < 0 {
+		return false, fmt.Errorf("shadowgit: storage limit must be nonnegative")
 	}
 	if len(trees) == 0 {
 		if err := s.clearRef(ctx); err != nil {
-			return err
+			return false, err
 		}
 		clear(s.pending)
 		s.pending = nil
-		if err := s.collect(ctx); err != nil {
-			// The release committed; callers must discard their old records even
-			// when subsequent cache cleanup needs another attempt.
-			slog.WarnContext(ctx, "Could not collect released undo snapshots", "error", err)
-		}
-		return nil
+		err := s.collect(ctx)
+		s.collectionNeeded = err != nil
+		return true, err
 	}
 
 	trees = slices.Clone(trees)
@@ -108,23 +123,29 @@ func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 	}
 	out, err := s.runBytes(ctx, nil, strings.NewReader(input.String()), "mktree")
 	if err != nil {
-		return fmt.Errorf("shadowgit: retain trees: %w", err)
+		return false, fmt.Errorf("shadowgit: retain trees: %w", err)
 	}
 	commit, err := s.commitTree(ctx, strings.TrimSpace(string(out)), "", "buckley-undo: retained trees")
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Keep the previous published root and the proposed root through collection.
-	// A failed ref update must leave the existing undo history usable.
-	if err := s.collect(ctx, commit); err != nil {
-		return err
+	if limit > 0 {
+		used, err := s.retainedBytes(ctx, commit)
+		if err != nil {
+			return false, err
+		}
+		if used > limit {
+			return false, fmt.Errorf("%w: need %d bytes, limit %d", ErrStorageLimit, used, limit)
+		}
 	}
 	if err := s.updateRef(ctx, commit); err != nil {
-		return err
+		return false, err
 	}
 	clear(s.pending)
 	s.pending = nil
-	return nil
+	err = s.collect(ctx)
+	s.collectionNeeded = err != nil
+	return true, err
 }
 
 // Close releases only this handle's ref and prevents late turns from repinning it.
@@ -168,9 +189,17 @@ func (s *Store) WriteTree(ctx context.Context) (string, error) {
 	if s.closed {
 		return "", fmt.Errorf("shadowgit: snapshot: %w", os.ErrClosed)
 	}
+	if s.collectionNeeded {
+		if err := s.collect(ctx); err != nil {
+			return "", err
+		}
+		s.collectionNeeded = false
+	}
 	tree, err := s.writeTree(ctx)
 	if err != nil {
-		return "", errors.Join(err, s.collect(ctx))
+		collectErr := s.collect(ctx)
+		s.collectionNeeded = collectErr != nil
+		return "", errors.Join(err, collectErr)
 	}
 	s.pending = append(s.pending, tree)
 	return tree, nil
@@ -456,7 +485,7 @@ func (s *Store) run(ctx context.Context, env []string, args ...string) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
+func (s *Store) command(ctx context.Context, env []string, args ...string) *exec.Cmd {
 	// Every index used here is private and short-lived. Split indexes would
 	// leave sharedindex sidecars in the user's Git directory after cleanup.
 	options := []string{"-c", "core.splitIndex=false", "-c", "core.logAllRefUpdates=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
@@ -465,8 +494,13 @@ func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, arg
 	}
 	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	cmd.Dir = s.repoDir
-	cmd.Stdin = input
 	cmd.Env = s.environment(env)
+	return cmd
+}
+
+func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
+	cmd := s.command(ctx, env, args...)
+	cmd.Stdin = input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

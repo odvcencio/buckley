@@ -806,6 +806,7 @@ Set resource budgets in user config; project config cannot change them.
 resources:
   session_memory_bytes: 8388608 # 8 MiB of retained working state per session
   storage_bytes: 2147483648     # 2 GiB per database; evidence blobs count at their stored size
+  undo_storage_bytes: 134217728 # 128 MiB per live TUI session's private undo cache
 ```
 
 Headless and TUI session memory accounting bounds retained conversation history
@@ -818,6 +819,16 @@ cannot fit pause the session; raise the limit and restart to reload them.
 This bounds retained working state, not total process RSS, provider-native state
 or temporary allocations during a model or tool call. The minimum enabled memory
 budget is 64 KiB; an explicit `0` disables it.
+
+The TUI expires its oldest undo records to keep each live session's private Git
+cache within `undo_storage_bytes` after a turn settles. The cache includes private
+metadata and unique retained objects, counted by allocated file blocks on Unix
+and 4 KiB rounded file sizes elsewhere. If one turn's before/after snapshots
+cannot fit, completed files and transcript remain saved while undo history is
+cleared. This does not delete resume or replay evidence. The minimum enabled undo
+budget is 1 MiB; `0` disables this limit. Snapshot capture and Git ref updates need
+temporary disk space beyond the retained budget. Cleanup failures are reported
+and prevent further snapshot capture until cleanup succeeds.
 
 Disk accounting is transactional. SQLite allocation, indexes and WAL growth also
 have limits; conservative headroom can stop writes before the configured byte

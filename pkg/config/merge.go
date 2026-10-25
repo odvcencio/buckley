@@ -73,6 +73,7 @@ var mergeStrategies = map[string]mergeStrategy{
 	"retention.pressure_age":           scopedScalarMerge,
 	"resources.storage_bytes":          scopedScalarMerge,
 	"resources.session_memory_bytes":   scopedScalarMerge,
+	"resources.undo_storage_bytes":     scopedScalarMerge,
 
 	// Per-name / per-key merges: a project config can add or override a
 	// single named entry without restating everything else at that level.
