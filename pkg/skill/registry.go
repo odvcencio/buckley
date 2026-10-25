@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// ActivationPersistence stores skill transitions without coupling the registry to storage.
+type ActivationPersistence interface {
+	SaveSessionSkill(sessionID, skillName, activatedBy, scope string) error
+	DeactivateSessionSkill(sessionID, skillName string) error
+}
+
 // Registry manages skill discovery, loading, and activation
 type Registry struct {
 	mu          sync.RWMutex
@@ -17,6 +23,8 @@ type Registry struct {
 	active      map[string]*ActiveSkill // Currently active skills
 	loader      *Loader
 	diagnostics []string
+	persistence ActivationPersistence
+	sessionID   string
 }
 
 // NewRegistry creates a new skill registry
@@ -26,6 +34,13 @@ func NewRegistry() *Registry {
 		active: make(map[string]*ActiveSkill),
 		loader: NewLoader(),
 	}
+}
+
+// SetPersistence binds Activate and Deactivate to a durable session.
+func (r *Registry) SetPersistence(sessionID string, persistence ActivationPersistence) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionID, r.persistence = sessionID, persistence
 }
 
 // Register adds or replaces a skill in the registry.
@@ -187,6 +202,12 @@ func (r *Registry) Activate(name, scope, activatedBy string) error {
 		return ErrSkillAlreadyActive{Name: name}
 	}
 
+	if r.persistence != nil {
+		if err := r.persistence.SaveSessionSkill(r.sessionID, name, activatedBy, scope); err != nil {
+			return fmt.Errorf("persist skill %q activation: %w", name, err)
+		}
+	}
+
 	r.active[name] = &ActiveSkill{
 		Skill:       skill,
 		Scope:       scope,
@@ -204,6 +225,12 @@ func (r *Registry) Deactivate(name string) error {
 
 	if _, active := r.active[name]; !active {
 		return ErrSkillNotActive{Name: name}
+	}
+
+	if r.persistence != nil {
+		if err := r.persistence.DeactivateSessionSkill(r.sessionID, name); err != nil {
+			return fmt.Errorf("persist skill %q deactivation: %w", name, err)
+		}
 	}
 
 	delete(r.active, name)
@@ -314,4 +341,53 @@ func promptSkillDescription(description string) string {
 		return compact
 	}
 	return strings.TrimSpace(string(runes[:maxRunes-1])) + "…"
+}
+
+// ToolFilter intersects the restrictions of all active skills. Nil is unrestricted.
+func (r *Registry) ToolFilter() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var allowed []string
+	for _, active := range r.active {
+		tools := active.Skill.AllowedTools
+		if len(tools) == 0 {
+			continue
+		}
+		if allowed == nil {
+			allowed = append([]string{}, tools...)
+			continue
+		}
+		next := allowed[:0]
+		for _, name := range allowed {
+			for _, permitted := range tools {
+				if name == permitted {
+					next = append(next, name)
+					break
+				}
+			}
+		}
+		allowed = next
+	}
+	sort.Strings(allowed)
+	return allowed
+}
+
+// ActiveInstructions renders current guidance independently of transcript retention.
+func (r *Registry) ActiveInstructions(metadata SkillConversationMetadata) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.active))
+	for name := range r.active {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var text strings.Builder
+	for _, name := range names {
+		active := r.active[name]
+		fmt.Fprintf(&text, "# Active Skill: %s\n\n**Scope:** %s\n\n", name, active.Scope)
+		text.WriteString(FormatTodoRequirement(active.Skill, metadata))
+		text.WriteString(active.Skill.Content)
+		text.WriteString("\n\n")
+	}
+	return strings.TrimSpace(text.String())
 }
