@@ -130,6 +130,18 @@ func TestMarkdownPPForTerminalPreservesTaskLists(t *testing.T) {
 	}
 }
 
+func TestMarkdownPPForTerminalFinishesZeroNumberedList(t *testing.T) {
+	// mdpp before v0.5.0 looped forever on a list numbered from 0 once a reply
+	// was long enough (2048 bytes, three headings) to take its segmented path.
+	reply := "# Plan\n\n" +
+		strings.Repeat("Padding words keep this reply above the size where mdpp segments it.\n", 40) +
+		"\n## Notes\n\nnone\n\n## Phasing\n\n0. **Flag gate.** first step\n1. second step\n"
+	got := markdownPPForTerminal(reply)
+	if !strings.Contains(got, "first step") || !strings.Contains(got, "second step") {
+		t.Fatalf("zero-numbered list items were lost: %q", got)
+	}
+}
+
 func TestChatViewScrollbarClickAndDrag(t *testing.T) {
 	view := NewChatView()
 	view.Layout(runtime.Rect{X: 0, Y: 0, Width: 40, Height: 6})
