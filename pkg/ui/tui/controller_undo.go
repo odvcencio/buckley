@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/ui/shadowgit"
@@ -131,21 +132,30 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 		records[0] = turnUndoRecord{}
 		records = records[1:]
 	}
-	trees := undoTrees(records, sess.redoStack)
-	appendedAfter := sess.Conversation.AppendCount()
-	c.mu.Unlock()
-	if err := boundary.store.RetainTrees(ctx, trees); err != nil {
-		return
-	}
-	c.mu.Lock()
-	if sess.historyVersion == boundary.historyVersion && sess.Conversation.AppendCount() == appendedAfter {
-		sess.undoStack = records
+	diskLimit := c.cfg.Resources.UndoStorageBytes
+	diskEvicted := false
+	for {
+		committed, err := boundary.store.RetainTreesWithinLimit(ctx, undoTrees(records, sess.redoStack), diskLimit)
+		if errors.Is(err, shadowgit.ErrStorageLimit) && len(records) > 0 {
+			records[0] = turnUndoRecord{}
+			records = records[1:]
+			diskEvicted = true
+			continue
+		}
+		if committed {
+			// Publish under the controller lock before another operation can use
+			// records whose private objects were just collected.
+			sess.undoStack = records
+		}
 		c.mu.Unlock()
+		if err != nil {
+			slog.WarnContext(ctx, "Could not retain undo snapshots", "error", err, "committed", committed)
+			c.app.AddMessage("Undo snapshot retention failed; completed work is preserved. Check Buckley logs.", "system")
+		} else if diskEvicted && len(records) == 0 {
+			c.app.AddMessage("Completed work saved. Undo is unavailable for this turn because its snapshots exceed the undo storage budget.", "system")
+		}
 		return
 	}
-	trees = undoTrees(sess.undoStack, sess.redoStack)
-	c.mu.Unlock()
-	_ = boundary.store.RetainTrees(ctx, trees)
 }
 
 func undoTurnStart(sess *SessionState, boundary turnBoundary) (int, bool) {

@@ -46,6 +46,9 @@ func (s *Store) initStorage(ctx context.Context) error {
 	if err := os.WriteFile(filepath.Join(private, "HEAD"), []byte("ref: refs/worktree/buckley/unborn\n"), 0600); err != nil {
 		return fmt.Errorf("shadowgit: initialize private HEAD: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(private, s.ref)), 0700); err != nil {
+		return fmt.Errorf("shadowgit: initialize private ref directory: %w", err)
+	}
 	s.gitDir, s.commonDir, s.workTree = private, commonDir, workTree
 	return nil
 }
