@@ -154,6 +154,7 @@ type startupOptions struct {
 	toolsSet         bool
 	readRoots        []string // --read-root paths, repeatable
 	// Optional one-shot caps; zero means no cap.
+	capFlags        map[string]bool
 	maxToolCalls    int
 	maxElapsed      time.Duration
 	maxOutputTokens int
@@ -336,7 +337,7 @@ func main() {
 		ModelOverride: modelOverrideFlag,
 		AllowedTools:  opts.tools,
 		ReadRoots:     opts.readRoots,
-		Caps:          oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD},
+		Caps:          oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD, Set: opts.capFlags},
 		CodeMode:      opts.codeMode,
 		Limits:        acpLoopLimits{TaskIntent: opts.taskIntent, Persist: opts.persist},
 	}
@@ -1933,6 +1934,10 @@ func (opts *startupOptions) setCap(flagName, raw string) error {
 		}
 		opts.budgetUSD = v
 	}
+	if opts.capFlags == nil {
+		opts.capFlags = make(map[string]bool)
+	}
+	opts.capFlags[flagName] = true
 	return nil
 }
 

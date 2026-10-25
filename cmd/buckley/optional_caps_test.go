@@ -45,15 +45,13 @@ func TestReadOnlyIntentHasNoImplicitCaps(t *testing.T) {
 		t.Fatalf("read-only ladder set: %+v", limits)
 	}
 	// A read-only run with no flags builds a governor that does not stop at 16 calls.
-	gov := newACPToolLoopGovernorWithLimits(config.DefaultConfig(), withoutFuse(limits))
+	gov := newACPToolLoopGovernorWithLimits(config.DefaultConfig(), limits)
 	for i := 0; i < 60; i++ {
 		if d := gov.Observe("read_file", fmt.Sprintf(`{"path":"f%d"}`, i), fmt.Sprintf("c%d", i), true); d.Stop {
 			t.Fatalf("read-only governor stopped at call %d: %s", i+1, d.Reason)
 		}
 	}
 }
-
-func withoutFuse(l acpLoopLimits) acpLoopLimits { return l }
 
 func TestExplicitCapsLimitAOneShot(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -106,5 +104,29 @@ func TestOneShotCapHintNamesTheCapAndHowToRaiseIt(t *testing.T) {
 	spend := oneShotCapHint(errors.New("model spend reached the explicit $2.0000 child limit"), acpLoopLimits{MaxCostUSD: 2})
 	if !strings.Contains(spend, "--budget") {
 		t.Fatalf("spend hint = %q", spend)
+	}
+}
+
+func TestExplicitZeroCapsOverrideConfiguredValues(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"--max-tool-calls=0", "--max-elapsed", "0s", "--max-output-tokens=0", "--budget", "0", "-p", "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"--max-tool-calls", "--max-elapsed", "--max-output-tokens", "--budget"} {
+		if !opts.capFlags[name] {
+			t.Fatalf("explicit zero flag %s lost its presence", name)
+		}
+	}
+	cfg := config.DefaultConfig()
+	cfg.Oneshot.MaxToolCalls, cfg.Oneshot.MaxElapsed, cfg.Oneshot.MaxOutputTokens, cfg.Oneshot.BudgetUSD = 7, time.Minute, 3000, 4
+	caps := oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD, Set: opts.capFlags}
+	got := applyOneShotCaps(acpLoopLimits{}, cfg, caps)
+	if got.MaxToolCalls != 0 || got.MaxElapsedSeconds != 0 || got.MaxOutputTokens != 0 || got.MaxCostUSD != 0 {
+		t.Fatalf("explicit zeros retained configured limits: %+v", got)
+	}
+	parent := acpLoopLimits{MaxToolCalls: 2, MaxElapsedSeconds: 3, MaxOutputTokens: 4, MaxCostUSD: 5}
+	got = applyOneShotCaps(parent, cfg, caps)
+	if got.MaxToolCalls != 2 || got.MaxElapsedSeconds != 3 || got.MaxOutputTokens != 4 || got.MaxCostUSD != 5 {
+		t.Fatalf("CLI flags widened caller limits: %+v", got)
 	}
 }

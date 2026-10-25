@@ -37,9 +37,10 @@ type oneShotOptions struct {
 	OutputSchema  string
 }
 
-// oneShotCaps are the optional run caps from flags. A zero field falls back to
-// the matching oneshot.* config key, and zero there means no cap.
+// oneShotCaps records flag values and presence so an explicit zero removes
+// a configured cap while an omitted flag inherits it.
 type oneShotCaps struct {
+	Set             map[string]bool
 	MaxToolCalls    int
 	MaxElapsed      time.Duration
 	MaxOutputTokens int
@@ -53,21 +54,21 @@ func applyOneShotCaps(limits acpLoopLimits, cfg *config.Config, caps oneShotCaps
 	if cfg != nil {
 		fromConfig = cfg.Oneshot
 	}
-	pickInt := func(flag, key int) int {
-		if flag > 0 {
+	pickInt := func(flag, key int, explicit bool) int {
+		if explicit || flag > 0 {
 			return flag
 		}
 		return max(key, 0)
 	}
 	if limits.MaxToolCalls <= 0 {
-		limits.MaxToolCalls = pickInt(caps.MaxToolCalls, fromConfig.MaxToolCalls)
+		limits.MaxToolCalls = pickInt(caps.MaxToolCalls, fromConfig.MaxToolCalls, caps.Set["--max-tool-calls"])
 	}
 	if limits.MaxOutputTokens <= 0 {
-		limits.MaxOutputTokens = pickInt(caps.MaxOutputTokens, fromConfig.MaxOutputTokens)
+		limits.MaxOutputTokens = pickInt(caps.MaxOutputTokens, fromConfig.MaxOutputTokens, caps.Set["--max-output-tokens"])
 	}
 	if limits.MaxElapsedSeconds <= 0 {
 		elapsed := caps.MaxElapsed
-		if elapsed <= 0 {
+		if elapsed <= 0 && !caps.Set["--max-elapsed"] {
 			elapsed = fromConfig.MaxElapsed
 		}
 		if elapsed > 0 {
@@ -76,7 +77,7 @@ func applyOneShotCaps(limits acpLoopLimits, cfg *config.Config, caps oneShotCaps
 	}
 	if limits.MaxCostUSD <= 0 {
 		limits.MaxCostUSD = caps.BudgetUSD
-		if limits.MaxCostUSD <= 0 && fromConfig.BudgetUSD > 0 {
+		if limits.MaxCostUSD <= 0 && !caps.Set["--budget"] && fromConfig.BudgetUSD > 0 {
 			limits.MaxCostUSD = fromConfig.BudgetUSD
 		}
 	}
