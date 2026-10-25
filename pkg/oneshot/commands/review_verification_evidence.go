@@ -201,7 +201,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 			}
 		}
 		if !declaredCI && len(required) > 0 {
-			rep.Rejected = append(rep.Rejected, "CI checks have no declared path coverage; configure buckbot.verification.declared.ci_checks or record a verification receipt")
+			evaluateUnmappedCI(&rep, in.Checks, required, add)
 		}
 	}
 
@@ -211,6 +211,57 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 		}
 	}
 	return rep
+}
+
+// evaluateUnmappedCI applies the lenient default when no ci_checks mapping is
+// declared: CI on the reviewed head counts for every changed path only if every
+// reported check has completed and none failed. Skipped checks are fine. A
+// failing check blocks, by name. Pending or queued checks do not count, and the
+// report says why. A repository wanting per-path precision declares ci_checks.
+func evaluateUnmappedCI(rep *VerificationReport, checks []CICheck, required []string, add func(EvidenceItem, bool)) {
+	var pending, failed []string
+	seenPending, seenFailed := map[string]bool{}, map[string]bool{}
+	passed, skipped, pendingCount := 0, 0, 0
+	for _, check := range checks {
+		switch check.State {
+		case CICheckPass:
+			passed++
+		case CICheckSkipped:
+			skipped++
+		case CICheckFail:
+			if !seenFailed[check.Name] {
+				seenFailed[check.Name] = true
+				failed = append(failed, check.Name)
+			}
+		default:
+			pendingCount++
+			if !seenPending[check.Name] {
+				seenPending[check.Name] = true
+				pending = append(pending, check.Name)
+			}
+		}
+	}
+	sort.Strings(failed)
+	sort.Strings(pending)
+	for _, name := range failed {
+		add(EvidenceItem{Kind: "ci", Label: "ci check `" + name + "`", Detail: "failed on the reviewed head (no path mapping declared; it affects all changed paths)", Paths: append([]string(nil), required...)}, false)
+	}
+	if len(rep.Failing) > 0 {
+		return
+	}
+	if pendingCount > 0 {
+		rep.Rejected = append(rep.Rejected, fmt.Sprintf("CI is not finished: %d of %d checks are pending or queued (%s); CI counts as verification once every check has completed without failing", pendingCount, len(checks), strings.Join(limitList(pending, 6), ", ")))
+		return
+	}
+	if passed == 0 {
+		return
+	}
+	label := fmt.Sprintf("CI: all %d checks passed on the reviewed head", passed)
+	detail := "no path mapping declared; counts for all changed paths"
+	if skipped > 0 {
+		detail = fmt.Sprintf("no path mapping declared; counts for all changed paths; %d skipped", skipped)
+	}
+	add(EvidenceItem{Kind: "ci", Label: label, Detail: detail, Paths: append([]string(nil), required...)}, true)
 }
 
 // newestReceipts keeps only the latest receipt for each distinct command,
