@@ -956,6 +956,9 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	}
 	result.toolEvidence = append([]oneshot.AgentToolCall(nil), fwResult.ToolEvidence...)
 	result.commandEvidence = append([]model.CommandExecutionEvidence(nil), fwResult.CommandEvidence...)
+	if fwResult.Incomplete {
+		result.reviewText = mostCompleteIncompleteReview(result.reviewText, fwResult)
+	}
 	result.reviewText = appendReviewInfrastructureDiagnostics(result.reviewText, result.toolEvidence)
 	result.incomplete = fwResult.Incomplete
 	result.incompleteWhy = fwResult.IncompleteReason
@@ -1071,7 +1074,9 @@ func appendReviewAttemptDiagnostics(review string, trace *transparency.Trace) st
 			}
 			b.WriteString("\n")
 		}
-		if excerpt := reviewAttemptExcerpt(attemptTrace.Content, 4000); excerpt != "" {
+		if content := strings.TrimSpace(attemptTrace.Content); content != "" && strings.Contains(review, content) {
+			b.WriteString("\nResponse is preserved above.\n")
+		} else if excerpt := reviewAttemptExcerpt(attemptTrace.Content, 4000); excerpt != "" {
 			b.WriteString("\nResponse excerpt:\n\n> ")
 			b.WriteString(strings.ReplaceAll(excerpt, "\n", "\n> "))
 			b.WriteString("\n")
