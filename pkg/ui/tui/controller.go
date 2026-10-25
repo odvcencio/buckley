@@ -116,6 +116,7 @@ type SessionState struct {
 	Cancel          context.CancelFunc
 	MessageQueue    []QueuedMessage // Messages queued while streaming
 	deferredHistory bool
+	runtimeLoader   func(*storage.Store) (*SessionState, error)
 	persistenceErr  error
 	historyVersion  uint64
 
@@ -434,7 +435,14 @@ func loadOrCreateControllerSessions(cfg ControllerConfig, workDir string) ([]*Se
 	if err != nil {
 		return nil, 0, err
 	}
-	return resolveControllerSession(cfg, workDir, projectSessions)
+	sessions, current, err := resolveControllerSession(cfg, workDir, projectSessions)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := sessions[current].loadRuntime(cfg.Store); err != nil {
+		return nil, 0, fmt.Errorf("load selected session: %w", err)
+	}
+	return sessions, current, nil
 }
 
 func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*SessionState, error) {
@@ -443,27 +451,15 @@ func loadActiveProjectSessions(cfg ControllerConfig, workDir string) ([]*Session
 	if err != nil {
 		return nil, fmt.Errorf("list project sessions: %w", err)
 	}
-	active := make([]storage.Session, 0, len(allSessions))
-	for _, s := range allSessions {
-		if s.ProjectPath != workDir || s.Status != storage.SessionStatusActive {
+	for _, saved := range allSessions {
+		if saved.ProjectPath != workDir || saved.Status != storage.SessionStatusActive {
 			continue
 		}
-		active = append(active, s)
-	}
-	selected := 0
-	for i, s := range active {
-		if cfg.SessionID != "" && s.ID == cfg.SessionID || cfg.SessionID == "" && s.MessageCount > 0 {
-			selected = i
-			break
+		sessionID := saved.ID
+		sess := &SessionState{ID: sessionID, Conversation: conversation.New(sessionID), deferredHistory: saved.MessageCount > 0}
+		sess.runtimeLoader = func(store *storage.Store) (*SessionState, error) {
+			return newSessionState(cfg.Config, store, workDir, cfg.Telemetry, sessionID, true, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
 		}
-	}
-	for i, s := range active {
-		loadHistory := i == selected
-		sess, err := newSessionState(cfg.Config, cfg.Store, workDir, cfg.Telemetry, s.ID, loadHistory, cfg.CodeModeToolFactory, cfg.RunLedger, cfg.SubagentEvidence)
-		if err != nil {
-			return nil, err
-		}
-		sess.deferredHistory = !loadHistory
 		projectSessions = append(projectSessions, sess)
 	}
 	return projectSessions, nil
@@ -474,7 +470,7 @@ func resolveControllerSession(cfg ControllerConfig, workDir string, projectSessi
 	if sessionID == "" {
 		if len(projectSessions) > 0 {
 			for i, sess := range projectSessions {
-				if sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
+				if sess.deferredHistory || sess.Conversation != nil && len(sess.Conversation.Messages) > 0 {
 					return projectSessions, i, nil
 				}
 			}
@@ -1650,6 +1646,10 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	}
 
 	sess := c.sessions[idx]
+	if err := c.loadSessionRuntimeLocked(sess); err != nil {
+		c.app.AddMessage("Could not load session: "+err.Error(), "system")
+		return
+	}
 	if sess.deferredHistory {
 		if err := sess.Conversation.LoadWorkingSet(c.store, sessionWorkingMemoryBytes(c.cfg)); err != nil {
 			c.app.AddMessage("Could not load session: "+err.Error(), "system")

@@ -31,6 +31,13 @@ func (c *Controller) streamResponseWithIntent(ctx context.Context, prompt string
 }
 
 func (c *Controller) streamResponseTurn(ctx context.Context, prompt string, sess *SessionState, taskIntent agentloop.TaskIntent) bool {
+	c.mu.Lock()
+	err := c.loadSessionRuntimeLocked(sess)
+	c.mu.Unlock()
+	if err != nil {
+		c.handleStreamError(ctx, err)
+		return false
+	}
 	turnBoundary := c.beginTurnUndo(sess)
 	modelID := c.prepareStreamRequest(prompt, sess)
 	if strings.TrimSpace(modelID) == "" {
