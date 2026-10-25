@@ -23,6 +23,16 @@ func retentionGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func retentionPrivateGit(t *testing.T, store *Store, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"--git-dir=" + store.StorageDir()}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("private git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestRetainTrees_ReleasesDiscardedTreesAndIsolatesHandles(t *testing.T) {
 	dir := newTestRepo(t)
 	writeFile(t, dir, "user.txt", "committed")
@@ -59,6 +69,12 @@ func TestRetainTrees_ReleasesDiscardedTreesAndIsolatesHandles(t *testing.T) {
 			t.Fatal(err)
 		}
 		trees = append(trees, tree)
+		if content == "other handle" {
+			other, err := b.WriteTree(ctx)
+			if err != nil || other != tree {
+				t.Fatalf("independent snapshot mismatch: %s %s %v", tree, other, err)
+			}
+		}
 	}
 	if err := a.RetainTrees(ctx, trees[:1]); err != nil {
 		t.Fatal(err)
@@ -69,24 +85,27 @@ func TestRetainTrees_ReleasesDiscardedTreesAndIsolatesHandles(t *testing.T) {
 	if err := a.RetainTrees(ctx, []string{trees[2], trees[2]}); err != nil {
 		t.Fatal(err)
 	}
-	if got := retentionGit(t, dir, "rev-list", "--count", a.RefName()); got != "1" {
+	if got := retentionPrivateGit(t, a, "rev-list", "--count", a.RefName()); got != "1" {
 		t.Fatalf("retention root has ancestors: %s", got)
 	}
-	if got := retentionGit(t, dir, "ls-tree", a.RefName()+"^{tree}"); strings.Count(got, "\n") != 0 {
+	if got := retentionPrivateGit(t, a, "ls-tree", a.RefName()+"^{tree}"); strings.Count(got, "\n") != 0 {
 		t.Fatal("duplicate roots were retained")
 	}
-	// This collector is confined to the owned t.TempDir Git fixture.
+	// User Git collection cannot remove either independent handle's snapshots.
+	if clean, err := a.Clean(ctx, trees[2]); err != nil || !clean {
+		t.Fatalf("clean after retention: %v %v", clean, err)
+	}
 	retentionGit(t, dir, "gc", "--prune=now")
-	if exec.Command("git", "-C", dir, "cat-file", "-e", trees[0]).Run() == nil {
+	if exec.Command("git", "--git-dir="+a.StorageDir(), "cat-file", "-e", trees[0]).Run() == nil {
 		t.Fatal("discarded snapshot remains pinned")
 	}
-	retentionGit(t, dir, "cat-file", "-e", trees[1])
-	retentionGit(t, dir, "cat-file", "-e", trees[2])
+	retentionPrivateGit(t, b, "cat-file", "-e", trees[1])
+	retentionPrivateGit(t, a, "cat-file", "-e", trees[2])
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
 	retentionGit(t, dir, "gc", "--prune=now")
-	retentionGit(t, dir, "cat-file", "-e", trees[1])
+	retentionPrivateGit(t, b, "cat-file", "-e", trees[1])
 	if got := retentionGit(t, dir, "rev-parse", "refs/buckley/undo/legacy"); got != head {
 		t.Fatal("legacy ref changed")
 	}

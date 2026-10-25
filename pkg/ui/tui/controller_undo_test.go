@@ -389,7 +389,7 @@ func TestUndoStore_DoesNotCreateVisibleBranches(t *testing.T) {
 		t.Fatalf("expected no visible branches, got: %s", out)
 	}
 
-	refOut, err := exec.CommandContext(context.Background(), "git", "-C", dir, "for-each-ref", sess.undoStore.RefName()).CombinedOutput()
+	refOut, err := exec.CommandContext(context.Background(), "git", "--git-dir="+sess.undoStore.StorageDir(), "for-each-ref", sess.undoStore.RefName()).CombinedOutput()
 	if err != nil {
 		t.Fatalf("git for-each-ref: %v", err)
 	}
