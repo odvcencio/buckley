@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -252,7 +253,10 @@ func TestUndoRedo_RefusalPreservesFilesAndConversation(t *testing.T) {
 				if got := lastSystemMessage(t, app); !strings.Contains(got, "refusing to "+direction) {
 					t.Fatalf("expected refusal, got %q", got)
 				}
-				if !reflect.DeepEqual(messages, sess.Conversation.Messages) || len(sess.undoStack) != undos || len(sess.redoStack) != redos {
+				messagesMatch := slices.EqualFunc(messages, sess.Conversation.Messages, func(a, b conversation.Message) bool {
+					return reflect.DeepEqual(a, b)
+				})
+				if !messagesMatch || len(sess.undoStack) != undos || len(sess.redoStack) != redos {
 					t.Fatal("refusal changed conversation or undo/redo history")
 				}
 				if got, err := os.ReadFile(file); err != nil || string(got) != string(data) {
