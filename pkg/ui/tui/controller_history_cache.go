@@ -29,6 +29,9 @@ func (c *Controller) boundIdleHistoryLocked() error {
 			resident += bytes
 		}
 	}
+	if resident <= limit {
+		return nil
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].session.historyUse < candidates[j].session.historyUse
 	})

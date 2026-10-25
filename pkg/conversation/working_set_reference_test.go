@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -42,7 +43,10 @@ func TestWorkingSetReference_PreservesProviderWireAndBookkeeping(t *testing.T) {
 	if err := c.SaveAllMessages(store); err != nil {
 		t.Fatal(err)
 	}
-	before := c.ToModelMessages()
+	before, err := json.Marshal(c.ToModelMessages())
+	if err != nil {
+		t.Fatal(err)
+	}
 	tokens := c.TokenCount
 	canonical, err := store.GetAllMessages(c.SessionID)
 	if err != nil {
@@ -59,7 +63,8 @@ func TestWorkingSetReference_PreservesProviderWireAndBookkeeping(t *testing.T) {
 	if err := c.RestoreWorkingSet(store, ref); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(before, c.ToModelMessages()) || c.TokenCount != tokens || c.CompactionCount != 7 {
+	afterWire, err := json.Marshal(c.ToModelMessages())
+	if err != nil || !bytes.Equal(before, afterWire) || c.TokenCount != tokens || c.CompactionCount != 7 {
 		t.Fatal("restore changed provider-visible continuation prefix or bookkeeping")
 	}
 }
