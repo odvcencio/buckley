@@ -207,7 +207,7 @@ func newProgressTestController(t *testing.T, progress *ProgressController, store
 		// explicitly; the default governor has no ceiling.
 		Governor: New(Config{MaxRounds: 32, MaxToolCalls: 96}),
 		BuildRequest: func(ctx context.Context, r int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}, "probe"), nil
 		},
 		CallModel: ModelCallerFunc(func(ctx context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			round++
@@ -432,7 +432,7 @@ func TestController_ExposesProgressProjectionOnNormalCompletion(t *testing.T) {
 	modelCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}, "search_text"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++

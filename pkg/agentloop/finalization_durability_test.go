@@ -408,7 +408,7 @@ func newFinalizationOrdinalController(
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
 			messages := []model.Message{{Role: "user", Content: "answer from the tool evidence"}}
 			messages = append(messages, history.messages...)
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: messages}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: messages}, "search_text"), nil
 		},
 		CallModel: ContextualModelCallerFunc(call),
 		DispatchTools: ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {

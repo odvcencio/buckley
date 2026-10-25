@@ -236,7 +236,7 @@ func TestController_ReplaysReasoningMetadataAfterStoreReopen(t *testing.T) {
 			BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
 				req := current
 				req.Messages = append([]model.Message(nil), messages...)
-				return testToolRequest(req), nil
+				return testToolRequest(req, "read_file"), nil
 			},
 			CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 				providerCalls++

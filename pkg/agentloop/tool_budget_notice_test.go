@@ -42,7 +42,7 @@ func TestController_ToolBudgetNotice(t *testing.T) {
 				FinalizeOnStop: true,
 				History:        history,
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+					return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "read_file"), nil
 				},
 				CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 					modelCalls++

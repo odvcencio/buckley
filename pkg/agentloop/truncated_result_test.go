@@ -54,7 +54,7 @@ func TestController_TruncatedTerminalCandidatePreservesPublicPrefix(t *testing.T
 			dispatchCalls := 0
 			ctrl, err := NewController(ControllerConfig{
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}, "write_file"), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					modelCalls++
@@ -118,7 +118,7 @@ func TestController_FinalizationTruncationPreservesDraftThroughExhaustion(t *tes
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "search_text"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -185,7 +185,7 @@ func TestController_FinalizationSuccessClearsStaleTruncatedPartial(t *testing.T)
 		Governor:       New(Config{ExactRepeatLimit: 100, OutcomeRepeatLimit: 100, MaxRounds: 1, MaxToolCalls: 10}),
 		FinalizeOnStop: true,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "search_text"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
