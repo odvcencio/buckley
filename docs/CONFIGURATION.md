@@ -510,8 +510,12 @@ buckbot:
 - **CI.** For a PR, check runs reported on the exact head commit count.
   `ci_checks` names the checks that cover a declared glob; a pending, failed,
   skipped or other-commit check does not cover it. Duplicate named checks
-  must all pass. Checks without declared path coverage are reported but do not
-  verify source paths; configure `ci_checks` or record a verification receipt.
+  must all pass. With no `ci_checks` mapping declared, the default is lenient:
+  CI on the reviewed head counts for every changed path once every reported check
+  has completed and none failed (skipped checks are fine, and at least one must
+  pass). A failing check blocks and is named; a pending or queued check keeps the
+  paths unverified and the gate says CI is not finished. Declare `ci_checks` for
+  per-path precision, or record a verification receipt.
 - **Report.** Every review ends with a "Verification Evidence" section listing
   covered paths with the receipt or check that covers them, failing evidence
   (a finding: a review does not approve over it), and unverified paths. A

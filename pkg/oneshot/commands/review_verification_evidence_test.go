@@ -248,3 +248,99 @@ func TestEvaluateVerificationNewestReceiptForACommandWins(t *testing.T) {
 		t.Fatalf("report = %+v", rep)
 	}
 }
+
+// With no ci_checks mapping declared, CI on the reviewed head counts for every
+// changed path once every reported check has completed and none failed.
+func TestEvaluateVerificationUnmappedCI(t *testing.T) {
+	files := []string{"client/js/a.js", "scene/x.go"}
+	base := VerificationInput{Mode: VerifyReceiptOrCI, Files: files, ChecksOnHead: true,
+		Declared: []DeclaredVerification{{Name: "js", Paths: []string{"client/**"}, Command: []string{"make", "test-js"}}}}
+
+	t.Run("all green is verified and names its basis", func(t *testing.T) {
+		in := base
+		in.Checks = []CICheck{{"build", CICheckPass}, {"test", CICheckPass}, {"docs", CICheckSkipped}}
+		rep := EvaluateVerification(in)
+		if len(rep.Unverified) != 0 || len(rep.Failing) != 0 || len(rep.Covered) != 1 || len(rep.Rejected) != 0 {
+			t.Fatalf("report = %+v", rep)
+		}
+		if code, msg := rep.Gate(); code != VerificationGateOK {
+			t.Fatalf("gate = %d %q", code, msg)
+		}
+		md := rep.Markdown()
+		for _, want := range []string{"CI: all 2 checks passed on the reviewed head", "no path mapping declared; counts for all changed paths", "1 skipped"} {
+			if !strings.Contains(md, want) {
+				t.Errorf("markdown lacks %q:\n%s", want, md)
+			}
+		}
+	})
+
+	t.Run("one failing blocks and names the check", func(t *testing.T) {
+		in := base
+		in.Checks = []CICheck{{"build", CICheckPass}, {"browser-tests", CICheckFail}}
+		rep := EvaluateVerification(in)
+		if len(rep.Failing) != 1 || !strings.Contains(rep.Failing[0].Label, "browser-tests") || len(rep.Covered) != 0 {
+			t.Fatalf("report = %+v", rep)
+		}
+		code, msg := rep.Gate()
+		if code != VerificationGateFailing || !strings.Contains(msg, "browser-tests") {
+			t.Fatalf("gate = %d %q", code, msg)
+		}
+	})
+
+	t.Run("pending or queued is not verified and says so", func(t *testing.T) {
+		in := base
+		in.Checks = []CICheck{{"build", CICheckPass}, {"test", CICheckPending}}
+		rep := EvaluateVerification(in)
+		if len(rep.Covered) != 0 || len(rep.Unverified) != 2 {
+			t.Fatalf("report = %+v", rep)
+		}
+		code, msg := rep.Gate()
+		if code != VerificationGateMissing || !strings.Contains(msg, "not finished") || !strings.Contains(msg, "test") {
+			t.Fatalf("gate = %d %q", code, msg)
+		}
+	})
+
+	t.Run("only skipped checks prove nothing", func(t *testing.T) {
+		in := base
+		in.Checks = []CICheck{{"docs", CICheckSkipped}}
+		if rep := EvaluateVerification(in); len(rep.Covered) != 0 || len(rep.Unverified) != 2 {
+			t.Fatalf("report = %+v", rep)
+		}
+	})
+
+	t.Run("duplicate check names keep the worst state", func(t *testing.T) {
+		in := base
+		in.Checks = []CICheck{{"test", CICheckFail}, {"test", CICheckPass}}
+		if rep := EvaluateVerification(in); len(rep.Failing) != 1 {
+			t.Fatalf("report = %+v", rep)
+		}
+	})
+
+	t.Run("another commit's checks never count", func(t *testing.T) {
+		in := base
+		in.ChecksOnHead = false
+		in.Checks = []CICheck{{"build", CICheckPass}}
+		if rep := EvaluateVerification(in); len(rep.Covered) != 0 {
+			t.Fatalf("report = %+v", rep)
+		}
+	})
+
+	t.Run("receipt mode ignores CI", func(t *testing.T) {
+		in := base
+		in.Mode = VerifyReceipt
+		in.Checks = []CICheck{{"build", CICheckPass}}
+		if rep := EvaluateVerification(in); len(rep.Covered) != 0 {
+			t.Fatalf("report = %+v", rep)
+		}
+	})
+
+	t.Run("receipts still cover their paths beside unmapped CI", func(t *testing.T) {
+		in := base
+		in.Mode = VerifyReceipt
+		in.Receipts = []verifyreceipt.Receipt{receipt("ev_R", verifyreceipt.StatusPass, 0, "client/**")}
+		rep := EvaluateVerification(in)
+		if strings.Join(rep.Unverified, ",") != "scene/x.go" || len(rep.Covered) != 1 {
+			t.Fatalf("report = %+v", rep)
+		}
+	})
+}

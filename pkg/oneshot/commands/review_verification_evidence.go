@@ -201,7 +201,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 			}
 		}
 		if !declaredCI && len(required) > 0 {
-			rep.Rejected = append(rep.Rejected, "CI checks have no declared path coverage; configure buckbot.verification.declared.ci_checks or record a verification receipt")
+			evaluateUnmappedCI(&rep, byName, required, add)
 		}
 	}
 
@@ -211,6 +211,51 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 		}
 	}
 	return rep
+}
+
+// evaluateUnmappedCI applies the lenient default when no ci_checks mapping is
+// declared: CI on the reviewed head counts for every changed path only if every
+// reported check has completed and none failed. Skipped checks are fine. A
+// failing check blocks, by name. Pending or queued checks do not count, and the
+// report says why. A repository wanting per-path precision declares ci_checks.
+func evaluateUnmappedCI(rep *VerificationReport, byName map[string]CICheckState, required []string, add func(EvidenceItem, bool)) {
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var pending []string
+	passed, skipped := 0, 0
+	for _, name := range names {
+		switch byName[name] {
+		case CICheckPass:
+			passed++
+		case CICheckSkipped:
+			skipped++
+		case CICheckFail:
+			add(EvidenceItem{Kind: "ci", Label: "ci check `" + name + "`", Detail: "failed on the reviewed head (no path mapping declared; it affects all changed paths)",
+				Paths: append([]string(nil), required...)}, false)
+		default:
+			pending = append(pending, name)
+		}
+	}
+	if len(rep.Failing) > 0 {
+		return
+	}
+	if len(pending) > 0 {
+		rep.Rejected = append(rep.Rejected, fmt.Sprintf("CI is not finished: %d of %d checks are pending or queued (%s); CI counts as verification once every check has completed without failing",
+			len(pending), len(names), strings.Join(limitList(pending, 6), ", ")))
+		return
+	}
+	if passed == 0 {
+		return
+	}
+	label := fmt.Sprintf("CI: all %d checks passed on the reviewed head", passed)
+	detail := "no path mapping declared; counts for all changed paths"
+	if skipped > 0 {
+		detail = fmt.Sprintf("no path mapping declared; counts for all changed paths; %d skipped", skipped)
+	}
+	add(EvidenceItem{Kind: "ci", Label: label, Detail: detail, Paths: append([]string(nil), required...)}, true)
 }
 
 // newestReceipts keeps only the latest receipt for each distinct command,
