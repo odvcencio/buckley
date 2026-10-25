@@ -48,7 +48,7 @@ func (t *RunTestsTool) TrustedVerification() bool {
 }
 
 func (t *RunTestsTool) Description() string {
-	return "Run tests with optional path/pattern filtering and framework detection. Omit path to test every Go package (./...); path . tests one package. Streams Go/Cargo counts while retaining bounded output and failure details; truncation and original readable output bytes are reported. Jest/Pytest reports have an 8 MiB capture budget; Unix streams report payloads without disk storage. Complete results are capped at 24 KiB (or the configured smaller limit). Evidence-budget failures cannot verify a pass. A workspace with no framework returns unavailable."
+	return "Run tests with optional path/pattern filtering and framework detection. Omit path to test every Go package (./...); path . tests one package. Streams Go/Cargo counts while retaining bounded output and failure details; truncation and original readable output bytes are reported. Jest/Pytest reports have an 8 MiB capture budget; Unix streams report payloads without disk storage. Complete results are capped at 24 KiB (or the configured smaller limit). Evidence-budget failures cannot verify a pass. Missing paths and workspaces with no framework return unavailable without launching tests."
 }
 
 func (t *RunTestsTool) Parameters() ParameterSchema {
@@ -60,7 +60,7 @@ func (t *RunTestsTool) Parameters() ParameterSchema {
 			// tests the whole workspace.
 			"path": {
 				Type:        "string",
-				Description: "Optional: directory or file to test. Omit it to test everything under the workspace root (for Go, every package). Name a path such as ./pkg/a to test one package.",
+				Description: "Optional: directory or file to test. Omit it to test everything under the workspace root (for Go, every package). Name ./pkg/a for one package or ./pkg/... for a recursive Go package pattern.",
 			},
 			"pattern": {
 				Type:        "string",
@@ -149,7 +149,29 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 	}
 
 	// Detect test framework
-	framework := t.detectTestFramework(absTestPath)
+	framework, pathErr := t.frameworkForTestPath(absTestPath, testPath)
+	if pathErr != nil {
+		reason := fmt.Sprintf("test path cannot be inspected: %v", pathErr)
+		if errors.Is(pathErr, os.ErrNotExist) {
+			reason = "test path does not exist: " + testPath
+		}
+		unavailable := &Result{
+			Error: reason + ". Nothing ran; check the path and filesystem access before retrying run_tests.",
+			Data:  verificationNotRun(VerificationStatusUnavailable, reason),
+		}
+		budget := DefaultTestResultBytes
+		if t.maxOutputBytes > 0 {
+			budget = min(budget, t.maxOutputBytes)
+		}
+		bounded, err := boundTestResult(unavailable, budget)
+		if err != nil || bounded.Data[VerificationStatusKey] != nil {
+			return bounded, err
+		}
+		return boundTestResult(&Result{
+			Error: "Test path is unavailable. Nothing ran; check the path and filesystem access.",
+			Data:  verificationNotRun(VerificationStatusUnavailable, "the requested test path is unavailable"),
+		}, budget)
+	}
 	// pytest, jest, and cargo test the whole directory tree by default, but
 	// "go test ." tests only the package in the current directory, and fails
 	// outright when that directory holds none. When the caller named no path,
@@ -281,6 +303,47 @@ func (t *RunTestsTool) ExecuteWithContext(ctx context.Context, params map[string
 		budget = min(budget, t.maxOutputBytes)
 	}
 	return boundTestResult(result, budget)
+}
+
+// frameworkForTestPath checks literal targets before inspecting their framework.
+// Go package patterns instead validate their fixed directory prefix; the Go
+// runner remains responsible for selecting the matching packages.
+func (t *RunTestsTool) frameworkForTestPath(path, requestedPath string) (string, error) {
+	if _, err := os.Stat(path); err == nil {
+		return t.detectTestFramework(path), nil
+	} else if !errors.Is(err, os.ErrNotExist) || !strings.Contains(requestedPath, "...") {
+		return "", err
+	}
+	prefix := requestedPath[:strings.Index(requestedPath, "...")]
+	base := filepath.Dir(prefix)
+	if !filepath.IsAbs(base) && strings.TrimSpace(t.workDir) != "" {
+		base = filepath.Join(t.workDir, base)
+	}
+	info, err := os.Stat(base)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("Go test pattern prefix %q is not a directory", base)
+	}
+	if t.detectTestFramework(base) == "go" {
+		return "go", nil
+	}
+	base, err = filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	for dir := base; ; dir = filepath.Dir(dir) {
+		for _, marker := range []string{"go.mod", "go.work"} {
+			if info, err := os.Stat(filepath.Join(dir, marker)); err == nil && !info.IsDir() {
+				return "go", nil
+			}
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return "unknown", nil
 }
 
 func (t *RunTestsTool) detectTestFramework(path string) string {
@@ -533,7 +596,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 
 func localGoTestPath(path string) string {
 	path = filepath.ToSlash(strings.TrimSpace(path))
-	if path == "" || path == "." || strings.HasPrefix(path, ".") || filepath.IsAbs(path) {
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || filepath.IsAbs(path) {
 		return path
 	}
 	return "./" + path
