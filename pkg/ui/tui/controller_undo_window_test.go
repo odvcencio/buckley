@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/storage"
 )
 
 func TestUndoRedo_RecentTurnsSurviveWorkingWindowTrims(t *testing.T) {
@@ -116,5 +119,75 @@ func TestUndoLastTurn_RefusesUnrecordedConversationTail(t *testing.T) {
 	}
 	if data, err := os.ReadFile(file); err != nil || string(data) != "completed" {
 		t.Fatalf("completed work changed: %q %v", data, err)
+	}
+}
+
+func TestUndoRedo_ResumedWindowPreservesCanonicalPrefix(t *testing.T) {
+	repo := newUndoTestGitRepo(t)
+	ctrl, _, sess := newUndoTestController(t, repo)
+	ctrl.cfg = config.DefaultConfig()
+	t.Cleanup(ctrl.closeUndoStores)
+	store, err := storage.New(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctrl.store = store
+	if err := store.CreateSession(&storage.Session{ID: sess.ID, Status: storage.SessionStatusPaused}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	messages := make([]storage.Message, 480)
+	for i := range messages {
+		messages[i] = storage.Message{SessionID: sess.ID, Role: "assistant", Content: fmt.Sprintf("saved %d", i), Timestamp: now.Add(time.Duration(i)), Tokens: i + 1}
+	}
+	messages[0].Role = "system"
+	messages[1].Role = "user"
+	if err := store.ReplaceMessages(sess.ID, messages); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetAllMessages(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedding := []byte{1, 2, 3, 4}
+	if err := store.SaveMessageEmbedding(t.Context(), before[len(before)-1].ID, embedding); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Conversation.LoadWorkingSet(store, sessionWorkingMemoryBytes(ctrl.cfg)); err != nil {
+		t.Fatal(err)
+	}
+	boundary := ctrl.beginTurnUndo(sess)
+	for _, text := range []string{"new task", "new result"} {
+		sess.Conversation.AddAssistantMessage(text)
+		if err := sess.Conversation.SaveMessage(store, sess.Conversation.Messages[len(sess.Conversation.Messages)-1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctrl.finishTurnUndo(sess, boundary)
+	if len(sess.undoStack) != 1 {
+		t.Fatal("resumed turn was not retained")
+	}
+	for _, direction := range []string{"undo", "redo", "undo"} {
+		if direction == "undo" {
+			ctrl.undoLastTurn()
+		} else {
+			ctrl.redoLastTurn()
+		}
+		after, err := store.GetAllMessages(sess.ID)
+		want := 480
+		if direction == "redo" {
+			want += 2
+		}
+		if err != nil || len(after) != want {
+			t.Fatalf("%s: messages=%d want=%d err=%v", direction, len(after), want, err)
+		}
+		if !reflect.DeepEqual(after[:480], before) {
+			t.Fatalf("%s rewrote the saved prefix", direction)
+		}
+		var storedEmbedding []byte
+		if err := store.DB().QueryRow("SELECT embedding FROM messages WHERE id = ?", before[len(before)-1].ID).Scan(&storedEmbedding); err != nil || !reflect.DeepEqual(storedEmbedding, embedding) {
+			t.Fatalf("%s changed attached embedding: %x %v", direction, storedEmbedding, err)
+		}
 	}
 }

@@ -308,7 +308,7 @@ func (c *Controller) undoLastTurn() {
 	sess.Conversation.UpdateTokenCount()
 	saveErr := (error)(nil)
 	if c.store != nil {
-		saveErr = sess.Conversation.SaveAllMessages(c.store)
+		saveErr = sess.Conversation.SaveMessagesFrom(c.store, start)
 	}
 
 	messages := cloneMessages(sess.Conversation.Messages)
@@ -363,11 +363,12 @@ func (c *Controller) redoLastTurn() {
 	sess.redoStack[len(sess.redoStack)-1] = turnUndoRecord{}
 	sess.redoStack = sess.redoStack[:len(sess.redoStack)-1]
 	sess.undoStack = append(sess.undoStack, record)
+	messagesBefore := len(sess.Conversation.Messages)
 	sess.Conversation.Messages = append(sess.Conversation.Messages, record.messages...)
 	sess.Conversation.UpdateTokenCount()
 	saveErr := (error)(nil)
 	if c.store != nil {
-		saveErr = sess.Conversation.SaveAllMessages(c.store)
+		saveErr = sess.Conversation.SaveMessagesFrom(c.store, messagesBefore)
 	}
 	retainedBefore := len(sess.undoStack) + len(sess.redoStack)
 	boundErr := c.boundSessionWorkingSetLocked(sess)
