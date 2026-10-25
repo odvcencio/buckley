@@ -20,8 +20,7 @@ type SkillRegistry interface {
 	Activate(name, scope, activatedBy string) error
 	Deactivate(name string) error
 	IsActive(name string) bool
-	GetActive(name string) any // Returns *skill.ActiveSkill
-	ListActive() []any         // Returns []*skill.ActiveSkill
+	ToolFilter() []string
 }
 
 // SkillConversation interface for injecting skill content into conversation
@@ -138,12 +137,7 @@ func (t *SkillActivationTool) activate(skillName string, params map[string]any) 
 		t.Conversation.AddSystemMessage(msg.String())
 	}
 
-	// Apply tool restrictions if specified
-	if allowedTools := skillObj.GetAllowedTools(); len(allowedTools) > 0 {
-		if t.Conversation != nil {
-			t.Conversation.SetToolFilter(allowedTools)
-		}
-	}
+	t.refreshToolFilter()
 
 	return &Result{
 		Success: true,
@@ -152,7 +146,7 @@ func (t *SkillActivationTool) activate(skillName string, params map[string]any) 
 			"scope":         scope,
 			"message":       fmt.Sprintf("Skill '%s' activated. Follow its instructions precisely.", skillName),
 			"content":       msg.String(),
-			"allowed_tools": skillObj.GetAllowedTools(),
+			"allowed_tools": t.Registry.ToolFilter(),
 		},
 	}, nil
 }
@@ -173,11 +167,7 @@ func (t *SkillActivationTool) deactivate(skillName string) (*Result, error) {
 		return nil, fmt.Errorf("failed to deactivate skill: %w", err)
 	}
 
-	// Clear tool filter (will need to check if other skills have restrictions)
-	activeSkills := t.Registry.ListActive()
-	if len(activeSkills) == 0 {
-		t.Conversation.ClearToolFilter()
-	}
+	t.refreshToolFilter()
 
 	return &Result{
 		Success: true,
@@ -186,4 +176,15 @@ func (t *SkillActivationTool) deactivate(skillName string) (*Result, error) {
 			"message": fmt.Sprintf("Skill '%s' deactivated", skillName),
 		},
 	}, nil
+}
+
+func (t *SkillActivationTool) refreshToolFilter() {
+	if t.Conversation == nil {
+		return
+	}
+	if allowed := t.Registry.ToolFilter(); allowed != nil {
+		t.Conversation.SetToolFilter(allowed)
+	} else {
+		t.Conversation.ClearToolFilter()
+	}
 }

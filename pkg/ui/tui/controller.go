@@ -203,7 +203,10 @@ func newSessionState(cfg *config.Config, store *storage.Store, workDir string, h
 		fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
 	}
 
-	skillState := skill.NewRuntimeState(sess.Conversation.AddSystemMessage)
+	skillState := skill.NewRuntimeState(nil)
+	if err := restoreSessionSkills(skills, skillState, store, sessionID); err != nil {
+		return nil, err
+	}
 	registry, hookCloser := buildRegistry(cfg, store, workDir, hub, sessionID)
 	registry.Register(&builtin.SkillActivationTool{
 		Registry:     skills,
@@ -1391,6 +1394,9 @@ func (c *Controller) buildSystemPrompt(sess *SessionState) string {
 	skillDescriptions := ""
 	if sess != nil && sess.SkillRegistry != nil {
 		skillDescriptions = sess.SkillRegistry.GetDescriptions()
+		if active := sess.SkillRegistry.ActiveInstructions(sess.SkillState); active != "" {
+			basePrompt += "\n\n" + active
+		}
 	}
 	return prompts.BuildRuntimeSystemPrompt(prompts.RuntimePromptInput{
 		Evaluator:         c.evaluator,
