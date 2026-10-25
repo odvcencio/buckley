@@ -1,5 +1,5 @@
 // Package shadowgit snapshots a git worktree into a hidden ref namespace
-// (refs/buckley/undo/<session>) so the TUI can revert and restore file
+// (refs/buckley/undo-live/<session>/<handle>) so the TUI can revert and restore file
 // changes turn by turn, without creating visible branches or touching the
 // caller's git index. It is the file-side twin of Buckley's conversation
 // history: every operation here is plain git plumbing (write-tree,
@@ -10,13 +10,17 @@ package shadowgit
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 )
 
 // ErrNotAGitRepo is returned by New when repoDir is not inside a git
@@ -41,11 +45,12 @@ func SanitizeRefComponent(sessionID string) string {
 	return sanitized
 }
 
-// Store wraps the hidden undo ref for one session inside one git working
-// tree.
+// Store owns one live handle's hidden undo ref inside a git working tree.
 type Store struct {
 	repoDir string
 	ref     string
+	mu      sync.Mutex
+	closed  bool
 }
 
 // New returns a Store rooted at repoDir for sessionID. It returns
@@ -56,11 +61,57 @@ func New(repoDir, sessionID string) (*Store, error) {
 	if repoDir == "" {
 		return nil, fmt.Errorf("shadowgit: repoDir cannot be empty")
 	}
-	store := &Store{repoDir: repoDir, ref: "refs/buckley/undo/" + SanitizeRefComponent(sessionID)}
+	store := &Store{repoDir: repoDir, ref: "refs/buckley/undo-live/" + SanitizeRefComponent(sessionID) + "/" + rand.Text()}
 	if _, err := store.run(context.Background(), nil, "rev-parse", "--git-dir"); err != nil {
 		return nil, ErrNotAGitRepo
 	}
 	return store, nil
+}
+
+// RetainTrees pins exactly the trees needed by this live undo handle. Its
+// parentless root does not retain discarded turns or another handle's history.
+// Releasing a tree makes it eligible for ordinary Git garbage collection.
+func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("shadowgit: retain trees: %w", os.ErrClosed)
+	}
+	if len(trees) == 0 {
+		return s.clearRef(ctx)
+	}
+	trees = slices.Clone(trees)
+	slices.Sort(trees)
+	trees = slices.Compact(trees)
+	var input strings.Builder
+	for i, tree := range trees {
+		fmt.Fprintf(&input, "040000 tree %s\t%04d\n", tree, i)
+	}
+	out, err := s.runBytes(ctx, nil, strings.NewReader(input.String()), "mktree")
+	if err != nil {
+		return fmt.Errorf("shadowgit: retain trees: %w", err)
+	}
+	commit, err := s.CommitTree(ctx, strings.TrimSpace(string(out)), "", "buckley-undo: retained trees")
+	if err != nil {
+		return err
+	}
+	return s.UpdateRef(ctx, commit)
+}
+
+// Close releases only this handle's ref and prevents late turns from repinning it.
+// Other handles, legacy refs, branches, the index and Git objects are untouched.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return s.clearRef(context.Background())
+}
+
+func (s *Store) clearRef(ctx context.Context) error {
+	if _, err := s.run(ctx, nil, "update-ref", "-d", s.ref); err != nil {
+		return fmt.Errorf("shadowgit: release undo ref: %w", err)
+	}
+	return nil
 }
 
 // RefName returns the hidden ref this store reads and writes.
@@ -226,7 +277,7 @@ func (s *Store) restoreBlob(ctx context.Context, tree, path, destPath string) er
 	if err != nil {
 		return err
 	}
-	content, err := s.runBytes(ctx, nil, "show", tree+":"+path)
+	content, err := s.runBytes(ctx, nil, nil, "show", tree+":"+path)
 	if err != nil {
 		return fmt.Errorf("shadowgit: read %s from tree: %w", path, err)
 	}
@@ -256,16 +307,17 @@ func (s *Store) blobMode(ctx context.Context, tree, path string) (string, error)
 }
 
 func (s *Store) run(ctx context.Context, env []string, args ...string) (string, error) {
-	out, err := s.runBytes(ctx, env, args...)
+	out, err := s.runBytes(ctx, env, nil, args...)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (s *Store) runBytes(ctx context.Context, env []string, args ...string) ([]byte, error) {
+func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = s.repoDir
+	cmd.Stdin = input
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}

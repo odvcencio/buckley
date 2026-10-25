@@ -79,9 +79,10 @@ type Controller struct {
 	recentModels []string
 
 	// Multi-session support - each session runs independently
-	historyClock   uint64
-	sessions       []*SessionState // Active sessions for this project
-	currentSession int             // Index into sessions
+	historyClock     uint64
+	undoStoresClosed bool
+	sessions         []*SessionState // Active sessions for this project
+	currentSession   int             // Index into sessions
 
 	// runLedger is the optional read-only run ledger backing the
 	// navigator's Sessions section (see ControllerConfig.RunLedger).
@@ -533,6 +534,7 @@ func (c *Controller) Run() error {
 		c.telemetryBridge.Start(context.Background())
 	}
 	defer func() {
+		c.closeUndoStores()
 		for _, sess := range c.sessions {
 			if sess == nil {
 				continue
@@ -1730,6 +1732,7 @@ func (c *Controller) Stop() {
 		}
 	}
 	c.mu.Unlock()
+	c.closeUndoStores()
 	c.app.Quit()
 }
 

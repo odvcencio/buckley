@@ -9,7 +9,7 @@ import (
 )
 
 // maxUndoDepth caps how many turns /undo can walk back, bounding both
-// memory (retained message slices) and the shadow-git ref's commit chain.
+// memory (retained message slices) and the live handle's retained trees.
 const maxUndoDepth = 20
 
 // turnBoundary is the state beginTurnUndo captures at the start of a turn,
@@ -28,6 +28,9 @@ type turnBoundary struct {
 func (c *Controller) sessionUndoStore(sess *SessionState) *shadowgit.Store {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.undoStoresClosed {
+		return nil
+	}
 	if sess.undoStoreChecked {
 		return sess.undoStore
 	}
@@ -64,14 +67,21 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 }
 
 // finishTurnUndo closes out a turn started by beginTurnUndo: it snapshots
-// the post-turn worktree, chains both trees onto the session's shadow-git
-// ref for reachability, and pushes an undo record when the turn appended
-// any conversation messages.
+// the post-turn worktree, retains the supported undo/redo trees, and pushes
+// an undo record when the turn appended conversation messages.
 func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	if boundary.store == nil || boundary.beforeTree == "" {
 		return
 	}
 	ctx := context.Background()
+	c.mu.Lock()
+	if sess.historyVersion != boundary.historyVersion || len(sess.Conversation.Messages) <= boundary.messagesBefore {
+		trees := undoTrees(sess.undoStack, sess.redoStack)
+		c.mu.Unlock()
+		_ = boundary.store.RetainTrees(ctx, trees)
+		return
+	}
+	c.mu.Unlock()
 	afterTree, err := boundary.store.WriteTree(ctx)
 	if err != nil {
 		return
@@ -79,30 +89,19 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 
 	c.mu.Lock()
 	if sess.historyVersion != boundary.historyVersion {
+		trees := undoTrees(sess.undoStack, sess.redoStack)
 		c.mu.Unlock()
+		_ = boundary.store.RetainTrees(ctx, trees)
 		return
 	}
 	messagesAfter := len(sess.Conversation.Messages)
 	if messagesAfter <= boundary.messagesBefore {
+		trees := undoTrees(sess.undoStack, sess.redoStack)
 		c.mu.Unlock()
+		_ = boundary.store.RetainTrees(ctx, trees)
 		return
 	}
 	messages := append([]conversation.Message(nil), sess.Conversation.Messages[boundary.messagesBefore:]...)
-	c.mu.Unlock()
-
-	parent, _ := boundary.store.CurrentRef(ctx)
-	beforeCommit, err := boundary.store.CommitTree(ctx, boundary.beforeTree, parent, "buckley-undo: before turn")
-	if err != nil {
-		return
-	}
-	afterCommit, err := boundary.store.CommitTree(ctx, afterTree, beforeCommit, "buckley-undo: after turn")
-	if err != nil {
-		return
-	}
-	if err := boundary.store.UpdateRef(ctx, afterCommit); err != nil {
-		return
-	}
-
 	record := turnUndoRecord{
 		beforeTree:     boundary.beforeTree,
 		afterTree:      afterTree,
@@ -110,17 +109,55 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 		messages:       messages,
 	}
 
-	c.mu.Lock()
-	sess.undoStack = append(sess.undoStack, record)
-	if len(sess.undoStack) > maxUndoDepth {
-		sess.undoStack = append([]turnUndoRecord(nil), sess.undoStack[len(sess.undoStack)-maxUndoDepth:]...)
+	records := append(append([]turnUndoRecord(nil), sess.undoStack...), record)
+	if len(records) > maxUndoDepth {
+		excess := len(records) - maxUndoDepth
+		clear(records[:excess])
+		records = records[excess:]
 	}
 	limit := sessionWorkingMemoryBytes(c.cfg) / 4
-	for limit > 0 && len(sess.undoStack) > 0 && undoMemoryBytes(sess.undoStack) > limit {
-		sess.undoStack[0] = turnUndoRecord{}
-		sess.undoStack = sess.undoStack[1:]
+	for limit > 0 && len(records) > 0 && undoMemoryBytes(records) > limit {
+		records[0] = turnUndoRecord{}
+		records = records[1:]
+	}
+	trees := undoTrees(records, sess.redoStack)
+	c.mu.Unlock()
+	if err := boundary.store.RetainTrees(ctx, trees); err != nil {
+		return
+	}
+	c.mu.Lock()
+	if sess.historyVersion == boundary.historyVersion {
+		sess.undoStack = records
 	}
 	c.mu.Unlock()
+}
+
+func undoTrees(undo, redo []turnUndoRecord) []string {
+	trees := make([]string, 0, 2*(len(undo)+len(redo)))
+	for _, records := range [][]turnUndoRecord{undo, redo} {
+		for _, record := range records {
+			trees = append(trees, record.beforeTree, record.afterTree)
+		}
+	}
+	return trees
+}
+
+func (c *Controller) closeUndoStores() {
+	c.mu.Lock()
+	c.undoStoresClosed = true
+	var stores []*shadowgit.Store
+	for _, sess := range c.sessions {
+		if sess == nil {
+			continue
+		}
+		if sess.undoStore != nil {
+			stores = append(stores, sess.undoStore)
+		}
+	}
+	c.mu.Unlock()
+	for _, store := range stores {
+		_ = store.Close()
+	}
 }
 
 // undoLastTurn reverts the current session's most recent turn: its
