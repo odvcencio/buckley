@@ -13,7 +13,7 @@ func TestController_SubmittedResponseCompletion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			calls, reads, validations := 0, 0, 0
+			calls, reads, validations, dispatched := 0, 0, 0, 0
 			history := &recordingHistory{}
 			contract := &CompletionContract{
 				TaskIntent: ReadOnlyIntent,
@@ -77,7 +77,12 @@ func TestController_SubmittedResponseCompletion(t *testing.T) {
 			cfg := ControllerConfig{
 				Governor: New(govCfg), History: history, CompletionContract: contract, MaxModelRequests: 2,
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 10}), nil
+					req := testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 10})
+					if name == "dispatch interrupted" {
+						parallel := true
+						req.ParallelToolCalls = &parallel
+					}
+					return req, nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					calls++
@@ -103,7 +108,9 @@ func TestController_SubmittedResponseCompletion(t *testing.T) {
 					if name == "dispatch interrupted" {
 						return outcomes, errors.New("unresolved suffix")
 					}
-					return outcomes[:len(requested)], nil
+					start := dispatched
+					dispatched += len(requested)
+					return outcomes[start:dispatched], nil
 				}),
 				ObserveToolOutcome: func(context.Context, model.ToolCall, ToolOutcome, bool) error {
 					if name == "cancel observer" {
