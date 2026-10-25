@@ -112,9 +112,7 @@ func (c *Controller) runToolLoopWithIntent(ctx context.Context, sess *SessionSta
 	}
 
 	state := c.newToolLoopState(sess, modelID, taskIntent)
-	allowedTools := toolLoopAllowedTools(sess)
-
-	ctrl, err := c.newToolLoopController(sess, modelID, allowedTools, &state, taskIntent)
+	ctrl, err := c.newToolLoopController(sess, modelID, &state, taskIntent)
 	if err != nil {
 		return toolLoopResult{}, err
 	}
@@ -284,8 +282,9 @@ func (c *Controller) continuationEligibleForRoute(route model.ModelRoute) bool {
 //     per-call Observe() consultation share the one instance this turn's
 //     other guard-adjacent code (contextScale retries, finishGuardedToolLoop)
 //     already references.
-func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState, taskIntent agentloop.TaskIntent) (*agentloop.Controller, error) {
+func (c *Controller) newToolLoopController(sess *SessionState, modelID string, state *toolLoopState, taskIntent agentloop.TaskIntent) (*agentloop.Controller, error) {
 	currentRound := 0
+	var allowedTools []string
 
 	buildRequest := func(ctx context.Context, round int) (model.ChatRequest, error) {
 		c.mu.Lock()
@@ -305,6 +304,7 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, a
 		if err != nil {
 			return model.ChatRequest{}, err
 		}
+		allowedTools = toolLoopAllowedTools(sess)
 		req, nextUseTools := c.buildToolLoopRequestWithStateForRoute(sess, route, state.useTools, allowedTools, state)
 		state.useTools = nextUseTools
 		return req, nil
@@ -604,6 +604,9 @@ func (c *Controller) buildToolLoopRequestWithStateForRoute(sess *SessionState, r
 	}
 
 	if useTools && sess.ToolRegistry != nil && (c.modelMgr == nil || c.modelMgr.OfferToolsForRoute(route)) {
+		if allowedTools != nil {
+			sess.ToolRegistry.SetDiscoveredTools(allowedTools...)
+		}
 		tools := sess.ToolRegistry.ToOpenAIFunctionsGoverned(c.evaluator, "interactive", "coding", allowedTools, 0)
 		if len(tools) > 0 {
 			req.Tools = tools
