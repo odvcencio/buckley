@@ -344,3 +344,30 @@ func TestEvaluateVerificationUnmappedCI(t *testing.T) {
 		}
 	})
 }
+
+func TestEvaluateVerificationUnmappedCI_DuplicateCompletionStates(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		checks []CICheck
+		gate   int
+	}{
+		{"pending then skipped", []CICheck{{"build", CICheckPass}, {"test", CICheckPending}, {"test", CICheckSkipped}}, VerificationGateMissing},
+		{"skipped then pending", []CICheck{{"build", CICheckPass}, {"test", CICheckSkipped}, {"test", CICheckPending}}, VerificationGateMissing},
+		{"pass then skipped", []CICheck{{"test", CICheckPass}, {"test", CICheckSkipped}}, VerificationGateOK},
+		{"skipped then pass", []CICheck{{"test", CICheckSkipped}, {"test", CICheckPass}}, VerificationGateOK},
+		{"failure then skipped", []CICheck{{"build", CICheckPass}, {"test", CICheckFail}, {"test", CICheckSkipped}}, VerificationGateFailing},
+		{"skipped then failure", []CICheck{{"build", CICheckPass}, {"test", CICheckSkipped}, {"test", CICheckFail}}, VerificationGateFailing},
+		{"unknown then skipped", []CICheck{{"build", CICheckPass}, {"test", ""}, {"test", CICheckSkipped}}, VerificationGateMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := EvaluateVerification(VerificationInput{Mode: VerifyReceiptOrCI, Files: []string{"loop.go"}, ChecksOnHead: true, Checks: tc.checks})
+			gate, _ := rep.Gate()
+			if gate != tc.gate {
+				t.Fatalf("gate=%d want %d report=%+v", gate, tc.gate, rep)
+			}
+			if gate == VerificationGateMissing && (len(rep.Rejected) == 0 || !strings.Contains(rep.Rejected[0], "test")) {
+				t.Fatalf("pending duplicate missing from explanation: %+v", rep)
+			}
+		})
+	}
+}

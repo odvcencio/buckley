@@ -201,7 +201,7 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 			}
 		}
 		if !declaredCI && len(required) > 0 {
-			evaluateUnmappedCI(&rep, byName, required, add)
+			evaluateUnmappedCI(&rep, in.Checks, required, add)
 		}
 	}
 
@@ -218,33 +218,39 @@ func EvaluateVerification(in VerificationInput) VerificationReport {
 // reported check has completed and none failed. Skipped checks are fine. A
 // failing check blocks, by name. Pending or queued checks do not count, and the
 // report says why. A repository wanting per-path precision declares ci_checks.
-func evaluateUnmappedCI(rep *VerificationReport, byName map[string]CICheckState, required []string, add func(EvidenceItem, bool)) {
-	names := make([]string, 0, len(byName))
-	for name := range byName {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	var pending []string
-	passed, skipped := 0, 0
-	for _, name := range names {
-		switch byName[name] {
+func evaluateUnmappedCI(rep *VerificationReport, checks []CICheck, required []string, add func(EvidenceItem, bool)) {
+	var pending, failed []string
+	seenPending, seenFailed := map[string]bool{}, map[string]bool{}
+	passed, skipped, pendingCount := 0, 0, 0
+	for _, check := range checks {
+		switch check.State {
 		case CICheckPass:
 			passed++
 		case CICheckSkipped:
 			skipped++
 		case CICheckFail:
-			add(EvidenceItem{Kind: "ci", Label: "ci check `" + name + "`", Detail: "failed on the reviewed head (no path mapping declared; it affects all changed paths)",
-				Paths: append([]string(nil), required...)}, false)
+			if !seenFailed[check.Name] {
+				seenFailed[check.Name] = true
+				failed = append(failed, check.Name)
+			}
 		default:
-			pending = append(pending, name)
+			pendingCount++
+			if !seenPending[check.Name] {
+				seenPending[check.Name] = true
+				pending = append(pending, check.Name)
+			}
 		}
+	}
+	sort.Strings(failed)
+	sort.Strings(pending)
+	for _, name := range failed {
+		add(EvidenceItem{Kind: "ci", Label: "ci check `" + name + "`", Detail: "failed on the reviewed head (no path mapping declared; it affects all changed paths)", Paths: append([]string(nil), required...)}, false)
 	}
 	if len(rep.Failing) > 0 {
 		return
 	}
-	if len(pending) > 0 {
-		rep.Rejected = append(rep.Rejected, fmt.Sprintf("CI is not finished: %d of %d checks are pending or queued (%s); CI counts as verification once every check has completed without failing",
-			len(pending), len(names), strings.Join(limitList(pending, 6), ", ")))
+	if pendingCount > 0 {
+		rep.Rejected = append(rep.Rejected, fmt.Sprintf("CI is not finished: %d of %d checks are pending or queued (%s); CI counts as verification once every check has completed without failing", pendingCount, len(checks), strings.Join(limitList(pending, 6), ", ")))
 		return
 	}
 	if passed == 0 {
