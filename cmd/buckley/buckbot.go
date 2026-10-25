@@ -284,8 +284,17 @@ func formatBuckbotGitHubReview(parsed *commands.ParsedReview, review, headSHA st
 	verdict := "NEEDS FOLLOW-UP"
 	noteType := "NOTE"
 	if parsed.Approved {
-		verdict = "READY TO MERGE"
-		noteType = "TIP"
+		switch {
+		case parsed.BuildVerification == commands.VerificationFail || parsed.TestVerification == commands.VerificationFail:
+			verdict = "REVIEW CONFLICTS WITH FAILED VERIFICATION"
+			noteType = "CAUTION"
+		case parsed.BuildVerification == commands.VerificationPass &&
+			(parsed.TestVerification == commands.VerificationPass || parsed.TestVerification == commands.VerificationNotApplicable):
+			verdict = "POSITIVE REVIEW · CHECK MERGE GATES"
+			noteType = "TIP"
+		default:
+			verdict = "CONDITIONAL APPROVAL · VERIFICATION REQUIRED"
+		}
 	} else if parsed.HasBlockers() {
 		verdict = "CHANGES REQUESTED"
 		noteType = "CAUTION"

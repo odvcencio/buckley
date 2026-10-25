@@ -227,9 +227,9 @@ type ReviewValidationOptions struct {
 	RequiresFeedbackDisposition bool
 	RequiredFeedbackIDs         []string
 	RequirePassingRemoteCI      bool
-	// AllowUnverifiedApproval lets a review approve with Build or Tests
-	// UNAVAILABLE or NOT_APPLICABLE, because the reviewer does not run
-	// verification. FAIL still blocks an approval.
+	// AllowUnverifiedApproval lets a review approve with Build UNAVAILABLE or
+	// Tests UNAVAILABLE/NOT_APPLICABLE when the reviewer does not run verification.
+	// Failed and provisional states still block approval.
 	AllowUnverifiedApproval bool
 }
 
@@ -399,6 +399,12 @@ func validateApprovalEvidence(parsed *ParsedReview, opts ReviewValidationOptions
 	if opts.AllowUnverifiedApproval {
 		if parsed.BuildVerification == VerificationFail || parsed.TestVerification == VerificationFail {
 			return fmt.Errorf("an approval is inconsistent with failing verification (Build %s, Tests %s)", parsed.BuildVerification, parsed.TestVerification)
+		}
+		if parsed.BuildVerification != VerificationPass && parsed.BuildVerification != VerificationUnavailable {
+			return fmt.Errorf("an unverified approval requires Build status PASS or UNAVAILABLE, got %s", parsed.BuildVerification)
+		}
+		if parsed.TestVerification != VerificationPass && parsed.TestVerification != VerificationUnavailable && parsed.TestVerification != VerificationNotApplicable {
+			return fmt.Errorf("an unverified approval requires Tests status PASS, UNAVAILABLE, or NOT_APPLICABLE, got %s", parsed.TestVerification)
 		}
 		return nil
 	}

@@ -102,11 +102,11 @@ func TestFormatBuckbotInlineFinding(t *testing.T) {
 }
 
 func TestFormatBuckbotGitHubReview(t *testing.T) {
-	approved := commands.ParseReview("## Grade: A\n\n## Coverage\n- every file\n\n## Invariant Audit\n- bounds\n\n## Falsification\n- disproved\n\n## Verdict\n- **Approved**: YES\n- **Blockers**: NONE")
+	approved := commands.ParseReview("## Grade: A\n\n## Build & Test Status\n- Build: PASS\n- Tests: PASS\n\n## Coverage\n- every file\n\n## Invariant Audit\n- bounds\n\n## Falsification\n- disproved\n\n## Verdict\n- **Approved**: YES\n- **Blockers**: NONE")
 	got := formatBuckbotGitHubReview(approved, approved.RawReview, "1234567890abcdef")
 	for _, want := range []string{
 		"[!TIP]",
-		"Buckbot · Grade A · READY TO MERGE",
+		"Buckbot · Grade A · POSITIVE REVIEW · CHECK MERGE GATES",
 		"`1234567890ab`",
 		"Line comments contain only demonstrated findings.",
 		"<summary><strong>Full changed-file coverage ledger</strong></summary>",
