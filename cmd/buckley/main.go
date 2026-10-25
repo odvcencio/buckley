@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -153,12 +154,18 @@ type startupOptions struct {
 	toolsSet         bool
 	readRoots        []string // --read-root paths, repeatable
 	allowShell       bool     // --allow-shell
-	taskIntent       agentloop.TaskIntent
-	taskIntentSet    bool
-	persist          bool
-	codeMode         bool
-	plainModeSet     bool
-	plainMode        bool
+	// Optional one-shot caps; zero means no cap.
+	capFlags        map[string]bool
+	maxToolCalls    int
+	maxElapsed      time.Duration
+	maxOutputTokens int
+	budgetUSD       float64
+	taskIntent      agentloop.TaskIntent
+	taskIntentSet   bool
+	persist         bool
+	codeMode        bool
+	plainModeSet    bool
+	plainMode       bool
 }
 
 type startupPendingFlag int
@@ -172,10 +179,12 @@ const (
 	startupPendingAgent
 	startupPendingTools
 	startupPendingReadRoot
+	startupPendingCap
 	startupPendingTaskIntent
 )
 
 type startupFlagState struct {
+	capFlag       string // the cap flag waiting for its value
 	pending       startupPendingFlag
 	modelFlagSeen bool
 	agentFlagSeen bool
@@ -330,6 +339,7 @@ func main() {
 		AllowedTools:  opts.tools,
 		ReadRoots:     opts.readRoots,
 		AllowShell:    opts.allowShell,
+		Caps:          oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD, Set: opts.capFlags},
 		CodeMode:      opts.codeMode,
 		Limits:        acpLoopLimits{TaskIntent: opts.taskIntent, Persist: opts.persist},
 	}
@@ -900,6 +910,10 @@ func printHelp() {
 	fmt.Println("  --task-intent <intent>           One-shot result contract: unknown, read_only, or mutation")
 	fmt.Println("  --tools <names>                  Limit one-shot model tools (comma-separated, repeatable)")
 	fmt.Println("  --allow-shell                    Offer run_shell to a one-shot mutation run in a trusted project (or name it in --tools)")
+	fmt.Println("  --max-tool-calls <n>             Cap one-shot tool calls (default: no cap)")
+	fmt.Println("  --max-elapsed <duration>         Cap one-shot wall time, e.g. 90m (default: no cap)")
+	fmt.Println("  --max-output-tokens <n>          Cap tokens per model response (default: no cap)")
+	fmt.Println("  --budget <usd>                   Cap one-shot model spend (default: no cap)")
 	fmt.Println("  --read-root <path>               Let read-only tools read this directory or file (repeatable; also tools.read_roots)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
 	fmt.Println("  --encoding json|toon             Set serialization format")
@@ -1708,6 +1722,10 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (boo
 		if err := opts.addTools(arg); err != nil {
 			return true, err
 		}
+	case startupPendingCap:
+		if err := opts.setCap(s.capFlag, arg); err != nil {
+			return true, err
+		}
 	case startupPendingReadRoot:
 		if strings.TrimSpace(arg) == "" {
 			return true, fmt.Errorf("--read-root requires a path")
@@ -1796,6 +1814,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 			return false, nil
 		}
 		opts.allowShell = true
+	case "--max-tool-calls", "--max-elapsed", "--max-output-tokens", "--budget":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending, s.capFlag = startupPendingCap, arg
 	case "--read-root":
 		if !beforeCommand {
 			return false, nil
@@ -1826,6 +1849,11 @@ func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg str
 		opts.agentPath = strings.TrimSpace(strings.TrimPrefix(arg, "--agent="))
 		s.agentFlagSeen = true
 		return true, nil
+	}
+	for _, name := range []string{"--max-tool-calls", "--max-elapsed", "--max-output-tokens", "--budget"} {
+		if strings.HasPrefix(arg, name+"=") && beforeCommand {
+			return true, opts.setCap(name, strings.TrimPrefix(arg, name+"="))
+		}
 	}
 	if strings.HasPrefix(arg, "--read-root=") && beforeCommand {
 		if strings.TrimSpace(strings.TrimPrefix(arg, "--read-root=")) == "" {
@@ -1867,6 +1895,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("--agent requires a path")
 	case startupPendingTools:
 		return fmt.Errorf("--tools requires comma-separated tool names")
+	case startupPendingCap:
+		return fmt.Errorf("%s requires a value", s.capFlag)
 	case startupPendingReadRoot:
 		return fmt.Errorf("--read-root requires a path")
 	case startupPendingTaskIntent:
@@ -1881,6 +1911,41 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 	if opts.toolsSet && len(opts.args) > 0 {
 		return fmt.Errorf("--tools is only supported with -p or piped one-shot input")
 	}
+	return nil
+}
+
+// setCap records an optional one-shot cap. Zero means no cap; negative values
+// are errors.
+func (opts *startupOptions) setCap(flagName, raw string) error {
+	raw = strings.TrimSpace(raw)
+	switch flagName {
+	case "--max-tool-calls", "--max-output-tokens":
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s needs a whole number of at least 0 (0 means no cap), got %q", flagName, raw)
+		}
+		if flagName == "--max-tool-calls" {
+			opts.maxToolCalls = n
+		} else {
+			opts.maxOutputTokens = n
+		}
+	case "--max-elapsed":
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			return fmt.Errorf("--max-elapsed needs a duration such as 90m (0 means no cap), got %q", raw)
+		}
+		opts.maxElapsed = d
+	case "--budget":
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("--budget needs a dollar amount of at least 0 (0 means no cap), got %q", raw)
+		}
+		opts.budgetUSD = v
+	}
+	if opts.capFlags == nil {
+		opts.capFlags = make(map[string]bool)
+	}
+	opts.capFlags[flagName] = true
 	return nil
 }
 

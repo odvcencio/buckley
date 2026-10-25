@@ -2,13 +2,20 @@ package commands
 
 import "testing"
 
-func TestEvaluateVerification_RejectsUnmappedCI(t *testing.T) {
+// Owner decision: unmapped CI is the lenient default. A fully green run counts;
+// anything unfinished or failing does not (see TestEvaluateVerificationUnmappedCI).
+func TestEvaluateVerification_UnmappedAllGreenCIIsVerified(t *testing.T) {
 	for _, checks := range [][]CICheck{{{"Pages", CICheckPass}}, {{"Build", CICheckPass}, {"Test", CICheckPass}}} {
 		rep := EvaluateVerification(VerificationInput{Mode: VerifyReceiptOrCI, Files: []string{"pkg/engine/loop.go"}, ChecksOnHead: true, Checks: checks})
 		code, _ := rep.Gate()
-		if code != VerificationGateMissing || rep.Qualifier() != "unverified" || len(rep.Covered) != 0 {
-			t.Fatalf("unmapped checks authorize source coverage: %+v gate=%d", rep, code)
+		if code != VerificationGateOK || rep.Qualifier() != "verified" || len(rep.Covered) != 1 {
+			t.Fatalf("all-green unmapped CI not accepted: %+v gate=%d", rep, code)
 		}
+	}
+	rep := EvaluateVerification(VerificationInput{Mode: VerifyReceiptOrCI, Files: []string{"pkg/engine/loop.go"}, ChecksOnHead: true,
+		Checks: []CICheck{{"Build", CICheckPass}, {"Test", CICheckPending}}})
+	if code, _ := rep.Gate(); code != VerificationGateMissing || rep.Qualifier() != "unverified" {
+		t.Fatalf("a pending check was accepted: %+v gate=%d", rep, code)
 	}
 }
 

@@ -194,8 +194,8 @@ func TestGoalLoopGovernorConfig_UsesDurableEmergencyFuse(t *testing.T) {
 	if execute.MaxRounds != 137 || execute.MaxToolCalls != 509 {
 		t.Fatalf("execute limits = (%d, %d), want (137, 509)", execute.MaxRounds, execute.MaxToolCalls)
 	}
-	if execute.ReadOnlyWarningAt != goalReadOnlyWarning || execute.ReadOnlyActionAt != goalReadOnlyAction || execute.MaxReadOnlyCalls != goalReadOnlyLimit {
-		t.Fatalf("execute read-only ladder = (%d, %d, %d), want (%d, %d, %d)", execute.ReadOnlyWarningAt, execute.ReadOnlyActionAt, execute.MaxReadOnlyCalls, goalReadOnlyWarning, goalReadOnlyAction, goalReadOnlyLimit)
+	if execute.ReadOnlyWarningAt != 0 || execute.ReadOnlyActionAt != 0 || execute.MaxReadOnlyCalls != 0 {
+		t.Fatalf("execute read-only ladder = (%d, %d, %d), want none", execute.ReadOnlyWarningAt, execute.ReadOnlyActionAt, execute.MaxReadOnlyCalls)
 	}
 
 	verify := goalLoopGovernorConfig(cfg, goalloop.PhaseVerify)

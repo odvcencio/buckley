@@ -203,6 +203,9 @@ func newProgressTestController(t *testing.T, progress *ProgressController, store
 	round := 0
 	ctrl, err := NewController(ControllerConfig{
 		Progress: progress,
+		// The stub model never stops asking for tools, so the test bounds it
+		// explicitly; the default governor has no ceiling.
+		Governor: New(Config{MaxRounds: 32, MaxToolCalls: 96}),
 		BuildRequest: func(ctx context.Context, r int) (model.ChatRequest, error) {
 			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
 		},

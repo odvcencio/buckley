@@ -1,6 +1,9 @@
 package widgets
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +130,32 @@ func TestMarkdownPPForTerminalPreservesTaskLists(t *testing.T) {
 	got := markdownPPForTerminal("- [ ] inspect parser\n- [x] add fixture")
 	if !strings.Contains(got, "- [ ] inspect parser") || !strings.Contains(got, "- [x] add fixture") {
 		t.Fatalf("Markdown++ lowering lost task list semantics: %q", got)
+	}
+}
+
+func TestMarkdownPPForTerminalFinishesZeroNumberedList(t *testing.T) {
+	if os.Getenv("BUCKLEY_TEST_MDPP_ZERO_LIST_CHILD") != "1" {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+t.Name()+"$")
+		cmd.Env = append(os.Environ(), "BUCKLEY_TEST_MDPP_ZERO_LIST_CHILD=1", "GOMEMLIMIT=32MiB")
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatal("zero-numbered list rendering did not finish within two seconds")
+		}
+		if err != nil {
+			t.Fatalf("renderer child: %v\n%s", err, out)
+		}
+		return
+	}
+	// mdpp before v0.5.0 looped forever on a list numbered from 0 once a reply
+	// was long enough (2048 bytes, three headings) to take its segmented path.
+	reply := "# Plan\n\n" +
+		strings.Repeat("Padding words keep this reply above the size where mdpp segments it.\n", 40) +
+		"\n## Notes\n\nnone\n\n## Phasing\n\n0. **Flag gate.** first step\n1. second step\n"
+	got := markdownPPForTerminal(reply)
+	if !strings.Contains(got, "\n0. **Flag gate.** first step\n1. second step") {
+		t.Fatalf("zero-numbered list items were lost: %q", got)
 	}
 }
 

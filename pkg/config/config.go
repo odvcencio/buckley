@@ -511,6 +511,14 @@ type OneshotModeConfig struct {
 	// project even when --tools does not name it. Sandbox, approval rules and
 	// approval.denied_tools still apply. Off by default.
 	AllowShell bool `yaml:"allow_shell"`
+
+	// Optional caps for one-shot runs. Zero (the default) means no cap. The
+	// matching flags --max-tool-calls, --max-elapsed, --max-output-tokens and
+	// --budget override them for one run.
+	MaxToolCalls    int           `yaml:"max_tool_calls"`
+	MaxElapsed      time.Duration `yaml:"max_elapsed"`
+	MaxOutputTokens int           `yaml:"max_output_tokens"`
+	BudgetUSD       float64       `yaml:"budget_usd"`
 }
 
 // RLMConfig controls Buckley's coordinator–worker runtime. The historical
