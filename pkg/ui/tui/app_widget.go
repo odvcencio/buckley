@@ -649,6 +649,18 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/help", Label: "/help", Description: "Show available commands"},
 		{ID: "/quit", Label: "/quit", Description: "Exit Buckley"},
 	}
+	palette.SetFilterFn(func(item widgets.PaletteItem, query string) bool {
+		query = strings.ToLower(query)
+		prefix := "/" + strings.TrimPrefix(query, "/")
+		for _, command := range items {
+			if strings.HasPrefix(command.Label, prefix) {
+				return strings.HasPrefix(item.Label, prefix)
+			}
+		}
+		return strings.Contains(strings.ToLower(item.Label), query) ||
+			strings.Contains(strings.ToLower(item.Description), query) ||
+			strings.Contains(strings.ToLower(item.Category), query)
+	})
 	palette.SetItems(items)
 
 	palette.SetOnSelect(func(item widgets.PaletteItem) {
