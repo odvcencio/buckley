@@ -1066,8 +1066,17 @@ func TestGoalTurnEngine_GuardStopReturnsFinalSynthesis(t *testing.T) {
 
 func TestGoalTurnEngine_RepetitionWithoutStateChangeParks(t *testing.T) {
 	t.Parallel()
-	repeated := goalEngineToolCallResponse("read_file", `{"path":"missing-probe.txt"}`)
+	repeated := goalEngineToolCallResponse("missing_probe", `{}`)
 	engine, _ := newGoalEngineUnderTest(t, []string{repeated, repeated, repeated, goalEngineTextResponse})
+	executions := 0
+	engine.registry.Register(&goalStateTestTool{
+		name:     "missing_probe",
+		metadata: tool.ToolMetadata{Impact: tool.ImpactReadOnly},
+		execute: func() error {
+			executions++
+			return fmt.Errorf("probe unavailable")
+		},
+	})
 
 	outcome, err := engine.RunTurn(context.Background(), goalloop.TaskContext{
 		RunID: "run-1", TaskID: "task-stalled", TurnID: "turn-stalled",
@@ -1075,6 +1084,9 @@ func TestGoalTurnEngine_RepetitionWithoutStateChangeParks(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
+	}
+	if executions != 3 {
+		t.Fatalf("probe executions = %d, want three observed failures before parking", executions)
 	}
 	if outcome.Blocker == nil {
 		t.Fatal("repetition guard did not produce a governed park blocker")
