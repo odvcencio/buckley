@@ -249,7 +249,14 @@ func (c *Controller) compactCurrentSession() {
 				err = sess.Conversation.SaveAllMessages(c.store)
 			}
 		}
+		var cacheErr error
+		if err == nil {
+			cacheErr = c.boundIdleHistoryLocked()
+		}
 		c.mu.Unlock()
+		if cacheErr != nil {
+			c.app.AddMessage("Keeping inactive history in memory: "+cacheErr.Error(), "system")
+		}
 
 		c.app.StopProcessStatus()
 		if err != nil {

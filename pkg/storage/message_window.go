@@ -11,6 +11,11 @@ import (
 
 var ErrSessionMemoryBudget = errors.New("session working history exceeds memory budget")
 
+const workingSetReadCostSQL = `512 + 2 * (length(CAST(content AS BLOB)) +
+		length(CAST(COALESCE(content_json, '') AS BLOB)) + length(CAST(COALESCE(tool_calls, '') AS BLOB)) +
+		length(CAST(COALESCE(reasoning, '') AS BLOB)) + length(CAST(COALESCE(reasoning_details, '') AS BLOB)) +
+		length(CAST(COALESCE(tool_call_id, '') AS BLOB)) + length(CAST(COALESCE(name, '') AS BLOB)))`
+
 // MessageWindow is a bounded view of canonical history. BeforeID identifies the
 // stored prefix that a working-view edit must preserve.
 type MessageWindow struct {
@@ -43,11 +48,8 @@ func (s *Store) GetMessageWindow(ctx context.Context, sessionID string, maxBytes
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE session_id = ? AND is_summary = 1`, sessionID).Scan(&summaryCount); err != nil {
 		return MessageWindow{}, err
 	}
-	const cost = `512 + 2 * (length(CAST(content AS BLOB)) +
-		length(CAST(COALESCE(content_json, '') AS BLOB)) + length(CAST(COALESCE(tool_calls, '') AS BLOB)) +
-		length(CAST(COALESCE(reasoning, '') AS BLOB)) + length(CAST(COALESCE(reasoning_details, '') AS BLOB)) +
-		length(CAST(COALESCE(tool_call_id, '') AS BLOB)) + length(CAST(COALESCE(name, '') AS BLOB)))`
-	rows, err := tx.QueryContext(ctx, `SELECT id, `+cost+` FROM messages WHERE session_id = ? AND ((role = 'system' AND is_summary = 0) OR id IN (
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, `+workingSetReadCostSQL+` FROM messages WHERE session_id = ? AND ((role = 'system' AND is_summary = 0) OR id IN (
 		(SELECT MIN(id) FROM messages WHERE session_id = ? AND role = 'user'),
 		(SELECT MAX(id) FROM messages WHERE session_id = ? AND is_summary = 1))) ORDER BY id LIMIT 257`,
 		sessionID, sessionID, sessionID)
@@ -75,7 +77,7 @@ func (s *Store) GetMessageWindow(ctx context.Context, sessionID string, maxBytes
 	if err != nil {
 		return MessageWindow{}, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id, `+cost+` FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 257`, sessionID)
+	rows, err = tx.QueryContext(ctx, `SELECT id, `+workingSetReadCostSQL+` FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 257`, sessionID)
 	if err != nil {
 		return MessageWindow{}, err
 	}
