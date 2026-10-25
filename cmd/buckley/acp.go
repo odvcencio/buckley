@@ -1100,6 +1100,7 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 // the last phase update sent (sendACPPhaseUpdate dedupes on it).
 type acpLoopState struct {
 	allowHostTools        bool
+	allowShell            bool
 	bestEffortObservation bool
 	useTools              bool
 	toolTurnEnabled       bool
@@ -1162,7 +1163,10 @@ func runACPLoop(
 }
 
 type acpLoopLimits struct {
-	allowHostTools        bool
+	allowHostTools bool
+	// allowShell offers run_shell to a one-shot run with no approver. It was
+	// granted by decideOneShotShell; sandbox and approval middleware still apply.
+	allowShell            bool
 	longMutation          bool
 	bestEffortObservation bool
 	Persist               bool
@@ -1269,6 +1273,7 @@ func runACPLoopWithLimits(
 	}
 	state := &acpLoopState{
 		allowHostTools:                   limits.allowHostTools,
+		allowShell:                       limits.allowShell,
 		bestEffortObservation:            limits.bestEffortObservation,
 		useTools:                         acpModelCanUseTools(registry, mgr, route),
 		route:                            route,
@@ -1536,7 +1541,7 @@ func newACPLoopController(
 			return model.ChatRequest{}, err
 		}
 		state.lastPhase = sendACPPhaseUpdate(stream, state.lastPhase, "Thinking…")
-		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil || limits.allowHostTools, governor.ActionRequired(), limits.TaskIntent, limits.allowHostTools)
+		toolTurn := buildACPToolTurn(registry, skillState, evaluator, state.useTools, agent != nil || limits.allowHostTools, governor.ActionRequired(), limits.TaskIntent, limits.allowHostTools, limits.allowShell)
 		state.useTools = toolTurn.UseTools
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
@@ -2565,16 +2570,22 @@ func acpModelCanUseTools(registry *tool.Registry, mgr *model.Manager, route mode
 	return registry != nil && (mgr == nil || mgr.OfferToolsForRoute(route))
 }
 
+// buildACPToolTurn builds one turn's tool list. hostTools[0] marks an
+// unrestricted host lane; hostTools[1] marks a run granted run_shell by
+// decideOneShotShell, which lifts only the default no-approver policy that
+// hides destructive tools (dispatch still runs the sandbox and approval
+// middleware).
 func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, evaluator types.RuleEvaluator, useTools bool, permissionAvailable bool, actionRequired bool, intent agentloop.TaskIntent, hostTools ...bool) acpToolTurn {
+	allowShell := len(hostTools) > 1 && hostTools[1]
 	turn := acpToolTurn{UseTools: useTools}
 	if skillState != nil {
 		turn.AllowedTools = skillState.ToolFilter()
 	}
 	if actionRequired && intent != agentloop.ReadOnlyIntent && registry != nil {
-		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools, len(hostTools) > 0 && hostTools[0])
+		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools, allowShell || (len(hostTools) > 0 && hostTools[0]))
 	}
 	if !permissionAvailable && registry != nil {
-		turn.AllowedTools = acpFallbackAllowedToolNames(registry, turn.AllowedTools)
+		turn.AllowedTools = acpFallbackAllowedToolNames(registry, turn.AllowedTools, allowShell)
 	}
 	if !useTools || registry == nil {
 		turn.UseTools = false
@@ -2592,7 +2603,7 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 // acpFallbackAllowedToolNames keeps a noninteractive request aligned with the
 // permission decision it will receive at dispatch time. Advertising a tool
 // that the fallback always denies wastes model turns and invites denial loops.
-func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string) []string {
+func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string, allowShell ...bool) []string {
 	hasFilter := allowed != nil
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
@@ -2606,7 +2617,7 @@ func acpFallbackAllowedToolNames(registry *tool.Registry, allowed []string) []st
 				continue
 			}
 		}
-		if acpFallbackPermissionDecision(acpRiskLabel(tool.GetMetadata(registered).Impact)) {
+		if acpFallbackPermissionDecision(acpRiskLabel(tool.GetMetadata(registered).Impact)) || (name == "run_shell" && len(allowShell) > 0 && allowShell[0]) {
 			names = append(names, name)
 		}
 	}
@@ -2942,7 +2953,7 @@ func dispatchACPToolCall(ctx context.Context, registry *tool.Registry, evaluator
 		return agentloop.ToolOutcome{Content: toolText, Error: toolText, EffectClass: effectClass}
 	}
 
-	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed && !(agent == nil && state.allowHostTools && ctx.Err() == nil) {
+	if allowed, reason := requestACPToolPermission(ctx, agent, registry, sessionID, tc, params, workDir, logf); !allowed && !(agent == nil && state.allowHostTools && ctx.Err() == nil) && !(agent == nil && state.allowShell && tc.Function.Name == "run_shell" && ctx.Err() == nil) {
 		toolText := fmt.Sprintf("Permission denied for %s: %s", tc.Function.Name, reason)
 		result := &builtin.Result{Success: false, Error: toolText}
 		sendACPToolCallUpdate(stream, tc, params, acp.ToolCallStatusFailed, toolText, map[string]any{

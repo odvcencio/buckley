@@ -507,6 +507,11 @@ type OneshotModeConfig struct {
 	// DefaultOneshotDataPolicy.
 	DataPolicy string `yaml:"data_policy" env:"BUCKLEY_ONESHOT_DATA_POLICY"`
 
+	// AllowShell offers run_shell to a one-shot mutation run in a trusted
+	// project even when --tools does not name it. Sandbox, approval rules and
+	// approval.denied_tools still apply. Off by default.
+	AllowShell bool `yaml:"allow_shell"`
+
 	// Optional caps for one-shot runs. Zero (the default) means no cap. The
 	// matching flags --max-tool-calls, --max-elapsed, --max-output-tokens and
 	// --budget override them for one run.

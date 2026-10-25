@@ -345,6 +345,7 @@ in `cmd/gosx` and `perf/ouroboros`).
 oneshot:
   mode: classic
   data_policy: none # none (default), zdr, or deny
+  allow_shell: false # offer run_shell to trusted-project mutation one-shots; see docs/CLI.md
   # Optional one-shot caps. Zero or unset means no cap.
   max_tool_calls: 0
   max_elapsed: 0s        # for example 90m
