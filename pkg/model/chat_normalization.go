@@ -311,15 +311,25 @@ func repairToolMessageSequence(messages []Message) []Message {
 
 	out := make([]Message, 0, len(messages))
 	var pending []pendingToolCall
+	var deferredSystems []Message
+	flushPending := func() {
+		out = appendMissingToolResults(out, pending)
+		pending = nil
+		out = append(out, deferredSystems...)
+		deferredSystems = nil
+	}
 
 	for _, msg := range messages {
+		if msg.Role == "system" && len(pending) > 0 {
+			deferredSystems = append(deferredSystems, msg)
+			continue
+		}
 		if msg.Role == "tool" {
 			var matched pendingToolCall
 			var ok bool
 			pending, matched, ok = consumePendingToolCall(pending, msg.ToolCallID)
 			if !ok {
-				out = appendMissingToolResults(out, pending)
-				pending = nil
+				flushPending()
 				if orphan := orphanToolResultMessage(msg); !messageContentEmpty(orphan.Content) {
 					out = append(out, orphan)
 				}
@@ -329,11 +339,13 @@ func repairToolMessageSequence(messages []Message) []Message {
 				msg.Name = matched.name
 			}
 			out = append(out, msg)
+			if len(pending) == 0 {
+				flushPending()
+			}
 			continue
 		}
 
-		out = appendMissingToolResults(out, pending)
-		pending = nil
+		flushPending()
 
 		out = append(out, msg)
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
@@ -347,7 +359,7 @@ func repairToolMessageSequence(messages []Message) []Message {
 		}
 	}
 
-	out = appendMissingToolResults(out, pending)
+	flushPending()
 	return out
 }
 

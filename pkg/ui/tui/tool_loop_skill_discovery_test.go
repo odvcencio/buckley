@@ -160,6 +160,15 @@ func TestRunToolLoop_SkillChangesRefreshSchemasAndDispatch(t *testing.T) {
 			if !strings.Contains(conversation.GetContentAsString(tools[1].Content), marker) || !strings.Contains(conversation.GetContentAsString(tools[3].Content), "completed-work-survived") {
 				t.Fatalf("actual directory/read evidence missing: %+v", tools)
 			}
+			activationResult := false
+			for _, msg := range requests[1].Messages {
+				if msg.Role == "tool" && msg.Name == "activate_skill" && strings.Contains(model.ExtractTextContentOrEmpty(msg.Content), "# Skill Activated: directory-review") {
+					activationResult = true
+				}
+			}
+			if !activationResult {
+				t.Fatal("skill activation result lost its tool role in the next provider request")
+			}
 			last, _ := json.Marshal(requests[4].Messages)
 			if !strings.Contains(string(last), marker) || !strings.Contains(string(last), "completed-work-survived") {
 				t.Fatal("completed results missing from the next model request")
