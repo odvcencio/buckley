@@ -362,7 +362,7 @@ func (l *Loader) parseAgentSkillFile(content, fallbackName string) (*Skill, erro
 			return nil, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
 		}
 	}
-	skill.Content = strings.TrimSpace(body)
+	skill.setContent(body)
 	if strings.TrimSpace(skill.Name) == "" {
 		skill.Name = strings.TrimSpace(fallbackName)
 	}
@@ -434,7 +434,7 @@ func (l *Loader) parseSkillFile(content string) (*Skill, error) {
 	}
 
 	// Store markdown content (everything after second ---)
-	skill.Content = strings.TrimSpace(parts[2])
+	skill.setContent(parts[2])
 
 	return &skill, nil
 }

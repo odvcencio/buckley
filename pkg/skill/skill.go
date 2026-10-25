@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unique"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,10 +33,18 @@ type Skill struct {
 	// Full markdown content (after frontmatter)
 	Content string `yaml:"-"`
 
+	// Keep shared body storage alive only while the skill is loaded.
+	contentHandle unique.Handle[string]
+
 	// Metadata
 	Source   string    `yaml:"-"` // Where loaded from (bundled|plugin|personal|project)
 	FilePath string    `yaml:"-"` // Full path to SKILL.md
 	LoadedAt time.Time `yaml:"-"`
+}
+
+func (s *Skill) setContent(content string) {
+	s.contentHandle = unique.Make(strings.TrimSpace(content))
+	s.Content = s.contentHandle.Value()
 }
 
 // UnmarshalYAML accepts both Buckley's legacy allowed_tools list and the
