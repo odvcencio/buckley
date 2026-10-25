@@ -36,3 +36,20 @@ func TestMessageCursor_RejectsSyntheticAndUntimestampedMessages(t *testing.T) {
 		t.Fatal("empty cursor matched")
 	}
 }
+
+func TestAppendCount_TracksRealMessagesAcrossProjection(t *testing.T) {
+	conv := New("counted")
+	for range 300 {
+		conv.AddAssistantMessage("content")
+	}
+	if _, err := conv.BoundWorkingSet(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if conv.AppendCount() != 300 || len(conv.Messages) > 256 {
+		t.Fatal("projection changed append count or exceeded its message bound")
+	}
+	conv.AppendMessage(Message{Role: "user", Tokens: 7})
+	if conv.AppendCount() != 301 {
+		t.Fatal("generic append was not counted")
+	}
+}

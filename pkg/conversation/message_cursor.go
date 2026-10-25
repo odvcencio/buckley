@@ -1,5 +1,17 @@
 package conversation
 
+// AppendMessage adds one real message. Working-view projection and historical
+// reloads do not advance this counter, so callers can detect a partially trimmed turn.
+func (c *Conversation) AppendMessage(msg Message) {
+	c.Messages = append(c.Messages, msg)
+	c.TokenCount += msg.Tokens
+	c.appendedMessages++
+}
+
+func (c *Conversation) AppendCount() uint64 {
+	return c.appendedMessages
+}
+
 // MessageCursor identifies a message without retaining its content. Like message
 // persistence, it uses timestamp and role, with tool identifiers for disambiguation.
 // It survives working-view trims and storage reloads.

@@ -16,12 +16,12 @@ const maxUndoDepth = 20
 // turnBoundary is the state beginTurnUndo captures at the start of a turn,
 // consumed by finishTurnUndo once the turn (streaming, tool loop) settles.
 type turnBoundary struct {
-	store             *shadowgit.Store
-	beforeTree        string
-	messagesBefore    int
-	historyVersion    uint64
-	workingSetVersion uint64
-	previousMessage   conversation.MessageCursor
+	store           *shadowgit.Store
+	beforeTree      string
+	messagesBefore  int
+	historyVersion  uint64
+	appendedBefore  uint64
+	previousMessage conversation.MessageCursor
 }
 
 // sessionUndoStore lazily resolves and caches sess's shadow-git store. It
@@ -53,7 +53,7 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 	c.mu.Lock()
 	messagesBefore := len(sess.Conversation.Messages)
 	historyVersion := sess.historyVersion
-	workingSetVersion := sess.workingSetVersion
+	appendedBefore := sess.Conversation.AppendCount()
 	var previousMessage conversation.MessageCursor
 	if messagesBefore > 0 {
 		previousMessage = sess.Conversation.Messages[messagesBefore-1].Cursor()
@@ -63,7 +63,7 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 
 	store := c.sessionUndoStore(sess)
 	boundary := turnBoundary{store: store, messagesBefore: messagesBefore, historyVersion: historyVersion,
-		workingSetVersion: workingSetVersion, previousMessage: previousMessage}
+		appendedBefore: appendedBefore, previousMessage: previousMessage}
 	if store == nil {
 		return boundary
 	}
@@ -132,13 +132,13 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 		records = records[1:]
 	}
 	trees := undoTrees(records, sess.redoStack)
-	workingSetVersion := sess.workingSetVersion
+	appendedAfter := sess.Conversation.AppendCount()
 	c.mu.Unlock()
 	if err := boundary.store.RetainTrees(ctx, trees); err != nil {
 		return
 	}
 	c.mu.Lock()
-	if sess.historyVersion == boundary.historyVersion && sess.workingSetVersion == workingSetVersion {
+	if sess.historyVersion == boundary.historyVersion && sess.Conversation.AppendCount() == appendedAfter {
 		sess.undoStack = records
 		c.mu.Unlock()
 		return
@@ -149,17 +149,27 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 }
 
 func undoTurnStart(sess *SessionState, boundary turnBoundary) (int, bool) {
-	if sess.historyVersion != boundary.historyVersion {
+	conv := sess.Conversation
+	if sess.historyVersion != boundary.historyVersion || conv.AppendCount() < boundary.appendedBefore {
 		return 0, false
 	}
-	if boundary.messagesBefore == 0 {
-		return 0, sess.workingSetVersion == boundary.workingSetVersion
+	start := boundary.messagesBefore
+	if boundary.messagesBefore > 0 && boundary.previousMessage != (conversation.MessageCursor{}) {
+		index := conv.MessageIndex(boundary.previousMessage)
+		if index < 0 {
+			return 0, false
+		}
+		start = index + 1
 	}
-	if boundary.previousMessage != (conversation.MessageCursor{}) {
-		index := sess.Conversation.MessageIndex(boundary.previousMessage)
-		return index + 1, index >= 0
+	if start > len(conv.Messages) || uint64(len(conv.Messages)-start) != conv.AppendCount()-boundary.appendedBefore {
+		return 0, false
 	}
-	return boundary.messagesBefore, sess.workingSetVersion == boundary.workingSetVersion
+	for _, msg := range conv.Messages[start:] {
+		if msg.Cursor() == (conversation.MessageCursor{}) {
+			return 0, false
+		}
+	}
+	return start, true
 }
 
 func undoMessageRange(conv *conversation.Conversation, messages []conversation.Message) (int, int, bool) {

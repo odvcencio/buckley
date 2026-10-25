@@ -227,7 +227,7 @@ func (c *Controller) persistAndRenderIncompleteDraft(sess *SessionState, draft s
 		Tokens:      conversation.CountTokens(content),
 		IsTruncated: true,
 	}
-	sess.Conversation.Messages = append(sess.Conversation.Messages, msg)
+	sess.Conversation.AppendMessage(msg)
 	sess.Conversation.TokenCount += msg.Tokens
 	c.saveLatestConversationMessage(sess)
 }

@@ -22,7 +22,6 @@ func (c *Controller) boundSessionWorkingSetLocked(sess *SessionState) error {
 		if sess.continuation != nil {
 			sess.continuation.Reset()
 		}
-		sess.workingSetVersion++
 		if err != nil {
 			sess.historyVersion++
 			clear(sess.undoStack)

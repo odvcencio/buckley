@@ -24,7 +24,7 @@ func TestController_ResourceBudgetBoundsQueuedInputAndInvalidatesTrimmedUndo(t *
 	if err := c.boundSessionWorkingSetLocked(sess); err != nil {
 		t.Fatal(err)
 	}
-	if sess.workingSetVersion != 1 || len(sess.undoStack) != 0 || len(sess.redoStack) != 0 || sess.Conversation.WorkingSetBytes() > cfg.Resources.SessionMemoryBytes/2 {
+	if sess.historyVersion != 0 || len(sess.undoStack) != 0 || len(sess.redoStack) != 0 || sess.Conversation.WorkingSetBytes() > cfg.Resources.SessionMemoryBytes/2 {
 		t.Fatal("trim retained stale undo data or exceeded working allocation")
 	}
 	for range 30 {

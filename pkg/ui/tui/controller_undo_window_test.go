@@ -64,24 +64,34 @@ func TestUndoRedo_RecentTurnsSurviveWorkingWindowTrims(t *testing.T) {
 }
 
 func TestFinishTurnUndo_DoesNotRetainPartialOversizedFirstTurn(t *testing.T) {
-	repo := newUndoTestGitRepo(t)
-	ctrl, _, sess := newUndoTestController(t, repo)
-	ctrl.cfg = config.DefaultConfig()
-	t.Cleanup(ctrl.closeUndoStores)
-	file := filepath.Join(repo, "state.txt")
-	boundary := ctrl.beginTurnUndo(sess)
-	for i := range 300 {
-		sess.Conversation.AddAssistantMessage(fmt.Sprintf("completed %d", i))
-	}
-	if err := os.WriteFile(file, []byte("completed file"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctrl.finishTurnUndo(sess, boundary)
-	if len(sess.undoStack) != 0 || len(sess.Conversation.Messages) > 256 {
-		t.Fatal("partial turn was retained or memory bound was lost")
-	}
-	if data, err := os.ReadFile(file); err != nil || string(data) != "completed file" {
-		t.Fatalf("completed work changed: %q %v", data, err)
+	for _, anchor := range []string{"none", "system", "summary"} {
+		t.Run(anchor, func(t *testing.T) {
+			repo := newUndoTestGitRepo(t)
+			ctrl, _, sess := newUndoTestController(t, repo)
+			ctrl.cfg = config.DefaultConfig()
+			t.Cleanup(ctrl.closeUndoStores)
+			if anchor != "none" {
+				sess.Conversation.AddSystemMessage("pinned anchor")
+				if anchor == "summary" {
+					sess.Conversation.Messages[0].IsSummary = true
+				}
+			}
+			file := filepath.Join(repo, "state.txt")
+			boundary := ctrl.beginTurnUndo(sess)
+			for i := range 300 {
+				sess.Conversation.AddAssistantMessage(fmt.Sprintf("completed %d", i))
+			}
+			if err := os.WriteFile(file, []byte("completed file"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctrl.finishTurnUndo(sess, boundary)
+			if len(sess.undoStack) != 0 || len(sess.Conversation.Messages) > 256 {
+				t.Fatal("partial turn was retained or memory bound was lost")
+			}
+			if data, err := os.ReadFile(file); err != nil || string(data) != "completed file" {
+				t.Fatalf("completed work changed: %q %v", data, err)
+			}
+		})
 	}
 }
 

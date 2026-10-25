@@ -107,23 +107,22 @@ type QueuedMessage struct {
 
 // SessionState holds the state for a single session.
 type SessionState struct {
-	ID                string
-	Conversation      *conversation.Conversation
-	ToolRegistry      *tool.Registry
-	HookCloser        io.Closer
-	SkillRegistry     *skill.Registry
-	SkillState        *skill.RuntimeState
-	Streaming         bool
-	Compacting        bool
-	Cancel            context.CancelFunc
-	MessageQueue      []QueuedMessage // Messages queued while streaming
-	historyReference  *conversation.WorkingSetReference
-	historyUse        uint64
-	deferredHistory   bool
-	runtimeLoader     func(*storage.Store) (*SessionState, error)
-	persistenceErr    error
-	historyVersion    uint64
-	workingSetVersion uint64
+	ID               string
+	Conversation     *conversation.Conversation
+	ToolRegistry     *tool.Registry
+	HookCloser       io.Closer
+	SkillRegistry    *skill.Registry
+	SkillState       *skill.RuntimeState
+	Streaming        bool
+	Compacting       bool
+	Cancel           context.CancelFunc
+	MessageQueue     []QueuedMessage // Messages queued while streaming
+	historyReference *conversation.WorkingSetReference
+	historyUse       uint64
+	deferredHistory  bool
+	runtimeLoader    func(*storage.Store) (*SessionState, error)
+	persistenceErr   error
+	historyVersion   uint64
 
 	DisableToolsNextTurn bool
 	subagentListCursor   string
