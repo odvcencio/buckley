@@ -25,6 +25,20 @@ func TestReviewResultFromAgent_PreservesEarlierCompleteFinding(t *testing.T) {
 	if result.parsed != nil || !result.incomplete || !strings.Contains(result.reviewText, "must not be used as an approval") {
 		t.Fatal("salvage must remain incomplete and cannot expose an approval")
 	}
+	if strings.Count(result.reviewText, "earlier complete report") != 1 || !strings.Contains(result.reviewText, "Response is preserved above.") {
+		t.Fatal("diagnostics repeated the report already preserved in full")
+	}
+}
+
+func TestAppendReviewAttemptDiagnostics_DoesNotRepeatPreservedResponse(t *testing.T) {
+	trace := &transparency.Trace{Attempts: []transparency.TraceAttempt{
+		salvageSelectionAttempt("primary", 1, "earlier rejected draft"),
+		salvageSelectionAttempt("primary", 2, "preserved complete response"),
+	}}
+	got := appendReviewAttemptDiagnostics("preserved complete response", trace)
+	if strings.Count(got, "preserved complete response") != 1 || !strings.Contains(got, "earlier rejected draft") || !strings.Contains(got, "### Primary attempt 2") {
+		t.Fatalf("diagnostics lost attribution or duplicated the selected response: %s", got)
+	}
 }
 
 func TestReviewResultFromAgent_SalvageSelection(t *testing.T) {
