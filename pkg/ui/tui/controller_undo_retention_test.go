@@ -43,7 +43,7 @@ func TestUndoRetention_DepthAndBranchDiscardSurviveCollection(t *testing.T) {
 			}
 		})
 	}
-	if len(sess.undoStack) != maxUndoDepth || undoRetentionGit(t, dir, "rev-list", "--count", sess.undoStore.RefName()) != "1" {
+	if len(sess.undoStack) != maxUndoDepth || undoRetentionGit(t, dir, "--git-dir="+sess.undoStore.StorageDir(), "rev-list", "--count", sess.undoStore.RefName()) != "1" {
 		t.Fatal("retained undo history exceeds its depth")
 	}
 	oldTipTree := sess.undoStack[len(sess.undoStack)-1].afterTree
@@ -79,7 +79,10 @@ func TestUndoRetention_DepthAndBranchDiscardSurviveCollection(t *testing.T) {
 		t.Fatal("new turn retained discarded redo")
 	}
 	undoRetentionGit(t, dir, "gc", "--prune=now")
-	if exec.Command("git", "-C", dir, "cat-file", "-e", oldTipTree).Run() == nil {
+	if clean, err := sess.undoStore.Clean(context.Background(), sess.undoStack[len(sess.undoStack)-1].afterTree); err != nil || !clean {
+		t.Fatalf("private collection after branch discard: %v %v", clean, err)
+	}
+	if exec.Command("git", "--git-dir="+sess.undoStore.StorageDir(), "cat-file", "-e", oldTipTree).Run() == nil {
 		t.Fatal("discarded redo snapshot remains pinned")
 	}
 	if undoRetentionGit(t, dir, "rev-parse", "HEAD") != head {
@@ -123,7 +126,7 @@ func TestUndoRetention_MemoryAndWindowInvalidationReleaseRoots(t *testing.T) {
 		t.Fatal("invalidated history remains pinned")
 	}
 	blob := undoRetentionGit(t, dir, "hash-object", file)
-	if exec.Command("git", "-C", dir, "cat-file", "-e", blob).Run() == nil {
+	if exec.Command("git", "--git-dir="+sess.undoStore.StorageDir(), "cat-file", "-e", blob).Run() == nil {
 		t.Fatal("invalidated turn unnecessarily wrote an after snapshot")
 	}
 	data, err := os.ReadFile(file)

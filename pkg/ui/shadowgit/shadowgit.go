@@ -1,10 +1,7 @@
-// Package shadowgit snapshots a git worktree into a hidden ref namespace
-// (refs/buckley/undo-live/<session>/<handle>) so the TUI can revert and restore file
-// changes turn by turn, without creating visible branches or touching the
-// caller's git index. It is the file-side twin of Buckley's conversation
-// history: every operation here is plain git plumbing (write-tree,
-// commit-tree, update-ref, diff, cat-file) run against a temporary index
-// file, never the repository's real one.
+// Package shadowgit snapshots worktree files into a live handle's private Git
+// objects and retention ref. Capture and restore preserve repository settings
+// through temporary indexes; collection uses only the owned bare repository.
+// The user's branches, object database and real index remain untouched.
 package shadowgit
 
 import (
@@ -14,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -49,12 +48,17 @@ func SanitizeRefComponent(sessionID string) string {
 	return sanitized
 }
 
-// Store owns one live handle's hidden undo ref inside a git working tree.
+// Store owns one live handle's private snapshot objects and retention ref.
 type Store struct {
-	repoDir string
-	ref     string
-	mu      sync.Mutex
-	closed  bool
+	repoDir   string
+	gitDir    string
+	commonDir string
+	workTree  string
+	pending   []string
+	removed   bool
+	ref       string
+	mu        sync.Mutex
+	closed    bool
 }
 
 // New returns a Store rooted at repoDir for sessionID. It returns
@@ -65,16 +69,16 @@ func New(repoDir, sessionID string) (*Store, error) {
 	if repoDir == "" {
 		return nil, fmt.Errorf("shadowgit: repoDir cannot be empty")
 	}
-	store := &Store{repoDir: repoDir, ref: "refs/buckley/undo-live/" + SanitizeRefComponent(sessionID) + "/" + rand.Text()}
-	if _, err := store.run(context.Background(), nil, "rev-parse", "--git-dir"); err != nil {
-		return nil, ErrNotAGitRepo
+	store := &Store{repoDir: repoDir, ref: "refs/worktree/buckley/undo-live/" + SanitizeRefComponent(sessionID) + "/" + rand.Text()}
+	if err := store.initStorage(context.Background()); err != nil {
+		return nil, err
 	}
 	return store, nil
 }
 
 // RetainTrees pins exactly the trees needed by this live undo handle. Its
 // parentless root does not retain discarded turns or another handle's history.
-// Releasing a tree makes it eligible for ordinary Git garbage collection.
+// Expired private objects are collected without touching the user's object database.
 func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,8 +86,19 @@ func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 		return fmt.Errorf("shadowgit: retain trees: %w", os.ErrClosed)
 	}
 	if len(trees) == 0 {
-		return s.clearRef(ctx)
+		if err := s.clearRef(ctx); err != nil {
+			return err
+		}
+		clear(s.pending)
+		s.pending = nil
+		if err := s.collect(ctx); err != nil {
+			// The release committed; callers must discard their old records even
+			// when subsequent cache cleanup needs another attempt.
+			slog.WarnContext(ctx, "Could not collect released undo snapshots", "error", err)
+		}
+		return nil
 	}
+
 	trees = slices.Clone(trees)
 	slices.Sort(trees)
 	trees = slices.Compact(trees)
@@ -95,20 +110,41 @@ func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 	if err != nil {
 		return fmt.Errorf("shadowgit: retain trees: %w", err)
 	}
-	commit, err := s.CommitTree(ctx, strings.TrimSpace(string(out)), "", "buckley-undo: retained trees")
+	commit, err := s.commitTree(ctx, strings.TrimSpace(string(out)), "", "buckley-undo: retained trees")
 	if err != nil {
 		return err
 	}
-	return s.UpdateRef(ctx, commit)
+	// Keep the previous published root and the proposed root through collection.
+	// A failed ref update must leave the existing undo history usable.
+	if err := s.collect(ctx, commit); err != nil {
+		return err
+	}
+	if err := s.updateRef(ctx, commit); err != nil {
+		return err
+	}
+	clear(s.pending)
+	s.pending = nil
+	return nil
 }
 
 // Close releases only this handle's ref and prevents late turns from repinning it.
-// Other handles, legacy refs, branches, the index and Git objects are untouched.
+// It removes the owned cache without changing other handles or the user's Git data.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.removed {
+		return nil
+	}
 	s.closed = true
-	return s.clearRef(context.Background())
+	if err := s.clearRef(context.Background()); err != nil {
+		return err
+	}
+	clear(s.pending)
+	s.pending = nil
+	if err := s.collect(context.Background()); err != nil {
+		return err
+	}
+	return s.removeStorage()
 }
 
 func (s *Store) clearRef(ctx context.Context) error {
@@ -127,14 +163,26 @@ func (s *Store) RefName() string {
 // temporary index file and returns its SHA. It never reads or writes
 // repoDir's real .git/index.
 func (s *Store) WriteTree(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", fmt.Errorf("shadowgit: snapshot: %w", os.ErrClosed)
+	}
+	tree, err := s.writeTree(ctx)
+	if err != nil {
+		return "", errors.Join(err, s.collect(ctx))
+	}
+	s.pending = append(s.pending, tree)
+	return tree, nil
+}
+
+func (s *Store) writeTree(ctx context.Context) (string, error) {
 	tmpIndexPath, cleanup, err := temporaryIndex()
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
-
-	env := []string{"GIT_INDEX_FILE=" + tmpIndexPath}
-	return s.stageWorktree(ctx, env)
+	return s.stageWorktree(ctx, []string{"GIT_INDEX_FILE=" + tmpIndexPath})
 }
 
 func (s *Store) stageWorktree(ctx context.Context, env []string) (string, error) {
@@ -169,6 +217,19 @@ func temporaryIndex() (string, func(), error) {
 // parent (pass "" for no parent), and returns the new commit's SHA. It
 // does not move any ref; call UpdateRef to publish it.
 func (s *Store) CommitTree(ctx context.Context, treeSHA, parentSHA, message string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", fmt.Errorf("shadowgit: commit: %w", os.ErrClosed)
+	}
+	commit, err := s.commitTree(ctx, treeSHA, parentSHA, message)
+	if err == nil {
+		s.pending = append(s.pending, commit)
+	}
+	return commit, err
+}
+
+func (s *Store) commitTree(ctx context.Context, treeSHA, parentSHA, message string) (string, error) {
 	args := []string{"commit-tree", treeSHA}
 	if parentSHA != "" {
 		args = append(args, "-p", parentSHA)
@@ -190,6 +251,20 @@ func (s *Store) CommitTree(ctx context.Context, treeSHA, parentSHA, message stri
 // UpdateRef points the hidden ref at commitSHA, keeping it (and every
 // ancestor tree it can reach) alive for future undo/redo.
 func (s *Store) UpdateRef(ctx context.Context, commitSHA string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("shadowgit: update ref: %w", os.ErrClosed)
+	}
+	if err := s.updateRef(ctx, commitSHA); err != nil {
+		return err
+	}
+	clear(s.pending)
+	s.pending = nil
+	return nil
+}
+
+func (s *Store) updateRef(ctx context.Context, commitSHA string) error {
 	if _, err := s.run(ctx, nil, "update-ref", s.ref, commitSHA); err != nil {
 		return fmt.Errorf("shadowgit: update-ref: %w", err)
 	}
@@ -199,6 +274,11 @@ func (s *Store) UpdateRef(ctx context.Context, commitSHA string) error {
 // CurrentRef returns the hidden ref's current commit SHA, or "" if the ref
 // does not exist yet.
 func (s *Store) CurrentRef(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", nil
+	}
 	sha, err := s.run(ctx, nil, "rev-parse", "--verify", "--quiet", s.ref)
 	if err != nil {
 		return "", nil // ref does not exist yet; not an error
@@ -208,6 +288,11 @@ func (s *Store) CurrentRef(ctx context.Context) (string, error) {
 
 // CommitTreeSHA returns the tree a commit points at.
 func (s *Store) CommitTreeSHA(ctx context.Context, commitSHA string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", fmt.Errorf("shadowgit: resolve tree: %w", os.ErrClosed)
+	}
 	tree, err := s.run(ctx, nil, "rev-parse", "--verify", commitSHA+"^{tree}")
 	if err != nil {
 		return "", fmt.Errorf("shadowgit: resolve commit tree: %w", err)
@@ -226,6 +311,15 @@ type DiffEntry struct {
 // with --no-renames so every change is reported as a plain add/modify/
 // delete or type change. Paths are relative to the repository root.
 func (s *Store) Diff(ctx context.Context, sourceTree, targetTree string) ([]DiffEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("shadowgit: diff: %w", os.ErrClosed)
+	}
+	return s.diff(ctx, sourceTree, targetTree)
+}
+
+func (s *Store) diff(ctx context.Context, sourceTree, targetTree string) ([]DiffEntry, error) {
 	out, err := s.runBytes(ctx, nil, nil, "diff", "--no-renames", "--raw", "-z", sourceTree, targetTree, "--")
 	if err != nil {
 		return nil, fmt.Errorf("shadowgit: diff: %w", err)
@@ -253,7 +347,17 @@ func (s *Store) Diff(ctx context.Context, sourceTree, targetTree string) ([]Diff
 // Clean reports whether the current worktree tree matches expectedTree.
 // Apply performs the same check itself before restoring any files.
 func (s *Store) Clean(ctx context.Context, expectedTree string) (bool, error) {
-	current, err := s.WriteTree(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, fmt.Errorf("shadowgit: check worktree: %w", os.ErrClosed)
+	}
+	clean, err := s.clean(ctx, expectedTree)
+	return clean, errors.Join(err, s.collect(ctx))
+}
+
+func (s *Store) clean(ctx context.Context, expectedTree string) (bool, error) {
+	current, err := s.writeTree(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -265,12 +369,20 @@ func (s *Store) Clean(ctx context.Context, expectedTree string) (bool, error) {
 // untouched. It refuses with ErrWorktreeChanged if the current worktree no
 // longer matches sourceTree, even when the two snapshots have no file changes.
 func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error {
-	entries, err := s.Diff(ctx, sourceTree, targetTree)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("shadowgit: restore: %w", os.ErrClosed)
+	}
+	if err := s.collect(ctx); err != nil {
+		return err
+	}
+	entries, err := s.diff(ctx, sourceTree, targetTree)
 	if err != nil {
 		return err
 	}
 	if len(entries) == 0 {
-		clean, err := s.Clean(ctx, sourceTree)
+		clean, err := s.clean(ctx, sourceTree)
 		if err != nil {
 			return err
 		}
@@ -290,7 +402,7 @@ func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error 
 		return err
 	}
 	if current != sourceTree {
-		return ErrWorktreeChanged
+		return errors.Join(ErrWorktreeChanged, s.collect(ctx))
 	}
 	if err := s.checkUntracked(ctx, env, entries); err != nil {
 		return err
@@ -347,12 +459,14 @@ func (s *Store) run(ctx context.Context, env []string, args ...string) (string, 
 func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
 	// Every index used here is private and short-lived. Split indexes would
 	// leave sharedindex sidecars in the user's Git directory after cleanup.
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.splitIndex=false"}, args...)...)
+	options := []string{"-c", "core.splitIndex=false", "-c", "core.logAllRefUpdates=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+	if s.gitDir != "" {
+		options = append(options, "-c", "core.hooksPath="+filepath.Join(s.gitDir, "hooks"))
+	}
+	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	cmd.Dir = s.repoDir
 	cmd.Stdin = input
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = s.environment(env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
