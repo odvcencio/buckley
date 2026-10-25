@@ -28,6 +28,9 @@ type turnBoundary struct {
 func (c *Controller) sessionUndoStore(sess *SessionState) *shadowgit.Store {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.undoStoresClosed {
+		return nil
+	}
 	if sess.undoStoreChecked {
 		return sess.undoStore
 	}
@@ -141,12 +144,12 @@ func undoTrees(undo, redo []turnUndoRecord) []string {
 
 func (c *Controller) closeUndoStores() {
 	c.mu.Lock()
+	c.undoStoresClosed = true
 	var stores []*shadowgit.Store
 	for _, sess := range c.sessions {
 		if sess == nil {
 			continue
 		}
-		sess.undoStoreChecked = true
 		if sess.undoStore != nil {
 			stores = append(stores, sess.undoStore)
 		}

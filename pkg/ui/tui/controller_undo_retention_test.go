@@ -148,4 +148,9 @@ func TestCloseUndoStores_PreventsLateStoreCreation(t *testing.T) {
 	if ctrl.sessionUndoStore(lazy) != nil {
 		t.Fatal("shutdown created a new undo store")
 	}
+	late := &SessionState{ID: "late", Conversation: conversation.New("late")}
+	ctrl.sessions = append(ctrl.sessions, late)
+	if ctrl.sessionUndoStore(late) != nil {
+		t.Fatal("a session created after shutdown opened a new undo store")
+	}
 }
