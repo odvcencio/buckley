@@ -70,9 +70,17 @@ func (r *Registry) filterDiscoveredToolNames(governed []string) []string {
 	return visible
 }
 
-func (r *Registry) exposeTools(names ...string) {
+// SetDiscoveredTools replaces the specialized schema working set. It has no
+// effect when discovery is disabled; caller permission filters still apply.
+func (r *Registry) SetDiscoveredTools(names ...string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.discoveryEnabled {
+		return
+	}
 	r.discoveryExposed = make(map[string]struct{}, len(r.discoveryCore)+len(names))
 	for name := range r.discoveryCore {
 		r.discoveryExposed[name] = struct{}{}
@@ -140,7 +148,7 @@ func (t *DiscoveryTool) Execute(params map[string]any) (*builtin.Result, error) 
 			"description": match.tool.Description(),
 		})
 	}
-	t.registry.exposeTools(names...)
+	t.registry.SetDiscoveredTools(names...)
 	if len(items) == 0 {
 		return &builtin.Result{Success: false, Error: "no matching tools found"}, nil
 	}

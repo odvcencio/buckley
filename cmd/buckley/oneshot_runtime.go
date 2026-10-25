@@ -339,6 +339,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	toolFilter = sourceScopeToolFilter(toolFilter, limits.SourceScope)
 	callerTools = ensureRequiredOneShotTools(callerTools, artifactSubmission != nil, codeRuntime != nil)
 	callerTools = sourceScopeToolFilter(callerTools, limits.SourceScope)
+	if toolFilter == nil && codeRuntime == nil {
+		registry.EnableDynamicDiscovery(ensureRequiredOneShotTools(tool.DefaultDiscoveryTools, artifactSubmission != nil, false))
+	}
 	skillState.SetToolCeiling(callerTools)
 	if toolFilter != nil {
 		skillState.SetToolFilter(toolFilter)

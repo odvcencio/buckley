@@ -2580,6 +2580,11 @@ func buildACPToolTurn(registry *tool.Registry, skillState *skill.RuntimeState, e
 	turn := acpToolTurn{UseTools: useTools}
 	if skillState != nil {
 		turn.AllowedTools = skillState.ToolFilter()
+		// Refresh explicit skill/profile selections before fallback permissions
+		// expand an unrestricted catalog into an enumerated allowlist.
+		if useTools && registry != nil && turn.AllowedTools != nil {
+			registry.SetDiscoveredTools(turn.AllowedTools...)
+		}
 	}
 	if actionRequired && intent != agentloop.ReadOnlyIntent && registry != nil {
 		turn.AllowedTools = acpActionToolNames(registry, turn.AllowedTools, allowShell || (len(hostTools) > 0 && hostTools[0]))
