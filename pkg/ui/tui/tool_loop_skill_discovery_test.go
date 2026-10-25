@@ -157,7 +157,7 @@ func TestRunToolLoop_SkillChangesRefreshSchemasAndDispatch(t *testing.T) {
 			if len(tools) != 4 {
 				t.Fatalf("completed tool results=%d, want 4", len(tools))
 			}
-			if !strings.Contains(tools[1].Content, marker) || !strings.Contains(tools[3].Content, "completed-work-survived") {
+			if !strings.Contains(conversation.GetContentAsString(tools[1].Content), marker) || !strings.Contains(conversation.GetContentAsString(tools[3].Content), "completed-work-survived") {
 				t.Fatalf("actual directory/read evidence missing: %+v", tools)
 			}
 			last, _ := json.Marshal(requests[4].Messages)
