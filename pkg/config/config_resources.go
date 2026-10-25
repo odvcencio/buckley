@@ -11,7 +11,8 @@ const (
 )
 
 // ResourceConfig bounds retained working history per session and accounted
-// storage per database, including replay evidence. Zero explicitly disables a limit.
+// storage per database, including replay evidence, and private TUI undo caches.
+// Zero explicitly disables a limit.
 type ResourceConfig struct {
 	SessionMemoryBytes int   `yaml:"session_memory_bytes"`
 	StorageBytes       int64 `yaml:"storage_bytes"`

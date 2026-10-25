@@ -161,9 +161,52 @@ func TestRetainTreesWithinLimit_RefFailurePreservesOldRoot(t *testing.T) {
 	if current, _ := store.CurrentRef(ctx); current != ref {
 		t.Fatal("failed publication changed old root")
 	}
+	// Failed publication discarded staging, so recapture the unchanged worktree
+	// before asking Apply to compare it with the still-published old snapshot.
+	after = restoreTree(t, store)
 	if err := store.Apply(ctx, after, before); err != nil {
 		t.Fatalf("failed publication destroyed old undo objects: %v", err)
 	}
+}
+
+func TestRetainTreesWithinLimit_RepeatedRefFailuresDoNotAccumulateStaging(t *testing.T) {
+	repo := newTestRepo(t)
+	store, err := New(repo, "publication-loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	writeFile(t, repo, "file", "published snapshot")
+	before := restoreTree(t, store)
+	if err := store.RetainTrees(ctx, []string{before}); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := store.CurrentRef(ctx)
+	lock := filepath.Join(store.StorageDir(), store.RefName()+".lock")
+	if err := os.WriteFile(lock, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for turn := range 8 {
+		if err := os.WriteFile(filepath.Join(repo, "artifact"), budgetPayload(turn, 256<<10), 0600); err != nil {
+			t.Fatal(err)
+		}
+		after := restoreTree(t, store)
+		committed, err := store.RetainTreesWithinLimit(ctx, []string{before, after}, 1<<20)
+		if committed || err == nil || errors.Is(err, ErrStorageLimit) {
+			t.Fatalf("turn %d: committed=%v err=%v", turn, committed, err)
+		}
+		if current, _ := store.CurrentRef(ctx); current != ref {
+			t.Fatal("ref failure moved published root")
+		}
+		if len(store.pending) != 0 || privateObjectBytes(t, store) > 1024 {
+			t.Fatalf("turn %d retained failed staging", turn)
+		}
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	retentionPrivateGit(t, store, "cat-file", "-e", before)
 }
 
 func TestRetainTreesWithinLimit_CleanupFailureBlocksFurtherCapture(t *testing.T) {

@@ -103,6 +103,18 @@ func (s *Store) RetainTreesWithinLimit(ctx context.Context, trees []string, limi
 	if limit < 0 {
 		return false, fmt.Errorf("shadowgit: storage limit must be nonnegative")
 	}
+	defer func() {
+		if err == nil || committed || errors.Is(err, ErrStorageLimit) {
+			return
+		}
+		// A failed publication leaves only the previous root supported. Do not
+		// accumulate fresh staging snapshots while publication stays blocked.
+		clear(s.pending)
+		s.pending = nil
+		collectErr := s.collect(ctx)
+		s.collectionNeeded = collectErr != nil
+		err = errors.Join(err, collectErr)
+	}()
 	if len(trees) == 0 {
 		if err := s.clearRef(ctx); err != nil {
 			return false, err
