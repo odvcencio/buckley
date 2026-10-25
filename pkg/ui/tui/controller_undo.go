@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"m31labs.dev/buckley/pkg/conversation"
@@ -192,17 +193,12 @@ func (c *Controller) undoLastTurn() {
 	}
 
 	ctx := context.Background()
-	clean, err := store.Clean(ctx, record.afterTree)
-	if err != nil {
-		c.app.AddMessage("Could not check worktree state: "+err.Error(), "system")
-		return
-	}
-	if !clean {
-		c.app.AddMessage("Worktree has changes this turn did not make; refusing to undo. Commit or stash them first.", "system")
-		return
-	}
 	if err := store.Apply(ctx, record.afterTree, record.beforeTree); err != nil {
-		c.app.AddMessage("Undo failed while restoring files: "+err.Error(), "system")
+		if errors.Is(err, shadowgit.ErrWorktreeChanged) {
+			c.app.AddMessage("Worktree has changes this turn did not make; refusing to undo. Commit or stash them first.", "system")
+		} else {
+			c.app.AddMessage("Undo failed while restoring files: "+err.Error(), "system")
+		}
 		return
 	}
 
@@ -256,17 +252,12 @@ func (c *Controller) redoLastTurn() {
 	}
 
 	ctx := context.Background()
-	clean, err := store.Clean(ctx, record.beforeTree)
-	if err != nil {
-		c.app.AddMessage("Could not check worktree state: "+err.Error(), "system")
-		return
-	}
-	if !clean {
-		c.app.AddMessage("Worktree has changes since the undo; refusing to redo. Commit or stash them first.", "system")
-		return
-	}
 	if err := store.Apply(ctx, record.beforeTree, record.afterTree); err != nil {
-		c.app.AddMessage("Redo failed while restoring files: "+err.Error(), "system")
+		if errors.Is(err, shadowgit.ErrWorktreeChanged) {
+			c.app.AddMessage("Worktree has changes since the undo; refusing to redo. Commit or stash them first.", "system")
+		} else {
+			c.app.AddMessage("Redo failed while restoring files: "+err.Error(), "system")
+		}
 		return
 	}
 
