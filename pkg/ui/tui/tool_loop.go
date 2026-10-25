@@ -284,14 +284,6 @@ func (c *Controller) continuationEligibleForRoute(route model.ModelRoute) bool {
 //     per-call Observe() consultation share the one instance this turn's
 //     other guard-adjacent code (contextScale retries, finishGuardedToolLoop)
 //     already references.
-//
-// The one behavior this intentionally does not preserve: a mid-batch guard
-// stop no longer skips remaining calls in the same parallel tool-call
-// batch, since Controller consults the Governor once per call only after
-// Dispatch returns the whole batch's outcomes. Parallel tool calls are
-// already suppressed via ParallelToolCalls=false whenever the provider
-// advertises support for it, so this narrows to providers that both omit
-// that parameter and have a model choose multiple calls in one turn.
 func (c *Controller) newToolLoopController(sess *SessionState, modelID string, allowedTools []string, state *toolLoopState, taskIntent agentloop.TaskIntent) (*agentloop.Controller, error) {
 	currentRound := 0
 

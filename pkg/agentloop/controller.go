@@ -1094,24 +1094,11 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		if c.cfg.History != nil {
 			c.cfg.History.Append(msg)
 		}
-		toolRound, err := c.prepareToolRound(ctx, msg.ToolCalls, result.Rounds)
-		if err != nil {
-			result.ToolCalls += toolRound.knownOutcomeCount()
-			_, observeErr := c.observeToolRound(ctx, toolRound, &progress)
-			result.Progress = progress.Snapshot()
-			c.appendUnresolvedToolMessages(toolRound, "No confirmed result is available for this tool. Outcome unknown. Inspect state before retrying; no success or verification is established.")
-			return result, c.markToolRoundInterrupted(result, errors.Join(err, observeErr))
-		}
-		dispatchErr := c.dispatchToolRound(ctx, toolRound, result.Rounds)
+		toolRound, stopDecision, toolErr := c.executeToolBatch(ctx, msg.ToolCalls, result.Rounds, roundResult.parallelToolCalls, &progress)
 		result.ToolCalls += toolRound.knownOutcomeCount()
-
-		stopDecision, observeErr := c.observeToolRound(ctx, toolRound, &progress)
 		result.Progress = progress.Snapshot()
-		if dispatchErr != nil {
-			c.appendUnresolvedToolMessages(toolRound, "No confirmed result is available for this tool. Outcome unknown. Inspect state before retrying; no success or verification is established.")
-		}
-		if dispatchErr != nil || observeErr != nil {
-			return result, c.markToolRoundInterrupted(result, errors.Join(dispatchErr, observeErr))
+		if toolErr != nil {
+			return result, c.markToolRoundInterrupted(result, toolErr)
 		}
 		if contractEnabled && contract.SubmittedResponse != nil && !toolCallsClipped {
 			successfulRound := true
@@ -1318,7 +1305,11 @@ func (c *Controller) executeModelRound(ctx context.Context, result *Result, roun
 	if err != nil {
 		return nil, contextWindow, err
 	}
+	parallelToolCalls := req.ParallelToolCalls != nil && *req.ParallelToolCalls
 	roundResult, err := c.executePreparedModelRound(ctx, result, req, round, "model", useContinuation)
+	if roundResult != nil {
+		roundResult.parallelToolCalls = parallelToolCalls
+	}
 	return roundResult, contextWindow, err
 }
 
@@ -1870,14 +1861,15 @@ type modelCostReservation struct {
 }
 
 type modelRoundResult struct {
-	response         *model.ChatResponse
-	chargedCostUSD   float64
-	costRecorded     bool
-	pricingError     string
-	partial          bool
-	partialRetryable bool
-	providerError    string
-	identity         *model.ExecutionIdentity
+	parallelToolCalls bool
+	response          *model.ChatResponse
+	chargedCostUSD    float64
+	costRecorded      bool
+	pricingError      string
+	partial           bool
+	partialRetryable  bool
+	providerError     string
+	identity          *model.ExecutionIdentity
 	// responseToolOffer is the tool-offer decision for the exact provider
 	// request that produced response. It is persisted with the response so
 	// replay cannot widen a no-tools retry back into a dispatchable call.
@@ -2951,6 +2943,9 @@ func (c *Controller) shouldChargeModelReservation(response *model.ChatResponse, 
 // result; keeping the bookkeeping together makes replay and dispatch order
 // explicit without leaking a second orchestration API.
 type toolRoundState struct {
+	firstIndex     int
+	batchSize      int
+	priorStop      bool
 	calls          []model.ToolCall
 	steps          []runledger.ExecutionStep
 	outcomes       []ToolOutcome
@@ -2964,6 +2959,7 @@ type toolRoundState struct {
 func newToolRoundState(calls []model.ToolCall) *toolRoundState {
 	return &toolRoundState{
 		calls:          calls,
+		batchSize:      len(calls),
 		steps:          make([]runledger.ExecutionStep, len(calls)),
 		outcomes:       make([]ToolOutcome, len(calls)),
 		replayed:       make([]bool, len(calls)),
@@ -2987,8 +2983,7 @@ func (s *toolRoundState) knownOutcomeCount() int {
 	return count
 }
 
-func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCall, round int) (*toolRoundState, error) {
-	state := newToolRoundState(calls)
+func (c *Controller) prepareToolRound(ctx context.Context, state *toolRoundState, round int) error {
 	for index := range state.calls {
 		if err := c.prepareToolStep(ctx, state, round, index); err != nil {
 			var replayErrs []error
@@ -3000,7 +2995,7 @@ func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCal
 					replayErrs = append(replayErrs, replayErr)
 				}
 			}
-			return state, errors.Join(append([]error{err}, replayErrs...)...)
+			return errors.Join(append([]error{err}, replayErrs...)...)
 		}
 	}
 	c.recordEvent(ctx, runledger.EventToolRequested, map[string]any{
@@ -3011,13 +3006,13 @@ func (c *Controller) prepareToolRound(ctx context.Context, calls []model.ToolCal
 	for index := range state.calls {
 		if state.replayed[index] {
 			if err := c.replayToolStep(ctx, state, index); err != nil {
-				return state, err
+				return err
 			}
 			continue
 		}
 		c.recordEvent(ctx, runledger.EventToolStarted, state.records[index])
 	}
-	return state, nil
+	return nil
 }
 
 func (c *Controller) appendUnresolvedToolMessages(state *toolRoundState, content string) {
@@ -3039,7 +3034,7 @@ func (c *Controller) appendUnresolvedToolMessages(state *toolRoundState, content
 
 func (c *Controller) prepareToolStep(ctx context.Context, state *toolRoundState, round, index int) error {
 	call := state.calls[index]
-	stepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, round, "tool", index)
+	stepID := StableStepID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, round, "tool", state.firstIndex+index)
 	inputDigest, err := jsonDigest(call)
 	if err != nil {
 		return fmt.Errorf("agentloop: digest tool request: %w", err)
@@ -3138,13 +3133,13 @@ func (c *Controller) dispatchPendingTools(ctx context.Context, state *toolRoundS
 			calls[position] = ToolDispatchCall{
 				Call:               call,
 				ProviderToolCallID: call.ID,
-				ApprovalID:         StableApprovalID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, stepID, round, index),
+				ApprovalID:         StableApprovalID(c.cfg.RunID, c.cfg.TaskID, c.cfg.TurnID, stepID, round, state.firstIndex+index),
 				RunID:              c.cfg.RunID,
 				TaskID:             c.cfg.TaskID,
 				TurnID:             c.cfg.TurnID,
 				StepID:             stepID,
 				Round:              round,
-				ToolIndex:          index,
+				ToolIndex:          state.firstIndex + index,
 			}
 		}
 		return contextual.DispatchWithContext(ctx, calls)
@@ -3276,7 +3271,7 @@ func (c *Controller) observeToolRound(ctx context.Context, state *toolRoundState
 				}
 			}
 		}
-		if index == len(state.calls)-1 && !decision.Stop && !stopDecision.Stop {
+		if state.firstIndex+index == state.batchSize-1 && !state.priorStop && !decision.Stop && !stopDecision.Stop {
 			if remaining := c.cfg.Governor.RemainingToolCalls(); remaining >= 1 && remaining <= 3 {
 				content += fmt.Sprintf("\n\nHarness budget: %d tool calls remain. Reserve enough for any required verification after your last edit; report unverified work as incomplete.", remaining)
 				if contract, enabled := c.completionContract(); enabled {
