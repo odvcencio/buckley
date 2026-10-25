@@ -32,9 +32,6 @@ import (
 const (
 	goalCompleteToolName = "goal_task_complete"
 	goalBlockedToolName  = "goal_task_blocked"
-	goalReadOnlyWarning  = 8
-	goalReadOnlyAction   = 12
-	goalReadOnlyLimit    = 16
 )
 
 // goalTurnEngine adapts the real model stack — model manager, governed
@@ -408,11 +405,8 @@ func goalLoopGovernorConfig(cfg *config.Config, phase string) agentloop.Config {
 			governorConfig.MaxToolCalls = limit
 		}
 	}
-	if phase != goalloop.PhaseVerify {
-		governorConfig.ReadOnlyWarningAt = goalReadOnlyWarning
-		governorConfig.ReadOnlyActionAt = goalReadOnlyAction
-		governorConfig.MaxReadOnlyCalls = goalReadOnlyLimit
-	}
+	// No read-only ceiling: a goal turn may read as long as it needs. Exact
+	// repeat, cycle and outcome detection still stop a loop that goes nowhere.
 	return governorConfig
 }
 

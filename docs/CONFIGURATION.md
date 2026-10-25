@@ -345,7 +345,20 @@ in `cmd/gosx` and `perf/ouroboros`).
 oneshot:
   mode: classic
   data_policy: none # none (default), zdr, or deny
+  # Optional one-shot caps. Zero or unset means no cap.
+  max_tool_calls: 0
+  max_elapsed: 0s        # for example 90m
+  max_output_tokens: 0
+  budget_usd: 0
 ```
+
+The cap keys match the one-shot flags `--max-tool-calls`, `--max-elapsed`,
+`--max-output-tokens` and `--budget`; a flag overrides its key. Nothing is capped by
+default, including read-only intent and the durable goal engine. The distant
+`agent_controller.emergency_fuse` (500 model requests, 2,000 tool executions, 6 hours)
+still bounds runaway runs; raise or zero it to remove that bound. The model stream's
+first-content wait is `providers.openai_compatible.stream_first_content_timeout`,
+which is off (0) by default, so slow-thinking models are not cut off.
 
 `data_policy` controls whether `buckley commit` and `buckley pr` (the one-shot
 `api` backend) attach OpenRouter privacy fields or enforce the durable-goal

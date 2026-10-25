@@ -68,14 +68,19 @@ buckley --task-intent read_only \
   > plan.md
 ```
 
-Read-only one-shots default to 16 tool calls, 180 seconds, and 4,096 output tokens
-per request. These are small-task defaults, not a suitable budget for a 6,000-word
-spec. For longer work, `buckley agent run` accepts `--max-tool-calls`,
-`--max-elapsed-seconds`, and `--max-output-tokens` with a configured agent spec.
-Use its `--dry-run --json` preview to inspect resolved limits before spending a
-model call. Profile and protocol limits can narrow the requested budget. Output
-tokens include any provider reasoning allowance; a word target is not a token cap.
-Do not solve an undersized budget by removing the read-only contract.
+One-shot runs have no tool-call, elapsed-time, output-token or cost cap unless you
+ask for one. Read-only intent keeps its no-edit contract and instruction but adds no
+limit, so a model that reads widely and thinks for a long time can finish. Set caps
+for one run with `--max-tool-calls N`, `--max-elapsed DURATION` (for example `90m`),
+`--max-output-tokens N` and `--budget USD`, or set them for every run with
+`oneshot.max_tool_calls`, `oneshot.max_elapsed`, `oneshot.max_output_tokens` and
+`oneshot.budget_usd`. Zero means no cap, and a flag overrides the config key. A run
+that reaches a cap says which one and how to raise it. Repeated identical tool calls
+and action cycles are still stopped: that detector guards against a loop that makes no
+progress and is not a budget. `buckley agent run` accepts `--max-tool-calls`,
+`--max-elapsed-seconds` and `--max-output-tokens` with a configured agent spec; use its
+`--dry-run --json` preview to inspect resolved limits. Output tokens include any
+provider reasoning allowance; a word target is not a token cap.
 
 For a code change, use `--task-intent mutation`, name the files or behavior to
 change and the relevant checks, and request a final account of changes and test

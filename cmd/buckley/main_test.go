@@ -267,15 +267,15 @@ func TestOneShotProtocolExecutionContract_DynamicOnly(t *testing.T) {
 	}
 }
 
-func TestApplyOneShotTaskIntentDefaults_ReadOnlyIsBoundedSummary(t *testing.T) {
+func TestApplyOneShotTaskIntentDefaults_ReadOnlyHasNoImplicitCap(t *testing.T) {
 	got := applyOneShotTaskIntentDefaults(acpLoopLimits{
 		TaskIntent:        agentloop.ReadOnlyIntent,
 		ReadOnlyWarningAt: 3,
 		ReadOnlyActionAt:  5,
 		MaxReadOnlyCalls:  9,
 	})
-	if got.MaxToolCalls != defaultReadOnlyToolCalls || got.MaxElapsedSeconds != defaultReadOnlyElapsedSeconds || got.MaxOutputTokens != defaultReadOnlyOutputTokens {
-		t.Fatalf("read-only defaults = %+v, want tool=%d elapsed=%d output=%d", got, defaultReadOnlyToolCalls, defaultReadOnlyElapsedSeconds, defaultReadOnlyOutputTokens)
+	if got.MaxToolCalls != 0 || got.MaxElapsedSeconds != 0 || got.MaxOutputTokens != 0 {
+		t.Fatalf("read-only intent added a cap: %+v", got)
 	}
 	if got.ReadOnlyWarningAt != 0 || got.ReadOnlyActionAt != 0 || got.MaxReadOnlyCalls != 0 {
 		t.Fatalf("read-only reserve remained active: %+v", got)

@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1737,13 +1736,9 @@ func acpCompletionContract(limits acpLoopLimits) *agentloop.CompletionContract {
 
 func newACPToolLoopGovernorWithLimits(cfg *config.Config, limits acpLoopLimits) *agentloop.Governor {
 	governorConfig := agentloop.DefaultConfig()
-	if limits.ChildContract || limits.longMutation {
-		// Remove the legacy 32/96 per-turn defaults. Explicitly configured
-		// operator emergency fuses below remain global runaway protection; they
-		// are distinct from the optional child task budget.
-		governorConfig.MaxRounds = math.MaxInt
-		governorConfig.MaxToolCalls = math.MaxInt
-	}
+	// DefaultConfig sets no round or tool-call ceiling. Explicitly configured
+	// operator emergency fuses below remain global runaway protection; they
+	// are distinct from the optional task budget.
 	governorConfig.WarnOnSuccessfulRepeats = limits.longMutation
 	if cfg != nil {
 		if limit := cfg.AgentController.EmergencyFuse.ModelRequests; limit > 0 {

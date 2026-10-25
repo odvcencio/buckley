@@ -1083,7 +1083,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 			msg.ToolCalls = msg.ToolCalls[:remaining]
 		}
 		if len(msg.ToolCalls) == 0 {
-			reason := "tool loop has no remaining calls in its harness allowance"
+			reason := "tool loop has no remaining calls in its harness allowance; raise it with --max-tool-calls or oneshot.max_tool_calls, or remove it by setting 0"
 			result.FinishReason = FinishReasonLoopGuard
 			result.GuardDecision = Decision{Stop: true, Kind: "tool_call_limit", Reason: reason}
 			result.Content = GuardStopMessage(reason)
