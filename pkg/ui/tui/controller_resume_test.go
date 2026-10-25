@@ -38,8 +38,8 @@ func newResumeLookupTestController(t *testing.T) (*Controller, *storage.Store) {
 	ctrl.sessions, ctrl.currentSession = sessions, selected
 	ctrl.conversation, ctrl.registry = sessions[selected].Conversation, sessions[selected].ToolRegistry
 	t.Cleanup(func() {
-		ctrl.Stop()
 		for _, sess := range ctrl.sessions {
+			_ = sess.ToolRegistry.Close()
 			if sess.HookCloser != nil {
 				_ = sess.HookCloser.Close()
 			}
