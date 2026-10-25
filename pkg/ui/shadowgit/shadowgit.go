@@ -27,6 +27,10 @@ import (
 // working tree.
 var ErrNotAGitRepo = errors.New("shadowgit: not a git repository")
 
+// ErrWorktreeChanged means the source snapshot no longer matches the worktree.
+// Apply returns it before restoring any files.
+var ErrWorktreeChanged = errors.New("shadowgit: worktree differs from source snapshot")
+
 // EmptyTree is git's well-known SHA-1 for an empty tree, used as the
 // "before" state for a session's very first tracked turn.
 const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -130,6 +134,10 @@ func (s *Store) WriteTree(ctx context.Context) (string, error) {
 	defer cleanup()
 
 	env := []string{"GIT_INDEX_FILE=" + tmpIndexPath}
+	return s.stageWorktree(ctx, env)
+}
+
+func (s *Store) stageWorktree(ctx context.Context, env []string) (string, error) {
 	if _, err := s.run(ctx, env, "add", "--all", "--", "."); err != nil {
 		return "", fmt.Errorf("shadowgit: stage worktree: %w", err)
 	}
@@ -243,9 +251,7 @@ func (s *Store) Diff(ctx context.Context, sourceTree, targetTree string) ([]Diff
 }
 
 // Clean reports whether the current worktree tree matches expectedTree.
-// Callers use this as the dirty-state check before undo/redo: when it is
-// false, the worktree has changes the tracked turn did not make, and the
-// caller should refuse the operation.
+// Apply performs the same check itself before restoring any files.
 func (s *Store) Clean(ctx context.Context, expectedTree string) (bool, error) {
 	current, err := s.WriteTree(ctx)
 	if err != nil {
@@ -256,14 +262,21 @@ func (s *Store) Clean(ctx context.Context, expectedTree string) (bool, error) {
 
 // Apply restores repoDir's worktree so it matches targetTree for exactly
 // the paths that differ from sourceTree, leaving every other file
-// (including anything the caller's dirty-state check has already vetted)
-// untouched.
+// untouched. It refuses with ErrWorktreeChanged if the current worktree no
+// longer matches sourceTree, even when the two snapshots have no file changes.
 func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error {
 	entries, err := s.Diff(ctx, sourceTree, targetTree)
 	if err != nil {
 		return err
 	}
 	if len(entries) == 0 {
+		clean, err := s.Clean(ctx, sourceTree)
+		if err != nil {
+			return err
+		}
+		if !clean {
+			return ErrWorktreeChanged
+		}
 		return nil
 	}
 	index, cleanup, err := temporaryIndex()
@@ -272,11 +285,12 @@ func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error 
 	}
 	defer cleanup()
 	env := []string{"GIT_INDEX_FILE=" + index}
-	if _, err := s.run(ctx, env, "read-tree", "--no-sparse-checkout", sourceTree); err != nil {
-		return fmt.Errorf("shadowgit: prepare restore index: %w", err)
+	current, err := s.stageWorktree(ctx, env)
+	if err != nil {
+		return err
 	}
-	if _, err := s.run(ctx, env, "update-index", "--refresh"); err != nil {
-		return fmt.Errorf("shadowgit: worktree changed before restore: %w", err)
+	if current != sourceTree {
+		return ErrWorktreeChanged
 	}
 	if err := s.checkUntracked(ctx, env, entries); err != nil {
 		return err
@@ -331,7 +345,9 @@ func (s *Store) run(ctx context.Context, env []string, args ...string) (string, 
 }
 
 func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	// Every index used here is private and short-lived. Split indexes would
+	// leave sharedindex sidecars in the user's Git directory after cleanup.
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.splitIndex=false"}, args...)...)
 	cmd.Dir = s.repoDir
 	cmd.Stdin = input
 	if len(env) > 0 {

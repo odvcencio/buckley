@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,6 +207,66 @@ func TestUndoLastTurn_RefusesOnDirtyWorktree(t *testing.T) {
 	}
 	if string(data) != "edited by turn" {
 		t.Fatalf("file content = %q, want unchanged (refused undo)", string(data))
+	}
+}
+
+func TestUndoRedo_RefusalPreservesFilesAndConversation(t *testing.T) {
+	for _, direction := range []string{"undo", "redo"} {
+		for _, fileChange := range []bool{false, true} {
+			name := direction + " conversation only"
+			if fileChange {
+				name = direction + " file change"
+			}
+			t.Run(name, func(t *testing.T) {
+				repo := newUndoTestGitRepo(t)
+				file := filepath.Join(repo, "file.txt")
+				if err := os.WriteFile(file, []byte("original"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				ctrl, app, sess := newUndoTestController(t, repo)
+				simulateTurn(t, ctrl, sess, func() {
+					if fileChange {
+						if err := os.WriteFile(file, []byte("turn output"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+				if direction == "redo" {
+					ctrl.undoLastTurn()
+				}
+				drainAllMessages(app)
+				messages := cloneMessages(sess.Conversation.Messages)
+				undos, redos := len(sess.undoStack), len(sess.redoStack)
+				data, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				manual := filepath.Join(repo, "manual.txt")
+				if err := os.WriteFile(manual, []byte("new user work"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if direction == "undo" {
+					ctrl.undoLastTurn()
+				} else {
+					ctrl.redoLastTurn()
+				}
+				if got := lastSystemMessage(t, app); !strings.Contains(got, "refusing to "+direction) {
+					t.Fatalf("expected refusal, got %q", got)
+				}
+				messagesMatch := slices.EqualFunc(messages, sess.Conversation.Messages, func(a, b conversation.Message) bool {
+					return reflect.DeepEqual(a, b)
+				})
+				if !messagesMatch || len(sess.undoStack) != undos || len(sess.redoStack) != redos {
+					t.Fatal("refusal changed conversation or undo/redo history")
+				}
+				if got, err := os.ReadFile(file); err != nil || string(got) != string(data) {
+					t.Fatalf("turn file changed: %v", err)
+				}
+				if got, err := os.ReadFile(manual); err != nil || string(got) != "new user work" {
+					t.Fatalf("manual work changed: %v", err)
+				}
+			})
+		}
 	}
 }
 
