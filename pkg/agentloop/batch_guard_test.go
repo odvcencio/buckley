@@ -50,9 +50,9 @@ func batchGuardConfig(history *recordingHistory, parallel *bool, executed *int) 
 	}
 }
 
-func testParallelToolRequest(req model.ChatRequest) model.ChatRequest {
+func testParallelToolRequest(req model.ChatRequest, names ...string) model.ChatRequest {
 	parallel := true
-	req = testToolRequest(req)
+	req = testToolRequest(req, names...)
 	req.ParallelToolCalls = &parallel
 	return req
 }

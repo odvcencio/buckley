@@ -117,7 +117,7 @@ func TestController_RepeatedMutationResultsRespectProgressAndLimits(t *testing.T
 			controller, err := NewController(ControllerConfig{
 				Governor: New(tc.governor),
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+					return testToolRequest(model.ChatRequest{Model: "test-model"}, "run_shell"), nil
 				},
 				CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 					return toolCallResponse("call", "run_shell", `{"command":"generate"}`, model.Usage{}), nil
@@ -153,7 +153,7 @@ func TestController_EditVerificationCyclesRemainProductive(t *testing.T) {
 			TaskIntent: MutationIntent, RequireObservableChange: true, RequirePostChangeVerification: true,
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "edit_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			providerCalls++

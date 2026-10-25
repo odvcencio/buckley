@@ -94,7 +94,7 @@ func TestController_FailedToolEventCarriesBoundedDiagnostics(t *testing.T) {
 	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}, "run_shell"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -285,7 +285,7 @@ func TestController_ReplaysPersistedOverCeilingResponseWithoutDispatch(t *testin
 			return float64(usage.TotalTokens) / 1000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}, "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -426,7 +426,7 @@ func TestController_LegacyResponseReplayFailsClosedUnderCostCeiling(t *testing.T
 func TestController_V1ResponseWithoutToolOfferReplayRejectsStructuredCall(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := t.Context()
-	request := testToolRequest(model.ChatRequest{Model: "test-model"})
+	request := testToolRequest(model.ChatRequest{Model: "test-model"}, "write_file")
 	projected := ProjectForContinuation(request, 0, nil, "", false)
 	inputDigest, err := jsonDigest(projected)
 	if err != nil {
@@ -508,7 +508,7 @@ func TestController_V1ResponseWithoutToolOfferReplayRejectsStructuredCall(t *tes
 func TestController_ResponseOfferFalsePartialResponsePersistsAndReplaysWithoutDispatch(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := t.Context()
-	request := testToolRequest(model.ChatRequest{Model: "test-model"})
+	request := testToolRequest(model.ChatRequest{Model: "test-model"}, "write_file")
 	providerErr := errors.New("provider stream interrupted after structured response")
 	dispatchCalls := 0
 	history := &recordingHistory{}
@@ -702,7 +702,7 @@ func TestController_PricingFailurePersistsResponseAndReplaysWithoutProvider(t *t
 			return float64(usage.TotalTokens) / 1_000_000, nil
 		},
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", MaxTokens: 100}, "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -1307,7 +1307,7 @@ func TestController_ReplaysToolResultWithoutExecutingDispatcher(t *testing.T) {
 	var observedEvidenceIDs []string
 	var observedReplayFlags []bool
 	build := func(context.Context, int) (model.ChatRequest, error) {
-		return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+		return testToolRequest(model.ChatRequest{Model: "test-model"}, "read_file"), nil
 	}
 	firstProvider := func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 		providerCalls++
@@ -1398,7 +1398,7 @@ func TestController_DispatchErrorBlocksAmbiguousSuffixUntilRerun(t *testing.T) {
 
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "read_file", "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -1497,7 +1497,7 @@ func TestController_LargeToolResultStaysInEvidence(t *testing.T) {
 	providerCalls := 0
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}, "read_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++

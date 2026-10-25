@@ -47,6 +47,14 @@ func TestRunner_TypedCanceledInterruptionPersistsIncompleteNotice(t *testing.T) 
 			return &builtin.Result{Success: true, Data: map[string]any{"result": "prefix changed"}}, nil
 		},
 	})
+	registry.Register(headlessStateTool{
+		name:     "write_file",
+		metadata: tool.ToolMetadata{Category: tool.CategoryFilesystem, Impact: tool.ImpactModifying},
+		execute: func() (*builtin.Result, error) {
+			t.Error("unstarted suffix executed after cancellation")
+			return &builtin.Result{Success: false}, nil
+		},
+	})
 	emitter := &mockEmitter{}
 	runner := newHeadlessContractTestRunner(t, server.URL, root, registry)
 	runner.emitter = emitter

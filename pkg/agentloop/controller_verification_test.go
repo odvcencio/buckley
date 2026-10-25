@@ -16,7 +16,7 @@ func TestController_VerificationRepeatPreservesCompletedResultsAndReplay(t *test
 	patterns := []string{"TestWAV", "TestLoudness", "TestVerify", "TestWAV", "TestVerifyDuration", "TestWAV"}
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			providerCalls++

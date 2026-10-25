@@ -912,7 +912,7 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		}
 
 		msg := choice.Message
-		if len(msg.ToolCalls) > 0 && !roundResultAllowsToolDispatch(roundResult) {
+		if len(msg.ToolCalls) > 0 && !roundResultAllowsToolDispatch(roundResult, msg.ToolCalls) {
 			return c.rejectUnofferedToolCalls(ctx, result, msg, roundResult)
 		}
 		if len(msg.ToolCalls) == 0 {
@@ -1305,9 +1305,11 @@ func (c *Controller) executeModelRound(ctx context.Context, result *Result, roun
 	if err != nil {
 		return nil, contextWindow, err
 	}
+	authorizedTools := requestToolNames(req)
 	parallelToolCalls := req.ParallelToolCalls != nil && *req.ParallelToolCalls
 	roundResult, err := c.executePreparedModelRound(ctx, result, req, round, "model", useContinuation)
 	if roundResult != nil {
+		roundResult.authorizedTools = authorizedTools
 		roundResult.parallelToolCalls = parallelToolCalls
 	}
 	return roundResult, contextWindow, err
@@ -1749,8 +1751,30 @@ func requestOffersTools(req model.ChatRequest) bool {
 	return len(req.Tools) > 0 && req.ToolChoice != "none"
 }
 
-func roundResultAllowsToolDispatch(roundResult *modelRoundResult) bool {
-	return roundResult != nil && roundResult.responseToolOfferKnown && roundResult.responseToolsOffered
+func requestToolNames(req model.ChatRequest) map[string]struct{} {
+	if !requestOffersTools(req) {
+		return nil
+	}
+	names := make(map[string]struct{}, len(req.Tools))
+	for _, schema := range req.Tools {
+		function, _ := schema["function"].(map[string]any)
+		if name, _ := function["name"].(string); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
+func roundResultAllowsToolDispatch(roundResult *modelRoundResult, calls []model.ToolCall) bool {
+	if roundResult == nil || !roundResult.responseToolOfferKnown || !roundResult.responseToolsOffered {
+		return false
+	}
+	for _, call := range calls {
+		if _, ok := roundResult.authorizedTools[call.Function.Name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Controller) rejectUnofferedToolCalls(ctx context.Context, result *Result, message model.Message, roundResult *modelRoundResult) (*Result, error) {
@@ -1760,6 +1784,14 @@ func (c *Controller) rejectUnofferedToolCalls(ctx context.Context, result *Resul
 	reason := fmt.Sprintf("model requested %d tool call(s) but the response-producing request did not offer tools", len(message.ToolCalls))
 	if roundResult == nil || !roundResult.responseToolOfferKnown {
 		reason = fmt.Sprintf("model requested %d tool call(s) but the response-producing request's tool offer cannot be verified", len(message.ToolCalls))
+	} else if roundResult.responseToolsOffered {
+		for _, call := range message.ToolCalls {
+			if _, ok := roundResult.authorizedTools[call.Function.Name]; !ok {
+				name := truncateIncompleteNoticeText(modelstep.NormalizeErrorText(call.Function.Name), 96)
+				reason = fmt.Sprintf("model requested tool %q, which was not offered by this request", name)
+				break
+			}
+		}
 	}
 	// The completed model step and its durable response evidence remain intact.
 	// Preserve the returned assistant message as incomplete evidence, but do not
@@ -1875,6 +1907,9 @@ type modelRoundResult struct {
 	// replay cannot widen a no-tools retry back into a dispatchable call.
 	responseToolOfferKnown bool
 	responseToolsOffered   bool
+	// Initiating schemas are the authorization ceiling even when an adapter
+	// retries without tools. Rebuilt from the digest-checked request on replay.
+	authorizedTools map[string]struct{}
 }
 
 const (

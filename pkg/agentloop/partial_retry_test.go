@@ -20,7 +20,7 @@ func TestController_PartialRetryKeepsCompletedWorkAndReplays(t *testing.T) {
 	providerCalls, writes, notices := 0, 0, 0
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message{{Role: "user", Content: "write once then report"}}, history.messages...)}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message{{Role: "user", Content: "write once then report"}}, history.messages...)}, "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 			providerCalls++
@@ -84,7 +84,7 @@ func TestController_PartialRetryIsBoundedAndRedacted(t *testing.T) {
 	calls, notices, dispatches := 0, 0, 0
 	controller, buildErr := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}), nil
+			return testToolRequest(model.ChatRequest{Model: "test-model"}, "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			calls++

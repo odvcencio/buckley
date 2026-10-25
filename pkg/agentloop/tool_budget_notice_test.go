@@ -42,7 +42,7 @@ func TestController_ToolBudgetNotice(t *testing.T) {
 				FinalizeOnStop: true,
 				History:        history,
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					req := testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)})
+					req := testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "read_file")
 					if tc.name == "failed parallel batch" {
 						parallel := true
 						req.ParallelToolCalls = &parallel
