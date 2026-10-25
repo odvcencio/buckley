@@ -16,10 +16,12 @@ const maxUndoDepth = 20
 // turnBoundary is the state beginTurnUndo captures at the start of a turn,
 // consumed by finishTurnUndo once the turn (streaming, tool loop) settles.
 type turnBoundary struct {
-	store          *shadowgit.Store
-	beforeTree     string
-	messagesBefore int
-	historyVersion uint64
+	store           *shadowgit.Store
+	beforeTree      string
+	messagesBefore  int
+	historyVersion  uint64
+	appendedBefore  uint64
+	previousMessage conversation.MessageCursor
 }
 
 // sessionUndoStore lazily resolves and caches sess's shadow-git store. It
@@ -51,11 +53,17 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 	c.mu.Lock()
 	messagesBefore := len(sess.Conversation.Messages)
 	historyVersion := sess.historyVersion
+	appendedBefore := sess.Conversation.AppendCount()
+	var previousMessage conversation.MessageCursor
+	if messagesBefore > 0 {
+		previousMessage = sess.Conversation.Messages[messagesBefore-1].Cursor()
+	}
 	sess.redoStack = nil
 	c.mu.Unlock()
 
 	store := c.sessionUndoStore(sess)
-	boundary := turnBoundary{store: store, messagesBefore: messagesBefore, historyVersion: historyVersion}
+	boundary := turnBoundary{store: store, messagesBefore: messagesBefore, historyVersion: historyVersion,
+		appendedBefore: appendedBefore, previousMessage: previousMessage}
 	if store == nil {
 		return boundary
 	}
@@ -76,7 +84,9 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	}
 	ctx := context.Background()
 	c.mu.Lock()
-	if sess.historyVersion != boundary.historyVersion || len(sess.Conversation.Messages) <= boundary.messagesBefore {
+	_ = c.boundSessionWorkingSetLocked(sess)
+	start, valid := undoTurnStart(sess, boundary)
+	if !valid || len(sess.Conversation.Messages) <= start {
 		trees := undoTrees(sess.undoStack, sess.redoStack)
 		c.mu.Unlock()
 		_ = boundary.store.RetainTrees(ctx, trees)
@@ -89,25 +99,25 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	}
 
 	c.mu.Lock()
-	if sess.historyVersion != boundary.historyVersion {
+	start, valid = undoTurnStart(sess, boundary)
+	if !valid {
 		trees := undoTrees(sess.undoStack, sess.redoStack)
 		c.mu.Unlock()
 		_ = boundary.store.RetainTrees(ctx, trees)
 		return
 	}
 	messagesAfter := len(sess.Conversation.Messages)
-	if messagesAfter <= boundary.messagesBefore {
+	if messagesAfter <= start {
 		trees := undoTrees(sess.undoStack, sess.redoStack)
 		c.mu.Unlock()
 		_ = boundary.store.RetainTrees(ctx, trees)
 		return
 	}
-	messages := append([]conversation.Message(nil), sess.Conversation.Messages[boundary.messagesBefore:]...)
+	messages := append([]conversation.Message(nil), sess.Conversation.Messages[start:]...)
 	record := turnUndoRecord{
-		beforeTree:     boundary.beforeTree,
-		afterTree:      afterTree,
-		messagesBefore: boundary.messagesBefore,
-		messages:       messages,
+		beforeTree: boundary.beforeTree,
+		afterTree:  afterTree,
+		messages:   messages,
 	}
 
 	records := append(append([]turnUndoRecord(nil), sess.undoStack...), record)
@@ -122,15 +132,91 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 		records = records[1:]
 	}
 	trees := undoTrees(records, sess.redoStack)
+	appendedAfter := sess.Conversation.AppendCount()
 	c.mu.Unlock()
 	if err := boundary.store.RetainTrees(ctx, trees); err != nil {
 		return
 	}
 	c.mu.Lock()
-	if sess.historyVersion == boundary.historyVersion {
+	if sess.historyVersion == boundary.historyVersion && sess.Conversation.AppendCount() == appendedAfter {
 		sess.undoStack = records
+		c.mu.Unlock()
+		return
 	}
+	trees = undoTrees(sess.undoStack, sess.redoStack)
 	c.mu.Unlock()
+	_ = boundary.store.RetainTrees(ctx, trees)
+}
+
+func undoTurnStart(sess *SessionState, boundary turnBoundary) (int, bool) {
+	conv := sess.Conversation
+	if sess.historyVersion != boundary.historyVersion || conv.AppendCount() < boundary.appendedBefore {
+		return 0, false
+	}
+	start := boundary.messagesBefore
+	if boundary.messagesBefore > 0 && boundary.previousMessage != (conversation.MessageCursor{}) {
+		index := conv.MessageIndex(boundary.previousMessage)
+		if index < 0 {
+			return 0, false
+		}
+		start = index + 1
+	}
+	if start > len(conv.Messages) || uint64(len(conv.Messages)-start) != conv.AppendCount()-boundary.appendedBefore {
+		return 0, false
+	}
+	for _, msg := range conv.Messages[start:] {
+		if msg.Cursor() == (conversation.MessageCursor{}) {
+			return 0, false
+		}
+	}
+	return start, true
+}
+
+func undoMessageRange(conv *conversation.Conversation, messages []conversation.Message) (int, int, bool) {
+	if len(messages) == 0 {
+		return 0, 0, false
+	}
+	start := conv.MessageIndex(messages[0].Cursor())
+	end := start + len(messages)
+	if start < 0 || end > len(conv.Messages) {
+		return 0, 0, false
+	}
+	for i, msg := range messages {
+		if msg.Cursor() != conv.Messages[start+i].Cursor() {
+			return 0, 0, false
+		}
+	}
+	return start, end, true
+}
+
+// Keep a contiguous suffix of turns whose messages still exist in the working
+// view. Redo payloads are independent of that view and keep their own budget.
+func (c *Controller) pruneUndoHistoryLocked(sess *SessionState) {
+	records := sess.undoStack
+	kept, previousEnd := 0, -1
+	for _, record := range records {
+		start, end, valid := undoMessageRange(sess.Conversation, record.messages)
+		if !valid || (kept > 0 && start != previousEnd) {
+			clear(records[:kept])
+			kept = 0
+		}
+		if valid {
+			records[kept] = record
+			kept++
+			previousEnd = end
+		}
+	}
+	clear(records[kept:])
+	sess.undoStack = records[:kept]
+	limit := sessionWorkingMemoryBytes(c.cfg) / 4
+	used := undoMemoryBytes(sess.undoStack) + undoMemoryBytes(sess.redoStack)
+	for _, stack := range []*[]turnUndoRecord{&sess.undoStack, &sess.redoStack} {
+		for limit > 0 && len(*stack) > 0 && used > limit {
+			used -= undoMemoryBytes((*stack)[:1])
+			(*stack)[0] = turnUndoRecord{}
+			*stack = (*stack)[1:]
+		}
+	}
 }
 
 func undoTrees(undo, redo []turnUndoRecord) []string {
@@ -185,6 +271,18 @@ func (c *Controller) undoLastTurn() {
 	}
 	record := sess.undoStack[len(sess.undoStack)-1]
 	store := sess.undoStore
+	start, end, valid := undoMessageRange(sess.Conversation, record.messages)
+	if !valid || end != len(sess.Conversation.Messages) {
+		clear(sess.undoStack)
+		sess.undoStack = nil
+		trees := undoTrees(sess.undoStack, sess.redoStack)
+		c.mu.Unlock()
+		if store != nil {
+			_ = store.RetainTrees(context.Background(), trees)
+		}
+		c.app.AddMessage("Undo history is outside the current working context.", "system")
+		return
+	}
 	c.mu.Unlock()
 
 	if store == nil {
@@ -206,15 +304,15 @@ func (c *Controller) undoLastTurn() {
 	sess.undoStack[len(sess.undoStack)-1] = turnUndoRecord{}
 	sess.undoStack = sess.undoStack[:len(sess.undoStack)-1]
 	sess.redoStack = append(sess.redoStack, record)
-	sess.Conversation.Messages = sess.Conversation.Messages[:record.messagesBefore]
+	sess.Conversation.Messages = sess.Conversation.Messages[:start]
 	sess.Conversation.UpdateTokenCount()
 	saveErr := (error)(nil)
 	if c.store != nil {
-		saveErr = sess.Conversation.SaveAllMessages(c.store)
+		saveErr = sess.Conversation.SaveMessagesFrom(c.store, start)
 	}
+
 	messages := cloneMessages(sess.Conversation.Messages)
 	c.mu.Unlock()
-
 	c.rerenderTranscript(sess, messages)
 	if saveErr != nil {
 		c.app.AddMessage("Undid last turn, but failed to persist: "+saveErr.Error(), "system")
@@ -265,18 +363,37 @@ func (c *Controller) redoLastTurn() {
 	sess.redoStack[len(sess.redoStack)-1] = turnUndoRecord{}
 	sess.redoStack = sess.redoStack[:len(sess.redoStack)-1]
 	sess.undoStack = append(sess.undoStack, record)
+	messagesBefore := len(sess.Conversation.Messages)
 	sess.Conversation.Messages = append(sess.Conversation.Messages, record.messages...)
 	sess.Conversation.UpdateTokenCount()
 	saveErr := (error)(nil)
 	if c.store != nil {
-		saveErr = sess.Conversation.SaveAllMessages(c.store)
+		saveErr = sess.Conversation.SaveMessagesFrom(c.store, messagesBefore)
+	}
+	retainedBefore := len(sess.undoStack) + len(sess.redoStack)
+	boundErr := c.boundSessionWorkingSetLocked(sess)
+	if boundErr != nil {
+		sess.persistenceErr = boundErr
+	}
+	var trees []string
+	if len(sess.undoStack)+len(sess.redoStack) < retainedBefore {
+		trees = undoTrees(sess.undoStack, sess.redoStack)
 	}
 	messages := cloneMessages(sess.Conversation.Messages)
 	c.mu.Unlock()
 
+	if trees != nil {
+		_ = store.RetainTrees(ctx, trees)
+	}
+
 	c.rerenderTranscript(sess, messages)
 	if saveErr != nil {
 		c.app.AddMessage("Redid last turn, but failed to persist: "+saveErr.Error(), "system")
+		return
+	}
+	if boundErr != nil {
+		c.app.SetStatus("Paused - session memory budget")
+		c.app.AddMessage("Redid last turn; working context paused: "+boundErr.Error(), "system")
 		return
 	}
 	c.app.AddMessage(fmt.Sprintf("Redid last turn (%d message(s), file changes restored).", len(record.messages)), "system")

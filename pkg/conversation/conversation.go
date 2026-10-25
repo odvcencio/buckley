@@ -29,12 +29,13 @@ type Message struct {
 
 // Conversation manages a conversation with the LLM
 type Conversation struct {
-	SessionID       string
-	Messages        []Message
-	TokenCount      int
-	CompactionCount int
-	historyBeforeID int64
-	memoryBlocked   error
+	SessionID        string
+	Messages         []Message
+	TokenCount       int
+	CompactionCount  int
+	historyBeforeID  int64
+	memoryBlocked    error
+	appendedMessages uint64
 }
 
 const (
@@ -99,8 +100,7 @@ func (c *Conversation) AddUserMessage(content string) {
 		Tokens:    estimateTokens(content),
 		IsSummary: false,
 	}
-	c.Messages = append(c.Messages, msg)
-	c.TokenCount += msg.Tokens
+	c.AppendMessage(msg)
 }
 
 // AddAssistantMessage adds an assistant message
@@ -125,8 +125,7 @@ func (c *Conversation) AddAssistantMessageWithReasoningDetails(content string, r
 		Reasoning:        reasoning,
 		ReasoningDetails: cloneReasoningDetails(reasoningDetails),
 	}
-	c.Messages = append(c.Messages, msg)
-	c.TokenCount += msg.Tokens
+	c.AppendMessage(msg)
 }
 
 // AddSystemMessage adds a system message
@@ -138,8 +137,7 @@ func (c *Conversation) AddSystemMessage(content string) {
 		Tokens:    estimateTokens(content),
 		IsSummary: false,
 	}
-	c.Messages = append(c.Messages, msg)
-	c.TokenCount += msg.Tokens
+	c.AppendMessage(msg)
 }
 
 // AddToolCallMessage adds an assistant message with tool calls
@@ -174,8 +172,7 @@ func (c *Conversation) AddToolCallMessageWithContent(content string, toolCalls [
 		Reasoning:        reasoning,
 		ReasoningDetails: cloneReasoningDetails(reasoningDetails),
 	}
-	c.Messages = append(c.Messages, msg)
-	c.TokenCount += msg.Tokens
+	c.AppendMessage(msg)
 }
 
 // AddToolResponseMessage adds a tool response message
@@ -189,8 +186,7 @@ func (c *Conversation) AddToolResponseMessage(toolCallID string, name string, co
 		Name:       name,
 		IsSummary:  false,
 	}
-	c.Messages = append(c.Messages, msg)
-	c.TokenCount += msg.Tokens
+	c.AppendMessage(msg)
 }
 
 // ToModelMessages converts conversation messages to model messages
@@ -357,13 +353,33 @@ func (c *Conversation) SaveMessage(store *storage.Store, msg Message) error {
 
 // SaveAllMessages saves all messages to storage
 func (c *Conversation) SaveAllMessages(store *storage.Store) error {
+	return c.SaveMessagesFrom(store, 0)
+}
+
+// SaveMessagesFrom replaces a changed tail while preserving its saved prefix.
+// It falls back to a full save when the prefix contains unsaved messages.
+func (c *Conversation) SaveMessagesFrom(store *storage.Store, start int) error {
+	if start < 0 || start > len(c.Messages) {
+		return fmt.Errorf("save message tail: invalid start %d", start)
+	}
+	beforeID := c.historyBeforeID
+	for _, msg := range c.Messages[:start] {
+		if msg.workingOnly {
+			continue
+		}
+		if msg.storageID == 0 {
+			return c.SaveAllMessages(store)
+		}
+		beforeID = max(beforeID, msg.storageID)
+	}
 	if c.memoryBlocked != nil {
 		return c.memoryBlocked
 	}
-	messages := make([]storage.Message, 0, len(c.Messages))
-	indices := make([]int, 0, len(c.Messages))
-	for i, msg := range c.Messages {
-		if msg.workingOnly || (c.historyBeforeID > 0 && msg.storageID > 0 && msg.storageID <= c.historyBeforeID) {
+	messages := make([]storage.Message, 0, len(c.Messages)-start)
+	indices := make([]int, 0, len(c.Messages)-start)
+	for offset, msg := range c.Messages[start:] {
+		i := start + offset
+		if msg.workingOnly || (start == 0 && c.historyBeforeID > 0 && msg.storageID > 0 && msg.storageID <= c.historyBeforeID) {
 			continue
 		}
 		storageMsg, err := StorageMessage(c.SessionID, msg)
@@ -373,7 +389,7 @@ func (c *Conversation) SaveAllMessages(store *storage.Store) error {
 		messages = append(messages, storageMsg)
 		indices = append(indices, i)
 	}
-	if err := store.ReplaceMessagesAfter(c.SessionID, c.historyBeforeID, messages); err != nil {
+	if err := store.ReplaceMessagesAfter(c.SessionID, beforeID, messages); err != nil {
 		return err
 	}
 	for i, index := range indices {

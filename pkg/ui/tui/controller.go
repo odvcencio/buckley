@@ -157,10 +157,9 @@ type SessionState struct {
 // /undo and /redo can restore both the file changes and the conversation
 // tail together.
 type turnUndoRecord struct {
-	beforeTree     string
-	afterTree      string
-	messagesBefore int
-	messages       []conversation.Message
+	beforeTree string
+	afterTree  string
+	messages   []conversation.Message
 }
 
 // CodeModeToolFactory creates the per-session exec_program tool. The command
