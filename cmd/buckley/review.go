@@ -956,6 +956,9 @@ func reviewResultFromAgent(fwResult *oneshot.RunResult, audit *transparency.Cont
 	}
 	result.toolEvidence = append([]oneshot.AgentToolCall(nil), fwResult.ToolEvidence...)
 	result.commandEvidence = append([]model.CommandExecutionEvidence(nil), fwResult.CommandEvidence...)
+	if fwResult.Incomplete {
+		result.reviewText = mostCompleteIncompleteReview(result.reviewText, fwResult)
+	}
 	result.reviewText = appendReviewInfrastructureDiagnostics(result.reviewText, result.toolEvidence)
 	result.incomplete = fwResult.Incomplete
 	result.incompleteWhy = fwResult.IncompleteReason
