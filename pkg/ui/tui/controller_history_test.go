@@ -118,6 +118,27 @@ func TestIdleHistory_PinsBusyQueuedAndFailedPersistence(t *testing.T) {
 	}
 }
 
+func TestIdleHistory_NewSessionBoundsPreviousForeground(t *testing.T) {
+	ctrl, _ := newHistoryResidencyTestController(t)
+	for i := 1; i <= 4; i++ {
+		ctrl.resumeSession(fmt.Sprintf("history-%d", i))
+	}
+	previous := ctrl.sessions[ctrl.currentSession].ID
+	ctrl.newSession()
+	if ctrl.sessions[ctrl.currentSession].ID == previous {
+		t.Fatal("new session was not created")
+	}
+	resident := 0
+	for i, sess := range ctrl.sessions {
+		if i != ctrl.currentSession {
+			resident += sess.Conversation.WorkingSetBytes()
+		}
+	}
+	if resident > sessionWorkingMemoryBytes(ctrl.cfg) {
+		t.Fatal("starting a new session bypassed the inactive history budget")
+	}
+}
+
 func TestIdleHistory_BackgroundTurnRestoresBeforeAppendingInput(t *testing.T) {
 	ctrl, sessions := newHistoryResidencyTestController(t)
 	for i := 1; i < 8; i++ {

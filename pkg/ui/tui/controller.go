@@ -1284,11 +1284,17 @@ func (c *Controller) newSession() {
 	c.currentSession = 0
 	c.conversation = newSess.Conversation
 	c.registry = newSess.ToolRegistry
+	c.historyClock++
+	newSess.historyUse = c.historyClock
+	cacheErr := c.boundIdleHistoryLocked()
 
 	// Clear scrollback and show fresh welcome
 	c.app.ClearScrollback()
 	c.app.WelcomeScreen()
 	c.app.AddMessage("New session started: "+newSessionID, "system")
+	if cacheErr != nil {
+		c.app.AddMessage("Keeping inactive history in memory: "+cacheErr.Error(), "system")
+	}
 	c.app.SetStatus("Ready")
 }
 
