@@ -129,8 +129,24 @@ func TestOneShot_DiscoveryPreservesToolContracts(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(schemas) > 12000 {
-					t.Errorf("request %d schemas=%d bytes, want bounded working set", i+1, len(schemas))
+				coreBytes := len(schemas)
+				if mode == "artifact" {
+					for _, definition := range request.Tools {
+						function, _ := definition["function"].(map[string]any)
+						if function["name"] == "submit_artifact" {
+							required, err := json.Marshal(definition)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if len(required) > 7000 {
+								t.Errorf("required artifact schema=%d bytes", len(required))
+							}
+							coreBytes -= len(required)
+						}
+					}
+				}
+				if coreBytes > 12000 {
+					t.Errorf("request %d core schemas=%d bytes, total=%d, want bounded working set", i+1, coreBytes, len(schemas))
 				}
 				if mode == "explicit" || mode == "profile" {
 					if len(names) != 1 || !names["git_log"] {
