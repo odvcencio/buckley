@@ -1,54 +1,123 @@
 package tui
 
 import (
-	"fmt"
-	"sort"
+	"encoding/json"
+	"strings"
+
+	"m31labs.dev/buckley/pkg/conversation"
+	"m31labs.dev/buckley/pkg/model"
 )
 
-// boundIdleHistoryLocked shares one working-window budget among inactive views.
-// Selected, busy, queued and failed-persistence sessions keep their bodies.
-// The session runtime, undo records and provider continuation are never evicted.
-func (c *Controller) boundIdleHistoryLocked() error {
-	limit := sessionWorkingMemoryBytes(c.cfg)
-	if limit <= 0 || c.store == nil {
-		return nil
+func renderConversationHistory(app *WidgetApp, messages []conversation.Message) {
+	if app == nil {
+		return
 	}
-	type candidate struct {
-		session *SessionState
-		bytes   int
+	renderConversationHistoryWith(app.AddMessage, messages)
+}
+
+func renderConversationHistoryImmediately(app *WidgetApp, messages []conversation.Message) {
+	if app == nil {
+		return
 	}
-	var candidates []candidate
-	resident := 0
-	for i, sess := range c.sessions {
-		if i == c.currentSession || sess.Streaming || sess.Compacting || len(sess.MessageQueue) > 0 || sess.persistenceErr != nil || sess.historyReference != nil {
-			continue
+	renderConversationHistoryWith(app.addMessageImmediately, messages)
+}
+
+func renderConversationHistoryWith(addMessage func(content, source string), messages []conversation.Message) {
+	var progress strings.Builder
+	flushProgress := func() {
+		if progress.Len() == 0 {
+			return
 		}
-		bytes := sess.Conversation.WorkingSetBytes()
-		if bytes > 0 {
-			candidates = append(candidates, candidate{sess, bytes})
-			resident += bytes
+		addMessage(progress.String(), "system")
+		progress.Reset()
+	}
+	startProgress := func() {
+		if progress.Len() == 0 {
+			progress.WriteString("Working")
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].session.historyUse < candidates[j].session.historyUse
-	})
-	var firstErr error
-	for _, entry := range candidates {
-		if resident <= limit {
-			break
-		}
-		reference, err := entry.session.Conversation.ReleaseWorkingSet(c.store)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("session %s: %w", entry.session.ID, err)
+
+	for _, msg := range messages {
+		content := conversation.GetContentAsString(msg.Content)
+		switch msg.Role {
+		case "assistant":
+			if strings.TrimSpace(msg.Reasoning) != "" || len(msg.ToolCalls) > 0 {
+				startProgress()
+				if reasoning := strings.TrimSpace(msg.Reasoning); reasoning != "" {
+					progress.WriteString("\n\nThinking\n\n")
+					progress.WriteString(model.NormalizeReasoningText(reasoning))
+				}
+				for _, call := range msg.ToolCalls {
+					progress.WriteString("\n\n→ ")
+					progress.WriteString(toolCallProgressSummary(call))
+				}
 			}
-			continue
+			if strings.TrimSpace(content) != "" && len(msg.ToolCalls) == 0 {
+				flushProgress()
+				addMessage(content, "assistant")
+			}
+		case "tool":
+			startProgress()
+			progress.WriteString("\n  ")
+			progress.WriteString(storedToolResultProgressSummary(msg.Name, content))
+			if guidance := storedCodeModeRecovery(content); guidance != "" {
+				progress.WriteString("\n\n")
+				progress.WriteString(codeModeRecoveryProgress(guidance))
+			}
+		default:
+			flushProgress()
+			if strings.TrimSpace(content) != "" {
+				addMessage(content, msg.Role)
+			}
 		}
-		if reference != nil {
-			entry.session.historyReference = reference
-		}
-		// A nil reference pins unsaved data outside the recoverable cache.
-		resident -= entry.bytes
 	}
-	return firstErr
+	flushProgress()
+}
+
+func storedCodeModeRecovery(content string) string {
+	const marker = "CODE MODE RECOVERY:"
+	index := strings.Index(content, marker)
+	if index < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[index:])
+}
+
+func storedToolResultProgressSummary(name, content string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	detail := storedToolError(content)
+	if detail != "" {
+		return "✗ " + name + " — " + compactStatusText(detail, 200)
+	}
+	return "✓ " + name + " — completed"
+}
+
+func storedToolError(content string) string {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(strings.ToLower(content), "error:") {
+		return strings.TrimSpace(content[len("error:"):])
+	}
+	var payload struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if json.Unmarshal([]byte(content), &payload) == nil && (!payload.Success || strings.TrimSpace(payload.Error) != "") {
+		if strings.TrimSpace(payload.Error) != "" {
+			return strings.TrimSpace(payload.Error)
+		}
+		return "failed"
+	}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "error:") {
+			detail := strings.Trim(strings.TrimSpace(line[len("error:"):]), "\"")
+			if detail != "" && detail != "null" {
+				return detail
+			}
+		}
+	}
+	return ""
 }
