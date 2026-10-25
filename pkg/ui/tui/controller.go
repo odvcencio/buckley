@@ -1548,25 +1548,38 @@ func (c *Controller) resumeSession(reference string) {
 		c.app.AddMessage("Session storage unavailable", "system")
 		return
 	}
-	all, err := c.store.ListSessionsByRepo(c.workDir)
-	if err != nil {
-		c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
-		return
-	}
-	project := make([]storage.Session, 0)
-	for _, sess := range all {
-		if sess.ProjectPath == c.workDir {
-			project = append(project, sess)
-		}
-	}
+	reference = strings.TrimSpace(reference)
+	n, err := strconv.Atoi(reference)
 	var target *storage.Session
-	if n, err := strconv.Atoi(strings.TrimSpace(reference)); err == nil && n > 0 && n <= len(project) {
-		target = &project[n-1]
+	if err != nil {
+		target, err = c.store.GetSession(reference)
+		if err != nil {
+			c.app.AddMessage("Could not load session: "+err.Error(), "system")
+			return
+		}
+		if target != nil && target.ProjectPath != c.workDir {
+			target = nil
+		}
 	} else {
-		for i := range project {
-			if project[i].ID == strings.TrimSpace(reference) {
-				target = &project[i]
-				break
+		all, err := c.store.ListSessionsByRepo(c.workDir)
+		if err != nil {
+			c.app.AddMessage("Could not list sessions: "+err.Error(), "system")
+			return
+		}
+		project := make([]storage.Session, 0)
+		for _, sess := range all {
+			if sess.ProjectPath == c.workDir {
+				project = append(project, sess)
+			}
+		}
+		if n > 0 && n <= len(project) {
+			target = &project[n-1]
+		} else {
+			for i := range project {
+				if project[i].ID == reference {
+					target = &project[i]
+					break
+				}
 			}
 		}
 	}
