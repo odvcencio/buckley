@@ -107,22 +107,23 @@ type QueuedMessage struct {
 
 // SessionState holds the state for a single session.
 type SessionState struct {
-	ID               string
-	Conversation     *conversation.Conversation
-	ToolRegistry     *tool.Registry
-	HookCloser       io.Closer
-	SkillRegistry    *skill.Registry
-	SkillState       *skill.RuntimeState
-	Streaming        bool
-	Compacting       bool
-	Cancel           context.CancelFunc
-	MessageQueue     []QueuedMessage // Messages queued while streaming
-	historyReference *conversation.WorkingSetReference
-	historyUse       uint64
-	deferredHistory  bool
-	runtimeLoader    func(*storage.Store) (*SessionState, error)
-	persistenceErr   error
-	historyVersion   uint64
+	ID                string
+	Conversation      *conversation.Conversation
+	ToolRegistry      *tool.Registry
+	HookCloser        io.Closer
+	SkillRegistry     *skill.Registry
+	SkillState        *skill.RuntimeState
+	Streaming         bool
+	Compacting        bool
+	Cancel            context.CancelFunc
+	MessageQueue      []QueuedMessage // Messages queued while streaming
+	historyReference  *conversation.WorkingSetReference
+	historyUse        uint64
+	deferredHistory   bool
+	runtimeLoader     func(*storage.Store) (*SessionState, error)
+	persistenceErr    error
+	historyVersion    uint64
+	workingSetVersion uint64
 
 	DisableToolsNextTurn bool
 	subagentListCursor   string
@@ -157,10 +158,9 @@ type SessionState struct {
 // /undo and /redo can restore both the file changes and the conversation
 // tail together.
 type turnUndoRecord struct {
-	beforeTree     string
-	afterTree      string
-	messagesBefore int
-	messages       []conversation.Message
+	beforeTree string
+	afterTree  string
+	messages   []conversation.Message
 }
 
 // CodeModeToolFactory creates the per-session exec_program tool. The command

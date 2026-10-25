@@ -66,8 +66,8 @@ func TestIdleHistory_LimitsBodiesAndPreservesSessionState(t *testing.T) {
 	wire := conv.ToModelMessages()
 	old.continuation = new(model.ContinuationCoordinator)
 	cursor := old.continuation
-	old.undoStack = []turnUndoRecord{{messagesBefore: 1, messages: append([]conversation.Message(nil), conv.Messages[1:]...)}}
-	old.redoStack = []turnUndoRecord{{messagesBefore: 2}}
+	old.undoStack = []turnUndoRecord{{messages: append([]conversation.Message(nil), conv.Messages[1:]...)}}
+	old.redoStack = []turnUndoRecord{{}}
 	old.DisableToolsNextTurn = true
 	for i := 1; i < 8; i++ {
 		ctrl.resumeSession(fmt.Sprintf("history-%d", i))

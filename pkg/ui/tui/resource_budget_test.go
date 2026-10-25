@@ -20,11 +20,11 @@ func TestController_ResourceBudgetBoundsQueuedInputAndInvalidatesTrimmedUndo(t *
 		sess.Conversation.AddAssistantMessage(strings.Repeat("x", 4096))
 	}
 	sess.undoStack = []turnUndoRecord{{messages: append([]conversation.Message(nil), sess.Conversation.Messages...)}}
-	sess.redoStack = sess.undoStack
+	sess.redoStack = append([]turnUndoRecord(nil), sess.undoStack...)
 	if err := c.boundSessionWorkingSetLocked(sess); err != nil {
 		t.Fatal(err)
 	}
-	if sess.historyVersion != 1 || len(sess.undoStack) != 0 || len(sess.redoStack) != 0 || sess.Conversation.WorkingSetBytes() > cfg.Resources.SessionMemoryBytes/2 {
+	if sess.workingSetVersion != 1 || len(sess.undoStack) != 0 || len(sess.redoStack) != 0 || sess.Conversation.WorkingSetBytes() > cfg.Resources.SessionMemoryBytes/2 {
 		t.Fatal("trim retained stale undo data or exceeded working allocation")
 	}
 	for range 30 {

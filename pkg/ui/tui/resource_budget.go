@@ -22,9 +22,15 @@ func (c *Controller) boundSessionWorkingSetLocked(sess *SessionState) error {
 		if sess.continuation != nil {
 			sess.continuation.Reset()
 		}
-		sess.historyVersion++
-		sess.undoStack = nil
-		sess.redoStack = nil
+		sess.workingSetVersion++
+		if err != nil {
+			sess.historyVersion++
+			clear(sess.undoStack)
+			clear(sess.redoStack)
+			sess.undoStack, sess.redoStack = nil, nil
+		} else {
+			c.pruneUndoHistoryLocked(sess)
+		}
 	}
 	return err
 }
