@@ -1398,7 +1398,7 @@ func TestController_DispatchErrorBlocksAmbiguousSuffixUntilRerun(t *testing.T) {
 
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "read_file", "write_file"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "read_file", "write_file"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			providerCalls++

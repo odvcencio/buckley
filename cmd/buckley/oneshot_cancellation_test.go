@@ -73,9 +73,18 @@ func TestSessionShutdown_ClosesOutstandingWorkers(t *testing.T) {
 		}
 	})
 	var requests atomic.Int32
+	var discovered atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			fmt.Fprint(w, `{"data":[{"id":"worker-test","supported_parameters":["tools"]}]}`)
+			return
+		}
+		if mode != "one-shot" && !discovered.Swap(true) {
+			writeOneShotArtifactRouteSSE(t, w, map[string]any{"tool_calls": []map[string]any{{
+				"index": 0, "id": "discover-spawn", "type": "function", "function": map[string]any{
+					"name": "discover_tools", "arguments": `{"query":"spawn_subagent"}`,
+				},
+			}}}, "tool_calls")
 			return
 		}
 		if requests.Add(1) == 1 {

@@ -1066,7 +1066,7 @@ func TestGoalTurnEngine_GuardStopReturnsFinalSynthesis(t *testing.T) {
 
 func TestGoalTurnEngine_RepetitionWithoutStateChangeParks(t *testing.T) {
 	t.Parallel()
-	repeated := goalEngineToolCallResponse("missing_probe", `{}`)
+	repeated := goalEngineToolCallResponse("read_file", `{"path":"missing-probe.txt"}`)
 	engine, _ := newGoalEngineUnderTest(t, []string{repeated, repeated, repeated, goalEngineTextResponse})
 
 	outcome, err := engine.RunTurn(context.Background(), goalloop.TaskContext{

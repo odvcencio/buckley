@@ -42,7 +42,12 @@ func TestController_ToolBudgetNotice(t *testing.T) {
 				FinalizeOnStop: true,
 				History:        history,
 				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-					return testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "read_file"), nil
+					req := testToolRequest(model.ChatRequest{Model: "test-model", Messages: append([]model.Message(nil), history.messages...)}, "read_file")
+					if tc.name == "failed parallel batch" {
+						parallel := true
+						req.ParallelToolCalls = &parallel
+					}
+					return req, nil
 				},
 				CallModel: ModelCallerFunc(func(_ context.Context, req model.ChatRequest, _ bool) (*model.ChatResponse, error) {
 					modelCalls++
@@ -96,7 +101,7 @@ func TestController_ToolBudgetNotice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if modelCalls != 2 || dispatched != min(tc.batch, tc.limit) || result.ToolCalls != dispatched {
+			if modelCalls != 2 || dispatched != min(tc.batch, tc.limit, exactLimit) || result.ToolCalls != dispatched {
 				t.Fatalf("model calls=%d dispatched=%d result=%+v", modelCalls, dispatched, result)
 			}
 		})

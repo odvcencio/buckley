@@ -603,7 +603,7 @@ func TestExperimentExecutor_DelegateIncompleteResultPropagatesToFinalSynthesis(t
 		ID:      "delegate-incomplete",
 		Name:    "delegate incomplete",
 		Prompt:  "delegate then synthesize",
-		Context: map[string]string{"model_id": "gpt-4o"},
+		Context: map[string]string{"model_id": "gpt-4o", "tools_allowed": "delegate_task"},
 	}
 	registry := executor.buildRegistry(task, t.TempDir())
 
@@ -682,7 +682,7 @@ func TestExperimentExecutor_DelegateCapBreachEmitsFailedOutcomeAndStops(t *testi
 		ID:      "delegate-cap",
 		Name:    "delegate cap",
 		Prompt:  "delegate then stop on cap",
-		Context: map[string]string{"model_id": "gpt-4o"},
+		Context: map[string]string{"model_id": "gpt-4o", "tools_allowed": "delegate_task"},
 	}
 
 	conversation, err := executor.runConversation(context.Background(), "gpt-4o", executor.buildRegistry(task, t.TempDir()), task.Prompt, "", "", "")

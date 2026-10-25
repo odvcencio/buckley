@@ -14,7 +14,7 @@ func TestClipboardCommands_IncludeNativePlatformBridge(t *testing.T) {
 	case "darwin":
 		want = "pbcopy"
 	case "windows":
-		want = "clip.exe"
+		want = "powershell.exe"
 	}
 	for _, command := range commands {
 		if len(command) > 0 && command[0] == want {
@@ -35,7 +35,7 @@ func TestClipboardCommandAvailable_AbsoluteExecutable(t *testing.T) {
 }
 
 func TestClipboardCommandsFor_LinuxIncludesWSLBridge(t *testing.T) {
-	want := "/mnt/c/Windows/System32/clip.exe"
+	want := "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 	for _, command := range clipboardCommandsFor("linux") {
 		if len(command) > 0 && command[0] == want {
 			return

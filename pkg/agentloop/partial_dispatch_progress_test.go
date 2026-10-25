@@ -33,7 +33,7 @@ func TestController_PartialDispatchSurfacesPrefixProgressAndKeepsContinuationInc
 		},
 		MaxModelRequests: 2,
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -210,7 +210,7 @@ func TestController_PartialDispatchShortOutcomeSurfacesOnlyConfirmedPrefix(t *te
 	dispatchCalls := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -268,7 +268,7 @@ func TestController_ToolOutcomePersistenceFailureDoesNotFabricateProgress(t *tes
 	storeErr := errors.New("store tool result failed")
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			return toolCallResponse("call-write", "edit_file", `{}`, model.Usage{}), nil
@@ -318,7 +318,7 @@ func TestController_ObserverErrorRecordsAllKnownOutcomesAndLatches(t *testing.T)
 	observed := 0
 	ctrl, err := NewController(ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
@@ -383,7 +383,7 @@ func TestController_ReplayLoadFailureKeepsEarlierKnownOutcomeVisible(t *testing.
 	modelCalls := 0
 	config := ControllerConfig{
 		BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
-			return testToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
+			return testParallelToolRequest(model.ChatRequest{Model: "test-model"}, "edit_file", "read_file", "run_tests"), nil
 		},
 		CallModel: ModelCallerFunc(func(context.Context, model.ChatRequest, bool) (*model.ChatResponse, error) {
 			modelCalls++
