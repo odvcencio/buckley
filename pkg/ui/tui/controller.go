@@ -79,6 +79,7 @@ type Controller struct {
 	recentModels []string
 
 	// Multi-session support - each session runs independently
+	historyClock   uint64
 	sessions       []*SessionState // Active sessions for this project
 	currentSession int             // Index into sessions
 
@@ -105,20 +106,22 @@ type QueuedMessage struct {
 
 // SessionState holds the state for a single session.
 type SessionState struct {
-	ID              string
-	Conversation    *conversation.Conversation
-	ToolRegistry    *tool.Registry
-	HookCloser      io.Closer
-	SkillRegistry   *skill.Registry
-	SkillState      *skill.RuntimeState
-	Streaming       bool
-	Compacting      bool
-	Cancel          context.CancelFunc
-	MessageQueue    []QueuedMessage // Messages queued while streaming
-	deferredHistory bool
-	runtimeLoader   func(*storage.Store) (*SessionState, error)
-	persistenceErr  error
-	historyVersion  uint64
+	ID               string
+	Conversation     *conversation.Conversation
+	ToolRegistry     *tool.Registry
+	HookCloser       io.Closer
+	SkillRegistry    *skill.Registry
+	SkillState       *skill.RuntimeState
+	Streaming        bool
+	Compacting       bool
+	Cancel           context.CancelFunc
+	MessageQueue     []QueuedMessage // Messages queued while streaming
+	historyReference *conversation.WorkingSetReference
+	historyUse       uint64
+	deferredHistory  bool
+	runtimeLoader    func(*storage.Store) (*SessionState, error)
+	persistenceErr   error
+	historyVersion   uint64
 
 	DisableToolsNextTurn bool
 	subagentListCursor   string
@@ -305,6 +308,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	app.chatView.SetMemoryBudget(sessionWorkingMemoryBytes(cfg.Config) / 2)
 
 	ctrl := &Controller{
+		historyClock:        1,
 		app:                 app,
 		cfg:                 cfg.Config,
 		modelMgr:            cfg.ModelManager,
@@ -327,6 +331,7 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 		subagentEvidence:    cfg.SubagentEvidence,
 		approvalRouter:      newTUIApprovalRouter(),
 	}
+	projectSessions[currentIdx].historyUse = 1
 	for _, session := range projectSessions {
 		configureSessionSubagentPolicy(session, evaluator)
 	}
@@ -1279,11 +1284,17 @@ func (c *Controller) newSession() {
 	c.currentSession = 0
 	c.conversation = newSess.Conversation
 	c.registry = newSess.ToolRegistry
+	c.historyClock++
+	newSess.historyUse = c.historyClock
+	cacheErr := c.boundIdleHistoryLocked()
 
 	// Clear scrollback and show fresh welcome
 	c.app.ClearScrollback()
 	c.app.WelcomeScreen()
 	c.app.AddMessage("New session started: "+newSessionID, "system")
+	if cacheErr != nil {
+		c.app.AddMessage("Keeping inactive history in memory: "+cacheErr.Error(), "system")
+	}
 	c.app.SetStatus("Ready")
 }
 
@@ -1673,6 +1684,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 	c.currentSession = idx
 	c.conversation = sess.Conversation
 	c.registry = sess.ToolRegistry
+	cacheErr := c.boundIdleHistoryLocked()
 
 	// Clear and rebuild display
 	c.app.ClearScrollback()
@@ -1686,6 +1698,9 @@ func (c *Controller) switchToSessionLocked(idx int) {
 
 	// Replay conversation to display
 	renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
+	if cacheErr != nil {
+		c.app.addMessageImmediately("Keeping inactive history in memory: "+cacheErr.Error(), "system")
+	}
 
 	if sess.Streaming {
 		c.app.SetStatus("Streaming...")

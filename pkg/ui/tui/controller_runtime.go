@@ -29,13 +29,20 @@ func (s *SessionState) loadRuntime(store *storage.Store) error {
 
 // loadSessionRuntimeLocked must be called with c.mu held.
 func (c *Controller) loadSessionRuntimeLocked(sess *SessionState) error {
-	if sess.runtimeLoader == nil {
-		return nil
+	if sess.runtimeLoader != nil {
+		if err := sess.loadRuntime(c.store); err != nil {
+			return err
+		}
+		configureSessionSubagentPolicy(sess, c.evaluator)
+		c.configureSessionPermissions(sess)
 	}
-	if err := sess.loadRuntime(c.store); err != nil {
-		return err
+	if sess.historyReference != nil {
+		if err := sess.Conversation.RestoreWorkingSet(c.store, sess.historyReference); err != nil {
+			return fmt.Errorf("restore session %s history: %w", sess.ID, err)
+		}
+		sess.historyReference = nil
 	}
-	configureSessionSubagentPolicy(sess, c.evaluator)
-	c.configureSessionPermissions(sess)
+	c.historyClock++
+	sess.historyUse = c.historyClock
 	return nil
 }

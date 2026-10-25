@@ -102,7 +102,11 @@ func (c *Controller) finishStreamTurn(sess *SessionState, advance bool) (context
 	sess.Cancel = nil
 	c.emitStreaming(sess.ID, false)
 	if !advance || len(sess.MessageQueue) == 0 {
+		cacheErr := c.boundIdleHistoryLocked()
 		c.mu.Unlock()
+		if cacheErr != nil {
+			c.app.AddMessage("Keeping inactive history in memory: "+cacheErr.Error(), "system")
+		}
 		c.refreshSessionNav()
 		return nil, QueuedMessage{}, false
 	}
