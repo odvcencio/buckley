@@ -15,7 +15,7 @@ type slashCommandOverlay struct {
 
 func (p *slashCommandOverlay) HandleMessage(msg runtime.Message) runtime.HandleResult {
 	key, ok := msg.(runtime.KeyMsg)
-	if !ok {
+	if !ok || key.Key != terminal.KeyEnter && (key.Key != terminal.KeyRune || key.Rune != ' ') {
 		return p.PaletteWidget.HandleMessage(msg)
 	}
 	query := strings.TrimSpace(p.Query())
