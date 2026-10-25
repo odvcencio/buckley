@@ -16,7 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -123,18 +123,11 @@ func (s *Store) RefName() string {
 // temporary index file and returns its SHA. It never reads or writes
 // repoDir's real .git/index.
 func (s *Store) WriteTree(ctx context.Context) (string, error) {
-	tmpIndex, err := os.CreateTemp("", "buckley-undo-index-*")
+	tmpIndexPath, cleanup, err := temporaryIndex()
 	if err != nil {
-		return "", fmt.Errorf("shadowgit: create temp index: %w", err)
+		return "", err
 	}
-	tmpIndexPath := tmpIndex.Name()
-	_ = tmpIndex.Close()
-	// git treats a zero-byte index file as corrupt rather than empty, so
-	// remove it and let `git add` create a fresh index at this path.
-	if err := os.Remove(tmpIndexPath); err != nil {
-		return "", fmt.Errorf("shadowgit: prepare temp index: %w", err)
-	}
-	defer os.Remove(tmpIndexPath)
+	defer cleanup()
 
 	env := []string{"GIT_INDEX_FILE=" + tmpIndexPath}
 	if _, err := s.run(ctx, env, "add", "--all", "--", "."); err != nil {
@@ -145,6 +138,23 @@ func (s *Store) WriteTree(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("shadowgit: write-tree: %w", err)
 	}
 	return tree, nil
+}
+
+func temporaryIndex() (string, func(), error) {
+	file, err := os.CreateTemp("", "buckley-undo-index-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("shadowgit: create temp index: %w", err)
+	}
+	name := file.Name()
+	_ = file.Close()
+	// Git rejects a zero-byte index. Let it create a fresh one at this path.
+	if err := os.Remove(name); err != nil {
+		return "", nil, fmt.Errorf("shadowgit: prepare temp index: %w", err)
+	}
+	return name, func() {
+		_ = os.Remove(name)
+		_ = os.Remove(name + ".lock")
+	}, nil
 }
 
 // CommitTree wraps treeSHA in a commit object, with parentSHA as its
@@ -200,37 +210,34 @@ func (s *Store) CommitTreeSHA(ctx context.Context, commitSHA string) (string, er
 // DiffEntry is one path that differs between two trees.
 type DiffEntry struct {
 	Path string
-	// Status is 'A' (added in target), 'M' (modified), or 'D' (removed in
-	// target).
+	// Status is 'A' (added), 'M' (modified), 'D' (removed), or 'T' (type changed).
 	Status byte
 }
 
 // Diff returns the paths that differ between sourceTree and targetTree,
 // with --no-renames so every change is reported as a plain add/modify/
-// delete triple that Apply can restore file by file.
+// delete or type change. Paths are relative to the repository root.
 func (s *Store) Diff(ctx context.Context, sourceTree, targetTree string) ([]DiffEntry, error) {
-	out, err := s.run(ctx, nil, "diff", "--no-renames", "--name-status", sourceTree, targetTree)
+	out, err := s.runBytes(ctx, nil, nil, "diff", "--no-renames", "--raw", "-z", sourceTree, targetTree, "--")
 	if err != nil {
 		return nil, fmt.Errorf("shadowgit: diff: %w", err)
 	}
-	if out == "" {
-		return nil, nil
-	}
 	var entries []DiffEntry
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			continue
+	for len(out) > 0 {
+		header, rest, ok := bytes.Cut(out, []byte{0})
+		if !ok {
+			return nil, fmt.Errorf("shadowgit: unterminated diff header")
 		}
-		fields := strings.SplitN(line, "\t", 2)
-		if len(fields) != 2 {
-			continue
+		name, rest, ok := bytes.Cut(rest, []byte{0})
+		fields := strings.Fields(string(header))
+		if !ok || len(fields) != 5 || len(fields[4]) != 1 {
+			return nil, fmt.Errorf("shadowgit: invalid diff record")
 		}
-		status := fields[0]
-		if len(status) == 0 {
-			continue
+		if fields[0] == ":160000" || fields[1] == "160000" {
+			return nil, fmt.Errorf("shadowgit: cannot restore submodule %q", name)
 		}
-		entries = append(entries, DiffEntry{Path: fields[1], Status: status[0]})
+		entries = append(entries, DiffEntry{Path: string(name), Status: fields[4][0]})
+		out = rest
 	}
 	return entries, nil
 }
@@ -256,54 +263,63 @@ func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error 
 	if err != nil {
 		return err
 	}
+	if len(entries) == 0 {
+		return nil
+	}
+	index, cleanup, err := temporaryIndex()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	env := []string{"GIT_INDEX_FILE=" + index}
+	if _, err := s.run(ctx, env, "read-tree", "--no-sparse-checkout", sourceTree); err != nil {
+		return fmt.Errorf("shadowgit: prepare restore index: %w", err)
+	}
+	if _, err := s.run(ctx, env, "update-index", "--refresh"); err != nil {
+		return fmt.Errorf("shadowgit: worktree changed before restore: %w", err)
+	}
+	if err := s.checkUntracked(ctx, env, entries); err != nil {
+		return err
+	}
+	if _, err := s.run(ctx, env, "read-tree", "--no-sparse-checkout", "--no-recurse-submodules", "-m", "-u", sourceTree, targetTree); err != nil {
+		return fmt.Errorf("shadowgit: restore worktree: %w", err)
+	}
+	return nil
+}
+
+// read-tree may overwrite ignored files. Include them in this check, collapsing
+// untracked directories so caches do not need to be enumerated file by file.
+func (s *Store) checkUntracked(ctx context.Context, env []string, entries []DiffEntry) error {
+	targets := make(map[string]bool, len(entries))
+	parents := make(map[string]bool)
 	for _, entry := range entries {
-		full := filepath.Join(s.repoDir, entry.Path)
-		switch entry.Status {
-		case 'D':
-			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("shadowgit: remove %s: %w", entry.Path, err)
-			}
-		default: // 'A' or 'M'
-			if err := s.restoreBlob(ctx, targetTree, entry.Path, full); err != nil {
-				return err
+		if entry.Status == 'D' {
+			continue
+		}
+		targets[entry.Path] = true
+		for parent := path.Dir(entry.Path); parent != "."; parent = path.Dir(parent) {
+			parents[parent] = true
+		}
+	}
+	out, err := s.runBytes(ctx, env, nil, "ls-files", "--others", "--directory", "--full-name", "-z")
+	if err != nil {
+		return fmt.Errorf("shadowgit: check untracked files: %w", err)
+	}
+	for _, name := range bytes.Split(out, []byte{0}) {
+		if len(name) == 0 {
+			continue
+		}
+		name := strings.TrimSuffix(string(name), "/")
+		if targets[name] || parents[name] {
+			return fmt.Errorf("shadowgit: restore would overwrite untracked path %q", name)
+		}
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if targets[parent] {
+				return fmt.Errorf("shadowgit: restore would overwrite untracked path %q", name)
 			}
 		}
 	}
 	return nil
-}
-
-func (s *Store) restoreBlob(ctx context.Context, tree, path, destPath string) error {
-	mode, err := s.blobMode(ctx, tree, path)
-	if err != nil {
-		return err
-	}
-	content, err := s.runBytes(ctx, nil, nil, "show", tree+":"+path)
-	if err != nil {
-		return fmt.Errorf("shadowgit: read %s from tree: %w", path, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return fmt.Errorf("shadowgit: create parent dir for %s: %w", path, err)
-	}
-	perm := os.FileMode(0o644)
-	if mode == "100755" {
-		perm = 0o755
-	}
-	if err := os.WriteFile(destPath, content, perm); err != nil {
-		return fmt.Errorf("shadowgit: write %s: %w", path, err)
-	}
-	return nil
-}
-
-func (s *Store) blobMode(ctx context.Context, tree, path string) (string, error) {
-	out, err := s.run(ctx, nil, "ls-tree", tree, "--", path)
-	if err != nil {
-		return "", fmt.Errorf("shadowgit: ls-tree %s: %w", path, err)
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "100644", nil
-	}
-	return fields[0], nil
 }
 
 func (s *Store) run(ctx context.Context, env []string, args ...string) (string, error) {
