@@ -202,3 +202,31 @@ func TestPrivateStorage_PreservesRepositoryAttributesAndFilters(t *testing.T) {
 		t.Fatalf("smudge filter lost: %q", got)
 	}
 }
+
+func TestRetainTrees_EmptyHistoryReleasesPhysicalObjects(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, repo, "completed", "completed work stays intact")
+	store, err := New(repo, "released")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	for _, published := range []bool{false, true} {
+		tree := restoreTree(t, store)
+		if published {
+			if err := store.RetainTrees(ctx, []string{tree}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.RetainTrees(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		if bytes := privateObjectBytes(t, store); bytes != 0 {
+			t.Fatalf("published=%v: empty history retained %d object bytes", published, bytes)
+		}
+		if got := readFile(t, repo, "completed"); got != "completed work stays intact" {
+			t.Fatal("releasing undo changed completed work")
+		}
+	}
+}

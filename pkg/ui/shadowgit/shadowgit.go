@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -84,16 +85,19 @@ func (s *Store) RetainTrees(ctx context.Context, trees []string) error {
 		return fmt.Errorf("shadowgit: retain trees: %w", os.ErrClosed)
 	}
 	if len(trees) == 0 {
-		if err := s.collect(ctx); err != nil {
-			return err
-		}
 		if err := s.clearRef(ctx); err != nil {
 			return err
 		}
 		clear(s.pending)
 		s.pending = nil
+		if err := s.collect(ctx); err != nil {
+			// The release committed; callers must discard their old records even
+			// when subsequent cache cleanup needs another attempt.
+			slog.WarnContext(ctx, "Could not collect released undo snapshots", "error", err)
+		}
 		return nil
 	}
+
 	trees = slices.Clone(trees)
 	slices.Sort(trees)
 	trees = slices.Compact(trees)

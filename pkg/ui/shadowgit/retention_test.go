@@ -151,7 +151,11 @@ func TestRetainTrees_FailureKeepsPreviousRootAndReleaseCanReopen(t *testing.T) {
 	if ref, _ := store.CurrentRef(ctx); ref != "" {
 		t.Fatal("empty retention did not release its ref")
 	}
-	if err := store.RetainTrees(ctx, []string{tree}); err != nil {
+	later, err := store.WriteTree(ctx)
+	if err != nil || later != tree {
+		t.Fatalf("recapture after release: %s %v", later, err)
+	}
+	if err := store.RetainTrees(ctx, []string{later}); err != nil {
 		t.Fatal("released live handle could not retain a later turn", err)
 	}
 }
