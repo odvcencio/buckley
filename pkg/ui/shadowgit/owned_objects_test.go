@@ -230,3 +230,53 @@ func TestRetainTrees_EmptyHistoryReleasesPhysicalObjects(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateStorage_DoesNotRunUserReferenceHooks(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("reference hook fixture requires a POSIX shell")
+	}
+	repo := newTestRepo(t)
+	writeFile(t, repo, "file", "original")
+	retentionGit(t, repo, "add", ".")
+	retentionGit(t, repo, "commit", "-qm", "user baseline")
+	head := retentionGit(t, repo, "rev-parse", "HEAD")
+	sentinel := filepath.Join(t.TempDir(), "hook-ran")
+	t.Setenv("BUCKLEY_TEST_HOOK_SENTINEL", sentinel)
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	if err := os.Mkdir(hooks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte("#!/bin/sh\nprintf hook >> \"$BUCKLEY_TEST_HOOK_SENTINEL\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "global-config"))
+	retentionGit(t, repo, "config", "--global", "core.hooksPath", hooks)
+	retentionGit(t, repo, "update-ref", "refs/user-hook-control", head)
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("control hook did not execute: %v", err)
+	}
+	if err := os.Remove(sentinel); err != nil {
+		t.Fatal(err)
+	}
+	before := userGitFiles(t, repo)
+	store, err := New(repo, "hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := restoreTree(t, store)
+	if err := store.RetainTrees(context.Background(), []string{tree}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetainTrees(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("internal private ref invoked the user's hook: %v", err)
+	}
+	if !reflect.DeepEqual(userGitFiles(t, repo), before) {
+		t.Fatal("private reference operations changed user Git data")
+	}
+}

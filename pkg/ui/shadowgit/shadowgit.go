@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -458,7 +459,11 @@ func (s *Store) run(ctx context.Context, env []string, args ...string) (string, 
 func (s *Store) runBytes(ctx context.Context, env []string, input io.Reader, args ...string) ([]byte, error) {
 	// Every index used here is private and short-lived. Split indexes would
 	// leave sharedindex sidecars in the user's Git directory after cleanup.
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.splitIndex=false", "-c", "core.logAllRefUpdates=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
+	options := []string{"-c", "core.splitIndex=false", "-c", "core.logAllRefUpdates=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+	if s.gitDir != "" {
+		options = append(options, "-c", "core.hooksPath="+filepath.Join(s.gitDir, "hooks"))
+	}
+	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	cmd.Dir = s.repoDir
 	cmd.Stdin = input
 	cmd.Env = s.environment(env)

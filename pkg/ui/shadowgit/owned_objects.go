@@ -40,7 +40,7 @@ func (s *Store) initStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("shadowgit: create storage: %w", err)
 	}
-	if _, err := s.run(ctx, nil, "init", "--bare", "--template=", "--object-format="+format, "--quiet", private); err != nil {
+	if _, err := s.run(ctx, nil, "-c", "core.hooksPath="+filepath.Join(private, "hooks"), "init", "--bare", "--template=", "--object-format="+format, "--quiet", private); err != nil {
 		return fmt.Errorf("shadowgit: initialize storage: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(private, "HEAD"), []byte("ref: refs/worktree/buckley/unborn\n"), 0600); err != nil {
