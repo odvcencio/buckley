@@ -36,7 +36,7 @@ func NewRegistry() *Registry {
 	}
 }
 
-// SetPersistence binds subsequent transitions to a durable session.
+// SetPersistence binds Activate and Deactivate to a durable session.
 func (r *Registry) SetPersistence(sessionID string, persistence ActivationPersistence) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

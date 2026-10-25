@@ -28,7 +28,7 @@ func TestSkillActivationTool_RecomputesRemainingRestrictions(t *testing.T) {
 		{"activate", "a", []string{"read_file"}},
 		{"activate", "b", []string{"read_file"}},
 		{"activate", "guidance", []string{"read_file"}},
-		{"deactivate", "a", []string{"read_file", "list_directory"}},
+		{"deactivate", "a", []string{"list_directory", "read_file"}},
 		{"deactivate", "b", []string{"read_file", "list_directory"}},
 		{"deactivate", "guidance", []string{"read_file", "list_directory"}},
 	} {
