@@ -61,13 +61,15 @@ type Governor struct {
 	evidenceCalls  int
 	lastFailedCall int
 
-	exactCounts   map[string]int
-	outcomeCounts map[string]int
-	actionHistory []string
+	exactCounts        map[string]int
+	outcomeCounts      map[string]int
+	actionHistory      []string
+	verificationCounts map[string]int
 
-	maxExactCount   int
-	maxOutcomeCount int
-	readOnlyCalls   int
+	maxExactCount        int
+	maxOutcomeCount      int
+	maxVerificationCount int
+	readOnlyCalls        int
 }
 
 // ObserveEffect tracks whether tool work is advancing beyond discovery.
@@ -89,9 +91,11 @@ func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, s
 	if success && stateObserved && stateChanged {
 		clear(g.exactCounts)
 		clear(g.outcomeCounts)
+		clear(g.verificationCounts)
 		g.actionHistory = g.actionHistory[:0]
 		g.maxExactCount = 0
 		g.maxOutcomeCount = 0
+		g.maxVerificationCount = 0
 		g.evidenceCalls = 0
 		g.readOnlyCalls = 0
 		return Decision{}
@@ -246,6 +250,43 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	return Decision{}
 }
 
+// ObserveVerification detects repeated passing checks on observed unchanged
+// workspace state. Timing, cache markers, and other output noise cannot make
+// the same verification request count as progress. Call ObserveProgress first
+// so a confirmed change starts a fresh window.
+func (g *Governor) ObserveVerification(name, arguments string, outcome ToolOutcome) Decision {
+	if g == nil || !outcome.VerificationObserved {
+		return Decision{}
+	}
+	key := digest(strings.TrimSpace(name) + "\x00" + canonicalToolValue(arguments, "{}"))
+	if !outcome.Success || !outcome.VerificationPassed {
+		delete(g.verificationCounts, key)
+		return Decision{}
+	}
+	if !outcome.StateObserved || outcome.StateObservationFailed {
+		delete(g.verificationCounts, key)
+		return Decision{}
+	}
+	if g.verificationCounts == nil {
+		g.verificationCounts = make(map[string]int)
+	}
+	g.verificationCounts[key]++
+	count := g.verificationCounts[key]
+	g.maxVerificationCount = max(g.maxVerificationCount, count)
+	if count >= g.config.ExactRepeatLimit {
+		reason := fmt.Sprintf("%s repeated the same passing verification %d times without an observed workspace change", name, count)
+		return g.repeatDecision("verification_repeat", reason, count, true)
+	}
+	if count == g.config.ExactRepeatLimit-1 {
+		return Decision{
+			Kind:  "verification_repeat_warning",
+			Count: count,
+			Nudge: "Harness notice: this verification already passed on unchanged workspace state. Reuse that result; choose the tool needed for the remaining task or report a concrete blocker.",
+		}
+	}
+	return Decision{}
+}
+
 // Rounds reports the number of model rounds observed.
 func (g *Governor) Rounds() int {
 	if g == nil {
@@ -287,6 +328,9 @@ func (g *Governor) RepetitionPressure() float64 {
 	pressure := 0.0
 	if g.config.ExactRepeatLimit > 0 {
 		if p := float64(g.maxExactCount) / float64(g.config.ExactRepeatLimit); p > pressure {
+			pressure = p
+		}
+		if p := float64(g.maxVerificationCount) / float64(g.config.ExactRepeatLimit); p > pressure {
 			pressure = p
 		}
 	}
