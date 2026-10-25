@@ -674,7 +674,7 @@ func (a *WidgetApp) showSlashCommandPalette() {
 	palette.Focus()
 
 	// Push as modal overlay
-	a.screen.PushLayer(palette, true)
+	a.screen.PushLayer(&slashCommandOverlay{PaletteWidget: palette, app: a}, true)
 	a.dirty = true
 }
 
@@ -1337,6 +1337,7 @@ func (a *WidgetApp) handlePaletteCommand(id string) {
 }
 
 func (a *WidgetApp) prefillInput(text string) {
+	a.inputArea.Clear()
 	a.inputArea.SetText(text)
 	a.inputArea.Focus()
 	a.refreshInputLayout()
