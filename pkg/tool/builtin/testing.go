@@ -316,9 +316,6 @@ func (t *RunTestsTool) frameworkForTestPath(path, requestedPath string) (string,
 	}
 	prefix := requestedPath[:strings.Index(requestedPath, "...")]
 	base := filepath.Dir(prefix)
-	if strings.HasSuffix(prefix, string(filepath.Separator)) {
-		base = filepath.Clean(prefix)
-	}
 	if !filepath.IsAbs(base) && strings.TrimSpace(t.workDir) != "" {
 		base = filepath.Join(t.workDir, base)
 	}
@@ -599,7 +596,7 @@ func (t *RunTestsTool) runTestsForFramework(ctx context.Context, framework, path
 
 func localGoTestPath(path string) string {
 	path = filepath.ToSlash(strings.TrimSpace(path))
-	if path == "" || path == "." || strings.HasPrefix(path, ".") || filepath.IsAbs(path) {
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || filepath.IsAbs(path) {
 		return path
 	}
 	return "./" + path

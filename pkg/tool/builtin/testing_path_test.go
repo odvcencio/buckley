@@ -43,6 +43,14 @@ func TestRunTestsTool_MissingPathDoesNotLaunchCommand(t *testing.T) {
 }
 
 func TestRunTestsTool_GoPackagePatternsRunRealTests(t *testing.T) {
+	previous := execCommandContext
+	t.Cleanup(func() { execCommandContext = previous })
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name != "go" || len(args) == 0 || args[len(args)-1] == "..." {
+			t.Fatalf("refusing nonlocal test invocation: %s %q", name, args)
+		}
+		return exec.CommandContext(ctx, name, args...)
+	}
 	root := filepath.Join(t.TempDir(), "workspace...literal")
 	for path, content := range map[string]string{
 		"go.mod":                 "module example.invalid/patterns\n\ngo 1.26\n",
@@ -61,7 +69,7 @@ func TestRunTestsTool_GoPackagePatternsRunRealTests(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			tool := &RunTestsTool{}
 			tool.SetWorkDir(root)
-			result, err := tool.ExecuteWithContext(t.Context(), map[string]any{"path": path, "pattern": "^TestPattern$"})
+			result, err := tool.ExecuteWithContext(t.Context(), map[string]any{"path": path, "pattern": "^TestPattern$", "timeout_seconds": 15})
 			if err != nil || result == nil || !result.Success {
 				t.Fatalf("selector=%s result=%+v err=%v", path, result, err)
 			}
@@ -87,5 +95,15 @@ func TestRunTestsTool_PathDiagnosticRetainsUnavailableWithinBudget(t *testing.T)
 	body, err := json.Marshal(result)
 	if err != nil || len(body) > 512 {
 		t.Fatalf("diagnostic bytes=%d err=%v", len(body), err)
+	}
+}
+
+func TestLocalGoTestPath_RecursiveSelectorsRemainLocal(t *testing.T) {
+	for input, want := range map[string]string{"...": "./...", "./...": "./...", "pkg/...": "./pkg/...", ".hidden": "./.hidden", "../pkg": "../pkg"} {
+		t.Run(input, func(t *testing.T) {
+			if got := localGoTestPath(input); got != want {
+				t.Fatalf("path=%q want=%q", got, want)
+			}
+		})
 	}
 }
