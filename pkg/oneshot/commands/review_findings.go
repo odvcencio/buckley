@@ -787,10 +787,13 @@ func parseFalsificationConclusion(section string) FalsificationConclusion {
 		}
 	}
 	suffix := strings.TrimSpace(rawSuffix)
-	if falsificationConclusionWordRE.MatchString(suffix) {
+	conclusion := FalsificationConclusion(strings.ToUpper(matches[0][1]))
+	// Only DISPROVED can authorize approval, so retain its stricter ambiguity
+	// check. Other outcomes may explain why a claim cannot be proved or disproved.
+	if conclusion == FalsificationDisproved && falsificationConclusionWordRE.MatchString(suffix) {
 		return ""
 	}
-	return FalsificationConclusion(strings.ToUpper(matches[0][1]))
+	return conclusion
 }
 
 func parseCoverageLedger(section string) ([]CoverageEntry, FeedbackDisposition, string, []FeedbackEntry) {
