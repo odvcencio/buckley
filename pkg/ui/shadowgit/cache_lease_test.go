@@ -1,15 +1,14 @@
 package shadowgit
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,39 +241,28 @@ func TestCacheLease_PreservesUnknownCachesAndContinuesRecovery(t *testing.T) {
 }
 
 func TestCacheLease_GitChildProtectsCacheAfterOwnerExit(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fixture uses a POSIX clean filter")
-	}
 	repo := newTestRepo(t)
 	store := leasedTestStore(t, repo, "git-child")
-	control := t.TempDir()
-	ready, release := filepath.Join(control, "ready"), filepath.Join(control, "release")
-	script := filepath.Join(control, "filter")
-	body := "#!/bin/sh\n: > \"$BUCKLEY_LEASE_READY\"\nwhile [ ! -e \"$BUCKLEY_LEASE_RELEASE\" ]; do sleep .02; done\ncat\n"
-	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BUCKLEY_LEASE_READY", ready)
-	t.Setenv("BUCKLEY_LEASE_RELEASE", release)
-	retentionGit(t, repo, "config", "filter.lease.clean", "'"+strings.ReplaceAll(script, "'", "'\\''")+"'")
-	writeFile(t, repo, ".gitattributes", "*.hold filter=lease\n")
-	writeFile(t, repo, "payload.hold", "completed source")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := store.command(ctx, []string{"GIT_INDEX_FILE=" + filepath.Join(store.StorageDir(), "index-456")}, "add", "--all", "--", ".")
+	cmd := store.command(ctx, nil, "hash-object", "-w", "--stdin")
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cmd.Stdout = &output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600); _ = cmd.Wait() })
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
+	t.Cleanup(func() {
+		_ = input.Close()
+		if cmd.ProcessState == nil {
+			_ = cmd.Wait()
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("Git clean filter did not start")
-		}
-		time.Sleep(10 * time.Millisecond)
+	})
+	if _, err := input.Write([]byte("completed source waiting for EOF")); err != nil {
+		t.Fatal(err)
 	}
 	dir := store.StorageDir()
 	abandonTestStore(t, store)
@@ -282,20 +270,22 @@ func TestCacheLease_GitChildProtectsCacheAfterOwnerExit(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("active Git child's cache was reaped: %v", err)
 	}
-	if err := os.WriteFile(release, nil, 0600); err != nil {
+	if err := input.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	id := strings.TrimSpace(output.String())
+	if len(id) != 40 && len(id) != 64 {
+		t.Fatalf("Git child did not hash its completed input: %q", id)
+	}
+	retentionPrivateGit(t, store, "cat-file", "-e", id)
 	leasedTestStore(t, repo, "after-child")
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("finished Git child's cache was not reclaimed: %v", err)
 	}
 	if _, err := os.Stat(other.StorageDir()); err != nil {
 		t.Fatal("cleanup removed a live unrelated owner")
-	}
-	if readFile(t, repo, "payload.hold") != "completed source" {
-		t.Fatal("cleanup changed the source file")
 	}
 }
