@@ -9,6 +9,44 @@ import (
 	"testing"
 )
 
+func TestPrivateStorage_PackedCollectionReusesInstalledPackAndRemovesSidecars(t *testing.T) {
+	repo := newTestRepo(t)
+	retentionGit(t, repo, "config", "core.bigFileThreshold", "1")
+	writeFile(t, repo, "file", "completed work")
+	store, err := New(repo, "packed-reuse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	tree := restoreTree(t, store)
+	if err := store.RetainTrees(ctx, []string{tree}); err != nil {
+		t.Fatal(err)
+	}
+	packs, err := filepath.Glob(filepath.Join(store.gitDir, "objects", "pack", "*.pack"))
+	if err != nil || len(packs) != 1 {
+		t.Fatalf("expected one retained pack: %v %v", packs, err)
+	}
+	original, err := os.Stat(packs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep := packs[0][:len(packs[0])-len(".pack")] + ".keep"
+	if err := os.WriteFile(keep, []byte("obsolete private sidecar"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if clean, err := store.Clean(ctx, tree); err != nil || !clean {
+		t.Fatalf("repeated collection: clean=%v err=%v", clean, err)
+	}
+	after, err := os.Stat(packs[0])
+	if err != nil || !os.SameFile(original, after) {
+		t.Fatalf("collection replaced an identical installed pack: %v", err)
+	}
+	if _, err := os.Stat(keep); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("obsolete private sidecar was retained: %v", err)
+	}
+}
+
 func TestPrivateStorage_PackedCollectionPreservesPendingAndReleasesEmptyHistory(t *testing.T) {
 	repo := newTestRepo(t)
 	retentionGit(t, repo, "config", "core.bigFileThreshold", "1")

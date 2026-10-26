@@ -72,14 +72,25 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 func (p *retentionPack) bytes() (int64, error) {
 	var total int64
 	for _, ext := range []string{".pack", ".idx"} {
-		info, err := os.Lstat(filepath.Join(p.dir, "pack-"+p.id+ext))
+		name := "pack-" + p.id + ext
+		info, err := os.Lstat(filepath.Join(p.dir, name))
 		if err != nil {
 			return 0, err
 		}
 		if !info.Mode().IsRegular() {
 			return 0, fmt.Errorf("shadowgit: retained pack is not a regular file")
 		}
-		total += allocatedBytes(info)
+		used := allocatedBytes(info)
+		existing, err := os.Lstat(filepath.Join(p.store.gitDir, "objects", "pack", name))
+		if err == nil {
+			if !existing.Mode().IsRegular() {
+				return 0, fmt.Errorf("shadowgit: existing retained pack is not a regular file")
+			}
+			used = max(used, allocatedBytes(existing))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		}
+		total += used
 	}
 	return total, nil
 }
@@ -117,7 +128,15 @@ func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...s
 	if pack.id != "" {
 		for _, ext := range []string{".pack", ".idx"} {
 			name := "pack-" + pack.id + ext
-			if err := root.Rename(filepath.Join("objects", "pack", filepath.Base(pack.dir), name), filepath.Join("objects", "pack", name)); err != nil {
+			target := filepath.Join("objects", "pack", name)
+			if _, err := root.Lstat(target); err == nil {
+				// Content-addressed packs are immutable. Windows also refuses
+				// replacing the read-only files Git has already installed.
+				continue
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := root.Rename(filepath.Join("objects", "pack", filepath.Base(pack.dir), name), target); err != nil {
 				return fmt.Errorf("shadowgit: install retained pack: %w", err)
 			}
 		}
@@ -133,7 +152,7 @@ func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...s
 			return err
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasPrefix(entry.Name(), "pack-") || pack.id != "" && strings.HasPrefix(entry.Name(), "pack-"+pack.id+".") {
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), "pack-") || entry.Name() == "pack-"+pack.id+".pack" || entry.Name() == "pack-"+pack.id+".idx" {
 				continue
 			}
 			if err := root.Remove(filepath.Join("objects", "pack", entry.Name())); err != nil {
