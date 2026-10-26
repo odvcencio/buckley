@@ -23,6 +23,7 @@ type turnBoundary struct {
 	historyVersion  uint64
 	appendedBefore  uint64
 	previousMessage conversation.MessageCursor
+	captureErr      error
 }
 
 // sessionUndoStore lazily resolves and caches sess's shadow-git store. It
@@ -39,7 +40,7 @@ func (c *Controller) sessionUndoStore(sess *SessionState) *shadowgit.Store {
 		return sess.undoStore
 	}
 	sess.undoStoreChecked = true
-	store, err := shadowgit.New(c.workDir, sess.ID)
+	store, err := shadowgit.New(c.workDir, sess.ID, shadowgit.WithCaptureLimit(c.cfg.Resources.UndoCaptureBytes))
 	if err != nil {
 		return nil
 	}
@@ -70,6 +71,7 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 	}
 	tree, err := store.WriteTree(context.Background())
 	if err != nil {
+		boundary.captureErr = err
 		return boundary
 	}
 	boundary.beforeTree = tree
@@ -80,7 +82,14 @@ func (c *Controller) beginTurnUndo(sess *SessionState) turnBoundary {
 // the post-turn worktree, retains the supported undo/redo trees, and pushes
 // an undo record when the turn appended conversation messages.
 func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
-	if boundary.store == nil || boundary.beforeTree == "" {
+	if boundary.store == nil {
+		return
+	}
+	if boundary.captureErr != nil {
+		c.releaseFailedUndoCapture(sess, boundary.store, boundary.captureErr)
+		return
+	}
+	if boundary.beforeTree == "" {
 		return
 	}
 	ctx := context.Background()
@@ -96,6 +105,7 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 	c.mu.Unlock()
 	afterTree, err := boundary.store.WriteTree(ctx)
 	if err != nil {
+		c.releaseFailedUndoCapture(sess, boundary.store, err)
 		return
 	}
 
@@ -155,6 +165,20 @@ func (c *Controller) finishTurnUndo(sess *SessionState, boundary turnBoundary) {
 			c.app.AddMessage("Completed work saved. Undo is unavailable for this turn because its snapshots exceed the undo storage budget.", "system")
 		}
 		return
+	}
+}
+
+func (c *Controller) releaseFailedUndoCapture(sess *SessionState, store *shadowgit.Store, captureErr error) {
+	ctx := context.Background()
+	c.mu.Lock()
+	_ = c.boundSessionWorkingSetLocked(sess)
+	err := store.RetainTrees(ctx, undoTrees(sess.undoStack, sess.redoStack))
+	c.mu.Unlock()
+	slog.WarnContext(ctx, "Could not capture undo snapshot", "error", captureErr, "cleanup_error", err)
+	if errors.Is(captureErr, shadowgit.ErrCaptureLimit) {
+		c.app.AddMessage("Completed work is preserved. Undo is unavailable for this turn because snapshot inputs exceed resources.undo_capture_bytes.", "system")
+	} else {
+		c.app.AddMessage("Undo snapshot capture failed; completed work is preserved. Check Buckley logs.", "system")
 	}
 }
 

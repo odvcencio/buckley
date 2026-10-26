@@ -61,17 +61,24 @@ type Store struct {
 	closed           bool
 	collectionNeeded bool
 	lease            *cacheLease
+	captureLimit     int64
 }
 
 // New returns a Store rooted at repoDir for sessionID. It returns
 // ErrNotAGitRepo when repoDir is not inside a git working tree, since
 // shadow-git snapshots have nowhere durable to live otherwise.
-func New(repoDir, sessionID string) (*Store, error) {
+func New(repoDir, sessionID string, options ...Option) (*Store, error) {
 	repoDir = strings.TrimSpace(repoDir)
 	if repoDir == "" {
 		return nil, fmt.Errorf("shadowgit: repoDir cannot be empty")
 	}
 	store := &Store{repoDir: repoDir, ref: "refs/worktree/buckley/undo-live/" + SanitizeRefComponent(sessionID) + "/" + rand.Text()}
+	for _, option := range options {
+		option(store)
+	}
+	if store.captureLimit < 0 {
+		return nil, fmt.Errorf("shadowgit: capture limit must be nonnegative")
+	}
 	if err := store.initStorage(context.Background()); err != nil {
 		store.lease.close()
 		return nil, err
@@ -234,6 +241,9 @@ func (s *Store) writeTree(ctx context.Context) (string, error) {
 }
 
 func (s *Store) stageWorktree(ctx context.Context, env []string) (string, error) {
+	if err := s.checkCaptureInputs(ctx, env); err != nil {
+		return "", err
+	}
 	if _, err := s.run(ctx, env, "add", "--all", "--", "."); err != nil {
 		return "", fmt.Errorf("shadowgit: stage worktree: %w", err)
 	}

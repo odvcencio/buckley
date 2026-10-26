@@ -8,6 +8,7 @@ const (
 	// 637 MB of accounted use, so 512 MiB blocked receipts within a day.
 	DefaultStorageBytes     = 2 << 30
 	DefaultUndoStorageBytes = 128 << 20
+	DefaultUndoCaptureBytes = 512 << 20
 )
 
 // ResourceConfig bounds retained working history per session and accounted
@@ -17,14 +18,15 @@ type ResourceConfig struct {
 	SessionMemoryBytes int   `yaml:"session_memory_bytes"`
 	StorageBytes       int64 `yaml:"storage_bytes"`
 	UndoStorageBytes   int64 `yaml:"undo_storage_bytes"`
+	UndoCaptureBytes   int64 `yaml:"undo_capture_bytes"`
 }
 
 func defaultResourceConfig() ResourceConfig {
-	return ResourceConfig{SessionMemoryBytes: DefaultSessionMemoryBytes, StorageBytes: DefaultStorageBytes, UndoStorageBytes: DefaultUndoStorageBytes}
+	return ResourceConfig{SessionMemoryBytes: DefaultSessionMemoryBytes, StorageBytes: DefaultStorageBytes, UndoStorageBytes: DefaultUndoStorageBytes, UndoCaptureBytes: DefaultUndoCaptureBytes}
 }
 
 func validateResources(c *Config) error {
-	if c.Resources.SessionMemoryBytes < 0 || c.Resources.StorageBytes < 0 || c.Resources.UndoStorageBytes < 0 {
+	if c.Resources.SessionMemoryBytes < 0 || c.Resources.StorageBytes < 0 || c.Resources.UndoStorageBytes < 0 || c.Resources.UndoCaptureBytes < 0 {
 		return fmt.Errorf("resource budgets must be nonnegative")
 	}
 	if c.Resources.SessionMemoryBytes > 0 && c.Resources.SessionMemoryBytes < 64<<10 {
@@ -35,6 +37,9 @@ func validateResources(c *Config) error {
 	}
 	if c.Resources.UndoStorageBytes > 0 && c.Resources.UndoStorageBytes < 1<<20 {
 		return fmt.Errorf("resources.undo_storage_bytes must be at least 1048576")
+	}
+	if c.Resources.UndoCaptureBytes > 0 && c.Resources.UndoCaptureBytes < 1<<20 {
+		return fmt.Errorf("resources.undo_capture_bytes must be at least 1048576")
 	}
 	return nil
 }
