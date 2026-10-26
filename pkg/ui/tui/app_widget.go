@@ -1725,7 +1725,15 @@ func (a *WidgetApp) SetRLMStatus(status *widgets.RLMStatus, scratchpad []widgets
 
 // ClearScrollback clears all messages.
 func (a *WidgetApp) ClearScrollback() {
-	a.chatView.Clear()
+	a.clearScrollback(false)
+}
+
+func (a *WidgetApp) clearScrollback(keepSyntaxCache bool) {
+	if keepSyntaxCache {
+		a.chatView.ClearContent()
+	} else {
+		a.chatView.Clear()
+	}
 	a.unreadCount = 0
 	a.updateScrollStatus()
 }

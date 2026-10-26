@@ -19,7 +19,9 @@ func renderConversationHistoryImmediately(app *WidgetApp, messages []conversatio
 	if app == nil {
 		return
 	}
-	renderConversationHistoryWith(app.addMessageImmediately, messages)
+	renderConversationHistoryWith(app.chatView.AddMessage, messages)
+	app.updateScrollStatus()
+	app.dirty = true
 }
 
 func renderConversationHistoryWith(addMessage func(content, source string), messages []conversation.Message) {
