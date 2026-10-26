@@ -143,10 +143,19 @@ func (s *Store) RetainTreesWithinLimit(ctx context.Context, trees []string, limi
 	if err != nil {
 		return false, err
 	}
+	var pack *retentionPack
 	if limit > 0 {
-		used, err := s.retainedBytes(ctx, commit)
+		var used int64
+		used, pack, err = s.retainedBytes(ctx, commit)
 		if err != nil {
 			return false, err
+		}
+		if pack != nil {
+			defer func() {
+				cleanupErr := pack.close()
+				s.collectionNeeded = s.collectionNeeded || cleanupErr != nil
+				err = errors.Join(err, cleanupErr)
+			}()
 		}
 		if used > limit {
 			return false, fmt.Errorf("%w: need %d bytes, limit %d", ErrStorageLimit, used, limit)
@@ -157,7 +166,11 @@ func (s *Store) RetainTreesWithinLimit(ctx context.Context, trees []string, limi
 	}
 	clear(s.pending)
 	s.pending = nil
-	err = s.collect(ctx)
+	if pack != nil {
+		err = s.collectPack(ctx, pack)
+	} else {
+		err = s.collect(ctx)
+	}
 	s.collectionNeeded = err != nil
 	return true, err
 }

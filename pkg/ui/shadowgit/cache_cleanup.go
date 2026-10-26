@@ -32,6 +32,15 @@ func cacheTempName(name, prefix string) bool {
 }
 
 func ownedCacheEntry(name, ref string, dir bool) bool {
+	parts := strings.Split(name, "/")
+	if len(parts) >= 3 && parts[0] == "objects" && parts[1] == "pack" && cacheTempName(parts[2], "tmp_pack_") {
+		if dir && len(parts) == 3 {
+			return true
+		}
+		if len(parts) == 4 {
+			name = "objects/pack/" + parts[3]
+		}
+	}
 	if dir {
 		switch name {
 		case ".", "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "info":
@@ -61,7 +70,7 @@ func ownedCacheEntry(name, ref string, dir bool) bool {
 		}
 		return true
 	}
-	parts := strings.Split(name, "/")
+	parts = strings.Split(name, "/")
 	if len(parts) != 3 || parts[0] != "objects" {
 		return false
 	}
