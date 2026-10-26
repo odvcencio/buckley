@@ -49,7 +49,22 @@ func ownedCacheEntry(name, ref string, dir bool) bool {
 		return true
 	}
 	parts := strings.Split(name, "/")
-	if len(parts) != 3 || parts[0] != "objects" || len(parts[1]) != 2 || !cacheHex(parts[1]) {
+	if len(parts) != 3 || parts[0] != "objects" {
+		return false
+	}
+	if parts[1] == "pack" {
+		if base, ok := strings.CutPrefix(parts[2], "pack-"); ok {
+			id, ext, _ := strings.Cut(base, ".")
+			if (len(id) == 40 || len(id) == 64) && cacheHex(id) {
+				switch ext {
+				case "pack", "idx", "rev", "bitmap", "keep", "promisor":
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if len(parts[1]) != 2 || !cacheHex(parts[1]) {
 		return false
 	}
 	if (len(parts[2]) == 38 || len(parts[2]) == 62) && cacheHex(parts[2]) {

@@ -157,6 +157,35 @@ func TestCacheLease_ReapsPartialInitializationAndLargeObjectDirectory(t *testing
 	}
 }
 
+func TestCacheLease_ReapsPackedCaptureWithoutReadingRepositoryConfig(t *testing.T) {
+	repo := newTestRepo(t)
+	retentionGit(t, repo, "config", "core.bigFileThreshold", "1")
+	store := leasedTestStore(t, repo, "packed")
+	data := budgetPayload(7, 256<<10)
+	if err := os.WriteFile(filepath.Join(repo, "artifact"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restoreTree(t, store)
+	packs, err := filepath.Glob(filepath.Join(store.StorageDir(), "objects", "pack", "*.pack"))
+	if err != nil || len(packs) == 0 {
+		t.Fatalf("streamed capture did not create a pack: %v", err)
+	}
+	// Cleanup must not execute configuration from an abandoned bare repository.
+	if err := os.WriteFile(filepath.Join(store.StorageDir(), "config"), []byte("invalid interrupted repository configuration"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := store.StorageDir()
+	abandonTestStore(t, store)
+	leasedTestStore(t, repo, "reap-packed")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("packed cache was not reclaimed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "artifact"))
+	if err != nil || sha256.Sum256(got) != sha256.Sum256(data) {
+		t.Fatal("packed cleanup changed completed file")
+	}
+}
+
 func TestCacheLease_PreservesUnknownCachesAndContinuesRecovery(t *testing.T) {
 	for _, scenario := range []string{"legacy", "malformed", "foreign platform", "unexpected file", "symlink"} {
 		t.Run(scenario, func(t *testing.T) {
