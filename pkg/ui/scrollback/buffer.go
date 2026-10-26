@@ -722,8 +722,8 @@ func (b *Buffer) PositionForView(row, col int) (line, column int, ok bool) {
 		return 0, 0, false
 	}
 
-	column := wrapped.contentColumn(col)
-	position := wrapped.contentByteOffset + runeOffsetToByte(wrapped.content[wrapped.contentByteOffset:], column)
+	runeColumn := wrapped.contentColumn(col)
+	position := wrapped.contentByteOffset + runeOffsetToByte(wrapped.content[wrapped.contentByteOffset:], runeColumn)
 	return wrapped.lineIndex, position, true
 }
 
