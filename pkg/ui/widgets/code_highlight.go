@@ -80,11 +80,7 @@ func (c *ChatView) highlightCodeBlock(lines []scrollback.Line, language string) 
 		return
 	}
 
-	lang := entry.Language()
-	if lang == nil {
-		return
-	}
-	highlighter, ok := c.highlighterFor(entry, lang)
+	highlighter, ok := c.highlighterFor(entry)
 	if !ok {
 		return
 	}
@@ -120,13 +116,18 @@ func firstCodeLine(code string) string {
 	return code
 }
 
-func (c *ChatView) highlighterFor(entry *grammars.LangEntry, lang *gotreesitter.Language) (*gotreesitter.Highlighter, bool) {
+func (c *ChatView) highlighterFor(entry *grammars.LangEntry) (*gotreesitter.Highlighter, bool) {
 	for i, cached := range c.highlighters {
 		if cached.language == entry.Name {
 			copy(c.highlighters[i:], c.highlighters[i+1:])
 			c.highlighters[len(c.highlighters)-1] = cached
 			return cached.highlighter, true
 		}
+	}
+
+	lang := entry.Language()
+	if lang == nil {
+		return nil, false
 	}
 
 	opts := []gotreesitter.HighlighterOption{

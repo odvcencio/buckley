@@ -393,6 +393,7 @@ func main() {
 	}
 
 	// Create and run TUI
+	configureGrammarCache()
 	ctrl, err := tui.NewController(tui.ControllerConfig{
 		Config:              cfg,
 		ModelManager:        modelManager,

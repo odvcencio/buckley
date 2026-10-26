@@ -821,6 +821,14 @@ This bounds retained working state, not total process RSS, provider-native state
 or temporary allocations during a model or tool call. The minimum enabled memory
 budget is 64 KiB; an explicit `0` disables it.
 
+Interactive rendering retains at most 16 decoded grammars in gotreesitter's
+shared cache and evicts entries idle for one minute, checked every 15 seconds.
+Active parsers and the eight recent chat highlighters remain valid after cache
+eviction. Set `GOTREESITTER_GRAMMAR_CACHE_LIMIT`, `GOTREESITTER_GRAMMAR_IDLE_TTL`,
+or `GOTREESITTER_GRAMMAR_IDLE_SWEEP` to override these defaults. A cache limit of
+`0` disables retention; a negative limit allows unlimited entries. An idle TTL of
+`0s` disables idle eviction. These are cache controls, not process RSS limits.
+
 The TUI expires its oldest undo records to keep each live session's private Git
 cache within `undo_storage_bytes` after a turn settles. The cache includes private
 metadata and unique retained objects, counted by allocated file blocks on Unix

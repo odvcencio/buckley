@@ -29,6 +29,15 @@ func TestMain(m *testing.M) {
 		main()
 		return
 	}
+	if os.Getenv("BUCKLEY_TEST_GRAMMAR_CACHE") != "" {
+		os.Exit(m.Run())
+	}
+
+	if bin := os.Getenv("BUCKLEY_TEST_MCP_SERVER_BIN"); bin != "" {
+		acpFakeMCPServerBin = bin
+		os.Exit(m.Run())
+	}
+
 	dir, err := os.MkdirTemp("", "buckley-acp-fakeserver-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "acp test setup: mkdtemp:", err)
@@ -36,13 +45,14 @@ func TestMain(m *testing.M) {
 	}
 
 	bin := filepath.Join(dir, "fakeserver")
-	build := exec.Command("go", "build", "-o", bin, "m31labs.dev/buckley/pkg/mcp/testdata/fakeserver")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "m31labs.dev/buckley/pkg/mcp/testdata/fakeserver")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "acp test setup: building fakeserver: %v\n%s\n", err, out)
 		os.RemoveAll(dir)
 		os.Exit(1)
 	}
 	acpFakeMCPServerBin = bin
+	_ = os.Setenv("BUCKLEY_TEST_MCP_SERVER_BIN", bin)
 
 	code := m.Run()
 	os.RemoveAll(dir)
