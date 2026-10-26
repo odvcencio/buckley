@@ -60,6 +60,7 @@ type Store struct {
 	mu               sync.Mutex
 	closed           bool
 	collectionNeeded bool
+	lease            *cacheLease
 }
 
 // New returns a Store rooted at repoDir for sessionID. It returns
@@ -72,6 +73,7 @@ func New(repoDir, sessionID string) (*Store, error) {
 	}
 	store := &Store{repoDir: repoDir, ref: "refs/worktree/buckley/undo-live/" + SanitizeRefComponent(sessionID) + "/" + rand.Text()}
 	if err := store.initStorage(context.Background()); err != nil {
+		store.lease.close()
 		return nil, err
 	}
 	return store, nil
@@ -169,15 +171,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	if err := s.clearRef(context.Background()); err != nil {
-		return err
-	}
-	clear(s.pending)
-	s.pending = nil
-	if err := s.collect(context.Background()); err != nil {
-		return err
-	}
-	return s.removeStorage()
+	return s.closeStorage()
 }
 
 func (s *Store) clearRef(ctx context.Context) error {
@@ -218,7 +212,7 @@ func (s *Store) WriteTree(ctx context.Context) (string, error) {
 }
 
 func (s *Store) writeTree(ctx context.Context) (string, error) {
-	tmpIndexPath, cleanup, err := temporaryIndex()
+	tmpIndexPath, cleanup, err := s.temporaryIndex()
 	if err != nil {
 		return "", err
 	}
@@ -237,8 +231,8 @@ func (s *Store) stageWorktree(ctx context.Context, env []string) (string, error)
 	return tree, nil
 }
 
-func temporaryIndex() (string, func(), error) {
-	file, err := os.CreateTemp("", "buckley-undo-index-*")
+func (s *Store) temporaryIndex() (string, func(), error) {
+	file, err := os.CreateTemp(s.gitDir, "index-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("shadowgit: create temp index: %w", err)
 	}
@@ -432,7 +426,7 @@ func (s *Store) Apply(ctx context.Context, sourceTree, targetTree string) error 
 		}
 		return nil
 	}
-	index, cleanup, err := temporaryIndex()
+	index, cleanup, err := s.temporaryIndex()
 	if err != nil {
 		return err
 	}
@@ -507,6 +501,9 @@ func (s *Store) command(ctx context.Context, env []string, args ...string) *exec
 	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	cmd.Dir = s.repoDir
 	cmd.Env = s.environment(env)
+	if s.lease != nil && s.lease.file != nil {
+		inheritCacheLease(cmd, s.lease.file)
+	}
 	return cmd
 }
 
