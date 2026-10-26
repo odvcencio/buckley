@@ -15,7 +15,7 @@ import (
 type retentionPack struct {
 	store *Store
 	dir   string
-	id    string
+	ids   map[string]bool
 	kept  map[string]bool
 }
 
@@ -56,9 +56,9 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 			err = errors.Join(err, pack.close())
 		}
 	}()
-	// Reuse existing compressed objects, but avoid an unbounded delta search or
-	// user-configured pack splitting. Large blobs keep Git's streaming path.
-	args := []string{"-c", "pack.writeReverseIndex=false", "pack-objects", "--revs", "--non-empty", "--quiet", "--window=0", "--threads=1", "--max-pack-size=0", "--index-version=2", "--no-write-bitmap-index"}
+	// Split replacement packs so large blobs can outlive changing retention
+	// metadata without being copied again. Keep Git's bounded streaming path.
+	args := []string{"-c", "pack.writeReverseIndex=false", "pack-objects", "--revs", "--non-empty", "--quiet", "--window=0", "--threads=1", "--max-pack-size=1m", "--index-version=2", "--no-write-bitmap-index"}
 	if all {
 		args = append(args, "--all")
 	}
@@ -70,18 +70,21 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 	if err != nil {
 		return nil, fmt.Errorf("shadowgit: pack retained objects: %w", err)
 	}
-	pack.id = strings.TrimSpace(string(out))
-	if pack.id != "" && ((len(pack.id) != 40 && len(pack.id) != 64) || !cacheHex(pack.id)) {
-		return nil, fmt.Errorf("shadowgit: invalid retained pack ID %q", pack.id)
+	pack.ids = make(map[string]bool)
+	for _, id := range strings.Fields(string(out)) {
+		if (len(id) != 40 && len(id) != 64) || !cacheHex(id) {
+			return nil, fmt.Errorf("shadowgit: invalid retained pack ID %q", id)
+		}
+		pack.ids[id] = true
 	}
 	return pack, nil
 }
 
 func (p *retentionPack) bytes() (int64, error) {
 	var total int64
-	if p.id != "" {
+	for id := range p.ids {
 		for _, ext := range []string{".pack", ".idx"} {
-			name := "pack-" + p.id + ext
+			name := "pack-" + id + ext
 			info, err := os.Lstat(filepath.Join(p.dir, name))
 			if err != nil {
 				return 0, err
@@ -148,9 +151,9 @@ func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...s
 	if err := walkCache(root, s.ref, "objects/pack", false); err != nil {
 		return err
 	}
-	if pack.id != "" {
+	for id := range pack.ids {
 		for _, ext := range []string{".pack", ".idx"} {
-			name := "pack-" + pack.id + ext
+			name := "pack-" + id + ext
 			target := filepath.Join("objects", "pack", name)
 			if _, err := root.Lstat(target); err == nil {
 				// Content-addressed packs are immutable. Windows also refuses
@@ -177,7 +180,7 @@ func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...s
 		for _, entry := range entries {
 			name := entry.Name()
 			base, ext, _ := strings.Cut(name, ".")
-			if entry.IsDir() || !strings.HasPrefix(name, "pack-") || (ext == "pack" || ext == "idx") && (base == "pack-"+pack.id || pack.kept[base+".pack"]) {
+			if entry.IsDir() || !strings.HasPrefix(name, "pack-") || (ext == "pack" || ext == "idx") && (pack.ids[strings.TrimPrefix(base, "pack-")] || pack.kept[base+".pack"]) {
 				continue
 			}
 			if err := root.Remove(filepath.Join("objects", "pack", entry.Name())); err != nil {
