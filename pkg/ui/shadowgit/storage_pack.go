@@ -16,6 +16,7 @@ type retentionPack struct {
 	store *Store
 	dir   string
 	id    string
+	kept  map[string]bool
 }
 
 func (s *Store) hasPacks() (bool, error) {
@@ -41,11 +42,15 @@ func (s *Store) hasPacks() (bool, error) {
 }
 
 func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *retentionPack, err error) {
+	kept, err := s.reusablePacks(ctx, roots, all)
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp(filepath.Join(s.gitDir, "objects", "pack"), "tmp_pack_")
 	if err != nil {
 		return nil, fmt.Errorf("shadowgit: stage retained pack: %w", err)
 	}
-	pack := &retentionPack{store: s, dir: dir}
+	pack := &retentionPack{store: s, dir: dir, kept: kept}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, pack.close())
@@ -56,6 +61,9 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 	args := []string{"-c", "pack.writeReverseIndex=false", "pack-objects", "--revs", "--non-empty", "--quiet", "--window=0", "--threads=1", "--max-pack-size=0", "--index-version=2", "--no-write-bitmap-index"}
 	if all {
 		args = append(args, "--all")
+	}
+	for name := range kept {
+		args = append(args, "--keep-pack="+name)
 	}
 	args = append(args, filepath.Join(dir, "pack"))
 	out, err := s.runBytes(ctx, []string{"GIT_COMMON_DIR=" + s.gitDir}, strings.NewReader(strings.Join(roots, "\n")+"\n"), args...)
@@ -71,26 +79,41 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 
 func (p *retentionPack) bytes() (int64, error) {
 	var total int64
-	for _, ext := range []string{".pack", ".idx"} {
-		name := "pack-" + p.id + ext
-		info, err := os.Lstat(filepath.Join(p.dir, name))
-		if err != nil {
-			return 0, err
-		}
-		if !info.Mode().IsRegular() {
-			return 0, fmt.Errorf("shadowgit: retained pack is not a regular file")
-		}
-		used := allocatedBytes(info)
-		existing, err := os.Lstat(filepath.Join(p.store.gitDir, "objects", "pack", name))
-		if err == nil {
-			if !existing.Mode().IsRegular() {
-				return 0, fmt.Errorf("shadowgit: existing retained pack is not a regular file")
+	if p.id != "" {
+		for _, ext := range []string{".pack", ".idx"} {
+			name := "pack-" + p.id + ext
+			info, err := os.Lstat(filepath.Join(p.dir, name))
+			if err != nil {
+				return 0, err
 			}
-			used = max(used, allocatedBytes(existing))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
+			if !info.Mode().IsRegular() {
+				return 0, fmt.Errorf("shadowgit: retained pack is not a regular file")
+			}
+			used := allocatedBytes(info)
+			existing, err := os.Lstat(filepath.Join(p.store.gitDir, "objects", "pack", name))
+			if err == nil {
+				if !existing.Mode().IsRegular() {
+					return 0, fmt.Errorf("shadowgit: existing retained pack is not a regular file")
+				}
+				used = max(used, allocatedBytes(existing))
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return 0, err
+			}
+			total += used
 		}
-		total += used
+	}
+	for name := range p.kept {
+		base := strings.TrimSuffix(name, ".pack")
+		for _, ext := range []string{".pack", ".idx"} {
+			info, err := os.Lstat(filepath.Join(p.store.gitDir, "objects", "pack", base+ext))
+			if err != nil {
+				return 0, err
+			}
+			if !info.Mode().IsRegular() {
+				return 0, fmt.Errorf("shadowgit: reusable pack is not a regular file")
+			}
+			total += allocatedBytes(info)
+		}
 	}
 	return total, nil
 }
@@ -152,7 +175,9 @@ func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...s
 			return err
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasPrefix(entry.Name(), "pack-") || entry.Name() == "pack-"+pack.id+".pack" || entry.Name() == "pack-"+pack.id+".idx" {
+			name := entry.Name()
+			base, ext, _ := strings.Cut(name, ".")
+			if entry.IsDir() || !strings.HasPrefix(name, "pack-") || (ext == "pack" || ext == "idx") && (base == "pack-"+pack.id || pack.kept[base+".pack"]) {
 				continue
 			}
 			if err := root.Remove(filepath.Join("objects", "pack", entry.Name())); err != nil {
