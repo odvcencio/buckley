@@ -2,8 +2,8 @@ package shadowgit
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,9 +36,16 @@ func (s *Store) initStorage(ctx context.Context) error {
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return fmt.Errorf("shadowgit: create storage parent: %w", err)
 	}
+	if err := reapAbandonedStorage(parent); err != nil {
+		slog.WarnContext(ctx, "Could not collect abandoned undo caches", "error", err)
+	}
 	private, err := os.MkdirTemp(parent, "handle-")
 	if err != nil {
 		return fmt.Errorf("shadowgit: create storage: %w", err)
+	}
+	s.lease, err = newCacheLease(private, s.ref)
+	if err != nil {
+		return fmt.Errorf("shadowgit: lease storage: %w", err)
 	}
 	if _, err := s.run(ctx, nil, "-c", "core.hooksPath="+filepath.Join(private, "hooks"), "init", "--bare", "--template=", "--object-format="+format, "--quiet", private); err != nil {
 		return fmt.Errorf("shadowgit: initialize storage: %w", err)
@@ -91,55 +98,5 @@ func (s *Store) collect(ctx context.Context, extra ...string) error {
 	if err != nil {
 		return fmt.Errorf("shadowgit: collect private objects: %w", err)
 	}
-	return nil
-}
-
-// removeStorage removes only known private metadata and empty directories.
-// Unexpected files are preserved; the user's Git directory is never pruned here.
-func (s *Store) removeStorage() error {
-	entries, err := os.ReadDir(s.gitDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		switch entry.Name() {
-		case "objects", "refs", "info", "description", "HEAD", "config":
-		default:
-			return fmt.Errorf("shadowgit: preserving unexpected private file %q", entry.Name())
-		}
-	}
-	remove := func(name string) error {
-		err := os.Remove(filepath.Join(s.gitDir, name))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	for name := filepath.Dir(s.ref); name != "." && name != "refs"; name = filepath.Dir(name) {
-		if err := remove(name); err != nil {
-			return fmt.Errorf("shadowgit: remove private ref directory: %w", err)
-		}
-	}
-	entries, err = os.ReadDir(filepath.Join(s.gitDir, "objects"))
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if err := remove(filepath.Join("objects", entry.Name())); err != nil {
-			return fmt.Errorf("shadowgit: remove private object directory: %w", err)
-		}
-	}
-	for _, name := range []string{"objects", "refs/heads", "refs/tags", "refs", "info/exclude", "info", "description", "HEAD", "config"} {
-		if err := remove(name); err != nil {
-			return fmt.Errorf("shadowgit: remove private metadata: %w", err)
-		}
-	}
-	if err := os.Remove(s.gitDir); err != nil {
-		return fmt.Errorf("shadowgit: remove storage: %w", err)
-	}
-	s.removed = true
 	return nil
 }

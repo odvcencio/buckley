@@ -133,7 +133,7 @@ func TestApply_RefusesObstructingIgnoredFilesBeforeEdits(t *testing.T) {
 			}
 			// Make a target in which node is tracked, then a source in which it
 			// is ignored. The real index remains unrelated to either snapshot.
-			index, cleanup, err := temporaryIndex()
+			index, cleanup, err := store.temporaryIndex()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -231,7 +231,7 @@ func TestApply_RejectsChangedSubmoduleBeforeEdits(t *testing.T) {
 	}
 	before := restoreTree(t, store)
 	writeFile(t, repo, "a.txt", "changed")
-	index, cleanup, err := temporaryIndex()
+	index, cleanup, err := store.temporaryIndex()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -830,6 +830,14 @@ budget is 1 MiB; `0` disables this limit. Snapshot capture and Git ref updates n
 temporary disk space beyond the retained budget. Cleanup failures are reported
 and prevent further snapshot capture until cleanup succeeds.
 
+On platforms with file locking, new undo caches keep an owner lease across the
+UI process and its Git subprocesses. Opening another undo store reclaims marked
+caches whose last owner has exited, including interrupted temporary indexes.
+Live and paused sessions keep their snapshots. Older unmarked caches, markers
+from another operating system, and caches with unexpected files or links are
+preserved rather than guessed to be abandoned. Cleanup leaves durable transcript
+and replay evidence intact.
+
 Disk accounting is transactional. SQLite allocation, indexes and WAL growth also
 have limits; conservative headroom can stop writes before the configured byte
 total is reached. A full budget rejects further storage writes without deleting
