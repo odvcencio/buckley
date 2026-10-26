@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -156,6 +157,14 @@ func (c *ChatView) codeLineSpans(content string, lineStart, lineEnd int, ranges 
 		return nil
 	}
 
+	// Highlighter ranges are disjoint and ordered. Restrict each line to its
+	// own captures so distant tokens do not inflate scanning or allocation.
+	ranges = ranges[sort.Search(len(ranges), func(i int) bool {
+		return int(ranges[i].EndByte) > lineStart
+	}):]
+	ranges = ranges[:sort.Search(len(ranges), func(i int) bool {
+		return int(ranges[i].StartByte) >= lineEnd
+	})]
 	spans := make([]scrollback.Span, 0, len(ranges)+1)
 	cursor := 0
 	for _, highlight := range ranges {
