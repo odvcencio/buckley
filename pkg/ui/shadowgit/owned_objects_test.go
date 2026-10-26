@@ -280,3 +280,18 @@ func TestPrivateStorage_DoesNotRunUserReferenceHooks(t *testing.T) {
 		t.Fatal("private reference operations changed user Git data")
 	}
 }
+
+func logUserGitChanges(t *testing.T, before, after map[string][32]byte) {
+	t.Helper()
+	for name, previous := range before {
+		current, exists := after[name]
+		if !exists || previous != current {
+			t.Logf("user Git metadata changed: path=%q before=%x after=%x exists=%v", name, previous, current, exists)
+		}
+	}
+	for name, current := range after {
+		if _, existed := before[name]; !existed {
+			t.Logf("user Git metadata added: path=%q sha256=%x", name, current)
+		}
+	}
+}

@@ -19,6 +19,7 @@ func newTestRepo(t *testing.T) string {
 		}
 	}
 	runInit("init", "--quiet")
+	runInit("config", "maintenance.auto", "false")
 	runInit("config", "user.email", "test@example.com")
 	runInit("config", "user.name", "Test")
 	return dir
