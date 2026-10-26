@@ -37,7 +37,7 @@ func abandonTestStore(t *testing.T, store *Store) {
 	store.lease.file = nil
 }
 
-func cacheFiles(t *testing.T, root string) map[string][32]byte {
+func cacheFiles(t *testing.T, root string, owner ...*os.File) map[string][32]byte {
 	t.Helper()
 	result := make(map[string][32]byte)
 	if err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
@@ -54,6 +54,15 @@ func cacheFiles(t *testing.T, root string) map[string][32]byte {
 				return err
 			}
 			data = []byte(link)
+		} else if entry.Name() == cacheOwnerFile && len(owner) > 0 {
+			info, err := owner[0].Stat()
+			if err != nil {
+				return err
+			}
+			data = make([]byte, info.Size())
+			if _, err := owner[0].ReadAt(data, 0); err != nil {
+				return err
+			}
 		} else {
 			data, err = os.ReadFile(name)
 			if err != nil {
@@ -78,13 +87,13 @@ func TestCacheLease_PreservesOldPausedOwnerAndItsUndo(t *testing.T) {
 	if err := store.RetainTrees(context.Background(), []string{before, after}); err != nil {
 		t.Fatal(err)
 	}
-	original := cacheFiles(t, store.StorageDir())
+	original := cacheFiles(t, store.StorageDir(), store.lease.file)
 	old := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := os.Chtimes(filepath.Join(store.StorageDir(), cacheOwnerFile), old, old); err != nil {
 		t.Fatal(err)
 	}
 	leasedTestStore(t, repo, "other owner")
-	if !reflect.DeepEqual(original, cacheFiles(t, store.StorageDir())) {
+	if !reflect.DeepEqual(original, cacheFiles(t, store.StorageDir(), store.lease.file)) {
 		t.Fatal("opening another store changed a paused owner's cache")
 	}
 	if err := store.Apply(context.Background(), after, before); err != nil || readFile(t, repo, "file") != "before" {
