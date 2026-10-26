@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"m31labs.dev/fluffyui/backend"
 )
@@ -988,11 +989,12 @@ func wrapStyledLine(text string, spans, prefix []Span, width int, isCode bool) [
 		if len(lines) > 0 {
 			linePrefix = continuationPrefix
 		}
-		lineSpans := make([]Span, 0, len(linePrefix)+len(segment))
+		segmentSpans := spansFromRunes(segment)
+		lineSpans := make([]Span, 0, len(linePrefix)+len(segmentSpans))
 		if len(linePrefix) > 0 {
 			lineSpans = append(lineSpans, linePrefix...)
 		}
-		lineSpans = append(lineSpans, spansFromRunes(segment)...)
+		lineSpans = append(lineSpans, segmentSpans...)
 		lines = append(lines, WrappedLine{Text: spansText(lineSpans), Spans: lineSpans})
 	}
 
@@ -1097,15 +1099,22 @@ func blankPrefix(prefix []Span) []Span {
 
 func styledRunesFromSpans(text string, spans []Span) []styledRune {
 	if len(spans) == 0 {
-		out := make([]styledRune, 0, len(text))
-		for _, r := range []rune(text) {
+		out := make([]styledRune, 0, utf8.RuneCountInString(text))
+		for _, r := range text {
 			out = append(out, styledRune{r: r, style: backend.DefaultStyle()})
 		}
 		return out
 	}
-	var out []styledRune
+	count := 0
 	for _, span := range spans {
-		for _, r := range []rune(span.Text) {
+		count += utf8.RuneCountInString(span.Text)
+	}
+	var out []styledRune
+	if count > 0 {
+		out = make([]styledRune, 0, count)
+	}
+	for _, span := range spans {
+		for _, r := range span.Text {
 			out = append(out, styledRune{r: r, style: span.Style})
 		}
 	}
@@ -1116,17 +1125,32 @@ func spansFromRunes(runes []styledRune) []Span {
 	if len(runes) == 0 {
 		return nil
 	}
-	var spans []Span
-	current := Span{Style: runes[0].style}
-	for _, sr := range runes {
-		if current.Style == sr.style {
-			current.Text += string(sr.r)
-			continue
+	runs := 1
+	for i := 1; i < len(runes); i++ {
+		if runes[i].style != runes[i-1].style {
+			runs++
 		}
-		spans = append(spans, current)
-		current = Span{Style: sr.style, Text: string(sr.r)}
 	}
-	spans = append(spans, current)
+	spans := make([]Span, 0, runs)
+	for start := 0; start < len(runes); {
+		end := start + 1
+		for end < len(runes) && runes[end].style == runes[start].style {
+			end++
+		}
+		text := ""
+		if end-start == 1 {
+			text = string(runes[start].r)
+		} else {
+			var builder strings.Builder
+			builder.Grow(end - start)
+			for _, sr := range runes[start:end] {
+				builder.WriteRune(sr.r)
+			}
+			text = builder.String()
+		}
+		spans = append(spans, Span{Style: runes[start].style, Text: text})
+		start = end
+	}
 	return spans
 }
 
