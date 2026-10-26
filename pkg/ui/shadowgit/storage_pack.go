@@ -92,6 +92,9 @@ func (p *retentionPack) close() error {
 	defer root.Close()
 	name := filepath.Join("objects", "pack", filepath.Base(p.dir))
 	if err := walkCache(root, p.store.ref, filepath.ToSlash(name), false); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // Native prune can remove the empty staging directory.
+		}
 		return err
 	}
 	if err := walkCache(root, p.store.ref, filepath.ToSlash(name), true); err != nil {
