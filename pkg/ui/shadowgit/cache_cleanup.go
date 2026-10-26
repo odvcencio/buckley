@@ -166,5 +166,8 @@ func removeOwnedStorage(parent *os.Root, name, ref string, lease *cacheLease) er
 			return err
 		}
 	}
+	if err := root.Close(); err != nil {
+		return err
+	}
 	return parent.Remove(name)
 }
