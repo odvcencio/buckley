@@ -1,6 +1,8 @@
 name: Storage preservation diagnostic
 
 on:
+  push:
+    branches: [codex/tui-heap-diagnostic-20261026]
   workflow_dispatch:
 
 permissions:
