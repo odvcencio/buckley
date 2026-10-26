@@ -50,6 +50,7 @@ func TestChatView_CodeLineSpans_StorageScalesWithLines(t *testing.T) {
 func TestChatView_CodeLineSpans_PreservesMultilineAndUnicodeStyles(t *testing.T) {
 	view := NewChatView()
 	plain := backend.DefaultStyle().Foreground(backend.ColorWhite)
+	view.SetMarkdownRenderer(nil, backend.DefaultStyle())
 	muted := plain.Foreground(backend.ColorBrightBlack).Italic(true)
 	keyword := plain.Foreground(backend.ColorBlue).Bold(true)
 	str := plain.Foreground(backend.ColorGreen)
