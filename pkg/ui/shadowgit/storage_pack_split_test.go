@@ -141,6 +141,8 @@ func TestSplitRetention_AdmissionAndFailuresPreserveHistory(t *testing.T) {
 					shim := t.TempDir()
 					block = filepath.Join(shim, "block-prune")
 					body := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = prune ] && [ -e \"$BUCKLEY_TEST_PRUNE_BLOCK\" ]; then echo 'fixture prune failure' >&2; exit 55; fi\ndone\nexec '" + strings.ReplaceAll(realGit, "'", "'\\''") + "' \"$@\"\n"
+					body = strings.Replace(body, "for arg do\n", "for arg do\n if [ \"$arg\" = add ]; then echo capture > \"$BUCKLEY_TEST_CAPTURE_MARK\"; fi\n", 1)
+					t.Setenv("BUCKLEY_TEST_CAPTURE_MARK", filepath.Join(shim, "capture-called"))
 					if err := os.WriteFile(filepath.Join(shim, "git"), []byte(body), 0755); err != nil {
 						t.Fatal(err)
 					}
@@ -158,9 +160,11 @@ func TestSplitRetention_AdmissionAndFailuresPreserveHistory(t *testing.T) {
 			current, _ := store.CurrentRef(ctx)
 			if phase == "collection" {
 				retentionPrivateGit(t, store, "cat-file", "-e", after)
-				used := privateObjectBytes(t, store)
-				if _, err := store.WriteTree(ctx); err == nil || privateObjectBytes(t, store) != used {
+				if _, err := store.WriteTree(ctx); err == nil {
 					t.Fatal("failed collection allowed additional capture writes")
+				}
+				if _, err := os.Stat(os.Getenv("BUCKLEY_TEST_CAPTURE_MARK")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("blocked capture invoked git add: %v", err)
 				}
 			} else {
 				if current != oldRoot {
