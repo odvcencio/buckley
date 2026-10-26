@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 	"unsafe"
 
@@ -35,4 +36,11 @@ func cacheLeaseBusy(err error) bool { return errors.Is(err, windows.ERROR_SHARIN
 
 func inheritCacheLease(cmd *exec.Cmd, file *os.File) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(file.Fd())}}
+	// Cmd stores a raw Windows handle; retain the Go file until the command
+	// finishes so its finalizer cannot close the handle before inheritance.
+	cancel := cmd.Cancel
+	cmd.Cancel = func() error {
+		defer runtime.KeepAlive(file)
+		return cancel()
+	}
 }
