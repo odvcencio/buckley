@@ -44,6 +44,7 @@ personality:
 resources:
   session_memory_bytes: 8388608
   undo_storage_bytes: 134217728
+  undo_capture_bytes: 536870912
   storage_bytes: 536870912
 
 retention:

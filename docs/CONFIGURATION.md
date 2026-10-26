@@ -807,6 +807,7 @@ resources:
   session_memory_bytes: 8388608 # 8 MiB of retained working state per session
   storage_bytes: 2147483648     # 2 GiB per database; evidence blobs count at their stored size
   undo_storage_bytes: 134217728 # 128 MiB per live TUI session's private undo cache
+  undo_capture_bytes: 536870912 # 512 MiB of raw file and pathname bytes per snapshot
 ```
 
 Headless and TUI session memory accounting bounds retained conversation history
@@ -829,6 +830,15 @@ cleared. This does not delete resume or replay evidence. The minimum enabled und
 budget is 1 MiB; `0` disables this limit. Snapshot capture and Git ref updates need
 temporary disk space beyond the retained budget. Cleanup failures are reported
 and prevent further snapshot capture until cleanup succeeds.
+
+Before staging or checking a worktree for undo/redo, `undo_capture_bytes` checks
+eligible file sizes and pathname bytes without reading their contents. An
+oversized input skips that turn's undo capture, reports the limit, and releases
+unfinished snapshots while preserving completed work and published history.
+Ignored files and paths outside the working scope do not count. This is an input
+preflight: filters, file metadata and concurrent file growth can use additional
+disk space. It is not a filesystem quota. The minimum enabled input limit is
+1 MiB; `0` disables it. Restart to apply a changed limit to existing sessions.
 
 On platforms with file locking, new undo caches keep an owner lease across the
 UI process and its Git subprocesses. Opening another undo store reclaims marked
