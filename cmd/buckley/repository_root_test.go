@@ -147,3 +147,29 @@ func TestProjectTrustStore_InvalidAncestorKeepsDecisionsSeparate(t *testing.T) {
 		t.Fatalf("reset removed the second workspace decision: %s", got)
 	}
 }
+
+func TestLoadProjectTrustStore_RepositoryChangesDoNotBroadenRecordedScope(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := loadProjectTrustStore(filepath.Join(t.TempDir(), "trust.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set(child, projectTrustTrusted); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, root, "init", "-q")
+	reloaded, err := loadProjectTrustStore(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Status(root); got != projectTrustUnknown {
+		t.Fatalf("new parent repository inherited a child approval: %s", got)
+	}
+	if reloaded.statuses[child] != projectTrustTrusted {
+		t.Fatal("original child decision was lost")
+	}
+}

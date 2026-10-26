@@ -83,7 +83,8 @@ func loadProjectTrustStore(path string) (*projectTrustStore, error) {
 	}
 
 	for _, project := range raw.Projects {
-		root := normalizeProjectTrustPath(project.Path)
+		// Preserve the scope recorded by the user across repository changes.
+		root := absoluteProjectTrustPath(project.Path)
 		if root == "" {
 			continue
 		}
@@ -229,24 +230,26 @@ func (s *projectTrustStore) save() error {
 }
 
 func normalizeProjectTrustPath(path string) string {
+	path = absoluteProjectTrustPath(path)
+	if path == "" {
+		return ""
+	}
+	if repoRoot, ok := findGitRepoRoot(path); ok {
+		return repoRoot
+	}
+	return path
+}
+
+func absoluteProjectTrustPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
-
-	absPath, err := filepath.Abs(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return ""
 	}
-	absPath = filepath.Clean(absPath)
-
-	if repoRoot, ok := findGitRepoRoot(absPath); ok {
-		if resolved, err := filepath.Abs(repoRoot); err == nil {
-			absPath = filepath.Clean(resolved)
-		}
-	}
-
-	return absPath
+	return filepath.Clean(absolute)
 }
 
 func projectTrustStatusForPath(path string) (projectTrustStatus, string, string, error) {
