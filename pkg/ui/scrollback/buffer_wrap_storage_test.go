@@ -50,7 +50,7 @@ func TestWrapStyledLine_PreservesTextAndStyles(t *testing.T) {
 		{name: "unicode code", text: "café 日本語", spans: []Span{{Text: "café ", Style: blue}, {Text: "日本語", Style: green}}, width: 6, code: true,
 			want: []WrappedLine{{Text: "café 日", Spans: []Span{{Text: "café ", Style: blue}, {Text: "日", Style: green}}}, {Text: "本語", Spans: []Span{{Text: "本語", Style: green}}}}},
 		{name: "word wrapping and prefix", text: "one  two café tail", spans: []Span{{Text: "one  two café tail", Style: blue}}, prefix: []Span{{Text: "> ", Style: border}}, width: 8,
-			want: []WrappedLine{{Text: "> one", Spans: []Span{{Text: "> ", Style: border}, {Text: "one", Style: blue}}}, {Text: "  two", Spans: []Span{{Text: "  ", Style: border}, {Text: "two", Style: blue}}}, {Text: "  café", Spans: []Span{{Text: "  ", Style: border}, {Text: "café", Style: blue}}}, {Text: "  tail", Spans: []Span{{Text: "  ", Style: border}, {Text: "tail", Style: blue}}}}},
+			want: []WrappedLine{{Text: "> one", Spans: []Span{{Text: "> ", Style: border}, {Text: "one", Style: blue}}}, {Text: "  two", Spans: []Span{{Text: "  "}, {Text: "two", Style: blue}}}, {Text: "  café", Spans: []Span{{Text: "  "}, {Text: "café", Style: blue}}}, {Text: "  tail", Spans: []Span{{Text: "  "}, {Text: "tail", Style: blue}}}}},
 		{name: "fragmented matching styles", text: "AB🙂é", spans: []Span{{Text: "A", Style: blue}, {Text: "B", Style: blue}, {Text: "🙂", Style: green}, {Text: "é", Style: green}}, width: 8, code: true,
 			want: []WrappedLine{{Text: "AB🙂é", Spans: []Span{{Text: "AB", Style: blue}, {Text: "🙂é", Style: green}}}}},
 		{name: "invalid UTF-8", text: "x\xffz", width: 10, code: true,
