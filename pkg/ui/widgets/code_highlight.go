@@ -13,6 +13,12 @@ import (
 // Keep highlighting bounded for interactive rendering while allowing small
 // grammar queries to finish on loaded hosts and under race instrumentation.
 const codeHighlightTimeoutMicros = 50_000
+const maxCachedHighlighters = 8
+
+type cachedHighlighter struct {
+	language    string
+	highlighter *gotreesitter.Highlighter
+}
 
 type codeSyntaxStyles struct {
 	Default   backend.Style
@@ -115,11 +121,12 @@ func firstCodeLine(code string) string {
 }
 
 func (c *ChatView) highlighterFor(entry *grammars.LangEntry, lang *gotreesitter.Language) (*gotreesitter.Highlighter, bool) {
-	if c.highlighters == nil {
-		c.highlighters = make(map[string]*gotreesitter.Highlighter)
-	}
-	if highlighter := c.highlighters[entry.Name]; highlighter != nil {
-		return highlighter, true
+	for i, cached := range c.highlighters {
+		if cached.language == entry.Name {
+			copy(c.highlighters[i:], c.highlighters[i+1:])
+			c.highlighters[len(c.highlighters)-1] = cached
+			return cached.highlighter, true
+		}
 	}
 
 	opts := []gotreesitter.HighlighterOption{
@@ -134,7 +141,13 @@ func (c *ChatView) highlighterFor(entry *grammars.LangEntry, lang *gotreesitter.
 	if err != nil {
 		return nil, false
 	}
-	c.highlighters[entry.Name] = highlighter
+	cached := cachedHighlighter{language: entry.Name, highlighter: highlighter}
+	if len(c.highlighters) == maxCachedHighlighters {
+		copy(c.highlighters, c.highlighters[1:])
+		c.highlighters[len(c.highlighters)-1] = cached
+	} else {
+		c.highlighters = append(c.highlighters, cached)
+	}
 	return highlighter, true
 }
 
