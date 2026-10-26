@@ -66,6 +66,7 @@ func TestPrivateStorage_InterruptedPackPreparationIsReaped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	if store.lease == nil || store.lease.file == nil {
 		t.Skip("filesystem has no ownership locks")
 	}

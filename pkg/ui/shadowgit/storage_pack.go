@@ -53,7 +53,7 @@ func (s *Store) preparePack(ctx context.Context, roots []string, all bool) (_ *r
 	}()
 	// Reuse existing compressed objects, but avoid an unbounded delta search or
 	// user-configured pack splitting. Large blobs keep Git's streaming path.
-	args := []string{"pack-objects", "--revs", "--non-empty", "--quiet", "--window=0", "--threads=1", "--max-pack-size=0", "--index-version=2", "--no-write-bitmap-index", "--no-write-reverse-index"}
+	args := []string{"-c", "pack.writeReverseIndex=false", "pack-objects", "--revs", "--non-empty", "--quiet", "--window=0", "--threads=1", "--max-pack-size=0", "--index-version=2", "--no-write-bitmap-index"}
 	if all {
 		args = append(args, "--all")
 	}
