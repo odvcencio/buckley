@@ -3,6 +3,7 @@ package shadowgit
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -114,6 +115,45 @@ func TestCacheLease_ReapsAbandonedObjectsAndInterruptedIndexes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(original, userGitFiles(t, repo)) || readFile(t, repo, "user") != "user work" {
 		t.Fatal("orphan cleanup changed user work or Git metadata")
+	}
+}
+
+func TestCacheLease_ReapsPartialInitializationAndLargeObjectDirectory(t *testing.T) {
+	repo := newTestRepo(t)
+	parent := filepath.Join(repo, ".git", "buckley", "undo")
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(parent, "handle-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := newCacheLease(dir, "refs/worktree/buckley/undo-live/partial/initialized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease == nil {
+		t.Skip("platform has no cache file locks")
+	}
+	t.Cleanup(lease.close)
+	if err := os.MkdirAll(filepath.Join(dir, "objects", "aa"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for n := range 500 {
+		name := filepath.Join(dir, "objects", "aa", fmt.Sprintf("%038x", n))
+		if err := os.WriteFile(name, []byte("partial object bytes"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"config.lock", "index-789.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("interrupted init"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lease.close()
+	leasedTestStore(t, repo, "recover-partial")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("partial initialization was not reclaimed: %v", err)
 	}
 }
 

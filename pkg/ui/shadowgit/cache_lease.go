@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,7 +38,10 @@ func newCacheLease(dir, ref string) (*cacheLease, error) {
 	if err != nil || !locked {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
-		return nil, err // Unsupported platforms keep the existing unleased cache behavior.
+		if err != nil {
+			slog.Warn("Automatic undo cache recovery unavailable", "error", err)
+		}
+		return nil, nil // Filesystems without locks keep the existing unleased behavior.
 	}
 	lease := &cacheLease{file: file, ref: ref}
 	if _, err := fmt.Fprintf(file, "buckley-undo-v1\n%s\n%s\n", runtime.GOOS, ref); err != nil {
@@ -50,7 +54,7 @@ func newCacheLease(dir, ref string) (*cacheLease, error) {
 func abandonedLease(dir string) (*cacheLease, error) {
 	name := filepath.Join(dir, cacheOwnerFile)
 	info, err := os.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) || err == nil && !info.Mode().IsRegular() {
+	if errors.Is(err, os.ErrNotExist) || err == nil && (!info.Mode().IsRegular() || info.Size() == 0 || info.Size() > 1024) {
 		return nil, nil
 	}
 	if err != nil {
