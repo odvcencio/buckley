@@ -16,12 +16,28 @@ import (
 // discard older records and retry with a smaller set of trees.
 var ErrStorageLimit = errors.New("shadowgit: undo storage budget exceeded")
 
-// retainedBytes charges private metadata and the unique objects reachable from
-// root. Unreachable staging objects are removed only after the new ref commits.
-func (s *Store) retainedBytes(ctx context.Context, root string) (int64, error) {
+// retainedBytes charges metadata and reachable loose objects, or prepares and
+// measures a complete replacement pack. Nothing published is removed here.
+func (s *Store) retainedBytes(ctx context.Context, root string) (used int64, pack *retentionPack, err error) {
+	packed, err := s.hasPacks()
+	if err != nil {
+		return 0, nil, err
+	}
+	if packed {
+		pack, err = s.preparePack(ctx, []string{root}, false)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer func() {
+			if err != nil {
+				err = errors.Join(err, pack.close())
+				pack = nil
+			}
+		}()
+	}
 	objects := filepath.Join(s.gitDir, "objects")
 	var total int64
-	err := filepath.WalkDir(s.gitDir, func(name string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(s.gitDir, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -36,24 +52,31 @@ func (s *Store) retainedBytes(ctx context.Context, root string) (int64, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("shadowgit: account metadata: %w", err)
+		return 0, pack, fmt.Errorf("shadowgit: account metadata: %w", err)
 	}
 	// A new ref may not exist yet. Its object ID fits in the same allocation
 	// unit as the private HEAD file; existing ref storage is conservatively kept.
 	head, err := os.Stat(filepath.Join(s.gitDir, "HEAD"))
 	if err != nil {
-		return 0, fmt.Errorf("shadowgit: account ref: %w", err)
+		return 0, pack, fmt.Errorf("shadowgit: account ref: %w", err)
 	}
 	total += allocatedBytes(head)
+	if pack != nil {
+		packedBytes, err := pack.bytes()
+		if err != nil {
+			return 0, pack, fmt.Errorf("shadowgit: account retained pack: %w", err)
+		}
+		return total + packedBytes, pack, nil
+	}
 	cmd := s.command(ctx, []string{"GIT_COMMON_DIR=" + s.gitDir}, "rev-list", "--objects", "--no-object-names", root)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return 0, err
+		return 0, pack, err
 	}
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("shadowgit: enumerate retained objects: %w", err)
+		return 0, pack, fmt.Errorf("shadowgit: enumerate retained objects: %w", err)
 	}
 	scanner := bufio.NewScanner(stdout)
 	var accountErr error
@@ -78,7 +101,7 @@ func (s *Store) retainedBytes(ctx context.Context, root string) (int64, error) {
 	_ = stdout.Close()
 	err = errors.Join(accountErr, scanner.Err(), cmd.Wait())
 	if err != nil {
-		return 0, fmt.Errorf("shadowgit: account retained objects: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return 0, pack, fmt.Errorf("shadowgit: account retained objects: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return total, nil
+	return total, nil, nil
 }

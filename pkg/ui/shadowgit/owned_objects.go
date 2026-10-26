@@ -2,6 +2,7 @@ package shadowgit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -90,7 +91,24 @@ func (s *Store) environment(extra []string) []string {
 // collect holds the store lock, so no snapshot or restore can race collection.
 // Capture shares user attributes/configuration; collection switches the common
 // directory back to the owned bare repository, including its refs and shallow file.
-func (s *Store) collect(ctx context.Context, extra ...string) error {
+func (s *Store) collect(ctx context.Context, extra ...string) (err error) {
+	packed, err := s.hasPacks()
+	if err != nil {
+		return err
+	}
+	if !packed {
+		return s.prune(ctx, extra...)
+	}
+	roots := append(append([]string(nil), s.pending...), extra...)
+	pack, err := s.preparePack(ctx, roots, true)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, pack.close()) }()
+	return s.collectPack(ctx, pack, extra...)
+}
+
+func (s *Store) prune(ctx context.Context, extra ...string) error {
 	args := []string{"prune", "--expire=now"}
 	args = append(args, s.pending...)
 	args = append(args, extra...)
