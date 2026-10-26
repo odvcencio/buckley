@@ -22,14 +22,21 @@ func TestParseFalsificationConclusion_ExplanatoryProse(t *testing.T) {
 			want: FalsificationUnresolved,
 		},
 		{
-			name: "proved_explanation",
+			name: "proved_keeps_strict_suffix_check",
 			line: "- **Conclusion**: PROVED — the counterexample disproved the documented guarantee.",
-			want: FalsificationProved,
 		},
 		{
 			name: "disproved_explanation",
 			line: "- **Conclusion**: DISPROVED — the focused failure was not reproduced.",
 			want: FalsificationDisproved,
+		},
+		{
+			name: "conflicting_finding_status",
+			line: "- **Conclusion**: PROVED for one route, but UNRESOLVED for another",
+		},
+		{
+			name: "conflicting_lowercase_finding_status",
+			line: "- **Conclusion**: PROVED for one route, but unresolved for another",
 		},
 		{
 			name: "conflicting_approval_status",
@@ -72,9 +79,9 @@ func TestReviewBranchDef_ExplanatoryConclusionKeepsApprovalGate(t *testing.T) {
 			decision:   "NEEDS DISCUSSION",
 		},
 		{
-			name:       "proved",
-			conclusion: "PROVED — the counterexample disproved the documented guarantee.",
-			decision:   "REQUEST CHANGES",
+			name:       "unresolved_explicit_status_words",
+			conclusion: "UNRESOLVED — the supplied evidence establishes neither PROVED nor DISPROVED.",
+			decision:   "NEEDS DISCUSSION",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
