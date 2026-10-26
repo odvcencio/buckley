@@ -45,6 +45,7 @@ func newUndoTestController(t *testing.T, workDir string) (*Controller, *WidgetAp
 		workDir:  workDir,
 		sessions: []*SessionState{sess},
 	}
+	t.Cleanup(ctrl.closeUndoStores)
 	return ctrl, app, sess
 }
 

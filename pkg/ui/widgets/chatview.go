@@ -3,7 +3,6 @@ package widgets
 import (
 	"strings"
 
-	"github.com/odvcencio/gotreesitter"
 	"m31labs.dev/buckley/pkg/ui/scrollback"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/compositor"
@@ -36,7 +35,7 @@ type ChatView struct {
 	mdRenderer   *markdown.Renderer
 	codeBlockBG  backend.Style
 	syntax       codeSyntaxStyles
-	highlighters map[string]*gotreesitter.Highlighter
+	highlighters []cachedHighlighter
 	lastSource   string
 	lastContent  string
 	memoryBytes  int
@@ -311,6 +310,8 @@ func (c *ChatView) RemoveThinkingIndicator() {
 
 // Clear clears all messages.
 func (c *ChatView) Clear() {
+	clear(c.highlighters)
+	c.highlighters = c.highlighters[:0]
 	c.buffer.Clear()
 	c.lastSource = ""
 	c.lastContent = ""
