@@ -15,80 +15,88 @@ import (
 
 const reusablePackMinBytes = 1 << 20
 const maxReusablePacks = 64
+const maxReusablePackObjects = 64
 
 type reusablePack struct {
-	name   string
-	object string
-	bytes  int64
+	name    string
+	objects []string
+	bytes   int64
 }
 
-// singlePackObject reads only fixed-size headers. Multi-object, delta and
-// unsupported indexes use ordinary repacking rather than retaining stale data.
-func singlePackObject(root *os.Root, name string) (string, error) {
+// smallPackObjects reads bounded index tables without loading blob contents.
+// Unsupported or larger indexes continue through ordinary repacking.
+func smallPackObjects(root *os.Root, name string) ([]string, error) {
 	pack, err := root.Open("objects/pack/" + name)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var header [13]byte
 	_, err = pack.ReadAt(header[:], 0)
 	_ = pack.Close()
 	if errors.Is(err, io.EOF) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	version := binary.BigEndian.Uint32(header[4:8])
 	kind := header[12] >> 4 & 7
-	if string(header[:4]) != "PACK" || version != 2 && version != 3 || binary.BigEndian.Uint32(header[8:12]) != 1 || kind < 1 || kind > 4 {
-		return "", nil
+	if string(header[:4]) != "PACK" || version != 2 && version != 3 || (binary.BigEndian.Uint32(header[8:12]) == 0 || binary.BigEndian.Uint32(header[8:12]) > maxReusablePackObjects) || kind < 1 || kind > 4 {
+		return nil, nil
 	}
 	index, err := root.Open("objects/pack/" + strings.TrimSuffix(name, ".pack") + ".idx")
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer index.Close()
 	var prefix [8]byte
 	if _, err := index.ReadAt(prefix[:], 0); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
 	// V1 interleaves offsets and names; V2 has a header followed by the
 	// fanout table and contiguous names. Both use the repository hash width.
-	countOffset, objectOffset := int64(255*4), int64(256*4+4)
+	countOffset, objectOffset := int64(255*4), int64(256*4)
+	width := (len(name) - len("pack-") - len(".pack")) / 2
+	stride, offset := width+4, 4
 	if binary.BigEndian.Uint32(prefix[:4]) == 0xff744f63 {
 		if binary.BigEndian.Uint32(prefix[4:]) != 2 {
-			return "", nil
+			return nil, nil
 		}
 		countOffset, objectOffset = 8+255*4, 8+256*4
+		stride, offset = width, 0
 	}
 	var count [4]byte
 	if _, err := index.ReadAt(count[:], countOffset); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
-	if binary.BigEndian.Uint32(count[:]) != 1 {
-		return "", nil
+	if binary.BigEndian.Uint32(count[:]) != binary.BigEndian.Uint32(header[8:12]) {
+		return nil, nil
 	}
-	id := make([]byte, (len(name)-len("pack-")-len(".pack"))/2)
-	if _, err := index.ReadAt(id, objectOffset); err != nil {
+	ids := make([]byte, int(binary.BigEndian.Uint32(count[:]))*stride)
+	if _, err := index.ReadAt(ids, objectOffset); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
-	return hex.EncodeToString(id), nil
+	objects := make([]string, len(ids)/stride)
+	for i := range objects {
+		objects[i] = hex.EncodeToString(ids[i*stride+offset : i*stride+offset+width])
+	}
+	return objects, nil
 }
 
-// reusablePacks keeps only wholly reachable single-object packs. The bounded
-// candidate list also bounds memory and command-line size on Windows.
+// reusablePacks keeps only wholly reachable packs. Fixed candidate/object caps
+// bound memory and command-line size; every other object is repacked normally.
 func (s *Store) reusablePacks(ctx context.Context, roots []string, all bool) (map[string]bool, error) {
 	root, err := os.OpenRoot(s.gitDir)
 	if err != nil {
@@ -120,26 +128,15 @@ func (s *Store) reusablePacks(ctx context.Context, roots []string, all bool) (ma
 			if !info.Mode().IsRegular() || allocatedBytes(info) < reusablePackMinBytes {
 				continue
 			}
-			object, err := singlePackObject(root, entry.Name())
+			objects, err := smallPackObjects(root, entry.Name())
 			if err != nil {
 				return nil, fmt.Errorf("shadowgit: inspect reusable pack: %w", err)
 			}
-			if object == "" {
+			if len(objects) == 0 {
 				continue
 			}
-			candidate := reusablePack{entry.Name(), object, allocatedBytes(info)}
-			slot := -1
-			for i, existing := range candidates {
-				if existing.object == object {
-					slot = i
-					break
-				}
-			}
-			if slot >= 0 {
-				if candidate.bytes < candidates[slot].bytes {
-					candidates[slot] = candidate
-				}
-			} else if len(candidates) < maxReusablePacks {
+			candidate := reusablePack{entry.Name(), objects, allocatedBytes(info)}
+			if len(candidates) < maxReusablePacks {
 				candidates = append(candidates, candidate)
 			} else {
 				smallest := 0
@@ -160,9 +157,11 @@ func (s *Store) reusablePacks(ctx context.Context, roots []string, all bool) (ma
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	byObject := make(map[string]string, len(candidates))
-	for _, candidate := range candidates {
-		byObject[candidate.object] = candidate.name
+	byObject := make(map[string][]int)
+	for i, candidate := range candidates {
+		for _, object := range candidate.objects {
+			byObject[object] = append(byObject[object], i)
+		}
 	}
 	args := []string{"rev-list", "--objects", "--no-object-names", "--stdin"}
 	if all {
@@ -179,16 +178,34 @@ func (s *Store) reusablePacks(ctx context.Context, roots []string, all bool) (ma
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	kept := make(map[string]bool, len(candidates))
+	hits := make([]int, len(candidates))
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		if name, ok := byObject[scanner.Text()]; ok {
-			kept[name] = true
+		for _, i := range byObject[scanner.Text()] {
+			hits[i]++
 		}
 	}
 	_ = stdout.Close()
 	if err := errors.Join(scanner.Err(), cmd.Wait()); err != nil {
 		return nil, fmt.Errorf("shadowgit: find reusable packs: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	kept := make(map[string]bool, len(candidates))
+	used := make(map[string]bool)
+	for i, candidate := range candidates {
+		if hits[i] != len(candidate.objects) {
+			continue
+		}
+		overlap := false
+		for _, object := range candidate.objects {
+			overlap = overlap || used[object]
+		}
+		if overlap {
+			continue
+		}
+		kept[candidate.name] = true
+		for _, object := range candidate.objects {
+			used[object] = true
+		}
 	}
 	return kept, nil
 }

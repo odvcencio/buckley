@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// retentionPack is prepared outside Git's searchable pack directory. Rejected
-// proposals can be removed without losing objects needed by the published root.
+// retentionPack stages replacement objects outside Git's searchable pack
+// directory and reuses complete packs needed by the proposed retention root.
 type retentionPack struct {
 	store *Store
 	dir   string
@@ -137,7 +137,7 @@ func (p *retentionPack) close() error {
 	return root.Remove(name)
 }
 
-// collectPack installs a complete replacement before removing any old packs.
+// collectPack installs new objects before removing packs outside the retained set.
 // The caller holds the store lock and includes every published/pending root.
 func (s *Store) collectPack(ctx context.Context, pack *retentionPack, extra ...string) error {
 	root, err := os.OpenRoot(s.gitDir)

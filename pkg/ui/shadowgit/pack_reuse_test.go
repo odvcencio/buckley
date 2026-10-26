@@ -1,6 +1,7 @@
 package shadowgit
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -68,6 +69,23 @@ func TestReusablePacks_RetainsOriginalFilesAndCollectsExpiredSnapshots(t *testin
 					}
 					if newPacks != 1 {
 						t.Fatalf("turn %d: expected one streamed blob, got %d", turn, newPacks)
+					}
+					if indexVersion == "1" {
+						// Bulk capture writes V2 even when pack.indexVersion is set.
+						// Use native Git to produce a real V1 compatibility fixture.
+						converted := filepath.Join(t.TempDir(), "native.idx")
+						retentionPrivateGit(t, store, "index-pack", "--index-version=1", "-o", converted, blobs[turn])
+						data, err := os.ReadFile(converted)
+						if err != nil {
+							t.Fatal(err)
+						}
+						name := strings.TrimSuffix(blobs[turn], ".pack") + ".idx"
+						if err := os.Chmod(name, 0600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(name, data, 0444); err != nil {
+							t.Fatal(err)
+						}
 					}
 					index, err := os.Open(strings.TrimSuffix(blobs[turn], ".pack") + ".idx")
 					if err != nil {
@@ -140,22 +158,19 @@ func TestReusablePacks_PublicationAndCollectionFailuresPreserveHistory(t *testin
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			ctx := context.Background()
+			var before string
 			for turn := range 2 {
 				if err := os.WriteFile(filepath.Join(repo, "artifact"), budgetPayload(turn, 2<<20), 0600); err != nil {
 					t.Fatal(err)
 				}
 				if turn == 0 {
-					tree := restoreTree(t, store)
-					if err := store.RetainTrees(ctx, []string{tree}); err != nil {
+					before = restoreTree(t, store)
+					if err := store.RetainTrees(ctx, []string{before}); err != nil {
 						t.Fatal(err)
 					}
 				}
 			}
 			oldRoot, _ := store.CurrentRef(ctx)
-			before, err := store.run(ctx, nil, "rev-parse", oldRoot+":0000")
-			if err != nil {
-				t.Fatal(err)
-			}
 			after := restoreTree(t, store)
 			block := filepath.Join(store.gitDir, store.ref+".lock")
 			if phase == "collection" {
@@ -209,17 +224,26 @@ func TestReusablePacks_PublicationAndCollectionFailuresPreserveHistory(t *testin
 func TestReusablePacks_BoundsCandidatesWithoutDroppingOtherObjects(t *testing.T) {
 	repo := newTestRepo(t)
 	retentionGit(t, repo, "config", "core.bigFileThreshold", "1")
-	for i := range maxReusablePacks + 1 {
-		if err := os.WriteFile(filepath.Join(repo, strconv.Itoa(i)), budgetPayload(i, (1<<20)+4096), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	store, err := New(repo, "reuse-cap")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
+	for i := range maxReusablePacks + 1 {
+		data := budgetPayload(i, (1<<20)+4096)
+		if err := os.WriteFile(filepath.Join(repo, strconv.Itoa(i)), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		object, err := store.runBytes(ctx, []string{"GIT_COMMON_DIR=" + store.gitDir}, bytes.NewReader(data), "hash-object", "-w", "--stdin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.runBytes(ctx, []string{"GIT_COMMON_DIR=" + store.gitDir}, strings.NewReader(strings.TrimSpace(string(object))+"\n"), "pack-objects", "--window=0", "--threads=1", "--index-version=2", filepath.Join(store.gitDir, "objects", "pack", "pack"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	tree := restoreTree(t, store)
 	kept, err := store.reusablePacks(ctx, []string{tree}, false)
 	if err != nil || len(kept) != maxReusablePacks {
@@ -235,5 +259,47 @@ func TestReusablePacks_BoundsCandidatesWithoutDroppingOtherObjects(t *testing.T)
 	}
 	if clean, err := store.Clean(ctx, tree); err != nil || !clean {
 		t.Fatalf("objects outside the candidate cap were lost: clean=%v err=%v", clean, err)
+	}
+}
+
+func TestReusablePacks_PartiallyReachablePackIsRepacked(t *testing.T) {
+	repo := newTestRepo(t)
+	retentionGit(t, repo, "config", "core.bigFileThreshold", "1")
+	if err := os.WriteFile(filepath.Join(repo, "artifact"), budgetPayload(0, 2<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, repo, "note", "original")
+	store, err := New(repo, "partial-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	before := restoreTree(t, store)
+	packs, err := filepath.Glob(filepath.Join(store.gitDir, "objects/pack/*.pack"))
+	if err != nil || len(packs) != 1 {
+		t.Fatalf("expected one native bulk pack: %v %v", packs, err)
+	}
+	if err := store.RetainTrees(ctx, []string{before}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(packs[0]); err != nil {
+		t.Fatalf("wholly reachable bulk pack was lost: %v", err)
+	}
+	writeFile(t, repo, "note", "changed")
+	after := restoreTree(t, store)
+	committed, err := store.RetainTreesWithinLimit(ctx, []string{after}, 4<<20)
+	if err != nil || !committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	if _, err := os.Stat(packs[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partially expired bulk pack stayed pinned: %v", err)
+	}
+	if err := store.Apply(ctx, after, after); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "artifact"))
+	if err != nil || sha256.Sum256(got) != sha256.Sum256(budgetPayload(0, 2<<20)) || readFile(t, repo, "note") != "changed" {
+		t.Fatal("partial-pack fallback changed completed work")
 	}
 }
