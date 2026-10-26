@@ -107,6 +107,13 @@ func TestCacheLease_ReapsAbandonedObjectsAndInterruptedIndexes(t *testing.T) {
 		}
 	}
 	dir := store.StorageDir()
+	index, _, err := store.temporaryIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(index, []byte("interrupted native index"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	abandonTestStore(t, store)
 	leasedTestStore(t, repo, "reaper")
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -137,6 +144,14 @@ func TestCacheLease_ReapsPartialInitializationAndLargeObjectDirectory(t *testing
 	t.Cleanup(lease.close)
 	if err := os.MkdirAll(filepath.Join(dir, "objects", "aa"), 0700); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "objects", "pack"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tmp_pack_abc123", "tmp_idx_Abc123"} {
+		if err := os.WriteFile(filepath.Join(dir, "objects", "pack", name), []byte("interrupted pack"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for n := range 500 {
 		name := filepath.Join(dir, "objects", "aa", fmt.Sprintf("%038x", n))

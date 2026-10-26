@@ -18,6 +18,19 @@ func cacheHex(value string) bool {
 	return value != ""
 }
 
+func cacheTempName(name, prefix string) bool {
+	suffix, ok := strings.CutPrefix(name, prefix)
+	if !ok || len(suffix) == 0 || len(suffix) > 32 {
+		return false
+	}
+	for _, c := range suffix {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func ownedCacheEntry(name, ref string, dir bool) bool {
 	if dir {
 		switch name {
@@ -62,7 +75,7 @@ func ownedCacheEntry(name, ref string, dir bool) bool {
 				}
 			}
 		}
-		return false
+		return cacheTempName(parts[2], "tmp_pack_") || cacheTempName(parts[2], "tmp_idx_")
 	}
 	if len(parts[1]) != 2 || !cacheHex(parts[1]) {
 		return false
@@ -70,15 +83,7 @@ func ownedCacheEntry(name, ref string, dir bool) bool {
 	if (len(parts[2]) == 38 || len(parts[2]) == 62) && cacheHex(parts[2]) {
 		return true
 	}
-	if suffix, ok := strings.CutPrefix(parts[2], "tmp_obj_"); ok && len(suffix) > 0 && len(suffix) <= 32 {
-		for _, c := range suffix {
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
-				return false
-			}
-		}
-		return true
-	}
-	return false
+	return cacheTempName(parts[2], "tmp_obj_")
 }
 
 // walkCache validates before deleting, uses bounded directory batches, and never
