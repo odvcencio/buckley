@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -12,7 +14,18 @@ import (
 )
 
 func openCacheLease(name string, create bool) (*os.File, error) {
-	path, err := windows.UTF16PtrFromString(name)
+	absolute, err := filepath.Abs(name)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(absolute, `\\?\`) {
+		if strings.HasPrefix(absolute, `\\`) {
+			absolute = `\\?\UNC\` + absolute[2:]
+		} else {
+			absolute = `\\?\` + absolute
+		}
+	}
+	path, err := windows.UTF16PtrFromString(absolute)
 	if err != nil {
 		return nil, err
 	}
