@@ -722,8 +722,9 @@ func (b *Buffer) PositionForView(row, col int) (line, column int, ok bool) {
 		return 0, 0, false
 	}
 
-	position := wrapped.contentOffset + wrapped.contentColumn(col)
-	return wrapped.lineIndex, runeOffsetToByte(wrapped.content, max(0, position)), true
+	column := wrapped.contentColumn(col)
+	position := wrapped.contentByteOffset + runeOffsetToByte(wrapped.content[wrapped.contentByteOffset:], column)
+	return wrapped.lineIndex, position, true
 }
 
 func (b *Buffer) absoluteViewRow(row, col int) (int, bool) {
@@ -738,32 +739,37 @@ func (b *Buffer) absoluteViewRow(row, col int) (int, bool) {
 }
 
 type wrappedRowPosition struct {
-	lineIndex     int
-	content       string
-	wrapped       WrappedLine
-	contentOffset int
-	prefixLen     int
+	lineIndex         int
+	content           string
+	wrapped           WrappedLine
+	contentByteOffset int
+	prefixLen         int
 }
 
 func findWrappedRow(lines []Line, absoluteRow int) (wrappedRowPosition, bool) {
 	rowIndex := 0
 	for lineIdx, line := range lines {
 		prefixLen := len([]rune(spansText(line.Prefix)))
-		contentOffset := 0
+		contentByteOffset := 0
 
 		for _, wrapped := range line.Wrapped {
 			segmentLen := wrappedContentLen(wrapped, prefixLen)
 			if rowIndex == absoluteRow {
 				return wrappedRowPosition{
-					lineIndex:     lineIdx,
-					content:       line.Content,
-					wrapped:       wrapped,
-					contentOffset: contentOffset,
-					prefixLen:     prefixLen,
+					lineIndex:         lineIdx,
+					content:           line.Content,
+					wrapped:           wrapped,
+					contentByteOffset: contentByteOffset,
+					prefixLen:         prefixLen,
 				}, true
 			}
 
-			contentOffset += segmentLen
+			contentByteOffset += runeOffsetToByte(line.Content[contentByteOffset:], segmentLen)
+			if !line.IsCode {
+				for contentByteOffset < len(line.Content) && line.Content[contentByteOffset] == ' ' {
+					contentByteOffset++
+				}
+			}
 			rowIndex++
 		}
 	}
