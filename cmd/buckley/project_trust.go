@@ -115,7 +115,8 @@ func (s *projectTrustStore) Set(projectRoot string, status projectTrustStatus) e
 	if s == nil {
 		return nil
 	}
-	root := normalizeProjectTrustPath(projectRoot)
+	requested := absoluteProjectTrustPath(projectRoot)
+	root := normalizeProjectTrustPath(requested)
 	if root == "" {
 		return fmt.Errorf("project path cannot be empty")
 	}
@@ -123,6 +124,7 @@ func (s *projectTrustStore) Set(projectRoot string, status projectTrustStatus) e
 		return fmt.Errorf("invalid project trust status: %s", status)
 	}
 	return s.update(func(statuses map[string]projectTrustStatus) {
+		delete(statuses, requested)
 		statuses[root] = status
 	})
 }
@@ -131,11 +133,13 @@ func (s *projectTrustStore) Reset(projectRoot string) error {
 	if s == nil {
 		return nil
 	}
-	root := normalizeProjectTrustPath(projectRoot)
+	requested := absoluteProjectTrustPath(projectRoot)
+	root := normalizeProjectTrustPath(requested)
 	if root == "" {
 		return fmt.Errorf("project path cannot be empty")
 	}
 	return s.update(func(statuses map[string]projectTrustStatus) {
+		delete(statuses, requested)
 		delete(statuses, root)
 	})
 }
@@ -377,6 +381,13 @@ func runTrustCommand(args []string) error {
 		target = args[1]
 	}
 
+	if strings.TrimSpace(target) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+		target = cwd
+	}
 	status, root, storePath, err := projectTrustStatusForPath(target)
 	if err != nil {
 		return err
@@ -392,17 +403,17 @@ func runTrustCommand(args []string) error {
 		fmt.Printf("Status:  %s\n", status)
 		fmt.Printf("Store:   %s\n", storePath)
 	case "allow", "trust":
-		if err := store.Set(root, projectTrustTrusted); err != nil {
+		if err := store.Set(target, projectTrustTrusted); err != nil {
 			return err
 		}
 		fmt.Printf("Marked trusted: %s\n", root)
 	case "deny", "restrict":
-		if err := store.Set(root, projectTrustRestricted); err != nil {
+		if err := store.Set(target, projectTrustRestricted); err != nil {
 			return err
 		}
 		fmt.Printf("Marked restricted: %s\n", root)
 	case "reset", "forget", "rm":
-		if err := store.Reset(root); err != nil {
+		if err := store.Reset(target); err != nil {
 			return err
 		}
 		fmt.Printf("Cleared trust decision: %s\n", root)

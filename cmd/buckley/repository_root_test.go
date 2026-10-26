@@ -173,3 +173,41 @@ func TestLoadProjectTrustStore_RepositoryChangesDoNotBroadenRecordedScope(t *tes
 		t.Fatal("original child decision was lost")
 	}
 }
+
+func TestProjectTrustStore_ChangedScopeDoesNotReviveAfterRepositoryDamage(t *testing.T) {
+	for _, action := range []string{"reset", "restrict"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			child := filepath.Join(root, "child")
+			if err := os.Mkdir(child, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			store, err := loadProjectTrustStore(filepath.Join(t.TempDir(), "trust.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set(child, projectTrustTrusted); err != nil {
+				t.Fatal(err)
+			}
+			runGitIn(t, root, "init", "-q")
+			if action == "reset" {
+				err = store.Reset(child)
+			} else {
+				err = store.Set(child, projectTrustRestricted)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("corrupt\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			reloaded, err := loadProjectTrustStore(store.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := reloaded.Status(child); got != projectTrustUnknown {
+				t.Fatalf("old child approval revived after %s: %s", action, got)
+			}
+		})
+	}
+}
