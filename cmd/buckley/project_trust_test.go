@@ -43,17 +43,19 @@ func TestResolveProjectTrustPathHonorsBuckleyDataDir(t *testing.T) {
 
 func TestNormalizeProjectTrustPathUsesRepoRoot(t *testing.T) {
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 	subDir := filepath.Join(repoRoot, "pkg", "orchestrator")
 	if err := os.MkdirAll(subDir, 0o755); err != nil {
 		t.Fatalf("mkdir subdir: %v", err)
 	}
 
+	want, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := normalizeProjectTrustPath(subDir)
-	if got != repoRoot {
-		t.Fatalf("normalizeProjectTrustPath(%q) = %q want %q", subDir, got, repoRoot)
+	if got != want {
+		t.Fatalf("normalizeProjectTrustPath(%q) = %q want %q", subDir, got, want)
 	}
 }
 
@@ -68,9 +70,7 @@ func TestProjectTrustStoreRoundTrip(t *testing.T) {
 	}
 
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 	projectPath := filepath.Join(repoRoot, "cmd")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project path: %v", err)
@@ -122,9 +122,7 @@ func TestEnsureProjectTrustTrustedDecisionPersists(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 	projectPath := filepath.Join(repoRoot, "cmd", "buckley")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project path: %v", err)
@@ -186,9 +184,7 @@ func TestEnsureProjectTrustRestrictedDecisionClampsConfig(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 
 	oldTerminal := stdinIsTerminalFn
 	stdinIsTerminalFn = func() bool { return true }
@@ -246,9 +242,7 @@ func TestEnsureProjectTrustUnknownNonInteractiveRestrictsConfig(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 
 	oldTerminal := stdinIsTerminalFn
 	stdinIsTerminalFn = func() bool { return false }
@@ -308,9 +302,7 @@ func TestRunTrustCommandAllowStatusReset(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
+	runGitIn(t, repoRoot, "init", "-q")
 
 	out := captureStdout(t, func() {
 		if err := runTrustCommand([]string{"allow", repoRoot}); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/giturl"
 )
@@ -228,9 +230,18 @@ func findGitRepoRoot(start string) (string, bool) {
 		return "", false
 	}
 
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		marker := filepath.Join(dir, ".git")
+		if _, err := os.Lstat(marker); err == nil {
+			if _, err := readGitOutput(dir, "rev-parse", "--resolve-git-dir", marker); err != nil {
+				return "", false
+			}
 			return dir, true
+		} else if !os.IsNotExist(err) {
+			return "", false
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -255,7 +266,10 @@ func findSingleChildGitRepo(dir string) (string, bool) {
 			continue
 		}
 		child := filepath.Join(dir, name)
-		if _, err := os.Stat(filepath.Join(child, ".git")); err == nil {
+		if _, err := os.Lstat(filepath.Join(child, ".git")); err == nil {
+			if _, ok := findGitRepoRoot(child); !ok {
+				continue
+			}
 			if candidate != "" {
 				return "", false
 			}
@@ -279,6 +293,15 @@ func dirIsEmpty(path string) (bool, error) {
 		return true, nil
 	}
 	return false, err
+}
+
+func readGitOutput(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
 }
 
 func runGitCommand(args ...string) error {
