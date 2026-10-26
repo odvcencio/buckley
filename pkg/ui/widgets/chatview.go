@@ -312,6 +312,11 @@ func (c *ChatView) RemoveThinkingIndicator() {
 func (c *ChatView) Clear() {
 	clear(c.highlighters)
 	c.highlighters = c.highlighters[:0]
+	c.ClearContent()
+}
+
+// ClearContent removes messages while retaining the bounded syntax parser cache.
+func (c *ChatView) ClearContent() {
 	c.buffer.Clear()
 	c.lastSource = ""
 	c.lastContent = ""

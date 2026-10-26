@@ -433,11 +433,10 @@ func (c *Controller) redoLastTurn() {
 	c.app.AddMessage(fmt.Sprintf("Redid last turn (%d message(s), file changes restored).", len(record.messages)), "system")
 }
 
-// rerenderTranscript rebuilds the visible chat transcript from sess's
-// current message list, the same way switchToSessionLocked does when
-// switching sessions.
+// rerenderTranscript rebuilds the current session while reusing its bounded
+// syntax parser cache.
 func (c *Controller) rerenderTranscript(sess *SessionState, messages []conversation.Message) {
-	c.app.ClearScrollback()
+	c.app.clearScrollback(true)
 	c.app.WelcomeScreen()
 	c.app.addMessageImmediately("Session: "+sess.ID, "system")
 	renderConversationHistoryImmediately(c.app, messages)
