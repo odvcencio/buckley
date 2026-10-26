@@ -85,7 +85,8 @@ func TestRetainTreesWithinLimit_RejectsWithoutLosingPublishedHistory(t *testing.
 			if err != nil || sha256.Sum256(got) != sha256.Sum256(data) {
 				t.Fatal("budget refusal changed completed file work")
 			}
-			if !reflect.DeepEqual(original, userGitFiles(t, repo)) {
+			if current := userGitFiles(t, repo); !reflect.DeepEqual(original, current) {
+				logUserGitChanges(t, original, current)
 				t.Fatal("budget accounting changed user Git data")
 			}
 		})

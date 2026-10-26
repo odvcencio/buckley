@@ -93,7 +93,8 @@ func TestPrivateStorage_PackedCollectionPreservesPendingAndReleasesEmptyHistory(
 	if bytes := privateObjectBytes(t, store); bytes != 0 {
 		t.Fatalf("empty history retained %d packed object bytes", bytes)
 	}
-	if !reflect.DeepEqual(original, userGitFiles(t, repo)) {
+	if current := userGitFiles(t, repo); !reflect.DeepEqual(original, current) {
+		logUserGitChanges(t, original, current)
 		t.Fatal("packed collection changed user Git data")
 	}
 }

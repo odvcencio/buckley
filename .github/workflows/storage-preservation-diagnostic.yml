@@ -1,0 +1,28 @@
+name: Storage preservation diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preservation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record native tools
+        run: |
+          git --version
+          go version
+      - name: Repeat preservation assertions with exact file diagnostics
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+          GO_TEST_TIMEOUT: 4m
+        run: ./scripts/test.sh -count=50 -run '^(TestPrivateStorage_PackedCollectionPreservesPendingAndReleasesEmptyHistory|TestRetainTreesWithinLimit_RejectsWithoutLosingPublishedHistory)$'
