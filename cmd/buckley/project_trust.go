@@ -84,7 +84,7 @@ func loadProjectTrustStore(path string) (*projectTrustStore, error) {
 
 	for _, project := range raw.Projects {
 		// Preserve the scope recorded by the user across repository changes.
-		root := absoluteProjectTrustPath(project.Path)
+		root := strings.TrimSpace(project.Path)
 		if root == "" {
 			continue
 		}

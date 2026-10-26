@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -209,5 +210,41 @@ func TestProjectTrustStore_ChangedScopeDoesNotReviveAfterRepositoryDamage(t *tes
 				t.Fatalf("old child approval revived after %s: %s", action, got)
 			}
 		})
+	}
+}
+
+func TestLoadProjectTrustStore_PreservesRecordedPathText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trust.json")
+	records := []projectTrustRecord{
+		{Path: `R:\foreign\project`, Status: projectTrustTrusted},
+		{Path: "../previous-project", Status: projectTrustRestricted},
+	}
+	data, err := json.Marshal(projectTrustFile{Version: 1, Projects: records})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := loadProjectTrustStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if store.statuses[record.Path] != record.Status {
+			t.Fatalf("recorded path %q was reinterpreted", record.Path)
+		}
+	}
+	if err := store.Set(t.TempDir(), projectTrustTrusted); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadProjectTrustStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if reloaded.statuses[record.Path] != record.Status {
+			t.Fatalf("another decision changed recorded path %q", record.Path)
+		}
 	}
 }
