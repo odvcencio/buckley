@@ -83,7 +83,8 @@ func loadProjectTrustStore(path string) (*projectTrustStore, error) {
 	}
 
 	for _, project := range raw.Projects {
-		root := normalizeProjectTrustPath(project.Path)
+		// Preserve the scope recorded by the user across repository changes.
+		root := strings.TrimSpace(project.Path)
 		if root == "" {
 			continue
 		}
@@ -114,7 +115,8 @@ func (s *projectTrustStore) Set(projectRoot string, status projectTrustStatus) e
 	if s == nil {
 		return nil
 	}
-	root := normalizeProjectTrustPath(projectRoot)
+	requested := absoluteProjectTrustPath(projectRoot)
+	root := normalizeProjectTrustPath(requested)
 	if root == "" {
 		return fmt.Errorf("project path cannot be empty")
 	}
@@ -122,6 +124,7 @@ func (s *projectTrustStore) Set(projectRoot string, status projectTrustStatus) e
 		return fmt.Errorf("invalid project trust status: %s", status)
 	}
 	return s.update(func(statuses map[string]projectTrustStatus) {
+		delete(statuses, requested)
 		statuses[root] = status
 	})
 }
@@ -130,11 +133,13 @@ func (s *projectTrustStore) Reset(projectRoot string) error {
 	if s == nil {
 		return nil
 	}
-	root := normalizeProjectTrustPath(projectRoot)
+	requested := absoluteProjectTrustPath(projectRoot)
+	root := normalizeProjectTrustPath(requested)
 	if root == "" {
 		return fmt.Errorf("project path cannot be empty")
 	}
 	return s.update(func(statuses map[string]projectTrustStatus) {
+		delete(statuses, requested)
 		delete(statuses, root)
 	})
 }
@@ -229,24 +234,26 @@ func (s *projectTrustStore) save() error {
 }
 
 func normalizeProjectTrustPath(path string) string {
+	path = absoluteProjectTrustPath(path)
+	if path == "" {
+		return ""
+	}
+	if repoRoot, ok := findGitRepoRoot(path); ok {
+		return repoRoot
+	}
+	return path
+}
+
+func absoluteProjectTrustPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
-
-	absPath, err := filepath.Abs(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return ""
 	}
-	absPath = filepath.Clean(absPath)
-
-	if repoRoot, ok := findGitRepoRoot(absPath); ok {
-		if resolved, err := filepath.Abs(repoRoot); err == nil {
-			absPath = filepath.Clean(resolved)
-		}
-	}
-
-	return absPath
+	return filepath.Clean(absolute)
 }
 
 func projectTrustStatusForPath(path string) (projectTrustStatus, string, string, error) {
@@ -374,6 +381,13 @@ func runTrustCommand(args []string) error {
 		target = args[1]
 	}
 
+	if strings.TrimSpace(target) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+		target = cwd
+	}
 	status, root, storePath, err := projectTrustStatusForPath(target)
 	if err != nil {
 		return err
@@ -389,17 +403,17 @@ func runTrustCommand(args []string) error {
 		fmt.Printf("Status:  %s\n", status)
 		fmt.Printf("Store:   %s\n", storePath)
 	case "allow", "trust":
-		if err := store.Set(root, projectTrustTrusted); err != nil {
+		if err := store.Set(target, projectTrustTrusted); err != nil {
 			return err
 		}
 		fmt.Printf("Marked trusted: %s\n", root)
 	case "deny", "restrict":
-		if err := store.Set(root, projectTrustRestricted); err != nil {
+		if err := store.Set(target, projectTrustRestricted); err != nil {
 			return err
 		}
 		fmt.Printf("Marked restricted: %s\n", root)
 	case "reset", "forget", "rm":
-		if err := store.Reset(root); err != nil {
+		if err := store.Reset(target); err != nil {
 			return err
 		}
 		fmt.Printf("Cleared trust decision: %s\n", root)

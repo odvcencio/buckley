@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -43,7 +41,7 @@ func newOneShotToolTracker(writer io.Writer, workDir string) *oneShotToolTracker
 		writer:  writer,
 		workDir: workDir,
 		now:     time.Now,
-		git:     runOneShotGit,
+		git:     readGitOutput,
 		calls:   map[string]*oneShotToolCall{},
 	}
 	if workDir != "" {
@@ -52,15 +50,6 @@ func newOneShotToolTracker(writer io.Writer, workDir string) *oneShotToolTracker
 		}
 	}
 	return t
-}
-
-func runOneShotGit(dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
 }
 
 func (t *oneShotToolTracker) start(u acp.SessionUpdate) {

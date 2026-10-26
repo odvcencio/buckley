@@ -94,9 +94,10 @@ func TestPrepareTaskWorkspaceUsesSingleChildRepoRoot(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir repo: %v", err)
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	runGitIn(t, repo, "init", "-q")
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -123,11 +124,11 @@ func TestPrepareTaskWorkspacePrefersSingleChildRepoOverAncestor(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
 	repo := filepath.Join(workspace, "repo")
-	for _, dir := range []string{filepath.Join(root, ".git"), filepath.Join(repo, ".git")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	runGitIn(t, root, "init", "-q")
+	runGitIn(t, repo, "init", "-q")
 	if err := os.Chdir(workspace); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
