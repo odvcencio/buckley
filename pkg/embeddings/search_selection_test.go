@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -16,10 +17,16 @@ import (
 	"modernc.org/sqlite"
 )
 
-type selectionEmbeddingProvider struct{}
+type selectionEmbeddingProvider struct{ dimensions int }
 
-func (selectionEmbeddingProvider) Embed(ctx context.Context, _ string) ([]float64, error) {
-	return []float64{1, 0}, ctx.Err()
+func (p selectionEmbeddingProvider) Embed(ctx context.Context, _ string) ([]float64, error) {
+	dimensions := p.dimensions
+	if dimensions == 0 {
+		dimensions = 2
+	}
+	vector := make([]float64, dimensions)
+	vector[0] = 1
+	return vector, ctx.Err()
 }
 
 func newSelectionSearcher(t testing.TB) (*Searcher, *sql.DB) {
@@ -54,6 +61,8 @@ func TestSearcherSearch_RankingAndThreshold(t *testing.T) {
 			if _, err := db.Exec(`INSERT INTO embeddings (file_path, content_hash, content, embedding) VALUES ('corrupt.go','fixture','corrupt',X'00')`); err != nil {
 				t.Fatal(err)
 			}
+			insertSelectionRow(t, db, "wide.go", "wide", `{}`, make([]float64, 32))
+			insertSelectionRow(t, db, "late.go", "late", `{}`, []float64{1, 10})
 			got, err := s.Search(context.Background(), "query", limit)
 			if err != nil {
 				t.Fatal(err)
@@ -183,6 +192,7 @@ func BenchmarkSearcherSearchLimited(b *testing.B) {
 	for _, count := range []int{1000, 10000} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			s, db := newSelectionSearcher(b)
+			s.provider = selectionEmbeddingProvider{dimensions: 1536}
 			tx, err := db.Begin()
 			if err != nil {
 				b.Fatal(err)
@@ -192,7 +202,12 @@ func BenchmarkSearcherSearchLimited(b *testing.B) {
 				b.Fatal(err)
 			}
 			for i := range count {
-				vector, err := serializeEmbedding([]float64{1, float64(count-i) / float64(count) / 2})
+				values := make([]float64, 1536)
+				values[0] = 1
+				for j := 1; j < len(values); j++ {
+					values[j] = float64(count-i) / float64(count) / 2 / math.Sqrt(float64(len(values)-1))
+				}
+				vector, err := serializeEmbedding(values)
 				if err != nil {
 					b.Fatal(err)
 				}
