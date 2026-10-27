@@ -291,6 +291,11 @@ func runReviewCommand(args []string) (returnErr error) {
 		clearCostBudget:       opts.noBudget,
 		depth:                 opts.depth,
 	})
+	if !opts.projectMode {
+		if err := runtime.preflightApprovalCritic(policy); err != nil {
+			return err
+		}
+	}
 	var reviewErr error
 	result, reviewErr = runReviewWithPolicy(ctx, opts, runtime.framework, policy)
 
@@ -543,6 +548,16 @@ func resolveReviewCriticRuntime(ctx context.Context, cfg *config.Config, checker
 	dedicated := criticModel != primaryModel || primaryModelAdaptive ||
 		(explicitReasoning != "" && (primaryReasoningAdaptive || criticReasoning != primaryReasoning))
 	return criticModel, criticReasoning, dedicated
+}
+
+func (r *reviewCommandRuntime) preflightApprovalCritic(policy automatedReviewOptions) error {
+	if !policy.approvalCritic || policy.maxCostUSD <= 0 || r.criticModel == "" || r.mgr.ProviderIDForModel(r.criticModel) == "codex" {
+		return nil
+	}
+	if _, err := r.mgr.GetModelInfo(r.criticModel); err != nil {
+		return fmt.Errorf("approval critic %q is unavailable for a cost-bounded review: %w; configure --critic-model with an available model before retrying; no model call was made", r.criticModel, err)
+	}
+	return nil
 }
 
 func (r *reviewCommandRuntime) Close() {

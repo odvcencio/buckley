@@ -57,7 +57,7 @@ func (l *Loader) Domains() ([]string, error) {
 		if filepath.Ext(d.Name()) != ".arb" {
 			return nil
 		}
-		rel, _ := filepath.Rel("rules", path)
+		rel := strings.TrimPrefix(path, "rules/")
 		domain := strings.TrimSuffix(rel, ".arb")
 		domains = append(domains, domain)
 		return nil
