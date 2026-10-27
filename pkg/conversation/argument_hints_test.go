@@ -86,6 +86,46 @@ func TestCompactToolArguments_StringHintPrefix(t *testing.T) {
 	}
 }
 
+func FuzzCompactToolArguments_HintCompatibility(f *testing.F) {
+	for _, body := range []string{
+		`{"path":"src/file.go","content":"ignored"}`,
+		`{"path":"first","\u0070ath":"last","future":{"number":1e999}}`,
+		`{"command":"` + strings.Repeat(`\u0000`, 250) + `\ud83d\ude80"}`,
+		`{"path":"` + strings.Repeat("é日本語🚀", 200) + `"}`,
+		`{"path":4,"file":false,"query":null}`,
+		`{"path":"incomplete`,
+	} {
+		f.Add(body)
+	}
+	f.Fuzz(func(t *testing.T, body string) {
+		if len(body) > 32<<10 {
+			t.Skip()
+		}
+		const limit = 16 << 10
+		arguments := strings.Repeat(" ", limit+1) + body
+		digest := sha256.Sum256([]byte(arguments))
+		want := map[string]any{"_buckley_compacted": true, "original_bytes": len(arguments), "sha256": hex.EncodeToString(digest[:6])}
+		var decoded map[string]any
+		if json.Unmarshal([]byte(arguments), &decoded) == nil {
+			for _, key := range []string{"path", "file", "command", "query", "pattern", "url", "name"} {
+				switch value := decoded[key].(type) {
+				case string:
+					want[key] = utf8Prefix(value, 200)
+				case float64, bool:
+					want[key] = value
+				}
+			}
+		}
+		encoded, err := json.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := compactToolArguments(arguments, limit); got != string(encoded) {
+			t.Fatalf("summary differs from JSON scalar semantics: %s, want %s", got, encoded)
+		}
+	})
+}
+
 func BenchmarkCompactToolArguments_LargeWrite(b *testing.B) {
 	for _, size := range []int{128 << 10, 1 << 20} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {
