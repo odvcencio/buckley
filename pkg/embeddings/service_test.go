@@ -222,7 +222,7 @@ func TestSerializeDeserializeEmbedding(t *testing.T) {
 	}
 
 	// Deserialize
-	result, err := deserializeEmbedding(bytes)
+	result, err := deserializeEmbedding(bytes, nil)
 	if err != nil {
 		t.Fatalf("Deserialize failed: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestDeserializeEmbedding_Invalid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := deserializeEmbedding(tt.bytes)
+			_, err := deserializeEmbedding(tt.bytes, nil)
 			if err == nil {
 				t.Error("Expected error for invalid data")
 			}

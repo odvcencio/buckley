@@ -340,7 +340,7 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) (SearchR
 		if err := rows.Scan(&filePath, &embeddingBytes); err != nil {
 			continue
 		}
-		decoded, err := decodeEmbeddingInto(embeddingBytes, embedding)
+		decoded, err := deserializeEmbedding(embeddingBytes, embedding)
 		if err != nil {
 			continue
 		}
@@ -679,11 +679,7 @@ func serializeEmbedding(embedding []float64) ([]byte, error) {
 }
 
 // deserializeEmbedding converts bytes back to float64 slice.
-func deserializeEmbedding(data []byte) ([]float64, error) {
-	return decodeEmbeddingInto(data, nil)
-}
-
-func decodeEmbeddingInto(data []byte, embedding []float64) ([]float64, error) {
+func deserializeEmbedding(data []byte, embedding []float64) ([]float64, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("invalid embedding data")
 	}
