@@ -80,6 +80,15 @@ func TestCompactModelMessages_PartialBatchStaysExact(t *testing.T) {
 	opts := DefaultEfficientContextOptions()
 	opts.RecentMessages, opts.MaxBytes = 2, 4096
 	got := CompactModelMessages(messages, opts)
+	completedResultFound := false
+	for _, msg := range got {
+		if msg.Role == "tool" && msg.ToolCallID == "done" && msg.Content == "Completed." {
+			completedResultFound = true
+		}
+	}
+	if !completedResultFound {
+		t.Fatal("completed sibling feedback was dropped from the pending exchange")
+	}
 	for _, msg := range got {
 		if assistantHasToolCall(msg, "pending") {
 			if !reflect.DeepEqual(msg, pending) {
