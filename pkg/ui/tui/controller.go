@@ -89,10 +89,10 @@ type Controller struct {
 	runLedger        runledger.Store
 	subagentEvidence evidence.Store
 	// sessionRunNodes maps a run ID shown in the navigator back to its
-	// materialized run-tree node, so a click can show that run's state in
+	// compact run overview, so a click can show that run's state in
 	// the inspector. Rebuilt on every refreshSessionNav call; nil when the
 	// navigator is showing the flat session-list fallback.
-	sessionRunNodes map[string]*runledger.RunNode
+	sessionRunNodes map[string]*runledger.RunOverview
 }
 
 // QueuedMessage represents a user message queued during streaming.
