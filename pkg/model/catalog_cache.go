@@ -3,12 +3,19 @@ package model
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"syscall"
 	"time"
+)
+
+const (
+	windowsSharingViolation    = syscall.Errno(32)
+	catalogCacheSharingRetries = 3
 )
 
 // cachePricing mirrors ModelPricing's wire shape (dollars per one million
@@ -50,6 +57,11 @@ type cacheCatalogDoc struct {
 // refresh has nothing to merge against yet.
 func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 	data, err := os.ReadFile(path)
+	// Windows replacement can briefly reject a new reader's open handle.
+	for attempt := 0; err != nil && runtime.GOOS == "windows" && errors.Is(err, windowsSharingViolation) && attempt < catalogCacheSharingRetries; attempt++ {
+		time.Sleep(10 * time.Millisecond)
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]ModelInfo{}, nil
@@ -184,7 +196,7 @@ func SaveCatalogCache(path string, catalog map[string]ModelInfo) error {
 		if err == nil {
 			return nil
 		}
-		if runtime.GOOS != "windows" || attempt >= 3 {
+		if runtime.GOOS != "windows" || attempt >= catalogCacheSharingRetries {
 			return fmt.Errorf("publish catalog cache: %w", err)
 		}
 		// Windows readers can briefly prevent replacement while their file
