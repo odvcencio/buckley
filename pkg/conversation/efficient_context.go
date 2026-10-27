@@ -75,7 +75,8 @@ func CompactModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 // CompactModelMessages prunes stale high-volume fields without removing tool
 // call/result pairs required by chat-completion APIs. It never strips
 // Reasoning/ReasoningDetails from an assistant message whose tool calls lack a
-// recorded tool result: providers hard-error when a thinking block detaches
+// recorded tool result. Unanswered tool messages also retain their exact
+// arguments and content: providers hard-error when a thinking block detaches
 // from its tool_use, so this protocol-correctness rule applies regardless of
 // recency windows.
 func CompactModelMessages(messages []model.Message, opts EfficientContextOptions) []model.Message {
@@ -84,8 +85,8 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		opts = DefaultEfficientContextOptions()
 		opts.PinnedFromIndex = pinned
 	}
-	result, protectedReasoning, rootTaskIndex := prepareModelMessages(messages, opts)
-	return compactToBudget(result, opts, protectedReasoning, rootTaskIndex)
+	result, incompleteExchanges, rootTaskIndex := prepareModelMessages(messages, opts)
+	return compactToBudget(result, opts, incompleteExchanges, rootTaskIndex)
 }
 
 func prepareModelMessages(messages []model.Message, opts EfficientContextOptions) ([]model.Message, map[int]bool, int) {
@@ -93,7 +94,7 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 	if recentStart < 0 {
 		recentStart = 0
 	}
-	hasReasoning, hasOldToolResult := false, false
+	hasReasoning, hasOldToolResult, hasOldToolCall := false, false, false
 	result := make([]model.Message, len(messages))
 	copy(result, messages)
 	for i := range result {
@@ -102,6 +103,9 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 		msg := &result[i]
 		if msg.Role == "assistant" && (msg.Reasoning != "" || len(msg.ReasoningDetails) > 0) {
 			hasReasoning = true
+		}
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 && i < recentStart {
+			hasOldToolCall = true
 		}
 		if msg.Role == "tool" && i < recentStart && (opts.PinnedFromIndex <= 0 || i >= opts.PinnedFromIndex) {
 			if content, ok := msg.Content.(string); ok && content != "" {
@@ -114,9 +118,9 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 		reasoningStart = 0
 	}
 
-	var protectedReasoning map[int]bool
-	if hasReasoning {
-		protectedReasoning = unansweredToolCallIndices(result)
+	var incompleteExchanges map[int]bool
+	if hasReasoning || hasOldToolCall {
+		incompleteExchanges = incompleteToolExchangeIndices(result)
 	}
 	rootTaskIndex := firstUserMessageIndex(result)
 
@@ -155,7 +159,7 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 	for i := len(result) - 1; i >= 0; i-- {
 		msg := &result[i]
 		pinned := opts.PinnedFromIndex > 0 && i < opts.PinnedFromIndex
-		if i < reasoningStart && msg.Role == "assistant" && !pinned && !protectedReasoning[i] {
+		if i < reasoningStart && msg.Role == "assistant" && !pinned && !incompleteExchanges[i] {
 			msg.Reasoning = ""
 			msg.ReasoningDetails = nil
 		}
@@ -171,7 +175,7 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 				hasIdentity = true
 			}
 		}
-		if i >= recentStart || pinned {
+		if i >= recentStart || pinned || incompleteExchanges[i] {
 			if hasIdentity {
 				seenToolResults[identity] = i
 			}
@@ -199,7 +203,7 @@ func prepareModelMessages(messages []model.Message, opts EfficientContextOptions
 			}
 		}
 	}
-	return result, protectedReasoning, rootTaskIndex
+	return result, incompleteExchanges, rootTaskIndex
 }
 
 func firstUserMessageIndex(messages []model.Message) int {
@@ -213,11 +217,20 @@ func firstUserMessageIndex(messages []model.Message) int {
 	return -1
 }
 
-// unansweredToolCallIndices returns the indices of assistant messages that
-// have at least one tool call without a matching tool-result message
-// elsewhere in the list. Reasoning belonging to these messages must never be
-// stripped by projection or compaction (decision 0001, pin rule).
-func unansweredToolCallIndices(messages []model.Message) map[int]bool {
+// incompleteToolExchangeIndices protects unanswered assistant calls and any
+// available results from the same batch. Dropping a completed sibling's result
+// would make provider repair falsely describe it as unfinished.
+func incompleteToolExchangeIndices(messages []model.Message) map[int]bool {
+	hasCalls := false
+	for _, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			hasCalls = true
+			break
+		}
+	}
+	if !hasCalls {
+		return make(map[int]bool)
+	}
 	answered := make(map[string]bool)
 	for _, msg := range messages {
 		if msg.Role == "tool" && msg.ToolCallID != "" {
@@ -225,6 +238,7 @@ func unansweredToolCallIndices(messages []model.Message) map[int]bool {
 		}
 	}
 	protected := make(map[int]bool)
+	var exchangeIDs map[string]bool
 	for i, msg := range messages {
 		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
 			continue
@@ -235,14 +249,34 @@ func unansweredToolCallIndices(messages []model.Message) map[int]bool {
 				break
 			}
 		}
+		if protected[i] {
+			if exchangeIDs == nil {
+				exchangeIDs = make(map[string]bool)
+			}
+			for _, call := range msg.ToolCalls {
+				if call.ID != "" {
+					exchangeIDs[call.ID] = true
+				}
+			}
+		}
+	}
+	if len(exchangeIDs) > 0 {
+		for i, msg := range messages {
+			if msg.Role == "tool" && exchangeIDs[msg.ToolCallID] {
+				protected[i] = true
+			}
+		}
 	}
 	return protected
 }
 
-func compactToBudget(messages []model.Message, opts EfficientContextOptions, protectedReasoning map[int]bool, rootTaskIndex int) []model.Message {
+func compactToBudget(messages []model.Message, opts EfficientContextOptions, incompleteExchanges map[int]bool, rootTaskIndex int) []model.Message {
 	totalBytes := modelMessagesBytes(messages)
 	if opts.MaxBytes <= 0 || totalBytes <= opts.MaxBytes {
 		return messages
+	}
+	if incompleteExchanges == nil {
+		incompleteExchanges = incompleteToolExchangeIndices(messages)
 	}
 	// Keep the immediate action/result tail exact. If a burst of verbose tools
 	// filled the nominal recent window, compact the oldest part of that burst.
@@ -259,6 +293,9 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 		start = opts.PinnedFromIndex
 	}
 	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
+		if incompleteExchanges[i] {
+			continue
+		}
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -267,10 +304,8 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 				msg.Content = compactHistoricalContent(content, opts.OldToolBytes, "tool output")
 			}
 		case "assistant":
-			if !protectedReasoning[i] {
-				msg.Reasoning = ""
-				msg.ReasoningDetails = nil
-			}
+			msg.Reasoning = ""
+			msg.ReasoningDetails = nil
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, opts.OldToolArgumentBytes)
 			} else {
@@ -290,6 +325,9 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 		totalBytes += modelMessageBytes(*msg) - before
 	}
 	for i := start; i < stop && totalBytes > opts.MaxBytes; i++ {
+		if incompleteExchanges[i] {
+			continue
+		}
 		msg := &messages[i]
 		before := modelMessageBytes(*msg)
 		switch msg.Role {
@@ -298,10 +336,8 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 				msg.Content = compactHistoricalContent(content, 192, "tool output")
 			}
 		case "assistant":
-			if !protectedReasoning[i] {
-				msg.Reasoning = ""
-				msg.ReasoningDetails = nil
-			}
+			msg.Reasoning = ""
+			msg.ReasoningDetails = nil
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, 192)
 			} else if content, ok := msg.Content.(string); ok {
@@ -319,12 +355,12 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 		totalBytes += modelMessageBytes(*msg) - before
 	}
 	if totalBytes > opts.MaxBytes {
-		return collapseHistoricalPrefix(messages, opts.MaxBytes, opts.PinnedFromIndex)
+		return collapseHistoricalPrefix(messages, opts.MaxBytes, opts.PinnedFromIndex, incompleteExchanges)
 	}
 	return messages
 }
 
-func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromIndex int) []model.Message {
+func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromIndex int, incompleteExchanges map[int]bool) []model.Message {
 	if len(messages) <= 2 {
 		return messages
 	}
@@ -342,10 +378,13 @@ func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromInde
 	}
 
 	protected := make([]model.Message, 0, tailStart)
+	var exchanges []model.Message
 	collapsed := make([]model.Message, 0, tailStart)
-	for _, msg := range messages[:tailStart] {
+	for i, msg := range messages[:tailStart] {
 		if msg.Role == "system" {
 			protected = append(protected, msg)
+		} else if incompleteExchanges[i] {
+			exchanges = append(exchanges, msg)
 		} else {
 			collapsed = append(collapsed, msg)
 		}
@@ -362,9 +401,10 @@ func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromInde
 		summaryLimit = 4096
 	}
 	summary := deterministicHistorySummary(collapsed, summaryLimit)
-	result := make([]model.Message, 0, len(protected)+1+len(messages)-tailStart)
+	result := make([]model.Message, 0, len(protected)+len(exchanges)+1+len(messages)-tailStart)
 	result = append(result, protected...)
 	result = append(result, model.Message{Role: "system", Content: summary})
+	result = append(result, exchanges...)
 	result = append(result, messages[tailStart:]...)
 	return result
 }
