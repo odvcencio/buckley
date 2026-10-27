@@ -99,27 +99,60 @@ func storedToolResultProgressSummary(name, content string) string {
 
 func storedToolError(content string) string {
 	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "{") || content == "null" {
+		var payload struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}
+		if json.Unmarshal([]byte(content), &payload) == nil {
+			if detail := strings.TrimSpace(payload.Error); detail != "" {
+				return detail
+			}
+			if !payload.Success {
+				return "failed"
+			}
+			return ""
+		}
+	}
+	// TOON root scalars carry the envelope. Nested data may have its own
+	// success/error fields and must not override the tool's result.
+	var success, hasSuccess bool
+	var detail string
+	for line := range strings.Lines(content) {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch key {
+		case "success":
+			if value == "true" || value == "false" {
+				success, hasSuccess = value == "true", true
+			}
+		case "error":
+			if json.Unmarshal([]byte(value), &detail) != nil {
+				detail = value
+			}
+			detail = strings.TrimSpace(detail)
+		}
+	}
+	if hasSuccess {
+		if detail != "" {
+			return detail
+		}
+		if !success {
+			return "failed"
+		}
+		return ""
+	}
 	if strings.HasPrefix(strings.ToLower(content), "error:") {
 		return strings.TrimSpace(content[len("error:"):])
 	}
-	var payload struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
-	}
-	if json.Unmarshal([]byte(content), &payload) == nil && (!payload.Success || strings.TrimSpace(payload.Error) != "") {
-		if strings.TrimSpace(payload.Error) != "" {
-			return strings.TrimSpace(payload.Error)
-		}
-		return "failed"
-	}
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(line), "error:") {
-			detail := strings.Trim(strings.TrimSpace(line[len("error:"):]), "\"")
-			if detail != "" && detail != "null" {
-				return detail
-			}
-		}
+	if detail != "" {
+		return detail
 	}
 	return ""
 }
