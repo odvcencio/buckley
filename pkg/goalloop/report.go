@@ -74,11 +74,13 @@ type ReportAction struct {
 // Report assembles the morning report for a goal run from the ledger and
 // each task's latest checkpoint.
 func (l *Loop) Report(ctx context.Context, runID string) (Report, error) {
-	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID, Types: []string{
+		runledger.EventTaskCreated, runledger.EventDurableApprovalWaiting, runledger.EventDurableApprovalResolved,
+	}})
 	if err != nil {
 		return Report{}, fmt.Errorf("goalloop: list events: %w", err)
 	}
-	state, err := runledger.MaterializeRun(runID, events)
+	createdByTask, err := firstCreatedByTask(runID, events)
 	if err != nil {
 		return Report{}, fmt.Errorf("goalloop: materialize run: %w", err)
 	}
@@ -114,11 +116,7 @@ func (l *Loop) Report(ctx context.Context, runID string) (Report, error) {
 	}
 	var tasks []taskRow
 
-	for taskID, task := range state.Tasks {
-		created, ok := firstCreated(task.Events)
-		if !ok {
-			continue
-		}
+	for taskID, created := range createdByTask {
 		switch payloadString(created.Payload, "kind") {
 		case "goal":
 			report.Statement = payloadString(created.Payload, "statement")

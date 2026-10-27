@@ -14,7 +14,7 @@ import (
 // only task.created payloads, so it works on any machine that has the
 // ledger, with no other state.
 func (l *Loop) LoadGoal(ctx context.Context, runID string) (Goal, map[string]TaskSpec, error) {
-	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID, Types: []string{runledger.EventTaskCreated}})
 	if err != nil {
 		return Goal{}, nil, fmt.Errorf("goalloop: list events: %w", err)
 	}
