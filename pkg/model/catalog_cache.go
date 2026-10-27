@@ -1,11 +1,21 @@
 package model
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"syscall"
+	"time"
+)
+
+const (
+	windowsSharingViolation    = syscall.Errno(32)
+	catalogCacheSharingRetries = 3
 )
 
 // cachePricing mirrors ModelPricing's wire shape (dollars per one million
@@ -47,6 +57,11 @@ type cacheCatalogDoc struct {
 // refresh has nothing to merge against yet.
 func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 	data, err := os.ReadFile(path)
+	// Windows replacement can briefly reject a new reader's open handle.
+	for attempt := 0; err != nil && runtime.GOOS == "windows" && errors.Is(err, windowsSharingViolation) && attempt < catalogCacheSharingRetries; attempt++ {
+		time.Sleep(10 * time.Millisecond)
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]ModelInfo{}, nil
@@ -80,8 +95,9 @@ func LoadCatalogCache(path string) (map[string]ModelInfo, error) {
 	return out, nil
 }
 
-// SaveCatalogCache writes catalog to path, sorted by ID, creating parent
-// directories as needed.
+// SaveCatalogCache publishes compact catalog JSON sorted by ID without
+// modifying an open reader's file. Existing permissions and symbolic links
+// are preserved, and parent directories are created as needed.
 func SaveCatalogCache(path string, catalog map[string]ModelInfo) error {
 	ids := make([]string, 0, len(catalog))
 	for id := range catalog {
@@ -108,15 +124,83 @@ func SaveCatalogCache(path string, catalog map[string]ModelInfo) error {
 		})
 	}
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	data, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("encode catalog cache: %w", err)
+	}
+	var existing os.FileInfo
+	for links := 0; ; links++ {
+		existing, err = os.Lstat(path)
+		if os.IsNotExist(err) {
+			existing = nil
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("inspect catalog cache: %w", err)
+		}
+		if existing.Mode()&os.ModeSymlink == 0 {
+			break
+		}
+		if links >= 255 {
+			return fmt.Errorf("resolve catalog cache: too many symbolic links")
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("resolve catalog cache: %w", err)
+		}
+		if filepath.IsAbs(target) {
+			path = target
+		} else {
+			parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+			if err != nil {
+				return fmt.Errorf("resolve catalog cache directory: %w", err)
+			}
+			path = filepath.Join(parent, target)
+		}
+	}
+	if existing != nil {
+		if !existing.Mode().IsRegular() {
+			return fmt.Errorf("catalog cache must be a regular file")
+		}
+		if existing.Mode().Perm()&0o222 == 0 {
+			return fmt.Errorf("write catalog cache: %w", os.ErrPermission)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create catalog cache directory: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	// Keep staging beside the destination for same-filesystem publication.
+	// OpenFile preserves umask behavior when creating a new cache.
+	tempPath := filepath.Join(filepath.Dir(path), ".model-catalog-"+rand.Text()+".tmp")
+	file, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create catalog cache staging file: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(tempPath)
+	}()
+	if existing != nil {
+		if err := file.Chmod(existing.Mode().Perm()); err != nil {
+			return fmt.Errorf("preserve catalog cache permissions: %w", err)
+		}
+	}
+	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("write catalog cache: %w", err)
 	}
-	return nil
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close catalog cache staging file: %w", err)
+	}
+	for attempt := 0; ; attempt++ {
+		err := os.Rename(tempPath, path)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" || attempt >= catalogCacheSharingRetries {
+			return fmt.Errorf("publish catalog cache: %w", err)
+		}
+		// Windows readers can briefly prevent replacement while their file
+		// handle is open. The previous cache stays intact if retries expire.
+		time.Sleep(10 * time.Millisecond)
+	}
 }
