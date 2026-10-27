@@ -125,7 +125,7 @@ func flattenRunTree(node *runledger.RunOverview, depth int, byID map[string]*run
 		ID:     node.Run.RunID,
 		Label:  runNavLabel(node),
 		Depth:  depth,
-		Status: node.Status,
+		Status: runOverviewStatus(node),
 	})
 	for _, child := range node.Children {
 		flattenRunTree(child, depth+1, byID, out)
@@ -141,6 +141,19 @@ func runNavLabel(node *runledger.RunOverview) string {
 		label = node.Run.RunID
 	}
 	return label
+}
+
+func runOverviewStatus(node *runledger.RunOverview) string {
+	status := node.Status
+	// A closed run row remains authoritative when lifecycle events are absent
+	// or incomplete in legacy history.
+	if node.Run.EndedAt != nil || status == "" {
+		status = node.Run.Status
+	}
+	if status == "" {
+		status = string(widgets.ActivityRunning)
+	}
+	return status
 }
 
 // handleSessionNodeSelected shows a selected run-tree node's state in the
@@ -159,10 +172,7 @@ func (c *Controller) handleSessionNodeSelected(node widgets.SessionNavNode) {
 }
 
 func runNodeToActivityRecord(node *runledger.RunOverview) widgets.ActivityRecord {
-	status := widgets.ActivityStatus(node.Status)
-	if status == "" {
-		status = widgets.ActivityRunning
-	}
+	status := widgets.ActivityStatus(runOverviewStatus(node))
 	title := strings.TrimSpace(node.Run.AgentID)
 	if title == "" {
 		title = node.Run.RunID
@@ -176,7 +186,7 @@ func runNodeToActivityRecord(node *runledger.RunOverview) widgets.ActivityRecord
 	if node.Run.ModelID != "" {
 		fmt.Fprintf(&detail, "Model: %s\n", node.Run.ModelID)
 	}
-	fmt.Fprintf(&detail, "Status: %s\n", node.Run.Status)
+	fmt.Fprintf(&detail, "Status: %s\n", status)
 	fmt.Fprintf(&detail, "Events: %d\n", node.EventCount)
 
 	var finishedAt time.Time
