@@ -333,16 +333,18 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) (SearchR
 	defer rows.Close()
 
 	var candidates searchCandidates
+	var embedding []float64
 	for rows.Next() {
 		var filePath string
-		var embeddingBytes []byte
+		var embeddingBytes sql.RawBytes
 		if err := rows.Scan(&filePath, &embeddingBytes); err != nil {
 			continue
 		}
-		embedding, err := deserializeEmbedding(embeddingBytes)
+		decoded, err := decodeEmbeddingInto(embeddingBytes, embedding)
 		if err != nil {
 			continue
 		}
+		embedding = decoded
 		similarity, err := CosineSimilarity(queryEmbedding, embedding)
 		if err != nil {
 			continue
@@ -678,6 +680,10 @@ func serializeEmbedding(embedding []float64) ([]byte, error) {
 
 // deserializeEmbedding converts bytes back to float64 slice.
 func deserializeEmbedding(data []byte) ([]float64, error) {
+	return decodeEmbeddingInto(data, nil)
+}
+
+func decodeEmbeddingInto(data []byte, embedding []float64) ([]float64, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("invalid embedding data")
 	}
@@ -686,7 +692,11 @@ func deserializeEmbedding(data []byte) ([]float64, error) {
 	if len(data) != expected {
 		return nil, fmt.Errorf("invalid embedding length")
 	}
-	embedding := make([]float64, length)
+	if cap(embedding) < int(length) {
+		embedding = make([]float64, length)
+	} else {
+		embedding = embedding[:length]
+	}
 	for i := 0; i < int(length); i++ {
 		offset := 4 + i*8
 		embedding[i] = math.Float64frombits(binary.BigEndian.Uint64(data[offset : offset+8]))
