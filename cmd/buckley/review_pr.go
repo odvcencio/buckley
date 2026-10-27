@@ -326,6 +326,9 @@ func runReviewPRCommand(args []string) (returnErr error) {
 		depth:                      opts.depth,
 		decisionsGate:              reviewDepthGateConfig{forceFullDepth: opts.fullDepth},
 	})
+	if err := runtime.preflightApprovalCritic(policy); err != nil {
+		return err
+	}
 	if opts.post {
 		policy.contextReady = func(ctx context.Context, prInfo *commands.PRInfo, plan automatedReviewOptions) error {
 			if prInfo == nil {
