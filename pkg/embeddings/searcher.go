@@ -1,6 +1,7 @@
 package embeddings
 
 import (
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -319,80 +320,81 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) (SearchR
 		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT file_path, content, embedding, metadata
-		FROM embeddings
-	`)
+	// Keep ranking and payload reads in the same snapshot during index refreshes.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin semantic search: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT file_path, embedding FROM embeddings`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query embeddings: %w", err)
 	}
 	defer rows.Close()
 
-	var results SearchResults
+	var candidates searchCandidates
+	var embedding []float64
 	for rows.Next() {
-		var filePath, content string
-		var embeddingBytes []byte
-		var metadata sql.NullString
-
-		if err := rows.Scan(&filePath, &content, &embeddingBytes, &metadata); err != nil {
+		var filePath string
+		var embeddingBytes sql.RawBytes
+		if err := rows.Scan(&filePath, &embeddingBytes); err != nil {
 			continue
 		}
-
-		embedding, err := deserializeEmbedding(embeddingBytes)
+		decoded, err := deserializeEmbedding(embeddingBytes, embedding)
 		if err != nil {
 			continue
 		}
-
+		embedding = decoded
 		similarity, err := CosineSimilarity(queryEmbedding, embedding)
 		if err != nil {
 			continue
 		}
 
-		meta := parseMetadata(metadata.String)
-		if meta["file"] == "" {
-			meta["file"] = normalizeDisplayPath(filePath)
+		candidate := SearchResult{ID: filePath, Similarity: similarity}
+		if limit <= 0 {
+			candidates = append(candidates, candidate)
+		} else if len(candidates) < limit {
+			heap.Push(&candidates, candidate)
+		} else if similarity > candidates[0].Similarity {
+			candidates[0] = candidate
+			heap.Fix(&candidates, 0)
 		}
-
-		results = append(results, SearchResult{
-			ID:         filePath,
-			Content:    content,
-			Similarity: similarity,
-			Metadata:   meta,
-		})
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	if len(results) == 0 {
-		return results, nil
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 
-	sort.Sort(results)
-
-	selected := make(SearchResults, 0, len(results))
-	for i, result := range results {
-		if i > 0 && result.Similarity < similarityThreshold {
-			if limit > 0 && len(selected) >= limit {
-				break
+	var results SearchResults
+	if len(candidates) > 0 {
+		sort.Sort(SearchResults(candidates))
+		stmt, err := tx.PrepareContext(ctx, `SELECT content, metadata FROM embeddings WHERE file_path = ?`)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare search result lookup: %w", err)
+		}
+		defer stmt.Close()
+		results = make(SearchResults, 0, len(candidates))
+		for i, candidate := range candidates {
+			if i > 0 && candidate.Similarity < similarityThreshold {
+				continue
 			}
-			continue
-		}
-		selected = append(selected, result)
-		if limit > 0 && len(selected) >= limit {
-			break
+			var metadata sql.NullString
+			if err := stmt.QueryRowContext(ctx, candidate.ID).Scan(&candidate.Content, &metadata); err != nil {
+				return nil, fmt.Errorf("failed to load search result %q: %w", candidate.ID, err)
+			}
+			candidate.Metadata = parseMetadata(metadata.String)
+			if candidate.Metadata["file"] == "" {
+				candidate.Metadata["file"] = normalizeDisplayPath(candidate.ID)
+			}
+			results = append(results, candidate)
 		}
 	}
-
-	if len(selected) == 0 {
-		if limit > 0 && len(results) > limit {
-			return results[:limit], nil
-		}
-		return results, nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to finish semantic search: %w", err)
 	}
-
-	return selected, nil
+	return results, nil
 }
 
 // ClearIndex removes all indexed embeddings.
@@ -677,7 +679,7 @@ func serializeEmbedding(embedding []float64) ([]byte, error) {
 }
 
 // deserializeEmbedding converts bytes back to float64 slice.
-func deserializeEmbedding(data []byte) ([]float64, error) {
+func deserializeEmbedding(data []byte, embedding []float64) ([]float64, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("invalid embedding data")
 	}
@@ -686,7 +688,11 @@ func deserializeEmbedding(data []byte) ([]float64, error) {
 	if len(data) != expected {
 		return nil, fmt.Errorf("invalid embedding length")
 	}
-	embedding := make([]float64, length)
+	if cap(embedding) < int(length) {
+		embedding = make([]float64, length)
+	} else {
+		embedding = embedding[:length]
+	}
 	for i := 0; i < int(length); i++ {
 		offset := 4 + i*8
 		embedding[i] = math.Float64frombits(binary.BigEndian.Uint64(data[offset : offset+8]))
