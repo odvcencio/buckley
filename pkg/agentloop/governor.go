@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// DefaultEvidenceWindow bounds in-memory repeat evidence per detector. Larger
+// configured repeat thresholds extend the window so they remain reachable.
+const DefaultEvidenceWindow = 4096
+
 // Config controls bounded agent-loop execution and stagnation detection.
 type Config struct {
 	MaxRounds    int
@@ -58,13 +62,12 @@ type Governor struct {
 
 	rounds         int
 	toolCalls      int
-	evidenceCalls  int
 	lastFailedCall int
 
-	exactCounts        map[string]int
-	outcomeCounts      map[string]int
+	exactCounts        repeatWindow
+	outcomeCounts      repeatWindow
 	actionHistory      []string
-	verificationCounts map[string]int
+	verificationCounts repeatWindow
 
 	maxExactCount        int
 	maxOutcomeCount      int
@@ -89,14 +92,13 @@ func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, s
 		return Decision{}
 	}
 	if success && stateObserved && stateChanged {
-		clear(g.exactCounts)
-		clear(g.outcomeCounts)
-		clear(g.verificationCounts)
+		g.exactCounts.reset()
+		g.outcomeCounts.reset()
+		g.verificationCounts.reset()
 		g.actionHistory = g.actionHistory[:0]
 		g.maxExactCount = 0
 		g.maxOutcomeCount = 0
 		g.maxVerificationCount = 0
-		g.evidenceCalls = 0
 		g.readOnlyCalls = 0
 		return Decision{}
 	}
@@ -145,11 +147,13 @@ func (g *Governor) ObserveProgress(effectClass string, success, stateObserved, s
 // New constructs a progress-aware loop governor.
 func New(config Config) *Governor {
 	config = normalizedConfig(config)
+	window := max(DefaultEvidenceWindow, config.ExactRepeatLimit, config.OutcomeRepeatLimit)
 	return &Governor{
-		config:        config,
-		exactCounts:   make(map[string]int),
-		outcomeCounts: make(map[string]int),
-		actionHistory: make([]string, 0, config.CycleMaxLength*config.CycleRepeats*2),
+		config:             config,
+		exactCounts:        newRepeatWindow(window),
+		outcomeCounts:      newRepeatWindow(window),
+		verificationCounts: newRepeatWindow(window),
+		actionHistory:      make([]string, 0, config.CycleMaxLength*config.CycleRepeats*2),
 	}
 }
 
@@ -197,15 +201,10 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 	if !success {
 		g.lastFailedCall = g.toolCalls
 	}
-	g.evidenceCalls++
-	g.exactCounts[exactKey]++
-	g.outcomeCounts[outcomeKey]++
-	if g.exactCounts[exactKey] > g.maxExactCount {
-		g.maxExactCount = g.exactCounts[exactKey]
-	}
-	if g.outcomeCounts[outcomeKey] > g.maxOutcomeCount {
-		g.maxOutcomeCount = g.outcomeCounts[outcomeKey]
-	}
+	exactCount := g.exactCounts.observe(exactKey)
+	outcomeCount := g.outcomeCounts.observe(outcomeKey)
+	g.maxExactCount = max(g.maxExactCount, exactCount)
+	g.maxOutcomeCount = max(g.maxOutcomeCount, outcomeCount)
 	// Cycle detection includes the result. Repeating a polling action while its
 	// evidence changes is progress; repeating the same action/evidence sequence is not.
 	g.appendAction(exactKey)
@@ -215,7 +214,6 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 		return stopDecision("tool_call_limit", reason, g.toolCalls)
 	}
 
-	exactCount := g.exactCounts[exactKey]
 	if exactCount >= g.config.ExactRepeatLimit {
 		reason := fmt.Sprintf("%s repeated the same action and received the same result %d times", name, exactCount) + failureDetail
 		return g.repeatDecision("exact_repeat", reason, exactCount, success)
@@ -227,7 +225,6 @@ func (g *Governor) Observe(name, arguments, result string, success bool) Decisio
 		return g.repeatDecision("action_cycle", reason, g.config.CycleRepeats, cycleSucceeded)
 	}
 
-	outcomeCount := g.outcomeCounts[outcomeKey]
 	if outcomeCount >= g.config.OutcomeRepeatLimit {
 		reason := fmt.Sprintf("%s produced the same outcome %d times despite repeated attempts", name, outcomeCount) + failureDetail
 		return g.repeatDecision("outcome_repeat", reason, outcomeCount, success)
@@ -260,18 +257,14 @@ func (g *Governor) ObserveVerification(name, arguments string, outcome ToolOutco
 	}
 	key := digest(strings.TrimSpace(name) + "\x00" + canonicalToolValue(arguments, "{}"))
 	if !outcome.Success || !outcome.VerificationPassed {
-		delete(g.verificationCounts, key)
+		g.verificationCounts.forget(key)
 		return Decision{}
 	}
 	if !outcome.StateObserved || outcome.StateObservationFailed {
-		delete(g.verificationCounts, key)
+		g.verificationCounts.forget(key)
 		return Decision{}
 	}
-	if g.verificationCounts == nil {
-		g.verificationCounts = make(map[string]int)
-	}
-	g.verificationCounts[key]++
-	count := g.verificationCounts[key]
+	count := g.verificationCounts.observe(key)
 	g.maxVerificationCount = max(g.maxVerificationCount, count)
 	if count >= g.config.ExactRepeatLimit {
 		reason := fmt.Sprintf("%s repeated the same passing verification %d times without an observed workspace change", name, count)
@@ -350,18 +343,17 @@ func (g *Governor) RepetitionPressure() float64 {
 // both "new" say nothing about stagnation yet.
 const evidenceNoveltyMinSamples = 4
 
-// EvidenceNovelty reports the fraction of tool outcomes since the latest
-// successful observed state change that were first occurrences (0 = every
-// outcome was a repeat, 1 = all new), and whether enough outcomes exist for
-// the signal to mean anything. Outcome
-// identity uses the same canonicalized evidence hashing the repeat
-// detectors use: a changed content hash is new evidence, a re-read is not.
+// EvidenceNovelty reports distinct outcomes as a fraction of the recent
+// evidence window, cleared by a successful observed workspace change. It also
+// reports whether enough outcomes exist for the signal to mean anything.
+// Outcome identity uses the repeat detectors' canonicalized evidence hashes.
 func (g *Governor) EvidenceNovelty() (float64, bool) {
-	if g == nil || g.evidenceCalls == 0 {
+	if g == nil || len(g.outcomeCounts.history) == 0 {
 		return 0, false
 	}
-	novelty := float64(len(g.outcomeCounts)) / float64(g.evidenceCalls)
-	return novelty, g.evidenceCalls >= evidenceNoveltyMinSamples
+	calls := len(g.outcomeCounts.history)
+	novelty := float64(len(g.outcomeCounts.counts)) / float64(calls)
+	return novelty, calls >= evidenceNoveltyMinSamples
 }
 
 // ActionRequired reports whether discovery has crossed the action boundary.
