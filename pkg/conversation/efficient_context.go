@@ -524,11 +524,11 @@ func compactToolArguments(arguments string, limit int) string {
 		remaining = remaining[n:]
 	}
 	var digest [sha256.Size]byte
-	hasher.Sum(digest[:0])
+	sum := hasher.Sum(digest[:0])
 	summary := map[string]any{
 		"_buckley_compacted": true,
 		"original_bytes":     len(arguments),
-		"sha256":             hex.EncodeToString(digest[:6]),
+		"sha256":             hex.EncodeToString(sum[:6]),
 	}
 	var parsed map[string]argumentHint
 	if json.Unmarshal([]byte(arguments), &parsed) == nil {
