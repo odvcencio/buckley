@@ -516,20 +516,28 @@ func compactToolArguments(arguments string, limit int) string {
 	if len(arguments) <= limit {
 		return arguments
 	}
-	digest := sha256.Sum256([]byte(arguments))
+	hasher := sha256.New()
+	var block [32 << 10]byte
+	for remaining := arguments; len(remaining) > 0; {
+		n := copy(block[:], remaining)
+		hasher.Write(block[:n])
+		remaining = remaining[n:]
+	}
+	var digest [sha256.Size]byte
+	sum := hasher.Sum(digest[:0])
 	summary := map[string]any{
 		"_buckley_compacted": true,
 		"original_bytes":     len(arguments),
-		"sha256":             hex.EncodeToString(digest[:6]),
+		"sha256":             hex.EncodeToString(sum[:6]),
 	}
-	var parsed map[string]any
+	var parsed map[string]argumentHint
 	if json.Unmarshal([]byte(arguments), &parsed) == nil {
 		for _, key := range []string{"path", "file", "command", "query", "pattern", "url", "name"} {
 			value, ok := parsed[key]
 			if !ok {
 				continue
 			}
-			switch typed := value.(type) {
+			switch typed := value.value.(type) {
 			case string:
 				summary[key] = utf8Prefix(typed, 200)
 			case float64, bool:
