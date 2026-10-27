@@ -72,4 +72,12 @@ func TestLoop_WorklistProjectionMatchesFullHistory(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(projectedReport, fullReport) || RenderReport(projectedReport) != RenderReport(fullReport) {
 		t.Fatalf("report differs with full history: %+v, %v", fullReport, err)
 	}
+	goal, specs, err := loop.LoadGoal(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullGoal, fullSpecs, err := full.LoadGoal(ctx, runID)
+	if err != nil || !reflect.DeepEqual(goal, fullGoal) || !reflect.DeepEqual(specs, fullSpecs) {
+		t.Fatalf("restored goal or task specifications differ with full history: %+v, %v", fullGoal, err)
+	}
 }
