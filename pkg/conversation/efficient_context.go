@@ -221,6 +221,16 @@ func firstUserMessageIndex(messages []model.Message) int {
 // available results from the same batch. Dropping a completed sibling's result
 // would make provider repair falsely describe it as unfinished.
 func incompleteToolExchangeIndices(messages []model.Message) map[int]bool {
+	hasCalls := false
+	for _, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			hasCalls = true
+			break
+		}
+	}
+	if !hasCalls {
+		return make(map[int]bool)
+	}
 	answered := make(map[string]bool)
 	for _, msg := range messages {
 		if msg.Role == "tool" && msg.ToolCallID != "" {
@@ -294,10 +304,8 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, inc
 				msg.Content = compactHistoricalContent(content, opts.OldToolBytes, "tool output")
 			}
 		case "assistant":
-			if !incompleteExchanges[i] {
-				msg.Reasoning = ""
-				msg.ReasoningDetails = nil
-			}
+			msg.Reasoning = ""
+			msg.ReasoningDetails = nil
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, opts.OldToolArgumentBytes)
 			} else {
@@ -328,10 +336,8 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, inc
 				msg.Content = compactHistoricalContent(content, 192, "tool output")
 			}
 		case "assistant":
-			if !incompleteExchanges[i] {
-				msg.Reasoning = ""
-				msg.ReasoningDetails = nil
-			}
+			msg.Reasoning = ""
+			msg.ReasoningDetails = nil
 			if len(msg.ToolCalls) > 0 {
 				compactToolCallArguments(msg.ToolCalls, 192)
 			} else if content, ok := msg.Content.(string); ok {
