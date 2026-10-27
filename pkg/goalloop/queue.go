@@ -38,11 +38,11 @@ func retryDue(blocker *taskstate.Blocker) bool {
 // the restart path too: a crashed process calls BuildQueue and continues
 // (design section 5.3).
 func (l *Loop) BuildQueue(ctx context.Context, runID string) ([]QueueItem, error) {
-	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID})
+	events, err := l.ledger.ListEvents(ctx, runledger.EventQuery{RunID: runID, Types: []string{runledger.EventTaskCreated}})
 	if err != nil {
 		return nil, fmt.Errorf("goalloop: list events: %w", err)
 	}
-	state, err := runledger.MaterializeRun(runID, events)
+	createdByTask, err := firstCreatedByTask(runID, events)
 	if err != nil {
 		return nil, fmt.Errorf("goalloop: materialize run: %w", err)
 	}
@@ -52,9 +52,8 @@ func (l *Loop) BuildQueue(ctx context.Context, runID string) ([]QueueItem, error
 		seq  int64
 	}
 	var items []ordered
-	for taskID, task := range state.Tasks {
-		created, ok := firstCreated(task.Events)
-		if !ok || payloadString(created.Payload, "kind") != "task" {
+	for taskID, created := range createdByTask {
+		if payloadString(created.Payload, "kind") != "task" {
 			continue
 		}
 
@@ -101,13 +100,26 @@ func (l *Loop) BuildQueue(ctx context.Context, runID string) ([]QueueItem, error
 	return queue, nil
 }
 
-func firstCreated(events []runledger.Event) (runledger.Event, bool) {
-	for _, ev := range events {
-		if ev.Type == runledger.EventTaskCreated {
-			return ev, true
+// Selected event streams contain intentional sequence gaps. Keep the first
+// creation facts without expanding those gaps into an audit-sized slice.
+func firstCreatedByTask(runID string, events []runledger.Event) (map[string]runledger.Event, error) {
+	created := map[string]runledger.Event{}
+	var lastSequence int64
+	for i, ev := range events {
+		if ev.RunID != "" && ev.RunID != runID {
+			return nil, fmt.Errorf("event %s belongs to run %s, not %s", ev.ID, ev.RunID, runID)
+		}
+		if i > 0 && ev.Sequence <= lastSequence {
+			return nil, fmt.Errorf("events out of order at index %d: sequence %d did not increase past %d", i, ev.Sequence, lastSequence)
+		}
+		lastSequence = ev.Sequence
+		if ev.Type == runledger.EventTaskCreated && ev.TaskID != "" {
+			if _, exists := created[ev.TaskID]; !exists {
+				created[ev.TaskID] = ev
+			}
 		}
 	}
-	return runledger.Event{}, false
+	return created, nil
 }
 
 func payloadString(payload map[string]any, key string) string {
