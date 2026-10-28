@@ -179,3 +179,43 @@ func TestFormatSubagentCommandResult_StatusShowsBoundedFindings(t *testing.T) {
 		t.Fatalf("status lost findings or exceeded its budget: bytes=%d", len(message))
 	}
 }
+
+func TestHandleCommand_SubagentInstructionsPreserveFormatting(t *testing.T) {
+	tests := []struct {
+		name, text string
+		want       map[string]any
+	}{
+		{name: "multiline spawn", text: "/agent spawn @reviewer - Review:\n- first\n- second", want: map[string]any{"action": "spawn", "agent": "reviewer", "initial_task": "Review:\n- first\n- second"}},
+		{name: "tabs and quotes", text: "/agent\tsend\tall\tRun \"go test\"\tthen check", want: map[string]any{"action": "send", "id": "all", "message": "Run \"go test\"\tthen check"}},
+		{name: "unicode and leading whitespace", text: " \t/agent\u2003steer\u2003agent:reviewer\u2003Inspect café\n  λ", want: map[string]any{"action": "steer", "id": "agent:reviewer", "message": "Inspect café\n  λ"}},
+		{name: "multiline cancel reason", text: "/agent cancel all Please stop:\n  task complete", want: map[string]any{"action": "cancel", "id": "all", "reason": "Please stop:\n  task complete"}},
+		{name: "uppercase alias", text: "/AGENTS", want: map[string]any{"action": "list"}},
+		{name: "unicode fold is not alias", text: "/agentſ"},
+		{name: "blank", text: "/agent \t\n", want: map[string]any{"action": "list"}},
+		{name: "missing body", text: "/agent send all\t"},
+		{name: "invalid action", text: "/agent wat x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app, err := NewWidgetApp(WidgetAppConfig{Backend: sim.New(80, 24)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(app.finalizeBackend)
+			registry := tool.NewEmptyRegistry()
+			probe := &subagentPageProbeTool{}
+			registry.Register(probe)
+			controller := &Controller{app: app, sessions: []*SessionState{{ToolRegistry: registry}}, currentSession: 0}
+			controller.handleCommand(tc.text)
+			if tc.want == nil {
+				if len(probe.calls) != 0 {
+					t.Fatalf("unexpected calls: %#v", probe.calls)
+				}
+				return
+			}
+			if len(probe.calls) != 1 || !reflect.DeepEqual(probe.calls[0], tc.want) {
+				t.Fatalf("calls = %#v, want %#v", probe.calls, tc.want)
+			}
+		})
+	}
+}

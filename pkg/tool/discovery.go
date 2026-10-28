@@ -148,10 +148,10 @@ func (t *DiscoveryTool) Execute(params map[string]any) (*builtin.Result, error) 
 			"description": match.tool.Description(),
 		})
 	}
-	t.registry.SetDiscoveredTools(names...)
 	if len(items) == 0 {
 		return &builtin.Result{Success: false, Error: "no matching tools found"}, nil
 	}
+	t.registry.SetDiscoveredTools(names...)
 	return &builtin.Result{Success: true, Data: map[string]any{
 		"enabled": items,
 		"hint":    "The enabled tool schemas will be available on the next model turn.",
