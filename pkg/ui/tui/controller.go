@@ -699,6 +699,16 @@ func parseTUITaskIntent(raw string) (agentloop.TaskIntent, error) {
 
 // handleCommand processes slash commands.
 func (c *Controller) handleCommand(text string) {
+	trimmed := strings.TrimLeftFunc(text, unicode.IsSpace)
+	commandEnd := strings.IndexFunc(trimmed, unicode.IsSpace)
+	if commandEnd < 0 {
+		commandEnd = len(trimmed)
+	}
+	command := strings.ToLower(trimmed[:commandEnd])
+	if command == "/agent" || command == "/agents" {
+		c.handleSubagentCommand(subagentCommandArgs(trimmed[commandEnd:]))
+		return
+	}
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
 		return
@@ -783,9 +793,6 @@ func (c *Controller) handleCommand(text string) {
 
 	case "/task":
 		c.handleTaskCommand(text, parts[0])
-
-	case "/agent", "/agents":
-		c.handleSubagentCommand(parts[1:])
 
 	case "/plans":
 		c.showPlans()

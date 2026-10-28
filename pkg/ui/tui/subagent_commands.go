@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"m31labs.dev/buckley/pkg/agentcoord"
 	"m31labs.dev/buckley/pkg/tool/builtin"
@@ -22,6 +23,49 @@ const subagentCommandUsage = `Subagent commands:
 type parsedSubagentCommand struct {
 	action string
 	params map[string]any
+}
+
+// subagentCommandArgs separates routing tokens while preserving instruction text.
+func subagentCommandArgs(text string) []string {
+	pop := func(s string) (string, string) {
+		s = strings.TrimLeftFunc(s, unicode.IsSpace)
+		if i := strings.IndexFunc(s, unicode.IsSpace); i >= 0 {
+			return s[:i], strings.TrimLeftFunc(s[i:], unicode.IsSpace)
+		}
+		return s, ""
+	}
+	action, rest := pop(text)
+	if action == "" {
+		return nil
+	}
+	args := []string{action}
+	switch strings.ToLower(action) {
+	case "spawn":
+		first, remaining := pop(rest)
+		if strings.HasPrefix(first, "@") {
+			args = append(args, first)
+			rest = remaining
+			first, remaining = pop(rest)
+		}
+		if first == "-" {
+			args = append(args, first)
+			rest = remaining
+		}
+		if rest != "" {
+			args = append(args, rest)
+		}
+	case "send", "steer", "cancel":
+		target, remaining := pop(rest)
+		if target != "" {
+			args = append(args, target)
+		}
+		if remaining != "" {
+			args = append(args, remaining)
+		}
+	default:
+		args = append(args, strings.Fields(rest)...)
+	}
+	return args
 }
 
 func parseSubagentCommand(args []string) (parsedSubagentCommand, error) {
