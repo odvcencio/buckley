@@ -613,6 +613,10 @@ type ControllerConfig struct {
 	// provider names, prompt text, or final prose.
 	CompletionContract *CompletionContract
 
+	// StopOnUnavailableVerification stops after the configured unavailable
+	// verification streak when a changed workspace remains unverified.
+	StopOnUnavailableVerification bool
+
 	// RunLedger, when set, receives one event per model request
 	// (started/completed/failed), one per tool-dispatch batch, and one per
 	// controller stop decision. RunID and SessionID identify the events;
@@ -1099,6 +1103,19 @@ func (c *Controller) Run(ctx context.Context) (result *Result, runErr error) {
 		result.Progress = progress.Snapshot()
 		if toolErr != nil {
 			return result, c.markToolRoundInterrupted(result, toolErr)
+		}
+		if !stopDecision.Stop && c.cfg.StopOnUnavailableVerification && contractEnabled && contract.MaxVerificationUnavailable > 0 && result.Progress.VerificationUnavailableStreak >= contract.MaxVerificationUnavailable {
+			var contractErr *CompletionContractError
+			if err := contract.evaluate(result.Progress); errors.As(err, &contractErr) && contractErr.Reason == CompletionMissingPostChangeVerification {
+				reason := fmt.Sprintf("%d verification attempts in a row could not run; the latest changes remain unverified", result.Progress.VerificationUnavailableStreak)
+				if why := strings.TrimSpace(result.Progress.lastUnavailableReason); why != "" {
+					reason += ": " + why
+				}
+				result.CompletionStatus = CompletionIncomplete
+				result.Termination = Termination{Kind: TerminationVerificationStalled, Code: "verification_unavailable", Reason: reason}
+				c.recordDecision(ctx, result.Termination.Kind, reason)
+				return result, result.RequireConclusive()
+			}
 		}
 		if contractEnabled && contract.SubmittedResponse != nil && !toolCallsClipped {
 			successfulRound := true

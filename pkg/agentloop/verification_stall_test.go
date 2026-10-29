@@ -479,3 +479,99 @@ func TestController_ContinuationInstructionExplainsHowToVerify(t *testing.T) {
 		t.Errorf("the persistence instruction must tell the model what to do when nothing can verify: %s", PersistenceInstruction)
 	}
 }
+func TestController_UnavailableVerificationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rounds       [][]string
+		enabled      bool
+		identical    bool
+		wantRequests int
+		wantStop     bool
+	}{
+		{name: "distinct", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable}}, enabled: true, wantRequests: 4, wantStop: true},
+		{name: "identical", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable}}, enabled: true, identical: true, wantRequests: 4},
+		{name: "before change", rounds: [][]string{{stepUnavailable}, {stepUnavailable}, {stepUnavailable}}, enabled: true, wantRequests: 4},
+		{name: "failed verification stays failed", rounds: [][]string{{stepEdit}, {stepFail}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable}}, enabled: true, wantRequests: 7},
+		{name: "disabled", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable}}, wantRequests: 6},
+		{name: "mutation resets", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepEdit}, {stepUnavailable}, {stepUnavailable}}, enabled: true, wantRequests: 8},
+		{name: "verification resets", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepPass}}, enabled: true, wantRequests: 5},
+		{name: "parallel mutation resets", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable, stepEdit}}, enabled: true, wantRequests: 6},
+		{name: "parallel verification resets", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable, stepPass}}, enabled: true, wantRequests: 5},
+		{name: "parallel full batch persisted", rounds: [][]string{{stepEdit}, {stepUnavailable}, {stepUnavailable}, {stepUnavailable, stepUnavailable}}, enabled: true, wantRequests: 4, wantStop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			history := &recordingHistory{}
+			contract := CompletionContract{RequirePostChangeVerification: true, MaxVerificationUnavailable: 3}
+			requests := 0
+			stops := 0
+			cfg := ControllerConfig{OnStop: func(Termination) { stops++ }, CompletionContract: &contract, StopOnUnavailableVerification: tc.enabled, History: history,
+				BuildRequest: func(context.Context, int) (model.ChatRequest, error) {
+					r := testToolRequest(model.ChatRequest{Model: "test", Messages: history.messages})
+					p := true
+					r.ParallelToolCalls = &p
+					return r, nil
+				},
+				CallModel: ModelCallerFunc(func(_ context.Context, _ model.ChatRequest, _ bool) (*model.ChatResponse, error) {
+					requests++
+					if requests > len(tc.rounds) {
+						return textResponse("done", model.Usage{}), nil
+					}
+					response := &model.ChatResponse{Choices: []model.Choice{{FinishReason: "tool_calls", Message: model.Message{Role: "assistant"}}}}
+					for i, kind := range tc.rounds[requests-1] {
+						args := fmt.Sprintf(`{"round":%d,"index":%d}`, requests, i)
+						if tc.identical && kind == stepUnavailable {
+							args = `{}`
+						}
+						response.Choices[0].Message.ToolCalls = append(response.Choices[0].Message.ToolCalls, model.ToolCall{ID: fmt.Sprintf("%s-%d-%d", kind, requests, i), Type: "function", Function: model.FunctionCall{Name: "test_tool", Arguments: args}})
+					}
+					return response, nil
+				}),
+				DispatchTools: ToolDispatcherFunc(func(_ context.Context, calls []model.ToolCall) ([]ToolOutcome, error) {
+					out := make([]ToolOutcome, len(calls))
+					for i, call := range calls {
+						kind, _, _ := strings.Cut(call.ID, "-")
+						out[i] = stallOutcome(kind)
+					}
+					return out, nil
+				}),
+			}
+			c, err := NewController(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, runErr := c.Run(context.Background())
+			if requests != tc.wantRequests {
+				t.Fatalf("requests=%d, want %d; result=%+v err=%v", requests, tc.wantRequests, result, runErr)
+			}
+			if tc.wantStop {
+				notice := PresentIncompleteResult(runErr)
+				if notice.Code != "verification_unavailable" || !strings.Contains(notice.Message, "unverified") || !strings.Contains(notice.NextAction, "addressing the reason") {
+					t.Fatalf("notice = %+v", notice)
+				}
+				if stops != 1 {
+					t.Fatalf("stop callbacks=%d, want 1", stops)
+				}
+				if runErr == nil || result.CompletionStatus != CompletionIncomplete || result.Termination.Kind != TerminationVerificationStalled || !strings.Contains(result.Termination.Reason, "unverified") {
+					t.Fatalf("result=%+v err=%v", result, runErr)
+				}
+				count := 0
+				for _, m := range history.messages {
+					if m.Role == "tool" {
+						count++
+					}
+				}
+				want := 0
+				for _, round := range tc.rounds {
+					want += len(round)
+				}
+				if count != want {
+					t.Fatalf("recorded tool results=%d, want %d", count, want)
+				}
+			} else if tc.identical && result.Termination.Kind != "exact_repeat" {
+				t.Fatalf("hard governor stop was replaced: %+v", result.Termination)
+			} else if result.Termination.Kind == TerminationVerificationStalled {
+				t.Fatalf("unexpected unavailable stop: %+v", result.Termination)
+			}
+		})
+	}
+}
