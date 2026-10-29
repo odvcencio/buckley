@@ -58,6 +58,9 @@ type WrappedLine struct {
 // Line represents a single line in the buffer.
 type Line struct {
 	Content      string
+	TargetID     uint64
+	Targeted     bool
+	Auxiliary    bool
 	Style        LineStyle
 	Timestamp    time.Time
 	Source       string // "user", "assistant", "system", "tool"
@@ -189,6 +192,7 @@ func (b *Buffer) AppendAuxLine(content string, style LineStyle, source string) {
 		Style:     style,
 		Timestamp: time.Now(),
 		Source:    source,
+		Auxiliary: true,
 	}
 	b.appendLineLocked(line, false)
 }
@@ -236,12 +240,163 @@ func (b *Buffer) ReplaceLastMessage(lines []Line) {
 	}
 }
 
+// AppendTargetMessage appends a message whose surviving lines can be replaced by ID.
+func (b *Buffer) AppendTargetMessage(id uint64, lines []Line) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lastMessageStart = len(b.lines)
+	b.hasLastMessage = true
+	for _, line := range lines {
+		line.Targeted, line.TargetID = true, id
+		b.appendLineLocked(line, false)
+	}
+}
+
+// TargetSource returns the source of a still-visible target.
+func (b *Buffer) TargetSource(id uint64) (string, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for i := len(b.lines) - 1; i >= 0; i-- {
+		if b.lines[i].Targeted && b.lines[i].TargetID == id {
+			return b.lines[i].Source, true
+		}
+	}
+	return "", false
+}
+
+// ReplaceTargetMessage replaces only the surviving contiguous lines for id.
+// A fully evicted or ended target is never redirected to another message.
+func (b *Buffer) ReplaceTargetMessage(id uint64, lines []Line) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	end := len(b.lines)
+	for end > 0 && !(b.lines[end-1].Targeted && b.lines[end-1].TargetID == id) {
+		end--
+	}
+	if end == 0 {
+		return false
+	}
+	start := end - 1
+	for start > 0 && b.lines[start-1].Targeted && b.lines[start-1].TargetID == id {
+		start--
+	}
+	b.spliceTargetLocked(start, end, id, lines)
+	return true
+}
+
+// InsertTargetMessageBefore inserts a target immediately before a live anchor.
+func (b *Buffer) InsertTargetMessageBefore(id, beforeID uint64, lines []Line) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	start := -1
+	for i := range b.lines {
+		if b.lines[i].Targeted && b.lines[i].TargetID == beforeID {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return false
+	}
+	b.spliceTargetLocked(start, start, id, lines)
+	return true
+}
+
+func (b *Buffer) spliceTargetLocked(start, end int, id uint64, lines []Line) {
+	if len(lines) == 0 {
+		lines = []Line{{}}
+	}
+	rowsBefore := 0
+	if b.scrollMode == ScrollModeManual {
+		for _, line := range b.lines[:start] {
+			rowsBefore += len(line.Wrapped)
+		}
+	}
+	oldRows := 0
+	for _, line := range b.lines[start:end] {
+		oldRows += len(line.Wrapped)
+		b.bytes -= lineRetainedBytes(line)
+	}
+	prepared := make([]Line, len(lines))
+	for i, line := range lines {
+		line.Targeted, line.TargetID = true, id
+		if line.Timestamp.IsZero() {
+			line.Timestamp = time.Now()
+		}
+		line.Content, line.Source, line.Language = strings.Clone(line.Content), strings.Clone(line.Source), strings.Clone(line.Language)
+		line.Style.Prefix = strings.Clone(line.Style.Prefix)
+		line.Spans, line.Prefix = cloneLineSpans(line.Spans), cloneLineSpans(line.Prefix)
+		line.Wrapped = wrapLineWithSpans(line.Content, line.Spans, line.Prefix, b.width-2, line.IsCode)
+		prepared[i] = line
+		b.totalRows += len(line.Wrapped)
+		b.bytes += lineRetainedBytes(line)
+	}
+	b.totalRows -= oldRows
+	newRows := 0
+	for _, line := range prepared {
+		newRows += len(line.Wrapped)
+	}
+	if b.scrollMode == ScrollModeManual && b.scrollTop >= rowsBefore+oldRows {
+		b.scrollTop += newRows - oldRows
+	}
+	delta := len(prepared) - (end - start)
+	if end == len(b.lines) {
+		clear(b.lines[start:end])
+		b.lines = append(b.lines[:start], prepared...)
+	} else {
+		updated := make([]Line, 0, len(b.lines)+delta)
+		updated = append(updated, b.lines[:start]...)
+		updated = append(updated, prepared...)
+		updated = append(updated, b.lines[end:]...)
+		b.lines = updated
+	}
+	if b.hasLastMessage {
+		if b.lastMessageStart >= end {
+			b.lastMessageStart += delta
+		} else if b.lastMessageStart >= start {
+			b.lastMessageStart = start
+		}
+	}
+	if b.hasSelection || b.selecting {
+		first, last := min(b.selStart.Line, b.selEnd.Line), max(b.selStart.Line, b.selEnd.Line)
+		if start != end && first < end && last >= start {
+			b.selecting, b.hasSelection = false, false
+			b.selStart, b.selEnd = Position{}, Position{}
+		} else {
+			if b.selStart.Line >= end {
+				b.selStart.Line += delta
+			}
+			if b.selEnd.Line >= end {
+				b.selEnd.Line += delta
+			}
+		}
+	}
+	b.trimExcess()
+	b.searchLocked(b.searchQuery)
+	if b.scrollMode == ScrollModeFollow {
+		b.scrollToBottom()
+	} else {
+		b.clampScroll()
+	}
+}
+
+// EndTarget retires the identity without changing the visible message.
+func (b *Buffer) EndTarget(id uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := range b.lines {
+		if b.lines[i].Targeted && b.lines[i].TargetID == id {
+			b.lines[i].Targeted = false
+		}
+	}
+}
+
 // AppendText appends text to the last line (for streaming).
 func (b *Buffer) AppendText(text string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if len(b.lines) == 0 {
+	if len(b.lines) == 0 || b.lines[len(b.lines)-1].Targeted {
 		return
 	}
 
@@ -315,39 +470,65 @@ func (b *Buffer) Clear() {
 	b.hasLastMessage = false
 }
 
-// RemoveLastLineIfSource removes the last line if it has the given source.
-// Returns true if a line was removed.
-func (b *Buffer) RemoveLastLineIfSource(source string) bool {
+// RemoveAuxLinesIfSource removes all auxiliary lines of the given source.
+func (b *Buffer) RemoveAuxLinesIfSource(source string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if len(b.lines) == 0 {
+	removedAny := false
+	for index := len(b.lines) - 1; index >= 0; index-- {
+		removed := b.lines[index]
+		if !removed.Auxiliary || removed.Source != source {
+			continue
+		}
+		removedAny = true
+		if b.scrollMode == ScrollModeManual {
+			rowsBefore := 0
+			for _, line := range b.lines[:index] {
+				rowsBefore += len(line.Wrapped)
+			}
+			if b.scrollTop >= rowsBefore+len(removed.Wrapped) {
+				b.scrollTop -= len(removed.Wrapped)
+			}
+		}
+		b.totalRows -= len(removed.Wrapped)
+		b.bytes -= lineRetainedBytes(removed)
+		copy(b.lines[index:], b.lines[index+1:])
+		b.lines[len(b.lines)-1] = Line{}
+		b.lines = b.lines[:len(b.lines)-1]
+		if b.hasSelection || b.selecting {
+			first, last := min(b.selStart.Line, b.selEnd.Line), max(b.selStart.Line, b.selEnd.Line)
+			if first <= index && last >= index {
+				b.selecting, b.hasSelection = false, false
+				b.selStart, b.selEnd = Position{}, Position{}
+			} else {
+				if b.selStart.Line > index {
+					b.selStart.Line--
+				}
+				if b.selEnd.Line > index {
+					b.selEnd.Line--
+				}
+			}
+		}
+		if b.hasLastMessage {
+			if b.lastMessageStart > index {
+				b.lastMessageStart--
+			}
+			if b.lastMessageStart >= len(b.lines) {
+				b.hasLastMessage = false
+				b.lastMessageStart = 0
+			}
+		}
+	}
+	if !removedAny {
 		return false
 	}
-
-	last := b.lines[len(b.lines)-1]
-	if last.Source != source {
-		return false
-	}
-
-	// Remove the line
-	b.totalRows -= len(last.Wrapped)
-	b.bytes -= lineRetainedBytes(last)
-	b.lines[len(b.lines)-1] = Line{}
-	b.lines = b.lines[:len(b.lines)-1]
-
-	// Adjust scroll if needed
+	b.searchLocked(b.searchQuery)
 	if b.scrollMode == ScrollModeFollow {
 		b.scrollToBottom()
 	} else {
 		b.clampScroll()
 	}
-
-	if b.hasLastMessage && b.lastMessageStart >= len(b.lines) {
-		b.hasLastMessage = false
-		b.lastMessageStart = 0
-	}
-
 	return true
 }
 
@@ -498,6 +679,10 @@ func (b *Buffer) Search(query string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	return b.searchLocked(query)
+}
+
+func (b *Buffer) searchLocked(query string) int {
 	b.searchQuery = query
 	b.searchMatches = nil
 	b.searchIndex = 0
@@ -817,6 +1002,9 @@ func (b *Buffer) trimExcess() {
 		evicted = true
 		removed := b.lines[0]
 		b.totalRows -= len(removed.Wrapped)
+		if b.scrollMode == ScrollModeManual {
+			b.scrollTop = max(0, b.scrollTop-len(removed.Wrapped))
+		}
 		b.bytes -= lineRetainedBytes(removed)
 		b.lines[0] = Line{}
 		b.lines = b.lines[1:]
@@ -828,7 +1016,7 @@ func (b *Buffer) trimExcess() {
 		}
 
 		// Adjust selection indices
-		if b.hasSelection {
+		if b.hasSelection || b.selecting {
 			b.selStart.Line--
 			b.selEnd.Line--
 			if b.selStart.Line < 0 || b.selEnd.Line < 0 {

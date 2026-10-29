@@ -43,6 +43,10 @@ func renderConversationHistoryWith(addMessage func(content, source string), mess
 		content := conversation.GetContentAsString(msg.Content)
 		switch msg.Role {
 		case "assistant":
+			if strings.TrimSpace(content) != "" && len(msg.ToolCalls) > 0 {
+				flushProgress()
+				addMessage(content, "assistant")
+			}
 			if strings.TrimSpace(msg.Reasoning) != "" || len(msg.ToolCalls) > 0 {
 				startProgress()
 				if reasoning := strings.TrimSpace(msg.Reasoning); reasoning != "" {
@@ -77,18 +81,35 @@ func renderConversationHistoryWith(addMessage func(content, source string), mess
 }
 
 func storedCodeModeRecovery(content string) string {
-	const marker = "CODE MODE RECOVERY:"
-	index := strings.Index(content, marker)
+	index := recoverySuffixStart(content)
 	if index < 0 {
 		return ""
 	}
 	return strings.TrimSpace(content[index:])
 }
 
+func recoverySuffixStart(content string) int {
+	const marker = "CODE MODE RECOVERY:"
+	if strings.HasPrefix(content, marker) {
+		return 0
+	}
+	if i := strings.Index(content, "\n\n"+marker); i >= 0 {
+		return i + 2
+	}
+	if i := strings.Index(content, `\n\n`+marker); i >= 0 {
+		return i + 4
+	}
+	return -1
+}
+
 func storedToolResultProgressSummary(name, content string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "tool"
+	}
+	// Recovery guidance is rendered separately below the tool result.
+	if index := recoverySuffixStart(content); index >= 0 {
+		content = strings.TrimSuffix(content[:index], `\n\n`)
 	}
 	detail := storedToolError(content)
 	if detail != "" {

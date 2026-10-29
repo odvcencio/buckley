@@ -74,6 +74,7 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 	sess := &SessionState{ID: "session-1", Conversation: conv}
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
+	app.bindPresentationSession(sess.ID)
 
 	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
@@ -106,6 +107,8 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 	sawStreamDone := false
 	for _, m := range drainAllMessages(app) {
 		switch v := m.(type) {
+		case presentationUpdate:
+			seeds++
 		case AddMessageMsg:
 			if v.Source == "assistant" && v.Content == "" {
 				seeds++
@@ -121,16 +124,21 @@ func TestRunToolLoopStreamsAssistantTextLiveWithoutDoubleRender(t *testing.T) {
 		case StreamDone:
 			sawStreamDone = true
 		}
+		app.processMessage(m)
 	}
 
 	if seeds != 1 {
-		t.Fatalf("expected exactly one seeded empty assistant bubble, got %d", seeds)
+		t.Fatalf("expected exactly one targeted assistant seed, got %d", seeds)
 	}
 	if discreteFinal != 0 {
 		t.Fatalf("final answer was double-rendered as a discrete AddMessage %d time(s)", discreteFinal)
 	}
 	if !sawStreamDone {
 		t.Fatal("expected a StreamDone message to close the streamed bubble")
+	}
+	app.chatView.Search(result.Text)
+	if _, count := app.chatView.SearchMatches(); count != 1 {
+		t.Fatalf("visible answer count = %d, want 1", count)
 	}
 	if streamedText.String() != result.Text {
 		t.Fatalf("streamed text = %q, want it to equal the final persisted content %q exactly", streamedText.String(), result.Text)

@@ -305,7 +305,10 @@ func NewController(cfg ControllerConfig) (*Controller, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create TUI app: %w", err)
 	}
-	app.chatView.SetMemoryBudget(sessionWorkingMemoryBytes(cfg.Config) / 2)
+	chatBudget := sessionWorkingMemoryBytes(cfg.Config) / 2
+	liveBudget := chatBudget / 32
+	app.chatView.SetMemoryBudget(chatBudget - liveBudget)
+	app.live = newLivePresentation(liveBudget, 256)
 
 	ctrl := &Controller{
 		historyClock:        1,
@@ -561,6 +564,7 @@ func (c *Controller) Run() error {
 		c.app.addMessageImmediately(fmt.Sprintf("Resuming session: %s (%d messages)", sess.ID, len(sess.Conversation.Messages)), "system")
 		renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
 	}
+	c.app.bindPresentationSession(sess.ID)
 
 	// Run the app
 	return c.app.Run()
@@ -1299,6 +1303,7 @@ func (c *Controller) newSession() {
 	// Clear scrollback and show fresh welcome
 	c.app.ClearScrollback()
 	c.app.WelcomeScreen()
+	c.app.bindPresentationSession(newSessionID)
 	c.app.AddMessage("New session started: "+newSessionID, "system")
 	if cacheErr != nil {
 		c.app.AddMessage("Keeping inactive history in memory: "+cacheErr.Error(), "system")
@@ -1706,6 +1711,7 @@ func (c *Controller) switchToSessionLocked(idx int) {
 
 	// Replay conversation to display
 	renderConversationHistoryImmediately(c.app, sess.Conversation.Messages)
+	c.app.bindPresentationSession(sess.ID)
 	if cacheErr != nil {
 		c.app.addMessageImmediately("Keeping inactive history in memory: "+cacheErr.Error(), "system")
 	}

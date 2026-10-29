@@ -50,6 +50,11 @@ func streamFingerprint(sessionID string) [16]byte {
 	return fingerprint
 }
 
+type coalescerBuffer struct {
+	strings.Builder
+	targeted bool
+}
+
 type coalescerPublication struct {
 	msg      Message
 	bytes    int
@@ -81,7 +86,7 @@ type CoalescerSnapshot struct {
 // always run after unlocking it.
 type Coalescer struct {
 	mu          sync.Mutex
-	buffers     map[streamKey]*strings.Builder
+	buffers     map[streamKey]*coalescerBuffer
 	lastAdd     map[streamKey]time.Time
 	bufferBytes int
 
@@ -128,7 +133,7 @@ func NewCoalescer(cfg CoalescerConfig, post func(Message)) *Coalescer {
 		cfg.MaxWait = 16 * time.Millisecond
 	}
 	return &Coalescer{
-		buffers:         make(map[streamKey]*strings.Builder),
+		buffers:         make(map[streamKey]*coalescerBuffer),
 		lastAdd:         make(map[streamKey]time.Time),
 		boundaryMarkers: make(map[streamBoundaryKey]struct{}),
 		maxChars:        cfg.MaxChars,
@@ -144,6 +149,10 @@ func (c *Coalescer) Add(sessionID, text string) {
 
 // AddStream queues a chunk for one concrete stream generation.
 func (c *Coalescer) AddStream(sessionID string, generation uint64, text string) {
+	c.addStream(sessionID, generation, text, false)
+}
+
+func (c *Coalescer) addStream(sessionID string, generation uint64, text string, targeted bool) {
 	if text == "" {
 		return
 	}
@@ -173,7 +182,7 @@ func (c *Coalescer) AddStream(sessionID string, generation uint64, text string) 
 	if buf == nil {
 		if len(text) >= c.maxChars {
 			startPublisher = c.enqueuePublicationLocked(StreamFlush{
-				SessionID: key.sessionID, Generation: key.generation, Text: text,
+				SessionID: key.sessionID, Generation: key.generation, Text: text, Targeted: targeted,
 			}, false)
 			c.mu.Unlock()
 			c.drainPublications(startPublisher)
@@ -186,19 +195,20 @@ func (c *Coalescer) AddStream(sessionID string, generation uint64, text string) 
 			c.drainPublications(startPublisher)
 			return
 		}
-		buf = &strings.Builder{}
+		buf = &coalescerBuffer{targeted: targeted}
 		c.buffers[key] = buf
 		c.lastAdd[key] = time.Now()
 		c.bufferBytes += len(key.sessionID)
 	}
 
+	buf.targeted = buf.targeted || targeted
 	if buf.Len()+len(text) >= c.maxChars || c.bufferBytes-buf.Cap()+buf.Len()+len(text) > coalescerBufferMaxBytes {
 		existing := strings.Clone(buf.String())
 		c.bufferBytes -= len(key.sessionID) + buf.Cap()
 		delete(c.buffers, key)
 		delete(c.lastAdd, key)
 		startPublisher = c.enqueuePublicationLocked(StreamFlush{
-			SessionID: key.sessionID, Generation: key.generation, Text: existing + text,
+			SessionID: key.sessionID, Generation: key.generation, Text: existing + text, Targeted: buf.targeted,
 		}, false)
 		c.mu.Unlock()
 		c.drainPublications(startPublisher)
@@ -290,21 +300,28 @@ func (c *Coalescer) FlushAndPost(sessionID string, after Message) {
 // FlushAndPostStream atomically sequences a generation's final flush before
 // its boundary. A publisher already in flight drains both in FIFO order.
 func (c *Coalescer) FlushAndPostStream(sessionID string, generation uint64, after Message) {
+	c.flushAndPostStream(sessionID, generation, after)
+}
+
+func (c *Coalescer) flushAndPostStream(sessionID string, generation uint64, after Message) bool {
 	key := streamKey{sessionID: sessionID, generation: generation}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	startPublisher := false
+	rejected := c.rejected
 	if flush, ok := c.detachLocked(key); ok {
 		startPublisher = c.enqueuePublicationLocked(flush, false)
 	}
 	if c.enqueuePublicationLocked(after, true) {
 		startPublisher = true
 	}
+	ok := c.rejected == rejected
 	c.mu.Unlock()
 	c.drainPublications(startPublisher)
+	return ok
 }
 
 func (c *Coalescer) detachLocked(key streamKey) (StreamFlush, bool) {
@@ -316,7 +333,7 @@ func (c *Coalescer) detachLocked(key streamKey) (StreamFlush, bool) {
 	c.bufferBytes -= len(key.sessionID) + buf.Cap()
 	delete(c.buffers, key)
 	delete(c.lastAdd, key)
-	return StreamFlush{SessionID: key.sessionID, Generation: key.generation, Text: text}, true
+	return StreamFlush{SessionID: key.sessionID, Generation: key.generation, Text: text, Targeted: buf.targeted}, true
 }
 
 func (c *Coalescer) enqueuePublicationLocked(msg Message, boundary bool) bool {

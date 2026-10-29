@@ -68,6 +68,13 @@ func (c *Controller) streamResponseTurn(ctx context.Context, prompt string, sess
 		return ctx.Err() == context.Canceled
 	}
 	if c.handleStreamError(ctx, err) {
+		c.mu.Lock()
+		saveFailed := sess.persistenceErr != nil
+		c.mu.Unlock()
+		if !saveFailed {
+			c.app.retirePresentation(result.presentationTextID)
+			c.app.retirePresentation(result.presentationReasonID)
+		}
 		return ctx.Err() == context.Canceled
 	}
 
@@ -192,33 +199,54 @@ func (c *Controller) renderIncompleteStreamResponse(sess *SessionState, result t
 		}
 	}
 	text := strings.TrimSpace(result.Text)
-	c.persistAndRenderIncompleteNotice(sess, detail)
-	if text == "" {
-		return
+	c.mu.Lock()
+	noticeErr := c.persistAndRenderIncompleteNotice(sess, detail)
+	var draftErr error
+	if text != "" {
+		draftErr = c.persistAndRenderIncompleteDraft(sess, text)
 	}
-	c.persistAndRenderIncompleteDraft(sess, text)
+	if sess != nil && sess.Conversation != nil {
+		c.app.live.accept(result.presentationTextID)
+		c.app.live.accept(result.presentationReasonID)
+		if noticeErr != nil {
+			sess.persistenceErr = noticeErr
+		}
+	}
+	c.mu.Unlock()
+	if noticeErr == nil && draftErr == nil {
+		c.app.retirePresentation(result.presentationTextID)
+		c.app.retirePresentation(result.presentationReasonID)
+	}
 }
 
-func (c *Controller) persistAndRenderIncompleteNotice(sess *SessionState, content string) {
+func (c *Controller) persistAndRenderIncompleteNotice(sess *SessionState, content string) error {
 	if c.app != nil {
-		c.app.AddMessage(content, "system")
+		if sess != nil {
+			c.app.Post(AddMessageMsg{SessionID: sess.ID, Epoch: c.app.presentationEpoch.Load(), Content: content, Source: "system"})
+		} else {
+			c.app.AddMessage(content, "system")
+		}
 	}
 	if sess == nil || sess.Conversation == nil {
-		return
+		return nil
 	}
 	sess.Conversation.AddSystemMessage(content)
-	c.saveLatestConversationMessage(sess)
+	return c.saveLatestConversationMessage(sess)
 }
 
-func (c *Controller) persistAndRenderIncompleteDraft(sess *SessionState, draft string) {
+func (c *Controller) persistAndRenderIncompleteDraft(sess *SessionState, draft string) error {
 	draft = strings.TrimSpace(draft)
 	if draft == "" {
-		return
+		return nil
 	}
 	content := "Preserved draft (incomplete):\n" + draft
-	c.app.AddMessage(content, "assistant")
+	if sess != nil {
+		c.app.Post(AddMessageMsg{SessionID: sess.ID, Epoch: c.app.presentationEpoch.Load(), Content: content, Source: "assistant"})
+	} else {
+		c.app.AddMessage(content, "assistant")
+	}
 	if sess == nil || sess.Conversation == nil {
-		return
+		return nil
 	}
 	msg := conversation.Message{
 		Role:        "assistant",
@@ -229,7 +257,7 @@ func (c *Controller) persistAndRenderIncompleteDraft(sess *SessionState, draft s
 	}
 	sess.Conversation.AppendMessage(msg)
 	sess.Conversation.TokenCount += msg.Tokens
-	c.saveLatestConversationMessage(sess)
+	return c.saveLatestConversationMessage(sess)
 }
 
 func harnessStopReasonNotice(reason string) string {

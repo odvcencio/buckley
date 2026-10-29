@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/ui/filepicker"
+	"m31labs.dev/buckley/pkg/ui/scrollback"
 	"m31labs.dev/buckley/pkg/ui/widgets"
 	"m31labs.dev/fluffyui/backend"
 	"m31labs.dev/fluffyui/backend/tcell"
@@ -84,6 +85,11 @@ type WidgetApp struct {
 	streamGenerations     map[string]uint64
 	streamSequence        atomic.Uint64
 	streamGenerationBytes int
+	live                  *livePresentation
+	targetedStreams       sync.Map
+	presentationSession   string
+	presentationEpoch     atomic.Uint64
+	presentationBindings  map[uint64]presentationBinding
 	approvalLayerMu       sync.Mutex
 	approvalLayers        map[string]*widgets.ApprovalWidget
 
@@ -338,6 +344,8 @@ func NewWidgetApp(cfg WidgetAppConfig) (*WidgetApp, error) {
 		messages:             make(chan Message, 256),
 		delivery:             newEventDeliveryQueue(),
 		streamGenerations:    make(map[string]uint64),
+		live:                 newLivePresentation(scrollback.DefaultMaxBytes/32, 256),
+		presentationBindings: make(map[uint64]presentationBinding),
 		approvalLayers:       make(map[string]*widgets.ApprovalWidget),
 		statusText:           "Ready",
 		cursorPulseStart:     time.Now(),
@@ -1506,40 +1514,47 @@ func (a *WidgetApp) StreamChunk(sessionID, text string) {
 		a.postEvent(streamOverloadMsg{})
 		return
 	}
-	a.Post(StreamChunk{SessionID: sessionID, Generation: generation, Text: text})
+	a.live.append(generation, text)
+	a.Post(StreamChunk{SessionID: sessionID, Generation: generation, Text: text, Targeted: a.presentationTargeted(generation)})
 	a.streamMu.Unlock()
 }
 
 // StreamEnd signals the end of a streaming session.
-func (a *WidgetApp) StreamEnd(sessionID, fullText string) {
+func (a *WidgetApp) StreamEnd(sessionID, fullText string) { a.finishStream(sessionID, fullText, false) }
+
+func (a *WidgetApp) finishStream(sessionID, fullText string, corrected bool) bool {
 	if a == nil {
-		return
+		return false
 	}
 	if a.delivery.closed.Load() {
 		a.recordPostAfterClose()
-		return
+		return false
 	}
 	if len(sessionID) > coalescerBufferMaxBytes {
 		a.postEvent(streamOverloadMsg{})
-		return
+		return false
 	}
 	sessionID = strings.Clone(sessionID)
 	a.streamMu.Lock()
 	if a.delivery.closed.Load() {
 		a.streamMu.Unlock()
 		a.recordPostAfterClose()
-		return
+		return false
 	}
 	generation, ok := a.streamGenerationLocked(sessionID)
 	if !ok {
 		a.streamMu.Unlock()
 		a.postEvent(streamOverloadMsg{})
-		return
+		return false
 	}
 	delete(a.streamGenerations, sessionID)
 	a.streamGenerationBytes -= len(sessionID)
-	a.Post(StreamDone{SessionID: sessionID, Generation: generation, FullText: fullText})
+	if corrected && a.presentationTargeted(generation) {
+		a.live.replace(generation, fullText)
+	}
+	ok = a.postStreamDone(StreamDone{SessionID: sessionID, Generation: generation})
 	a.streamMu.Unlock()
+	return ok
 }
 
 func (a *WidgetApp) streamGenerationLocked(sessionID string) (uint64, bool) {
@@ -1734,6 +1749,8 @@ func (a *WidgetApp) clearScrollback(keepSyntaxCache bool) {
 	} else {
 		a.chatView.Clear()
 	}
+	a.presentationEpoch.Add(1)
+	clear(a.presentationBindings)
 	a.unreadCount = 0
 	a.updateScrollStatus()
 }

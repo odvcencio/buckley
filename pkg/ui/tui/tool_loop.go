@@ -18,6 +18,7 @@ import (
 )
 
 type toolLoopState struct {
+	sessionID      string
 	useTools       bool
 	totalUsage     model.Usage
 	progress       toolLoopProgress
@@ -66,12 +67,17 @@ type toolLoopResult struct {
 	ProviderFinishReason string
 	HarnessStopReason    string
 	Streamed             bool
+	presentationTextID   uint64
+	presentationReasonID uint64
 }
 
 type toolLoopProgress struct {
-	started       bool
-	reasoningOpen bool
-	reasoning     strings.Builder
+	started            bool
+	reasoningOpen      bool
+	reasoningID        uint64
+	textID             uint64
+	presentationFailed bool
+	reasoning          strings.Builder
 
 	// textOpen, textBuf, roundRendered, and roundRenderedText track this
 	// round's live-streamed assistant text bubble. textOpen is true while a
@@ -106,12 +112,16 @@ func (c *Controller) runToolLoop(ctx context.Context, sess *SessionState, modelI
 	return c.runToolLoopWithIntent(ctx, sess, modelID, agentloop.UnknownIntent)
 }
 
-func (c *Controller) runToolLoopWithIntent(ctx context.Context, sess *SessionState, modelID string, taskIntent agentloop.TaskIntent) (toolLoopResult, error) {
+func (c *Controller) runToolLoopWithIntent(ctx context.Context, sess *SessionState, modelID string, taskIntent agentloop.TaskIntent) (out toolLoopResult, runErr error) {
 	if err := c.validateToolLoopInputs(sess); err != nil {
 		return toolLoopResult{}, err
 	}
 
 	state := c.newToolLoopState(sess, modelID, taskIntent)
+	defer func() {
+		out.presentationTextID = state.progress.textID
+		out.presentationReasonID = state.progress.reasoningID
+	}()
 	ctrl, err := c.newToolLoopController(sess, modelID, &state, taskIntent)
 	if err != nil {
 		return toolLoopResult{}, err
@@ -206,6 +216,7 @@ func (c *Controller) newToolLoopState(sess *SessionState, modelID string, taskIn
 		}
 	}
 	return toolLoopState{
+		sessionID: sess.ID,
 		useTools: !c.consumeDisableToolsNextTurn(sess) &&
 			sess.ToolRegistry != nil &&
 			c.modelMgr.OfferToolsForRoute(route),
@@ -372,16 +383,20 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, s
 	history := agentloop.HistorySinkFunc(func(msg model.Message) {
 		switch {
 		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
-			c.recordToolLoopCalls(sess, msg.ToolCalls, msg)
+			c.recordToolLoopCalls(sess, msg.ToolCalls, msg, state)
 		case msg.Role == "tool":
+			c.mu.Lock()
 			sess.Conversation.AddToolResponseMessage(msg.ToolCallID, msg.Name, model.ExtractTextContentOrEmpty(msg.Content))
 			c.saveLatestConversationMessage(sess)
+			c.mu.Unlock()
 		case msg.Role == "user":
 			if c.app != nil {
 				c.app.SetStatus("Checking changes")
 			}
+			c.mu.Lock()
 			sess.Conversation.AddUserMessage(model.ExtractTextContentOrEmpty(msg.Content))
 			c.saveLatestConversationMessage(sess)
+			c.mu.Unlock()
 		}
 	})
 
@@ -504,7 +519,12 @@ func (c *Controller) markIncompleteToolLoopCompletion(state *toolLoopState, reas
 	if detail == "" {
 		detail = "the turn stopped before Buckley could accept a conclusive final answer"
 	}
-	c.app.ReplaceLastMessage("Buckley could not accept this streamed draft as final because " + strings.TrimSuffix(detail, ".") + ".")
+	diagnostic := "Buckley could not accept this streamed draft as final because " + strings.TrimSuffix(detail, ".") + "."
+	if state.progress.textID != 0 {
+		c.app.updatePresentation(state.progress.textID, diagnostic)
+	} else {
+		c.app.ReplaceLastMessage(diagnostic)
+	}
 	state.progress.roundRendered = false
 	state.progress.roundRenderedText = ""
 }
@@ -715,7 +735,17 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	accumulator := model.AcquireStreamAccumulator()
 	defer model.ReleaseStreamAccumulator(accumulator)
 	if state != nil {
+		c.mu.Lock()
+		canRetire := sess.persistenceErr == nil
+		c.mu.Unlock()
+		if canRetire {
+			c.app.retirePresentation(state.progress.textID)
+			c.app.retirePresentation(state.progress.reasoningID)
+		}
 		state.progress.reasoningOpen = false
+		state.progress.reasoningID = 0
+		state.progress.textID = 0
+		state.progress.presentationFailed = false
 		state.progress.reasoning.Reset()
 		state.progress.textOpen = false
 		state.progress.textBuf.Reset()
@@ -765,7 +795,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 		accumulator.Add(chunk)
 		for _, choice := range chunk.Choices {
 			receivedChoice = true
-			c.appendReasoningProgress(state, choice.Delta)
+			c.appendReasoningProgress(state, sess, choice.Delta)
 			c.appendTextProgress(state, sess, choice.Delta.Content)
 			if choice.FinishReason != nil {
 				finishReason = *choice.FinishReason
@@ -790,7 +820,7 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 		select {
 		case <-ctx.Done():
 			drainReadyChunks()
-			c.closeTextProgress(state, sess, "")
+			c.closeTextProgress(state, sess, "", false)
 			return partialResponseIfObserved(ctx.Err())
 		case chunk, ok := <-chunks:
 			if !ok {
@@ -805,14 +835,14 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 			}
 			if err != nil {
 				drainReadyChunks()
-				c.closeTextProgress(state, sess, "")
+				c.closeTextProgress(state, sess, "", false)
 				return partialResponseIfObserved(err)
 			}
 		}
 	}
 
 	message := accumulator.FinalizeWithTokenParsing()
-	c.closeTextProgress(state, sess, model.ExtractTextContentOrEmpty(message.Content))
+	c.closeTextProgress(state, sess, model.ExtractTextContentOrEmpty(message.Content), true)
 	if !receivedChoice {
 		resp := partialResponse()
 		return resp, model.NoResponseChoicesError(req, resp)
@@ -836,8 +866,8 @@ func (c *Controller) callToolLoopModel(ctx context.Context, req model.ChatReques
 	}, nil
 }
 
-func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.MessageDelta) {
-	if c == nil || c.app == nil || state == nil {
+func (c *Controller) appendReasoningProgress(state *toolLoopState, sess *SessionState, delta model.MessageDelta) {
+	if c == nil || c.app == nil || state == nil || sess == nil {
 		return
 	}
 	text := delta.Reasoning
@@ -852,12 +882,13 @@ func (c *Controller) appendReasoningProgress(state *toolLoopState, delta model.M
 	if !state.progress.started {
 		state.progress.started = true
 	}
-	if !state.progress.reasoningOpen {
-		c.app.AddMessage(display, "thinking")
-		state.progress.reasoningOpen = true
-		return
+	if state.progress.reasoningID == 0 {
+		state.progress.reasoningID = c.app.beginReasoningPresentation(sess.ID, state.progress.textID)
 	}
-	c.app.ReplaceLastMessage(display)
+	if state.progress.reasoningID != 0 {
+		c.app.updatePresentation(state.progress.reasoningID, display)
+	}
+	state.progress.reasoningOpen = true
 }
 
 // appendTextProgress streams one assistant text delta into the transcript
@@ -879,12 +910,15 @@ func (c *Controller) appendTextProgress(state *toolLoopState, sess *SessionState
 	// A new assistant bubble is about to become the last message; any
 	// reasoning bubble that was open no longer is.
 	state.progress.reasoningOpen = false
-	if !state.progress.textOpen {
-		c.app.AddMessage("", "assistant")
-		state.progress.textOpen = true
+	if !state.progress.textOpen && !state.progress.presentationFailed {
+		state.progress.textID = c.app.beginAssistantPresentation(sess.ID)
+		state.progress.textOpen = state.progress.textID != 0
+		state.progress.presentationFailed = !state.progress.textOpen
 	}
 	state.progress.textBuf.WriteString(text)
-	c.app.StreamChunk(sess.ID, text)
+	if state.progress.textOpen {
+		c.app.StreamChunk(sess.ID, text)
+	}
 }
 
 // closeTextProgress finalizes this round's streamed assistant bubble, if
@@ -894,20 +928,22 @@ func (c *Controller) appendTextProgress(state *toolLoopState, sess *SessionState
 // markup that already rendered live -- the bubble is corrected in place
 // before it closes, so no double-render still yields a transcript that
 // matches persisted history exactly.
-func (c *Controller) closeTextProgress(state *toolLoopState, sess *SessionState, finalText string) {
+func (c *Controller) closeTextProgress(state *toolLoopState, sess *SessionState, finalText string, finalized bool) {
 	if c == nil || c.app == nil || state == nil || !state.progress.textOpen {
 		return
 	}
 	rendered := state.progress.textBuf.String()
-	if finalText != "" && finalText != rendered {
-		c.app.ReplaceLastMessage(finalText)
+	corrected := finalized && finalText != rendered
+	if corrected {
 		rendered = finalText
 	}
+	delivered := false
 	if sess != nil {
-		c.app.StreamEnd(sess.ID, "")
+		c.app.finishStream(sess.ID, finalText, corrected)
+		_, delivered = c.app.live.snapshot(state.progress.textID)
 	}
 	state.progress.textOpen = false
-	state.progress.roundRendered = true
+	state.progress.roundRendered = delivered
 	state.progress.roundRenderedText = rendered
 }
 
@@ -947,8 +983,21 @@ func (c *Controller) finishToolLoopResponse(sess *SessionState, msg model.Messag
 	if text == "" && strings.TrimSpace(msg.Reasoning) != "" {
 		text = msg.Reasoning
 	}
+	c.mu.Lock()
 	sess.Conversation.AddAssistantMessageWithReasoningDetails(text, msg.Reasoning, msg.ReasoningDetails)
-	c.saveLatestConversationMessage(sess)
+	saveErr := c.saveLatestConversationMessage(sess)
+	if state != nil {
+		c.app.live.accept(state.progress.textID)
+		c.app.live.accept(state.progress.reasoningID)
+	}
+	c.mu.Unlock()
+	if saveErr == nil && state != nil {
+		c.app.retirePresentation(state.progress.textID)
+		c.app.retirePresentation(state.progress.reasoningID)
+	}
+	if saveErr != nil {
+		return toolLoopResult{}, saveErr
+	}
 	streamed := state != nil && state.progress.roundRendered && text != "" && state.progress.roundRenderedText == text
 	return toolLoopResult{
 		Text:                 text,
@@ -1001,11 +1050,21 @@ func hasAnyToolParam(params map[string]any, names ...string) bool {
 // preamble text the model wrote before the calls (msg.Content) so it
 // survives into wire history for subsequent requests -- see
 // conversation.AddToolCallMessageWithContent.
-func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message) {
+func (c *Controller) recordToolLoopCalls(sess *SessionState, calls []model.ToolCall, msg model.Message, state *toolLoopState) {
 	c.app.SetStatus(fmt.Sprintf("Model requested %d tool call(s)", len(calls)))
 	preamble := model.ExtractTextContentOrEmpty(msg.Content)
+	c.mu.Lock()
 	sess.Conversation.AddToolCallMessageWithContent(preamble, calls, msg.Reasoning, msg.ReasoningDetails)
-	c.saveLatestConversationMessage(sess)
+	saveErr := c.saveLatestConversationMessage(sess)
+	if state != nil {
+		c.app.live.accept(state.progress.textID)
+		c.app.live.accept(state.progress.reasoningID)
+	}
+	c.mu.Unlock()
+	if saveErr == nil && state != nil {
+		c.app.retirePresentation(state.progress.textID)
+		c.app.retirePresentation(state.progress.reasoningID)
+	}
 }
 
 // toolLoopExecuteOne runs one tool call -- argument parsing, registry and
@@ -1132,7 +1191,7 @@ func (c *Controller) appendToolCallProgress(state *toolLoopState, tc model.ToolC
 		state.progress.started = true
 	}
 	state.progress.reasoningOpen = false
-	c.app.AddMessage(toolCallProgressBlock(tc), "tool")
+	c.addToolProgress(state, toolCallProgressBlock(tc))
 }
 
 func (c *Controller) appendToolResultProgress(state *toolLoopState, name string, result *builtin.Result, execErr error) {
@@ -1142,7 +1201,7 @@ func (c *Controller) appendToolResultProgress(state *toolLoopState, name string,
 	if !state.progress.started {
 		state.progress.started = true
 	}
-	c.app.AppendToLastMessage("\n\n" + toolResultProgressSummary(name, result, execErr))
+	c.addToolProgress(state, toolResultProgressSummary(name, result, execErr))
 }
 
 // appendCodeModeRecoveryProgress makes the governed recovery decision visible
@@ -1153,7 +1212,15 @@ func (c *Controller) appendCodeModeRecoveryProgress(state *toolLoopState, guidan
 	if c == nil || c.app == nil || state == nil {
 		return
 	}
-	c.app.AppendToLastMessage("\n\n" + codeModeRecoveryProgress(guidance))
+	c.addToolProgress(state, codeModeRecoveryProgress(guidance))
+}
+
+func (c *Controller) addToolProgress(state *toolLoopState, content string) {
+	if state.sessionID == "" {
+		c.app.AddMessage(content, "tool")
+		return
+	}
+	c.app.Post(AddMessageMsg{SessionID: state.sessionID, Epoch: c.app.presentationEpoch.Load(), Content: content, Source: "tool"})
 }
 
 func codeModeRecoveryProgress(guidance string) string {

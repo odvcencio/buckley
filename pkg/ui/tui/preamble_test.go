@@ -82,6 +82,7 @@ func TestRunToolLoopPreservesPreambleAcrossToolCallAndWireHistory(t *testing.T) 
 	sess := &SessionState{ID: "session-1", Conversation: conv, ToolRegistry: registry}
 
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, workDir: t.TempDir()}
+	app.bindPresentationSession(sess.ID)
 
 	result, err := ctrl.runToolLoop(context.Background(), sess, "gpt-4o")
 	if err != nil {
@@ -140,22 +141,22 @@ func TestRunToolLoopPreservesPreambleAcrossToolCallAndWireHistory(t *testing.T) 
 
 	// Render: the preamble streams into its own bubble, and streamed text
 	// covers both the preamble and the final answer.
-	seeds := 0
 	var streamedText strings.Builder
 	for _, m := range drainAllMessages(app) {
-		switch v := m.(type) {
-		case AddMessageMsg:
-			if v.Source == "assistant" && v.Content == "" {
-				seeds++
-			}
-		case StreamFlush:
-			streamedText.WriteString(v.Text)
+		if flush, ok := m.(StreamFlush); ok {
+			streamedText.WriteString(flush.Text)
+		}
+		app.processMessage(m)
+	}
+	app.sweepPresentations()
+	for _, want := range []string{"Let me check that.", "Done: 42 files."} {
+		app.chatView.Search(want)
+		_, count := app.chatView.SearchMatches()
+		if count != 1 {
+			t.Fatalf("visible %q count = %d", want, count)
 		}
 	}
-	if seeds < 2 {
-		t.Fatalf("expected >=2 seeded assistant bubbles (preamble + final), got %d", seeds)
-	}
 	if !strings.Contains(streamedText.String(), "Let me check that.") || !strings.Contains(streamedText.String(), "Done: 42 files.") {
-		t.Fatalf("expected both preamble and final answer to render, got %q", streamedText.String())
+		t.Fatalf("expected both preamble and final answer to stream, got %q", streamedText.String())
 	}
 }

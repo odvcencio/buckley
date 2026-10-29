@@ -143,6 +143,31 @@ func (c *ChatView) AddMessage(content, source string) {
 	c.lastContent = content
 }
 
+// AddTargetMessage appends a message with an identity for later updates.
+// The caller retains the source text for streaming updates.
+func (c *ChatView) AddTargetMessage(id uint64, content, source string) {
+	c.lastSource, c.lastContent = "", ""
+	c.buffer.AppendTargetMessage(id, c.buildMessageLines(content, source))
+}
+
+// AddTargetMessageBefore inserts a target ahead of a surviving anchor.
+func (c *ChatView) AddTargetMessageBefore(id, beforeID uint64, content, source string) bool {
+	return c.buffer.InsertTargetMessageBefore(id, beforeID, c.buildMessageLines(content, source))
+}
+
+// ReplaceTargetText updates an existing target without touching later messages.
+func (c *ChatView) ReplaceTargetText(id uint64, content string) bool {
+	// Source is carried by the surviving target lines, not by an unbounded map.
+	source, ok := c.buffer.TargetSource(id)
+	if !ok {
+		return false
+	}
+	return c.buffer.ReplaceTargetMessage(id, c.buildMessageLines(content, source))
+}
+
+// EndTarget retires the identity after streaming completes.
+func (c *ChatView) EndTarget(id uint64) { c.buffer.EndTarget(id) }
+
 // AppendText appends text to the last message (for streaming).
 func (c *ChatView) AppendText(text string) {
 	if c.mdRenderer == nil || c.lastSource == "" {
@@ -305,7 +330,7 @@ func prependPrefix(existing, prefix []scrollback.Span) []scrollback.Span {
 
 // RemoveThinkingIndicator removes the thinking indicator if present.
 func (c *ChatView) RemoveThinkingIndicator() {
-	c.buffer.RemoveLastLineIfSource("thinking")
+	c.buffer.RemoveAuxLinesIfSource("thinking")
 }
 
 // Clear clears all messages.
