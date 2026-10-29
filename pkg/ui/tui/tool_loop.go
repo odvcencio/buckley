@@ -386,16 +386,17 @@ func (c *Controller) newToolLoopController(sess *SessionState, modelID string, s
 	})
 
 	return agentloop.NewController(agentloop.ControllerConfig{
-		Governor:           state.governor,
-		Progress:           newInteractiveProgressController(c.cfg),
-		FinalizeOnStop:     true,
-		CompletionContract: toolLoopCompletionContract(taskIntent),
-		LifecycleObserver:  telemetry.NewAgentLoopObserver(c.telemetry),
-		BuildRequest:       buildRequest,
-		CallModel:          callModel,
-		DispatchTools:      dispatch,
-		History:            history,
-		OnModelRetry:       func(notice string) { c.persistAndRenderIncompleteNotice(sess, notice) },
+		Governor:                      state.governor,
+		Progress:                      newInteractiveProgressController(c.cfg),
+		FinalizeOnStop:                true,
+		CompletionContract:            toolLoopCompletionContract(taskIntent),
+		StopOnUnavailableVerification: true,
+		LifecycleObserver:             telemetry.NewAgentLoopObserver(c.telemetry),
+		BuildRequest:                  buildRequest,
+		CallModel:                     callModel,
+		DispatchTools:                 dispatch,
+		History:                       history,
+		OnModelRetry:                  func(notice string) { c.persistAndRenderIncompleteNotice(sess, notice) },
 		ContextWindow: func(mid string) int {
 			if c.modelMgr == nil {
 				return 0
@@ -432,6 +433,7 @@ func toolLoopCompletionContract(taskIntent agentloop.TaskIntent) *agentloop.Comp
 		RequirePostChangeVerification: true,
 		RequireObservableChange:       taskIntent == agentloop.MutationIntent,
 		MaxRepairAttempts:             1,
+		MaxVerificationUnavailable:    3,
 		TaskIntent:                    taskIntent,
 	}
 }

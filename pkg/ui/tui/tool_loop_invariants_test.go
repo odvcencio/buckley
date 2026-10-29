@@ -1290,3 +1290,9 @@ func assistantFinals(messages []conversation.Message) []string {
 	}
 	return finals
 }
+func TestToolLoopCompletionContract_UnavailableLimit(t *testing.T) {
+	contract := toolLoopCompletionContract(agentloop.UnknownIntent)
+	if !contract.RequirePostChangeVerification || contract.MaxVerificationUnavailable != 3 {
+		t.Fatalf("contract = %+v", contract)
+	}
+}
