@@ -1,7 +1,5 @@
 package tui
 
-import "strings"
-
 type presentationUpdate struct{ id uint64 }
 
 func (presentationUpdate) isMessage() {}
@@ -90,8 +88,6 @@ func (a *WidgetApp) finishPresentation(id uint64) {
 	a.live.remove(id)
 	a.targetedStreams.Delete(id)
 }
-func normalizeLiveReasoning(s string) string { return "Thinking\n\n" + strings.TrimSpace(s) }
-
 func (a *WidgetApp) retirePresentation(id uint64) {
 	if id != 0 {
 		a.live.requestRetire(id)

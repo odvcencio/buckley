@@ -6,6 +6,8 @@ import (
 	"unsafe"
 )
 
+func (p *livePresentation) retainedBytes() int { p.mu.Lock(); defer p.mu.Unlock(); return p.bytes }
+
 func TestLivePresentation_ReattachTracksByteOffset(t *testing.T) {
 	p := newLivePresentation(4096, 8)
 	if !p.start("session", 11, "assistant", 0, 0) {

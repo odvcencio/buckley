@@ -158,7 +158,6 @@ func (p *livePresentation) remove(id uint64) {
 		}
 	}
 }
-func (p *livePresentation) retainedBytes() int { p.mu.Lock(); defer p.mu.Unlock(); return p.bytes }
 
 // sessionEntries returns a consistent snapshot in creation order.
 func (p *livePresentation) sessionEntries(session string) []livePresentationItem {
