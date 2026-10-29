@@ -15,12 +15,14 @@ func (a *WidgetApp) update(msg Message) bool {
 	case ResizeMsg:
 		return a.handleResizeMsg(m)
 	case StreamChunk:
-		a.coalescer.AddStream(m.SessionID, m.Generation, m.Text)
+		a.coalescer.addStream(m.SessionID, m.Generation, m.Text, m.Targeted)
 		return false
 	case StreamFlush:
 		return a.handleStreamFlushMsg(m)
 	case StreamDone:
 		return a.handleStreamDoneMsg(m)
+	case presentationUpdate:
+		return a.renderPresentation(m.id)
 	case AddMessageMsg:
 		return a.handleAddMessageMsg(m)
 	case AppendMsg:
@@ -97,6 +99,12 @@ func (a *WidgetApp) handleResizeMsg(m ResizeMsg) bool {
 }
 
 func (a *WidgetApp) handleStreamFlushMsg(m StreamFlush) bool {
+	if m.Targeted {
+		if snap, ok := a.live.snapshot(m.Generation); !ok || snap.session != m.SessionID {
+			return false
+		}
+		return a.renderPresentation(m.Generation)
+	}
 	a.chatView.AppendText(m.Text)
 	a.updateScrollStatus()
 	return true
@@ -105,6 +113,9 @@ func (a *WidgetApp) handleStreamFlushMsg(m StreamFlush) bool {
 func (a *WidgetApp) handleStreamDoneMsg(m StreamDone) bool {
 	if a.coalescer != nil {
 		a.coalescer.ClearStream(m.SessionID, m.Generation)
+	}
+	if a.presentationTargeted(m.Generation) {
+		a.renderPresentation(m.Generation)
 	}
 	return true
 }
@@ -127,6 +138,9 @@ func (a *WidgetApp) handleStreamBoundaryRejectedMsg(m streamBoundaryRejectedMsg)
 }
 
 func (a *WidgetApp) handleAddMessageMsg(m AddMessageMsg) bool {
+	if m.SessionID != "" && (m.SessionID != a.presentationSession || m.Epoch != a.presentationEpoch.Load()) {
+		return false
+	}
 	wasFollowing := a.isFollowing()
 	a.chatView.AddMessage(m.Content, m.Source)
 	if !wasFollowing && m.Source != "thinking" {

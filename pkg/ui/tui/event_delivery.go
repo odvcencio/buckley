@@ -177,14 +177,13 @@ func (a *WidgetApp) Post(msg Message) {
 	case StreamChunk:
 		if a.coalescer != nil {
 			m.SessionID = strings.Clone(m.SessionID)
-			a.coalescer.AddStream(m.SessionID, m.Generation, m.Text)
+			a.coalescer.addStream(m.SessionID, m.Generation, m.Text, m.Targeted)
 		}
 		return
 	case StreamDone:
 		if a.coalescer != nil {
 			m.SessionID = strings.Clone(m.SessionID)
-			m.FullText = ""
-			a.coalescer.FlushAndPostStream(m.SessionID, m.Generation, m)
+			a.postStreamDone(m)
 			return
 		}
 	}
@@ -683,6 +682,9 @@ func (a *WidgetApp) processFrameTick(now time.Time) {
 	if a.coalescer != nil {
 		a.coalescer.Tick()
 	}
+	if a.sweepPresentations() {
+		a.dirty = true
+	}
 	if a.updateAnimations(now) {
 		a.dirty = true
 	}
@@ -698,6 +700,8 @@ func (a *WidgetApp) closeEventDelivery() {
 	}
 	a.streamMu.Lock()
 	clear(a.streamGenerations)
+	a.targetedStreams.Clear()
+	a.live.clear()
 	a.streamGenerationBytes = 0
 	a.streamMu.Unlock()
 	a.closeModelPickerState()
@@ -896,7 +900,7 @@ func retainedMessageBytes(msg Message) int {
 	case ModelVariantMsg:
 		add(m.Name)
 	case AddMessageMsg:
-		add(m.Content, m.Source)
+		add(m.Content, m.Source, m.SessionID)
 	case AppendMsg:
 		add(m.Text)
 	case ReplaceLastMessageMsg:
@@ -969,7 +973,7 @@ func prepareMessageForRetention(msg Message) (Message, bool) {
 		m.Name = clone(m.Name)
 		return m, true
 	case AddMessageMsg:
-		m.Content, m.Source = clone(m.Content), clone(m.Source)
+		m.Content, m.Source, m.SessionID = clone(m.Content), clone(m.Source), clone(m.SessionID)
 		return m, true
 	case AppendMsg:
 		m.Text = clone(m.Text)
@@ -1350,4 +1354,9 @@ func retainedTypeHasReferences(typ reflect.Type) bool {
 		}
 	}
 	return false
+}
+
+func (a *WidgetApp) postStreamDone(m StreamDone) bool {
+	m.FullText = ""
+	return a.coalescer.flushAndPostStream(m.SessionID, m.Generation, m)
 }

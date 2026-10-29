@@ -440,4 +440,5 @@ func (c *Controller) rerenderTranscript(sess *SessionState, messages []conversat
 	c.app.WelcomeScreen()
 	c.app.addMessageImmediately("Session: "+sess.ID, "system")
 	renderConversationHistoryImmediately(c.app, messages)
+	c.app.bindPresentationSession(sess.ID)
 }

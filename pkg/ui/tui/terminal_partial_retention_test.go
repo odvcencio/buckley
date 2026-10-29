@@ -50,6 +50,7 @@ func newTerminalPartialController(t *testing.T, serverURL string, hub *telemetry
 	conv := conversation.New("session-1")
 	sess := &SessionState{ID: "session-1", Conversation: conv}
 	ctrl := &Controller{app: app, cfg: cfg, modelMgr: mgr, store: store, telemetry: hub, workDir: t.TempDir(), sessions: []*SessionState{sess}}
+	app.bindPresentationSession(sess.ID)
 	return ctrl, sess, app
 }
 
@@ -62,8 +63,14 @@ func assertTerminalPartialRenderedAndPersisted(t *testing.T, app *WidgetApp, ses
 		t.Fatalf("conversation missing incomplete notice: %+v", roleList(sess.Conversation.Messages))
 	}
 	var renderedNotice, renderedDraft, acceptedAssistant, cleanupReplacement, tokenUpdates int
+	seenCleanup := make(map[uint64]bool)
 	for _, msg := range drainAllMessages(app) {
 		switch v := msg.(type) {
+		case presentationUpdate:
+			if snap, ok := app.live.snapshot(v.id); ok && !seenCleanup[v.id] && strings.Contains(snap.content, "could not accept this streamed draft as final") {
+				cleanupReplacement++
+				seenCleanup[v.id] = true
+			}
 		case AddMessageMsg:
 			if v.Source == "system" && strings.Contains(v.Content, "Incomplete result:") {
 				renderedNotice++
@@ -148,6 +155,11 @@ func waitForThinkingContaining(t *testing.T, app *WidgetApp, text string) {
 	for {
 		select {
 		case msg := <-app.messages:
+			if update, ok := msg.(presentationUpdate); ok {
+				if snap, ok := app.live.snapshot(update.id); ok && snap.source == "thinking" && strings.Contains(snap.content, text) {
+					return
+				}
+			}
 			if add, ok := msg.(AddMessageMsg); ok && add.Source == "thinking" && strings.Contains(add.Content, text) {
 				return
 			}

@@ -47,6 +47,7 @@ func (PasteMsg) isMessage() {}
 type StreamChunk struct {
 	SessionID  string
 	Generation uint64
+	Targeted   bool
 	Text       string
 }
 
@@ -65,6 +66,7 @@ func (StreamDone) isMessage() {}
 type StreamFlush struct {
 	SessionID  string
 	Generation uint64
+	Targeted   bool
 	Text       string
 }
 
@@ -152,8 +154,10 @@ func (ModelVariantMsg) isMessage() {}
 
 // AddMessageMsg adds a new message to the conversation.
 type AddMessageMsg struct {
-	Content string
-	Source  string // "user", "assistant", "system", "tool", "thinking"
+	SessionID string
+	Epoch     uint64
+	Content   string
+	Source    string // "user", "assistant", "system", "tool", "thinking"
 }
 
 func (AddMessageMsg) isMessage() {}
