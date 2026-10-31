@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	gopath "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -123,7 +125,7 @@ func gatherSourceText(src ContextSource, opts ContextOpts) (string, error) {
 	case "git_files":
 		return gatherGitFiles(src.Params)
 	case "agents_md":
-		return gatherAgentsMD(opts)
+		return gatherAgentsMD(src.Params, opts)
 	case "env":
 		return gatherEnv(src.Params)
 	case "command":
@@ -146,6 +148,22 @@ func diffSafetyArgs() []string {
 	return []string{"--no-ext-diff", "--no-textconv", "--no-color"}
 }
 
+// rangeRefs returns the base and head refs of a git range source. Head
+// defaults to HEAD. A ref that starts with "-" would reach git as an option
+// (for example --output=file), so it is rejected.
+func rangeRefs(params map[string]string) (base, head string, err error) {
+	base, head = params["base"], params["head"]
+	if head == "" {
+		head = "HEAD"
+	}
+	for _, ref := range []string{base, head} {
+		if strings.HasPrefix(ref, "-") {
+			return "", "", fmt.Errorf("git ref %q looks like an option", ref)
+		}
+	}
+	return base, head, nil
+}
+
 // gatherGitDiff runs git diff with appropriate flags.
 //
 // The raw diff is reshaped by diffsignal before it reaches the model:
@@ -158,12 +176,17 @@ func gatherGitDiff(params map[string]string, opts ContextOpts) (string, error) {
 
 func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, DiffStats, error) {
 	var stats DiffStats
+	base, head, err := rangeRefs(params)
+	if err != nil {
+		return "", stats, err
+	}
+	attrSource := headAttrSource(params)
 	args := append([]string{"diff"}, diffSafetyArgs()...)
 
 	if params["staged"] == "true" {
 		args = append(args, "--cached")
-	} else if base := params["base"]; base != "" {
-		args = append(args, base+"...HEAD")
+	} else if base != "" {
+		args = append(args, base+"..."+head)
 	}
 
 	// Optional pathspec: "paths" param is a NUL-separated list of paths.
@@ -180,18 +203,20 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 		args = append(args, pathsArgs...)
 	}
 
-	diff, err := gitdiff.Capture(context.Background(), opts.WorkDir, contextPathArgs(params, args)...)
+	diff, err := gitdiff.Capture(context.Background(), opts.WorkDir, contextGitArgs(params, attrSource, args)...)
 	if err != nil {
-		// Retry without ...HEAD for base diff
+		// Git exits 128 for a range with no merge base (unrelated or shallow
+		// history). Compare the two commits directly: `git diff <base>` alone
+		// would compare the base with the working tree.
 		var exit *exec.ExitError
-		if base := params["base"]; base != "" && errors.As(err, &exit) && exit.ExitCode() == 128 {
+		if base != "" && errors.As(err, &exit) && exit.ExitCode() == 128 {
 			args = append([]string{"diff"}, diffSafetyArgs()...)
-			args = append(args, base)
+			args = append(args, base, head)
 			if len(pathsArgs) > 0 {
 				args = append(args, "--")
 				args = append(args, pathsArgs...)
 			}
-			diff, err = gitdiff.Capture(context.Background(), opts.WorkDir, contextPathArgs(params, args)...)
+			diff, err = gitdiff.Capture(context.Background(), opts.WorkDir, contextGitArgs(params, attrSource, args)...)
 		}
 		if err != nil {
 			return "", stats, err
@@ -210,7 +235,7 @@ func gatherGitDiffStats(params map[string]string, opts ContextOpts) (string, Dif
 		paths = append(paths, fd.Path)
 	}
 	isGenerated := anyGenerated(
-		generatedByAttrs(paths, params["staged"] == "true", opts.WorkDir),
+		generatedByAttrs(paths, params["staged"] == "true", attrSource, opts.WorkDir),
 		diffsignal.DefaultGenerated(paths),
 	)
 	stats = statsForFiles(diff.Files, isGenerated)
@@ -256,12 +281,16 @@ func gatherGitLog(params map[string]string) (string, error) {
 		return gatherGitLogWithBody(params)
 	}
 
+	base, head, err := rangeRefs(params)
+	if err != nil {
+		return "", err
+	}
 	args := []string{"log", "--oneline"}
 
-	if base := params["base"]; base != "" {
-		args = append(args, base+"..HEAD")
+	if base != "" {
+		args = append(args, base+".."+head)
 	} else {
-		args = append(args, "-20")
+		args = append(args, "-20", head)
 	}
 
 	output, err := contextGitOutput(args...)
@@ -272,13 +301,17 @@ func gatherGitLog(params map[string]string) (string, error) {
 }
 
 func gatherGitLogWithBody(params map[string]string) (string, error) {
+	base, head, err := rangeRefs(params)
+	if err != nil {
+		return "", err
+	}
 	format := "%h" + gitLogFieldSep + "%s" + gitLogFieldSep + "%b" + gitLogRecordSep
 	args := []string{"log", "--no-color", "--pretty=format:" + format}
 
-	if base := params["base"]; base != "" {
-		args = append(args, base+"..HEAD")
+	if base != "" {
+		args = append(args, base+".."+head)
 	} else {
-		args = append(args, "-20")
+		args = append(args, "-20", head)
 	}
 
 	raw, err := contextGitOutput(args...)
@@ -345,12 +378,17 @@ func renderGitLogWithBody(raw string) string {
 
 // gatherGitFiles runs git diff --name-status.
 func gatherGitFiles(params map[string]string) (string, error) {
+	base, head, err := rangeRefs(params)
+	if err != nil {
+		return "", err
+	}
+	attrSource := headAttrSource(params)
 	args := append([]string{"diff", "--name-status"}, diffSafetyArgs()...)
 
 	if params["staged"] == "true" {
 		args = append(args, "--cached")
-	} else if base := params["base"]; base != "" {
-		args = append(args, base+"...HEAD")
+	} else if base != "" {
+		args = append(args, base+"..."+head)
 	}
 
 	// Optional pathspec: "paths" param is a NUL-separated list of paths.
@@ -367,17 +405,18 @@ func gatherGitFiles(params map[string]string) (string, error) {
 		args = append(args, pathsArgs...)
 	}
 
-	output, err := contextGitOutput(contextPathArgs(params, args)...)
+	output, err := contextGitOutput(contextGitArgs(params, attrSource, args)...)
 	if err != nil {
-		// Retry without ...HEAD for base
-		if base := params["base"]; base != "" {
+		// No merge base (unrelated or shallow history): compare the two
+		// commits directly rather than the base with the working tree.
+		if base != "" {
 			args = append([]string{"diff", "--name-status"}, diffSafetyArgs()...)
-			args = append(args, base)
+			args = append(args, base, head)
 			if len(pathsArgs) > 0 {
 				args = append(args, "--")
 				args = append(args, pathsArgs...)
 			}
-			output, err = contextGitOutput(contextPathArgs(params, args)...)
+			output, err = contextGitOutput(contextGitArgs(params, attrSource, args)...)
 		}
 		if err != nil {
 			return "", err
@@ -386,8 +425,17 @@ func gatherGitFiles(params map[string]string) (string, error) {
 	return output, nil
 }
 
-// gatherAgentsMD reads AGENTS.md from the repository root.
-func gatherAgentsMD(opts ContextOpts) (string, error) {
+// agentsMDMaxBytes bounds the AGENTS.md text that reaches the prompt.
+const agentsMDMaxBytes = 10_000
+
+// gatherAgentsMD reads AGENTS.md from the repository root. With a "head" param
+// it reads the file as committed at that ref, so a dirty or different working
+// tree cannot change what the model is told. Without one it reads the working
+// tree file.
+func gatherAgentsMD(params map[string]string, opts ContextOpts) (string, error) {
+	if head := params["head"]; head != "" {
+		return gatherAgentsMDAtRef(head)
+	}
 	root, err := contextGitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", nil // Not in a repo is non-fatal for this source
@@ -395,11 +443,91 @@ func gatherAgentsMD(opts ContextOpts) (string, error) {
 	root = strings.TrimSpace(root)
 
 	agentsPath := filepath.Join(root, "AGENTS.md")
-	content, err := contextReadFileLimited(agentsPath, 10_000)
+	content, err := contextReadFileLimited(agentsPath, agentsMDMaxBytes)
 	if err != nil {
 		return "", nil // Missing AGENTS.md is non-fatal
 	}
 	return content, nil
+}
+
+// gatherAgentsMDAtRef reads AGENTS.md as committed at ref. A symlink is
+// followed one hop inside the repository, as reading the working tree file
+// would; git show alone prints the link target instead of the file.
+func gatherAgentsMDAtRef(ref string) (string, error) {
+	if strings.HasPrefix(ref, "-") {
+		return "", fmt.Errorf("git ref %q looks like an option", ref)
+	}
+	name := "AGENTS.md"
+	mode, err := contextTreeMode(ref, name)
+	if err != nil {
+		return "", nil // Missing AGENTS.md is non-fatal
+	}
+	if mode == gitModeSymlink {
+		link, err := contextShowLimited(ref, name, maxSymlinkTargetBytes)
+		if err != nil {
+			return "", nil
+		}
+		name = gopath.Join(gopath.Dir(name), strings.TrimSpace(link))
+		if gopath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
+			return "", nil
+		}
+		if mode, err = contextTreeMode(ref, name); err != nil {
+			return "", nil
+		}
+	}
+	if mode != gitModeFile && mode != gitModeExecutable {
+		return "", nil
+	}
+	content, err := contextShowLimited(ref, name, agentsMDMaxBytes)
+	if err != nil {
+		return "", nil
+	}
+	return content, nil
+}
+
+const (
+	gitModeFile           = "100644"
+	gitModeExecutable     = "100755"
+	gitModeSymlink        = "120000"
+	maxSymlinkTargetBytes = 4096
+)
+
+// contextTreeMode returns the git file mode of path in ref's tree, with path
+// taken from the repository root.
+func contextTreeMode(ref, path string) (string, error) {
+	out, err := contextGitOutput("ls-tree", "--full-tree", ref, "--", path)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("%s is not in %s", path, ref)
+	}
+	return fields[0], nil
+}
+
+// contextShowLimited returns at most maxBytes of path as committed at ref. It
+// stops reading at the limit, so a large committed file costs no more than
+// reading it from the working tree with head -c did.
+func contextShowLimited(ref, path string, maxBytes int) (string, error) {
+	cmd := exec.Command("git", "--no-pager", "show", "--no-textconv", ref+":"+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(stdout, int64(maxBytes)))
+	_ = stdout.Close()
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return "", readErr
+	}
+	if len(data) < maxBytes && waitErr != nil {
+		return "", waitErr
+	}
+	return string(data), nil
 }
 
 // gatherEnv reads an environment variable.
@@ -426,11 +554,16 @@ func gatherCommand(params map[string]string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func contextPathArgs(params map[string]string, args []string) []string {
+// contextGitArgs puts the global git options a source needs in front of the
+// subcommand in args: literal pathspecs, and the tree that supplies
+// gitattributes (empty means the working tree).
+func contextGitArgs(params map[string]string, attrSource string, args []string) []string {
+	var global []string
 	if params["literal_paths"] == "true" {
-		return append([]string{"--literal-pathspecs"}, args...)
+		global = append(global, "--literal-pathspecs")
 	}
-	return args
+	global = append(global, attrSourceArgs(attrSource)...)
+	return append(global, args...)
 }
 
 // contextGitOutput runs a git command and returns its output.

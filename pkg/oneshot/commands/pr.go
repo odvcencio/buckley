@@ -14,8 +14,25 @@ import (
 
 // PRDefinition implements oneshot.Definition for pull request generation.
 type PRDefinition struct {
-	// BaseBranch overrides automatic base branch detection.
+	// BaseBranch overrides automatic base branch detection. A caller that has
+	// resolved the base should pass a fully qualified ref: git reads a short
+	// name through tags and local branches before remote-tracking branches, so
+	// "origin/main" can name a different commit than the branch that was checked.
 	BaseBranch string
+
+	// BaseName is the branch name the prompt shows for BaseBranch. Empty shows
+	// BaseBranch itself.
+	BaseName string
+
+	// HeadRef is the ref the PR comes from; empty means HEAD. All evidence
+	// (diff, log, file list, AGENTS.md, gitattributes) is read from this ref's
+	// commits, never from the working tree, so the checked-out branch and any
+	// uncommitted edits cannot reach the PR text.
+	HeadRef string
+
+	// HeadName is the branch name the prompt shows for HeadRef. Empty shows
+	// HeadRef itself, or no head at all when HeadRef is empty too.
+	HeadName string
 
 	// ContextNotes is author-supplied steering text (for example, slice
 	// breakdown and verification evidence the diff alone cannot convey),
@@ -192,12 +209,12 @@ func (PRDefinition) Tool() tools.Definition {
 }
 
 func (d PRDefinition) ContextSources() []oneshot.ContextSource {
-	base := d.baseOrDefault()
+	base, head := d.baseOrDefault(), d.headOrDefault()
 	return []oneshot.ContextSource{
-		{Type: "git_diff", Params: map[string]string{"base": base}},
-		{Type: "git_log", Params: map[string]string{"base": base, "include_body": "true"}},
-		{Type: "git_files", Params: map[string]string{"base": base}},
-		{Type: "agents_md"},
+		{Type: "git_diff", Params: map[string]string{"base": base, "head": head}},
+		{Type: "git_log", Params: map[string]string{"base": base, "head": head, "include_body": "true"}},
+		{Type: "git_files", Params: map[string]string{"base": base, "head": head}},
+		{Type: "agents_md", Params: map[string]string{"head": head}},
 	}
 }
 
@@ -206,6 +223,30 @@ func (d PRDefinition) baseOrDefault() string {
 		return d.BaseBranch
 	}
 	return "main"
+}
+
+func (d PRDefinition) headOrDefault() string {
+	if d.HeadRef != "" {
+		return d.HeadRef
+	}
+	return "HEAD"
+}
+
+// branchLine names the branches in the prompt's first sentence.
+func (d PRDefinition) branchLine() string {
+	baseName := d.BaseName
+	if baseName == "" {
+		baseName = d.baseOrDefault()
+	}
+	base := "base: " + baseName
+	head := d.HeadName
+	if head == "" {
+		head = d.HeadRef
+	}
+	if head == "" {
+		return base
+	}
+	return "head: " + head + ", " + base
 }
 
 // isCommitAction reports whether action is one of the allowed commit verbs.
@@ -272,7 +313,7 @@ func (d PRDefinition) BuildPrompt(ctx *oneshot.Context) string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("Generate a pull request for the following branch changes (base: " + base + ").\n\n")
+	b.WriteString("Generate a pull request for the following branch changes (" + d.branchLine() + ").\n\n")
 
 	if notes := strings.TrimSpace(d.ContextNotes); notes != "" {
 		b.WriteString("## Author Notes\n\n")

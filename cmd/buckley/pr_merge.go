@@ -27,10 +27,13 @@ func execGhCommand(args ...string) ([]byte, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "gh", args...).Output()
 	if err != nil {
+		// Name the command, not its arguments: pr create and pr edit carry the
+		// whole PR body, and the error text must not repeat it.
+		label := strings.Join(args[:min(2, len(args))], " ")
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-			return out, fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+			return out, fmt.Errorf("gh %s: %w: %s", label, err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return out, fmt.Errorf("gh %s: %w", strings.Join(args, " "), err)
+		return out, fmt.Errorf("gh %s: %w", label, err)
 	}
 	return out, nil
 }

@@ -244,6 +244,7 @@ buckley commit [OPTIONS]
 | `--push=false` | Create the commit without pushing the current branch |
 | `--paths <path>` | Commit only matching staged paths; repeatable |
 | `--exclusive` | With `--paths`, reject staged files outside the selected paths |
+| `-C <dir>` / `--dir <dir>` | Run as if started in `<dir>`, like `git -C`. The commit takes everything staged in that repository, so pair `-C` with `--paths` (and `--exclusive`) when another process may be staging there. Uppercase `-C`: lowercase `-c` selects the config file |
 | `--context-trailer=false` | Omit the privacy-preserving change digest and aggregate stats trailers |
 | `--minimal-output` | Minimize terminal output |
 | `--trace` | Show context audit and model reasoning after generation |
@@ -254,6 +255,11 @@ buckley commit [OPTIONS]
 | `--squash <base>` | Squash every commit since the merge-base with `<base>` into one commit |
 | `--force` | With `--squash`, allow squashing a protected branch (`main`/`master`) |
 | `--force-with-lease` | With `--squash`, push the rewritten branch (`git push --force-with-lease`) |
+
+Name files to stage after the flags: `buckley commit --yes -- main.go`. The flag
+parser stops reading flags at the first file, so a flag written after one (for
+example `buckley commit main.go -C /other`) is an error, not a dropped flag. A
+`--` ends the flags, and a file name that starts with `-` goes after it.
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_COMMIT` - Override model for commit generation
@@ -330,7 +336,10 @@ buckley pr [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
-| `--base` | Base branch (default: from `BUCKLEY_PR_BASE` or repo default) |
+| `--head <branch>` | Branch the PR comes from (default: the checked-out branch). `owner:branch` names a fork's branch; `owner` must own the repository of the push remote (`BUCKLEY_REMOTE_NAME`, default `origin`) |
+| `--base` | Base branch. Default: `BUCKLEY_PR_BASE`; else the remote's default branch (`refs/remotes/<remote>/HEAD`, which `git remote set-head <remote> --auto` refreshes); else `main`, `master` or `develop` on the remote, then the same names locally. An error when none exists |
+| `-C <dir>` / `--dir <dir>` | Run as if started in `<dir>`, like `git -C`. Relative `--context-file`, `--config` and `--agent` (`BUCKLEY_AGENT`) paths resolve against the directory you launched in, so a file in the target repository cannot stand in for them. Uppercase `-C`: lowercase `-c` selects the config file |
+| `--push=false` | Do not push the head branch before creating the PR |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
 | `--effort <level>` | Override reasoning effort |
@@ -340,14 +349,65 @@ buckley pr [OPTIONS]
 - `BUCKLEY_PR_BACKEND` - Override backend; falls back to `BUCKLEY_ONESHOT_BACKEND`, then `api`
 - `BUCKLEY_EFFORT_PR` - Override effort; falls back to `BUCKLEY_ONESHOT_EFFORT`, then reasoning config
 - `BUCKLEY_PROMPT_PR` - Override prompt template
-- `BUCKLEY_PR_BASE` - Override base branch
+- `BUCKLEY_PR_BASE` - Base branch when `--base` is not given
+- `BUCKLEY_REMOTE_NAME` - Remote for fetches and pushes (default `origin`)
 
 **Example:**
 ```bash
 buckley pr                    # Create PR for current branch
 buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
+buckley pr --head feature -C ~/work/repo --yes   # PR for a branch another process has checked out
 ```
+
+The evidence that buckley gathers for the PR text comes from commits. The diff,
+commit log, file list, `AGENTS.md` and `.gitattributes` are read from the head
+branch's git objects, not from the working tree, so uncommitted edits and the
+checked-out branch do not reach it. That covers what buckley collects. With
+`--backend codex` or `--backend claude`, the agent CLI runs in the directory
+where buckley runs (the `-C` target, when given) and has read tools of its own,
+so it can still read the checked-out branch and uncommitted files. Reading
+`.gitattributes` from the head commit needs git 2.40 or newer; an older git makes
+buckley warn and read the working tree's `.gitattributes` instead.
+`$GIT_DIR/info/attributes` and `core.attributesFile` apply in both cases.
+
+The checks that can fail without a model run before the model call:
+confirmation (`--yes` or `--dry-run` when stdin is not a terminal), `gh`, the
+head and base branches, at least one commit ahead, and conflicts with an open
+PR.
+
+`buckley pr` takes flags only. Name the branch with `--head`. The flag parser
+stops reading flags at the first plain argument, so `buckley pr --yes feature -C /other`
+is an error, not a PR for the directory you launched in.
+
+How the head is read and pushed, with the worktree untouched in every case.
+Fetching the remote branch skips `FETCH_HEAD` (git 2.29 or newer), so a `git pull`
+that another process runs in the same checkout cannot pick up the fetched
+branch:
+
+| Head state | Evidence | Push |
+|------------|----------|------|
+| Local only | Local branch | Pushed (see `-u` below); an error before the model call with `--push=false` |
+| Remote only | `<remote>/<branch>`, after fetching that one branch | None |
+| Local equals remote | Local branch | Nothing to send, so no push and the branch config stays as it is. The one exception is the checked-out branch (no `--head`) when it does not track `<remote>/<branch>`: a push that sends nothing records the upstream |
+| Local ahead | Local branch | Fast-forward (see `-u` below). With `--push=false`: `<remote>/<branch>`, with a warning, because the PR holds only what the remote has |
+| Local behind | `<remote>/<branch>`, with a warning | None |
+| Diverged | Refused | Never forced |
+
+`-u` records an upstream. Without `--head`, `gh` finds the head through the
+branch's upstream, so the push passes `-u` unless the branch already tracks
+`<remote>/<branch>`. With `--head`, `gh` is told the head and another process may
+have the branch checked out, so `-u` goes only to a branch that has no upstream.
+An upstream that exists, even one that points elsewhere, is left alone.
+
+Without `--head`, a detached `HEAD` is an error. The open-PR lookup is keyed on
+the head branch and on the owner of the head repository (the push remote's
+owner), because `gh` lists PRs by branch name only. Neither the PR for whichever
+branch the worktree has checked out nor a PR from a same-named branch of
+another repository is edited, and in a fork checkout your own PR is the one
+found. An explicit `--base` that differs from the open PR's base is refused, not
+retargeted; `--no-update` refuses any open PR for the head. If `gh pr create`
+prints no PR URL, `buckley pr` fails instead of labeling a PR it cannot name.
 
 ### pr merge
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ type fakeLabelClient struct {
 	added   []string
 	removed []string
 	edits   int
+	reads   int
 }
 
 func (f *fakeLabelClient) EnsureLabel(_ context.Context, name, description, color string) error {
@@ -24,7 +27,10 @@ func (f *fakeLabelClient) EnsureLabel(_ context.Context, name, description, colo
 	f.created[name] = description
 	return nil
 }
-func (f *fakeLabelClient) PRLabels(context.Context, string) ([]string, error) { return f.labels, nil }
+func (f *fakeLabelClient) PRLabels(context.Context, string) ([]string, error) {
+	f.reads++
+	return f.labels, nil
+}
 func (f *fakeLabelClient) EditLabels(_ context.Context, _ string, add, remove []string) error {
 	f.edits++
 	f.added, f.removed = add, remove
@@ -57,6 +63,34 @@ func TestSetVerificationLabelIsIdempotent(t *testing.T) {
 	}
 	if fake.edits != 0 || len(fake.created) != 0 {
 		t.Fatalf("no change expected: edits=%d created=%v", fake.edits, fake.created)
+	}
+}
+
+func TestSetVerificationLabel_RefusesAnEmptyPR(t *testing.T) {
+	for _, pr := range []string{"", "  "} {
+		t.Run(fmt.Sprintf("%q", pr), func(t *testing.T) {
+			fake := &fakeLabelClient{}
+			_, _, err := setVerificationLabel(context.Background(), fake, pr, commands.VerifyReceiptOrCI)
+			if !errors.Is(err, errEmptyPRSelector) {
+				t.Fatalf("setVerificationLabel() error = %v, want %v", err, errEmptyPRSelector)
+			}
+			if fake.reads != 0 || fake.edits != 0 || len(fake.created) != 0 {
+				t.Fatalf("the client was used with an empty PR: reads=%d edits=%d created=%v", fake.reads, fake.edits, fake.created)
+			}
+		})
+	}
+}
+
+func TestRunPRLabelCommand_RefusesAnEmptyPR(t *testing.T) {
+	g := installFakeGh(t, "[]", "")
+
+	var err error
+	captureStdout(t, func() { err = runPRLabelCommand([]string{"--require-verification", ""}) })
+	if !errors.Is(err, errEmptyPRSelector) {
+		t.Fatalf("runPRLabelCommand() error = %v, want %v", err, errEmptyPRSelector)
+	}
+	if calls := g.calls(t); len(calls) != 0 {
+		t.Fatalf("gh was called with an empty PR argument, which it reads as the current branch's PR: %v", calls)
 	}
 }
 

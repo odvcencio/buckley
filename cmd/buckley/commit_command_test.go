@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,60 @@ func TestParseCommitCommandOptions(t *testing.T) {
 	}
 	if len(opts.filesToStage) != 1 || opts.filesToStage[0] != "a/file.go" {
 		t.Fatalf("filesToStage = %#v, want [a/file.go]", opts.filesToStage)
+	}
+}
+
+// TestParseCommitCommandOptions_FlagsAfterFiles covers Go's flag package,
+// which stops reading flags at the first file. A flag written after one used to
+// be handed to git as another file name, so `buckley commit main.go -C /other`
+// never reached /other.
+func TestParseCommitCommandOptions_FlagsAfterFiles(t *testing.T) {
+	t.Setenv(envCommitBackend, "")
+	t.Setenv(envOneshotBackend, "")
+
+	rejected := []struct {
+		name     string
+		args     []string
+		wantFlag string
+	}{
+		{"-C after a file", []string{"main.go", "-C", "/other"}, `"-C"`},
+		{"a boolean flag after the flags and a file", []string{"--yes", "main.go", "--dry-run"}, `"--dry-run"`},
+		{"a flag after two files", []string{"a.go", "b.go", "-paths", "x"}, `"-paths"`},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := parseCommitCommandOptions(tc.args)
+			if err == nil {
+				t.Fatalf("parseCommitCommandOptions(%q) = nil error, want a rejection", tc.args)
+			}
+			for _, want := range []string{tc.wantFlag, "before", `"--"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %s", err, want)
+				}
+			}
+		})
+	}
+
+	accepted := []struct {
+		name      string
+		args      []string
+		wantFiles []string
+	}{
+		{"files after the flags", []string{"--yes", "-C", "/repo", "a.go", "b.go"}, []string{"a.go", "b.go"}},
+		{"no files", []string{"--yes"}, nil},
+		{"anything after -- is a file, even when it starts with a dash", []string{"--yes", "--", "-odd.go", "--dry-run"}, []string{"-odd.go", "--dry-run"}},
+		{"a lone dash is a file name", []string{"a.go", "-"}, []string{"a.go", "-"}},
+	}
+	for _, tc := range accepted {
+		t.Run("accepts "+tc.name, func(t *testing.T) {
+			opts, err := parseCommitCommandOptions(tc.args)
+			if err != nil {
+				t.Fatalf("parseCommitCommandOptions(%q): %v", tc.args, err)
+			}
+			if len(opts.filesToStage) != len(tc.wantFiles) || (len(tc.wantFiles) > 0 && !reflect.DeepEqual(opts.filesToStage, tc.wantFiles)) {
+				t.Fatalf("filesToStage = %#v, want %#v", opts.filesToStage, tc.wantFiles)
+			}
+		})
 	}
 }
 
