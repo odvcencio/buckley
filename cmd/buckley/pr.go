@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +41,10 @@ type prCommandOptions struct {
 	contextFiles []string
 	noUpdate     bool
 	draft        bool
+	// head is the --head value; empty means the checked-out branch.
+	head string
+	// dir is the -C/--dir value; empty means the launch directory.
+	dir string
 	// verificationLabel is the requirement to set on the PR after it is
 	// created or updated; empty leaves labels alone.
 	verificationLabel commands.VerificationMode
@@ -62,8 +68,12 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print the generated PR without creating it")
 	yes := fs.Bool("yes", false, "skip confirmation prompts and create the PR")
-	pushFlag := fs.Bool("push", true, "push current branch before creating PR")
-	baseFlag := fs.String("base", "", "base branch (default: auto-detect main/master)")
+	pushFlag := fs.Bool("push", true, "push the head branch before creating PR")
+	baseFlag := fs.String("base", "", "base branch (default: BUCKLEY_PR_BASE, then the remote's default branch, then main, master or develop)")
+	headFlag := fs.String("head", "", "branch the PR comes from (default: the checked-out branch); owner:branch names a fork, and owner must own the push remote's repository. The PR text is built from that branch's commits, so the worktree can be on another branch or dirty")
+	var dir string
+	fs.StringVar(&dir, "C", "", "run as if started in this directory, like git -C (uppercase; lowercase -c selects the config file). Relative --context-file, --config and --agent paths resolve against the directory you launched in")
+	fs.StringVar(&dir, "dir", "", "same as -C")
 	verbose := fs.Bool("verbose", false, "show model reasoning and full trace")
 	showCost := fs.Bool("cost", true, "show token/cost breakdown")
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or models.utility.pr for API backend)")
@@ -81,6 +91,13 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return prCommandOptions{}, err
+	}
+	if operands := fs.Args(); len(operands) > 0 {
+		msg := fmt.Sprintf("unexpected argument %q: buckley pr takes flags only (name the branch with --head %s)", operands[0], operands[0])
+		if dropped, _, found := unreadFlag(fs, args); found {
+			msg += fmt.Sprintf("; the flag %q after it would not have been read either, so put every flag first", dropped)
+		}
+		return prCommandOptions{}, errors.New(msg)
 	}
 	effort, err := resolveOneshotEffort("pr", *effortFlag)
 	if err != nil {
@@ -110,6 +127,8 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		contextFiles:      append([]string(nil), contextFileFlag...),
 		noUpdate:          *noUpdate,
 		draft:             *draft,
+		head:              *headFlag,
+		dir:               dir,
 	}, nil
 }
 
@@ -181,14 +200,26 @@ func runPRCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	if opts.dir != "" {
+		if opts.contextFiles, err = enterWorkDir(opts.dir, opts.contextFiles); err != nil {
+			return err
+		}
+	}
 
-	runtime, cleanup, err := newPRCommandRuntime(opts)
-	defer cleanup()
+	plan, err := preflightPR(opts, execGhCommand)
+	if err != nil {
+		return err
+	}
+	warnPRHeadState(opts, plan)
+	warnPRGitVersion()
+
+	contextNotes, err := loadPRContextNotes(opts.contextFiles)
 	if err != nil {
 		return err
 	}
 
-	contextNotes, err := loadPRContextNotes(opts.contextFiles)
+	runtime, cleanup, err := newPRCommandRuntimeFn(opts)
+	defer cleanup()
 	if err != nil {
 		return err
 	}
@@ -200,12 +231,12 @@ func runPRCommand(args []string) error {
 		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
 	}
 
-	result, err := runPRGeneration(ctx, runtime.framework, resolveEvidenceBase(opts.base), opts.diffBudget, contextNotes)
+	result, err := runPRGeneration(ctx, runtime.framework, plan, opts.diffBudget, contextNotes)
 	if err != nil {
 		return err
 	}
 
-	pr, baseBranch, err := renderPRGenerationResult(opts, result, runtime.ledger)
+	pr, err := renderPRGenerationResult(opts, plan, result, runtime.ledger)
 	if err != nil {
 		return err
 	}
@@ -217,28 +248,31 @@ func runPRCommand(args []string) error {
 		return err
 	}
 
-	if opts.push {
-		if err := pushCurrentBranch(); err != nil {
+	if opts.push && plan.Head.PushNeeded {
+		if err := pushPRHead(plan.Head, plan.Remote); err != nil {
 			return err
 		}
 	}
+	warnIfPRHeadMoved(plan.Head)
 
-	if err := createPR(pr, baseBranch, opts.noUpdate, opts.draft); err != nil {
+	prURL, err := createPR(execGhCommand, pr, plan, opts)
+	if err != nil {
 		return err
 	}
 	if opts.verificationLabel != "" {
-		if prURL, found := openPRForBranch(); found {
-			ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
-			defer cancel()
-			if _, _, err := setVerificationLabel(ctx, ghLabelClient{}, prURL, opts.verificationLabel); err != nil {
-				return err
-			}
-			termOut.Dim("Verification policy label set: %s", opts.verificationLabel)
+		ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
+		defer cancel()
+		if _, _, err := setVerificationLabel(ctx, ghLabelClient{}, prURL, opts.verificationLabel); err != nil {
+			return err
 		}
+		termOut.Dim("Verification policy label set: %s", opts.verificationLabel)
 	}
 
 	return nil
 }
+
+// newPRCommandRuntimeFn builds the model runtime. Tests replace it.
+var newPRCommandRuntimeFn = newPRCommandRuntime
 
 func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), error) {
 	cfg, mgr, store, err := initOneshotDependencies(opts.backend)
@@ -275,11 +309,18 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 	}, cleanup, nil
 }
 
-func runPRGeneration(ctx context.Context, framework *oneshot.Framework, baseBranch string, diffBudget int, contextNotes string) (*prRunResult, error) {
+func runPRGeneration(ctx context.Context, framework *oneshot.Framework, plan *prPlan, diffBudget int, contextNotes string) (*prRunResult, error) {
 	spinner := terminal.NewSpinner("Generating PR...")
 	spinner.Start()
 
-	fwResult, err := framework.Run(ctx, commands.PRDefinition{BaseBranch: baseBranch, ContextNotes: contextNotes}, oneshot.RunOpts{
+	def := commands.PRDefinition{
+		BaseBranch:   plan.Base.Ref,
+		BaseName:     plan.Base.Label,
+		HeadRef:      plan.Head.Ref,
+		HeadName:     plan.Head.Name,
+		ContextNotes: contextNotes,
+	}
+	fwResult, err := framework.Run(ctx, def, oneshot.RunOpts{
 		ContextOpts: prContextOpts(diffBudget),
 	})
 	result := prRunResultFromFramework(fwResult)
@@ -315,7 +356,7 @@ func prRunResultFromFramework(fwResult *oneshot.RunResult) *prRunResult {
 	return result
 }
 
-func renderPRGenerationResult(opts prCommandOptions, result *prRunResult, ledger *transparency.CostLedger) (*commands.PRResult, string, error) {
+func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRunResult, ledger *transparency.CostLedger) (*commands.PRResult, error) {
 	if opts.verbose && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
@@ -324,26 +365,27 @@ func renderPRGenerationResult(opts prCommandOptions, result *prRunResult, ledger
 	}
 	if result.Error != nil {
 		printError(result.Error, result.Trace)
-		return nil, "", result.Error
+		return nil, result.Error
 	}
 	if result.PR == nil {
-		return nil, "", fmt.Errorf("no PR generated")
+		return nil, fmt.Errorf("no PR generated")
 	}
 
-	branch, baseBranch := detectPRBranches(opts.base)
-	printPR(result.PR, branch, baseBranch)
+	printPR(result.PR, plan)
 	if opts.showCost && result.Trace != nil {
 		printCost(result.Trace, ledger)
 	}
-	return result.PR, baseBranch, nil
+	return result.PR, nil
 }
+
+var errPRNonInteractive = errors.New("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
 
 func confirmPRCreation(opts prCommandOptions) error {
 	if opts.yes {
 		return nil
 	}
 	if !stdinIsTerminalFn() {
-		return fmt.Errorf("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
+		return errPRNonInteractive
 	}
 	fmt.Print("\nCreate this PR? [y/N] ")
 	var response string
@@ -354,58 +396,129 @@ func confirmPRCreation(opts prCommandOptions) error {
 	return nil
 }
 
-// resolveEvidenceBase picks the ref the PR EVIDENCE (diff/log/files) is
-// gathered against. A local base branch can silently sit many commits behind
-// its remote (held back by an old checkout or a worktree), which poisons the
-// generated PR into describing history that is already merged. The remote
-// tracking ref is the truth the PR will actually merge against, so prefer
-// origin/<base> whenever it exists; gh still receives the short base name.
-func resolveEvidenceBase(baseFlag string) string {
-	short, _ := prShortBase(baseFlag)
-	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
-	defer cancel()
-
-	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
-	if remote == "" {
-		remote = "origin"
-	}
-	tracking := remote + "/" + short
-	if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", tracking).Run(); err == nil {
-		return tracking
-	}
-	return short
+// prPlan is everything the preflight resolves before the model call.
+type prPlan struct {
+	Head    prHead
+	Base    prBase
+	Remote  string
+	Commits int
 }
 
-// prShortBase resolves the short base branch name (flag or auto-detected).
-func prShortBase(baseFlag string) (string, bool) {
-	if baseFlag != "" {
-		return baseFlag, true
+// explicitBase returns the base branch only when the caller chose it, which is
+// the only case where an open PR with another base is a conflict.
+func (p *prPlan) explicitBase() string {
+	if p.Base.Explicit {
+		return p.Base.Short
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
-	defer cancel()
-	for _, candidate := range []string{"main", "master", "develop"} {
-		if err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", candidate).Run(); err == nil {
-			return candidate, false
+	return ""
+}
+
+// summary renders "head -> base (N commits, tip abc1234)".
+func (p *prPlan) summary() string {
+	noun := "commits"
+	if p.Commits == 1 {
+		noun = "commit"
+	}
+	from := ""
+	if !p.Head.Local {
+		from = ", read from " + strings.TrimPrefix(p.Head.Ref, "refs/remotes/")
+	}
+	return fmt.Sprintf("%s → %s (%d %s, tip %s%s)", p.Head.Name, p.Base.Short, p.Commits, noun, shortSHA(p.Head.SHA), from)
+}
+
+// lookPathFn finds an executable on PATH. Tests replace it.
+var lookPathFn = exec.LookPath
+
+var errGhNotFound = errors.New("gh CLI not found (install from https://cli.github.com)")
+
+// preflightPR runs every check that can fail without a model: the
+// confirmation channel, gh, the head and base branches, the commit count and
+// conflicts with an open PR. A failure here costs no tokens. A dry run skips
+// the checks that need gh, the network or the push remote's URL, so it previews
+// in a repository whose remote is missing or is not a GitHub URL.
+func preflightPR(opts prCommandOptions, run ghCommandRunner) (*prPlan, error) {
+	if !opts.yes && !opts.dryRun && !stdinIsTerminalFn() {
+		return nil, errPRNonInteractive
+	}
+	if !opts.dryRun {
+		if _, err := lookPathFn("gh"); err != nil {
+			return nil, errGhNotFound
 		}
 	}
-	return "main", false
-}
 
-// detectPRBranches returns the current branch and base branch for PR display.
-func detectPRBranches(baseFlag string) (branch, baseBranch string) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
-	defer cancel()
-
-	if out, err := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
-		branch = strings.TrimSpace(string(out))
+	remote, err := prRemoteName()
+	if err != nil {
+		return nil, err
 	}
-	baseBranch, _ = prShortBase(baseFlag)
-	return
+	head, err := resolvePRHead(prHeadOptions{Flag: opts.head, Remote: remote, Push: opts.push, CheckRemote: !opts.dryRun})
+	if err != nil {
+		return nil, err
+	}
+	base, err := resolvePRBase(opts.base, remote)
+	if err != nil {
+		return nil, err
+	}
+	if head.Name == base.Short {
+		return nil, fmt.Errorf("head and base are both %s; pass --head <branch> or --base <branch>", head.Name)
+	}
+	commits, err := countPRCommits(base.Ref, head.Ref)
+	if err != nil {
+		return nil, err
+	}
+	if commits == 0 {
+		return nil, fmt.Errorf("%s has no commits that %s lacks, so there is no PR to open", head.Name, base.Label)
+	}
+	plan := &prPlan{Head: head, Base: base, Remote: remote, Commits: commits}
+
+	if opts.dryRun {
+		return plan, nil
+	}
+	if plan.Head.Owner, err = prHeadOwner(head, remote); err != nil {
+		return nil, err
+	}
+	existing, err := openPRForHead(run, plan.Head, plan.explicitBase())
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return plan, nil
+	}
+	if _, err := resolvePRUpdatePolicy(existing.URL, true, opts.noUpdate); err != nil {
+		return nil, err
+	}
+	if !base.Explicit && existing.Base != base.Short {
+		prWarnf("the open PR %s targets %s, but the PR text is written against %s; pass --base %s to match", existing.URL, existing.Base, base.Short, existing.Base)
+	}
+	return plan, nil
 }
 
-func printPR(pr *commands.PRResult, branch, baseBranch string) {
+// warnPRHeadState reports head states the preflight accepts but the caller
+// should know about.
+func warnPRHeadState(opts prCommandOptions, plan *prPlan) {
+	head, remoteBranch := plan.Head, plan.Remote+"/"+plan.Head.Name
+	if head.RemoteErr != nil {
+		prWarnf("could not compare %s with %s (%v); the PR text describes the local branch and may not match what the PR will contain", head.Name, remoteBranch, head.RemoteErr)
+	}
+	if head.Behind > 0 {
+		prWarnf("%s is %d commit(s) behind %s; the PR text describes the remote branch and nothing is pushed", head.Name, head.Behind, remoteBranch)
+	}
+	if !opts.push && head.Ahead > 0 {
+		prWarnf("%s has %d commit(s) that %s lacks and --push=false; the PR text describes %s and leaves them out", head.Name, head.Ahead, remoteBranch, remoteBranch)
+	}
+}
+
+// warnPRGitVersion says so when the installed git cannot read .gitattributes
+// from the head commit. The diff then follows the working tree's attributes,
+// which may belong to another branch or hold uncommitted edits.
+func warnPRGitVersion() {
+	if ok, installed := oneshot.HeadAttributesSupported(); !ok {
+		prWarnf("the installed git (%s) cannot read .gitattributes from the head commit; it needs 2.40 or newer. The diff follows the working tree's .gitattributes, so the PR text may not match the commits", installed)
+	}
+}
+
+func printPR(pr *commands.PRResult, plan *prPlan) {
 	termOut.Newline()
-	termOut.Header(fmt.Sprintf("PULL REQUEST: %s → %s", branch, baseBranch))
+	termOut.Header("PULL REQUEST: " + plan.summary())
 
 	// Build content for the box
 	var content strings.Builder
@@ -429,77 +542,51 @@ func printPR(pr *commands.PRResult, branch, baseBranch string) {
 	fmt.Println(pr.FormatBody())
 }
 
-func pushCurrentBranch() error {
-	branchCtx, branchCancel := context.WithTimeout(context.Background(), gitLocalTimeout)
-	defer branchCancel()
-
-	branch, err := exec.CommandContext(branchCtx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		return fmt.Errorf("failed to get current branch: %w", err)
-	}
-	branchName := strings.TrimSpace(string(branch))
-
-	remote := os.Getenv("BUCKLEY_REMOTE_NAME")
-	if remote == "" {
-		remote = "origin"
-	}
-
-	spinner := terminal.NewSpinner(fmt.Sprintf("Pushing to %s/%s...", remote, branchName))
-	spinner.Start()
-
-	pushCtx, pushCancel := context.WithTimeout(context.Background(), gitPushTimeout)
-	defer pushCancel()
-
-	cmd := exec.CommandContext(pushCtx, "git", "push", "-u", remote, branchName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		spinner.StopWithError(fmt.Sprintf("push failed: %s", strings.TrimSpace(string(output))))
-		return fmt.Errorf("git push failed: %w", err)
-	}
-
-	hashCtx, hashCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer hashCancel()
-	if hash := currentHeadHash(hashCtx, false); hash != "" {
-		spinner.StopWithSuccess(fmt.Sprintf("Pushed: %s to %s/%s", hash, remote, branchName))
-	} else {
-		spinner.StopWithSuccess(fmt.Sprintf("Pushed to %s/%s", remote, branchName))
-	}
-	return nil
-}
-
-func createPR(pr *commands.PRResult, baseBranch string, noUpdate, draft bool) error {
-	// Check for gh CLI
-	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("gh CLI not found (install from https://cli.github.com)")
-	}
-
+// createPR creates the PR for the plan, or updates the open PR for the same
+// head, and returns its URL. The lookup keys on the head branch, so the PR
+// that belongs to whatever branch the worktree has checked out is never touched.
+func createPR(run ghCommandRunner, pr *commands.PRResult, plan *prPlan, opts prCommandOptions) (string, error) {
 	body := pr.FormatBody()
-	existingURL, existingFound := openPRForBranch()
-	update, err := resolvePRUpdatePolicy(existingURL, existingFound, noUpdate)
+	existing, err := openPRForHead(run, plan.Head, plan.explicitBase())
 	if err != nil {
-		return err
+		return "", err
+	}
+	existingURL := ""
+	if existing != nil {
+		existingURL = existing.URL
+	}
+	update, err := resolvePRUpdatePolicy(existingURL, existing != nil, opts.noUpdate)
+	if err != nil {
+		return "", err
 	}
 	if update {
-		return updatePR(existingURL, pr.Header(), body)
+		if err := updatePR(run, existingURL, pr.Header(), body); err != nil {
+			return "", err
+		}
+		return existingURL, nil
 	}
 
 	spinner := terminal.NewSpinner("Creating PR...")
 	spinner.Start()
 
-	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "gh", buildGhPRCreateArgs(pr.Header(), body, baseBranch, draft)...)
-	output, err := cmd.CombinedOutput()
+	output, err := run(buildGhPRCreateArgs(pr.Header(), body, plan.Base.Short, plan.Head.GhHead, opts.draft)...)
 	if err != nil {
-		spinner.StopWithError(fmt.Sprintf("failed: %s", strings.TrimSpace(string(output))))
-		return fmt.Errorf("gh pr create failed: %w", err)
+		spinner.StopWithError(fmt.Sprintf("failed: %s", err))
+		return "", fmt.Errorf("gh pr create failed: %w", err)
 	}
 
-	// Extract PR URL from output
-	prURL := strings.TrimSpace(string(output))
+	prURL := lastLine(output)
+	if !prURLPattern.MatchString(prURL) {
+		spinner.StopWithError("gh printed no PR URL")
+		return "", fmt.Errorf("gh pr create exited 0 but its last output line is not a PR URL (%q); check whether the PR was created", prURL)
+	}
 	spinner.StopWithSuccess(fmt.Sprintf("PR created: %s", prURL))
-	return nil
+	return prURL, nil
+}
+
+func lastLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 // resolvePRUpdatePolicy decides whether createPR should update an existing
@@ -520,13 +607,17 @@ func resolvePRUpdatePolicy(existingURL string, existingFound bool, noUpdate bool
 	return true, nil
 }
 
-// buildGhPRCreateArgs assembles the `gh pr create` argument list, optionally
-// passing --draft through.
-func buildGhPRCreateArgs(title, body, baseBranch string, draft bool) []string {
+// buildGhPRCreateArgs assembles the `gh pr create` argument list. head is
+// passed as --head only when the caller gave one; --draft is passed through
+// when requested.
+func buildGhPRCreateArgs(title, body, baseBranch, head string, draft bool) []string {
 	args := []string{"pr", "create",
 		"--title", title,
 		"--body", body,
 		"--base", baseBranch,
+	}
+	if head != "" {
+		args = append(args, "--head", head)
 	}
 	if draft {
 		args = append(args, "--draft")
@@ -534,52 +625,101 @@ func buildGhPRCreateArgs(title, body, baseBranch string, draft bool) []string {
 	return args
 }
 
-// openPRForBranch reports the current branch's open PR, if one exists.
-// Closed and merged PRs stay untouched: a fresh push after a merge gets
-// a fresh PR.
-func openPRForBranch() (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "gh", "pr", "view", "--json", "state,url").Output()
-	if err != nil {
-		return "", false
-	}
-	return parseOpenPRView(output)
+// openPullRequest is an open PR as `gh pr list` reports it.
+type openPullRequest struct {
+	Number int
+	URL    string
+	Base   string
 }
 
-// parseOpenPRView extracts the URL from a `gh pr view --json state,url`
-// payload when the PR is still open.
-func parseOpenPRView(payload []byte) (string, bool) {
-	var view struct {
-		State string `json:"state"`
-		URL   string `json:"url"`
+// prURLPattern matches the URL of a pull request, the last line gh pr create
+// prints.
+var prURLPattern = regexp.MustCompile(`^https?://\S+/pull/[0-9]+$`)
+
+// errEmptyPRSelector stops an empty PR argument before it reaches gh, which
+// reads "" as "the PR for the current branch": a PR the caller did not mean.
+var errEmptyPRSelector = errors.New("no PR given: gh would read an empty PR argument as the PR for the current branch")
+
+// openPRForHead finds the open PR whose head is the branch head.Name of the
+// repository head.Owner owns. Closed and merged PRs stay untouched: a fresh
+// push after a merge gets a fresh PR. It returns nil when there is none and an
+// error when gh fails, so a transient failure never reads as "no PR".
+//
+// gh filters by branch name only, so the listing holds every open PR with that
+// head name: one from the base repository and one from each fork. Only the
+// head repository's owner tells them apart, so the match needs it. In a fork
+// checkout gh lists the parent repository, and the caller's own PR is the one
+// whose head owner is the fork. A base other than "" is the base the caller
+// chose: an open PR for the head with a different base is refused rather than
+// edited, because editing it would change a PR the caller did not name.
+func openPRForHead(run ghCommandRunner, head prHead, base string) (*openPullRequest, error) {
+	out, err := run("pr", "list", "--head", head.Name, "--state", "open",
+		"--json", "number,url,baseRefName,headRefName,headRepositoryOwner")
+	if err != nil {
+		return nil, fmt.Errorf("look up open PRs for %s: %w", head.Name, err)
 	}
-	if err := json.Unmarshal(payload, &view); err != nil {
-		return "", false
+	var listed []struct {
+		Number              int    `json:"number"`
+		URL                 string `json:"url"`
+		BaseRefName         string `json:"baseRefName"`
+		HeadRefName         string `json:"headRefName"`
+		HeadRepositoryOwner struct {
+			Login string `json:"login"`
+		} `json:"headRepositoryOwner"`
 	}
-	if view.State != "OPEN" || view.URL == "" {
-		return "", false
+	if err := json.Unmarshal(out, &listed); err != nil {
+		return nil, fmt.Errorf("decode open PRs for %s: %w", head.Name, err)
 	}
-	return view.URL, true
+	var matches []openPullRequest
+	for _, pr := range listed {
+		// No login means the head repository was deleted; nothing can be
+		// pushed to it, so the PR cannot be ours.
+		login := pr.HeadRepositoryOwner.Login
+		if pr.HeadRefName != head.Name || login == "" || !strings.EqualFold(login, head.Owner) {
+			continue
+		}
+		if pr.Number <= 0 || !prURLPattern.MatchString(pr.URL) {
+			return nil, fmt.Errorf("gh listed an open PR for %s without a usable number and URL (#%d %q)", head.Name, pr.Number, pr.URL)
+		}
+		matches = append(matches, openPullRequest{Number: pr.Number, URL: pr.URL, Base: pr.BaseRefName})
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	if base != "" {
+		for i := range matches {
+			if matches[i].Base == base {
+				return &matches[i], nil
+			}
+		}
+		return nil, fmt.Errorf("an open PR for %s targets %s, not %s; refusing to retarget it (%s)", head.Name, matches[0].Base, base, openPRURLs(matches))
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("%s has %d open PRs (%s); pass --base to pick one", head.Name, len(matches), openPRURLs(matches))
+	}
+	return &matches[0], nil
+}
+
+func openPRURLs(prs []openPullRequest) string {
+	parts := make([]string, len(prs))
+	for i, pr := range prs {
+		parts[i] = fmt.Sprintf("#%d %s", pr.Number, pr.URL)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // updatePR regenerates the existing open PR's title and body in place,
 // so re-running `buckley pr` after new commits refreshes the PR instead
 // of failing with "already exists".
-func updatePR(url, title, body string) error {
+func updatePR(run ghCommandRunner, url, title, body string) error {
+	if strings.TrimSpace(url) == "" {
+		return errEmptyPRSelector
+	}
 	spinner := terminal.NewSpinner("Updating PR...")
 	spinner.Start()
 
-	ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "gh", "pr", "edit", url,
-		"--title", title,
-		"--body", body,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		spinner.StopWithError(fmt.Sprintf("failed: %s", strings.TrimSpace(string(output))))
+	if _, err := run("pr", "edit", url, "--title", title, "--body", body); err != nil {
+		spinner.StopWithError(fmt.Sprintf("failed: %s", err))
 		return fmt.Errorf("gh pr edit failed: %w", err)
 	}
 	spinner.StopWithSuccess(fmt.Sprintf("PR updated: %s", url))

@@ -29,6 +29,9 @@ var verificationLabelInfo = map[string]struct{ description, color string }{
 // when the repository lacks it, adds it, and removes only the other
 // buckbot:verify-* labels. It never touches any other label.
 func setVerificationLabel(ctx context.Context, client prLabelClient, pr string, mode commands.VerificationMode) (add, remove []string, err error) {
+	if strings.TrimSpace(pr) == "" {
+		return nil, nil, errEmptyPRSelector
+	}
 	current, err := client.PRLabels(ctx, pr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read PR labels: %w", err)

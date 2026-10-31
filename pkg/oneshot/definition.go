@@ -18,9 +18,16 @@ type ContextSource struct {
 	//   git_diff:  "staged" => "true" for --cached; "base" => branch name for base...HEAD
 	//   git_log:   "base" => branch name for base..HEAD
 	//   git_files: "staged" => "true" for --cached --name-status; "base" => branch name
-	//   agents_md: (no params)
+	//   agents_md: "head" => ref to read AGENTS.md from; empty reads the working tree
 	//   env:       "name" => environment variable name
 	//   command:   "cmd" => shell command string
+	//
+	// git_diff, git_log and git_files also take "head" => the ref that ends the
+	// base range in place of HEAD (default HEAD). A head ref makes the source
+	// read commits only: the fallbacks that compare against the working tree are
+	// replaced by commit-to-commit comparisons, and the diff and the generated
+	// file classification read gitattributes from the head's tree (git 2.40 and
+	// newer; an older git reads the working tree's, see HeadAttributesSupported).
 	Params map[string]string
 }
 

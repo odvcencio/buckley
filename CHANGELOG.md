@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `buckley pr --head <branch>` opens a PR for a branch the worktree has not
+  checked out, and `-C <dir>` (alias `--dir`) runs `buckley pr` or
+  `buckley commit` as if started in another repository. `-C` resolves
+  `--config`, `--agent` (and `BUCKLEY_AGENT`) and relative `--context-file`
+  paths against the directory you launched in, so the target repository cannot
+  supply them. `buckley commit -C` commits everything staged in the target
+  repository, so pair it with `--paths` when another process may be staging
+  there.
+- The evidence that `buckley pr` gathers for the PR text (diff, commit log, file
+  list, `AGENTS.md` and `.gitattributes`) now comes from the head branch's
+  commits, not the working tree, so uncommitted edits and the checked-out branch
+  do not reach it. That covers what buckley collects: agent backends with
+  their own read tools (`--backend codex` and `--backend claude`) can still read
+  the working tree. Git 2.40 or newer reads `.gitattributes` from the head commit
+  (`--attr-source`); an older git warns and reads the working tree's
+  `.gitattributes`. Generated-file marks (`linguist-generated`, `-diff`) are
+  looked up from the repository root, so `-C <subdir>` no longer loses them.
+- `buckley pr` looks up the open PR by the head branch (`gh pr list --head`) and
+  by the owner of the head repository (the push remote's), so a same-named
+  branch of another repository is never edited and a fork checkout finds its
+  own PR; `--head owner:branch` must name the push remote's owner. A `gh`
+  failure is an error instead of "no PR", a PR without a URL is never passed to
+  `gh`, and an explicit `--base` that differs from the open PR's base is
+  refused. The base is read through its fully qualified ref, so a tag or local
+  branch named like it cannot replace it, and with `--push=false` the PR text
+  describes the remote branch the PR will hold.
+- `buckley pr` resolves the head before the model call. A local-only branch is
+  pushed with an explicit refspec. A remote-only branch is fetched (one
+  branch, `refs/remotes/*` only, without writing `FETCH_HEAD` on git 2.29 or
+  newer, so a `git pull` running in the same checkout cannot pick it up). A
+  branch behind its remote reads the remote. A branch equal to its remote is not
+  pushed when `--head` names it, and `--head` passes `-u` only to a branch that
+  has no upstream, because another process may have the branch checked out.
+  Without `--head`, the push passes `-u` unless the branch already tracks the
+  remote branch of the same name. A diverged branch is refused and never
+  forced.
 - `buckley commit` now completes an in-progress merge, cherry-pick, or
   revert that stopped on a conflict, instead of falling back to plain
   `git commit`. It refuses when unmerged paths remain, generates a merge
@@ -44,6 +80,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure. The trusted-exit-code check is language-aware: it accepts exit
   code 101 for a Rust/Cargo build error or test failure, not just 0 and 1.
   See docs/CONFIGURATION.md.
+
+### Changed
+- `buckley pr` picks its base branch in a new order when you do not pass
+  `--base`: `BUCKLEY_PR_BASE`, then the remote's default branch
+  (`refs/remotes/<remote>/HEAD`), then `<remote>/main`, `<remote>/master` and
+  `<remote>/develop`, then the same names as local branches. It used to take
+  the first of `main`, `master` or `develop` that resolved locally. A
+  repository whose default branch is `develop` or `trunk` now targets that
+  branch, not a local `main`. A stale `refs/remotes/<remote>/HEAD` (the default
+  branch was renamed after the clone) now sends PRs to the old name: refresh it
+  with `git remote set-head <remote> --auto`, or pass `--base`.
+  `BUCKLEY_PR_BASE` was documented but never read, so anyone who already had it
+  set now gets it honored. When no base exists, `buckley pr` fails and names
+  `--base` where it used to assume `main`.
+- `buckley pr` runs its checks before the model call: a detached `HEAD` without
+  `--head`, a missing `gh`, a non-terminal run without `--yes`, a branch with no
+  commits ahead of its base, a diverged branch, and `--no-update` against an
+  open PR. Most of these used to fail after the model call. A run that is not a
+  dry run also fetches the head branch from the remote before it generates the
+  text.
+- `buckley pr` rejects a positional argument, and `buckley commit` rejects a
+  flag written after a file name. Go reads flags only up to the first plain
+  argument, so `buckley pr --yes feature -C /other` used to drop `-C` without a
+  word and open a PR for the directory you launched in. Use `--head <branch>` to
+  name a branch, and put flags before files (`--` ends the flags).
+- Errors from `gh` name the command (`gh pr create`), not its arguments, so a
+  PR body never lands in an error message.
 
 ### Fixed
 - Headless mutation runs (`--task-intent mutation`, `--persist`) no longer

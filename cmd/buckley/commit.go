@@ -78,6 +78,7 @@ type commitCommandOptions struct {
 	squashBase     string
 	force          bool
 	forceWithLease bool
+	dir            string
 }
 
 type commitCommandRuntime struct {
@@ -145,9 +146,19 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	squashFlag := fs.String("squash", "", "squash all commits since the merge-base with this ref into one commit")
 	force := fs.Bool("force", false, "with --squash: allow squashing a protected branch (main/master)")
 	forceWithLease := fs.Bool("force-with-lease", false, "with --squash: push the rewritten branch (git push --force-with-lease)")
+	var dir string
+	const dirUsage = "run as if started in this directory, like git -C (uppercase; lowercase -c selects the config file). " +
+		"The commit takes everything staged in that repository, so a repository another process is staging into gets that work committed: " +
+		"pair -C with --paths (and --exclusive) there. Positional files and --paths resolve inside that directory; " +
+		"relative --config and --agent paths resolve against the directory you launched in"
+	fs.StringVar(&dir, "C", "", dirUsage)
+	fs.StringVar(&dir, "dir", "", "same as -C")
 
 	if err := fs.Parse(args); err != nil {
 		return commitCommandOptions{}, err
+	}
+	if dropped, before, found := unreadFlag(fs, args); found {
+		return commitCommandOptions{}, fmt.Errorf("flag %q comes after the file %q, so it was not read as a flag: put every flag before the files, or put \"--\" before a file name that starts with \"-\"", dropped, before)
 	}
 	effort, err := resolveOneshotEffort("commit", *effortFlag)
 	if err != nil {
@@ -178,6 +189,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 		squashBase:     strings.TrimSpace(*squashFlag),
 		force:          *force,
 		forceWithLease: *forceWithLease,
+		dir:            dir,
 	}
 	return opts, nil
 }
@@ -187,6 +199,11 @@ func runCommitCommand(args []string) error {
 	opts, err := parseCommitCommandOptions(args)
 	if err != nil {
 		return err
+	}
+	if opts.dir != "" {
+		if _, err := enterWorkDir(opts.dir, nil); err != nil {
+			return err
+		}
 	}
 
 	if opts.squashBase != "" {
