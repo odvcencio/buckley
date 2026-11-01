@@ -130,3 +130,105 @@ func TestPostureEnvVarOverridesConfigDefault(t *testing.T) {
 		t.Fatalf("expected BUCKLEY_POSTURE env override, got %q", cfg.Postures.Default)
 	}
 }
+
+func TestDefaultConfig_AllowAgentHarnessIsOff(t *testing.T) {
+	if config.DefaultConfig().Permissions.AllowAgentHarness {
+		t.Fatal("permissions.allow_agent_harness must default to false")
+	}
+}
+
+// TestLoad_AllowAgentHarnessIsOperatorOnly proves the switch comes only from
+// user-scope config. A repository's own .buckley/config.yaml is project scope
+// and cannot set it, through either loader, and cannot clear the operator's
+// choice either.
+func TestLoad_AllowAgentHarnessIsOperatorOnly(t *testing.T) {
+	const on = "permissions:\n  allow_agent_harness: true\n"
+	const off = "permissions:\n  allow_agent_harness: false\n"
+	tests := []struct {
+		name         string
+		user         string
+		project      string
+		want         bool
+		projectRules int
+	}{
+		{name: "unset", want: false},
+		{name: "user turns it on", user: on, want: true},
+		{name: "project cannot turn it on", project: on, want: false},
+		{name: "project cannot override the operator's off", user: off, project: on, want: false},
+		{name: "project cannot clear the operator's on", user: on, project: off, want: true},
+		{
+			name:         "project rules still load beside the ignored key",
+			project:      "permissions:\n  allow_agent_harness: true\n  project:\n    - tool: run_shell\n      arg_pattern: \"*\"\n      action: ask\n",
+			want:         false,
+			projectRules: 1,
+		},
+	}
+	for _, loader := range []struct {
+		name string
+		load func(t *testing.T, project string) *config.Config
+	}{
+		{name: "Load", load: func(t *testing.T, project string) *config.Config {
+			t.Chdir(project)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+			return cfg
+		}},
+		{name: "LoadForWorkspace", load: func(t *testing.T, project string) *config.Config {
+			cfg, err := config.LoadForWorkspace(project)
+			if err != nil {
+				t.Fatalf("config.LoadForWorkspace: %v", err)
+			}
+			return cfg
+		}},
+	} {
+		for _, tt := range tests {
+			t.Run(loader.name+"/"+tt.name, func(t *testing.T) {
+				home := t.TempDir()
+				project := t.TempDir()
+				t.Setenv("HOME", home)
+				writeConfigYAML(t, filepath.Join(home, ".buckley"), tt.user)
+				writeConfigYAML(t, filepath.Join(project, ".buckley"), tt.project)
+
+				cfg := loader.load(t, project)
+				if got := cfg.Permissions.AllowAgentHarness; got != tt.want {
+					t.Fatalf("permissions.allow_agent_harness = %t, want %t", got, tt.want)
+				}
+				if got := len(cfg.Permissions.Project); got != tt.projectRules {
+					t.Fatalf("project permission rules = %+v, want %d", cfg.Permissions.Project, tt.projectRules)
+				}
+			})
+		}
+	}
+}
+
+func TestLoadFromPath_AllowAgentHarnessFromExplicitConfig(t *testing.T) {
+	// LoadFromPath also reads $HOME/.buckley/config.env.
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "operator.yaml")
+	if err := os.WriteFile(path, []byte("permissions:\n  allow_agent_harness: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("config.LoadFromPath: %v", err)
+	}
+	if !cfg.Permissions.AllowAgentHarness {
+		t.Fatal("an explicit --config file is operator scope and must be able to set the switch")
+	}
+}
+
+// writeConfigYAML writes dir/config.yaml, or nothing when body is empty.
+func writeConfigYAML(t *testing.T, dir, body string) {
+	t.Helper()
+	if body == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}

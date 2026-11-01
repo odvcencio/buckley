@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `permissions.allow_agent_harness` lets the model launch agent CLIs from
+  `run_shell`. It defaults to `false`, which keeps the built-in deny for
+  `buckley`, `codex`, `claude`, `opencode`, `aider`, `cursor-agent`, `gemini`,
+  `amp` and `copilot`, also behind `env`, `sudo`, `timeout`, `nohup`, `nice`,
+  `exec` and `command`. Set it to `true` in `~/.buckley/config.yaml` or a
+  `--config` file to lift that deny. It applies to the TUI, ACP, one-shot runs,
+  the headless and IPC runners, the gRPC ACP server, and the `goal`, `plan`,
+  `execute`, `execute-task` and `experiment` commands. A repository's
+  `.buckley/config.yaml` cannot set it, and no environment variable does. The
+  switch opens agent launches, not self-escalation. These stay denied, as every
+  `buckley` command was before: `buckley trust allow`, `deny` and `reset` and
+  their aliases, `buckley goal approve`, `buckley remote tokens create` and
+  `revoke`, and `buckley remote login`. The check reads command text, so it is a
+  guard rail, not a sandbox. Your own rules keyed on
+  `command_class: agent_harness` still apply. See docs/CONFIGURATION.md.
 - `buckley pr --head <branch>` opens a PR for a branch the worktree has not
   checked out, and `-C <dir>` (alias `--dir`) runs `buckley pr` or
   `buckley commit` as if started in another repository. `-C` resolves
@@ -82,6 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See docs/CONFIGURATION.md.
 
 ### Changed
+- The built-in agent-launch deny no longer matches `goose`. Two tools use that
+  name: the database migration tool and Block's agent CLI. A shell tool call
+  that runs either one is no longer denied, with or without
+  `permissions.allow_agent_harness`.
 - `buckley pr` picks its base branch in a new order when you do not pass
   `--base`: `BUCKLEY_PR_BASE`, then the remote's default branch
   (`refs/remotes/<remote>/HEAD`), then `<remote>/main`, `<remote>/master` and
@@ -109,6 +128,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PR body never lands in an error message.
 
 ### Fixed
+- The built-in agent-launch deny reads a command line the way the shell does.
+  It no longer misses a launch that comes after `echo a\ #b;` or `echo $'a\'b';`,
+  follows a redirection, or has a backslash and newline inside its name. A
+  carriage return stays inside its word, as in the shell, instead of ending the
+  command. With `permissions.allow_agent_harness` on, the same reading keeps
+  `buckley goal approve`, `buckley remote login`,
+  `buckley remote tokens create` and `revoke`, and the `buckley trust` writes
+  denied when a startup flag has an empty or `$(...)` value, as in
+  `buckley -c "" goal approve run-1`.
+- `buckley trust allow --help` no longer trusts a directory named `--help`.
+  `buckley trust` took its first two arguments as the subcommand and the path,
+  so `-h`, `--help` and any mistyped flag became a path: run in your home
+  directory, `buckley trust allow --help` stored `~/--help` as trusted. It now
+  prints usage for `-h`, `--help` and `help`, before or after the path, and it
+  rejects unknown flags, a second path and an empty path. `buckley trust allow ""`
+  used to trust the current directory, so a script with an unset variable
+  trusted whatever directory it ran in; leave the path out to mean the current
+  directory. `allow` and `deny` also need an existing directory now. `reset`
+  still takes any path, so `buckley trust reset ~/--help` removes a record that
+  an older version stored. For a directory whose name starts with a dash, write
+  `./--name` or put `--` first.
 - Headless mutation runs (`--task-intent mutation`, `--persist`) no longer
   loop on "missing successful verification after the latest workspace
   change" when no check can run. Refused `run_verification` calls (for

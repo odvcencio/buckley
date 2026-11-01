@@ -772,6 +772,93 @@ approval:
 | `auto` | Full workspace access, approval for external operations |
 | `yolo` | Full autonomy (dangerous, use with caution) |
 
+### permissions
+
+Glob rules for tool calls, and one switch for agent launches. The switch,
+`allow_agent_harness`, is operator-only: put it in `~/.buckley/config.yaml` or in
+a file you pass with `--config`. Buckley ignores it in a repository's
+`.buckley/config.yaml`, and no environment variable sets it.
+
+```yaml
+permissions:
+  # Let the model start other agent CLIs from run_shell. Operator-only.
+  allow_agent_harness: false
+
+  # Glob rules. A deny in any list wins.
+  project:
+    - tool: run_shell
+      arg_pattern: "*docker*"
+      action: ask
+  user: []
+```
+
+`project` and `user` hold the rules. Each rule has a `tool` (`*` matches every
+tool), an `arg_pattern` (a glob on the command or path), an `action` (`allow`,
+`ask`, `park` or `deny`) and, optionally, a `command_class`. Unlike
+`allow_agent_harness`, a repository's `.buckley/config.yaml` can set these lists.
+As elsewhere, a list in a later file replaces the earlier list whole.
+
+`allow_agent_harness` controls a built-in deny. By default, `run_shell` refuses a
+command that starts `buckley`, `codex`, `claude`, `opencode`, `aider`,
+`cursor-agent`, `gemini`, `amp` or `copilot`, also behind `env`, `sudo`,
+`timeout`, `nohup`, `nice`, `exec` and `command`. No allow rule lifts this deny,
+and it holds in every approval mode. `goose` is not on the list, because two
+tools use that name: the database migration tool and Block's agent CLI. A `goose`
+command runs whether the key is off or on.
+
+Set the key to `true` to remove that deny. The TUI, ACP, one-shot runs, the
+headless and IPC runners, the gRPC ACP server, and the `goal`, `plan`, `execute`,
+`execute-task` and `experiment` commands then let the model run `buckley commit`,
+`buckley pr`, `codex exec` and the like. `buckley review` and `buckley review-pr`
+do not read the key.
+
+With the key on:
+
+- These `buckley` commands stay denied: `buckley trust allow`, `deny` and
+  `reset`, and their aliases `trust`, `restrict`, `forget` and `rm`;
+  `buckley goal approve`, with or without `--deny`; `buckley remote tokens create`
+  and `buckley remote tokens revoke`; and `buckley remote login`. They change a
+  project's trust decision, resolve a parked approval, mint or revoke an API
+  token, and store remote credentials. The key opens agent launches, not
+  self-escalation. Before the key existed, Buckley denied every `buckley`
+  command, so these are denied as they were. Buckley reads the line the way the
+  shell does. Startup flags such as `--config` between the words of a command do
+  not hide it, and neither does an empty or quoted value for a flag, a `$(...)`
+  that gives one word, a line continuation, a redirection or a comment.
+- Buckley also denies a `buckley` command whose subcommand or verb it cannot
+  read, such as `buckley $CMD allow .`, `buckley goal "$ACTION" run-1` or
+  `buckley trust "$VERB" .`. A flag spelled with an expansion before those
+  words, such as `-c$(:)`, counts too, because it may become `-c` and take the
+  next word as its value. The read-only forms run: `buckley trust status`,
+  `buckley goal status` and `buckley remote tokens list`.
+- Your own rules still apply. A rule with `command_class: agent_harness` in
+  `permissions.project`, `permissions.user` or a posture still denies or asks.
+- Another agent runs under its own rules, not Buckley's. The key does not stop
+  these changes made through it: a launched agent can run `buckley trust allow`
+  or `buckley goal approve` itself, for example through `codex exec "..."`. A
+  nested `buckley` reads the config and trust store it finds when it starts, and
+  the model can point it at others with `--config`, `HOME=` or
+  `BUCKLEY_DATA_DIR=`. Buckley does not limit how deeply launched agents nest:
+  the delegation depth guard covers the `invoke_*` tools, not `run_shell`.
+- The check reads the command text and does not run the shell, so it is a guard
+  rail, not a sandbox. It does not see through `sh -c`, `eval`, scripts, shell
+  functions, `{ ...; }` groups, or `while` and `until` conditions. It does not
+  know every wrapper or wrapper option: `xargs`, `setsid`, `time`, `env -S` and
+  `sudo -r` slip past it, and so does a `+=` assignment before the program. It
+  cannot read a program name that a variable, a glob or a substitution builds,
+  and it does not know a copy of an agent binary under another name. It does not
+  read a command inside backquotes or a substitution in double quotes, such as
+  `echo "$(buckley goal approve run-1)"`, or the commands after a here-document
+  whose text holds an unpaired quote, backquote or `${`. It cannot tell when a flag's
+  value takes no word or several, as an unquoted `$VAR`, `$(...)` or `{a,b}` can:
+  `buckley -c $VAR` runs `goal approve` when `VAR` holds
+  `x.yaml goal approve run-1`, and `buckley -c $VAR x goal approve run-1` does
+  when `VAR` is empty.
+- A shell command can also edit `~/.buckley/project-trust.json` or
+  `~/.buckley/config.yaml`, including setting this key for later sessions;
+  `approval.mode` has the same exposure. To contain a model, use the sandbox
+  settings.
+
 ### tools.read_roots
 
 Let read-only file tools read paths outside the working directory. Each entry is

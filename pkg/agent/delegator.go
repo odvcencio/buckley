@@ -231,6 +231,7 @@ func (d *Delegator) filterTools(allowedTools []string) *tool.Registry {
 
 	// Create an empty registry (without built-in tools)
 	filtered := tool.NewEmptyRegistry()
+	filtered.SetAllowAgentHarness(d.registry.AllowAgentHarness())
 
 	// Create a set of allowed tool names for O(1) lookup
 	allowed := make(map[string]bool, len(allowedTools))

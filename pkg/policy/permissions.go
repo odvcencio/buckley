@@ -70,6 +70,7 @@ type PermissionRequest struct {
 	Category          string // "shell", "file_read", "file_write", ...
 	Arg               string // command string or path matched against ArgPattern
 	CommandClass      string // deterministic shell classification, when available
+	AllowAgentHarness bool   // operator opt-in: built-in defaults do not deny agent CLI launches
 	WorkspaceRelative bool   // true when Arg resolves inside the workspace root
 	Posture           string // active posture name, e.g. "interactive", "unattended"
 }

@@ -79,6 +79,7 @@ func (r *Registry) checkBuiltinPermissionDefaults(ctx *ExecutionContext) (*built
 	if !ok {
 		return nil, false
 	}
+	req.AllowAgentHarness = r.AllowAgentHarness()
 	dec := policy.EvaluateBuiltinDefaultsGo(req)
 	if !dec.Matched || dec.Action != policy.PermissionDeny {
 		return nil, false

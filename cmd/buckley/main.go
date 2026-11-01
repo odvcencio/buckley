@@ -468,6 +468,7 @@ func runPlanCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	registry.SetAllowAgentHarness(cfg.Permissions.AllowAgentHarness)
 	if cwd, err := os.Getwd(); err == nil {
 		registry.ConfigureContainers(cfg, cwd)
 	}
@@ -508,6 +509,7 @@ func runExecuteCommand(args []string) error {
 
 	// Create orchestrator
 	registry := tool.NewRegistry()
+	registry.SetAllowAgentHarness(cfg.Permissions.AllowAgentHarness)
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}
@@ -585,6 +587,7 @@ func runExecuteTaskCommand(args []string) error {
 	defer store.Close()
 
 	registry := tool.NewRegistry()
+	registry.SetAllowAgentHarness(cfg.Permissions.AllowAgentHarness)
 	if err := registry.LoadDefaultPlugins(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load some plugins: %v\n", err)
 	}

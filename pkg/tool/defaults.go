@@ -10,7 +10,9 @@ import (
 )
 
 // ApplyToolMiddlewareConfig installs the configured timeout, retry, output,
-// progress, validation, and file-tracking middleware on a registry.
+// progress, validation, and file-tracking middleware on a registry. It also
+// passes on the operator's permissions.allow_agent_harness choice, so every
+// surface that applies this config honors the switch.
 func ApplyToolMiddlewareConfig(registry *Registry, cfg *config.Config) {
 	if registry == nil {
 		return
@@ -30,6 +32,7 @@ func ApplyToolMiddlewareConfig(registry *Registry, cfg *config.Config) {
 		}
 		defaults.MaxOutputBytes = middleware.MaxResultBytes
 		defaults.DefaultPoolMode = cfg.Tools.DefaultPoolMode
+		defaults.AllowAgentHarness = cfg.Permissions.AllowAgentHarness
 	}
 	ApplyRegistryConfig(registry, defaults)
 }
@@ -75,6 +78,10 @@ type RegistryConfig struct {
 	MaxOutputBytes  int
 	Middleware      MiddlewareConfig
 	DefaultPoolMode string
+
+	// AllowAgentHarness is permissions.allow_agent_harness; see
+	// Registry.SetAllowAgentHarness.
+	AllowAgentHarness bool
 }
 
 // DefaultMiddlewareStack returns the default middleware chain.
@@ -132,6 +139,7 @@ func ApplyRegistryConfig(registry *Registry, cfg RegistryConfig) {
 	if cfg.DefaultPoolMode != "" {
 		registry.SetDefaultPoolMode(cfg.DefaultPoolMode)
 	}
+	registry.SetAllowAgentHarness(cfg.AllowAgentHarness)
 	if cfg.TelemetryHub != nil {
 		registry.EnableTelemetry(cfg.TelemetryHub, cfg.TelemetrySessionID)
 	}

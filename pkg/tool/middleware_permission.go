@@ -54,6 +54,11 @@ type PermissionGate struct {
 	// approval surface; headless callers leave it false to preserve their
 	// runner-owned approval path.
 	RequireApproval bool
+	// AllowAgentHarness is the operator's permissions.allow_agent_harness
+	// choice. When true, the built-in deny for agent CLI launches does not
+	// apply; rules in Layers still do. Commands that change buckley's own trust,
+	// approval, or credential state stay denied.
+	AllowAgentHarness bool
 }
 
 // PermissionApprovalRequest is the structured request passed to an
@@ -100,6 +105,7 @@ func NewPermissionMiddleware(gate *PermissionGate) Middleware {
 			if !ok {
 				return next(ctx)
 			}
+			req.AllowAgentHarness = gate.AllowAgentHarness
 
 			dec := policy.EvaluatePermissionLayersWithBuiltins(gate.Evaluator, req, gate.Layers...)
 			switch dec.Action {

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"m31labs.dev/buckley/pkg/mission"
@@ -44,6 +45,9 @@ type Registry struct {
 	discoveryExposed map[string]struct{}
 
 	defaultPoolMode string
+
+	// allowAgentHarness is read on every tool call, so it avoids mu.
+	allowAgentHarness atomic.Bool
 }
 
 type registryOptions struct {
@@ -215,6 +219,23 @@ func (r *Registry) DefaultPoolMode() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.defaultPoolMode
+}
+
+// SetAllowAgentHarness records the operator's permissions.allow_agent_harness
+// choice. When it is on, the built-in deny for agent CLI launches from
+// run_shell no longer applies to this registry. Commands that change buckley's
+// own trust, approval, or credential state stay denied. Only operator-scope
+// config sets it; callers pass cfg.Permissions.AllowAgentHarness.
+func (r *Registry) SetAllowAgentHarness(allow bool) {
+	if r == nil {
+		return
+	}
+	r.allowAgentHarness.Store(allow)
+}
+
+// AllowAgentHarness reports whether the operator allowed agent CLI launches.
+func (r *Registry) AllowAgentHarness() bool {
+	return r != nil && r.allowAgentHarness.Load()
 }
 
 // SetSandboxConfig configures command sandboxing for tools that support it.

@@ -162,6 +162,22 @@ func TestFilterTools(t *testing.T) {
 	}
 }
 
+func TestFilterTools_CarriesAllowAgentHarness(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		registry := tool.NewRegistry()
+		registry.SetAllowAgentHarness(allow)
+		delegator := NewDelegator(nil, registry, nil)
+
+		filtered := delegator.filterTools([]string{"read_file"})
+		if filtered == registry {
+			t.Fatal("expected a new filtered registry")
+		}
+		if got := filtered.AllowAgentHarness(); got != allow {
+			t.Fatalf("filtered registry AllowAgentHarness() = %t, want %t", got, allow)
+		}
+	}
+}
+
 func TestBuildToolDefinitions(t *testing.T) {
 	registry := tool.NewRegistry()
 	delegator := NewDelegator(nil, registry, nil)

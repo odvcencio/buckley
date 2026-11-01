@@ -3,6 +3,7 @@ package headless
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/policy"
@@ -214,5 +215,138 @@ func TestHeadlessPermissionMiddleware_InteractivePostureDefersToExistingFlow(t *
 	}
 	if len(sink.List()) != 0 {
 		t.Fatalf("expected no parked decisions under the interactive posture, got %+v", sink.List())
+	}
+}
+
+// recordingShell stands in for run_shell so no test starts a real process.
+type recordingShell struct{ commands []string }
+
+func (*recordingShell) Name() string        { return "run_shell" }
+func (*recordingShell) Description() string { return "records shell commands" }
+func (*recordingShell) Parameters() builtin.ParameterSchema {
+	return builtin.ParameterSchema{Type: "object"}
+}
+
+func (s *recordingShell) Execute(params map[string]any) (*builtin.Result, error) {
+	command, _ := params["command"].(string)
+	s.commands = append(s.commands, command)
+	return &builtin.Result{Success: true}, nil
+}
+
+func TestBuildHeadlessPermissionGate_CarriesAllowAgentHarness(t *testing.T) {
+	off := config.DefaultConfig()
+	on := config.DefaultConfig()
+	on.Permissions.AllowAgentHarness = true
+	for _, tt := range []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{name: "default config", cfg: off},
+		{name: "nil config"},
+		{name: "operator switch on", cfg: on, want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := buildHeadlessPermissionGate(tt.cfg, policy.PostureInteractive, nil, nil, policy.NewParkedDecisionLog())
+			if gate.AllowAgentHarness != tt.want {
+				t.Fatalf("gate.AllowAgentHarness = %t, want %t", gate.AllowAgentHarness, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildToolRegistry_CarriesAllowAgentHarness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, allow := range []bool{false, true} {
+		cfg := config.DefaultConfig()
+		cfg.Permissions.AllowAgentHarness = allow
+		r := &Registry{config: cfg}
+		tools, closer, err := r.buildToolRegistry("sess", "", nil, nil)
+		if err != nil {
+			t.Fatalf("buildToolRegistry: %v", err)
+		}
+		if closer != nil {
+			_ = closer.Close()
+		}
+		if got := tools.AllowAgentHarness(); got != allow {
+			t.Fatalf("registry AllowAgentHarness() = %t, want %t", got, allow)
+		}
+	}
+}
+
+func TestNewInertRunner_FallbackRegistryCarriesAllowAgentHarness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, allow := range []bool{false, true} {
+		cfg := config.DefaultConfig()
+		cfg.Permissions.AllowAgentHarness = allow
+		runner, err := newInertRunner(RunnerConfig{
+			Session:      &storage.Session{ID: "fallback-registry", CreatedAt: time.Now(), LastActive: time.Now()},
+			ModelManager: newTestModelManager(t),
+			Store:        newTestStore(t),
+			Config:       cfg,
+		})
+		if err != nil {
+			t.Fatalf("newInertRunner: %v", err)
+		}
+		runner.disposeBeforeStart()
+		if got := runner.tools.AllowAgentHarness(); got != allow {
+			t.Fatalf("fallback registry AllowAgentHarness() = %t, want %t", got, allow)
+		}
+	}
+}
+
+// TestHeadlessPermissionLayers_AgentHarnessSwitch runs a shell tool call
+// through both permission layers of a runner built by newInertRunner: the
+// registry that the session config configures, as Registry.buildToolRegistry
+// does it, and the gate that newInertRunner installs on it. It uses a recording
+// stand-in for run_shell, so nothing launches.
+func TestHeadlessPermissionLayers_AgentHarnessSwitch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tests := []struct {
+		name    string
+		allow   bool
+		command string
+		denied  bool
+	}{
+		{name: "launch denied by default", command: "buckley commit --yes", denied: true},
+		{name: "launch allowed with switch", allow: true, command: "buckley commit --yes"},
+		{name: "other agent allowed with switch", allow: true, command: "claude -p fix"},
+		{name: "trust write denied with switch", allow: true, command: "buckley trust allow .", denied: true},
+		{name: "trust write behind a quoted subcommand denied with switch", allow: true, command: `buckley $'trust' allow .`, denied: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Permissions.AllowAgentHarness = tt.allow
+			shell := &recordingShell{}
+			tools := tool.NewEmptyRegistry()
+			tools.Register(shell)
+			tool.ApplyToolMiddlewareConfig(tools, cfg)
+			runner, err := newInertRunner(RunnerConfig{
+				Session:      &storage.Session{ID: "layers", ProjectPath: t.TempDir(), CreatedAt: time.Now(), LastActive: time.Now()},
+				ModelManager: newTestModelManager(t),
+				Store:        newTestStore(t),
+				Config:       cfg,
+				Tools:        tools,
+			})
+			if err != nil {
+				t.Fatalf("newInertRunner: %v", err)
+			}
+			t.Cleanup(runner.disposeBeforeStart)
+
+			result, err := runner.tools.Execute("run_shell", map[string]any{"command": tt.command})
+			if err != nil {
+				t.Fatalf("unexpected execute error: %v", err)
+			}
+			if tt.denied {
+				if result == nil || result.Success || !strings.Contains(result.Error, "permission denied") || len(shell.commands) != 0 {
+					t.Fatalf("expected a permission denial, got %#v (ran %v)", result, shell.commands)
+				}
+				return
+			}
+			if result == nil || !result.Success || len(shell.commands) != 1 {
+				t.Fatalf("expected the command to run, got %#v (ran %v)", result, shell.commands)
+			}
+		})
 	}
 }
