@@ -12,9 +12,11 @@ const (
 	BuiltinDefaultsStrategy = "builtin_defaults_policy"
 )
 
-// BuiltinDefaultRules returns the built-in permission defaults: deny reads
-// of .env-shaped and credential-shaped paths, and ask before destructive
-// bash commands run outside the workspace.
+// BuiltinDefaultRules returns the built-in permission defaults: deny agent
+// CLI launches from run_shell, deny reads of .env-shaped and credential-shaped
+// paths, and ask before destructive bash commands run outside the workspace.
+// The operator can lift the agent-harness deny with
+// PermissionRequest.AllowAgentHarness; see builtinDefaultsRequest.
 func BuiltinDefaultRules() []PermissionRule {
 	return []PermissionRule{
 		{ID: "builtin.deny-agent-harness-shell", Tool: "run_shell", CommandClass: CommandClassAgentHarness, Action: PermissionDeny},
@@ -38,12 +40,27 @@ func BuiltinDefaultsLayer() PermissionLayer {
 	return PermissionLayer{Name: "built-in defaults", Rules: BuiltinDefaultRules()}
 }
 
+// builtinDefaultsRequest returns the request the built-in defaults evaluate.
+// With PermissionRequest.AllowAgentHarness set, an agent CLI launch drops its
+// command class, so the agent-harness deny cannot match; a command that changes
+// buckley's own trust, approval, or credential state keeps the class and stays
+// denied.
+// Only the built-in defaults see the change: caller-supplied layers evaluate
+// the original request, so a project rule keyed on the class still applies.
+// Both evaluation paths (Go and arbiter) read the class from this request.
+func builtinDefaultsRequest(req PermissionRequest) PermissionRequest {
+	if req.AllowAgentHarness && req.CommandClass == CommandClassAgentHarness && !writesBuckleyState(req.Arg) {
+		req.CommandClass = ""
+	}
+	return req
+}
+
 // EvaluateBuiltinDefaultsGo evaluates the built-in defaults using the
 // deterministic Go glob layer only (no arbiter). This is the fallback used
 // when a rules engine is unavailable, and the reference implementation the
 // arbiter strategy must match.
 func EvaluateBuiltinDefaultsGo(req PermissionRequest) PermissionDecision {
-	dec, _ := evaluateLayer(req, BuiltinDefaultsLayer())
+	dec, _ := evaluateLayer(builtinDefaultsRequest(req), BuiltinDefaultsLayer())
 	return dec
 }
 
@@ -56,13 +73,14 @@ func EvaluateBuiltinDefaultsArbiter(evaluator types.RuleEvaluator, req Permissio
 	if evaluator == nil {
 		return PermissionDecision{}, false
 	}
+	facts := builtinDefaultsRequest(req)
 	result, err := evaluator.EvalStrategy(BuiltinDefaultsDomain, BuiltinDefaultsStrategy, map[string]any{
-		"tool":               req.Tool,
-		"category":           req.Category,
-		"arg":                req.Arg,
-		"command_class":      req.CommandClass,
-		"workspace_relative": req.WorkspaceRelative,
-		"posture":            req.Posture,
+		"tool":               facts.Tool,
+		"category":           facts.Category,
+		"arg":                facts.Arg,
+		"command_class":      facts.CommandClass,
+		"workspace_relative": facts.WorkspaceRelative,
+		"posture":            facts.Posture,
 	})
 	if err != nil {
 		return PermissionDecision{}, false

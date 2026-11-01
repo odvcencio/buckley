@@ -133,6 +133,7 @@ func (e *experimentExecutor) buildRegistry(task *parallel.AgentTask, wtPath stri
 			return ok
 		}))
 	}
+	registry.SetAllowAgentHarness(e.config.Permissions.AllowAgentHarness)
 	_ = registry.LoadDefaultPlugins()
 	if len(allowedSet) > 0 {
 		registry.Filter(func(t tool.Tool) bool {

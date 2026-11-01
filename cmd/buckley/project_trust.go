@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -370,18 +372,106 @@ func clampProjectTrustLevel(level string) string {
 	}
 }
 
+const trustUsage = `Usage: buckley trust [status|allow|deny|reset] [path]
+
+Show or change the trust decision for a project. The path defaults to the
+current directory.
+
+  status   Show the decision (the default)
+  allow    Trust the project: it keeps your configured autonomy
+  deny     Restrict the project: approval=safe and trust_level=conservative
+  reset    Clear the decision, so Buckley asks again
+
+allow and deny need an existing directory. reset takes any path, so it can
+clear a record for a directory that no longer exists. To name a path that
+starts with a dash, write ./ before it or put -- before it. An empty path is an
+error; leave the path out to use the current directory.
+
+The global flags -c/--config VALUE, -q/--quiet, --no-color, --tui, --plain and
+--no-tui work as they do for every command. Buckley takes them off the line,
+with the value of -c, before this command reads its path.
+`
+
+// parseTrustArgs splits `buckley trust` arguments into the subcommand and an
+// optional path. -h, --help, and the word help print usage and return
+// flag.ErrHelp, also after the path. Any other flag, a second path, and a blank
+// path are errors: the arguments name what to trust, so a typo or an empty
+// variable must never become a trust record. The returned path is trimmed, so
+// the directory check and the stored record see the same text.
+func parseTrustArgs(args []string) (subCmd, target string, err error) {
+	fs := flag.NewFlagSet("trust", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	parse := func(in []string) ([]string, error) {
+		parseErr := fs.Parse(in)
+		if errors.Is(parseErr, flag.ErrHelp) {
+			fmt.Print(trustUsage)
+			return nil, parseErr
+		}
+		if parseErr != nil {
+			return nil, fmt.Errorf("buckley trust: %w (run 'buckley trust --help')", parseErr)
+		}
+		return fs.Args(), nil
+	}
+
+	rest, err := parse(args)
+	if err != nil {
+		return "", "", err
+	}
+	subCmd = "status"
+	if len(rest) > 0 {
+		if name := strings.ToLower(strings.TrimSpace(rest[0])); name != "" {
+			subCmd = name
+		}
+		rest = rest[1:]
+	}
+	if subCmd == "help" {
+		fmt.Print(trustUsage)
+		return "", "", flag.ErrHelp
+	}
+	if rest, err = parse(rest); err != nil {
+		return "", "", err
+	}
+	if len(rest) == 0 {
+		return subCmd, "", nil
+	}
+	target = strings.TrimSpace(rest[0])
+	if target == "" {
+		return "", "", fmt.Errorf("buckley trust %s: empty path (leave it out to use the current directory)", subCmd)
+	}
+	// A flag after the path is still a flag: -h asks for usage and any other
+	// flag is an error. Only a plain word is an unexpected second path.
+	extra, err := parse(rest[1:])
+	if err != nil {
+		return "", "", err
+	}
+	if len(extra) > 0 {
+		return "", "", fmt.Errorf("buckley trust %s: unexpected argument %q; it takes at most one path", subCmd, extra[0])
+	}
+	return subCmd, target, nil
+}
+
+// requireTrustDirectory rejects a path that is not an existing directory, so
+// allow and deny cannot record a typo. reset skips it on purpose: a record for a
+// directory that is gone must stay removable.
+func requireTrustDirectory(subCmd, target string) error {
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("buckley trust %s: %w", subCmd, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("buckley trust %s: %s is not a directory", subCmd, target)
+	}
+	return nil
+}
+
 func runTrustCommand(args []string) error {
-	subCmd := "status"
-	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
-		subCmd = strings.ToLower(strings.TrimSpace(args[0]))
+	subCmd, target, err := parseTrustArgs(args)
+	if err != nil {
+		return err
 	}
 
-	var target string
-	if len(args) > 1 {
-		target = args[1]
-	}
-
-	if strings.TrimSpace(target) == "" {
+	if target == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("get working directory: %w", err)
@@ -397,17 +487,27 @@ func runTrustCommand(args []string) error {
 		return err
 	}
 
+	// pkg/policy lists the verbs that write the store (everything but status) so
+	// that it can keep a model from running them. A new writing verb needs an
+	// entry in buckleyTrustWriteVerbs there; TestTrustWriteVerbs_MatchRunTrustCommand
+	// fails until it has one.
 	switch subCmd {
 	case "status":
 		fmt.Printf("Project: %s\n", root)
 		fmt.Printf("Status:  %s\n", status)
 		fmt.Printf("Store:   %s\n", storePath)
 	case "allow", "trust":
+		if err := requireTrustDirectory(subCmd, target); err != nil {
+			return err
+		}
 		if err := store.Set(target, projectTrustTrusted); err != nil {
 			return err
 		}
 		fmt.Printf("Marked trusted: %s\n", root)
 	case "deny", "restrict":
+		if err := requireTrustDirectory(subCmd, target); err != nil {
+			return err
+		}
 		if err := store.Set(target, projectTrustRestricted); err != nil {
 			return err
 		}

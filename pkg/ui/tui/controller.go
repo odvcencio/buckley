@@ -420,13 +420,14 @@ func (c *Controller) configureSessionPermissions(sess *SessionState) {
 			{Name: "project", Rules: permissions.Project},
 			{Name: "user", Rules: permissions.User},
 		},
-		WorkspaceRoot:    workspaceRoot,
-		Posture:          posture,
-		ParkAskDecisions: postureCfg.ParkAskDecisions,
-		Evaluator:        c.evaluator,
-		ParkedSink:       sess.parkedDecisions,
-		ApprovalHandler:  broker.Request,
-		RequireApproval:  true,
+		WorkspaceRoot:     workspaceRoot,
+		Posture:           posture,
+		ParkAskDecisions:  postureCfg.ParkAskDecisions,
+		Evaluator:         c.evaluator,
+		ParkedSink:        sess.parkedDecisions,
+		ApprovalHandler:   broker.Request,
+		RequireApproval:   true,
+		AllowAgentHarness: permissions.AllowAgentHarness,
 	}))
 	sess.permissionsReady = true
 }

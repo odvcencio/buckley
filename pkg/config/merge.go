@@ -60,6 +60,8 @@ var mergeStrategies = map[string]mergeStrategy{
 	"approval.mode":        scopedScalarMerge,
 	"sandbox.mode":         scopedScalarMerge,
 	"sandbox.allow_unsafe": scopedScalarMerge,
+	// Only the operator may let the model launch agent CLIs.
+	"permissions.allow_agent_harness": scopedScalarMerge,
 	// Read roots from user and project config combine; neither layer drops the other.
 	"tools.read_roots": mergeStringSliceUnion,
 	// A project cannot expire history belonging to other projects.

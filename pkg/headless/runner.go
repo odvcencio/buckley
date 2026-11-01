@@ -266,6 +266,7 @@ func newInertRunner(cfg RunnerConfig) (*Runner, error) {
 	tools := cfg.Tools
 	if tools == nil {
 		tools = tool.NewRegistry()
+		tools.SetAllowAgentHarness(sessionCfg.Permissions.AllowAgentHarness)
 	}
 
 	projectCtx := loadRunnerProjectContext(cfg.Session)
@@ -3189,12 +3190,13 @@ func buildHeadlessPermissionGate(sessionCfg *config.Config, posture string, sess
 	}
 
 	return &tool.PermissionGate{
-		Layers:           layers,
-		WorkspaceRoot:    workspaceRoot,
-		Posture:          posture,
-		ParkAskDecisions: postureCfg.ParkAskDecisions,
-		Evaluator:        evaluator,
-		ParkedSink:       sink,
+		Layers:            layers,
+		WorkspaceRoot:     workspaceRoot,
+		Posture:           posture,
+		ParkAskDecisions:  postureCfg.ParkAskDecisions,
+		Evaluator:         evaluator,
+		ParkedSink:        sink,
+		AllowAgentHarness: permissions.AllowAgentHarness,
 	}
 }
 

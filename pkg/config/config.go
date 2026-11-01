@@ -813,9 +813,14 @@ func (c SandboxConfig) ToSandboxConfig(workDir string) sandbox.Config {
 // regardless of layer order. Project rules load from ./.buckley/config.yaml
 // and User rules from ~/.buckley/config.yaml, matching the existing config
 // hierarchy (pkg/config/config_load.go).
+//
+// AllowAgentHarness lifts the built-in deny for agent CLI launches from
+// run_shell. It is an operator switch: only user-scope config (and --config)
+// may set it, so a repository's own config file cannot (see mergeStrategies).
 type PermissionsConfig struct {
-	Project []policy.PermissionRule `yaml:"project"`
-	User    []policy.PermissionRule `yaml:"user"`
+	Project           []policy.PermissionRule `yaml:"project"`
+	User              []policy.PermissionRule `yaml:"user"`
+	AllowAgentHarness bool                    `yaml:"allow_agent_harness"`
 }
 
 // PostureConfig is a named permission layer selectable via
