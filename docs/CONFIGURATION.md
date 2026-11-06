@@ -650,7 +650,9 @@ prompt_cache:
 - `openrouter` and `openai_compatible` trim messages to the last `system_messages` + `tail_messages` for compatible caching.
 - `openai` uses `prompt_cache_key` and `prompt_cache_retention` (no message trimming).
 - Native Anthropic caching supports Claude Haiku 5.5 and Opus 5.5, including
-  cache usage in budgeted runs.
+  cache usage in budgeted runs. A positive `system_messages` marks that many
+  leading system messages as a reusable prefix alongside automatic conversation
+  caching. Use `system_messages: 0` for automatic caching alone.
 - Per-request `prompt_cache` settings override config defaults.
 
 ### diagnostics
