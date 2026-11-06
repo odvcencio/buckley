@@ -1176,6 +1176,7 @@ type acpLoopLimits struct {
 	noChangeExpected      bool
 	OnContinuation        func(int, string)
 	OnStop                func(agentloop.Termination)
+	OnResult              func(*agentloop.Result)
 	ValidateFinalResponse func(string) error
 	SubmittedResponse     func() (string, bool)
 	RequiredSourceText    []string
@@ -1293,6 +1294,9 @@ func runACPLoopWithLimits(
 	defer func() {
 		discardPendingACPModelDelivery(state)
 		ctrl.CompleteLifecycleTurn(lifecycleResult, runErr)
+		if limits.OnResult != nil {
+			limits.OnResult(lifecycleResult)
+		}
 	}()
 
 	nudgeCount := 0

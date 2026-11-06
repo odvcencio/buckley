@@ -898,6 +898,10 @@ func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatReque
 	}
 
 	switch providerID {
+	case "anthropic":
+		if _, _, priced := nativeAnthropicPricing(req.Model, 0); priced && req.CacheControl == nil {
+			req.CacheControl = &CacheControl{Type: promptCacheControlType}
+		}
 	case "openrouter", "openai_compatible", "litellm":
 		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
 			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
@@ -1320,6 +1324,17 @@ func (m *Manager) GetContextLengthForRoute(route ModelRoute) (int, error) {
 
 // CalculateCost calculates the cost of an API call
 func (m *Manager) CalculateCost(modelID string, usage Usage) (float64, error) {
+	if m.ProviderIDForModel(modelID) == "anthropic" {
+		if pricing, readMultiplier, ok := nativeAnthropicPricing(modelID, usage.PromptTokens); ok {
+			reads := 0
+			if usage.PromptTokensDetails != nil {
+				reads = usage.PromptTokensDetails.CachedTokens
+			}
+			plain := max(0, usage.PromptTokens-reads-usage.CacheWriteTokens)
+			shortWrites := max(0, usage.CacheWriteTokens-usage.CacheWrite1hTokens)
+			return (float64(plain)+float64(reads)*readMultiplier+float64(shortWrites)*1.25+float64(usage.CacheWrite1hTokens)*2)*pricing.Prompt/1_000_000 + float64(usage.CompletionTokens)*pricing.Completion/1_000_000, nil
+		}
+	}
 	return m.CalculateCostFromTokens(modelID, usage.PromptTokens, usage.CompletionTokens)
 }
 

@@ -15,6 +15,9 @@ func TestPostEditDiagnostics_PreservesMainPackageFiles(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("Go toolchain unavailable")
 	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("Git unavailable for isolated build metadata")
+	}
 	t.Setenv(postEditDiagnosticsEnv, "on")
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOTOOLCHAIN", "local")
@@ -33,6 +36,12 @@ func TestPostEditDiagnostics_PreservesMainPackageFiles(t *testing.T) {
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/diagnostics\n\ngo 1.22\n"), 0644); err != nil {
 				t.Fatal(err)
+			}
+			// Shared temporary directories can sit beneath an unrelated Git
+			// marker. Give the fixture its own valid repository and keep VCS
+			// stamping enabled for the actual compiler/diagnostic assertions.
+			if output, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
+				t.Fatalf("initialize fixture metadata: %v %s", err, output)
 			}
 			dir := filepath.Join(root, "cmd", "probe")
 			if err := os.MkdirAll(dir, 0755); err != nil {

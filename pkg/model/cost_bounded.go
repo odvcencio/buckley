@@ -15,7 +15,8 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 		return req, err
 	}
 	req.Model = selectedModel
-	if source, active := m.costBoundedPromptCacheSource(req, providerID); active {
+	_, _, nativeCachePriced := nativeAnthropicPricing(selectedModel, 1000000)
+	if source, active := m.costBoundedPromptCacheSource(req, providerID); active && !(providerID == "anthropic" && nativeCachePriced) {
 		return req, fmt.Errorf("cost-bounded requests cannot use prompt caching (%s): authoritative cache-write pricing is unavailable", source)
 	}
 
@@ -104,6 +105,13 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		return 0, fmt.Errorf("cost-bounded pricing unavailable for %s: %w", modelID, err)
 	}
 	pricing := info.Pricing
+	_, _, nativeCachePriced := nativeAnthropicPricing(selectedModel, 1000000)
+	if providerID == "anthropic" && nativeCachePriced {
+		// Reserve the higher context tier and most expensive cache-write TTL.
+		// Cache hits can reduce billed cost without weakening admission limits.
+		pricing, _, _ = nativeAnthropicPricing(selectedModel, 1000000)
+		pricing.Prompt *= 2
+	}
 	if !finiteNonNegative(pricing.Prompt) || !finiteNonNegative(pricing.Completion) {
 		return 0, fmt.Errorf("cost-bounded pricing invalid for %s", modelID)
 	}
@@ -122,10 +130,19 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 {
 		return 0, fmt.Errorf("cost-bounded usage invalid for %s: token counts must be non-negative", modelID)
 	}
+	if providerID == "anthropic" && nativeCachePriced {
+		reads := 0
+		if usage.PromptTokensDetails != nil {
+			reads = usage.PromptTokensDetails.CachedTokens
+		}
+		if reads < 0 || usage.CacheWriteTokens < 0 || usage.CacheWrite1hTokens < 0 || reads > usage.PromptTokens || usage.CacheWriteTokens > usage.PromptTokens-reads || usage.CacheWrite1hTokens > usage.CacheWriteTokens {
+			return 0, fmt.Errorf("cost-bounded Anthropic cache usage is inconsistent for %s", modelID)
+		}
+	}
 	if usage.Estimated {
 		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: locally estimated token counts are not authoritative", modelID)
 	}
-	if usage.CacheWriteTokens != 0 {
+	if usage.CacheWriteTokens != 0 && !(providerID == "anthropic" && nativeCachePriced) {
 		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: authoritative cache-write pricing is unavailable", modelID)
 	}
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
@@ -134,6 +151,20 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 
 	return (float64(usage.PromptTokens)/1_000_000)*pricing.Prompt +
 		(float64(usage.CompletionTokens)/1_000_000)*pricing.Completion, nil
+}
+
+func nativeAnthropicPricing(modelID string, promptTokens int) (ModelPricing, float64, bool) {
+	switch normalizeModelForProvider(modelID, "anthropic") {
+	case "claude-haiku-5-5":
+		if promptTokens > 100000 {
+			return ModelPricing{Prompt: 0.50, Completion: 2.50}, 0.1, true
+		}
+		return ModelPricing{Prompt: 0.10, Completion: 0.50}, 0.1, true
+	case "claude-opus-5-5":
+		return ModelPricing{Prompt: 4, Completion: 20}, 0.05, true
+	default:
+		return ModelPricing{}, 0, false
+	}
 }
 
 func (m *Manager) costBoundedPromptCacheSource(req ChatRequest, providerID string) (string, bool) {

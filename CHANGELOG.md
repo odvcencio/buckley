@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-06
+
 ### Added
+- Use Claude Haiku 5.5 and Opus 5.5 directly through Anthropic, with native
+  reasoning, tool continuations, and prompt-cache usage accounting.
+- Set `--budget` and `--max-model-requests` on `buckley agent run`. Budgeted
+  runs report conservative spend accounting and estimated provider usage.
 - `permissions.allow_agent_harness` lets the model launch agent CLIs from
   `run_shell`. It defaults to `false`, which keeps the built-in deny for
   `buckley`, `codex`, `claude`, `opencode`, `aider`, `cursor-agent`, `gemini`,
@@ -128,6 +134,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PR body never lands in an error message.
 
 ### Fixed
+- Load Anthropic credentials from `~/.buckley/config.env` when the process
+  environment and YAML have no key.
+- Generate release notes from local Git history so publication can proceed
+  when the GitHub comparison endpoint is unavailable.
 - The built-in agent-launch deny reads a command line the way the shell does.
   It no longer misses a launch that comes after `echo a\ #b;` or `echo $'a\'b';`,
   follows a redirection, or has a backslash and newline inside its name. A
@@ -692,6 +702,7 @@ here to 1.1.0.
 - Plugin discovery limited to local paths only.
 
 [Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.2...HEAD
+[0.8.3]: https://github.com/odvcencio/buckley/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/odvcencio/buckley/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/odvcencio/buckley/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/odvcencio/buckley/compare/v0.7.0...v0.8.0

@@ -353,7 +353,11 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	} else {
 		projectContext = nil
 	}
-	systemPrompt := buildACPSystemPrompt(projectContext, cwd, skills, engine, agentPromptSection(opts.AgentProfile), knowledge)
+	promptSkills := skills
+	if toolFilter != nil && !slices.Contains(toolFilter, "activate_skill") {
+		promptSkills = nil
+	}
+	systemPrompt := buildACPSystemPrompt(projectContext, cwd, promptSkills, engine, agentPromptSection(opts.AgentProfile), knowledge)
 	if limits.SourceScope != nil {
 		systemPrompt += "\n\n" + sourceScopeInstruction(limits.SourceScope)
 	} else if instruction := oneShotReadRootsInstruction(readRoots); instruction != "" {
@@ -400,6 +404,24 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 	if limits.MaxElapsedSeconds > 0 {
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
 		defer cancel()
+	}
+	if limits.MaxCostUSD > 0 && !quietMode {
+		limits.OnResult = func(result *agentloop.Result) {
+			if result == nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Budgeted run: requests=%d tools=%d input_tokens=%d output_tokens=%d accounted_cost_usd=%.6f ceiling_usd=%.6f\n", result.ModelRequests, result.ToolCalls, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.CostUSD, limits.MaxCostUSD)
+			reads, thinking := 0, 0
+			if result.Usage.PromptTokensDetails != nil {
+				reads = result.Usage.PromptTokensDetails.CachedTokens
+			}
+			if result.Usage.CompletionTokenDetails != nil {
+				thinking = result.Usage.CompletionTokenDetails.ReasoningTokens
+			}
+			if estimate, err := mgr.CalculateCost(resolvedModel, result.Usage); err == nil {
+				fmt.Fprintf(os.Stderr, "Usage detail: cache_read_tokens=%d cache_write_tokens=%d thinking_tokens=%d estimated_cost_usd=%.6f\n", reads, result.Usage.CacheWriteTokens, thinking, estimate)
+			}
+		}
 	}
 	runCtx = withACPReplaySafeStream(runCtx)
 	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr, cwd), limits)

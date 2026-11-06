@@ -77,10 +77,10 @@ for one run with `--max-tool-calls N`, `--max-elapsed DURATION` (for example `90
 `oneshot.budget_usd`. Zero means no cap, and a flag overrides the config key. A run
 that reaches a cap says which one and how to raise it. Repeated identical tool calls
 and action cycles are still stopped: that detector guards against a loop that makes no
-progress and is not a budget. `buckley agent run` accepts `--max-tool-calls`,
-`--max-elapsed-seconds` and `--max-output-tokens` with a configured agent spec; use its
-`--dry-run --json` preview to inspect resolved limits. Output tokens include any
-provider reasoning allowance; a word target is not a token cap.
+progress and is not a budget. `buckley agent run` also accepts `--max-tool-calls`,
+`--max-elapsed-seconds`, `--max-output-tokens`, `--max-model-requests` and
+`--budget` with an agent spec. Use `--dry-run --json` to inspect the invocation.
+Output tokens include any provider reasoning allowance.
 
 One-shot runs have no approver, so by default they are not offered `run_shell` or other
 destructive tools. A trusted project can opt in to shell for a mutation run by naming
@@ -90,6 +90,9 @@ Shell is granted only with `--task-intent mutation` in a project marked trusted
 still apply to every command. A request that cannot be granted does not stop the run: the
 trace header prints `dropped from --tools: run_shell (...)` with the reason and, for an
 untrusted project, how to enable it.
+
+For `buckley agent run --allow-shell`, include `run_shell` in the agent's tool
+allowlist. The same trust, intent, sandbox, and approval checks apply.
 
 For a code change, use `--task-intent mutation`, name the files or behavior to
 change and the relevant checks, and request a final account of changes and test

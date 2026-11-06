@@ -649,6 +649,8 @@ prompt_cache:
 - If `providers` is empty, caching applies to any provider that supports it.
 - `openrouter` and `openai_compatible` trim messages to the last `system_messages` + `tail_messages` for compatible caching.
 - `openai` uses `prompt_cache_key` and `prompt_cache_retention` (no message trimming).
+- Native Anthropic caching supports Claude Haiku 5.5 and Opus 5.5, including
+  cache usage in budgeted runs.
 - Per-request `prompt_cache` settings override config defaults.
 
 ### diagnostics
@@ -1370,7 +1372,7 @@ input:
 |----------|-------------|
 | `OPENROUTER_API_KEY` | OpenRouter API key |
 | `OPENAI_API_KEY` | OpenAI API key |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key. Buckley also reads it from `~/.buckley/config.env` when YAML and the process environment supply no key. |
 | `GOOGLE_API_KEY` | Google AI API key |
 
 ### Model Overrides
