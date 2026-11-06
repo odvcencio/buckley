@@ -1003,7 +1003,15 @@ func TestExecutorFallsBackToCodexForGoWhenNativeSandboxIsUnavailable(t *testing.
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	executor := NewExecutorWithCodexCommand("/usr/bin/true")
+	launcher := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonicalLauncher, err := filepath.EvalSymlinks(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand(launcher)
 	executor.lookPath = func(name string) (string, error) {
 		switch name {
 		case "go":
@@ -1029,8 +1037,8 @@ func TestExecutorFallsBackToCodexForGoWhenNativeSandboxIsUnavailable(t *testing.
 		t.Fatalf("invocations = %d, want Codex preflight + run", len(invocations))
 	}
 	for _, invocation := range invocations {
-		if invocation.Name != "/usr/bin/true" {
-			t.Fatalf("launcher = %q, want Codex fallback", invocation.Name)
+		if invocation.Name != canonicalLauncher {
+			t.Fatalf("launcher = %q, want Codex fallback %q", invocation.Name, canonicalLauncher)
 		}
 	}
 }
