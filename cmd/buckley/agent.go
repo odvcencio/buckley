@@ -1081,7 +1081,7 @@ func runAgentRun(args []string) error {
 	if len(opts.requiredSourceText) > 0 && strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"]) != artifactv1.SchemaVersion {
 		return fmt.Errorf("--require-source-text requires the buckley.artifact/v1 output schema")
 	}
-	if opts.toolTier != "" {
+	if opts.toolTier != "" && !(contractPresent && strings.TrimSpace(subProfile.Spec.Tools.Tier) == "none") {
 		subProfile.Spec.Tools.Tier = opts.toolTier
 	}
 	opts.taskIntent = agentRunTaskIntent(opts, subProfile)
@@ -1408,6 +1408,9 @@ func applyAgentRunChildContract(profile *agentspec.RuntimeProfile, contract suba
 				spec.Tools.Allow = allowed
 			} else {
 				spec.Tools.Allow = intersectAgentRunTools(existing, allowed)
+				if len(spec.Tools.Allow) == 0 {
+					spec.Tools.Tier = "none"
+				}
 			}
 		}
 	}

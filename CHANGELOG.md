@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-06
+
+### Fixed
+- Keep empty child tool scopes closed when the parent's allowed tools and the
+  agent profile have no tools in common or a CLI flag requests a broader tier.
+- Honor the resolved agent allowlist when granting `run_shell` through
+  one-shot settings.
+
 ## [0.8.3] - 2026-11-06
 
 ### Added
@@ -701,7 +709,8 @@ here to 1.1.0.
 - Telemetry is local-only by default.
 - Plugin discovery limited to local paths only.
 
-[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/odvcencio/buckley/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/odvcencio/buckley/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/odvcencio/buckley/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/odvcencio/buckley/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/odvcencio/buckley/compare/v0.8.0...v0.8.1

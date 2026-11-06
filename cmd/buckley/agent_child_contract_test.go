@@ -255,6 +255,52 @@ subagents:
 	}
 }
 
+func TestRunAgentRun_ChildContractKeepsEmptyToolScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(path, []byte(`version: buckley.agent/v1
+name: scoped
+tools:
+  tier: full
+  allow: [read_file]
+subagents:
+  - name: worker
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		allowed []string
+		flags   []string
+	}{
+		{name: "disjoint", allowed: []string{"edit_file"}},
+		{name: "empty with tier override", flags: []string{"--tool-tier", "full"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contract, err := subagent.EncodeChildContract(subagent.ChildContract{
+				ToolsConstrained: true,
+				AllowedTools:     tc.allowed,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(subagent.ChildContractEnv, contract)
+			args := append([]string{"--dry-run", "--json"}, tc.flags...)
+			output := captureStdout(t, func() {
+				if err := runAgentRun(append(args, path, "worker", "inspect this")); err != nil {
+					t.Fatal(err)
+				}
+			})
+			var preview agentRunPreviewSnapshot
+			if err := json.Unmarshal([]byte(output), &preview); err != nil {
+				t.Fatal(err)
+			}
+			if preview.ToolTier != "none" || preview.ToolFilter != "none" || preview.AllowedTools == nil || len(preview.AllowedTools) != 0 {
+				t.Fatalf("child tool scope reopened: %s", output)
+			}
+		})
+	}
+}
+
 func TestRunAgentRun_AppliesChildModelBeforeDependencyInitialization(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.yaml")

@@ -142,15 +142,6 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		return 1
 	}
 
-	trust, _, _, trustErr := projectTrustStatusForPath(cwd)
-	if trustErr != nil {
-		trust = projectTrustUnknown
-	}
-	shell := decideOneShotShell(oneShotShellRequest{
-		Flag: opts.AllowShell, ConfigAllow: cfg.Oneshot.AllowShell, Tools: opts.AllowedTools,
-		Intent: limits.TaskIntent, Trust: trust, DeniedTools: cfg.Approval.DeniedTools, HostTools: limits.allowHostTools,
-	})
-	limits.allowShell = shell.Allow && !limits.allowHostTools
 	readRoots, err := config.ResolveReadRoots(cwd, cfg.Tools.ReadRoots, opts.ReadRoots)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -160,9 +151,6 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		fmt.Fprintf(os.Stderr, "workdir: %s\n", cwd)
 		if len(readRoots) > 0 {
 			fmt.Fprintf(os.Stderr, "read roots (read-only): %s\n", strings.Join(readRoots, ", "))
-		}
-		if limits.allowShell {
-			fmt.Fprintf(os.Stderr, "shell: run_shell enabled (trusted project; requested by %s; sandbox and approval rules apply)\n", shell.Source)
 		}
 		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
 	}
@@ -311,6 +299,19 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		}
 	}
 	callerTools := resolveOneShotToolFilter(opts.AgentProfile, registry, opts.AllowedTools)
+	trust, _, _, trustErr := projectTrustStatusForPath(cwd)
+	if trustErr != nil {
+		trust = projectTrustUnknown
+	}
+	shell := decideOneShotShell(oneShotShellRequest{
+		Flag: opts.AllowShell, ConfigAllow: cfg.Oneshot.AllowShell, Tools: opts.AllowedTools,
+		Intent: limits.TaskIntent, Trust: trust, DeniedTools: cfg.Approval.DeniedTools, HostTools: limits.allowHostTools,
+	})
+	if shell.Allow && (limits.ChildContract || opts.AgentProfile != nil) && callerTools != nil && !slices.Contains(callerTools, "run_shell") {
+		shell.Allow = false
+		shell.DropReason = "run_shell is outside the agent's allowed tools"
+	}
+	limits.allowShell = shell.Allow && !limits.allowHostTools
 	toolFilter := callerTools
 	if protocolAvailable && adaptiveProtocol.Mode == protocol.ModeDynamic {
 		toolFilter = applyProtocolToolFilter(toolFilter, adaptiveProtocol.VisibleTools)
@@ -331,6 +332,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		}
 	}
 	if !quietMode {
+		if limits.allowShell {
+			fmt.Fprintf(os.Stderr, "shell: run_shell enabled (trusted project; requested by %s; sandbox and approval rules apply)\n", shell.Source)
+		}
 		if line := formatDroppedTools(droppedRequestedTools(registry, opts.AllowedTools, shell, limits.allowHostTools)); line != "" {
 			fmt.Fprintln(os.Stderr, line)
 		}

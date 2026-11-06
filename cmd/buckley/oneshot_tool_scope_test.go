@@ -138,6 +138,88 @@ func TestExecuteOneShot_CallerToolScope(t *testing.T) {
 	}
 }
 
+func TestExecuteOneShot_ConfiguredShellRespectsAgentScope(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("BUCKLEY_DATA_DIR", t.TempDir())
+	t.Setenv("BUCKLEY_SKILLS_PATH", t.TempDir())
+	if err := runTrustCommand([]string{"allow"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		allowed   []string
+		want      []string
+		toolFree  bool
+		wantShell bool
+	}{
+		{name: "child excludes shell", allowed: []string{"read_file"}, want: []string{"read_file"}},
+		{name: "child includes shell", allowed: []string{"read_file", "run_shell"}, want: []string{"read_file", "run_shell"}, wantShell: true},
+		{name: "tool-free agent", toolFree: true, want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					fmt.Fprint(w, `{"data":[{"id":"scope-test","supported_parameters":["tools"]}]}`)
+					return
+				}
+				var req model.ChatRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+					return
+				}
+				requests.Add(1)
+				names := make([]string, 0, len(req.Tools))
+				for _, definition := range req.Tools {
+					function := definition["function"].(map[string]any)
+					names = append(names, function["name"].(string))
+				}
+				sort.Strings(names)
+				if !reflect.DeepEqual(names, tc.want) {
+					t.Errorf("offered tools = %v, want %v", names, tc.want)
+				}
+				writeOneShotArtifactRouteSSE(t, w, map[string]any{"content": "Scope checked."}, "stop")
+			}))
+			t.Cleanup(server.Close)
+			cfg := config.DefaultConfig()
+			cfg.Oneshot.AllowShell = true
+			cfg.Memory.HyphaeRecall = false
+			cfg.AdaptiveProtocol.Mode = "legacy"
+			cfg.Models.DefaultProvider = "openai_compatible"
+			cfg.Providers.OpenRouter.Enabled = false
+			cfg.Providers.OpenAICompatible.Enabled = true
+			cfg.Providers.OpenAICompatible.APIKey = "test-key"
+			cfg.Providers.OpenAICompatible.BaseURL = server.URL
+			cfg.Providers.OpenAICompatible.Models = []string{"scope-test"}
+			cfg.Providers.OpenAICompatible.SupportedParameters = map[string][]string{"scope-test": {"tools"}}
+			mgr, err := model.NewManager(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := oneShotOptions{
+				ModelOverride: "openai_compatible/scope-test",
+				AllowedTools:  tc.allowed,
+				Limits: acpLoopLimits{
+					TaskIntent:       agentloop.MutationIntent,
+					ChildContract:    !tc.toolFree,
+					MaxModelRequests: 1,
+				},
+			}
+			if tc.toolFree {
+				opts.AgentProfile = &agentspec.RuntimeProfile{Spec: &agentspec.Spec{Tools: agentspec.ToolSpec{Tier: "none"}}}
+			}
+			stderr := captureStderr(t, func() {
+				if code := executeOneShot("Report the tool scope. Do not make changes.", cfg, mgr, nil, nil, opts); code != 0 {
+					t.Errorf("one-shot exit code = %d", code)
+				}
+			})
+			if requests.Load() != 1 || strings.Contains(stderr, "shell: run_shell enabled") != tc.wantShell {
+				t.Fatalf("requests = %d, shell trace: %s", requests.Load(), stderr)
+			}
+		})
+	}
+}
+
 func TestSkillActivation_CallerScopeAlsoBoundsDispatch(t *testing.T) {
 	registry := tool.NewEmptyRegistry()
 	var shellCalls atomic.Int32
