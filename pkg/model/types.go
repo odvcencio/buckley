@@ -551,6 +551,7 @@ type Usage struct {
 	PromptTokensDetails    *PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
 	CompletionTokenDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
 	CacheWriteTokens       int                     `json:"cache_write_tokens,omitempty"`
+	CacheWrite1hTokens     int                     `json:"cache_write_1h_tokens,omitempty"`
 	// Estimated is true when Buckley derived the counts locally because the
 	// provider did not return usage. Estimated usage is useful for context and
 	// telemetry, but must not be treated as an authoritative provider invoice.
@@ -609,6 +610,7 @@ func AddUsage(total Usage, next Usage) Usage {
 	total.CompletionTokens += next.CompletionTokens
 	total.TotalTokens += next.TotalTokens
 	total.CacheWriteTokens += next.CacheWriteTokens
+	total.CacheWrite1hTokens += next.CacheWrite1hTokens
 	total.Estimated = total.Estimated || next.Estimated
 	if next.PromptTokensDetails != nil {
 		if total.PromptTokensDetails == nil {

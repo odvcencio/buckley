@@ -22,6 +22,26 @@ type AnthropicProvider struct {
 
 var anthropicModels = []ModelInfo{
 	{
+		ID:                  "anthropic/claude-haiku-5-5",
+		Name:                "Claude Haiku 5.5",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 0.10, Completion: 0.50},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
+		ID:                  "anthropic/claude-opus-5-5",
+		Name:                "Claude Opus 5.5",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 4.0, Completion: 20.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
 		ID:            "anthropic/claude-3.5-sonnet",
 		Name:          "Claude 3.5 Sonnet",
 		ContextLength: 200000,
@@ -73,6 +93,7 @@ func init() {
 
 // NewAnthropicProvider builds an Anthropic provider.
 func NewAnthropicProvider(apiKey, baseURL string, networkLogsEnabled bool) *AnthropicProvider {
+	baseURL = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(baseURL), "/"), "/v1")
 	if baseURL == "" {
 		baseURL = anthropicBaseURL
 	}
@@ -179,13 +200,36 @@ func (p *AnthropicProvider) SetTimeout(timeout time.Duration) {
 
 func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*anthropicRequest, error) {
 	anthReq := &anthropicRequest{
-		Model:       normalizeModelForProvider(req.Model, "anthropic"),
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-		Stream:      stream,
+		Model:        normalizeModelForProvider(req.Model, "anthropic"),
+		MaxTokens:    req.MaxTokens,
+		Temperature:  req.Temperature,
+		Stream:       stream,
+		CacheControl: req.CacheControl,
 	}
 	if anthReq.MaxTokens == 0 {
 		anthReq.MaxTokens = 4096
+	}
+	if anthReq.Model == "claude-opus-5-5" || anthReq.Model == "claude-haiku-5-5" {
+		anthReq.Temperature = 0
+		if req.Reasoning != nil {
+			if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
+				if anthReq.Model == "claude-opus-5-5" {
+					return nil, fmt.Errorf("anthropic: Claude Opus 5.5 cannot disable thinking; select a lower effort")
+				}
+				anthReq.Thinking = &anthropicThinkingConfig{Type: "disabled"}
+			}
+			if effort := strings.ToLower(strings.TrimSpace(req.Reasoning.Effort)); effort != "" {
+				switch effort {
+				case "low", "medium", "high", "xhigh", "max":
+					anthReq.OutputConfig = &anthropicOutputConfig{Effort: effort}
+				default:
+					return nil, fmt.Errorf("anthropic: unsupported effort %q", effort)
+				}
+			}
+		}
+		if anthReq.Model == "claude-opus-5-5" && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			return nil, fmt.Errorf("anthropic: Claude Opus 5.5 requires automatic tool choice")
+		}
 	}
 
 	var systemParts []string
@@ -241,15 +285,26 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
-	Model       string               `json:"model"`
-	System      string               `json:"system,omitempty"`
-	Messages    []anthropicMessage   `json:"messages"`
-	MaxTokens   int                  `json:"max_tokens"`
-	Temperature float64              `json:"temperature,omitempty"`
-	Stream      bool                 `json:"stream"`
-	Tools       []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
-	Metadata    map[string]string    `json:"metadata,omitempty"`
+	Model        string                   `json:"model"`
+	System       string                   `json:"system,omitempty"`
+	Messages     []anthropicMessage       `json:"messages"`
+	MaxTokens    int                      `json:"max_tokens"`
+	Temperature  float64                  `json:"temperature,omitempty"`
+	Stream       bool                     `json:"stream"`
+	Tools        []anthropicTool          `json:"tools,omitempty"`
+	ToolChoice   *anthropicToolChoice     `json:"tool_choice,omitempty"`
+	Metadata     map[string]string        `json:"metadata,omitempty"`
+	OutputConfig *anthropicOutputConfig   `json:"output_config,omitempty"`
+	Thinking     *anthropicThinkingConfig `json:"thinking,omitempty"`
+	CacheControl *CacheControl            `json:"cache_control,omitempty"`
+}
+
+type anthropicThinkingConfig struct {
+	Type string `json:"type"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort"`
 }
 
 type anthropicMessage struct {
@@ -265,12 +320,36 @@ type anthropicContent struct {
 	Input     map[string]any `json:"input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   any            `json:"content,omitempty"`
+	raw       json.RawMessage
 }
 
+// Keep the complete native block, including empty thinking and unknown fields.
+// Signed thinking is bound to the original assistant content and block order.
+func (c *anthropicContent) UnmarshalJSON(data []byte) error {
+	type plain anthropicContent
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = anthropicContent(decoded)
+	c.raw = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+func (c anthropicContent) MarshalJSON() ([]byte, error) {
+	if len(c.raw) > 0 {
+		return c.raw, nil
+	}
+	type plain anthropicContent
+	return json.Marshal(plain(c))
+}
+
+const anthropicContentFormat = "anthropic-content-v1"
+
 type anthropicTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema map[string]any `json:"input_schema"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	InputSchema any    `json:"input_schema"`
 }
 
 type anthropicToolChoice struct {
@@ -283,17 +362,30 @@ type anthropicResponse struct {
 	Model      string             `json:"model"`
 	Content    []anthropicContent `json:"content"`
 	StopReason string             `json:"stop_reason,omitempty"`
-	Usage      struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+	Usage      anthropicUsage     `json:"usage"`
+}
+
+type anthropicUsage struct {
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_input_tokens"`
+	CacheWriteTokens int `json:"cache_creation_input_tokens"`
+	CacheCreation    struct {
+		OneHourTokens int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
+	OutputDetails struct {
+		ThinkingTokens int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
 }
 
 func (a anthropicResponse) toChatResponse() (*ChatResponse, error) {
 	var parts []string
 	var toolCalls []ToolCall
+	var hasThinking bool
 	for _, c := range a.Content {
 		switch c.Type {
+		case "thinking", "redacted_thinking":
+			hasThinking = true
 		case "text":
 			if strings.TrimSpace(c.Text) != "" {
 				parts = append(parts, c.Text)
@@ -320,6 +412,15 @@ func (a anthropicResponse) toChatResponse() (*ChatResponse, error) {
 		Content:   content,
 		ToolCalls: toolCalls,
 	}
+	if hasThinking {
+		content, err := json.Marshal(a.Content)
+		if err != nil {
+			return nil, fmt.Errorf("preserve anthropic assistant content: %w", err)
+		}
+		msg.ReasoningDetails = []ReasoningDetail{{
+			Type: "reasoning.encrypted", Format: anthropicContentFormat, Data: string(content),
+		}}
+	}
 	finishReason := "stop"
 	if a.StopReason == "tool_use" {
 		finishReason = "tool_calls"
@@ -327,6 +428,19 @@ func (a anthropicResponse) toChatResponse() (*ChatResponse, error) {
 		finishReason = a.StopReason
 	}
 
+	usage := Usage{
+		PromptTokens:       a.Usage.InputTokens + a.Usage.CacheReadTokens + a.Usage.CacheWriteTokens,
+		CompletionTokens:   a.Usage.OutputTokens,
+		CacheWriteTokens:   a.Usage.CacheWriteTokens,
+		CacheWrite1hTokens: a.Usage.CacheCreation.OneHourTokens,
+	}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	if a.Usage.CacheReadTokens > 0 {
+		usage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: a.Usage.CacheReadTokens}
+	}
+	if a.Usage.OutputDetails.ThinkingTokens > 0 {
+		usage.CompletionTokenDetails = &CompletionTokenDetails{ReasoningTokens: a.Usage.OutputDetails.ThinkingTokens}
+	}
 	return &ChatResponse{
 		ID:    a.ID,
 		Model: "anthropic/" + a.Model,
@@ -337,11 +451,7 @@ func (a anthropicResponse) toChatResponse() (*ChatResponse, error) {
 				FinishReason: finishReason,
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     a.Usage.InputTokens,
-			CompletionTokens: a.Usage.OutputTokens,
-			TotalTokens:      a.Usage.InputTokens + a.Usage.OutputTokens,
-		},
+		Usage:             usage,
 		ExecutionIdentity: observedExecutionIdentity(a.ID, a.Model, nil),
 	}, nil
 }
@@ -352,7 +462,7 @@ func toAnthropicTools(rawTools []map[string]any) []anthropicTool {
 		function, _ := raw["function"].(map[string]any)
 		name, _ := function["name"].(string)
 		description, _ := function["description"].(string)
-		schema, _ := function["parameters"].(map[string]any)
+		schema := function["parameters"]
 		if strings.TrimSpace(name) == "" {
 			continue
 		}
@@ -378,6 +488,17 @@ func toAnthropicToolChoice(choice string) *anthropicToolChoice {
 }
 
 func anthropicMessageContent(msg Message) ([]anthropicContent, error) {
+	if msg.Role == "assistant" {
+		for _, detail := range msg.ReasoningDetails {
+			if detail.Format == anthropicContentFormat {
+				var content []anthropicContent
+				if err := json.Unmarshal([]byte(detail.Data), &content); err != nil {
+					return nil, fmt.Errorf("restore anthropic assistant content: %w", err)
+				}
+				return content, nil
+			}
+		}
+	}
 	content := anthropicTextBlocks(msg.Content)
 	for _, call := range msg.ToolCalls {
 		input := map[string]any{}
@@ -406,8 +527,10 @@ func anthropicTextBlocks(content any) []anthropicContent {
 
 func toStreamDelta(msg Message) MessageDelta {
 	delta := MessageDelta{
-		Role:    msg.Role,
-		Content: messageContentToText(msg.Content),
+		Role:             msg.Role,
+		Content:          messageContentToText(msg.Content),
+		Reasoning:        msg.Reasoning,
+		ReasoningDetails: msg.ReasoningDetails,
 	}
 	if len(msg.ToolCalls) == 0 {
 		return delta

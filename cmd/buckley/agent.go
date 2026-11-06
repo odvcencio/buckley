@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1014,6 +1015,9 @@ type agentRunOptions struct {
 	maxOutputTokens   int
 	maxToolCalls      int
 	maxElapsedSeconds int
+	maxModelRequests  int
+	maxCostUSD        float64
+	allowShell        bool
 	taskIntent        agentloop.TaskIntent
 	taskIntentSet     bool
 	dryRun            bool
@@ -1039,6 +1043,9 @@ type agentRunPreviewSnapshot struct {
 	ApprovalMode      string   `json:"approval_mode,omitempty"`
 	MaxToolCalls      int      `json:"max_tool_calls,omitempty"`
 	MaxElapsedSeconds int      `json:"max_elapsed_seconds,omitempty"`
+	MaxModelRequests  int      `json:"max_model_requests,omitempty"`
+	MaxCostUSD        float64  `json:"max_cost_usd,omitempty"`
+	AllowShell        bool     `json:"allow_shell,omitempty"`
 	ResolvedTier      string   `json:"resolved_tier,omitempty"`
 	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
 	StepCap           int      `json:"step_cap,omitempty"`
@@ -1078,6 +1085,9 @@ func runAgentRun(args []string) error {
 		subProfile.Spec.Tools.Tier = opts.toolTier
 	}
 	opts.taskIntent = agentRunTaskIntent(opts, subProfile)
+	if opts.allowShell && !slices.Contains(agentRunAllowedTools(subProfile), "run_shell") {
+		return fmt.Errorf("--allow-shell requires run_shell in the agent's allowed tools")
+	}
 	if opts.dryRun {
 		if opts.jsonOutput {
 			enc := json.NewEncoder(os.Stdout)
@@ -1135,6 +1145,15 @@ func runAgentRun(args []string) error {
 	limits.MaxOutputTokens = opts.maxOutputTokens
 	limits.TaskIntent = opts.taskIntent
 	limits = applyAgentRunExplicitLimits(limits, opts)
+	if opts.allowShell {
+		status, _, _, err := projectTrustStatusForPath(cwd)
+		if err != nil {
+			return err
+		}
+		if status != projectTrustTrusted {
+			return fmt.Errorf("--allow-shell requires a trusted workspace")
+		}
+	}
 	if outputSchema == "" && subProfile != nil && subProfile.Spec != nil {
 		outputSchema = strings.TrimSpace(subProfile.Spec.Metadata["buckley.output_schema"])
 	}
@@ -1142,6 +1161,7 @@ func runAgentRun(args []string) error {
 		AgentProfile:  subProfile,
 		ModelOverride: modelOverride,
 		AllowedTools:  allowedTools,
+		AllowShell:    opts.allowShell,
 		Limits:        limits,
 		OutputSchema:  outputSchema,
 	})
@@ -1152,6 +1172,12 @@ func runAgentRun(args []string) error {
 }
 
 func applyAgentRunExplicitLimits(limits acpLoopLimits, opts agentRunOptions) acpLoopLimits {
+	if opts.maxModelRequests > 0 {
+		limits.MaxModelRequests = minPositiveLimit(limits.MaxModelRequests, opts.maxModelRequests)
+	}
+	if opts.maxCostUSD > 0 && (limits.MaxCostUSD == 0 || opts.maxCostUSD < limits.MaxCostUSD) {
+		limits.MaxCostUSD = opts.maxCostUSD
+	}
 	if opts.maxToolCalls > 0 {
 		limits.MaxToolCalls = minPositiveLimit(limits.MaxToolCalls, opts.maxToolCalls)
 	}
@@ -1223,6 +1249,9 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	maxOutputTokens := fs.Int("max-output-tokens", 0, "maximum output tokens per model request (0 = unlimited)")
 	maxToolCalls := fs.Int("max-tool-calls", 0, "maximum tool calls for this run (0 = no additional limit)")
 	maxElapsedSeconds := fs.Int("max-elapsed-seconds", 0, "maximum wall-clock seconds for this run (0 = no additional limit)")
+	maxModelRequests := fs.Int("max-model-requests", 0, "maximum model requests for this run (0 = no additional limit)")
+	maxCostUSD := fs.Float64("budget", 0, "hard model spend ceiling in USD (0 = no additional limit)")
+	allowShell := fs.Bool("allow-shell", false, "allow the explicitly listed run_shell tool in a trusted workspace")
 	taskIntentFlag := fs.String("task-intent", "", "task intent: unknown, read_only, or mutation")
 	noTools := fs.Bool("no-tools", false, "run without tools")
 	dryRun := fs.Bool("dry-run", false, "show resolved subagent invocation without calling the model")
@@ -1239,6 +1268,12 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 	}
 	if *maxElapsedSeconds < 0 {
 		return agentRunOptions{}, fmt.Errorf("--max-elapsed-seconds must be zero or greater")
+	}
+	if *maxModelRequests < 0 {
+		return agentRunOptions{}, fmt.Errorf("--max-model-requests must be zero or greater")
+	}
+	if *maxCostUSD < 0 || math.IsNaN(*maxCostUSD) || math.IsInf(*maxCostUSD, 0) {
+		return agentRunOptions{}, fmt.Errorf("--budget must be finite and non-negative")
 	}
 	taskIntentSet := false
 	fs.Visit(func(f *flag.Flag) {
@@ -1268,6 +1303,9 @@ func parseAgentRunArgs(args []string) (agentRunOptions, error) {
 		maxOutputTokens:    *maxOutputTokens,
 		maxToolCalls:       *maxToolCalls,
 		maxElapsedSeconds:  *maxElapsedSeconds,
+		maxModelRequests:   *maxModelRequests,
+		maxCostUSD:         *maxCostUSD,
+		allowShell:         *allowShell,
 		taskIntent:         taskIntent,
 		taskIntentSet:      taskIntentSet,
 		dryRun:             *dryRun,
@@ -1554,6 +1592,15 @@ func renderAgentRunPreview(opts agentRunOptions, profile *agentspec.RuntimeProfi
 	if snapshot.MaxElapsedSeconds > 0 {
 		fmt.Fprintf(&b, "Max elapsed seconds: %d\n", snapshot.MaxElapsedSeconds)
 	}
+	if snapshot.MaxModelRequests > 0 {
+		fmt.Fprintf(&b, "Max model requests: %d\n", snapshot.MaxModelRequests)
+	}
+	if snapshot.MaxCostUSD > 0 {
+		fmt.Fprintf(&b, "Max cost (USD): %g\n", snapshot.MaxCostUSD)
+	}
+	if snapshot.AllowShell {
+		b.WriteString("Shell opt-in: requested\n")
+	}
 	fmt.Fprintf(&b, "Max output tokens: %d\n", snapshot.MaxOutputTokens)
 	if snapshot.ResolvedTier != "" {
 		fmt.Fprintf(&b, "Resolved tier: %s\n", snapshot.ResolvedTier)
@@ -1591,6 +1638,9 @@ func buildAgentRunPreviewSnapshot(opts agentRunOptions, profile *agentspec.Runti
 		Model:              previewAgentRunModel(opts, profile),
 		ToolTier:           previewAgentRunToolTier(profile),
 		MaxOutputTokens:    opts.maxOutputTokens,
+		MaxModelRequests:   opts.maxModelRequests,
+		MaxCostUSD:         opts.maxCostUSD,
+		AllowShell:         opts.allowShell,
 		TaskIntent:         string(taskIntent),
 		Task:               strings.TrimSpace(opts.task),
 	}
