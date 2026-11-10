@@ -1,6 +1,7 @@
 package commitmsg
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -114,7 +115,7 @@ func ValidateCommitFields(action, scope, subject string, body, issues []string) 
 		if normalized != "" {
 			nonEmptyBody++
 			if n := len(strings.Fields(normalized)); n > MaxBulletWords {
-				return fmt.Errorf("bullet %d has %d words; keep each bullet to at most %d words", nonEmptyBody, n, MaxBulletWords)
+				return &BulletTooLongError{Bullet: nonEmptyBody, Words: n}
 			}
 		}
 	}
@@ -175,6 +176,30 @@ func ValidateStyle(action, scope, subject string, bullets []string) error {
 	if err := validateSubjectStyle(action, subject); err != nil {
 		return err
 	}
+	return ValidateBullets(bullets)
+}
+
+// BulletTooLongError reports a bullet of more than MaxBulletWords words.
+type BulletTooLongError struct {
+	Bullet int // 1-based, counting non-empty bullets
+	Words  int
+}
+
+func (e *BulletTooLongError) Error() string {
+	return fmt.Sprintf("bullet %d has %d words; keep each bullet to at most %d words", e.Bullet, e.Words, MaxBulletWords)
+}
+
+// IsBulletTooLong reports whether err is, or wraps, a BulletTooLongError.
+func IsBulletTooLong(err error) bool {
+	var target *BulletTooLongError
+	return errors.As(err, &target)
+}
+
+// ValidateBullets applies the bullet limits alone: at most MaxBulletWords
+// words in a bullet and at most MaxBullets bullets. It serves a message whose
+// header is fixed by a tool and not written for these rules, such as the
+// "merge(<scope>): Merge <source> into <target>" header of a merge commit.
+func ValidateBullets(bullets []string) error {
 	count := 0
 	for _, bullet := range bullets {
 		normalized := NormalizeBullet(bullet)
@@ -183,7 +208,7 @@ func ValidateStyle(action, scope, subject string, bullets []string) error {
 		}
 		count++
 		if n := len(strings.Fields(normalized)); n > MaxBulletWords {
-			return fmt.Errorf("bullet %d has %d words; keep each bullet to at most %d words", count, n, MaxBulletWords)
+			return &BulletTooLongError{Bullet: count, Words: n}
 		}
 	}
 	if count > MaxBullets {

@@ -12,11 +12,12 @@ import (
 
 const tooLongBullet = "Detect generated files from headers and build output siblings, then collapse them into grouped diff summaries so reviewers see one line per group"
 
-func TestCommitRepairsOverlongBulletWithoutAnotherModelCall(t *testing.T) {
+func overlongBulletReply(t *testing.T) json.RawMessage {
+	t.Helper()
 	if n := len(strings.Fields(tooLongBullet)); n <= commitmsg.MaxBulletWords {
 		t.Fatalf("fixture bullet has %d words; it must exceed the limit", n)
 	}
-	bad, err := json.Marshal(map[string]any{
+	raw, err := json.Marshal(map[string]any{
 		"action":  "add",
 		"subject": "group generated files in review summaries",
 		"body":    []string{tooLongBullet, "Keep hand-written files in the per-file ledger"},
@@ -24,27 +25,68 @@ func TestCommitRepairsOverlongBulletWithoutAnotherModelCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The stub has one reply. A second model call fails the test.
-	invoker := &commitMarkupInvoker{replies: []json.RawMessage{bad}}
+	return raw
+}
+
+// A bullet over the word limit goes back to the model once. The model can
+// shorten its own words without losing the point; a cut by code cannot.
+func TestCommitOverlongBullet_AsksTheModelToShortenItOnce(t *testing.T) {
+	shortened, _ := json.Marshal(map[string]any{
+		"action":  "add",
+		"subject": "group generated files in review summaries",
+		"body":    []string{"Collapse generated files into one summary line per group", "Keep hand-written files in the per-file ledger"},
+	})
+	invoker := &commitMarkupInvoker{replies: []json.RawMessage{overlongBulletReply(t), shortened}}
 	result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), commitMarkupDefinition{}, oneshot.RunOpts{MaxRetries: 2})
 	if err != nil || result == nil || result.Value == nil {
 		t.Fatalf("run failed: result=%+v err=%v calls=%d", result, err, len(invoker.prompts))
 	}
-	if len(invoker.prompts) != 1 {
-		t.Fatalf("model called %d times, want 1", len(invoker.prompts))
+	if len(invoker.prompts) != 2 {
+		t.Fatalf("model called %d times, want 2", len(invoker.prompts))
+	}
+	if !strings.Contains(invoker.prompts[1], "bullet 1 has") || !strings.Contains(invoker.prompts[1], "at most 20 words") {
+		t.Fatalf("retry prompt does not name the bullet and the limit:\n%s", invoker.prompts[1])
+	}
+	if got := result.Value.(*CommitResult).Body[0]; got != "Collapse generated files into one summary line per group" {
+		t.Fatalf("body[0] = %q, want the model's own shortened bullet", got)
+	}
+	if len(result.Repairs) != 0 {
+		t.Fatalf("repairs = %q, want none: code cut nothing", result.Repairs)
+	}
+}
+
+// When the second answer is still too long, code cuts the bullet and the
+// result says so. The model is not asked a third time.
+func TestCommitOverlongBullet_StillTooLongIsCutAndReported(t *testing.T) {
+	invoker := &commitMarkupInvoker{replies: []json.RawMessage{overlongBulletReply(t), overlongBulletReply(t)}}
+	result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), commitMarkupDefinition{}, oneshot.RunOpts{MaxRetries: 3})
+	if err != nil || result == nil || result.Value == nil {
+		t.Fatalf("run failed: result=%+v err=%v calls=%d", result, err, len(invoker.prompts))
+	}
+	if len(invoker.prompts) != 2 {
+		t.Fatalf("model called %d times, want 2", len(invoker.prompts))
 	}
 	cr := result.Value.(*CommitResult)
-	if len(cr.Body) != 2 {
-		t.Fatalf("body = %q, want both bullets kept", cr.Body)
-	}
 	if n := len(strings.Fields(cr.Body[0])); n > commitmsg.MaxBulletWords {
 		t.Fatalf("repaired bullet has %d words: %q", n, cr.Body[0])
 	}
 	if !strings.HasPrefix(tooLongBullet, cr.Body[0]) {
 		t.Fatalf("repair changed the wording instead of shortening it: %q", cr.Body[0])
 	}
-	if cr.Body[1] != "Keep hand-written files in the per-file ledger" {
-		t.Fatalf("valid bullet changed: %q", cr.Body[1])
+	if len(result.Repairs) != 1 || !strings.Contains(result.Repairs[0], "cut bullet 1") {
+		t.Fatalf("repairs = %q, want one line about bullet 1", result.Repairs)
+	}
+}
+
+// With a single attempt there is no retry to spend: code cuts at once.
+func TestCommitOverlongBullet_NoRetryLeftIsCutAtOnce(t *testing.T) {
+	invoker := &commitMarkupInvoker{replies: []json.RawMessage{overlongBulletReply(t)}}
+	result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), commitMarkupDefinition{}, oneshot.RunOpts{MaxRetries: 1})
+	if err != nil || len(invoker.prompts) != 1 {
+		t.Fatalf("err=%v calls=%d", err, len(invoker.prompts))
+	}
+	if len(result.Repairs) != 1 {
+		t.Fatalf("repairs = %q", result.Repairs)
 	}
 }
 

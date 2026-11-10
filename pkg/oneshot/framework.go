@@ -186,6 +186,11 @@ type RunResult struct {
 	// IncompleteReason records why validation could not finish.
 	IncompleteReason string
 
+	// Repairs lists what code changed in the accepted result after the model
+	// answered, such as a bullet that was cut to the word limit. The caller
+	// tells the operator, because a cut can change the meaning of the text.
+	Repairs []string
+
 	// HostEvidence contains deterministic evidence collected once by the
 	// framework before model synthesis. It remains authoritative across every
 	// primary and approval-critic repair attempt.
@@ -234,10 +239,15 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	var lastTrace *transparency.Trace
 	var lastErr error
 	var traceAttempts []transparency.TraceAttempt
+	// failedChecks holds the distinct validation messages of this run, oldest
+	// first. A retry prompt that names only the latest one lets the model fix
+	// that rule and break an earlier one again.
+	var failedChecks []string
 
 	invoker := f.invoker
 	fallbackIndex, modelAttempts := 0, 0
 	attemptLimit := maxRetries
+	shortenAsked := false
 	for attempt := 0; attempt < attemptLimit; attempt++ {
 		modelAttempts++
 		result, trace, invokeErr := invoker.Invoke(ctx, systemPrompt, userPrompt, tool, audit)
@@ -295,14 +305,32 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			return nil
 		}
 		validationErr := validate(result.ToolCall.Arguments)
-		if validationErr != nil {
+		var acceptedRepairs []string
+		askToShorten := false
+		if validationErr != nil && !shortenAsked && attempt+1 < attemptLimit {
+			// Text that is only too long goes back to the model once: it can
+			// shorten its own words without losing the point. Code cuts only
+			// when that second answer is still too long.
+			if sd, ok := def.(ShortenFirstDefinition); ok && sd.ShortenFirst(validationErr) {
+				shortenAsked = true
+				askToShorten = true
+			}
+		}
+		if validationErr != nil && !askToShorten {
 			if repairer, ok := def.(RepairableDefinition); ok {
-				repaired, repairs := repairer.Repair(result.ToolCall.Arguments)
-				if len(repairs) > 0 && validate(repaired) == nil {
+				// What code fixed stays fixed, also when another check still
+				// fails. The error that goes to the model, and into the final
+				// error, is then the remaining one. Keeping the first error
+				// made a run end with "header exceeds 72 characters" when the
+				// header could be cut and a different check was the obstacle.
+				if repaired, repairs := repairer.Repair(result.ToolCall.Arguments); len(repairs) > 0 {
 					result.ToolCall.Arguments = repaired
-					validationErr = nil
-					for _, repair := range repairs {
-						slog.Info("repaired header: " + repair)
+					if validationErr = validate(repaired); validationErr == nil {
+						acceptedRepairs = repairs
+						for _, repair := range repairs {
+							// The repairs cover the body too, and some remove text.
+							slog.Info("repaired generated text: " + repair)
+						}
 					}
 				}
 			}
@@ -324,13 +352,16 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			// Echoing its own previous tool call arguments turns this into a
 			// targeted repair -- fix exactly this field in exactly this
 			// payload -- instead of a fresh, possibly-repeated guess.
+			message := strings.TrimSpace(err.Error())
+			earlier := earlierFailedChecks(failedChecks, message)
+			failedChecks = appendDistinct(failedChecks, message)
 			if sensitiveValidation(err) {
 				// The rejected arguments may hold private text; do not echo them.
-				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
-					".\n\nCall " + tool.Name + " again with corrected arguments."
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + message + "." + earlier +
+					"\n\nCall " + tool.Name + " again with corrected arguments."
 			} else {
-				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + strings.TrimSpace(err.Error()) +
-					".\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
+				userPrompt = baseUserPrompt + "\n\nThe previous response failed validation: " + message + "." + earlier +
+					"\n\nYour previous " + tool.Name + " call arguments were:\n```json\n" +
 					truncateForTrace(string(result.ToolCall.Arguments), validationRepairArgumentsMaxLen) +
 					"\n```\n\nFix the issue named above and call " + tool.Name + " again with corrected arguments."
 			}
@@ -373,6 +404,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			ContextAudit:    audit,
 			Attempts:        attempt + 1,
 			PrimaryAttempts: attempt + 1,
+			Repairs:         acceptedRepairs,
 		}, nil
 	}
 
@@ -382,6 +414,12 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	// or emitted malformed JSON.
 	if lastErr != nil {
 		err := fmt.Errorf("failed after %d attempts for command %q: last attempt: %w", attemptLimit, def.Name(), lastErr)
+		if earlier := otherFailedChecks(failedChecks, lastErr); len(earlier) > 0 {
+			// Say what the earlier attempts broke, so that the operator sees
+			// whether the model went back and forth between two rules.
+			err = fmt.Errorf("failed after %d attempts for command %q: last attempt: %w (earlier attempts: %s)",
+				attemptLimit, def.Name(), lastErr, strings.Join(earlier, "; "))
+		}
 		retainedTrace := traceWithErrorIfBlank(aggregateDefinitionTrace(traceAttempts, lastTrace), err)
 		return &RunResult{
 			Trace:            retainedTrace,
@@ -402,6 +440,42 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 		Incomplete:       true,
 		IncompleteReason: err.Error(),
 	}, err
+}
+
+// earlierFailedChecks renders the checks that earlier attempts of a run
+// failed, for the retry prompt. It leaves out current, which the prompt names
+// on its own, and returns "" when there is nothing else.
+func earlierFailedChecks(failed []string, current string) string {
+	var b strings.Builder
+	for _, message := range failed {
+		if message != current {
+			b.WriteString("\n- " + message)
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\n\nEarlier attempts failed these checks. The new arguments must pass them too:" + b.String()
+}
+
+// otherFailedChecks returns the failed checks that last does not already name.
+func otherFailedChecks(failed []string, last error) []string {
+	var out []string
+	for _, message := range failed {
+		if !strings.Contains(last.Error(), message) {
+			out = append(out, message)
+		}
+	}
+	return out
+}
+
+func appendDistinct(list []string, value string) []string {
+	for _, have := range list {
+		if have == value {
+			return list
+		}
+	}
+	return append(list, value)
 }
 
 func aggregateDefinitionTrace(attempts []transparency.TraceAttempt, fallback *transparency.Trace) *transparency.Trace {

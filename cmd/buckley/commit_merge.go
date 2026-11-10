@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -142,6 +143,7 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 	var b strings.Builder
 	b.WriteString(prompts.MergeNoteProseBlock() + "\n\n")
 	fmt.Fprintf(&b, "## Merge\n\nMerging %s into %s.\n\n", d.source, d.target)
+	fmt.Fprintf(&b, "Buckley writes the header itself: \"merge(<scope>): Merge %s into %s\". Supply the scope and the body. The action and the subject you send are not used.\n\n", d.source, d.target)
 	if len(d.subjects) > 0 {
 		b.WriteString("## Incoming commits\n\n")
 		for _, s := range d.subjects {
@@ -158,6 +160,52 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 	}
 	b.WriteString(d.CommitDefinition.BuildPrompt(ctx))
 	return b.String()
+}
+
+// unusedMergeSubject stands in for the model's subject when a merge result is
+// checked. It passes every subject rule, and it is too short for the
+// removed-name check to look at.
+const unusedMergeSubject = "x"
+
+// forChecks returns the tool arguments as the merge commit uses them: the
+// scope, body and issues the model sent, under the fixed action.
+//
+// completeMergeWithRunner replaces the action and the subject after
+// generation, so the checks must not judge what the model wrote there. Told
+// "Merging A into B", a model answers with the action "merge" and git's own
+// subject "Merge A into B". As a generated subject that breaks three rules at
+// once: a capital first letter, a repeated action verb, and with a long branch
+// name a header over 72 characters. The run then failed after three attempts
+// on text that was never going to be committed, and passed on a later try
+// when the model happened to word the subject differently.
+func (d mergeCommitDefinition) forChecks(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return raw
+	}
+	fields["action"], _ = json.Marshal("merge")
+	fields["subject"], _ = json.Marshal(unusedMergeSubject)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func (d mergeCommitDefinition) Validate(raw json.RawMessage) error {
+	return d.CommitDefinition.Validate(d.forChecks(raw))
+}
+
+func (d mergeCommitDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {
+	return d.CommitDefinition.Repair(d.forChecks(raw))
+}
+
+func (d mergeCommitDefinition) ValidateWithContext(ctx *oneshot.Context, raw json.RawMessage) error {
+	return d.CommitDefinition.ValidateWithContext(ctx, d.forChecks(raw))
+}
+
+func (d mergeCommitDefinition) PolicyFacts(ctx *oneshot.Context, raw json.RawMessage) (*oneshot.PolicyRequest, error) {
+	return d.CommitDefinition.PolicyFacts(ctx, d.forChecks(raw))
 }
 
 // squashMsgCommitDefinition wraps commands.CommitDefinition, adding the
@@ -341,6 +389,7 @@ func runCompleteMerge(opts commitCommandOptions, state repoOpState) error {
 // package's dependency-injection style (commitRunner is already an
 // interface for this purpose; see frameworkCommitRunner in commit.go).
 func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, runner commitRunner, ledger *transparency.CostLedger, source, target string) error {
+	runner = mergeHeaderRunner{commitRunner: runner, source: source, target: target}
 	result, err := runCommitGeneration(ctx, runner, opts)
 	if err != nil {
 		return err
@@ -353,8 +402,6 @@ func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, run
 		return fmt.Errorf("no merge commit message generated")
 	}
 
-	result.Commit.Action = "merge"
-	result.Commit.Subject = fmt.Sprintf("Merge %s into %s", source, target)
 	message := result.Commit.Format()
 
 	printCommitMessage(message)
@@ -386,6 +433,24 @@ func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, run
 		return pushChanges(opts.compactOutput, false)
 	}
 	return nil
+}
+
+// mergeHeaderRunner gives every message of the wrapped runner the fixed merge
+// header. The header was set once, after the first generation, so a message
+// regenerated at the confirmation prompt ([r]) kept the model's own action and
+// subject and the merge was committed without the merge grammar.
+type mergeHeaderRunner struct {
+	commitRunner
+	source, target string
+}
+
+func (r mergeHeaderRunner) Run(ctx context.Context) (*commitRunResult, error) {
+	result, err := r.commitRunner.Run(ctx)
+	if result != nil && result.Commit != nil {
+		result.Commit.Action = "merge"
+		result.Commit.Subject = fmt.Sprintf("Merge %s into %s", r.source, r.target)
+	}
+	return result, err
 }
 
 // runCompleteCherryPick finishes an in-progress `git cherry-pick` after

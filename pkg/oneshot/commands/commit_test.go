@@ -9,6 +9,7 @@ import (
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/oneshot"
 	"m31labs.dev/buckley/pkg/prompts"
+	"m31labs.dev/buckley/pkg/tools"
 )
 
 func isolateCommitPrompt(t *testing.T) {
@@ -256,5 +257,35 @@ func TestValidateWithContextSkipsRemovedEchoForGeneratedDiffs(t *testing.T) {
 	ctx.Diff = oneshot.DiffStats{Files: 1}
 	if err := (CommitDefinition{}).ValidateWithContext(ctx, raw); err == nil {
 		t.Fatal("source diff should flag the removed name")
+	}
+}
+
+// A commit that changed only an internal package got a BREAKING CHANGE
+// trailer. The flag now needs a reason, and the tool says what counts.
+func TestCommitValidate_BreakingNeedsAReason(t *testing.T) {
+	noReason := json.RawMessage(`{"action":"refactor","subject":"port the lex automaton","body":["Move the DFA walk"],"breaking":true}`)
+	if err := (CommitDefinition{}).Validate(noReason); err == nil || !strings.Contains(err.Error(), "without a breaking_reason") {
+		t.Fatalf("Validate() = %v, want the missing reason rejected", err)
+	}
+	blankReason := json.RawMessage(`{"action":"refactor","subject":"port the lex automaton","body":["Move the DFA walk"],"breaking":true,"breaking_reason":" - "}`)
+	if err := (CommitDefinition{}).Validate(blankReason); err == nil {
+		t.Fatal("a reason that is only a bullet marker passed")
+	}
+	withReason := json.RawMessage(`{"action":"refactor","subject":"port the lex automaton","body":["Move the DFA walk"],"breaking":true,"breaking_reason":"Importers must pass lex tables."}`)
+	if err := (CommitDefinition{}).Validate(withReason); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	notBreaking := json.RawMessage(`{"action":"refactor","subject":"port the lex automaton","body":["Move the DFA walk"]}`)
+	if err := (CommitDefinition{}).Validate(notBreaking); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+
+	for name, tool := range map[string]map[string]tools.Property{
+		"commit": CommitDefinition{}.Tool().Parameters.Properties,
+		"pr":     PRDefinition{}.Tool().Parameters.Properties,
+	} {
+		if desc := tool["breaking"].Description; !strings.Contains(desc, "internal code are not breaking") {
+			t.Errorf("%s: the breaking description does not say what is not breaking: %q", name, desc)
+		}
 	}
 }

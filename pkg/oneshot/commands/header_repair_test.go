@@ -84,12 +84,27 @@ func TestHeaderRepair_PreservesOtherFields(t *testing.T) {
 	}
 }
 
-func TestHeaderRepair_RejectsMixedFailures(t *testing.T) {
+// A payload with a header over the limit and no body: Repair cuts the header,
+// and the framework does not accept the result, because the body is still
+// missing. The model is asked again, about the body.
+func TestHeaderRepair_MixedFailuresAreRepairedButNotAccepted(t *testing.T) {
 	for _, def := range []oneshot.Definition{CommitDefinition{}, PRDefinition{}} {
 		raw := json.RawMessage(`{"action":"fix","scope":"project","subject":"` + strings.Repeat("word ", 30) + `","title":"` + strings.Repeat("word ", 30) + `"}`)
 		repaired, repairs := def.(oneshot.RepairableDefinition).Repair(raw)
-		if string(repaired) != string(raw) || len(repairs) != 0 {
-			t.Fatalf("%s repaired a payload with invalid body", def.Name())
+		if len(repairs) == 0 || string(repaired) == string(raw) {
+			t.Fatalf("%s did not cut the header of a payload with another problem", def.Name())
+		}
+		if err := def.Validate(repaired); err == nil || strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("%s: Validate(repaired) = %v, want the problem that remains", def.Name(), err)
+		}
+
+		invoker := &repairTestInvoker{raw: raw}
+		result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), repairTestDefinition{def}, oneshot.RunOpts{MaxRetries: 2})
+		if err == nil || (result != nil && result.Value != nil) {
+			t.Fatalf("%s: the framework accepted a payload that still fails validation", def.Name())
+		}
+		if invoker.calls != 2 || strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("%s: calls = %d, err = %v; want a retry about the remaining problem", def.Name(), invoker.calls, err)
 		}
 	}
 }

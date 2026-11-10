@@ -115,8 +115,8 @@ func TestParsePRCommandOptionsHonorsEnvironment(t *testing.T) {
 	if opts.showCost != true {
 		t.Fatal("showCost = false, want true")
 	}
-	if opts.timeout != 2*time.Minute {
-		t.Fatalf("timeout = %s, want 2m", opts.timeout)
+	if opts.timeout != defaultOneshotTimeout {
+		t.Fatalf("timeout = %s, want the default %s", opts.timeout, defaultOneshotTimeout)
 	}
 	if opts.diffBudget != diffsignal.PRDiffBudget {
 		t.Fatalf("diffBudget = %d, want default %d", opts.diffBudget, diffsignal.PRDiffBudget)

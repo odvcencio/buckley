@@ -106,3 +106,47 @@ func TestRepairBody(t *testing.T) {
 		})
 	}
 }
+
+// A cut can remove a fact: a bullet that counted "two ..., and two more ..."
+// came out as "two ...". The repair now says which bullet it cut and by how
+// much, so the author can check it.
+func TestRepairBody_SaysWhatItCut(t *testing.T) {
+	bullet := "Match C end-of-input and ill-formed UTF-8 lookahead; document two heuristics where the blob loses source detail, and two more where the scanner state is opaque"
+	out, repairs := RepairBody([]string{"Keep the guard", bullet})
+	if want := "Match C end-of-input and ill-formed UTF-8 lookahead; document two heuristics where the blob loses source detail"; out[1] != want {
+		t.Fatalf("cut bullet = %q, want %q", out[1], want)
+	}
+	if len(repairs) != 1 || repairs[0] != "cut bullet 2 from 25 to 16 words; check that it still says what changed" {
+		t.Fatalf("repairs = %q", repairs)
+	}
+
+	seven := []string{"one", "two", "three", "", "four", "five", "six", "seven"}
+	out, repairs = RepairBody(seven)
+	if len(repairs) != 1 || repairs[0] != "dropped 2 bullet(s) beyond the limit of 5" {
+		t.Fatalf("repairs = %q", repairs)
+	}
+	if kept := len(out); kept != 6 { // five bullets and the blank entry
+		t.Fatalf("kept %d entries: %q", kept, out)
+	}
+
+	if _, repairs = RepairBody([]string{"short bullet"}); len(repairs) != 0 {
+		t.Fatalf("repairs for a valid body = %q", repairs)
+	}
+}
+
+func TestRepairHeader_SaysHowMuchOfTheSubjectItCut(t *testing.T) {
+	subject := "teach the incremental parser to reuse subtrees across edits that touch only trailing whitespace and comments"
+	_, cut, repairs := RepairHeader("update", "", subject, HeaderLimit)
+	if len(cut) >= len(subject) {
+		t.Fatalf("subject was not cut: %q", cut)
+	}
+	found := false
+	for _, repair := range repairs {
+		if strings.HasPrefix(repair, "cut the subject from 16 to ") && strings.HasSuffix(repair, " words") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("repairs = %q, want the word counts of the cut", repairs)
+	}
+}

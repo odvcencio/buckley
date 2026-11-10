@@ -145,7 +145,7 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 		subject = string([]rune(subject)[:budget])
 	}
 	subject = strings.TrimRight(subject, " .")
-	repairs = append(repairs, "shortened subject")
+	repairs = append(repairs, fmt.Sprintf("cut the subject from %d to %d words", len(strings.Fields(cleanSubject)), len(strings.Fields(subject))))
 	return scope, subject, repairs
 }
 
@@ -173,17 +173,17 @@ func RepairBody(body []string) ([]string, []string) {
 	out := make([]string, len(body))
 	copy(out, body)
 	var repairs []string
-	shortened := false
 	for i, bullet := range out {
 		normalized := NormalizeBullet(bullet)
-		if len(strings.Fields(normalized)) <= MaxBulletWords {
+		words := len(strings.Fields(normalized))
+		if words <= MaxBulletWords {
 			continue
 		}
 		out[i] = shortenBullet(normalized)
-		shortened = true
-	}
-	if shortened {
-		repairs = append(repairs, "shortened long bullets")
+		// Say which bullet lost text and how much. A cut at a clause break can
+		// remove a fact ("two heuristics ..., and two more ..." became "two
+		// heuristics"), and the author can only check it when told where.
+		repairs = append(repairs, fmt.Sprintf("cut bullet %d from %d to %d words; check that it still says what changed", i+1, words, len(strings.Fields(out[i]))))
 	}
 	kept, nonEmpty := 0, 0
 	for _, bullet := range out {
@@ -204,7 +204,7 @@ func RepairBody(body []string) ([]string, []string) {
 			}
 		}
 		out = trimmed
-		repairs = append(repairs, "dropped extra bullets")
+		repairs = append(repairs, fmt.Sprintf("dropped %d bullet(s) beyond the limit of %d", nonEmpty-MaxBullets, MaxBullets))
 	}
 	return out, repairs
 }

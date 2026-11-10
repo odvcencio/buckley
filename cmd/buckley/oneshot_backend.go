@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/model"
@@ -411,6 +412,39 @@ func resolveOneshotEffort(commandName, flagValue string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported reasoning effort %q (use low, medium, high, xhigh, or max)", value)
 	}
+}
+
+// defaultOneshotTimeout bounds the generation of one commit message or PR
+// text. The limit covers every model attempt of the run (three, plus the
+// attempts of each fallback model), and a PR prompt carries up to 300,000 bytes
+// of diff. The earlier limit of two minutes cut runs that needed a retry, so
+// callers wrapped the command in a longer timeout of their own.
+const defaultOneshotTimeout = 5 * time.Minute
+
+// resolveOneshotTimeout returns the time limit for one generation: the
+// --timeout flag when it was given (flagValue above zero), then
+// BUCKLEY_TIMEOUT_<COMMAND>, then BUCKLEY_ONESHOT_TIMEOUT, then
+// defaultOneshotTimeout. The variables let a caller set the limit once instead
+// of on every call.
+func resolveOneshotTimeout(commandName string, flagValue time.Duration) (time.Duration, error) {
+	if flagValue < 0 {
+		return 0, fmt.Errorf("--timeout must be a positive duration, got %s", flagValue)
+	}
+	if flagValue > 0 {
+		return flagValue, nil
+	}
+	for _, name := range []string{"BUCKLEY_TIMEOUT_" + strings.ToUpper(commandName), "BUCKLEY_ONESHOT_TIMEOUT"} {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			continue
+		}
+		timeout, err := time.ParseDuration(value)
+		if err != nil || timeout <= 0 {
+			return 0, fmt.Errorf("%s=%q is not a positive duration such as 90s or 5m", name, value)
+		}
+		return timeout, nil
+	}
+	return defaultOneshotTimeout, nil
 }
 
 // resolveOneshotModelWithEffort resolves the model before applying an explicit

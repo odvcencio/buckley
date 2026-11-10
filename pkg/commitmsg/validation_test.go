@@ -123,3 +123,24 @@ func TestValidateStyleAllowsMissingBody(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateBullets(t *testing.T) {
+	if err := ValidateBullets([]string{"- Keep the incoming version.", "", "* Combine both sides by hand."}); err != nil {
+		t.Fatalf("ValidateBullets() = %v", err)
+	}
+	wordy := strings.Repeat("word ", MaxBulletWords+1)
+	if err := ValidateBullets([]string{wordy}); err == nil || !strings.Contains(err.Error(), "bullet 1 has") {
+		t.Errorf("ValidateBullets(long bullet) = %v", err)
+	}
+	if err := ValidateBullets(make([]string, 0)); err != nil {
+		t.Errorf("ValidateBullets(no bullets) = %v, want nil: a body is not required", err)
+	}
+	many := []string{"a", "b", "c", "d", "e", "f"}
+	if err := ValidateBullets(many); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Errorf("ValidateBullets(%d bullets) = %v", len(many), err)
+	}
+	// ValidateStyle keeps applying the same limits.
+	if err := ValidateStyle("fix", "", "keep the guard", many); err == nil {
+		t.Error("ValidateStyle lost the bullet-count rule")
+	}
+}

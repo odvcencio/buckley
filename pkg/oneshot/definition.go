@@ -150,10 +150,23 @@ func sensitiveValidation(err error) bool {
 	return errors.As(err, &s) && s.SensitiveValidation()
 }
 
-// RepairableDefinition can fix mechanical format errors without another model call.
-// The framework validates the repaired payload before it uses it.
+// RepairableDefinition can fix mechanical errors (format, length) without
+// another model call. Repair returns the arguments with those errors fixed and
+// one note for each fix; other problems may remain. The framework validates
+// the repaired payload before it uses it. When a problem remains, the retry
+// prompt names that problem and shows the repaired arguments, so the model is
+// not asked to fix what code already fixed.
 type RepairableDefinition interface {
 	Repair(json.RawMessage) (json.RawMessage, []string)
+}
+
+// ShortenFirstDefinition marks a definition whose over-long text should go back
+// to the model once before code cuts it. ShortenFirst reports whether a
+// validation error is only about text that is too long to keep as written. The
+// framework then asks the model to shorten it, one time per run. If the next
+// answer is still too long, Repair cuts it and the run reports the cut.
+type ShortenFirstDefinition interface {
+	ShortenFirst(err error) bool
 }
 
 // AgentDefinition describes a oneshot command that requires one autonomous

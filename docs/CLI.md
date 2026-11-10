@@ -249,12 +249,14 @@ buckley commit [OPTIONS]
 | `--exclusive` | With `--paths`, reject staged files outside the selected paths |
 | `-C <dir>` / `--dir <dir>` | Run as if started in `<dir>`, like `git -C`. The commit takes everything staged in that repository, so pair `-C` with `--paths` (and `--exclusive`) when another process may be staging there. Uppercase `-C`: lowercase `-c` selects the config file |
 | `--context-trailer=false` | Omit the privacy-preserving change digest and aggregate stats trailers |
+| `--allow-mixed` | Do not warn when generated files are staged next to source files |
+| `--breaking <auto\|keep\|never>` | `BREAKING CHANGE` trailer policy (default `auto`). See [Breaking changes](#breaking-changes) |
 | `--minimal-output` | Minimize terminal output |
 | `--trace` | Show context audit and model reasoning after generation |
 | `--model <id>` | Override the commit-message model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
-| `--effort <level>` | Override reasoning effort |
-| `--timeout <duration>` | Bound message generation (default `2m`) |
+| `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
+| `--timeout <duration>` | Time limit for generating the message, retries included. Default: `BUCKLEY_TIMEOUT_COMMIT`, then `BUCKLEY_ONESHOT_TIMEOUT`, then `5m` |
 | `--squash <base>` | Squash every commit since the merge-base with `<base>` into one commit |
 | `--force` | With `--squash`, allow squashing a protected branch (`main`/`master`) |
 | `--force-with-lease` | With `--squash`, push the rewritten branch (`git push --force-with-lease`) |
@@ -268,6 +270,7 @@ example `buckley commit main.go -C /other`) is an error, not a dropped flag. A
 - `BUCKLEY_MODEL_COMMIT` - Override model for commit generation
 - `BUCKLEY_COMMIT_BACKEND` - Override backend; falls back to `BUCKLEY_ONESHOT_BACKEND`, then `api`
 - `BUCKLEY_EFFORT_COMMIT` - Override effort; falls back to `BUCKLEY_ONESHOT_EFFORT`, then reasoning config
+- `BUCKLEY_TIMEOUT_COMMIT` - Time limit for generation (a duration such as `90s` or `5m`); falls back to `BUCKLEY_ONESHOT_TIMEOUT`, then `5m`
 - `BUCKLEY_PROMPT_COMMIT` - Override prompt template
 
 **Example:**
@@ -285,6 +288,40 @@ content are stored in these trailers. Buckley rechecks the staged diff before
 committing and aborts if it changed after message generation. Disable the
 trailers with `--context-trailer=false`; the staged-diff recheck still runs.
 
+#### Generated files
+
+A commit of generated files only (build output, minified or vendored files,
+files that `.gitattributes` marks `linguist-generated`) gets a fixed
+`update(<scope>): regenerate ...` message without a model call. When generated
+files are staged next to source files, `buckley commit` warns and names them,
+because the message can then describe only the source change. Test data is not
+counted: files under `testdata/` or `__snapshots__/` and `*.golden` or `*.snap`
+files change with the code they test. `--allow-mixed` turns the warning off for
+one commit.
+
+#### Bullets over the word limit
+
+A bullet of more than 20 words goes back to the model once, with the bullet
+number and the limit, so that it can shorten its own words. If the next answer
+is still too long, `buckley commit` cuts the bullet at a clause break or at the
+word limit, and prints `buckley: changed the generated message: cut bullet N
+from X to Y words` on stderr. Check that a cut bullet still says what changed.
+
+#### Breaking changes
+
+The model marks a commit as breaking, and must then say what users or importers
+have to change; the message gets a `BREAKING CHANGE:` trailer with that reason.
+A model sets the mark for any change that callers inside the repository must
+follow, so `buckley commit` checks the staged files (`--breaking=auto`, the
+default): when every changed file is a Go test, a file under `testdata/`, or Go
+code under an `internal/` directory, no other module can import what changed,
+and the trailer is left out with a note on stderr.
+
+That rule is about importers. A change under `internal/` can still change what
+a command does for the people who run it. For such a commit pass
+`--breaking=keep`, which keeps the trailer whenever the model asks for it.
+`--breaking=never` leaves it out.
+
 #### Merge, cherry-pick, and revert commits
 
 When `MERGE_HEAD`, `CHERRY_PICK_HEAD`, or `REVERT_HEAD` is present (a
@@ -294,7 +331,10 @@ instead of creating a normal commit:
 - **Merge**: refuses if any path is still unmerged, then generates a
   message with subject `merge(<scope>): Merge <source> into <target>` and a
   body that summarizes the incoming commits and states how each conflicted
-  file was resolved (kept one side, or combined both).
+  file was resolved (kept one side, or combined both). Buckley writes the
+  header; the model supplies the scope and the body, and only those are
+  checked. `buckley commit-check` accepts this header as it is and applies
+  the bullet limits to the body.
 - **Cherry-pick**: completes with the original commit's message plus a
   `(cherry picked from commit <sha>)` trailer. No model call is made — the
   message is already known.
@@ -359,11 +399,13 @@ buckley pr [OPTIONS]
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
 | `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
+| `--timeout <duration>` | Time limit for generating the text, retries included. Default: `BUCKLEY_TIMEOUT_PR`, then `BUCKLEY_ONESHOT_TIMEOUT`, then `5m` |
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_PR` - Override model for PR generation
 - `BUCKLEY_PR_BACKEND` - Override backend; falls back to `BUCKLEY_ONESHOT_BACKEND`, then `api`
 - `BUCKLEY_EFFORT_PR` - Override effort; falls back to `BUCKLEY_ONESHOT_EFFORT`, then reasoning config
+- `BUCKLEY_TIMEOUT_PR` - Time limit for generation; falls back to `BUCKLEY_ONESHOT_TIMEOUT`, then `5m`. `pr merge` uses it too
 - `BUCKLEY_PROMPT_PR` - Override prompt template
 - `BUCKLEY_PR_BASE` - Base branch when `--base` is not given
 - `BUCKLEY_REMOTE_NAME` - Remote for fetches and pushes (default `origin`)

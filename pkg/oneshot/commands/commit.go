@@ -108,10 +108,11 @@ func (CommitDefinition) Tool() tools.Definition {
 					tools.StringProperty(""),
 				),
 				"breaking": tools.BoolProperty(
-					"Introduces a breaking change",
+					"True only when people who run the released program or import its public API must change something. " +
+						"New code, tests, docs, and unexported or internal code are not breaking.",
 				),
 				"breaking_reason": tools.StringProperty(
-					"Compatibility impact when breaking; do not name removed or renamed identifiers",
+					"Required when breaking: what users or importers must change. Do not name removed or renamed identifiers.",
 				),
 				"issues": tools.ArrayProperty(
 					"Related issue numbers without '#'. References only ('Refs #N'), never closing issues. Do not infer from numbers in the diff.",
@@ -174,7 +175,15 @@ func (CommitDefinition) Validate(result json.RawMessage) error {
 	if err := json.Unmarshal(result, &cr); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
-	return commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues)
+	if err := commitmsg.ValidateCommitFields(cr.Action, cr.Scope, cr.Subject, cr.Body, cr.Issues); err != nil {
+		return err
+	}
+	// Without a reason the trailer repeated the first bullet, and a model sets
+	// the flag more readily than it can say who has to change what.
+	if cr.Breaking && commitmsg.NormalizeBullet(cr.BreakingReason) == "" {
+		return fmt.Errorf("breaking is true without a breaking_reason: say what users or importers must change, or set breaking to false")
+	}
+	return nil
 }
 
 // commitPolicyLoader loads the leak-check policy. Tests replace it.

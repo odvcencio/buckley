@@ -56,8 +56,17 @@ func CheckMessageWithPolicy(message, diff string, stats oneshot.DiffStats, engin
 		if m[1] != strings.ToLower(m[1]) {
 			report.Style = append(report.Style, "action must be lowercase")
 		}
-		if err := commitmsg.ValidateStyle(cr.Action, cr.Scope, cr.Subject, bullets); err != nil {
-			report.Style = append(report.Style, err.Error())
+		styleErr := commitmsg.ValidateStyle(cr.Action, cr.Scope, cr.Subject, bullets)
+		if isMergeHeader(cr.Action, cr.Subject) {
+			// `buckley commit` writes this header itself when it completes a
+			// merge. It starts with a capital, repeats the verb and can pass
+			// 72 characters with a long branch name, so the subject rules
+			// would flag every merge commit Buckley makes. The body is the
+			// author's, and its limits apply.
+			styleErr = commitmsg.ValidateBullets(bullets)
+		}
+		if styleErr != nil {
+			report.Style = append(report.Style, styleErr.Error())
 		}
 	}
 
@@ -81,6 +90,12 @@ func CheckMessageWithPolicy(message, diff string, stats oneshot.DiffStats, engin
 		}
 	}
 	return report
+}
+
+// isMergeHeader reports the fixed header of a completed merge:
+// "merge(<scope>): Merge <source> into <target>".
+func isMergeHeader(action, subject string) bool {
+	return action == "merge" && strings.HasPrefix(subject, "Merge ") && strings.Contains(subject, " into ")
 }
 
 // evalCommitPolicy asks commit_message.arb for the outcome. Facts come from the
