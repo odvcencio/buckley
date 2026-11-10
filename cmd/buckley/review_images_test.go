@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -171,8 +172,10 @@ func TestRejectImagesForTextOnlyProviders_AllTextOnlyTransports(t *testing.T) {
 // call is deleted. This reads review_pr.go and finds the call in
 // runReviewPRCommand.
 func TestRunReviewPRCommand_CallsTheImageProviderGuard(t *testing.T) {
+	// Other tests change the working directory, so find the source by this file.
+	_, thisFile, _, _ := runtime.Caller(0)
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "review_pr.go", nil, 0)
+	file, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), "review_pr.go"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
