@@ -152,3 +152,25 @@ func TestDropUnbackedTesting_LeavesOtherSectionsAlone(t *testing.T) {
 		t.Errorf("summary = %q", pr.Sections["summary"])
 	}
 }
+
+// Review of #468, second round, finding 4: the whole command is compared, with
+// inline code marks normalised on both sides.
+func TestDropUnbackedTesting_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T) {
+	src := PRSources{All: "go test ./pkg -run TestFoo"}
+	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestMissing`"}}
+	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 1 || len(pr.Testing) != 0 {
+		t.Fatalf("dropped = %q, kept = %q: the unsupported argument passed", dropped, pr.Testing)
+	}
+	// The same command with a supported argument stays, whichever side has the marks.
+	for _, all := range []string{"go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo`"} {
+		pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`", "go test ./pkg -run TestFoo"}}
+		if dropped := pr.DropUnbackedTesting(PRSources{All: all}); len(dropped) != 0 {
+			t.Errorf("source %q: dropped %q", all, dropped)
+		}
+	}
+	// Flags between two spans stay part of the command; prose after it does not.
+	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestA` -count=1 `TestB` passed locally"}}
+	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run TestA -count=1 TestB"}); len(dropped) != 0 {
+		t.Errorf("dropped %q", dropped)
+	}
+}
