@@ -167,7 +167,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	force := fs.Bool("force", false, "with --squash: allow squashing a protected branch (main/master)")
 	forceWithLease := fs.Bool("force-with-lease", false, "with --squash: push the rewritten branch (git push --force-with-lease)")
 	allowMixed := fs.Bool("allow-mixed", false, "do not warn when the commit holds generated files next to source files: they belong together")
-	breaking := fs.String("breaking", breakingAuto, "BREAKING CHANGE trailer: auto drops it when every changed file is a test or Go code under internal/ (code that other modules cannot import); keep trusts the model; never leaves it out")
+	breaking := fs.String("breaking", breakingAuto, "BREAKING CHANGE trailer: auto drops it only when every changed file is a test, a fixture or documentation; keep trusts the model; never leaves it out")
 	var dir string
 	const dirUsage = "run as if started in this directory, like git -C (uppercase; lowercase -c selects the config file). " +
 		"The commit takes everything staged in that repository, so a repository another process is staging into gets that work committed: " +
@@ -361,9 +361,11 @@ func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commi
 	if err != nil {
 		return nil
 	}
-	if build := buildOutput(stats.GeneratedPaths); len(build) > 0 && len(stats.SourcePaths) > 0 && !quietMode && !opts.allowMixed {
+	sourceCount := len(stats.SourcePaths)
+	stats = withoutTestDataGenerated(stats)
+	if build := stats.GeneratedPaths; len(build) > 0 && sourceCount > 0 && !quietMode && !opts.allowMixed {
 		termOut.Warn("commit mixes %d generated file(s) (%s) with %d source file(s); commit them separately so the message can describe the source change, or pass --allow-mixed when they belong together",
-			len(build), previewPaths(build, 3), len(stats.SourcePaths))
+			len(build), previewPaths(build, 3), sourceCount)
 	}
 	cr := commands.GeneratedCommit(stats)
 	if cr == nil {
@@ -373,6 +375,29 @@ func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commi
 		ledger: transparency.NewCostLedger(),
 		runner: fixedCommitRunner{commit: cr},
 	}
+}
+
+// withoutTestDataGenerated moves test data (golden files, snapshots) from the
+// generated paths to the source paths. They change with the code they test, so
+// a commit of golden files alone needs a model-written message, and the fixed
+// "regenerate ... no hand-written changes" message must not be chosen for it.
+func withoutTestDataGenerated(stats oneshot.DiffStats) oneshot.DiffStats {
+	build := buildOutput(stats.GeneratedPaths)
+	if len(build) == len(stats.GeneratedPaths) {
+		return stats
+	}
+	kept := map[string]bool{}
+	for _, path := range build {
+		kept[path] = true
+	}
+	moved := append([]string(nil), stats.SourcePaths...)
+	for _, path := range stats.GeneratedPaths {
+		if !kept[path] {
+			moved = append(moved, path)
+		}
+	}
+	stats.GeneratedPaths, stats.SourcePaths = build, moved
+	return stats
 }
 
 // buildOutput returns the generated paths that are build output. It leaves out
@@ -580,26 +605,33 @@ func applyBreakingPolicy(cr *commands.CommitResult, opts commitCommandOptions) {
 	if len(opts.paths) == 0 {
 		files, err = listStagedFiles()
 	}
-	if err != nil || len(files) == 0 || !noOutsideUserCanBreak(files) {
+	if err != nil || len(files) == 0 || !onlyTestsFixturesOrDocs(files) {
 		return
 	}
 	cr.Breaking = false
-	fmt.Fprintln(os.Stderr, "buckley: left out the BREAKING CHANGE trailer: every changed file is a test or Go code under internal/, which other modules cannot import. "+
-		"If people who run a command must change something, commit with --breaking=keep")
+	fmt.Fprintln(os.Stderr, "buckley: left out the BREAKING CHANGE trailer: every changed file is a test, a fixture or documentation. "+
+		"To drop it for other files too, commit with --breaking=never")
 }
 
-// noOutsideUserCanBreak reports whether every file is one that code outside
-// the module cannot depend on: a Go test, a file under testdata, or Go code
-// under an internal directory, which the Go toolchain refuses to import from
-// another module. Anything else may be public, so it does not count.
-func noOutsideUserCanBreak(files []string) bool {
+// onlyTestsFixturesOrDocs reports whether every changed file is a test, a
+// fixture or documentation. Only then can a breaking claim be dropped without
+// asking: no production code changed. Production code can break a user even
+// when other modules cannot import it (removing a flag from internal/cli, or an
+// internal change that alters what a command does), so it keeps the claim.
+func onlyTestsFixturesOrDocs(files []string) bool {
 	for _, file := range files {
-		elements := strings.Split(filepath.ToSlash(file), "/")
+		slash := filepath.ToSlash(file)
+		elements := strings.Split(slash, "/")
 		dirs := elements[:len(elements)-1]
+		base := strings.ToLower(elements[len(elements)-1])
+		ext := strings.ToLower(filepath.Ext(base))
 		switch {
-		case hasElement(dirs, "testdata"):
-		case strings.HasSuffix(file, "_test.go"):
-		case strings.HasSuffix(file, ".go") && hasElement(dirs, "internal"):
+		case isTestData(slash):
+		case hasElement(dirs, "testdata"), hasElement(dirs, "fixtures"), hasElement(dirs, "fixture"):
+		case strings.HasSuffix(slash, "_test.go"):
+		case ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".txt" || ext == ".adoc":
+		case hasElement(dirs, "docs") || hasElement(dirs, "doc"):
+		case base == "license" || base == "copying" || base == "notice":
 		default:
 			return false
 		}

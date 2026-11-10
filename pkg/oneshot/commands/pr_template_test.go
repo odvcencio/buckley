@@ -83,7 +83,7 @@ func TestParsePRTemplate(t *testing.T) {
 	if len(early.Sections) != 1 || early.Sections[0].Heading != "Real" || !early.Sections[0].Open || !strings.Contains(early.Preamble, "## not a heading") {
 		t.Errorf("a heading inside a comment in the preamble was read as a section: %+v", early)
 	}
-	if got, _ := (PRResult{}).templateBody(early, nil); !strings.Contains(got, "\n## Real ##\n") {
+	if got, _ := (PRResult{}).templateBody(early, nil, ""); !strings.Contains(got, "\n## Real ##\n") {
 		t.Errorf("the heading line is not written as the template has it:\n%s", got)
 	}
 
@@ -101,7 +101,7 @@ func TestPRBody_UnfilledTemplateIsTheTemplate(t *testing.T) {
 		if name == "checklists" {
 			text, tmpl = checklistTemplate(t)
 		}
-		got, rest := PRResult{}.templateBody(tmpl, nil)
+		got, rest := PRResult{}.templateBody(tmpl, nil, "")
 		if got != strings.TrimSpace(text) {
 			t.Errorf("%s: rendered template differs from the file:\n--- got\n%s\n--- want\n%s", name, got, strings.TrimSpace(text))
 		}
@@ -216,10 +216,16 @@ func TestPRBody_TemplateWithItsOwnNotVerifiedSection(t *testing.T) {
 		t.Fatalf("body =\n%s\n\nwant\n%s", body, want)
 	}
 
-	// Left empty by the model, the section stays as the template has it.
+	// Left empty by the model, the template's own slot gets the statement
+	// that the author supplied no verification gaps (review of #468, finding 6).
 	pr.Sections = map[string]string{"what_changed": "Fixes the guard."}
-	body = pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true})
-	if strings.Count(body, "## Not verified") != 1 || !strings.Contains(body, "<!-- Say what you did not check. -->") || strings.Contains(body, "Buckley wrote") {
+	body = pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true, HasNotes: true})
+	if strings.Count(body, "## Not verified") != 1 || !strings.Contains(body, "The author's notes do not say what was left unverified") {
+		t.Fatalf("body =\n%s", body)
+	}
+	// Without the option the slot stays as the template has it.
+	body = pr.Body(PRBodyOptions{Template: tmpl})
+	if !strings.Contains(body, "<!-- Say what you did not check. -->") || strings.Contains(body, "Buckley wrote") {
 		t.Fatalf("body =\n%s", body)
 	}
 }

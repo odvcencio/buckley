@@ -85,3 +85,9 @@ func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int) (j
 func (d CommitDefinition) ShortenFirst(err error) bool {
 	return err != nil && (commitmsg.IsBulletTooLong(err) || commitmsg.IsHeaderTooLong(err))
 }
+
+// ShortenFirst reports whether err is only a title over the 100-character
+// limit, so that the model shortens it once before code cuts it.
+func (d PRDefinition) ShortenFirst(err error) bool {
+	return err != nil && commitmsg.IsHeaderTooLong(err)
+}

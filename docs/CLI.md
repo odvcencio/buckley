@@ -320,16 +320,14 @@ from X to Y words` on stderr. Check that a cut bullet still says what changed.
 
 The model marks a commit as breaking, and must then say what users or importers
 have to change; the message gets a `BREAKING CHANGE:` trailer with that reason.
-A model sets the mark for any change that callers inside the repository must
-follow, so `buckley commit` checks the staged files (`--breaking=auto`, the
-default): when every changed file is a Go test, a file under `testdata/`, or Go
-code under an `internal/` directory, no other module can import what changed,
-and the trailer is left out with a note on stderr.
-
-That rule is about importers. A change under `internal/` can still change what
-a command does for the people who run it. For such a commit pass
-`--breaking=keep`, which keeps the trailer whenever the model asks for it.
-`--breaking=never` leaves it out.
+`buckley commit` keeps that claim for any change to production code, also under
+`internal/`, because such a change can still alter what a command does for the
+people who run it. With `--breaking=auto` (the default) it drops the claim only
+when every changed file is a test, a fixture (`testdata/`, golden files,
+snapshots) or documentation, and prints a note on stderr. `--breaking=keep`
+always keeps the claim the model makes; `--breaking=never` always leaves it out.
+`buckley pr` takes the same flag and applies the same rule to its Breaking
+Changes section.
 
 #### Merge, cherry-pick, and revert commits
 
@@ -391,6 +389,7 @@ buckley pr [OPTIONS]
 | `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
 | `--body-file <file>` | Post `<file>` as it is, without a model call. A first line `Title: ...` is the title; the rest is the body |
 | `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
+| `--breaking <auto\|keep\|never>` | Breaking Changes section policy (default `auto`), the same rule as for `buckley commit`. See [Breaking changes](#breaking-changes) |
 | `--yes` | Skip the confirmation prompt |
 | `--head <branch>` | Branch the PR comes from (default: the checked-out branch). `owner:branch` names a fork's branch; `owner` must own the repository of the push remote (`BUCKLEY_REMOTE_NAME`, default `origin`) |
 | `--base` | Base branch. Default: `BUCKLEY_PR_BASE`; else the remote's default branch (`refs/remotes/<remote>/HEAD`, which `git remote set-head <remote> --auto` refreshes); else `main`, `master` or `develop` on the remote, then the same names locally. An error when none exists |
@@ -513,6 +512,9 @@ heading of the same or a higher level. A short label on a line of its own
 next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,
 the body says that nothing was stated.
+
+HTML comments in a notes file (`<!-- ... -->`) are ignored: a heading inside one
+does not start a section, and commented-out text is never copied into the body.
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a

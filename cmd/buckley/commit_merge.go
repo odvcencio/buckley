@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
@@ -137,6 +138,9 @@ type mergeCommitDefinition struct {
 	source, target string
 	subjects       []string
 	resolutions    []string
+	// noConflicts is true only when git's MERGE_MSG was read and lists no
+	// conflicts. When the file is missing the prompt says nothing about conflicts.
+	noConflicts bool
 }
 
 func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
@@ -157,9 +161,11 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 			b.WriteString("- " + r + "\n")
 		}
 		b.WriteString("\n")
-	} else {
+	} else if d.noConflicts {
 		// Without this line a model that is told "Merging A into B" invented
-		// a conflict and its resolution (live check, 10 November 2026).
+		// a conflict and its resolution (live check, 10 November 2026). It is
+		// said only when git's record was read: missing information is not
+		// a clean merge.
 		b.WriteString("## Conflicts\n\nThere were no conflicts in this merge. Do not mention conflicts or how they were resolved.\n\n")
 	}
 	b.WriteString(d.CommitDefinition.BuildPrompt(ctx))
@@ -183,12 +189,26 @@ const unusedMergeSubject = "x"
 // on text that was never going to be committed, and passed on a later try
 // when the model happened to word the subject differently.
 func (d mergeCommitDefinition) forChecks(raw json.RawMessage) json.RawMessage {
+	return d.withFixedHeader(raw, unusedMergeSubject)
+}
+
+// forLeakChecks returns the arguments with the header that is committed: the
+// action "merge" and the subject "Merge <source> into <target>". Branch names
+// can hold an email address or a private term, and Buckley inserts them into
+// the header after generation, so the leak checks must read them.
+func (d mergeCommitDefinition) forLeakChecks(raw json.RawMessage) json.RawMessage {
+	return d.withFixedHeader(raw, fmt.Sprintf("Merge %s into %s", d.source, d.target))
+}
+
+func (d mergeCommitDefinition) withFixedHeader(raw json.RawMessage, subject string) json.RawMessage {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
+	// A tool call whose arguments are "null" decodes without error to a nil
+	// map; assigning to it would panic. Leave it for validation to reject.
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
 		return raw
 	}
 	fields["action"], _ = json.Marshal("merge")
-	fields["subject"], _ = json.Marshal(unusedMergeSubject)
+	fields["subject"], _ = json.Marshal(subject)
 	out, err := json.Marshal(fields)
 	if err != nil {
 		return raw
@@ -205,11 +225,11 @@ func (d mergeCommitDefinition) Repair(raw json.RawMessage) (json.RawMessage, []s
 }
 
 func (d mergeCommitDefinition) ValidateWithContext(ctx *oneshot.Context, raw json.RawMessage) error {
-	return d.CommitDefinition.ValidateWithContext(ctx, d.forChecks(raw))
+	return d.CommitDefinition.ValidateWithContext(ctx, d.forLeakChecks(raw))
 }
 
 func (d mergeCommitDefinition) PolicyFacts(ctx *oneshot.Context, raw json.RawMessage) (*oneshot.PolicyRequest, error) {
-	return d.CommitDefinition.PolicyFacts(ctx, d.forChecks(raw))
+	return d.CommitDefinition.PolicyFacts(ctx, d.forLeakChecks(raw))
 }
 
 // squashMsgCommitDefinition wraps commands.CommitDefinition, adding the
@@ -271,7 +291,7 @@ func commitSubjectsBetween(from, to string) ([]string, error) {
 	return subjects, nil
 }
 
-// mergeConflictFiles parses the "# Conflicts:" section git appends to
+// mergeConflictFilesKnown parses the "# Conflicts:" section git appends to
 // MERGE_MSG (or REVERT_HEAD's MERGE_MSG) when a merge/revert/cherry-pick
 // stops on conflicts. Format (observed, git 2.x):
 //
@@ -280,33 +300,37 @@ func commitSubjectsBetween(from, to string) ([]string, error) {
 //	# Conflicts:
 //	#	path/one
 //	#	path/two
-func mergeConflictFiles(gitDir string) []string {
+// conflictsHeaderRe finds git's "Conflicts:" line under any comment character
+// (core.commentChar can be "#", ";", "@" and others).
+var conflictsHeaderRe = regexp.MustCompile(`^(\S)\s?Conflicts:\s*$`)
+
+// mergeConflictFilesKnown is mergeConflictFiles plus whether the answer is
+// known. known is false when MERGE_MSG is missing or empty, so that a missing
+// record is never read as a merge without conflicts.
+func mergeConflictFilesKnown(gitDir string) (files []string, known bool) {
 	msg := readGitDirFile(gitDir, "MERGE_MSG")
-	if msg == "" {
-		return nil
+	if strings.TrimSpace(msg) == "" {
+		return nil, false
 	}
-	lines := strings.Split(msg, "\n")
-	var files []string
-	inSection := false
-	for _, line := range lines {
+	comment := ""
+	for _, line := range strings.Split(msg, "\n") {
 		trimmed := strings.TrimRight(line, "\r")
-		if strings.HasPrefix(trimmed, "# Conflicts:") {
-			inSection = true
+		if comment == "" {
+			if m := conflictsHeaderRe.FindStringSubmatch(trimmed); m != nil {
+				comment = m[1]
+			}
 			continue
 		}
-		if !inSection {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "#") {
+		if !strings.HasPrefix(trimmed, comment) {
 			break
 		}
-		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, comment))
 		if path == "" {
 			continue
 		}
 		files = append(files, path)
 	}
-	return files
+	return files, true
 }
 
 // analyzeConflictResolutions compares each conflicted file's resolved
@@ -365,10 +389,11 @@ func runCompleteMerge(opts commitCommandOptions, state repoOpState) error {
 	if err != nil {
 		return err
 	}
-	conflictFiles := mergeConflictFiles(state.GitDir)
+	conflictFiles, conflictsKnown := mergeConflictFilesKnown(state.GitDir)
 	resolutions := analyzeConflictResolutions(conflictFiles, "HEAD", state.MergeHead)
 
-	def := mergeCommitDefinition{source: source, target: target, subjects: subjects, resolutions: resolutions}
+	def := mergeCommitDefinition{source: source, target: target, subjects: subjects, resolutions: resolutions,
+		noConflicts: conflictsKnown && len(conflictFiles) == 0}
 
 	runtime, cleanup, err := newCommitCommandRuntime(opts, def)
 	defer cleanup()

@@ -365,3 +365,42 @@ func TestPRBody_ModelCopyOfCarriedSectionIsNotRepeated(t *testing.T) {
 		t.Errorf("the carried section appears %d times:\n%s", n, body)
 	}
 }
+
+// Review of #468, finding 1: a heading inside an HTML comment started a
+// carried section and published commented-out text.
+func TestAuthorSections_HTMLCommentsAreNotPublished(t *testing.T) {
+	text := "## Testing\n\n- go vet passes\n\n<!--\n## Evidence\n\nprivate token abc123 at /home/someone/secret\n-->\n\n<!-- Not verified: hidden -->\n\n## Not verified\n\n- Windows\n"
+	sections := AuthorSections([]PRNote{{Path: "n.md", Text: text}})
+	for _, s := range sections {
+		if strings.Contains(s.Body, "abc123") || strings.Contains(s.Body, "secret") || strings.Contains(s.Body, "hidden") || strings.Contains(s.Body, "<!--") {
+			t.Errorf("section %q publishes commented-out text: %q", s.Heading, s.Body)
+		}
+		if s.Kind == SectionEvidence {
+			t.Errorf("a heading inside a comment started the section %q", s.Heading)
+		}
+	}
+	if got := sectionsByKind(sections)[SectionNotVerified]; got != "Not verified\n- Windows\n" {
+		t.Errorf("not verified = %q", got)
+	}
+	// A comment marker inside a code fence is text, not a comment.
+	fenced := "## Testing\n\n```\n<!-- keep --> go test\n```\n"
+	if got := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: fenced}}))[SectionTesting]; !strings.Contains(got, "<!-- keep -->") {
+		t.Errorf("a comment marker inside a code fence was removed: %q", got)
+	}
+}
+
+// Finding 5: with a template headed Testing, an older "Testing" and a newer
+// "Test plan" must stay in note order and keep the testing kind.
+func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
+	older := PRNote{Path: "old.md", Text: "## Testing\n\nolder result\n"}
+	newer := PRNote{Path: "new.md", Text: "## Test plan\n\nnewer result\n"}
+	sections := AuthorSections([]PRNote{older, newer}, "Testing")
+	if len(sections) != 2 || sections[0].Body != "older result" || sections[1].Body != "newer result" {
+		t.Fatalf("sections = %+v, want older then newer", sections)
+	}
+	for _, s := range sections {
+		if s.Kind != SectionTesting {
+			t.Errorf("section %q has kind %q, want %q", s.Heading, s.Kind, SectionTesting)
+		}
+	}
+}
