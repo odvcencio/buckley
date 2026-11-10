@@ -284,7 +284,7 @@ func TestCommitValidate_BreakingNeedsAReason(t *testing.T) {
 		"commit": CommitDefinition{}.Tool().Parameters.Properties,
 		"pr":     PRDefinition{}.Tool().Parameters.Properties,
 	} {
-		if desc := tool["breaking"].Description; !strings.Contains(desc, "internal code are not breaking") {
+		if desc := tool["breaking"].Description; !strings.Contains(desc, "Adding code, tests and docs is not breaking") {
 			t.Errorf("%s: the breaking description does not say what is not breaking: %q", name, desc)
 		}
 	}

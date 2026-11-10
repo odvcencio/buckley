@@ -254,8 +254,9 @@ func (d PRDefinition) Tool() tools.Definition {
 			MaxLength:   72,
 		},
 		"breaking": tools.BoolProperty(
-			"True only when people who run the released program or import its public API must change something. " +
-				"New code, tests, docs, and unexported or internal code are not breaking.",
+			"True only when people who run the released program or import its public API must change something to keep working: " +
+				"a removed or renamed command, flag, option, setting or exported name, or changed behavior that callers rely on. " +
+				"Judge by the effect on users, not by where the code lives. Adding code, tests and docs is not breaking.",
 		),
 		"issues": tools.ArrayProperty(
 			"Issue numbers this PR RELATES TO, without # prefix. Rendered as "+
