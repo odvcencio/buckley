@@ -157,6 +157,10 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 			b.WriteString("- " + r + "\n")
 		}
 		b.WriteString("\n")
+	} else {
+		// Without this line a model that is told "Merging A into B" invented
+		// a conflict and its resolution (live check, 10 November 2026).
+		b.WriteString("## Conflicts\n\nThere were no conflicts in this merge. Do not mention conflicts or how they were resolved.\n\n")
 	}
 	b.WriteString(d.CommitDefinition.BuildPrompt(ctx))
 	return b.String()
