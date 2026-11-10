@@ -215,28 +215,48 @@ func TestLoadPRNotes_KeepsOrderAndSkipsEmptyFiles(t *testing.T) {
 	}
 }
 
-// Review of #468, second round, finding 2: commented-out text reaches neither
-// the prompt, nor the carried sections, nor the sources.
+// Commented-out text reaches neither the prompt, nor the carried sections, nor
+// the sources, wherever the comment is (reviews of #468, three rounds).
 func TestLoadPRNotes_CommentedTextReachesNothing(t *testing.T) {
+	const token = "secret-token-4711"
+	notes := map[string]string{
+		"plain":         "## Testing\n\n- go vet passes\n\n<!-- " + token + " `go test ./hidden` 98765 -->\n\n## Not verified\n\n- Windows\n",
+		"in code fence": "## Testing\n\n````markdown\n```\n````\n<!-- " + token + " -->\n\n```\n<!-- " + token + " -->\n```\n\n## Not verified\n\n- Windows\n",
+		"escaped ticks": "## Evidence\n\nLiteral \\` <!-- " + token + " --> \\`.\n\n## Not verified\n\n- Windows\n",
+		"inline code":   "## Testing\n\n- `<!-- " + token + " -->` is a comment\n\n## Not verified\n\n- Windows\n",
+	}
+	for name, content := range notes {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "n.md", content)
+			loaded, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prompt, _ := prNotesPrompt(loaded)
+			sources := commands.NewPRSources(loaded, nil)
+			var carried string
+			for _, s := range commands.AuthorSections(loaded) {
+				carried += s.Body
+			}
+			for what, text := range map[string]string{"prompt": prompt, "sections": carried, "record": sources.Record, "all": sources.All} {
+				if strings.Contains(text, token) || strings.Contains(text, "98765") || strings.Contains(text, "go test ./hidden") {
+					t.Errorf("the %s holds commented-out text: %q", what, text)
+				}
+			}
+			if !strings.Contains(carried, "Windows") {
+				t.Errorf("sections lost real text: %q", carried)
+			}
+		})
+	}
+}
+
+// An unclosed opener is refused, naming the file and the line.
+func TestLoadPRNotes_UnclosedCommentIsRefused(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "n.md", "## Testing\n\n- go vet passes\n\n<!-- secret-token-4711 `go test ./hidden` 98765 -->\n\n## Not verified\n\n- Windows\n")
-	notes, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	prompt, _ := prNotesPrompt(notes)
-	sections := commands.AuthorSections(notes)
-	sources := commands.NewPRSources(notes, nil)
-	var carried string
-	for _, s := range sections {
-		carried += s.Body
-	}
-	for name, text := range map[string]string{"prompt": prompt, "sections": carried, "record": sources.Record, "all": sources.All} {
-		if strings.Contains(text, "secret-token-4711") || strings.Contains(text, "98765") || strings.Contains(text, "go test ./hidden") {
-			t.Errorf("the %s holds commented-out text: %q", name, text)
-		}
-	}
-	if !strings.Contains(carried, "Windows") {
-		t.Errorf("sections lost real text: %q", carried)
+	writeFile(t, dir, "n.md", "## Testing\n\n- Run `printf '<!--'`\n")
+	_, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+	if err == nil || !strings.Contains(err.Error(), "n.md") || !strings.Contains(err.Error(), "line 3") || !strings.Contains(err.Error(), "&lt;!--") {
+		t.Fatalf("error = %v, want one naming the file, line 3 and the alternative", err)
 	}
 }

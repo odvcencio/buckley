@@ -465,12 +465,14 @@ the body always says that the author stated nothing, also when the model wrote
 text of its own for a Not verified slot of the template (that text follows the
 statement).
 
-Buckley removes HTML comments (`<!-- ... -->`) from each notes file once, when it
-reads the file, outside code fences and inline code. The model, the carried
-sections and the sources that the text is checked against all see the note
-without them, so commented-out text is used nowhere. A comment that is never
-closed removes the rest of the file. Other text in a carried section is copied
-word for word.
+HTML comments (`<!-- ... -->`) in a notes file are never sent to the model and
+never published. Buckley removes every comment when it reads the file, wherever
+it is: in prose, in inline code and in a fenced code block. The model, the
+carried sections and the sources that the text is checked against all see the
+note without them. A `<!--` that has no closing `-->` is an error that names the
+file and the line: close the comment, or write the opener another way (for
+example `&lt;!--`) when it is meant as text. Other text in a carried section is
+copied word for word.
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a
