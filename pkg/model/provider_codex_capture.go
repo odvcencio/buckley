@@ -1,6 +1,15 @@
 package model
 
-import "bytes"
+import (
+	"bytes"
+	"errors"
+)
+
+// errCodexCaptureLimit marks a run whose standard output passed the capture
+// limit. It is a distinct error so that resume recovery (which matches text in
+// the output) never reads ordinary command output as a resume failure, and so
+// that the error text never repeats that output.
+var errCodexCaptureLimit = errors.New("codex stdout exceeded the capture limit")
 
 const (
 	maxCodexStdoutBytes     = 16 * 1024 * 1024

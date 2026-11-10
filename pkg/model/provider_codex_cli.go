@@ -166,9 +166,6 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		if prepErr != nil {
 			return nil, fmt.Errorf("reproduce codex review snapshot %s: %w", req.ReviewSnapshot.ID(), prepErr)
 		}
-		if cleanup != nil {
-			defer cleanup()
-		}
 		if strings.TrimSpace(isolatedDir) == "" {
 			return nil, fmt.Errorf("reproduce codex review snapshot %s: empty workspace", req.ReviewSnapshot.ID())
 		}
@@ -233,7 +230,7 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		})
 	}
 	result, err := run(args, chatPrompt)
-	if err != nil && threadID != "" && codexResumeUnavailable(result) {
+	if err != nil && threadID != "" && !errors.Is(err, errCodexCaptureLimit) && codexResumeUnavailable(result) {
 		p.clearSessionThread(req.SessionID, threadID)
 		_ = os.WriteFile(outFile, nil, 0o600)
 		threadID = ""
@@ -1119,6 +1116,12 @@ func estimateCodexUsage(messages []Message, output string) Usage {
 }
 
 func formatCodexCLIError(err error, result CodexCLICommandResult) error {
+	if errors.Is(err, errCodexCaptureLimit) {
+		// The output was cut at a size limit. What is left is ordinary command
+		// output, not a provider error, and it can hold tokens and local paths:
+		// the error names the limit and nothing from the output.
+		return fmt.Errorf("codex CLI failed: %w", err)
+	}
 	stderr := strings.TrimSpace(string(result.Stderr))
 	stdout := codexCLIStdoutFailureDiagnostic(result.Stdout)
 	stderr = boundedCodexDiagnostic(stderr)
@@ -1318,7 +1321,7 @@ func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLIComma
 	err := execCmd.Run()
 	stdout.Flush()
 	if stdout.all.truncated || stdout.lineTruncated {
-		captureErr := fmt.Errorf("codex stdout exceeded the %d-byte capture limit; response and execution evidence are incomplete", maxCodexStdoutBytes)
+		captureErr := fmt.Errorf("%w (%d bytes); response and execution evidence are incomplete", errCodexCaptureLimit, maxCodexStdoutBytes)
 		err = errors.Join(err, captureErr)
 	}
 	stderrBytes := stderr.buf.Bytes()

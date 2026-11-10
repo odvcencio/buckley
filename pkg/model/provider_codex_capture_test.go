@@ -160,31 +160,100 @@ func TestReadCodexLastMessage_OversizedResponse(t *testing.T) {
 	}
 }
 
+// Exactly one cleanup call, for a real preparation error and for an empty
+// workspace (review of #472, finding 3).
 func TestCodexCLIProvider_WorkspacePreparationFailureCleansUp(t *testing.T) {
-	for _, empty := range []bool{true, false} {
-		t.Run(fmt.Sprintf("empty_%v", empty), func(t *testing.T) {
+	for _, mode := range []string{"preparation_error", "empty_workspace"} {
+		t.Run(mode, func(t *testing.T) {
 			provider := NewCodexCLIProvider(config.CodexConfig{}, config.SandboxConfig{}, config.ApprovalConfig{})
 			root := t.TempDir()
 			snapshot, err := NewReviewSnapshot(ReviewSnapshotHead, root, root, strings.Repeat("1", 40), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			cleaned := false
+			cleanups := 0
 			provider.reviewWorkspace = func(context.Context, *ReviewSnapshot) (string, func(), error) {
-				dir := root
-				if empty {
-					dir = ""
+				if mode == "preparation_error" {
+					return root, func() { cleanups++ }, errors.New("materialize failed")
 				}
-				return dir, func() { cleaned = true }, nil
+				return "", func() { cleanups++ }, nil
 			}
 			provider.runner = func(context.Context, CodexCLICommand) (CodexCLICommandResult, error) {
 				t.Fatal("started Codex after workspace preparation failure")
 				return CodexCLICommandResult{}, nil
 			}
-			if _, err := provider.ChatCompletion(context.Background(), ChatRequest{ReviewSnapshot: snapshot}); err == nil || !cleaned {
-				t.Fatalf("workspace preparation leaked cleanup: cleaned=%v err=%v", cleaned, err)
+			if _, err := provider.ChatCompletion(context.Background(), ChatRequest{ReviewSnapshot: snapshot}); err == nil {
+				t.Fatal("preparation failure returned no error")
+			}
+			if cleanups != 1 {
+				t.Fatalf("cleanup called %d times, want exactly 1", cleanups)
 			}
 		})
+	}
+}
+
+// A successful turn that exceeds the capture limit while its command output says
+// "session not found" must not be run again in a new thread: native shell
+// actions would run twice (review of #472, finding 1).
+func TestCodexCLIProvider_CaptureLimitDoesNotTriggerResumeRecovery(t *testing.T) {
+	provider := NewCodexCLIProvider(config.CodexConfig{}, config.SandboxConfig{}, config.ApprovalConfig{})
+	provider.setSessionThread("session-1", "thread-1")
+	calls := 0
+	provider.runner = func(context.Context, CodexCLICommand) (CodexCLICommandResult, error) {
+		calls++
+		return CodexCLICommandResult{Stdout: []byte(`{"type":"item.completed","item":{"aggregated_output":"grep: session not found"}}` + "\n")},
+			fmt.Errorf("%w (%d bytes); response and execution evidence are incomplete", errCodexCaptureLimit, maxCodexStdoutBytes)
+	}
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{SessionID: "session-1", Messages: []Message{{Role: "user", Content: "run it"}}})
+	if err == nil || !errors.Is(err, errCodexCaptureLimit) {
+		t.Fatalf("err = %v, want the capture-limit error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("Codex ran %d times, want 1: the turn was replayed", calls)
+	}
+	if provider.threadForSession("session-1") != "thread-1" {
+		t.Fatal("the valid thread mapping was deleted")
+	}
+
+	// A real resume failure still recovers.
+	calls = 0
+	provider.runner = func(_ context.Context, cmd CodexCLICommand) (CodexCLICommandResult, error) {
+		calls++
+		if calls == 1 {
+			return CodexCLICommandResult{Stderr: []byte("thread not found")}, errors.New("exit status 1")
+		}
+		return CodexCLICommandResult{Stdout: []byte(`{"type":"thread.started","thread_id":"thread-2"}` + "\n")}, nil
+	}
+	_, _ = provider.ChatCompletion(context.Background(), ChatRequest{SessionID: "session-1", Messages: []Message{{Role: "user", Content: "again"}}})
+	if calls != 2 {
+		t.Fatalf("a real resume failure ran Codex %d times, want 2", calls)
+	}
+}
+
+// Command output reached the error through the stdout fallback (review of
+// #472, finding 2).
+func TestCodexCLIProvider_CaptureLimitErrorHoldsNoCommandOutput(t *testing.T) {
+	const secret = "SENTINEL-SECRET-TOKEN-4711"
+	provider := NewCodexCLIProvider(config.CodexConfig{}, config.SandboxConfig{}, config.ApprovalConfig{})
+	provider.runner = func(context.Context, CodexCLICommand) (CodexCLICommandResult, error) {
+		return CodexCLICommandResult{
+				Stdout: []byte(`{"type":"item.completed","item":{"command":"cat .env","aggregated_output":"` + secret + `"}}` + "\n" + secret + " /home/someone/.config\n"),
+				Stderr: []byte("stderr " + secret),
+			},
+			fmt.Errorf("%w (%d bytes); response and execution evidence are incomplete", errCodexCaptureLimit, maxCodexStdoutBytes)
+	}
+	_, err := provider.ChatCompletion(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "go"}}})
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "/home/someone") {
+		t.Fatalf("the error repeats command output: %v", err)
+	}
+	if !strings.Contains(err.Error(), "capture limit") {
+		t.Fatalf("the error does not name the limit: %v", err)
+	}
+	if got := formatCodexCLIError(err, CodexCLICommandResult{Stdout: []byte(secret)}); strings.Contains(got.Error(), secret) {
+		t.Fatalf("formatCodexCLIError repeats output: %v", got)
 	}
 }
 
