@@ -439,3 +439,23 @@ func TestSanitizePRNote_InlineCodeIsNotAComment(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Review of #469, second round, finding 1: a "~~~" line inside a backtick fence
+// is text, so the real closing fence is the backtick one and a comment after it
+// is removed.
+func TestSanitizePRNote_MixedFenceMarkersDoNotToggleEachOther(t *testing.T) {
+	text := "## Evidence\n\n```\n~~~\n```\n<!-- private path /home/someone/secret -->\n"
+	if got := SanitizePRNote(text); strings.Contains(got, "secret") {
+		t.Fatalf("the comment after the closing fence was published:\n%s", got)
+	}
+	for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: text}}) {
+		if strings.Contains(s.Body, "secret") {
+			t.Errorf("section %q publishes the comment: %q", s.Heading, s.Body)
+		}
+	}
+	// A tilde fence is not closed by backticks either.
+	text = "~~~\n```\n<!-- inside the tilde fence -->\n~~~\n<!-- gone secret2 -->\n"
+	if got := SanitizePRNote(text); strings.Contains(got, "secret2") || !strings.Contains(got, "inside the tilde fence") {
+		t.Fatalf("got %q", got)
+	}
+}
