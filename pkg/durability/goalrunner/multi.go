@@ -1,6 +1,7 @@
 package goalrunner
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -8,19 +9,28 @@ import (
 	"m31labs.dev/buckley/pkg/durability"
 )
 
+// DefaultRunnerCacheSize bounds the number of loaded goals retained by a worker.
+const DefaultRunnerCacheSize = 32
+
 // Resolver serves any goal on the ledger from one worker process: every
 // activity request carries its run ID, and the resolver builds (and
 // caches) the per-goal Runner on first use. This is what lets a
 // standalone `buckley goal worker` host workflows it did not start.
 type Resolver struct {
 	mu    sync.Mutex
-	cache map[string]*Runner
+	cache map[string]*list.Element
+	order list.List
 	build func(ctx context.Context, runID string) (*Runner, error)
+}
+
+type cachedRunner struct {
+	runID  string
+	runner *Runner
 }
 
 // NewResolver wires a Resolver around a per-run Runner factory.
 func NewResolver(build func(ctx context.Context, runID string) (*Runner, error)) *Resolver {
-	return &Resolver{cache: map[string]*Runner{}, build: build}
+	return &Resolver{cache: map[string]*list.Element{}, build: build}
 }
 
 func (r *Resolver) runner(ctx context.Context, runID string) (*Runner, error) {
@@ -29,9 +39,12 @@ func (r *Resolver) runner(ctx context.Context, runID string) (*Runner, error) {
 	}
 	r.mu.Lock()
 	cached, ok := r.cache[runID]
+	if ok {
+		r.order.MoveToFront(cached)
+	}
 	r.mu.Unlock()
 	if ok {
-		return cached, nil
+		return cached.Value.(cachedRunner).runner, nil
 	}
 	built, err := r.build(ctx, runID)
 	if err != nil {
@@ -39,9 +52,15 @@ func (r *Resolver) runner(ctx context.Context, runID string) (*Runner, error) {
 	}
 	r.mu.Lock()
 	if cached, ok := r.cache[runID]; ok {
-		built = cached
+		r.order.MoveToFront(cached)
+		built = cached.Value.(cachedRunner).runner
 	} else {
-		r.cache[runID] = built
+		r.cache[runID] = r.order.PushFront(cachedRunner{runID: runID, runner: built})
+		if r.order.Len() > DefaultRunnerCacheSize {
+			oldest := r.order.Back()
+			delete(r.cache, oldest.Value.(cachedRunner).runID)
+			r.order.Remove(oldest)
+		}
 	}
 	r.mu.Unlock()
 	return built, nil
@@ -171,7 +190,18 @@ func (r *Resolver) FinalizeGoal(ctx context.Context, finalization durability.Goa
 	if err != nil {
 		return err
 	}
-	return runner.FinalizeGoal(ctx, finalization)
+	if err := runner.FinalizeGoal(ctx, finalization); err != nil {
+		return err
+	}
+	// Goals reload from the ledger on replay or resume; their evidence remains
+	// pinned there independently of this disposable in-memory cache.
+	r.mu.Lock()
+	if cached, ok := r.cache[finalization.RunID]; ok && cached.Value.(cachedRunner).runner == runner {
+		delete(r.cache, finalization.RunID)
+		r.order.Remove(cached)
+	}
+	r.mu.Unlock()
+	return nil
 }
 
 var _ durability.TaskRunner = (*Resolver)(nil)
