@@ -229,13 +229,7 @@ func runReviewCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	if !reviewOutputIsTerminalFn() {
-		// Standard output is a file or a pipe: it gets the review and nothing
-		// else. The model line, attempt counts and cost go to stderr.
-		previous := termOut
-		termOut = terminal.NewWithOutput(os.Stderr)
-		defer func() { termOut = previous }()
-	}
+	defer routeDiagnosticsAwayFromRedirectedOutput()()
 	ctx, cancel := newReviewCommandContext(time.Now(), opts.timeout)
 	defer cancel()
 
@@ -1276,6 +1270,19 @@ func printReviewContextAudit(audit *transparency.ContextAudit) {
 		items = append(items, fmt.Sprintf("%-40s %4d tok (%2.0f%%)%s", source.Name, source.Tokens, pct, truncated))
 	}
 	termOut.List(items)
+}
+
+// routeDiagnosticsAwayFromRedirectedOutput sends the model line, attempt
+// counts and cost to standard error when standard output is a file or a pipe,
+// so that standard output holds the review and nothing else. It returns the
+// function that puts the previous writer back.
+func routeDiagnosticsAwayFromRedirectedOutput() (restore func()) {
+	if reviewOutputIsTerminalFn() {
+		return func() {}
+	}
+	previous := termOut
+	termOut = terminal.NewWithOutput(os.Stderr)
+	return func() { termOut = previous }
 }
 
 func printReview(review string) {

@@ -300,6 +300,7 @@ func commitSubjectsBetween(from, to string) ([]string, error) {
 //	# Conflicts:
 //	#	path/one
 //	#	path/two
+//
 // conflictsHeaderRe finds git's "Conflicts:" line under any comment character
 // (core.commentChar can be "#", ";", "@" and others).
 var conflictsHeaderRe = regexp.MustCompile(`^(\S)\s?Conflicts:\s*$`)

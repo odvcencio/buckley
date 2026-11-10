@@ -1,7 +1,11 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/terminal"
 )
 
 // The session of 2026-11-09 did not use `buckley review` because, without a
@@ -33,14 +37,54 @@ func TestReviewMenuWanted(t *testing.T) {
 	}
 }
 
+// captureStdout swaps os.Stdout, but termOut keeps the writer it was built
+// with. Bind termOut to the captured stdout inside the callback, so that a
+// header written through termOut lands in the capture (review of #470, finding 2).
 func TestPrintReview_OnlyTheReviewWhenOutputIsNotATerminal(t *testing.T) {
-	previous := reviewOutputIsTerminalFn
-	t.Cleanup(func() { reviewOutputIsTerminalFn = previous })
+	previous, previousOut := reviewOutputIsTerminalFn, termOut
+	t.Cleanup(func() { reviewOutputIsTerminalFn, termOut = previous, previousOut })
 	reviewOutputIsTerminalFn = func() bool { return false }
 
 	review := "## Grade: B\n\n## Findings\n\nNone."
-	if out := captureStdout(t, func() { printReview(review) }); out != review+"\n" {
+	out := captureStdout(t, func() {
+		termOut = terminal.NewWithOutput(os.Stdout)
+		printReview(review)
+	})
+	if out != review+"\n" {
 		t.Fatalf("stdout = %q, want the review and nothing else", out)
+	}
+
+	reviewOutputIsTerminalFn = func() bool { return true }
+	out = captureStdout(t, func() {
+		termOut = terminal.NewWithOutput(os.Stdout)
+		printReview(review)
+	})
+	if !strings.Contains(out, "CODE REVIEW") || !strings.Contains(out, review) {
+		t.Fatalf("at a terminal the review keeps its header: %q", out)
+	}
+}
+
+// At the command level: with standard output redirected, the diagnostics of a
+// review go to standard error and standard output stays empty of them.
+func TestReviewDiagnosticsGoToStderrWhenOutputIsRedirected(t *testing.T) {
+	previous, previousOut := reviewOutputIsTerminalFn, termOut
+	t.Cleanup(func() { reviewOutputIsTerminalFn, termOut = previous, previousOut })
+	reviewOutputIsTerminalFn = func() bool { return false }
+
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			termOut = terminal.NewWithOutput(os.Stdout) // as at start-up
+			restore := routeDiagnosticsAwayFromRedirectedOutput()
+			termOut.Dim("Using model: example")
+			restore()
+		})
+	})
+	if strings.Contains(stdout, "Using model") {
+		t.Errorf("a diagnostic reached redirected stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "Using model: example") {
+		t.Errorf("stderr lacks the diagnostic: %q", stderr)
 	}
 }
 
