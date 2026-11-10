@@ -440,10 +440,18 @@ func TestPushPRHead_LeavesWorktreeAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePRHead: %v", err)
 	}
+	// Standard output is a pipe here, so the status line goes to stderr and
+	// stdout stays free for the PR text.
 	var pushErr error
-	out := captureStdout(t, func() { pushErr = pushPRHead(head, "origin") })
+	var stdout string
+	out := captureStderr(t, func() {
+		stdout = captureStdout(t, func() { pushErr = pushPRHead(head, "origin") })
+	})
 	if pushErr != nil {
 		t.Fatalf("pushPRHead: %v", pushErr)
+	}
+	if stdout != "" {
+		t.Errorf("pushPRHead wrote %q to a stdout that is not a terminal", stdout)
 	}
 
 	if remoteTip := runGitIn(t, r.origin, "rev-parse", "refs/heads/feature"); remoteTip != featureTip {

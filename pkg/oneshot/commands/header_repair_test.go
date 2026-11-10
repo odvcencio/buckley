@@ -71,7 +71,7 @@ func TestHeaderRepair_PreservesOtherFields(t *testing.T) {
 				if a != b {
 					t.Fatal("changed rendered commit body or trailers")
 				}
-			} else if original.(*PRResult).FormatBody() != fixed.(*PRResult).FormatBody() {
+			} else if original.(*PRResult).Body(PRBodyOptions{}) != fixed.(*PRResult).Body(PRBodyOptions{}) {
 				t.Fatal("changed PR body")
 			}
 			invoker := &repairTestInvoker{raw: raw}

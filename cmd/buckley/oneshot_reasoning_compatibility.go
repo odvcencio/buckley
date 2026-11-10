@@ -21,7 +21,9 @@ func applyOneshotReasoningCompatibility(engine *rules.Engine, profile oneshot.Re
 	}
 	profile.DisableReasoningForForcedTools = policyBool(result.Params["disable_reasoning_for_forced_tools"])
 	if profile.DisableReasoningForForcedTools && profile.RequireTool {
-		return profile, fmt.Sprintf("Reasoning disabled for forced tool selection on %s (%s).", capability.Model, capability.ProviderID)
+		// Name the effort setting: a caller who passes --effort high reads
+		// "reasoning disabled" as a note, not as "your flag did nothing".
+		return profile, fmt.Sprintf("Reasoning disabled for forced tool selection on %s (%s): this model cannot reason and answer a required tool call in one request, so --effort and BUCKLEY_EFFORT_* have no effect on this command.", capability.Model, capability.ProviderID)
 	}
 	return profile, ""
 }

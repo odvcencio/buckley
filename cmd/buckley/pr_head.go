@@ -377,7 +377,7 @@ func prDivergence(a, b string) (onlyA, onlyB int, err error) {
 // It passes -u only when head.SetUpstream says to.
 func pushPRHead(head prHead, remote string) error {
 	target := remote + "/" + head.Name
-	spinner := terminal.NewSpinner(fmt.Sprintf("Pushing to %s...", target))
+	spinner := terminal.NewSpinnerWithOutput(prStatusWriter(), fmt.Sprintf("Pushing to %s...", target))
 	spinner.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), gitPushTimeout)

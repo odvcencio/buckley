@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/diffsignal"
@@ -41,6 +43,19 @@ type prCommandOptions struct {
 	contextFiles []string
 	noUpdate     bool
 	draft        bool
+	// strict fails the run when the generated text states a decision or a
+	// number that its sources do not contain; the default is to warn.
+	strict bool
+	// template writes the body in the repository's pull request template when
+	// there is one.
+	template bool
+	// title replaces the title, generated or read from bodyFile.
+	title string
+	// output is a file that receives the title and body as shown.
+	output string
+	// bodyFile is a file whose title and body are posted as they are, without
+	// a model call.
+	bodyFile string
 	// head is the --head value; empty means the checked-out branch.
 	head string
 	// dir is the -C/--dir value; empty means the launch directory.
@@ -61,7 +76,23 @@ type prRunResult struct {
 	PR           *commands.PRResult
 	Trace        *transparency.Trace
 	ContextAudit *transparency.ContextAudit
-	Error        error
+	// Context is what the framework gathered for the prompt. The generated
+	// text is checked against it.
+	Context *oneshot.Context
+	Error   error
+}
+
+// observedPRDefinition records the context the framework gathers for the
+// prompt, so that the generated text can be checked against what the model
+// was given without reading git a second time.
+type observedPRDefinition struct {
+	commands.PRDefinition
+	gathered **oneshot.Context
+}
+
+func (d observedPRDefinition) BuildPrompt(ctx *oneshot.Context) string {
+	*d.gathered = ctx
+	return d.PRDefinition.BuildPrompt(ctx)
 }
 
 func parsePRCommandOptions(args []string) (prCommandOptions, error) {
@@ -82,9 +113,14 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 	diffBudget := fs.Int("diff-budget", diffsignal.PRDiffBudget, "total byte budget for gathered diff context (default: PR-scale budget, larger than the commit-message default)")
 	var contextFileFlag stringSliceFlag
-	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable); content is treated as data, not instructions")
+	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable, oldest first: a later file wins). The model reads the notes as data, not instructions. Sections headed Testing, Counters, Evidence, Not verified or Known gaps are copied into the PR body word for word")
 	noUpdate := fs.Bool("no-update", false, "fail instead of silently overwriting an existing open PR's title/body")
 	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
+	title := fs.String("title", "", "use this PR title instead of the generated one or the one in --body-file")
+	output := fs.String("output", "", "also write the title and body to this file, in the form --body-file reads; with --dry-run this saves the text for review")
+	bodyFile := fs.String("body-file", "", "post this file as it is, without a model call: a first line \"Title: ...\" is the title and the rest is the body (the form --output writes)")
+	template := fs.Bool("template", true, "write the body in the repository's pull request template when it has one (.github/PULL_REQUEST_TEMPLATE.md, read from the base branch); --template=false keeps Buckley's own sections")
+	strict := fs.Bool("strict", false, "fail, and create nothing, when the generated text states a decision or a number that the notes, commits and diff do not contain (default: warn)")
 	requireVerification := fs.Bool("require-verification", false, "label the PR buckbot:verify-required so Buckbot needs a receipt or passing CI before it reviews")
 	requireReceipt := fs.Bool("require-receipt", false, "label the PR buckbot:verify-receipt (receipt only)")
 	noRequireVerification := fs.Bool("no-require-verification", false, "label the PR buckbot:verify-optional")
@@ -111,6 +147,12 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	if err != nil {
 		return prCommandOptions{}, err
 	}
+	if strings.ContainsAny(*title, "\r\n") {
+		return prCommandOptions{}, errors.New("--title must be one line")
+	}
+	if *bodyFile != "" && len(contextFileFlag) > 0 {
+		return prCommandOptions{}, errors.New("--body-file posts the file as it is, so --context-file has no effect; pass one or the other")
+	}
 	return prCommandOptions{
 		verificationLabel: verificationLabel,
 		dryRun:            *dryRun,
@@ -127,6 +169,11 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		contextFiles:      append([]string(nil), contextFileFlag...),
 		noUpdate:          *noUpdate,
 		draft:             *draft,
+		strict:            *strict,
+		template:          *template,
+		title:             strings.TrimSpace(*title),
+		output:            *output,
+		bodyFile:          *bodyFile,
 		head:              *headFlag,
 		dir:               dir,
 	}, nil
@@ -137,38 +184,107 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 // breakdown and verification notes, not an unbounded attachment.
 const prContextNotesMaxBytes = 16_000
 
-// loadPRContextNotes reads and concatenates the given --context-file paths,
-// each labeled by its path, bounded to prContextNotesMaxBytes total. A
-// missing or unreadable file is an error (an explicitly-requested file
-// vanishing silently would defeat the point of asking for it); the size
-// bound truncates rather than errors, since a legitimate note that merely
-// ran long is still useful context.
-func loadPRContextNotes(paths []string) (string, error) {
-	if len(paths) == 0 {
-		return "", nil
-	}
-
-	var b strings.Builder
+// loadPRNotes reads the --context-file paths in the order given. A missing or
+// unreadable file is an error (an explicitly-requested file vanishing silently
+// would defeat the point of asking for it). An empty file is left out.
+func loadPRNotes(paths []string) ([]commands.PRNote, error) {
+	var notes []commands.PRNote
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("read --context-file %s: %w", path, err)
+			return nil, fmt.Errorf("read --context-file %s: %w", path, err)
 		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			continue
+		if text := strings.TrimSpace(string(data)); text != "" {
+			notes = append(notes, commands.PRNote{Path: path, Text: text})
 		}
+	}
+	return notes, nil
+}
+
+// prNotesPrompt renders the notes for the prompt, each labeled by its path
+// and, when there are several, by its position, because a later note is the
+// current one. The text is bounded to prContextNotesMaxBytes; the size bound
+// truncates rather than errors, since a legitimate note that merely ran long
+// is still useful context. cut is the number of bytes that were left out, so
+// that the caller can tell the author instead of dropping them in silence.
+func prNotesPrompt(notes []commands.PRNote) (text string, cut int) {
+	var b strings.Builder
+	for i, note := range notes {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "### %s\n\n%s", path, content)
+		switch {
+		case len(notes) == 1:
+			fmt.Fprintf(&b, "### %s\n\n%s", note.Path, note.Text)
+		case i == len(notes)-1:
+			fmt.Fprintf(&b, "### Note %d of %d, the latest: %s\n\n%s", i+1, len(notes), note.Path, note.Text)
+		default:
+			fmt.Fprintf(&b, "### Note %d of %d: %s\n\n%s", i+1, len(notes), note.Path, note.Text)
+		}
 	}
 
 	out := b.String()
-	if len(out) > prContextNotesMaxBytes {
-		out = out[:prContextNotesMaxBytes] + "\n... (truncated)"
+	if len(out) <= prContextNotesMaxBytes {
+		return out, 0
 	}
-	return out, nil
+	// Cut at the end of a line when there is one in the last part of the
+	// budget, and never inside a UTF-8 sequence.
+	keep := prContextNotesMaxBytes
+	if i := strings.LastIndexByte(out[:keep], '\n'); i > keep/2 {
+		keep = i
+	}
+	for keep > 0 && !utf8.RuneStart(out[keep]) {
+		keep--
+	}
+	return out[:keep] + "\n... (truncated)", len(out) - keep
+}
+
+// prTemplatePaths are the places where GitHub looks for a repository's single
+// pull request template, in both spellings it accepts.
+var prTemplatePaths = []string{
+	".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
+	"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
+	"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
+}
+
+// prTemplateMaxBytes bounds a template. A larger file is not one a person
+// fills in by hand, so it is ignored with a warning.
+const prTemplateMaxBytes = 32 * 1024
+
+// loadPRTemplate reads the repository's pull request template from git
+// objects, like the rest of the PR evidence: from the base branch, where
+// GitHub reads it, and from the head when the base has none (a branch that
+// adds the template). It returns nil when there is no template.
+func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
+	for _, ref := range []string{plan.Base.Ref, plan.Head.Ref} {
+		if ref == "" {
+			continue
+		}
+		for _, path := range prTemplatePaths {
+			text, err := gitOutput("show", ref+":"+path)
+			if err != nil {
+				continue
+			}
+			if len(text) > prTemplateMaxBytes {
+				prWarnf("%s is %d bytes, more than the %d a pull request template may have; the body uses Buckley's own sections", path, len(text), prTemplateMaxBytes)
+				return nil
+			}
+			return commands.ParsePRTemplate(text)
+		}
+	}
+	return nil
+}
+
+// templateHeadings lists the headings of a template; nil has none.
+func templateHeadings(template *commands.PRTemplate) []string {
+	if template == nil {
+		return nil
+	}
+	headings := make([]string, 0, len(template.Sections))
+	for _, section := range template.Sections {
+		headings = append(headings, section.Heading)
+	}
+	return headings
 }
 
 // prContextOpts derives the git-diff gathering options for a PR run: a
@@ -201,9 +317,22 @@ func runPRCommand(args []string) error {
 		return err
 	}
 	if opts.dir != "" {
-		if opts.contextFiles, err = enterWorkDir(opts.dir, opts.contextFiles); err != nil {
+		// Paths the caller typed belong to the launch directory.
+		paths, err := enterWorkDir(opts.dir, append(append([]string(nil), opts.contextFiles...), opts.output, opts.bodyFile))
+		if err != nil {
 			return err
 		}
+		n := len(opts.contextFiles)
+		opts.contextFiles, opts.output, opts.bodyFile = paths[:n], paths[n], paths[n+1]
+	}
+
+	if !stdoutIsTerminalFn() {
+		// Standard output is a file or a pipe: it gets the title and body, in
+		// the form --body-file reads, and then the PR's URL. Progress, the
+		// model line, the cost and warnings go to stderr.
+		previous := termOut
+		termOut = terminal.NewWithOutput(os.Stderr)
+		defer func() { termOut = previous }()
 	}
 
 	plan, err := preflightPR(opts, execGhCommand)
@@ -211,34 +340,24 @@ func runPRCommand(args []string) error {
 		return err
 	}
 	warnPRHeadState(opts, plan)
-	warnPRGitVersion()
 
-	contextNotes, err := loadPRContextNotes(opts.contextFiles)
+	var text prText
+	if opts.bodyFile != "" {
+		text, err = readPRText(opts.bodyFile, opts.title)
+		if err == nil {
+			printPR(nil, text, plan)
+		}
+	} else {
+		text, err = generatePRText(opts, plan)
+	}
 	if err != nil {
 		return err
 	}
-
-	runtime, cleanup, err := newPRCommandRuntimeFn(opts)
-	defer cleanup()
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
-	defer cancel()
-
-	if !quietMode {
-		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
-	}
-
-	result, err := runPRGeneration(ctx, runtime.framework, plan, opts.diffBudget, contextNotes)
-	if err != nil {
-		return err
-	}
-
-	pr, err := renderPRGenerationResult(opts, plan, result, runtime.ledger)
-	if err != nil {
-		return err
+	if opts.output != "" {
+		if err := os.WriteFile(opts.output, []byte(formatPRText(text)), 0o644); err != nil {
+			return fmt.Errorf("write --output %s: %w", opts.output, err)
+		}
+		fmt.Fprintf(os.Stderr, "PR text written to %s; post it as it is with --body-file %s\n", opts.output, opts.output)
 	}
 	if opts.dryRun {
 		return nil
@@ -255,9 +374,12 @@ func runPRCommand(args []string) error {
 	}
 	warnIfPRHeadMoved(plan.Head)
 
-	prURL, err := createPR(execGhCommand, pr, plan, opts)
+	prURL, err := createPR(execGhCommand, text, plan, opts)
 	if err != nil {
 		return err
+	}
+	if !stdoutIsTerminalFn() {
+		fmt.Println(prURL)
 	}
 	if opts.verificationLabel != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), ghAPITimeout)
@@ -269,6 +391,83 @@ func runPRCommand(args []string) error {
 	}
 
 	return nil
+}
+
+// generatePRText asks the model for the PR text, checks it against its
+// sources, prints it and returns the title and body as they will be posted.
+func generatePRText(opts prCommandOptions, plan *prPlan) (prText, error) {
+	warnPRGitVersion()
+
+	notes, err := loadPRNotes(opts.contextFiles)
+	if err != nil {
+		return prText{}, err
+	}
+	contextNotes, cut := prNotesPrompt(notes)
+	if cut > 0 {
+		prWarnf("the notes are %d bytes too long for the prompt, so the model does not read their end; sections headed Testing, Counters, Evidence, Not verified or Known gaps still reach the PR body in full", cut)
+	}
+	var template *commands.PRTemplate
+	if opts.template {
+		template = loadPRTemplate(plan)
+	}
+	sections := commands.AuthorSections(notes, templateHeadings(template)...)
+
+	runtime, cleanup, err := newPRCommandRuntimeFn(opts)
+	defer cleanup()
+	if err != nil {
+		return prText{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+
+	if !quietMode {
+		termOut.Dim("Using %s", describeOneshotBackend(runtime.backend, runtime.modelID))
+	}
+
+	result, err := runPRGeneration(ctx, runtime.framework, plan, opts.diffBudget, contextNotes, sections, template)
+	if err != nil {
+		return prText{}, err
+	}
+	return renderPRGenerationResult(opts, plan, result, runtime.ledger, notes, sections, template)
+}
+
+// formatPRText is the file form of a PR text: a "Title:" line, a blank line
+// and the body. parsePRText reads it back to the same title and body.
+func formatPRText(text prText) string {
+	return "Title: " + text.Title + "\n\n" + text.Body + "\n"
+}
+
+// parsePRText reads the file form of a PR text. A first line that starts with
+// "Title:" is the title; without one the whole content is the body.
+func parsePRText(content string) prText {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	first, rest, _ := strings.Cut(content, "\n")
+	if title, ok := strings.CutPrefix(first, "Title:"); ok {
+		return prText{Title: strings.TrimSpace(title), Body: strings.TrimSpace(rest)}
+	}
+	return prText{Body: strings.TrimSpace(content)}
+}
+
+// readPRText reads the text that --body-file names. title, when set, replaces
+// the file's title. A text without a title or without a body is an error: the
+// file is posted as it is, so nothing can fill a gap.
+func readPRText(path, title string) (prText, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return prText{}, fmt.Errorf("read --body-file %s: %w", path, err)
+	}
+	text := parsePRText(string(data))
+	if title != "" {
+		text.Title = title
+	}
+	if text.Title == "" {
+		return prText{}, fmt.Errorf("--body-file %s has no title: start it with a line \"Title: ...\" or pass --title", path)
+	}
+	if text.Body == "" {
+		return prText{}, fmt.Errorf("--body-file %s has no body", path)
+	}
+	return text, nil
 }
 
 // newPRCommandRuntimeFn builds the model runtime. Tests replace it.
@@ -309,21 +508,25 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 	}, cleanup, nil
 }
 
-func runPRGeneration(ctx context.Context, framework *oneshot.Framework, plan *prPlan, diffBudget int, contextNotes string) (*prRunResult, error) {
-	spinner := terminal.NewSpinner("Generating PR...")
+func runPRGeneration(ctx context.Context, framework *oneshot.Framework, plan *prPlan, diffBudget int, contextNotes string, sections []commands.AuthorSection, template *commands.PRTemplate) (*prRunResult, error) {
+	spinner := terminal.NewSpinnerWithOutput(prStatusWriter(), "Generating PR...")
 	spinner.Start()
 
-	def := commands.PRDefinition{
-		BaseBranch:   plan.Base.Ref,
-		BaseName:     plan.Base.Label,
-		HeadRef:      plan.Head.Ref,
-		HeadName:     plan.Head.Name,
-		ContextNotes: contextNotes,
-	}
+	var gathered *oneshot.Context
+	def := observedPRDefinition{gathered: &gathered, PRDefinition: commands.PRDefinition{
+		BaseBranch:     plan.Base.Ref,
+		BaseName:       plan.Base.Label,
+		HeadRef:        plan.Head.Ref,
+		HeadName:       plan.Head.Name,
+		ContextNotes:   contextNotes,
+		AuthorSections: sections,
+		Template:       template,
+	}}
 	fwResult, err := framework.Run(ctx, def, oneshot.RunOpts{
 		ContextOpts: prContextOpts(diffBudget),
 	})
 	result := prRunResultFromFramework(fwResult)
+	result.Context = gathered
 	if err != nil {
 		result.Error = err
 		spinner.StopWithError(err.Error())
@@ -356,7 +559,13 @@ func prRunResultFromFramework(fwResult *oneshot.RunResult) *prRunResult {
 	return result
 }
 
-func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRunResult, ledger *transparency.CostLedger) (*commands.PRResult, error) {
+// prText is the PR title and body exactly as they are shown and posted.
+type prText struct {
+	Title string
+	Body  string
+}
+
+func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRunResult, ledger *transparency.CostLedger, notes []commands.PRNote, sections []commands.AuthorSection, template *commands.PRTemplate) (prText, error) {
 	if opts.verbose && result.ContextAudit != nil {
 		printContextAudit(result.ContextAudit)
 	}
@@ -365,17 +574,52 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 	}
 	if result.Error != nil {
 		printError(result.Error, result.Trace)
-		return nil, result.Error
+		return prText{}, result.Error
 	}
 	if result.PR == nil {
-		return nil, fmt.Errorf("no PR generated")
+		return prText{}, fmt.Errorf("no PR generated")
 	}
 
-	printPR(result.PR, plan)
+	for _, section := range sections {
+		if section.Kind == commands.SectionTesting {
+			// The author's testing record replaces the model's steps.
+			result.PR.Testing = nil
+		}
+	}
+	claims := checkPRAgainstSources(result.PR, commands.NewPRSources(notes, result.Context))
+	text := prText{Title: opts.title, Body: result.PR.Body(commands.PRBodyOptions{
+		Sections:         sections,
+		StateNotVerified: true,
+		HasNotes:         len(notes) > 0,
+		Template:         template,
+	})}
+	if text.Title == "" {
+		text.Title = result.PR.Header()
+	}
+	printPR(result.PR, text, plan)
 	if opts.showCost && result.Trace != nil {
 		printCost(result.Trace, ledger)
 	}
-	return result.PR, nil
+	if opts.strict && claims > 0 {
+		return prText{}, fmt.Errorf("the generated text states %d thing(s) without a source (see the warnings); nothing was created (--strict)", claims)
+	}
+	return text, nil
+}
+
+// checkPRAgainstSources compares the model's text with what it was written
+// from. It removes each testing step whose command the sources do not contain
+// as written, and says so. It warns about decisions and numbers that have no
+// source, and returns how many of those there are: code cannot rewrite prose,
+// so the author decides, or --strict stops the run.
+func checkPRAgainstSources(pr *commands.PRResult, src commands.PRSources) (claims int) {
+	for _, step := range pr.DropUnbackedTesting(src) {
+		prWarnf("left out the testing step %q: its command is not in the notes, the commits, the diff or the project guidelines", step)
+	}
+	unbacked := pr.UnbackedClaims(src)
+	for _, claim := range unbacked {
+		prWarnf("%s", claim)
+	}
+	return len(unbacked)
 }
 
 var errPRNonInteractive = errors.New("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
@@ -387,7 +631,7 @@ func confirmPRCreation(opts prCommandOptions) error {
 	if !stdinIsTerminalFn() {
 		return errPRNonInteractive
 	}
-	fmt.Print("\nCreate this PR? [y/N] ")
+	fmt.Fprint(prStatusWriter(), "\nCreate this PR? [y/N] ")
 	var response string
 	fmt.Scanln(&response)
 	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
@@ -516,37 +760,54 @@ func warnPRGitVersion() {
 	}
 }
 
-func printPR(pr *commands.PRResult, plan *prPlan) {
+// prStatusWriter is where `buckley pr` writes progress. On a terminal that is
+// standard output, next to the text. When standard output is a file or a
+// pipe, it is stderr, so that the file holds the text and nothing else.
+func prStatusWriter() *os.File {
+	if stdoutIsTerminalFn() {
+		return os.Stdout
+	}
+	return os.Stderr
+}
+
+func printPR(pr *commands.PRResult, text prText, plan *prPlan) {
+	if !stdoutIsTerminalFn() {
+		// The text once, as --output writes it: no header, no box, no styling.
+		fmt.Print(formatPRText(text))
+		return
+	}
 	termOut.Newline()
 	termOut.Header("PULL REQUEST: " + plan.summary())
 
-	// Build content for the box
-	var content strings.Builder
-	content.WriteString(pr.Header())
-	content.WriteString("\n\n")
-	content.WriteString(pr.Summary)
-	content.WriteString("\n\nChanges:")
-	for _, change := range pr.Changes {
-		content.WriteString("\n  - ")
-		content.WriteString(change)
-	}
-	if pr.Breaking {
-		content.WriteString("\n\n⚠️  BREAKING CHANGES")
-	}
+	// Build content for the box. A text from --body-file and a body in the
+	// repository's template have no summary and changes to preview.
+	if pr != nil && pr.Summary != "" {
+		var content strings.Builder
+		content.WriteString(text.Title)
+		content.WriteString("\n\n")
+		content.WriteString(pr.Summary)
+		content.WriteString("\n\nChanges:")
+		for _, change := range pr.Changes {
+			content.WriteString("\n  - ")
+			content.WriteString(change)
+		}
+		if pr.Breaking {
+			content.WriteString("\n\n⚠️  BREAKING CHANGES")
+		}
 
-	termOut.Box("", content.String())
+		termOut.Box("", content.String())
+	}
 
 	// Also print the full body for piping
-	fmt.Println("Title:", pr.Header())
+	fmt.Println("Title:", text.Title)
 	fmt.Println()
-	fmt.Println(pr.FormatBody())
+	fmt.Println(text.Body)
 }
 
 // createPR creates the PR for the plan, or updates the open PR for the same
 // head, and returns its URL. The lookup keys on the head branch, so the PR
 // that belongs to whatever branch the worktree has checked out is never touched.
-func createPR(run ghCommandRunner, pr *commands.PRResult, plan *prPlan, opts prCommandOptions) (string, error) {
-	body := pr.FormatBody()
+func createPR(run ghCommandRunner, text prText, plan *prPlan, opts prCommandOptions) (string, error) {
 	existing, err := openPRForHead(run, plan.Head, plan.explicitBase())
 	if err != nil {
 		return "", err
@@ -560,16 +821,16 @@ func createPR(run ghCommandRunner, pr *commands.PRResult, plan *prPlan, opts prC
 		return "", err
 	}
 	if update {
-		if err := updatePR(run, existingURL, pr.Header(), body); err != nil {
+		if err := updatePR(run, existingURL, text.Title, text.Body); err != nil {
 			return "", err
 		}
 		return existingURL, nil
 	}
 
-	spinner := terminal.NewSpinner("Creating PR...")
+	spinner := terminal.NewSpinnerWithOutput(prStatusWriter(), "Creating PR...")
 	spinner.Start()
 
-	output, err := run(buildGhPRCreateArgs(pr.Header(), body, plan.Base.Short, plan.Head.GhHead, opts.draft)...)
+	output, err := run(buildGhPRCreateArgs(text.Title, text.Body, plan.Base.Short, plan.Head.GhHead, opts.draft)...)
 	if err != nil {
 		spinner.StopWithError(fmt.Sprintf("failed: %s", err))
 		return "", fmt.Errorf("gh pr create failed: %w", err)
@@ -708,6 +969,47 @@ func openPRURLs(prs []openPullRequest) string {
 	return strings.Join(parts, ", ")
 }
 
+// keepPreviousPRText saves the title and body that an update is about to
+// replace, in the form --body-file reads, under the git directory. An update
+// writes a newly generated text over the open PR. A body that someone edited
+// on GitHub or with `gh pr edit` after an earlier run was lost without a
+// trace; now it can be put back. A failure to read or save the old text does
+// not stop the update: it is reported, and the caller asked for the update.
+func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
+	out, err := run("pr", "view", url, "--json", "title,body")
+	if err != nil {
+		prWarnf("could not read the current text of %s (%v); it is replaced without a copy", url, err)
+		return
+	}
+	var current struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if json.Unmarshal(out, &current) != nil {
+		return
+	}
+	previous := prText{Title: strings.TrimSpace(current.Title), Body: strings.TrimSpace(strings.ReplaceAll(current.Body, "\r\n", "\n"))}
+	if previous.Body == "" || previous == next {
+		return
+	}
+	number := url[strings.LastIndex(url, "/")+1:]
+	name := fmt.Sprintf("buckley/pr-%s-%s.md", number, time.Now().UTC().Format("20060102T150405Z"))
+	path, err := gitOutput("rev-parse", "--git-path", name)
+	if err == nil {
+		path, err = filepath.Abs(path)
+	}
+	if err == nil {
+		if err = os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+			err = os.WriteFile(path, []byte(formatPRText(previous)), 0o644)
+		}
+	}
+	if err != nil {
+		prWarnf("could not save the current text of %s (%v); it is replaced without a copy", url, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "The PR's previous title and body are saved in %s; to put them back: buckley pr --yes --body-file %s\n", path, path)
+}
+
 // updatePR regenerates the existing open PR's title and body in place,
 // so re-running `buckley pr` after new commits refreshes the PR instead
 // of failing with "already exists".
@@ -715,7 +1017,8 @@ func updatePR(run ghCommandRunner, url, title, body string) error {
 	if strings.TrimSpace(url) == "" {
 		return errEmptyPRSelector
 	}
-	spinner := terminal.NewSpinner("Updating PR...")
+	keepPreviousPRText(run, url, prText{Title: title, Body: body})
+	spinner := terminal.NewSpinnerWithOutput(prStatusWriter(), "Updating PR...")
 	spinner.Start()
 
 	if _, err := run("pr", "edit", url, "--title", title, "--body", body); err != nil {

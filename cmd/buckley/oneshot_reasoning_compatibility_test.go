@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -45,6 +46,11 @@ func TestOneshotReasoningCompatibility_ScopesKnownRoute(t *testing.T) {
 			profile, diagnostic := resolveOneshotRequestProfileWithDiagnostic(tc.command, cfg, checker, "route-alias")
 			if profile.DisableReasoningForForcedTools != tc.wantCompatibility || (diagnostic != "") != tc.wantWarning {
 				t.Fatalf("profile = %+v, diagnostic = %q", profile, diagnostic)
+			}
+			// The effort is "high" here and does not reach the forced request,
+			// so the line must say that the setting has no effect.
+			if tc.wantWarning && (!strings.Contains(diagnostic, "--effort") || !strings.Contains(diagnostic, "no effect")) {
+				t.Fatalf("diagnostic = %q, want it to say that the effort setting has no effect", diagnostic)
 			}
 			if checker.Supported() && (profile.Reasoning == nil || profile.Reasoning.Effort != "high") {
 				t.Fatalf("free-text reasoning changed: %+v", profile.Reasoning)

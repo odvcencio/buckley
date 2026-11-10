@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -204,5 +205,46 @@ func TestSpinnerFrames(t *testing.T) {
 	}
 	if len(DotsFrames) == 0 {
 		t.Error("DotsFrames should not be empty")
+	}
+}
+
+// A spinner on a file that is not a terminal writes no animation frames and
+// no cursor escapes: only its final line.
+func TestSpinner_PlainOnAFileThatIsNotATerminal(t *testing.T) {
+	read := func(t *testing.T, use func(*Spinner)) string {
+		t.Helper()
+		file, err := os.CreateTemp(t.TempDir(), "spinner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		spinner := NewSpinnerWithOutput(file, "Generating PR...")
+		spinner.Start()
+		time.Sleep(200 * time.Millisecond) // two frames on a terminal
+		use(spinner)
+		data, err := os.ReadFile(file.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	success := read(t, func(s *Spinner) { s.WithoutTime().StopWithSuccess("Generated PR") })
+	if success != "✓ Generated PR\n" {
+		t.Errorf("success output = %q, want one plain line", success)
+	}
+	failure := read(t, func(s *Spinner) { s.WithoutTime().StopWithError("model request failed") })
+	if failure != "✗ model request failed\n" {
+		t.Errorf("error output = %q, want one plain line", failure)
+	}
+	timed := read(t, func(s *Spinner) { s.StopWithSuccess("Generated PR") })
+	if !strings.HasPrefix(timed, "✓ Generated PR (") || strings.ContainsAny(timed, "\r\x1b⠋⠙") {
+		t.Errorf("timed output = %q, want one plain line with the elapsed time", timed)
+	}
+	if stopped := read(t, func(s *Spinner) { s.Stop() }); stopped != "" {
+		t.Errorf("Stop wrote %q, want nothing", stopped)
+	}
+	if message := read(t, func(s *Spinner) { s.StopWithMessage("done") }); message != "done\n" {
+		t.Errorf("StopWithMessage wrote %q", message)
 	}
 }
