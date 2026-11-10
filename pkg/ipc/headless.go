@@ -395,6 +395,11 @@ func (s *Server) handleCreateHeadlessSession(w http.ResponseWriter, r *http.Requ
 }
 
 func respondHeadlessCreateError(w http.ResponseWriter, err error) {
+	if storage.IsStorageBudgetError(err) {
+		status, safeErr := commandAcceptanceHTTPError(err)
+		respondError(w, status, safeErr)
+		return
+	}
 	if stdliberrors.Is(err, headless.ErrInitialCommandAcceptance) {
 		status, safeErr := commandAcceptanceHTTPError(err)
 		respondError(w, status, safeErr)
