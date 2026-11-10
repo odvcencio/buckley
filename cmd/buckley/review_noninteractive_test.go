@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"m31labs.dev/buckley/pkg/config"
+	"m31labs.dev/buckley/pkg/model"
+	"m31labs.dev/buckley/pkg/storage"
 	"m31labs.dev/buckley/pkg/terminal"
 )
 
@@ -64,27 +68,44 @@ func TestPrintReview_OnlyTheReviewWhenOutputIsNotATerminal(t *testing.T) {
 	}
 }
 
-// At the command level: with standard output redirected, the diagnostics of a
-// review go to standard error and standard output stays empty of them.
-func TestReviewDiagnosticsGoToStderrWhenOutputIsRedirected(t *testing.T) {
-	previous, previousOut := reviewOutputIsTerminalFn, termOut
-	t.Cleanup(func() { reviewOutputIsTerminalFn, termOut = previous, previousOut })
+// At the command level (review of #470, second round): runReviewCommand itself
+// sends diagnostics to standard error when standard output is redirected, and
+// puts termOut back. Dependency initialisation is stubbed to print a
+// diagnostic and fail, so the command stops there. Removing the routing call
+// from runReviewCommand makes this test fail.
+func TestRunReviewCommand_DiagnosticsGoToStderrWhenOutputIsRedirected(t *testing.T) {
+	previousTerminal, previousOut, previousInit := reviewOutputIsTerminalFn, termOut, initReviewDependenciesFn
+	t.Cleanup(func() {
+		reviewOutputIsTerminalFn, termOut, initReviewDependenciesFn = previousTerminal, previousOut, previousInit
+	})
 	reviewOutputIsTerminalFn = func() bool { return false }
+	errStop := errors.New("stop after the diagnostic")
+	initReviewDependenciesFn = func(string) (*config.Config, *model.Manager, *storage.Store, error) {
+		termOut.Dim("Using model: example")
+		return nil, nil, nil, errStop
+	}
 
+	var runErr error
+	var before *terminal.Writer
 	var stdout string
 	stderr := captureStderr(t, func() {
 		stdout = captureStdout(t, func() {
 			termOut = terminal.NewWithOutput(os.Stdout) // as at start-up
-			restore := routeDiagnosticsAwayFromRedirectedOutput()
-			termOut.Dim("Using model: example")
-			restore()
+			before = termOut
+			runErr = runReviewCommand([]string{"--no-interactive"})
 		})
 	})
+	if !errors.Is(runErr, errStop) {
+		t.Fatalf("runReviewCommand error = %v, want the stub's error", runErr)
+	}
 	if strings.Contains(stdout, "Using model") {
 		t.Errorf("a diagnostic reached redirected stdout: %q", stdout)
 	}
 	if !strings.Contains(stderr, "Using model: example") {
 		t.Errorf("stderr lacks the diagnostic: %q", stderr)
+	}
+	if termOut != before {
+		t.Error("termOut was not restored after the command")
 	}
 }
 
