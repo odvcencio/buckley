@@ -259,3 +259,40 @@ func hasSection(sections []AuthorSection, kind string) bool {
 	}
 	return false
 }
+
+// withoutCarriedSections removes from model-written text any block that
+// starts at a Markdown heading naming a carried author section. Code writes
+// those sections word for word; a model that pastes them again into its own
+// field makes the body say everything twice (seen on 10 November 2026: Testing,
+// Not verified and Known gaps appeared twice in a body). A block runs to the
+// next heading of the same or a higher level.
+func withoutCarriedSections(text string, carried []AuthorSection) string {
+	if len(carried) == 0 || text == "" {
+		return text
+	}
+	names := map[string]bool{}
+	for _, s := range carried {
+		names[headingKey(s.Heading)] = true
+	}
+	var out []string
+	skipLevel := 0
+	inFence := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+		} else if m := atxHeadingRe.FindStringSubmatch(line); m != nil && !inFence {
+			level := len(m[1])
+			if skipLevel > 0 && level <= skipLevel {
+				skipLevel = 0
+			}
+			if skipLevel == 0 && names[headingKey(m[2])] {
+				skipLevel = level
+			}
+		}
+		if skipLevel == 0 {
+			out = append(out, line)
+		}
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+}

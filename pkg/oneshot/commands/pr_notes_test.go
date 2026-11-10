@@ -337,3 +337,31 @@ func TestPRBuildPrompt_NotesRules(t *testing.T) {
 		t.Errorf("prompt has note rules without notes:\n%s", none)
 	}
 }
+
+func TestWithoutCarriedSections_DropsPastedCopies(t *testing.T) {
+	carried := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified"}, {Kind: SectionKnownGaps, Heading: "Known gaps"}}
+	text := "Look at pr_notes.go first.\n\n## Testing\n\n- go test passes\n\n## Not verified\n\n- CI\n\n### sub\n\nmore\n\n## Known gaps\n\n- none\n"
+	got := withoutCarriedSections(text, carried)
+	want := "Look at pr_notes.go first.\n\n## Testing\n\n- go test passes"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := withoutCarriedSections(text, nil); got != text {
+		t.Errorf("no carried sections must leave the text alone, got %q", got)
+	}
+	fenced := "```\n## Not verified\n```\nkept"
+	if got := withoutCarriedSections(fenced, carried); got != fenced {
+		t.Errorf("a heading inside a code fence was removed: %q", got)
+	}
+}
+
+func TestPRBody_ModelCopyOfCarriedSectionIsNotRepeated(t *testing.T) {
+	template := ParsePRTemplate("## What changed\n<!-- x -->\n\n## Notes for Reviewers\n<!-- y -->\n")
+	carried := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified", Body: "- CI did not run"}}
+	pr := PRResult{Action: "add", Title: "x", Sections: map[string]string{
+		"what_changed": "Did it.", "notes_for_reviewers": "Look here.\n\n## Not verified\n\n- CI did not run\n"}}
+	body := pr.Body(PRBodyOptions{Sections: carried, Template: template})
+	if n := strings.Count(body, "CI did not run"); n != 1 {
+		t.Errorf("the carried section appears %d times:\n%s", n, body)
+	}
+}
