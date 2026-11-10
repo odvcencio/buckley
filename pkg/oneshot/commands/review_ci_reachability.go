@@ -49,6 +49,18 @@ type prTestRun struct {
 }
 
 func capturePRGoTestReachability(run prCommandRunner, target prReference, pr *PRInfo, changedFiles []string) (*reviewpolicy.CIReachabilityEvidence, error) {
+	evidence, err := capturePRBuckleyGoTestReachability(run, target, pr, changedFiles)
+	if err == nil {
+		return evidence, nil
+	}
+	matrixEvidence, matrixErr := capturePRGoMatrixReachability(run, target, pr, changedFiles)
+	if matrixErr != nil {
+		return nil, fmt.Errorf("Buckley CI adapter: %v; Go matrix CI adapter: %w", err, matrixErr)
+	}
+	return matrixEvidence, nil
+}
+
+func capturePRBuckleyGoTestReachability(run prCommandRunner, target prReference, pr *PRInfo, changedFiles []string) (*reviewpolicy.CIReachabilityEvidence, error) {
 	files := recognizedChangedTestFiles(changedFiles)
 	if pr == nil || len(files) == 0 {
 		return nil, nil

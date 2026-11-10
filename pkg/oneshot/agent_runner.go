@@ -238,6 +238,7 @@ func (r *AgentRunner) Run(ctx context.Context, systemPrompt, task string, allowe
 		AllowedTools:         allowedTools,
 		ReviewSnapshot:       opts.ReviewSnapshot,
 		OmitRawResult:        true,
+		InputImages:          opts.ImageParts,
 	}
 
 	// Create sub-agent with full tool access
@@ -438,6 +439,7 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 	if err != nil {
 		return nil, fmt.Errorf("resolve agent evidence snapshot root: %w", err)
 	}
+	requests = deduplicateNodeSnapshotEvidence(root, requests)
 
 	defer reviewsandbox.CleanupSnapshot(opts.VerificationCleanup, root)
 
@@ -516,6 +518,44 @@ func (r *AgentRunner) CollectAgentEvidence(ctx context.Context, requests []Agent
 		return nil, fmt.Errorf("agent evidence collection changed the captured source snapshot: %w", verifyErr)
 	}
 	return calls, nil
+}
+
+// The verifier promotes asset/script directories to their enclosing package.
+// Execute identical package commands once, while retaining distinct nested
+// packages, kinds, patterns and all other request parameters.
+func deduplicateNodeSnapshotEvidence(root string, requests []AgentEvidenceRequest) []AgentEvidenceRequest {
+	result := make([]AgentEvidenceRequest, 0, len(requests))
+	seen := map[string]bool{}
+	for _, request := range requests {
+		language, _ := request.Parameters["language"].(string)
+		path, _ := request.Parameters["path"].(string)
+		if request.Tool != "run_verification" || language != "node" {
+			result = append(result, request)
+			continue
+		}
+		promoted, err := reviewsandbox.NodeVerificationPackagePath(root, path)
+		if err != nil {
+			result = append(result, request)
+			continue
+		}
+		parameters := make(map[string]any, len(request.Parameters))
+		for key, value := range request.Parameters {
+			parameters[key] = value
+		}
+		parameters["path"] = promoted
+		key, err := json.Marshal(parameters)
+		if err != nil {
+			result = append(result, request)
+			continue
+		}
+		if seen[string(key)] {
+			continue
+		}
+		seen[string(key)] = true
+		request.Parameters = parameters
+		result = append(result, request)
+	}
+	return result
 }
 
 func collectAgentEvidenceRequest(ctx context.Context, registry *tool.Registry, index int, request AgentEvidenceRequest) AgentToolCall {

@@ -555,7 +555,9 @@ func TestAssemblePRContext_BuildPromptIncludesReviewEvidence(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
 		}
 	}
-	ctx, audit, err := assemblePRContext("208", prContextDependencies{run: run})
+	opts := DefaultPRContextOptions()
+	opts.MaxDiffBytes = diffsignal.MaxFileDiffBytes
+	ctx, audit, err := assemblePRContextWithOptions("208", prContextDependencies{run: run}, opts)
 	if err != nil {
 		t.Fatalf("assemblePRContext: %v", err)
 	}
@@ -1822,6 +1824,24 @@ func TestGetPRDiffWithBudgetBoundsAutomatedContext(t *testing.T) {
 	}
 }
 
+func TestGetPRDiffWithBudgetPreservesLargeFilesAndFollowingSources(t *testing.T) {
+	raw := oversizedReviewDiff() + "diff --git a/tail.go b/tail.go\n--- a/tail.go\n+++ b/tail.go\n@@ -0,0 +1 @@\n+var finalSource = true\n"
+	if !diffsignal.Prioritize(raw, 2_000_000).Truncated {
+		t.Fatal("fixture must expose the old per-file cap")
+	}
+	run := func(_ string, _ ...string) ([]byte, error) { return []byte(raw), nil }
+	diff, err := getPRDiffWithBudget(run, prReference{Number: 7}, 2_000_000, prDiffFallbackContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.Truncated || diff.Text != strings.TrimRight(raw, "\n") {
+		t.Fatal("review omitted source although the complete diff fits its budget")
+	}
+	if len(diff.Files) != 2 || diff.Files[1] != "tail.go" {
+		t.Fatalf("manifest=%v", diff.Files)
+	}
+}
+
 func TestGetPRDiffWithBudgetFallsBackToImmutableLocalDiffOnThrottle(t *testing.T) {
 	const (
 		baseSHA = "1111111111111111111111111111111111111111"
@@ -2254,4 +2274,51 @@ func assertAuditSource(t *testing.T, audit *transparency.ContextAudit, name stri
 		}
 	}
 	t.Fatalf("audit source %q not found", name)
+}
+
+func TestAssemblePRAgentsContext_BoundedImmutableRootInstructions(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		bytes     int
+		truncated bool
+	}{
+		{"instructions above old limit", 30835, false},
+		{"exact supported limit", 64 << 10, false},
+		{"above supported limit", (64 << 10) + 1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := strings.Repeat("R", test.bytes-4) + "TAIL"
+			ctx := &PRContext{PR: &PRInfo{HeadSHA: "head-sha"}, Files: []string{"graphics.go"}}
+			run := func(name string, args ...string) ([]byte, error) {
+				if name != "git" {
+					return nil, fmt.Errorf("unexpected command %s", name)
+				}
+				switch {
+				case matchesPRArgs(args, "--no-pager", "rev-parse", "--show-toplevel"):
+					return []byte("/repo\n"), nil
+				case matchesPRArgs(args, "--no-pager", "-C", "/repo", "rev-parse", "HEAD"):
+					return []byte("head-sha\n"), nil
+				case matchesPRArgs(args, "--no-pager", "-C", "/repo", "status", "--porcelain"):
+					return nil, nil
+				case matchesPRArgs(args, "--no-pager", "-C", "/repo", "ls-tree", "head-sha", "--", "AGENTS.md"):
+					return []byte("100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tAGENTS.md\n"), nil
+				case matchesPRArgs(args, "--no-pager", "-C", "/repo", "show", "head-sha:AGENTS.md"):
+					return []byte(content), nil
+				default:
+					return nil, fmt.Errorf("unexpected immutable instruction read %v", args)
+				}
+			}
+			assemblePRAgentsContext(ctx, transparency.NewContextAudit(), prContextDependencies{run: run})
+			if ctx.HasIncompleteContext() != test.truncated {
+				t.Fatalf("completeness=%v statuses=%+v", ctx.HasIncompleteContext(), ctx.ContextStatus)
+			}
+			want := content
+			if test.truncated {
+				want = content[:64<<10]
+			}
+			if ctx.AgentsMD != want {
+				t.Fatalf("captured %d instruction bytes; want %d", len(ctx.AgentsMD), len(want))
+			}
+		})
+	}
 }
