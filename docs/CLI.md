@@ -514,6 +514,9 @@ next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,
 the body says that nothing was stated.
 
+HTML comments in a notes file (`<!-- ... -->`) are ignored: a heading inside one
+does not start a section, and commented-out text is never copied into the body.
+
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a
 stale section from its file. The prompt still tells the model that a later note

@@ -169,7 +169,11 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 	// the rest are carried below, by kind.
 	author, templateText := opts.Sections, ""
 	if opts.Template != nil {
-		templateText, author = pr.templateBody(opts.Template, author)
+		fallback := ""
+		if opts.StateNotVerified && !hasSection(opts.Sections, SectionNotVerified) {
+			fallback = notVerifiedFallback(opts.HasNotes)
+		}
+		templateText, author = pr.templateBody(opts.Template, author, fallback)
 	}
 	carry := func(kind string) {
 		for _, s := range author {
@@ -206,10 +210,8 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 		carry(SectionNotVerified)
 	case opts.Template.hasKind(SectionNotVerified):
 		// The template has its own place for this, filled or left as it is.
-	case opts.StateNotVerified && opts.HasNotes:
-		section("Not verified", "The author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing.")
 	case opts.StateNotVerified:
-		section("Not verified", "The author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing.")
+		section("Not verified", notVerifiedFallback(opts.HasNotes))
 	}
 	carry(SectionKnownGaps)
 	section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
@@ -522,4 +524,13 @@ func (PRDefinition) Unmarshal(result json.RawMessage) (any, error) {
 	}
 	pr.Sections = sectionTexts(result)
 	return &pr, nil
+}
+
+// notVerifiedFallback is the statement that stands in for a Not verified
+// section when the author wrote none.
+func notVerifiedFallback(hasNotes bool) string {
+	if hasNotes {
+		return "The author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing."
+	}
+	return "The author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
 }

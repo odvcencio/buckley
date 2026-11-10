@@ -97,3 +97,27 @@ func TestCreatePR_UpdateWithoutAChangeOrACopy(t *testing.T) {
 		}
 	})
 }
+
+// Review of #468, finding 7: two updates within one second chose the same file
+// name, and the second overwrote the first copy of a hand-edited body.
+func TestCreatePR_TwoUpdatesInOneSecondKeepBothCopies(t *testing.T) {
+	r := newPRRepo(t)
+	for i, body := range []string{"First hand edit.", "Second hand edit."} {
+		gh := newPreflightGh(prListJSON(prListEntry(5, "feature", "main", "o")))
+		gh.responses["pr view"] = []byte(`{"title":"add: thing","body":"` + body + `"}`)
+		captureStderr(t, func() {
+			captureStdout(t, func() { createPR(gh.run, testPRResult, testPRPlan(""), prCommandOptions{}) })
+		})
+		if got := len(previousPRTexts(t, r)); got != i+1 {
+			t.Fatalf("after update %d there are %d saved copies, want %d", i+1, got, i+1)
+		}
+	}
+	var all string
+	for _, path := range previousPRTexts(t, r) {
+		data, _ := os.ReadFile(path)
+		all += string(data)
+	}
+	if !strings.Contains(all, "First hand edit.") || !strings.Contains(all, "Second hand edit.") {
+		t.Errorf("a copy was lost:\n%s", all)
+	}
+}
