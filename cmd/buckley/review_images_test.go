@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"image"
 	"image/color"
 	"image/png"
@@ -140,5 +143,55 @@ func TestRejectImagesForTextOnlyProviders(t *testing.T) {
 	}
 	if err := rejectImagesForTextOnlyProviders(nil, providerOf, false, "codex/gpt-6.1-sol"); err != nil {
 		t.Fatalf("a review without images was refused: %v", err)
+	}
+}
+
+// Review of #471, second round, finding 2: every provider whose adapter turns
+// messages into text is refused, for the primary and for the critic.
+func TestRejectImagesForTextOnlyProviders_AllTextOnlyTransports(t *testing.T) {
+	images := []model.ContentPart{{Type: "image_url", ImageURL: &model.ImageURL{URL: "data:image/png;base64,AAAA"}}}
+	providerOf := func(id string) string { return strings.SplitN(id, "/", 2)[0] }
+	for _, provider := range []string{"codex", "anthropic", "google", "ollama"} {
+		id := provider + "/some-model"
+		if err := rejectImagesForTextOnlyProviders(images, providerOf, false, id, ""); err == nil || !strings.Contains(err.Error(), provider+" provider") {
+			t.Errorf("primary on %s: %v", provider, err)
+		}
+		if err := rejectImagesForTextOnlyProviders(images, providerOf, false, "openrouter/x", id); err == nil || !strings.Contains(err.Error(), id) {
+			t.Errorf("critic on %s: %v", provider, err)
+		}
+	}
+	for _, provider := range []string{"openrouter", "openai", "openai_compatible", "litellm"} {
+		if err := rejectImagesForTextOnlyProviders(images, providerOf, false, provider+"/m", provider+"/m"); err != nil {
+			t.Errorf("%s was refused: %v", provider, err)
+		}
+	}
+}
+
+// The command must call the helper: a test of the helper alone passes when the
+// call is deleted. This reads review_pr.go and finds the call in
+// runReviewPRCommand.
+func TestRunReviewPRCommand_CallsTheImageProviderGuard(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "review_pr.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "runReviewPRCommand" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "rejectImagesForTextOnlyProviders" {
+					found = true
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatal("runReviewPRCommand no longer calls rejectImagesForTextOnlyProviders: --image would reach a transport that drops it")
 	}
 }

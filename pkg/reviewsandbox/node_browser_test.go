@@ -132,4 +132,9 @@ func TestNodeBrowserRuntimeRefusesSelfLocatingLauncher(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "looks for the browser next to itself") {
 		t.Fatalf("error = %v, want the launcher refused with a clear message", err)
 	}
+	// Review of #471, second round: the error reaches the model, so it must not
+	// carry the host path of the launcher.
+	if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), launcher) || !strings.Contains(err.Error(), "SLIDES_CHROME") {
+		t.Fatalf("the error leaks the host path or lacks the variable name: %v", err)
+	}
 }

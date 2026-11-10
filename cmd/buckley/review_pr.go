@@ -1169,10 +1169,12 @@ func printPRReview(reviewText string, prInfo *commands.PRInfo) {
 	fmt.Println(reviewText)
 }
 
-// textOnlyReviewProviders cannot carry image attachments: the Codex CLI
-// transport turns each message into text and drops image parts, so a review
-// would run without the pixels while the caller believes it saw them.
-var textOnlyReviewProviders = map[string]bool{"codex": true}
+// textOnlyReviewProviders cannot carry image attachments yet: the Codex CLI,
+// native Anthropic, Google and Ollama transports turn each message into text
+// (messageContentToText) and drop image parts, so a review would run without
+// the pixels while the caller believes it saw them. Remove a provider from this
+// list when its image conversion exists.
+var textOnlyReviewProviders = map[string]bool{"codex": true, "anthropic": true, "google": true, "ollama": true}
 
 // rejectImagesForTextOnlyProviders refuses --image when the primary or the
 // critic model runs on a provider that cannot carry images, and names it.

@@ -58,7 +58,9 @@ func prepareNodeBrowserRuntime(runtimeDir string) ([]string, map[string]string, 
 			}
 			if strings.HasPrefix(string(content), "#!") {
 				if selfLocatingScriptRe.Match(content) {
-					return nil, nil, fmt.Errorf("%s selects %s, a launcher script that looks for the browser next to itself; it cannot be copied into the private runtime. Select the browser binary itself, or a wrapper script that runs it by absolute path", key, selected)
+					// The path is left out on purpose: this error becomes verification
+					// output that the model reads, and the path is a host detail.
+					return nil, nil, fmt.Errorf("%s selects a launcher script that looks for the browser next to itself; it cannot be copied into the private runtime. Select the browser binary itself, or a wrapper script that runs it by absolute path", key)
 				}
 				copied := filepath.Join(runtimeDir, strings.ToLower(key))
 				if err := os.WriteFile(copied, content, 0o700); err != nil {

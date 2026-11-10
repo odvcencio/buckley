@@ -399,7 +399,7 @@ func readPRMatrixGoModule(run prCommandRunner, pr *PRInfo, sha, dir string) (str
 			line = before
 		}
 		fields := strings.Fields(line)
-		if len(fields) > 0 && fields[0] == "ignore" {
+		if isGoModDirective(line, "ignore") {
 			// "ignore" removes directories from ./... , so a changed test below
 			// one is not run by the matrix job. Refuse until the exclusions are
 			// evaluated.
@@ -439,4 +439,16 @@ func provePRMatrixGoPackages(run prCommandRunner, pr *PRInfo, sha, dir, module s
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+// isGoModDirective reports whether a go.mod line starts with the directive. Go's
+// lexer ends the keyword at a space or at a parenthesis, so "ignore(" opens a
+// block just as "ignore (" does.
+func isGoModDirective(line, directive string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, directive) {
+		return false
+	}
+	rest := line[len(directive):]
+	return rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '('
 }
