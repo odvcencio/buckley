@@ -113,7 +113,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
 	diffBudget := fs.Int("diff-budget", diffsignal.PRDiffBudget, "total byte budget for gathered diff context (default: PR-scale budget, larger than the commit-message default)")
 	var contextFileFlag stringSliceFlag
-	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable, oldest first: a later file wins). The model reads the notes as data, not instructions. Sections headed Testing, Counters, Evidence, Not verified or Known gaps are copied into the PR body word for word")
+	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable, oldest first: the model treats a later note as current, but a section of the same kind in an earlier file stays in the body). The model reads the notes as data, not instructions. Sections headed Testing, Counters, Evidence, Not verified or Known gaps are copied into the PR body word for word")
 	noUpdate := fs.Bool("no-update", false, "fail instead of silently overwriting an existing open PR's title/body")
 	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
 	title := fs.String("title", "", "use this PR title instead of the generated one or the one in --body-file")
