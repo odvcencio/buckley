@@ -209,6 +209,8 @@ func (p *OpenAIProvider) setAuthHeaders(req *http.Request) {
 }
 
 func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	// session_id is an OpenRouter extension, not an OpenAI request field.
+	req.SessionID = ""
 	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
 		return nil, err
@@ -225,5 +227,6 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 }
 
 func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
+	req.SessionID = ""
 	return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders, chunkChan)
 }

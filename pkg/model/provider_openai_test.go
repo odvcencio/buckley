@@ -12,6 +12,50 @@ import (
 	"time"
 )
 
+func TestOpenAIProvider_SessionIDStaysLocal(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "completion"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			body := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, _ := io.ReadAll(r.Body)
+				body <- data
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: [DONE]\n\n")
+					return
+				}
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			t.Cleanup(server.Close)
+			provider := NewOpenAIProvider("test-key", server.URL, false)
+			request := ChatRequest{Model: "openai/gpt-4o-mini", SessionID: "long-running-session", Messages: []Message{{Role: "user", Content: "hi"}}}
+			if stream {
+				chunks, errs := provider.ChatCompletionStream(context.Background(), request)
+				for range chunks {
+				}
+				for err := range errs {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if _, err := provider.ChatCompletion(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(<-body, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := wire["session_id"]; ok {
+				t.Fatal("OpenAI received an unsupported session_id field")
+			}
+		})
+	}
+}
+
 func TestOpenAIProvider_CostBoundedStreamRequestsUsage(t *testing.T) {
 	requestBody := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
