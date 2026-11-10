@@ -108,8 +108,9 @@ func (CommitDefinition) Tool() tools.Definition {
 					tools.StringProperty(""),
 				),
 				"breaking": tools.BoolProperty(
-					"True only when people who run the released program or import its public API must change something. " +
-						"New code, tests, docs, and unexported or internal code are not breaking.",
+					"True only when people who run the released program or import its public API must change something to keep working: " +
+						"a removed or renamed command, flag, option, setting or exported name, or changed behavior that callers rely on. " +
+						"Judge by the effect on users, not by where the code lives. Adding code, tests and docs is not breaking.",
 				),
 				"breaking_reason": tools.StringProperty(
 					"Required when breaking: what users or importers must change. Do not name removed or renamed identifiers.",

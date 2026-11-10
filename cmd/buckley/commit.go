@@ -618,6 +618,14 @@ func applyBreakingPolicy(cr *commands.CommitResult, opts commitCommandOptions) {
 // asking: no production code changed. Production code can break a user even
 // when other modules cannot import it (removing a flag from internal/cli, or an
 // internal change that alters what a command does), so it keeps the claim.
+// documentationFileNames are file names (without or with an extension such as
+// .txt) that hold documentation wherever they sit.
+var documentationFileNames = map[string]bool{
+	"license": true, "licence": true, "copying": true, "notice": true, "authors": true,
+	"contributors": true, "changelog": true, "changes": true, "readme": true,
+	"contributing": true, "code_of_conduct": true, "security": true,
+}
+
 func onlyTestsFixturesOrDocs(files []string) bool {
 	for _, file := range files {
 		slash := filepath.ToSlash(file)
@@ -629,9 +637,11 @@ func onlyTestsFixturesOrDocs(files []string) bool {
 		case isTestData(slash):
 		case hasElement(dirs, "testdata"), hasElement(dirs, "fixtures"), hasElement(dirs, "fixture"):
 		case strings.HasSuffix(slash, "_test.go"):
-		case ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".txt" || ext == ".adoc":
+		// Documentation by its path or its name. A bare ".txt" is not enough:
+		// CMakeLists.txt and requirements.txt are build inputs.
+		case ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".adoc":
 		case hasElement(dirs, "docs") || hasElement(dirs, "doc"):
-		case base == "license" || base == "copying" || base == "notice":
+		case documentationFileNames[base] || documentationFileNames[strings.TrimSuffix(base, ext)]:
 		default:
 			return false
 		}

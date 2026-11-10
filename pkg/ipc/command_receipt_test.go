@@ -491,6 +491,7 @@ func TestCommandAcceptanceErrorMapping_IsExactAndSanitized(t *testing.T) {
 		{"idempotency", sessionexec.ErrIdempotencyConflict, http.StatusConflict, connect.CodeAlreadyExists},
 		{"quiesced", sessionexec.ErrSessionQuiesced, http.StatusConflict, connect.CodeFailedPrecondition},
 		{"cancellation limit", sessionexec.ErrCancellationLimit, http.StatusTooManyRequests, connect.CodeResourceExhausted},
+		{"storage budget", storage.ErrStorageBudget, http.StatusInsufficientStorage, connect.CodeResourceExhausted},
 		{"deadline", context.DeadlineExceeded, http.StatusGatewayTimeout, connect.CodeDeadlineExceeded},
 		{"cancelled", context.Canceled, http.StatusRequestTimeout, connect.CodeCanceled},
 		{"closed", storage.ErrStoreClosed, http.StatusServiceUnavailable, connect.CodeUnavailable},

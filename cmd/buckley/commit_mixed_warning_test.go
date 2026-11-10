@@ -41,7 +41,7 @@ func TestGeneratedCommitRuntime_MixedWarning(t *testing.T) {
 		{
 			name:     "build output beside source warns and names the files",
 			files:    map[string]string{"main.go": "package main\n", "dist/bundle.min.js": "var a=1;\n", "internal/ccore/testdata/golden/a.json": longLine},
-			wantWarn: "commit mixes 1 generated file(s) (dist/bundle.min.js) with 1 source file(s)",
+			wantWarn: "commit mixes 1 generated file(s) (dist/bundle.min.js) with 2 source file(s)",
 		},
 		{
 			name:  "--allow-mixed acknowledges it",
@@ -55,8 +55,14 @@ func TestGeneratedCommitRuntime_MixedWarning(t *testing.T) {
 			stageRepo(t, tc.files)
 			// Every case is a mixed commit as the diff reader sees it, so a
 			// missing warning comes from the rule under test.
-			if stats, err := oneshot.StagedDiffStats(nil); err != nil || !stats.Mixed() {
+			// A golden file is a fixture, not generated, so only the cases with
+			// build output are mixed.
+			stats, err := oneshot.StagedDiffStats(nil)
+			if err != nil || (tc.files["dist/bundle.min.js"] != "" && !stats.Mixed()) {
 				t.Fatalf("StagedDiffStats = %+v, %v; want generated and source files", stats, err)
+			}
+			if len(stats.GeneratedPaths) > 0 && tc.files["dist/bundle.min.js"] == "" {
+				t.Fatalf("a golden file counts as generated: %+v", stats)
 			}
 			out := captureTermOut(t, func() {
 				if rt := generatedCommitRuntime(tc.opts, repoOpState{Kind: opNone}); rt != nil {

@@ -984,7 +984,7 @@ func classifyBody(fd *FileDiff, generated func(string) bool, minified bool) {
 		fd.Reason = ReasonGeneratedPath
 	case hasGeneratedHeader(fd.Segment):
 		fd.Reason = ReasonGeneratedHeader
-	case minified:
+	case minified && !isBoundedFixture(fd):
 		fd.Reason = ReasonMinified
 	}
 }
@@ -1082,4 +1082,30 @@ func summaryEntries(files []FileDiff, groups []GeneratedGroup) []string {
 		}
 	}
 	return entries
+}
+
+// IsFixturePath reports a path that holds expected test output: under testdata/
+// or __snapshots__/, or named *.golden or *.snap. Such files change with the code
+// they test.
+func IsFixturePath(path string) bool {
+	path = strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	if strings.HasSuffix(path, ".golden") || strings.HasSuffix(path, ".snap") {
+		return true
+	}
+	elements := strings.Split(path, "/")
+	for _, dir := range elements[:len(elements)-1] {
+		if dir == "testdata" || dir == "__snapshots__" {
+			return true
+		}
+	}
+	return false
+}
+
+// isBoundedFixture retains a test fixture whose content looks minified because
+// it is one long line (a JSON golden file). A person edited it; the model must
+// see the change, and it must not count as generated. The per-file budget still
+// applies: a fixture over MaxFileDiffBytes, or one cut by the capture limit,
+// stays summarized.
+func isBoundedFixture(fd *FileDiff) bool {
+	return IsFixturePath(fd.Path) && !fd.truncated && len(fd.Segment) <= MaxFileDiffBytes
 }

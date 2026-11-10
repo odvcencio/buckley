@@ -93,3 +93,21 @@ func TestPRTitleOverLimitIsReturnedToTheModelBeforeItIsCut(t *testing.T) {
 		t.Fatalf("err=%v calls=%d repairs=%q, want a cut after one retry", err, len(invoker.prompts), result.Repairs)
 	}
 }
+
+// Review of #469, second round, finding 3: the schemas no longer tell the model
+// that internal or unexported code is never breaking.
+func TestBreakingSchemaDescribesEffectOnUsers(t *testing.T) {
+	commit := CommitDefinition{}.Tool().Parameters.Properties["breaking"].Description
+	pr := PRDefinition{}.Tool().Parameters.Properties["breaking"].Description
+	for name, text := range map[string]string{"commit": commit, "pr": pr} {
+		if text == "" {
+			t.Fatalf("%s: no breaking description", name)
+		}
+		if strings.Contains(text, "internal code are not breaking") || strings.Contains(text, "unexported") {
+			t.Errorf("%s still excludes internal or unexported code: %q", name, text)
+		}
+		if !strings.Contains(text, "effect on users") {
+			t.Errorf("%s does not describe the effect on users: %q", name, text)
+		}
+	}
+}

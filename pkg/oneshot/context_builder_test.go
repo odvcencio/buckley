@@ -698,3 +698,33 @@ func TestGatherGit_RejectsOptionLikeRefs(t *testing.T) {
 		t.Fatalf("an option reached git and wrote %v (%v)", entries, err)
 	}
 }
+
+// Review of #469, second round, finding 4: a hand-edited one-line golden file
+// is a fixture. The model sees its change, and it does not count as generated.
+func TestBuildContextStagedGoldenFileIsNotDiscardedAsMinified(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q")
+	if err := os.MkdirAll(filepath.Join(dir, "testdata", "golden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	golden := `{"items":[` + strings.Repeat(`{"id":1,"name":"expected-output-row"},`, 70) + `{"id":99,"name":"HAND-EDITED-MARKER"}]}`
+	if len(golden) < 2500 {
+		t.Fatalf("fixture has %d bytes", len(golden))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testdata", "golden", "out.json"), []byte(golden), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", ".")
+	t.Chdir(dir)
+
+	ctx, err := BuildContext([]ContextSource{{Type: "git_diff", Params: map[string]string{"staged": "true"}}}, ContextOpts{MaxDiffBytes: 80_000})
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	if diff := ctx.Sources["git_diff:staged"]; !strings.Contains(diff, "HAND-EDITED-MARKER") {
+		t.Errorf("the golden file's content did not reach the model:\n%.800s", diff)
+	}
+	if ratio := ctx.Diff.GeneratedRatio(); ratio != 0 || len(ctx.Diff.GeneratedPaths) != 0 {
+		t.Errorf("a fixture counts as generated: ratio %v, paths %v", ratio, ctx.Diff.GeneratedPaths)
+	}
+}
