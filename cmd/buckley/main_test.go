@@ -1610,3 +1610,46 @@ func TestACPCompletionContractTaskIntent_ReadOnly(t *testing.T) {
 		t.Errorf("TaskIntent = %q, want %q", contract.TaskIntent, agentloop.ReadOnlyIntent)
 	}
 }
+
+func TestParseStartupOptions_Effort(t *testing.T) {
+	for _, raw := range [][]string{
+		{"--effort", "Low", "-p", "hello"},
+		{"-p", "hello", "--effort=low"},
+	} {
+		opts, err := parseStartupOptions(raw)
+		if err != nil {
+			t.Fatalf("parseStartupOptions(%v): %v", raw, err)
+		}
+		if !opts.effortSet || opts.effort != "low" || opts.prompt != "hello" || len(opts.args) != 0 {
+			t.Fatalf("parseStartupOptions(%v) = effort %q set=%v prompt %q args %v", raw, opts.effort, opts.effortSet, opts.prompt, opts.args)
+		}
+	}
+	for _, value := range []string{"off", "minimal", "medium", "high", "xhigh", "max"} {
+		if opts, err := parseStartupOptions([]string{"--effort", value, "-p", "x"}); err != nil || opts.effort != value {
+			t.Fatalf("effort %q = %+v, %v", value, opts, err)
+		}
+	}
+	if _, err := parseStartupOptions([]string{"--effort", "extreme", "-p", "x"}); err == nil || !strings.Contains(err.Error(), "unsupported reasoning effort") {
+		t.Fatalf("invalid effort: %v", err)
+	}
+	if _, err := parseStartupOptions([]string{"-p", "x", "--effort"}); err == nil || !strings.Contains(err.Error(), "--effort requires a value") {
+		t.Fatalf("missing value: %v", err)
+	}
+}
+
+func TestParseStartupOptions_EffortBeforeCommandIsAnError(t *testing.T) {
+	_, err := parseStartupOptions([]string{"--effort", "high", "commit"})
+	if err == nil || !strings.Contains(err.Error(), "after the command name") {
+		t.Fatalf("--effort before a command: %v", err)
+	}
+}
+
+func TestParseStartupOptions_EffortAfterCommandPassesThrough(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"commit", "--effort", "high"})
+	if err != nil {
+		t.Fatalf("parseStartupOptions: %v", err)
+	}
+	if opts.effortSet || len(opts.args) != 3 || opts.args[1] != "--effort" || opts.args[2] != "high" {
+		t.Fatalf("effort after a command was consumed: effortSet=%v args=%v", opts.effortSet, opts.args)
+	}
+}

@@ -37,6 +37,8 @@ type oneShotOptions struct {
 	CodeMode      bool
 	Limits        acpLoopLimits
 	OutputSchema  string
+	// Effort is the --effort flag for -p; empty falls back to the environment.
+	Effort string
 }
 
 // oneShotCaps records flag values and presence so an explicit zero removes
@@ -104,6 +106,21 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		}
 	}
 	outputSchema := strings.TrimSpace(opts.OutputSchema)
+	promptEffort, effortErr := resolvePromptEffort(opts.Effort)
+	if effortErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", effortErr)
+		return 2
+	}
+	if promptEffort != "" {
+		wireEffort := promptEffort
+		if wireEffort == "max" {
+			// The request builder knows minimal to xhigh; max is the top of
+			// that range.
+			wireEffort = "xhigh"
+		}
+		cfg = configWithOneshotEffort(cfg, wireEffort)
+	}
+	limits.answerReserve = cfg == nil || cfg.OneshotAnswerReserveEnabled()
 	var scopeErr error
 	limits, scopeErr = prepareOneShotSourceScope(limits, opts.CodeMode)
 	if scopeErr != nil {
@@ -153,6 +170,9 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 			fmt.Fprintf(os.Stderr, "read roots (read-only): %s\n", strings.Join(readRoots, ", "))
 		}
 		fmt.Fprintf(os.Stderr, "model: %s\n", resolvedModel)
+		for _, line := range oneShotReasoningHeader(cfg, mgr, resolvedModel, limits) {
+			fmt.Fprintln(os.Stderr, line)
+		}
 	}
 	if mgr != nil {
 		mgr.SetRequestTimeout(0)
