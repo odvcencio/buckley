@@ -179,6 +179,22 @@ func ValidateStyle(action, scope, subject string, bullets []string) error {
 	return ValidateBullets(bullets)
 }
 
+// HeaderTooLongError reports a header of more than its character limit.
+type HeaderTooLongError struct {
+	Limit  int
+	Length int
+}
+
+func (e *HeaderTooLongError) Error() string {
+	return fmt.Sprintf("header exceeds %d characters (%d)", e.Limit, e.Length)
+}
+
+// IsHeaderTooLong reports whether err is, or wraps, a HeaderTooLongError.
+func IsHeaderTooLong(err error) bool {
+	var target *HeaderTooLongError
+	return errors.As(err, &target)
+}
+
 // BulletTooLongError reports a bullet of more than MaxBulletWords words.
 type BulletTooLongError struct {
 	Bullet int // 1-based, counting non-empty bullets

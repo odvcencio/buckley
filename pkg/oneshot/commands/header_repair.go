@@ -78,9 +78,10 @@ func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int) (j
 	return repaired, repairs
 }
 
-// ShortenFirst reports whether err is only a bullet over the word limit. The
-// framework then asks the model to shorten the bullet once, and code cuts it
-// only if the next answer is still too long.
+// ShortenFirst reports whether err is only a bullet over the word limit or a
+// header over the character limit. The framework then asks the model to
+// shorten it once (the retry prompt names the limit and the current length),
+// and code cuts it only if the next answer is still too long.
 func (d CommitDefinition) ShortenFirst(err error) bool {
-	return err != nil && commitmsg.IsBulletTooLong(err)
+	return err != nil && (commitmsg.IsBulletTooLong(err) || commitmsg.IsHeaderTooLong(err))
 }

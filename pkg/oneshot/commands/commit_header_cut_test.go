@@ -31,12 +31,20 @@ func longHeaderCommit(t *testing.T, action, subject string, body ...string) json
 // A commit failed with "validation: header exceeds 72 characters (77)" after
 // three attempts and passed on the next run. A header over the limit alone is
 // cut by code; this is the case that already worked.
-func TestCommitHeaderOverLimit_IsCutWithoutAnotherModelCall(t *testing.T) {
+func TestCommitHeaderOverLimit_IsCutWhenTheRetryIsStillTooLong(t *testing.T) {
 	raw := longHeaderCommit(t, "update", "regenerate the tables and golden traces for the new lexer automaton", "Regenerate the tables")
-	invoker := &commitMarkupInvoker{replies: []json.RawMessage{raw}}
+	// The model is asked once to shorten the header; code cuts only when the
+	// second answer is still too long.
+	invoker := &commitMarkupInvoker{replies: []json.RawMessage{raw, raw}}
 	result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), commitMarkupDefinition{}, oneshot.RunOpts{MaxRetries: 3})
-	if err != nil || len(invoker.prompts) != 1 {
-		t.Fatalf("err=%v calls=%d, want the header cut in one call", err, len(invoker.prompts))
+	if err != nil || len(invoker.prompts) != 2 {
+		t.Fatalf("err=%v calls=%d, want one retry and then the cut", err, len(invoker.prompts))
+	}
+	if !strings.Contains(invoker.prompts[1], "header exceeds 72 characters (") {
+		t.Fatalf("retry prompt does not name the limit and the length:\n%s", invoker.prompts[1])
+	}
+	if len(result.Repairs) == 0 {
+		t.Fatal("the cut is not reported")
 	}
 	if header := result.Value.(*CommitResult).Header(); utf8.RuneCountInString(header) > commitmsg.HeaderLimit {
 		t.Fatalf("header %q is still over the limit", header)
@@ -123,11 +131,30 @@ func TestCommitHeaderOverLimit_ModelHearsTheRealProblemFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(invoker.prompts) != 2 {
-		t.Fatalf("model calls = %d, want 2: the first retry must name the safety check, not the header", len(invoker.prompts))
+	// Call 2 names the safety check, not the header. Call 3 is the one retry
+	// for a header that is still too long.
+	if len(invoker.prompts) != 3 || !strings.Contains(invoker.prompts[1], "safety check") || !strings.Contains(invoker.prompts[2], "header exceeds") {
+		t.Fatalf("model calls = %d, want 3 with the safety check named first", len(invoker.prompts))
 	}
 	message := result.Value.(*CommitResult).Format()
 	if strings.Contains(message, "quuxcorp") || utf8.RuneCountInString(strings.SplitN(message, "\n", 2)[0]) > commitmsg.HeaderLimit {
 		t.Fatalf("accepted message:\n%s", message)
+	}
+}
+
+// A fake model that returns a short header on the retry: nothing is cut.
+func TestCommitHeaderOverLimit_ShortHeaderOnRetryIsKeptAsWritten(t *testing.T) {
+	long := longHeaderCommit(t, "update", "regenerate the tables and golden traces for the new lexer automaton", "Regenerate the tables")
+	short := json.RawMessage(`{"action":"update","scope":"parser","subject":"regenerate lexer tables and traces","body":["Regenerate the tables"]}`)
+	invoker := &commitMarkupInvoker{replies: []json.RawMessage{long, short}}
+	result, err := oneshot.NewFramework(invoker, nil).Run(context.Background(), commitMarkupDefinition{}, oneshot.RunOpts{MaxRetries: 3})
+	if err != nil || len(invoker.prompts) != 2 {
+		t.Fatalf("err=%v calls=%d", err, len(invoker.prompts))
+	}
+	if got := result.Value.(*CommitResult).Header(); got != "update(parser): regenerate lexer tables and traces" {
+		t.Errorf("header = %q, want the model's own short header", got)
+	}
+	if len(result.Repairs) != 0 {
+		t.Errorf("repairs = %q, want none", result.Repairs)
 	}
 }

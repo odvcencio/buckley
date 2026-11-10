@@ -299,7 +299,16 @@ counted: files under `testdata/` or `__snapshots__/` and `*.golden` or `*.snap`
 files change with the code they test. `--allow-mixed` turns the warning off for
 one commit.
 
-#### Bullets over the word limit
+#### Headers and bullets over the limit
+
+A header of more than 72 characters goes back to the model once, with the limit
+and the current length, so that it can write a shorter one. If the next answer
+is still too long, `buckley commit` shortens it in this order: it removes
+filler words and a trailing qualifier, then cuts words from the end of the
+subject so that the subject ends on a content word (never on `from`, `to`,
+`with` and similar words). It keeps the scope unless the subject would be left
+with fewer than 4 words, and only then drops the scope. Each change is printed
+on stderr.
 
 A bullet of more than 20 words goes back to the model once, with the bullet
 number and the limit, so that it can shorten its own words. If the next answer

@@ -150,3 +150,65 @@ func TestRepairHeader_SaysHowMuchOfTheSubjectItCut(t *testing.T) {
 		t.Fatalf("repairs = %q, want the word counts of the cut", repairs)
 	}
 }
+
+func TestRepairHeader_KeepsScopeAndEndsOnAContentWord(t *testing.T) {
+	// The header the installed v0.8.4 wrote: it ended on "from".
+	subject := "rebuild C's invalid-lookahead and end-of-input lex steps from the generator's ADVANCE_MAP"
+	scope, got, repairs := RepairHeader("fix", "ccore", subject, HeaderLimit)
+	header := composeHeader("fix", scope, got)
+	if n := utf8.RuneCountInString(header); n > HeaderLimit {
+		t.Fatalf("header %q has %d characters", header, n)
+	}
+	if last := lastWord(got); trailingFunctionWords[last] {
+		t.Errorf("subject %q ends on the function word %q", got, last)
+	}
+	if scope != "ccore" {
+		t.Errorf("scope = %q, want it kept: the subject keeps %d words", scope, len(strings.Fields(got)))
+	}
+	if len(repairs) == 0 {
+		t.Error("the cut is not reported")
+	}
+}
+
+func TestRepairHeader_NeverEndsOnAFunctionWord(t *testing.T) {
+	for word := range trailingFunctionWords {
+		// Cut points land right after the function word.
+		base := "rebuild the generated lexer tables and traces " + word
+		subject := base + " extra words that push the header past the limit of seventy two"
+		_, got, _ := RepairHeader("fix", "", subject, utf8.RuneCountInString(composeHeader("fix", "", base)))
+		if last := lastWord(got); trailingFunctionWords[last] {
+			t.Errorf("after %q the subject %q ends on %q", word, got, last)
+		}
+	}
+}
+
+func TestRepairHeader_DropsScopeOnlyWhenTheSubjectWouldFallBelowFourWords(t *testing.T) {
+	scope, got, repairs := RepairHeader("fix", "a-very-long-scope-name-that-eats-the-header", "rebuild the lexer tables from the generated sources and traces", HeaderLimit)
+	if scope != "" {
+		t.Errorf("scope = %q, want it dropped: with it the subject would have fewer than 4 words (%q)", scope, got)
+	}
+	if !strings.Contains(strings.Join(repairs, ";"), "dropped scope") {
+		t.Errorf("repairs = %q", repairs)
+	}
+	if n := utf8.RuneCountInString(composeHeader("fix", scope, got)); n > HeaderLimit {
+		t.Errorf("header has %d characters", n)
+	}
+	if lastWord(got) == "from" {
+		t.Errorf("subject %q ends on a function word", got)
+	}
+}
+
+func TestRepairHeader_OnlyTheVerbSurvivesWithoutADanglingWord(t *testing.T) {
+	_, got, _ := RepairHeader("fix", "", "rebuild from "+strings.Repeat("x", 80), 20)
+	if got == "" || trailingFunctionWords[lastWord(got)] {
+		t.Errorf("subject = %q", got)
+	}
+}
+
+func lastWord(s string) string {
+	words := strings.Fields(strings.ToLower(s))
+	if len(words) == 0 {
+		return ""
+	}
+	return words[len(words)-1]
+}

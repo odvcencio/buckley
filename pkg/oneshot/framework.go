@@ -312,8 +312,15 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			// shorten its own words without losing the point. Code cuts only
 			// when that second answer is still too long.
 			if sd, ok := def.(ShortenFirstDefinition); ok && sd.ShortenFirst(validationErr) {
-				shortenAsked = true
+				// Only when length is the one obstacle: if code's repair
+				// still leaves another failure, that failure goes to the
+				// model first, as before.
 				askToShorten = true
+				if repairer, ok := def.(RepairableDefinition); ok {
+					repaired, repairs := repairer.Repair(result.ToolCall.Arguments)
+					askToShorten = len(repairs) > 0 && validate(repaired) == nil
+				}
+				shortenAsked = askToShorten
 			}
 		}
 		if validationErr != nil && !askToShorten {
