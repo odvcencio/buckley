@@ -283,7 +283,7 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection) (string, 
 		}
 		text := strings.Join(supplied, "\n\n")
 		if text == "" && s.Open {
-			text = commitmsg.NeutralizeCloseDirectives(strings.Trim(pr.Sections[s.Key], "\n"))
+			text = commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
 		}
 		switch {
 		case strings.TrimSpace(text) == "":
