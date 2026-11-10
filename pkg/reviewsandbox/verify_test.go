@@ -1222,3 +1222,57 @@ func indexOf(items []string, target string) int {
 	}
 	return -1
 }
+
+// Ubuntu images with Rust coreutils (ubuntu-26.04) keep the GNU tools under a
+// "gnu" prefix and make /usr/bin/true a symlink to /usr/bin/gnutrue. The
+// executor resolves the Codex launcher to its real path, so a launcher given
+// through such a symlink must run as the real file.
+func TestExecutorResolvesGnuPrefixedCodexLauncherSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "gnutrue")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "true")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveExplicitExecutable(alias)
+	if err != nil || got != canonical {
+		t.Fatalf("resolveExplicitExecutable(%q) = %q, %v; want %q", alias, got, err, canonical)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/review\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutorWithCodexCommand(alias)
+	executor.lookPath = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "/usr/local/go/bin/go", nil
+		case "true":
+			return "/usr/bin/true", nil
+		}
+		return "", errors.New("unavailable: " + name)
+	}
+	var names []string
+	executor.run = func(_ context.Context, invocation commandInvocation, _ int) (commandOutput, error) {
+		names = append(names, invocation.Name)
+		return commandOutput{ExitCode: 0}, nil
+	}
+	if result := executor.Verify(context.Background(), Request{SnapshotRoot: root, Kind: KindBuild, Language: LanguageGo}); result.Status != StatusPass {
+		t.Fatalf("verification = %#v", result)
+	}
+	for _, name := range names {
+		if name != canonical {
+			t.Fatalf("launcher = %q, want the real file %q", name, canonical)
+		}
+	}
+	if len(names) == 0 {
+		t.Fatal("the launcher never ran")
+	}
+}
