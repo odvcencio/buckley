@@ -785,6 +785,34 @@ without network access or a mount of the live checkout. If the sandbox is
 unavailable, Buckbot keeps the ordinary snapshot-rooted inspection tools. An
 exact `--model` value remains exact in both cases.
 
+### review
+
+Review local changes with repository context.
+
+```bash
+buckley review                         # the worktree against the base branch
+buckley review --scope branch          # commits only
+buckley review --output review.md      # write the review to a file
+buckley review > review.md             # the same through a redirect
+```
+
+| Flag | Description |
+|------|-------------|
+| `--scope <worktree\|branch\|changes>` | What to review (default `worktree`) |
+| `--base <branch>` | Base branch to compare against |
+| `--model <id>` / `--effort <level>` | Review model and reasoning effort (`BUCKLEY_MODEL_REVIEW`, `BUCKLEY_EFFORT_REVIEW`) |
+| `--depth <spot\|balanced\|in-depth>` | Review depth (default `spot`) |
+| `--output <file>` | Write the review to a file instead of standard output |
+| `--no-interactive` | Never show the fix menu |
+| `--timeout <duration>` | Total time limit |
+
+After the review, a menu offers to let the model fix findings. The menu reads
+answers from standard input, so it appears only when standard input and
+standard output are both terminals. A script or an agent gets the review and
+no menu, without `--no-interactive`. When standard output is a file or a pipe,
+it holds the review text alone; the model line, the attempt counts and the cost
+go to stderr.
+
 ### review-pr
 
 Review a GitHub pull request. The command uses dry-run output by default.

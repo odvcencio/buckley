@@ -283,6 +283,23 @@ func projectTrustStatusForPath(path string) (projectTrustStatus, string, string,
 	return store.Status(root), root, storePath, nil
 }
 
+// projectTrustNotice controls the "Project trust restricted" line.
+//
+// The restriction caps approval and trust level, which gate run_shell in
+// one-shot runs (ADR 0015). `buckley commit` and `buckley pr` call no such
+// tool, so for them the line reported a limit that did not apply to the
+// command, on every call in a worktree that has no trust record. Those
+// commands turn the line off; the restriction itself is applied as before.
+var projectTrustNotice = true
+
+// muteProjectTrustNotice turns the line off and returns the call that turns
+// it back on.
+func muteProjectTrustNotice() func() {
+	previous := projectTrustNotice
+	projectTrustNotice = false
+	return func() { projectTrustNotice = previous }
+}
+
 func ensureProjectTrust(cfg *config.Config, workDir string) (projectTrustStatus, string, error) {
 	status, root, storePath, err := projectTrustStatusForPath(workDir)
 	if err != nil {
@@ -309,7 +326,9 @@ func ensureProjectTrust(cfg *config.Config, workDir string) (projectTrustStatus,
 
 	if status == projectTrustRestricted {
 		applyProjectTrustRestrictions(cfg)
-		fmt.Fprintf(os.Stderr, "Project trust restricted: approval=%s trust_level=%s for %s\n", cfg.Approval.Mode, cfg.Orchestrator.TrustLevel, root)
+		if projectTrustNotice {
+			fmt.Fprintf(os.Stderr, "Project trust restricted: approval=%s trust_level=%s for %s\n", cfg.Approval.Mode, cfg.Orchestrator.TrustLevel, root)
+		}
 	}
 
 	return status, root, nil

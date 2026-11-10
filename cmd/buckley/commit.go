@@ -233,6 +233,7 @@ func runCommitCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer muteProjectTrustNotice()()
 	if opts.dir != "" {
 		if _, err := enterWorkDir(opts.dir, nil); err != nil {
 			return err

@@ -124,7 +124,7 @@ func parseReviewCommandOptions(args []string) (reviewCommandOptions, error) {
 	criticModel := fs.String("critic-model", "", "opt-in approval critic model for large or business-critical reviews")
 	timeout := fs.Duration("timeout", reviewTimeoutDefault(), "total review timeout (project reviews default to 20m)")
 	outputFile := fs.String("output", "", "write review to file instead of stdout")
-	interactive := fs.Bool("interactive", true, "show interactive menu to fix findings")
+	interactive := fs.Bool("interactive", true, "show a menu to fix findings; only when standard input and output are terminals")
 	noInteractive := fs.Bool("no-interactive", false, "disable interactive mode")
 	budgetUSD := fs.Float64("budget", 0, "maximum model spend in USD (0 = configured policy; defaults to uncapped)")
 	noBudget := fs.Bool("no-budget", false, "ignore a configured review cost cap for this run")
@@ -229,6 +229,13 @@ func runReviewCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if !reviewOutputIsTerminalFn() {
+		// Standard output is a file or a pipe: it gets the review and nothing
+		// else. The model line, attempt counts and cost go to stderr.
+		previous := termOut
+		termOut = terminal.NewWithOutput(os.Stderr)
+		defer func() { termOut = previous }()
+	}
 	ctx, cancel := newReviewCommandContext(time.Now(), opts.timeout)
 	defer cancel()
 
@@ -327,7 +334,7 @@ func runReviewCommand(args []string) (returnErr error) {
 		printReviewCost(result.trace, runtime.ledger)
 	}
 
-	if opts.interactive && opts.outputFile == "" {
+	if reviewMenuWanted(opts) {
 		parsed := result.parsed
 		if parsed == nil {
 			parsed = commands.ParseReview(result.reviewText)
@@ -338,6 +345,16 @@ func runReviewCommand(args []string) (returnErr error) {
 	}
 
 	return nil
+}
+
+// reviewMenuWanted reports whether to show the menu that fixes findings after
+// the review. The menu reads its answers from standard input, and its choices
+// let a model edit the working tree. Without a terminal there is nobody to
+// answer: an open pipe made the command wait, and piped text could be read as
+// a choice and start a fix. So the menu needs a terminal on both ends, and a
+// script or an agent gets the review without passing --no-interactive.
+func reviewMenuWanted(opts reviewCommandOptions) bool {
+	return opts.interactive && opts.outputFile == "" && stdinIsTerminalFn() && reviewOutputIsTerminalFn()
 }
 
 // salvageIncompleteReview writes the artifact from a review run that failed
@@ -1262,6 +1279,11 @@ func printReviewContextAudit(audit *transparency.ContextAudit) {
 }
 
 func printReview(review string) {
+	if !reviewOutputIsTerminalFn() {
+		// The review once, without the header: this is what a script reads.
+		fmt.Println(review)
+		return
+	}
 	termOut.Newline()
 	termOut.Header("CODE REVIEW")
 	termOut.Newline()
