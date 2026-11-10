@@ -305,7 +305,7 @@ func TestMergeConflictFiles_ParsesConflictsSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detectRepoOpStateIn: %v", err)
 	}
-	files := mergeConflictFiles(state.GitDir)
+	files, _ := mergeConflictFilesKnown(state.GitDir)
 	if len(files) != 1 || files[0] != "f.txt" {
 		t.Fatalf("files = %#v, want [f.txt]", files)
 	}

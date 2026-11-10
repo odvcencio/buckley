@@ -102,7 +102,10 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 	startWords := len(strings.Fields(subject))
 	if scope != "" {
 		kept, keptRepairs := shortenSubject(action, scope, subject, limit)
-		if n := len(strings.Fields(kept)); n >= minSubjectWords || n >= startWords {
+		// The retained header must fit: a long scope can leave no room even
+		// for a one-word subject, and then the scope goes.
+		fitsWithScope := utf8.RuneCountInString(composeHeader(action, scope, kept)) <= limit
+		if n := len(strings.Fields(kept)); fitsWithScope && (n >= minSubjectWords || n >= startWords) {
 			return scope, kept, append(repairs, keptRepairs...)
 		}
 		scope = ""

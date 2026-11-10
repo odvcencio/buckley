@@ -183,7 +183,7 @@ func TestMergeHeaderRunner_FixesTheHeaderOfEveryGeneration(t *testing.T) {
 // invents a conflict and how it was resolved (live check, 10 November 2026).
 func TestMergeCommitPrompt_SaysWhenThereWereNoConflicts(t *testing.T) {
 	ctx := &oneshot.Context{Sources: map[string]string{}}
-	clean := mergeCommitDefinition{source: "topic", target: "main"}.BuildPrompt(ctx)
+	clean := mergeCommitDefinition{source: "topic", target: "main", noConflicts: true}.BuildPrompt(ctx)
 	if !strings.Contains(clean, "There were no conflicts in this merge") {
 		t.Errorf("clean merge prompt lacks the no-conflict line:\n%s", clean)
 	}

@@ -212,3 +212,16 @@ func lastWord(s string) string {
 	}
 	return words[len(words)-1]
 }
+
+// Review of #469, finding 4: a scope so long that not even a one-word subject
+// fits must be dropped, not kept with an unchanged, oversized header.
+func TestRepairHeader_LongScopeWithOneWordSubjectDropsTheScope(t *testing.T) {
+	scope := strings.Repeat("s", 68)
+	gotScope, subject, repairs := RepairHeader("fix", scope, "restore", HeaderLimit)
+	if n := utf8.RuneCountInString(composeHeader("fix", gotScope, subject)); n > HeaderLimit {
+		t.Fatalf("header has %d characters: scope %q subject %q", n, gotScope, subject)
+	}
+	if gotScope != "" || !strings.Contains(strings.Join(repairs, ";"), "dropped scope") {
+		t.Errorf("scope = %q, repairs = %q", gotScope, repairs)
+	}
+}

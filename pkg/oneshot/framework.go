@@ -243,6 +243,10 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 	// first. A retry prompt that names only the latest one lets the model fix
 	// that rule and break an earlier one again.
 	var failedChecks []string
+	// partialRepairs are repairs that code applied to an answer that still
+	// failed another check. The model saw the changed text in the retry
+	// prompt and may have copied it, so the notice must survive.
+	var partialRepairs []string
 
 	invoker := f.invoker
 	fallbackIndex, modelAttempts := 0, 0
@@ -284,7 +288,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 			}
-			userPrompt = baseUserPrompt + "\n\nIMPORTANT: You MUST call the " + tool.Name + " tool. Do not reply with plain text."
+			userPrompt = baseUserPrompt + "\n\nIMPORTANT: You MUST call the " + tool.Name + " tool. Do not reply with plain text." + earlierFailedChecks(failedChecks, "")
 			continue
 		}
 
@@ -337,6 +341,10 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 						for _, repair := range repairs {
 							// The repairs cover the body too, and some remove text.
 							slog.Info("repaired generated text: " + repair)
+						}
+					} else {
+						for _, repair := range repairs {
+							partialRepairs = appendDistinct(partialRepairs, "an earlier answer was changed before the model saw it: "+repair)
 						}
 					}
 				}
@@ -394,7 +402,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			if traceIndex >= 0 {
 				traceAttempts[traceIndex].ValidationError = strings.TrimSpace(lastErr.Error())
 			}
-			userPrompt = baseUserPrompt + "\n\nThe tool call arguments must be valid JSON matching the schema for " + tool.Name + "."
+			userPrompt = baseUserPrompt + "\n\nThe tool call arguments must be valid JSON matching the schema for " + tool.Name + "." + earlierFailedChecks(failedChecks, "")
 			continue
 		}
 
@@ -411,7 +419,7 @@ func (f *Framework) Run(ctx context.Context, def Definition, opts RunOpts) (*Run
 			ContextAudit:    audit,
 			Attempts:        attempt + 1,
 			PrimaryAttempts: attempt + 1,
-			Repairs:         acceptedRepairs,
+			Repairs:         append(append([]string(nil), partialRepairs...), acceptedRepairs...),
 		}, nil
 	}
 

@@ -8,41 +8,41 @@ import (
 	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
-func TestNoOutsideUserCanBreak(t *testing.T) {
+// Review of #469, finding 2: production code keeps a breaking claim, also under
+// internal/. Only tests, fixtures and documentation drop it by default.
+func TestOnlyTestsFixturesOrDocs(t *testing.T) {
 	cases := []struct {
 		name  string
 		files []string
 		want  bool
 	}{
-		// The files of the commit that got a wrong trailer on 2026-11-09.
-		{"an internal Go package with its tests and golden files", []string{
-			"internal/ccore/lexer.go", "internal/ccore/golden_test.go", "internal/ccore/testdata/golden/json-object.json",
-		}, true},
-		{"a nested internal package", []string{"pkg/foo/internal/bar/x.go"}, true},
+		{"tests and golden files", []string{"internal/ccore/golden_test.go", "internal/ccore/testdata/golden/json-object.json"}, true},
 		{"tests only", []string{"pkg/foo/foo_test.go", "parser_test.go"}, true},
+		{"docs", []string{"docs/README.md", "README.md", "docs/guide.txt"}, true},
+		{"fixtures", []string{"pkg/x/fixtures/a.yaml", "pkg/x/__snapshots__/a.snap", "a.golden"}, true},
+		{"production code under internal", []string{"internal/ccore/lexer.go"}, false},
+		{"a CLI flag removed under internal", []string{"internal/cli/flags.go", "internal/cli/flags_test.go"}, false},
 		{"an exported package", []string{"parser.go"}, false},
-		{"internal code together with an exported package", []string{"internal/ccore/lexer.go", "parser.go"}, false},
 		{"a command", []string{"cmd/tool/main.go"}, false},
 		{"a file under internal that is not Go", []string{"internal/schema.json"}, false},
-		{"docs", []string{"docs/README.md"}, false},
-		{"a directory that only starts with internal", []string{"internalfoo/x.go"}, false},
-		{"a file named internal.go", []string{"internal.go"}, false},
+		{"tests with production code", []string{"parser_test.go", "parser.go"}, false},
 		{"no files", nil, false},
 	}
 	for _, tc := range cases {
-		if got := noOutsideUserCanBreak(tc.files); got != tc.want {
-			t.Errorf("%s: noOutsideUserCanBreak(%v) = %v, want %v", tc.name, tc.files, got, tc.want)
+		if got := onlyTestsFixturesOrDocs(tc.files); got != tc.want {
+			t.Errorf("%s: onlyTestsFixturesOrDocs(%v) = %v, want %v", tc.name, tc.files, got, tc.want)
 		}
 	}
 }
 
 func TestApplyBreakingPolicy(t *testing.T) {
 	internalOnly := map[string]string{
-		"internal/ccore/lexer.go":               "package ccore\n",
 		"internal/ccore/lexer_test.go":          "package ccore\n",
 		"internal/ccore/testdata/golden/a.json": "{}\n",
+		"docs/notes.md":                         "x\n",
 	}
 	withPublic := map[string]string{"internal/ccore/lexer.go": "package ccore\n", "parser.go": "package p\n"}
+	internalCode := map[string]string{"internal/cli/flags.go": "package cli\n"}
 
 	cases := []struct {
 		name     string
@@ -51,12 +51,13 @@ func TestApplyBreakingPolicy(t *testing.T) {
 		wantKept bool
 		wantNote bool
 	}{
-		{"auto drops the trailer when only internal code and tests changed", internalOnly, commitCommandOptions{breaking: breakingAuto}, false, true},
-		{"auto keeps it when an exported package changed", withPublic, commitCommandOptions{breaking: breakingAuto}, true, false},
+		{"auto drops the trailer when only tests, fixtures and docs changed", internalOnly, commitCommandOptions{breaking: breakingAuto}, false, true},
+		{"auto keeps it when production code changed", withPublic, commitCommandOptions{breaking: breakingAuto}, true, false},
 		{"keep trusts the model", internalOnly, commitCommandOptions{breaking: breakingKeep}, true, false},
 		{"options without a policy leave the result alone", internalOnly, commitCommandOptions{}, true, false},
+		{"auto keeps it for production code under internal", internalCode, commitCommandOptions{breaking: breakingAuto}, true, false},
 		{"never leaves it out", withPublic, commitCommandOptions{breaking: breakingNever}, false, false},
-		{"auto looks only at the files of a scoped commit", withPublic, commitCommandOptions{breaking: breakingAuto, paths: []string{"internal"}}, false, true},
+		{"auto looks only at the files of a scoped commit", mergeMaps(withPublic, internalOnly), commitCommandOptions{breaking: breakingAuto, paths: []string{"docs"}}, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +91,7 @@ func TestApplyBreakingPolicy(t *testing.T) {
 // the rule covers normal, merge and squash commits and the regenerate prompt.
 func TestRunCommitGeneration_AppliesTheBreakingPolicy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	stageRepo(t, map[string]string{"internal/ccore/lexer.go": "package ccore\n"})
+	stageRepo(t, map[string]string{"internal/ccore/lexer_test.go": "package ccore\n"})
 	runner := &fakeCommitRunner{result: &commitRunResult{Commit: &commands.CommitResult{
 		Action: "refactor", Scope: "ccore", Subject: "port the lex automaton", Body: []string{"Move the DFA walk"},
 		Breaking: true, BreakingReason: "Callers must supply lex tables.",
@@ -143,4 +144,15 @@ func TestRunCommitGeneration_ReportsWhatCodeChanged(t *testing.T) {
 	if !strings.Contains(stderr, "changed the generated message: cut bullet 1 from 25 to 16 words") {
 		t.Errorf("stderr does not report the cut:\n%s", stderr)
 	}
+}
+
+func mergeMaps(a, b map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }

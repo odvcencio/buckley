@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"m31labs.dev/buckley/pkg/oneshot"
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestIsTestData(t *testing.T) {
@@ -81,5 +82,24 @@ func TestPreviewPaths(t *testing.T) {
 	}
 	if got := previewPaths([]string{"a", "b", "c", "d", "e"}, 3); got != "a, b, c and 2 more" {
 		t.Errorf("previewPaths = %q", got)
+	}
+}
+
+// Review of #469, finding 6: a commit of golden files alone needs a model
+// written message; the fixed "regenerate ... no hand-written changes" text is
+// for build output.
+func TestGeneratedCommit_GoldenFilesAloneAreNotGenerated(t *testing.T) {
+	stats := oneshot.DiffStats{Files: 2, GeneratedPaths: []string{"pkg/x/testdata/a.golden.json", "pkg/x/b.golden"}}
+	if got := commands.GeneratedCommit(withoutTestDataGenerated(stats)); got != nil {
+		t.Fatalf("golden files alone got the fixed message: %+v", got)
+	}
+	mixed := oneshot.DiffStats{Files: 2, GeneratedPaths: []string{"dist/app.min.js", "pkg/x/testdata/a.golden.json"}}
+	moved := withoutTestDataGenerated(mixed)
+	if len(moved.GeneratedPaths) != 1 || len(moved.SourcePaths) != 1 {
+		t.Fatalf("moved = %+v", moved)
+	}
+	build := oneshot.DiffStats{Files: 1, GeneratedPaths: []string{"dist/app.min.js"}}
+	if commands.GeneratedCommit(withoutTestDataGenerated(build)) == nil {
+		t.Fatal("build output alone must keep the fixed message")
 	}
 }

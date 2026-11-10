@@ -30,7 +30,8 @@ func TestRunPRCommand_BreakingSectionNeedsAFileOutsideUsersCanReach(t *testing.T
 		files    map[string]string
 		wantKept bool
 	}{
-		{"internal code and tests only", map[string]string{"internal/ccore/lexer.go": "package ccore\n", "internal/ccore/lexer_test.go": "package ccore\n"}, false},
+		{"tests and docs only", map[string]string{"internal/ccore/lexer_test.go": "package ccore\n", "docs/a.md": "x\n"}, false},
+		{"production code under internal", map[string]string{"internal/ccore/lexer.go": "package ccore\n"}, true},
 		{"an exported package too", map[string]string{"internal/ccore/lexer.go": "package ccore\n", "parser.go": "package p\n"}, true},
 	}
 	for _, tc := range cases {
@@ -56,5 +57,43 @@ func TestRunPRCommand_BreakingSectionNeedsAFileOutsideUsersCanReach(t *testing.T
 				t.Errorf("stderr = %q, want a warning = %v", stderr, !tc.wantKept)
 			}
 		})
+	}
+}
+
+// Review of #469, finding 2: pr takes the same --breaking flag as commit.
+func TestRunPRCommand_BreakingFlag(t *testing.T) {
+	const raw = `{"action":"refactor","title":"port the lex automaton","summary":"Ports the automaton.","changes":["Move the DFA walk"],"breaking":true}`
+	for _, tc := range []struct {
+		flag     string
+		files    map[string]string
+		wantKept bool
+	}{
+		{"never", map[string]string{"parser.go": "package p\n"}, false},
+		{"keep", map[string]string{"docs/a.md": "x\n"}, true},
+		{"auto", map[string]string{"docs/a.md": "x\n"}, false},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			r := newPRRepo(t)
+			commitFiles(t, r, "feature", tc.files)
+			r.park(t)
+			stubPRDependencies(t, func() error { return nil })
+			stubPRModelWith(t, raw)
+			var err error
+			var out string
+			captureStderr(t, func() {
+				out = captureStdout(t, func() {
+					err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature", "--breaking=" + tc.flag})
+				})
+			})
+			if err != nil {
+				t.Fatalf("runPRCommand: %v", err)
+			}
+			if kept := strings.Contains(out, "## Breaking Changes"); kept != tc.wantKept {
+				t.Errorf("section present = %v, want %v:\n%s", kept, tc.wantKept, out)
+			}
+		})
+	}
+	if _, err := parsePRCommandOptions([]string{"--breaking=sometimes"}); err == nil {
+		t.Error("an unknown --breaking value was accepted")
 	}
 }
