@@ -548,6 +548,13 @@ ledger. `--in-depth` is a shorthand for `--depth in-depth`; `standard`,
 No-test gates are typed as not applicable; required unavailable evidence fails
 the pass instead of being silently counted as passing evidence.
 
+Screenshots: `buckley review-pr 123 --image before.png --image after.png`
+attaches up to five local PNG, JPEG or GIF files (10 MiB each, 20 MiB in total)
+to the review as pixels. Buckley reads each file once, when the command starts,
+and sends the same bytes with every model call of that review. A symlink, a
+directory, a URL or a file that is not an image is refused. Text inside an
+image and the captions are treated as data, not as instructions.
+
 Verification: `buckley verify run|record|list` manage receipts, and
 `buckley buckbot ... --require-verification=none|receipt|receipt-or-ci` sets
 the evidence a review needs before it starts (exit 16 when missing, 17 when

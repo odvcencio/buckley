@@ -78,14 +78,25 @@ type CIReachabilityRequest struct {
 // CIReachabilityEvidence records Go packages proven reachable by the pinned
 // CI test command on the PR merge snapshot in one required GitHub Actions check.
 type CIReachabilityEvidence struct {
-	Source   string   `json:"source"`
-	HeadSHA  string   `json:"head_sha"`
-	MergeSHA string   `json:"merge_sha"`
-	RunID    int64    `json:"run_id"`
-	JobID    int64    `json:"job_id"`
-	Check    string   `json:"check"`
-	Module   string   `json:"module"`
-	Packages []string `json:"packages"`
+	Source   string                 `json:"source"`
+	HeadSHA  string                 `json:"head_sha"`
+	MergeSHA string                 `json:"merge_sha"`
+	RunID    int64                  `json:"run_id"`
+	JobID    int64                  `json:"job_id"`
+	Check    string                 `json:"check"`
+	Module   string                 `json:"module"`
+	Packages []string               `json:"packages"`
+	Modules  []CIReachabilityModule `json:"modules,omitempty"`
+}
+
+// CIReachabilityModule binds one module's changed tests to its required job.
+type CIReachabilityModule struct {
+	Directory string   `json:"directory"`
+	Module    string   `json:"module"`
+	JobID     int64    `json:"job_id"`
+	Check     string   `json:"check"`
+	TestFiles []string `json:"test_files"`
+	Packages  []string `json:"packages"`
 }
 
 // CIAdmissionExpectation is recomputed by each authority boundary instead of
@@ -274,6 +285,10 @@ func expectedCIReachabilityStatus(request CIReachabilityRequest, evidence *CIRea
 	if evidence == nil || len(request.RecognizedChangedTestFiles) == 0 {
 		return CIReachabilityUnavailable
 	}
+	if evidence.Source == "github_ci_go_matrix_v1" {
+		// Matrix normalization proves every requested file has exactly one job.
+		return CIReachabilityCovered
+	}
 	packages := make(map[string]bool, len(evidence.Packages))
 	for _, pkg := range evidence.Packages {
 		packages[pkg] = true
@@ -298,12 +313,15 @@ func normalizeCIReachabilityEvidence(value *CIReachabilityEvidence, expectation 
 		return nil, nil
 	}
 	copy := *value
+	if copy.Source == "github_ci_go_matrix_v1" {
+		return normalizeCIMatrixReachabilityEvidence(copy, expectation, contexts)
+	}
 	copy.Source = strings.TrimSpace(copy.Source)
 	copy.HeadSHA = strings.TrimSpace(copy.HeadSHA)
 	copy.MergeSHA = strings.TrimSpace(copy.MergeSHA)
 	copy.Check = strings.TrimSpace(copy.Check)
 	copy.Module = strings.Trim(strings.TrimSpace(copy.Module), "/")
-	if copy.Source != "buckley_ci_go_test_v1" || copy.HeadSHA != expectation.Identity.HeadSHA ||
+	if copy.Source != "buckley_ci_go_test_v1" || len(copy.Modules) != 0 || copy.HeadSHA != expectation.Identity.HeadSHA ||
 		copy.MergeSHA == "" || copy.RunID <= 0 || copy.JobID <= 0 || copy.Check == "" || copy.Module == "" ||
 		len(expectation.TestReachability.RecognizedChangedTestFiles) == 0 {
 		return nil, fmt.Errorf("%w: incomplete or stale test-reachability evidence", ErrCIAdmissionInvalid)
@@ -356,6 +374,11 @@ func equalCIReachabilityEvidence(left, right *CIReachabilityEvidence) bool {
 		if left.Packages[index] != right.Packages[index] {
 			return false
 		}
+	}
+	leftModules, _ := json.Marshal(left.Modules)
+	rightModules, _ := json.Marshal(right.Modules)
+	if string(leftModules) != string(rightModules) {
+		return false
 	}
 	return true
 }

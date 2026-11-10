@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -286,10 +287,10 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 	// when bubblewrap is unavailable.
 	var bwrap string
 	var bwrapErr error
-	if language == LanguageGo {
+	if language == LanguageGo || language == LanguageNode {
 		bwrap, bwrapErr = e.lookPath("bwrap")
 	}
-	useNativeGo := language == LanguageGo && bwrapErr == nil
+	useNativeGo := (language == LanguageGo || language == LanguageNode) && bwrapErr == nil
 	var codex string
 	var codexErr error
 	if !useNativeGo {
@@ -333,15 +334,26 @@ func (e *Executor) Verify(parent context.Context, request Request) Result {
 		}
 		additionalReadRoots = append(additionalReadRoots, nodeModulesRoot)
 	}
+	var browserEnv map[string]string
+	if language == LanguageNode && useNativeGo {
+		browserRoots, env, browserErr := prepareNodeBrowserRuntime(runtimeDir)
+		if browserErr != nil {
+			result.Error = browserErr.Error()
+			return result
+		}
+		additionalReadRoots = append(additionalReadRoots, browserRoots...)
+		browserEnv = env
+	}
 
 	params := launchParams{
-		root:       root,
-		workDir:    writableWorkDir,
-		resolved:   resolved,
-		plan:       plan,
-		runtimeDir: runtimeDir,
-		maxOutput:  maxOutput,
-		readRoots:  additionalReadRoots,
+		root:        root,
+		workDir:     writableWorkDir,
+		resolved:    resolved,
+		plan:        plan,
+		runtimeDir:  runtimeDir,
+		maxOutput:   maxOutput,
+		readRoots:   additionalReadRoots,
+		environment: browserEnv,
 	}
 	var output commandOutput
 	var runErr error
@@ -385,13 +397,14 @@ func (e *Executor) resolveCodex() (string, error) {
 // launchParams carries the resolved, already-validated invocation details
 // shared by every sandbox launcher.
 type launchParams struct {
-	root       string
-	workDir    string
-	resolved   string
-	plan       plan
-	runtimeDir string
-	maxOutput  int
-	readRoots  []string
+	root        string
+	workDir     string
+	resolved    string
+	plan        plan
+	runtimeDir  string
+	maxOutput   int
+	readRoots   []string
+	environment map[string]string
 }
 
 // runViaCodex launches the resolved verification command inside Codex's OS
@@ -446,8 +459,18 @@ func (e *Executor) runViaCodex(ctx context.Context, codex string, params launchP
 // command runs in a disposable copy below the private runtime directory, which
 // is the only writable location, and the network namespace is unshared.
 func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params launchParams) (commandOutput, error, string) {
-	goRoot := filepath.Dir(filepath.Dir(params.resolved))
-	readRoots := []string{params.root, goRoot}
+	goRoot := ""
+	if executable, err := trustedLookPath("go"); err == nil {
+		goRoot = filepath.Dir(filepath.Dir(executable))
+	}
+	if params.plan.command == "go" {
+		goRoot = filepath.Dir(filepath.Dir(params.resolved))
+	}
+	readRoots := append(reviewReadRoots(params.resolved), params.root)
+	readRoots = append(readRoots, params.readRoots...)
+	if goRoot != "" {
+		readRoots = append(readRoots, goRoot)
+	}
 	if canonical, evalErr := filepath.EvalSymlinks(params.resolved); evalErr == nil {
 		readRoots = append(readRoots, filepath.Dir(canonical))
 	}
@@ -492,7 +515,12 @@ func (e *Executor) runViaNativeGo(ctx context.Context, bwrap string, params laun
 	)
 
 	env := ToolEnvironment(params.runtimeDir)
-	env["GOROOT"] = goRoot
+	if goRoot != "" {
+		env["GOROOT"] = goRoot
+	}
+	for key, value := range params.environment {
+		env[key] = value
+	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -862,6 +890,8 @@ type nodeLockPackage struct {
 	Resolved  json.RawMessage `json:"resolved"`
 	Integrity json.RawMessage `json:"integrity"`
 	Link      json.RawMessage `json:"link"`
+	Optional  bool            `json:"optional"`
+	OS        []string        `json:"os"`
 }
 
 type nodePackageLock struct {
@@ -927,6 +957,11 @@ func projectNodeDependencies(snapshotRoot, sourceRoot, packagePath, writablePack
 			return "", fmt.Errorf("Node verification dependencies are unavailable: package lock identity is invalid")
 		}
 		delete(expected.Packages, "")
+		for name, pkg := range expected.Packages {
+			if _, present := installed.Packages[name]; !present && nodeOptionalPackageExcludesOS(pkg, runtime.GOOS) {
+				delete(expected.Packages, name)
+			}
+		}
 		if !reflect.DeepEqual(expected.Packages, installed.Packages) {
 			return "", fmt.Errorf("Node verification dependencies are unavailable: node_modules does not exactly match package-lock.json")
 		}
@@ -952,6 +987,28 @@ func projectNodeDependencies(snapshotRoot, sourceRoot, packagePath, writablePack
 		return "", fmt.Errorf("Node verification dependencies are unavailable: project node_modules: %w", err)
 	}
 	return canonicalModules, nil
+}
+
+// npm omits optional packages restricted to a different platform. No generic
+// optional omission is accepted: the lock must explicitly exclude this OS.
+func nodeOptionalPackageExcludesOS(pkg nodeLockPackage, platform string) bool {
+	if !pkg.Optional || len(pkg.OS) == 0 {
+		return false
+	}
+	if platform == "windows" {
+		platform = "win32"
+	}
+	positive := false
+	for _, allowed := range pkg.OS {
+		if allowed == platform || allowed == "any" {
+			return false
+		}
+		if strings.HasPrefix(allowed, "!") {
+			return false
+		}
+		positive = true
+	}
+	return positive
 }
 
 func validateNodeModulesSymlinks(nodeModulesRoot string) error {

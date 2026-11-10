@@ -40,6 +40,7 @@ type reviewPRCommandOptions struct {
 	timeout              time.Duration
 	outputFile           string
 	prRef                string
+	imagePaths           []string
 	budgetUSD            float64
 	noBudget             bool
 	maxTurns             int
@@ -77,6 +78,14 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
+	var imagePaths []string
+	fs.Func("image", "attach one explicitly supplied local PNG, JPEG, or GIF screenshot (repeatable; maximum 5)", func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("--image requires a local screenshot path")
+		}
+		imagePaths = append(imagePaths, value)
+		return nil
+	})
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
 	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
 	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
@@ -133,6 +142,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		timeout:              *timeout,
 		outputFile:           *outputFile,
 		prRef:                fs.Arg(0),
+		imagePaths:           imagePaths,
 		budgetUSD:            *budgetUSD,
 		noBudget:             *noBudget,
 		maxTurns:             *maxTurns,
@@ -256,6 +266,10 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	imageParts, err := loadReviewImages(opts.imagePaths)
+	if err != nil {
+		return err
+	}
 	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post, hostedReviewCeiling(os.Getenv))
 	if timeoutWarning != "" {
 		fmt.Fprintln(os.Stderr, timeoutWarning)
@@ -308,6 +322,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
+		imageParts:                 imageParts,
 		maxIterations:              opts.maxTurns,
 		maxIterationsExplicit:      opts.maxTurns > 0,
 		maxToolCalls:               opts.maxToolCalls,
@@ -432,6 +447,7 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 const defaultShardConcurrency = 4
 
 type automatedReviewOptions struct {
+	imageParts                 []model.ContentPart
 	maxIterations              int
 	maxIterationsExplicit      bool
 	maxToolCalls               int
@@ -662,6 +678,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
 		}
 	}
+	if len(overrides.imageParts) > 0 {
+		defaults.imageParts = overrides.imageParts
+	}
 	if overrides.forceSinglePass {
 		defaults.forceSinglePass = true
 	}
@@ -801,6 +820,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	opts = boundPRApprovalCritic(opts, reviewDef)
 	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
+		ImageParts:               opts.imageParts,
 		Audit:                    audit,
 		MaxRetries:               opts.maxRetries,
 		MaxIterations:            opts.maxIterations,
@@ -969,6 +989,7 @@ func runPRReviewSharded(
 		}
 		fwResult, runErr := framework.RunAgent(shardCtx, reviewDef, oneshot.AgentRunOpts{
 			UserPrompt:              prompt,
+			ImageParts:              opts.imageParts,
 			MaxRetries:              opts.maxRetries,
 			MaxIterations:           shardOpts.maxIterations,
 			MaxToolCalls:            shardOpts.maxToolCalls,
