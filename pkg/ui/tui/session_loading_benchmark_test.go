@@ -30,7 +30,12 @@ func BenchmarkControllerSessionLoading(b *testing.B) {
 			}
 		}
 	}
-	cfg := ControllerConfig{Config: config.DefaultConfig(), Store: store}
+	// 128 messages of 64 KiB are 8 MiB per session, more than the default
+	// memory budget would load; give the loader room so the benchmark measures
+	// loading, not budget pruning.
+	appConfig := config.DefaultConfig()
+	appConfig.Resources.SessionMemoryBytes = 64 << 20
+	cfg := ControllerConfig{Config: appConfig, Store: store}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
