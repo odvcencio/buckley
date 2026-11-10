@@ -109,13 +109,13 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		}
 		return ""
 	}
-	lines := strings.Split(stripHTMLComments(strings.ReplaceAll(note.Text, "\r\n", "\n")), "\n")
+	lines := strings.Split(SanitizePRNote(strings.ReplaceAll(note.Text, "\r\n", "\n")), "\n")
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
 		curLevel int // heading level of cur; 0 when cur started at a label
 		body     []string
-		inFence  bool
+		fence    fenceTracker
 	)
 	flush := func() {
 		if cur == nil {
@@ -127,10 +127,9 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		cur, body = nil, nil
 	}
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			inFence = !inFence
-		} else if !inFence {
+		if fence.line(line) {
+			// A fence delimiter belongs to the section it sits in.
+		} else if !fence.inFence() {
 			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
 				level := len(m[1])
 				if cur != nil && curLevel > 0 && level > curLevel {
@@ -282,12 +281,10 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	}
 	var out []string
 	skipLevel := 0
-	inFence := false
+	var fence fenceTracker
 	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			inFence = !inFence
-		} else if m := atxHeadingRe.FindStringSubmatch(line); m != nil && !inFence {
+		if fence.line(line) {
+		} else if m := atxHeadingRe.FindStringSubmatch(line); m != nil && !fence.inFence() {
 			level := len(m[1])
 			if skipLevel > 0 && level <= skipLevel {
 				skipLevel = 0
@@ -303,55 +300,145 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
 
-// stripHTMLComments removes HTML comments from a note, outside code fences. A
-// heading inside a comment must not start a carried section, and commented-out
-// text must not be published. Line breaks inside a removed comment stay, so
-// that the rest of the note keeps its layout.
-func stripHTMLComments(text string) string {
+// fenceTracker follows Markdown code fences: a fence opens with three or more
+// backticks or tildes (up to three spaces of indent) and closes only with the
+// same character, at least as many of them, and nothing else on the line. A
+// shorter or different delimiter inside the fence is text.
+type fenceTracker struct {
+	char  byte
+	count int
+}
+
+// inFence reports whether a fence is open.
+func (f *fenceTracker) inFence() bool { return f.count > 0 }
+
+// line updates the state for one line and reports whether the line is a fence
+// delimiter (an opening or closing one).
+func (f *fenceTracker) line(text string) bool {
+	trimmed := strings.TrimLeft(text, " ")
+	if len(text)-len(trimmed) > 3 || trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return false
+	}
+	char := trimmed[0]
+	run := 0
+	for run < len(trimmed) && trimmed[run] == char {
+		run++
+	}
+	if run < 3 {
+		return false
+	}
+	rest := strings.TrimSpace(trimmed[run:])
+	if f.count == 0 {
+		if char == '`' && strings.Contains(rest, "`") {
+			return false // an inline span, not a fence
+		}
+		f.char, f.count = char, run
+		return true
+	}
+	if char == f.char && run >= f.count && rest == "" {
+		f.char, f.count = 0, 0
+		return true
+	}
+	return false
+}
+
+// SanitizePRNote removes HTML comments from a note, outside code fences and
+// inline code spans. A heading inside a comment must not start a carried
+// section, and commented-out text (a private token, a path) must reach neither
+// the model, nor the sources the text is checked against, nor the body. Line
+// breaks inside a removed comment stay, so that the rest of the note keeps its
+// layout. A comment that is never closed removes the rest of the note.
+func SanitizePRNote(text string) string {
 	if !strings.Contains(text, "<!--") {
 		return text
 	}
 	var out strings.Builder
-	inFence, inComment := false, false
+	var fence fenceTracker
+	inComment := false
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		if !inComment {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-				inFence = !inFence
+			if fence.line(line) || fence.inFence() {
+				out.WriteString(line)
+				if i < len(lines)-1 {
+					out.WriteString("\n")
+				}
+				continue
 			}
 		}
-		if inFence && !inComment {
-			out.WriteString(line)
-		} else {
-			rest := line
-			var kept strings.Builder
-			for rest != "" {
-				if inComment {
-					end := strings.Index(rest, "-->")
-					if end < 0 {
-						rest = ""
-						break
-					}
-					rest = rest[end+3:]
-					inComment = false
-					continue
-				}
-				start := strings.Index(rest, "<!--")
-				if start < 0 {
-					kept.WriteString(rest)
-					rest = ""
-					break
-				}
-				kept.WriteString(rest[:start])
-				rest = rest[start+4:]
-				inComment = true
-			}
-			out.WriteString(kept.String())
-		}
+		out.WriteString(stripCommentsInLine(line, &inComment))
 		if i < len(lines)-1 {
 			out.WriteString("\n")
 		}
 	}
 	return out.String()
+}
+
+// stripCommentsInLine removes comment text from one line outside inline code
+// spans. inComment carries a comment that continues over line breaks.
+func stripCommentsInLine(line string, inComment *bool) string {
+	var kept strings.Builder
+	rest := line
+	for rest != "" {
+		if *inComment {
+			end := strings.Index(rest, "-->")
+			if end < 0 {
+				return kept.String()
+			}
+			rest = rest[end+3:]
+			*inComment = false
+			continue
+		}
+		next := strings.IndexAny(rest, "`<")
+		if next < 0 {
+			kept.WriteString(rest)
+			break
+		}
+		kept.WriteString(rest[:next])
+		rest = rest[next:]
+		if rest[0] == '`' {
+			run := 0
+			for run < len(rest) && rest[run] == '`' {
+				run++
+			}
+			marker := rest[:run]
+			// A code span ends at the next run of the same length.
+			if end := indexBacktickRun(rest[run:], run); end >= 0 {
+				kept.WriteString(rest[:run+end+run])
+				rest = rest[run+end+run:]
+			} else {
+				kept.WriteString(marker)
+				rest = rest[run:]
+			}
+			continue
+		}
+		if strings.HasPrefix(rest, "<!--") {
+			rest = rest[4:]
+			*inComment = true
+			continue
+		}
+		kept.WriteByte('<')
+		rest = rest[1:]
+	}
+	return kept.String()
+}
+
+// indexBacktickRun returns the index of the first run of exactly n backticks
+// in s, or -1.
+func indexBacktickRun(s string, n int) int {
+	for i := 0; i < len(s); {
+		if s[i] != '`' {
+			i++
+			continue
+		}
+		run := 0
+		for i+run < len(s) && s[i+run] == '`' {
+			run++
+		}
+		if run == n {
+			return i
+		}
+		i += run
+	}
+	return -1
 }

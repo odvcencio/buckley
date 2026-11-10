@@ -78,10 +78,10 @@ var decisionWords = []struct{ said, source *regexp.Regexp }{
 // that names no command stays. In the text for a template section, a list item
 // is a step.
 func (pr *PRResult) DropUnbackedTesting(src PRSources) []string {
-	all := squeezeSpaces(src.All)
+	all := normalizeCommandText(src.All)
 	backed := func(step string) bool {
 		for _, command := range stepCommands(step) {
-			if !strings.Contains(all, squeezeSpaces(command)) {
+			if !strings.Contains(all, normalizeCommandText(command)) {
 				return false
 			}
 		}
@@ -138,14 +138,12 @@ func stepCommands(step string) []string {
 	}
 	text := trimBulletMarker(step)
 	if len(spans) > 0 {
-		// A span that is not the whole command (an argument in code format)
-		// must not hide the command before it.
+		// A command written in plain text with arguments in code format
+		// ("go test ./pkg -run `TestFoo`") is one command: its prefix and every
+		// code span that follows it directly, flags between them included.
 		if before, _, _ := strings.Cut(text, "`"); strings.TrimSpace(before) != "" {
-			if loc := commandTailRe.FindStringIndex(before); loc != nil {
-				before = before[:loc[0]]
-			}
-			if isCommand(before, false) {
-				commands = append(commands, strings.TrimSpace(before))
+			if full := plainCommandWithSpans(text); isCommand(full, false) {
+				commands = append(commands, full)
 			}
 		}
 		return commands
@@ -201,10 +199,10 @@ func (pr PRResult) UnbackedClaims(src PRSources) []string {
 	var claims []string
 
 	// A command in running text cannot be cut out like a list item can.
-	all := squeezeSpaces(src.All)
+	all := normalizeCommandText(src.All)
 	for _, key := range sortedKeys(pr.Sections) {
 		for _, span := range backtickSpanRe.FindAllStringSubmatch(pr.Sections[key], -1) {
-			if isCommand(span[1], false) && !strings.Contains(all, squeezeSpaces(span[1])) {
+			if isCommand(span[1], false) && !strings.Contains(all, normalizeCommandText(span[1])) {
 				claims = append(claims, fmt.Sprintf("the text names the command `%s`, which is not in the notes, the commits, the diff or the project guidelines", span[1]))
 			}
 		}
@@ -238,4 +236,48 @@ func plainNumber(n string) string {
 
 func squeezeSpaces(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// plainCommandWithSpans returns the command a step writes in plain text with
+// its arguments in code format, backticks removed: the text before the first
+// span, then each span, with the flag-like words between spans, until prose
+// starts.
+func plainCommandWithSpans(text string) string {
+	before, rest, _ := strings.Cut(text, "`")
+	if loc := commandTailRe.FindStringIndex(before); loc != nil {
+		return strings.TrimSpace(before[:loc[0]])
+	}
+	parts := []string{strings.TrimSpace(before)}
+	for {
+		span, after, found := strings.Cut(rest, "`")
+		if !found {
+			break
+		}
+		parts = append(parts, span)
+		next, more, ok := strings.Cut(after, "`")
+		if !ok {
+			break
+		}
+		// Words between two spans belong to the command only when they are
+		// flags or paths; anything else is prose and ends the command.
+		between := strings.Fields(next)
+		stop := false
+		for _, word := range between {
+			if !strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "./") && !strings.HasPrefix(word, "../") {
+				stop = true
+			}
+		}
+		if stop {
+			break
+		}
+		parts = append(parts, between...)
+		rest = more
+	}
+	return strings.Join(parts, " ")
+}
+
+// normalizeCommandText prepares text for comparing a command with its sources:
+// inline code marks are dropped and spaces squeezed on both sides.
+func normalizeCommandText(text string) string {
+	return squeezeSpaces(strings.ReplaceAll(text, "`", ""))
 }

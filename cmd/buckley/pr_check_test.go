@@ -90,3 +90,35 @@ func TestRunPRCommand_ADecisionWithoutASourceWarnsOrStops(t *testing.T) {
 		})
 	}
 }
+
+// Review of #468, second round, finding 4: a testing step with an unsupported
+// argument is left out, and --strict refuses it before gh runs.
+func TestRunPRCommand_StrictRefusesAnUnsupportedTestingStep(t *testing.T) {
+	r := newPRRepo(t)
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubGh(t)
+	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":[\"go test ./pkg -run `TestMissing`\"]}")
+	dir := t.TempDir()
+	writeFile(t, dir, "notes.md", "Ran go test ./pkg -run TestFoo and it passed.\n")
+
+	var err error
+	stderr := captureStderr(t, func() {
+		captureStdout(t, func() {
+			err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
+		})
+	})
+	if !strings.Contains(stderr, "left out the testing step") {
+		t.Errorf("the step was not left out:\n%s", stderr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "--strict") {
+		t.Fatalf("error = %v, want the --strict refusal", err)
+	}
+	for _, call := range g.calls(t) {
+		if strings.Join(call[:2], " ") == "pr create" {
+			t.Fatal("gh pr create ran although --strict refused")
+		}
+	}
+}

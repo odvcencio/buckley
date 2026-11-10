@@ -214,3 +214,29 @@ func TestLoadPRNotes_KeepsOrderAndSkipsEmptyFiles(t *testing.T) {
 		t.Fatalf("notes = %+v, want b.md then a.md", notes)
 	}
 }
+
+// Review of #468, second round, finding 2: commented-out text reaches neither
+// the prompt, nor the carried sections, nor the sources.
+func TestLoadPRNotes_CommentedTextReachesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "n.md", "## Testing\n\n- go vet passes\n\n<!-- secret-token-4711 `go test ./hidden` 98765 -->\n\n## Not verified\n\n- Windows\n")
+	notes, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, _ := prNotesPrompt(notes)
+	sections := commands.AuthorSections(notes)
+	sources := commands.NewPRSources(notes, nil)
+	var carried string
+	for _, s := range sections {
+		carried += s.Body
+	}
+	for name, text := range map[string]string{"prompt": prompt, "sections": carried, "record": sources.Record, "all": sources.All} {
+		if strings.Contains(text, "secret-token-4711") || strings.Contains(text, "98765") || strings.Contains(text, "go test ./hidden") {
+			t.Errorf("the %s holds commented-out text: %q", name, text)
+		}
+	}
+	if !strings.Contains(carried, "Windows") {
+		t.Errorf("sections lost real text: %q", carried)
+	}
+}
