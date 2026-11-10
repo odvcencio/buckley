@@ -174,3 +174,22 @@ func TestDropUnbackedTesting_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T
 		t.Errorf("dropped %q", dropped)
 	}
 }
+
+// Review of #468, third round: flags after the last code span are part of the
+// command.
+func TestDropUnbackedTesting_FlagAfterTheLastSpanIsPartOfTheCommand(t *testing.T) {
+	src := PRSources{All: "go test ./pkg -run TestFoo"}
+	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race"}}
+	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 1 || len(pr.Testing) != 0 {
+		t.Fatalf("dropped = %q, kept = %q: the unsupported -race passed", dropped, pr.Testing)
+	}
+	// Prose after the flags is not part of the command.
+	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race passed locally"}}
+	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run TestFoo -race"}); len(dropped) != 0 {
+		t.Fatalf("dropped a sourced step: %q", dropped)
+	}
+	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` passed locally"}}
+	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 0 {
+		t.Fatalf("prose was read as part of the command: %q", dropped)
+	}
+}

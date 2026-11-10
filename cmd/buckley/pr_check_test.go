@@ -122,3 +122,32 @@ func TestRunPRCommand_StrictRefusesAnUnsupportedTestingStep(t *testing.T) {
 		}
 	}
 }
+
+// Review of #468, third round: --strict fails on an unsupported flag after the
+// last code span too.
+func TestRunPRCommand_StrictRefusesAnUnsupportedFlagAfterTheLastSpan(t *testing.T) {
+	r := newPRRepo(t)
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubGh(t)
+	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":[\"go test ./pkg -run `TestFoo` -race\"]}")
+	dir := t.TempDir()
+	writeFile(t, dir, "notes.md", "Ran go test ./pkg -run TestFoo and it passed.\n")
+
+	var err error
+	stderr := captureStderr(t, func() {
+		captureStdout(t, func() {
+			err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
+		})
+	})
+	if !strings.Contains(stderr, "left out the testing step") || err == nil || !strings.Contains(err.Error(), "--strict") {
+		t.Fatalf("stderr = %q, error = %v, want the step left out and --strict refusing", stderr, err)
+	}
+	for _, call := range g.calls(t) {
+		if strings.Join(call[:2], " ") == "pr create" {
+			t.Fatal("gh pr create ran although --strict refused")
+		}
+	}
+}
