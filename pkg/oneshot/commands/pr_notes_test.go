@@ -404,3 +404,38 @@ func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
 		}
 	}
 }
+
+// Review of #468, second round, finding 1: a four-backtick fence holding a
+// three-backtick line closes only on a four-backtick line.
+func TestSanitizePRNote_FenceDelimitersMatchInLengthAndCharacter(t *testing.T) {
+	text := "## Testing\n\n````markdown\n```\n````\n<!-- private token abc123 -->\n\n~~~\n<!-- kept in a tilde fence -->\n```\nstill inside\n~~~\n<!-- gone abc123b -->\n"
+	got := SanitizePRNote(text)
+	if strings.Contains(got, "abc123") {
+		t.Errorf("a comment after the real closing fence was published:\n%s", got)
+	}
+	if !strings.Contains(got, "<!-- kept in a tilde fence -->") {
+		t.Errorf("a comment inside a fence was removed:\n%s", got)
+	}
+	sections := AuthorSections([]PRNote{{Path: "n.md", Text: text}})
+	for _, s := range sections {
+		if strings.Contains(s.Body, "abc123") {
+			t.Errorf("section %q publishes the token: %q", s.Heading, s.Body)
+		}
+	}
+}
+
+// Finding 3: an inline code span holding "<!--" is literal code.
+func TestSanitizePRNote_InlineCodeIsNotAComment(t *testing.T) {
+	text := "## Testing\n\n- `printf '<!--'` prints the opener\n- `` a ` <!-- b `` stays too\n\n## Not verified\n\n- Windows\n"
+	got := SanitizePRNote(text)
+	if got != text {
+		t.Fatalf("inline code was changed:\n%s", got)
+	}
+	if nv := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: text}}))[SectionNotVerified]; !strings.Contains(nv, "Windows") {
+		t.Fatalf("the Not verified section was erased: %q", nv)
+	}
+	// A real comment after a code span is still removed.
+	if got := SanitizePRNote("`code` <!-- hidden --> after"); got != "`code`  after" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -207,7 +207,10 @@ func loadPRNotes(paths []string) ([]commands.PRNote, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read --context-file %s: %w", path, err)
 		}
-		if text := strings.TrimSpace(string(data)); text != "" {
+		// Comments are removed once, here, so that the prompt, the carried
+		// sections and the sources the text is checked against all see the same
+		// note: commented-out text reaches none of them.
+		if text := strings.TrimSpace(commands.SanitizePRNote(strings.ReplaceAll(string(data), "\r\n", "\n"))); text != "" {
 			notes = append(notes, commands.PRNote{Path: path, Text: text})
 		}
 	}
@@ -630,15 +633,21 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 // source, and returns how many of those there are: code cannot rewrite prose,
 // so the author decides, or --strict stops the run.
 func checkPRAgainstSources(pr *commands.PRResult, src commands.PRSources) (claims int) {
-	for _, step := range pr.DropUnbackedTesting(src) {
+	dropped := pr.DropUnbackedTesting(src)
+	for _, step := range dropped {
 		prWarnf("left out the testing step %q: its command is not in the notes, the commits, the diff or the project guidelines", step)
 	}
 	unbacked := pr.UnbackedClaims(src)
 	for _, claim := range unbacked {
 		prWarnf("%s", claim)
 	}
-	return len(unbacked)
+	// A testing step that named a command nothing supports counts too: --strict
+	// stops on it, because the step is a claim that something was run.
+	return len(unbacked) + len(dropped)
 }
+
+// prBackupNow supplies the time in the name of a saved copy. Tests replace it.
+var prBackupNow = time.Now
 
 var errPRNonInteractive = errors.New("refusing to create PR without confirmation in non-interactive mode (use --dry-run or --yes)")
 
@@ -1011,7 +1020,7 @@ func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
 		return
 	}
 	number := url[strings.LastIndex(url, "/")+1:]
-	name := fmt.Sprintf("buckley/pr-%s-%s.md", number, time.Now().UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("buckley/pr-%s-%s.md", number, prBackupNow().UTC().Format("20060102T150405Z"))
 	path, err := gitOutput("rev-parse", "--git-path", name)
 	if err == nil {
 		path, err = filepath.Abs(path)

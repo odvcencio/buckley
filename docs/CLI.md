@@ -511,10 +511,16 @@ heading of the same or a higher level. A short label on a line of its own
 (`Evidence` above a list, or `Not verified:`) also starts one; it ends at the
 next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,
-the body says that nothing was stated.
+the body always says that the author stated nothing, also when the model wrote
+text of its own for a Not verified slot of the template (that text follows the
+statement).
 
-HTML comments in a notes file (`<!-- ... -->`) are ignored: a heading inside one
-does not start a section, and commented-out text is never copied into the body.
+Buckley removes HTML comments (`<!-- ... -->`) from each notes file once, when it
+reads the file, outside code fences and inline code. The model, the carried
+sections and the sources that the text is checked against all see the note
+without them, so commented-out text is used nowhere. A comment that is never
+closed removes the rest of the file. Other text in a carried section is copied
+word for word.
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a
@@ -531,10 +537,13 @@ The sources of a PR text are the author's notes, the commit messages, the diff,
 the file list and `AGENTS.md`. After the model answers, `buckley pr` compares
 what it wrote with them:
 
-- A testing step that names a command (a backtick span or a step that starts
-  with a program such as `go`, `make` or a script path) stays only when the
-  sources contain that command as written. Other steps are left out, and a
-  warning names each one. Put the commands you ran in a Testing section of a
+- A testing step that names a command stays only when the sources contain that
+  whole command. A command is a backtick span that starts with a program (such
+  as `go`, `make` or a script path), or a step that starts with such a program
+  in plain text, with its arguments in code format when it has any
+  (``go test ./pkg -run `TestFoo` ``). Inline code marks are ignored on both
+  sides. Steps that name no command are not checked. Other steps are left out,
+  and a warning names each one; with `--strict` a left-out step is an error. Put the commands you ran in a Testing section of a
   notes file to have them copied instead.
 - A word that states a decision (`rejected`, `approved`, `decided`, `ruled out`,
   `agreed`, `abandoned`, `dismissed`, `declined`) gets a warning when neither the
@@ -543,7 +552,8 @@ what it wrote with them:
   sources.
 
 Code cannot rewrite a sentence, so the last two are warnings on stderr and the
-text stays as the model wrote it. With `--strict` they are errors: nothing is
+text stays as the model wrote it. A command in the running text of a template
+section is also a warning. With `--strict` all of these are errors: nothing is
 pushed or created, and a dry run exits non-zero.
 
 The evidence that buckley gathers for the PR text comes from commits. The diff,
@@ -593,9 +603,11 @@ branch the worktree has checked out nor a PR from a same-named branch of
 another repository is edited, and in a fork checkout your own PR is the one
 found. An explicit `--base` that differs from the open PR's base is refused, not
 retargeted; `--no-update` refuses any open PR for the head. Before an update
-replaces the title and body of an open PR, the text it replaces is saved under
-the git directory (`buckley/pr-<number>-<time>.md`) and stderr names the file;
-`buckley pr --yes --body-file <that file>` puts it back. If `gh pr create`
+replaces the title and body of an open PR, `buckley pr` tries to save the text
+it replaces under the git directory as `buckley/pr-<number>-<time>-<random>.md`
+(the random part keeps two saves in one second apart) and stderr names the
+file; `buckley pr --yes --body-file <that file>` puts it back. When the copy
+cannot be written, a warning says so and the update goes on without a copy. If `gh pr create`
 prints no PR URL, `buckley pr` fails instead of labeling a PR it cannot name.
 
 ### pr merge

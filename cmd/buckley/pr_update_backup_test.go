@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // previousPRTexts returns the saved PR texts under the repository's git
@@ -102,6 +103,10 @@ func TestCreatePR_UpdateWithoutAChangeOrACopy(t *testing.T) {
 // name, and the second overwrote the first copy of a hand-edited body.
 func TestCreatePR_TwoUpdatesInOneSecondKeepBothCopies(t *testing.T) {
 	r := newPRRepo(t)
+	// Both saves use the same instant, so the test never depends on the clock.
+	previousNow := prBackupNow
+	prBackupNow = func() time.Time { return time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { prBackupNow = previousNow })
 	for i, body := range []string{"First hand edit.", "Second hand edit."} {
 		gh := newPreflightGh(prListJSON(prListEntry(5, "feature", "main", "o")))
 		gh.responses["pr view"] = []byte(`{"title":"add: thing","body":"` + body + `"}`)

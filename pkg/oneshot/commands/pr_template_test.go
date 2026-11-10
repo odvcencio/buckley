@@ -211,9 +211,21 @@ func TestPRBody_TemplateWithItsOwnNotVerifiedSection(t *testing.T) {
 	tmpl := ParsePRTemplate("## What changed\n\n<!-- Describe the change. -->\n\n## Not verified\n\n<!-- Say what you did not check. -->\n")
 	pr := PRResult{Action: "fix", Title: "guard", Sections: map[string]string{"what_changed": "Fixes the guard.", "not_verified": "Windows."}}
 
-	body := pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true})
-	if want := "## What changed\n\nFixes the guard.\n\n## Not verified\n\nWindows."; body != want {
-		t.Fatalf("body =\n%s\n\nwant\n%s", body, want)
+	// No author section: the statement that the author gave none stays, also
+	// when the model wrote text in the slot (review of #468, second round).
+	body := pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true, HasNotes: true})
+	if !strings.Contains(body, "The author's notes do not say what was left unverified") || !strings.Contains(body, "Windows.") {
+		t.Fatalf("model text suppressed the statement:\n%s", body)
+	}
+	if strings.Index(body, "The author's notes") > strings.Index(body, "Windows.") {
+		t.Fatalf("the statement must come before the model's text:\n%s", body)
+	}
+
+	// An author section fills the slot and no statement is added.
+	author := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified", Body: "- CI did not run"}}
+	body = pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true, HasNotes: true, Sections: author})
+	if strings.Contains(body, "do not say what was left unverified") || !strings.Contains(body, "CI did not run") {
+		t.Fatalf("body =\n%s", body)
 	}
 
 	// Left empty by the model, the template's own slot gets the statement
