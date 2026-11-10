@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -366,29 +367,6 @@ func TestPRBody_ModelCopyOfCarriedSectionIsNotRepeated(t *testing.T) {
 	}
 }
 
-// Review of #468, finding 1: a heading inside an HTML comment started a
-// carried section and published commented-out text.
-func TestAuthorSections_HTMLCommentsAreNotPublished(t *testing.T) {
-	text := "## Testing\n\n- go vet passes\n\n<!--\n## Evidence\n\nprivate token abc123 at /home/someone/secret\n-->\n\n<!-- Not verified: hidden -->\n\n## Not verified\n\n- Windows\n"
-	sections := AuthorSections([]PRNote{{Path: "n.md", Text: text}})
-	for _, s := range sections {
-		if strings.Contains(s.Body, "abc123") || strings.Contains(s.Body, "secret") || strings.Contains(s.Body, "hidden") || strings.Contains(s.Body, "<!--") {
-			t.Errorf("section %q publishes commented-out text: %q", s.Heading, s.Body)
-		}
-		if s.Kind == SectionEvidence {
-			t.Errorf("a heading inside a comment started the section %q", s.Heading)
-		}
-	}
-	if got := sectionsByKind(sections)[SectionNotVerified]; got != "Not verified\n- Windows\n" {
-		t.Errorf("not verified = %q", got)
-	}
-	// A comment marker inside a code fence is text, not a comment.
-	fenced := "## Testing\n\n```\n<!-- keep --> go test\n```\n"
-	if got := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: fenced}}))[SectionTesting]; !strings.Contains(got, "<!-- keep -->") {
-		t.Errorf("a comment marker inside a code fence was removed: %q", got)
-	}
-}
-
 // Finding 5: with a template headed Testing, an older "Testing" and a newer
 // "Test plan" must stay in note order and keep the testing kind.
 func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
@@ -405,57 +383,77 @@ func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
 	}
 }
 
-// Review of #468, second round, finding 1: a four-backtick fence holding a
-// three-backtick line closes only on a four-backtick line.
-func TestSanitizePRNote_FenceDelimitersMatchInLengthAndCharacter(t *testing.T) {
-	text := "## Testing\n\n````markdown\n```\n````\n<!-- private token abc123 -->\n\n~~~\n<!-- kept in a tilde fence -->\n```\nstill inside\n~~~\n<!-- gone abc123b -->\n"
-	got := SanitizePRNote(text)
-	if strings.Contains(got, "abc123") {
-		t.Errorf("a comment after the real closing fence was published:\n%s", got)
+// HTML comments are removed wherever they are, in prose, in inline code and in
+// fenced code, so that no private text can reach the model or the PR body
+// (reviews of #468, #469 and #470, three rounds of inputs).
+func TestSanitizePRNote_RemovesEveryCommentWhereverItIs(t *testing.T) {
+	const token = "PRIVATE-TOKEN-4711"
+	cases := map[string]string{
+		"plain":                     "## Evidence\n\n<!-- " + token + " -->\n",
+		"hidden heading":            "## Testing\n\n- go vet passes\n\n<!--\n## Evidence\n\n" + token + "\n-->\n",
+		"four-backtick fence":       "## Testing\n\n````markdown\n```\n````\n<!-- " + token + " -->\n",
+		"mixed tilde in backticks":  "## Evidence\n\n```\n~~~\n```\n<!-- " + token + " -->\n",
+		"mixed backtick in tildes":  "~~~\n```\n<!-- " + token + " -->\n~~~\n",
+		"inside a code fence":       "## Evidence\n\n```\n<!-- " + token + " -->\n```\n",
+		"inside inline code":        "## Evidence\n\n`<!-- " + token + " -->` and more\n",
+		"escaped backticks":         "## Evidence\n\nLiteral \\` <!-- " + token + " --> \\`.\n",
+		"code span across a line":   "## Testing\n\n- Run `printf\n  '<!-- " + token + " -->'` to print it.\n",
+		"comment after a code span": "`code` <!-- " + token + " --> after\n",
+		"nested opener":             "<!-- a <!-- " + token + " --> tail\n",
 	}
-	if !strings.Contains(got, "<!-- kept in a tilde fence -->") {
-		t.Errorf("a comment inside a fence was removed:\n%s", got)
-	}
-	sections := AuthorSections([]PRNote{{Path: "n.md", Text: text}})
-	for _, s := range sections {
-		if strings.Contains(s.Body, "abc123") {
-			t.Errorf("section %q publishes the token: %q", s.Heading, s.Body)
-		}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			clean, err := SanitizePRNote(text)
+			if err != nil {
+				t.Fatalf("SanitizePRNote: %v", err)
+			}
+			if strings.Contains(clean, token) || strings.Contains(clean, "<!--") {
+				t.Errorf("the comment survived:\n%s", clean)
+			}
+			for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: clean}}) {
+				if strings.Contains(s.Body, token) {
+					t.Errorf("section %q carries the token: %q", s.Heading, s.Body)
+				}
+			}
+			// Sections are also safe when the raw text reaches them.
+			for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: text}}) {
+				if strings.Contains(s.Body, token) {
+					t.Errorf("raw text: section %q carries the token: %q", s.Heading, s.Body)
+				}
+			}
+		})
 	}
 }
 
-// Finding 3: an inline code span holding "<!--" is literal code.
-func TestSanitizePRNote_InlineCodeIsNotAComment(t *testing.T) {
-	text := "## Testing\n\n- `printf '<!--'` prints the opener\n- `` a ` <!-- b `` stays too\n\n## Not verified\n\n- Windows\n"
-	got := SanitizePRNote(text)
-	if got != text {
-		t.Fatalf("inline code was changed:\n%s", got)
-	}
-	if nv := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: text}}))[SectionNotVerified]; !strings.Contains(nv, "Windows") {
-		t.Fatalf("the Not verified section was erased: %q", nv)
-	}
-	// A real comment after a code span is still removed.
-	if got := SanitizePRNote("`code` <!-- hidden --> after"); got != "`code`  after" {
-		t.Fatalf("got %q", got)
+// An opener with no closing marker is refused, with the line of the opener.
+func TestSanitizePRNote_UnclosedOpenerIsAnError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		text string
+		line int
+	}{
+		"inline code":   {"## Testing\n\n- Run `printf '<!--'` to print the opener.\n\n## Not verified\n\n- Windows\n", 3},
+		"across a line": {"## Testing\n\n- Run `printf\n  '<!--'` to print the opener.\n\n## Not verified\n\n- Windows\n", 4},
+		"plain":         {"intro\n<!-- never closed\ntext\n", 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := SanitizePRNote(tc.text)
+			want := fmt.Sprintf("line %d", tc.line)
+			if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "&lt;!--") {
+				t.Fatalf("error = %v, want one naming %s and the &lt;!-- alternative", err, want)
+			}
+		})
 	}
 }
 
-// Review of #469, second round, finding 1: a "~~~" line inside a backtick fence
-// is text, so the real closing fence is the backtick one and a comment after it
-// is removed.
-func TestSanitizePRNote_MixedFenceMarkersDoNotToggleEachOther(t *testing.T) {
-	text := "## Evidence\n\n```\n~~~\n```\n<!-- private path /home/someone/secret -->\n"
-	if got := SanitizePRNote(text); strings.Contains(got, "secret") {
-		t.Fatalf("the comment after the closing fence was published:\n%s", got)
+// A later Not verified section survives a closed comment, and the comment's
+// line breaks do not move the sections.
+func TestSanitizePRNote_LaterSectionsSurviveAClosedComment(t *testing.T) {
+	text := "## Testing\n\n- `printf '<!--' x -->` and <!-- hidden --> text\n\n## Not verified\n\n- Windows\n"
+	clean, err := SanitizePRNote(text)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: text}}) {
-		if strings.Contains(s.Body, "secret") {
-			t.Errorf("section %q publishes the comment: %q", s.Heading, s.Body)
-		}
-	}
-	// A tilde fence is not closed by backticks either.
-	text = "~~~\n```\n<!-- inside the tilde fence -->\n~~~\n<!-- gone secret2 -->\n"
-	if got := SanitizePRNote(text); strings.Contains(got, "secret2") || !strings.Contains(got, "inside the tilde fence") {
-		t.Fatalf("got %q", got)
+	if nv := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: clean}}))[SectionNotVerified]; !strings.Contains(nv, "Windows") {
+		t.Fatalf("the Not verified section was lost: %q\n%s", nv, clean)
 	}
 }

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -109,7 +110,8 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		}
 		return ""
 	}
-	lines := strings.Split(SanitizePRNote(strings.ReplaceAll(note.Text, "\r\n", "\n")), "\n")
+	sanitized, _ := stripHTMLComments(strings.ReplaceAll(note.Text, "\r\n", "\n"))
+	lines := strings.Split(sanitized, "\n")
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
@@ -342,103 +344,49 @@ func (f *fenceTracker) line(text string) bool {
 	return false
 }
 
-// SanitizePRNote removes HTML comments from a note, outside code fences and
-// inline code spans. A heading inside a comment must not start a carried
-// section, and commented-out text (a private token, a path) must reach neither
-// the model, nor the sources the text is checked against, nor the body. Line
-// breaks inside a removed comment stay, so that the rest of the note keeps its
-// layout. A comment that is never closed removes the rest of the note.
-func SanitizePRNote(text string) string {
-	if !strings.Contains(text, "<!--") {
-		return text
+// SanitizePRNote removes every HTML comment (<!-- ... -->) from a note, wherever
+// it is: in prose, in inline code and in fenced code. It does not track
+// Markdown structure on purpose: each rule that spared comments "inside code"
+// opened a new way to publish a private token, so the rule is simple and fails
+// closed. Line breaks inside a removed comment stay, so that the rest of the
+// note keeps its layout.
+//
+// A "<!--" with no closing "-->" is an error that names the line of the opener:
+// the rest of the note cannot be trusted. Write the opener another way (for
+// example "&lt;!--") when it is meant as text.
+func SanitizePRNote(text string) (string, error) {
+	out, unclosed := stripHTMLComments(text)
+	if unclosed > 0 {
+		return "", fmt.Errorf("line %d: \"<!--\" has no closing \"-->\"; close the comment, or write the opener another way (for example \"&lt;!--\") if it is meant as text", unclosed)
 	}
+	return out, nil
+}
+
+// stripHTMLComments removes the comments. When one is never closed it removes
+// the rest of the text and returns the line of its opener (1-based); otherwise
+// that line is 0.
+func stripHTMLComments(text string) (string, int) {
 	var out strings.Builder
-	var fence fenceTracker
-	inComment := false
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if !inComment {
-			if fence.line(line) || fence.inFence() {
-				out.WriteString(line)
-				if i < len(lines)-1 {
-					out.WriteString("\n")
-				}
-				continue
-			}
+	rest := text
+	line := 1
+	for {
+		start := strings.Index(rest, "<!--")
+		if start < 0 {
+			out.WriteString(rest)
+			return out.String(), 0
 		}
-		out.WriteString(stripCommentsInLine(line, &inComment))
-		if i < len(lines)-1 {
-			out.WriteString("\n")
+		out.WriteString(rest[:start])
+		line += strings.Count(rest[:start], "\n")
+		body := rest[start+4:]
+		end := strings.Index(body, "-->")
+		if end < 0 {
+			// Keep the line breaks so that nothing else moves.
+			out.WriteString(strings.Repeat("\n", strings.Count(body, "\n")))
+			return out.String(), line
 		}
+		newlines := strings.Count(body[:end], "\n")
+		out.WriteString(strings.Repeat("\n", newlines))
+		line += newlines
+		rest = body[end+3:]
 	}
-	return out.String()
-}
-
-// stripCommentsInLine removes comment text from one line outside inline code
-// spans. inComment carries a comment that continues over line breaks.
-func stripCommentsInLine(line string, inComment *bool) string {
-	var kept strings.Builder
-	rest := line
-	for rest != "" {
-		if *inComment {
-			end := strings.Index(rest, "-->")
-			if end < 0 {
-				return kept.String()
-			}
-			rest = rest[end+3:]
-			*inComment = false
-			continue
-		}
-		next := strings.IndexAny(rest, "`<")
-		if next < 0 {
-			kept.WriteString(rest)
-			break
-		}
-		kept.WriteString(rest[:next])
-		rest = rest[next:]
-		if rest[0] == '`' {
-			run := 0
-			for run < len(rest) && rest[run] == '`' {
-				run++
-			}
-			marker := rest[:run]
-			// A code span ends at the next run of the same length.
-			if end := indexBacktickRun(rest[run:], run); end >= 0 {
-				kept.WriteString(rest[:run+end+run])
-				rest = rest[run+end+run:]
-			} else {
-				kept.WriteString(marker)
-				rest = rest[run:]
-			}
-			continue
-		}
-		if strings.HasPrefix(rest, "<!--") {
-			rest = rest[4:]
-			*inComment = true
-			continue
-		}
-		kept.WriteByte('<')
-		rest = rest[1:]
-	}
-	return kept.String()
-}
-
-// indexBacktickRun returns the index of the first run of exactly n backticks
-// in s, or -1.
-func indexBacktickRun(s string, n int) int {
-	for i := 0; i < len(s); {
-		if s[i] != '`' {
-			i++
-			continue
-		}
-		run := 0
-		for i+run < len(s) && s[i+run] == '`' {
-			run++
-		}
-		if run == n {
-			return i
-		}
-		i += run
-	}
-	return -1
 }

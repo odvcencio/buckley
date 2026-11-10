@@ -209,8 +209,13 @@ func loadPRNotes(paths []string) ([]commands.PRNote, error) {
 		}
 		// Comments are removed once, here, so that the prompt, the carried
 		// sections and the sources the text is checked against all see the same
-		// note: commented-out text reaches none of them.
-		if text := strings.TrimSpace(commands.SanitizePRNote(strings.ReplaceAll(string(data), "\r\n", "\n"))); text != "" {
+		// note: commented-out text reaches none of them, also inside code. An
+		// unclosed comment is an error.
+		clean, err := commands.SanitizePRNote(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		if err != nil {
+			return nil, fmt.Errorf("--context-file %s: %w", path, err)
+		}
+		if text := strings.TrimSpace(clean); text != "" {
 			notes = append(notes, commands.PRNote{Path: path, Text: text})
 		}
 	}

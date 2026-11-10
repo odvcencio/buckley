@@ -255,22 +255,20 @@ func plainCommandWithSpans(text string) string {
 		}
 		parts = append(parts, span)
 		next, more, ok := strings.Cut(after, "`")
-		if !ok {
-			break
-		}
-		// Words between two spans belong to the command only when they are
-		// flags or paths; anything else is prose and ends the command.
-		between := strings.Fields(next)
+		// Flags and paths after a span belong to the command, also after the
+		// last span ("-run `TestFoo` -race"); the first other word is prose
+		// and ends the command.
 		stop := false
-		for _, word := range between {
+		for _, word := range strings.Fields(next) {
 			if !strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "./") && !strings.HasPrefix(word, "../") {
 				stop = true
+				break
 			}
+			parts = append(parts, word)
 		}
-		if stop {
+		if stop || !ok {
 			break
 		}
-		parts = append(parts, between...)
 		rest = more
 	}
 	return strings.Join(parts, " ")

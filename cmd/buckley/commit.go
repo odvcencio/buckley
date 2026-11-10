@@ -626,6 +626,11 @@ var documentationFileNames = map[string]bool{
 	"contributing": true, "code_of_conduct": true, "security": true,
 }
 
+// documentationExtensions are the only extensions that, with a name from
+// documentationFileNames, make a file documentation (README.txt). Any other
+// extension (security.go, license.go, changes.py) is code.
+var documentationExtensions = map[string]bool{".md": true, ".mdx": true, ".txt": true, ".rst": true, ".adoc": true}
+
 func onlyTestsFixturesOrDocs(files []string) bool {
 	for _, file := range files {
 		slash := filepath.ToSlash(file)
@@ -641,7 +646,7 @@ func onlyTestsFixturesOrDocs(files []string) bool {
 		// CMakeLists.txt and requirements.txt are build inputs.
 		case ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".adoc":
 		case hasElement(dirs, "docs") || hasElement(dirs, "doc"):
-		case documentationFileNames[base] || documentationFileNames[strings.TrimSuffix(base, ext)]:
+		case documentationFileNames[base] || (documentationExtensions[ext] && documentationFileNames[strings.TrimSuffix(base, ext)]):
 		default:
 			return false
 		}
