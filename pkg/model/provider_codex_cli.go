@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,6 +166,9 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		if prepErr != nil {
 			return nil, fmt.Errorf("reproduce codex review snapshot %s: %w", req.ReviewSnapshot.ID(), prepErr)
 		}
+		if cleanup != nil {
+			defer cleanup()
+		}
 		if strings.TrimSpace(isolatedDir) == "" {
 			return nil, fmt.Errorf("reproduce codex review snapshot %s: empty workspace", req.ReviewSnapshot.ID())
 		}
@@ -253,7 +258,10 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		}
 	}
 
-	content := readCodexLastMessage(outFile, result.Stdout)
+	content, err := readCodexLastMessage(outFile, result.Stdout)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(content) == "" {
 		return nil, fmt.Errorf("codex CLI returned an empty response")
 	}
@@ -792,12 +800,21 @@ func createCodexOutputFile() (string, string, func(), error) {
 	return path, runtimeDir, cleanup, nil
 }
 
-func readCodexLastMessage(path string, stdout []byte) string {
-	data, err := os.ReadFile(path)
-	if err == nil && strings.TrimSpace(string(data)) != "" {
-		return strings.TrimSpace(string(data))
+func readCodexLastMessage(path string, stdout []byte) (string, error) {
+	file, err := os.Open(path)
+	if err == nil {
+		defer file.Close()
+		data, readErr := io.ReadAll(io.LimitReader(file, maxCodexStdoutBytes+1))
+		if len(data) > maxCodexStdoutBytes {
+			return "", fmt.Errorf("codex last message exceeded the %d-byte capture limit; response is incomplete", maxCodexStdoutBytes)
+		}
+		if readErr == nil {
+			if content := strings.TrimSpace(string(data)); content != "" {
+				return content, nil
+			}
+		}
 	}
-	return strings.TrimSpace(string(stdout))
+	return strings.TrimSpace(string(stdout)), nil
 }
 
 func parseCodexCommandExecutionEvidence(stdout []byte) []CommandExecutionEvidence {
@@ -1104,6 +1121,8 @@ func estimateCodexUsage(messages []Message, output string) Usage {
 func formatCodexCLIError(err error, result CodexCLICommandResult) error {
 	stderr := strings.TrimSpace(string(result.Stderr))
 	stdout := codexCLIStdoutFailureDiagnostic(result.Stdout)
+	stderr = boundedCodexDiagnostic(stderr)
+	stdout = boundedCodexDiagnostic(stdout)
 	switch {
 	case stdout != "" && stderr != "":
 		return fmt.Errorf("codex CLI failed: %w: %s\ncodex CLI stderr: %s", err, stdout, stderr)
@@ -1277,36 +1296,6 @@ func boundedCodexTelemetryText(text string) string {
 	return text[:1021] + "..."
 }
 
-type codexLineWriter struct {
-	all     bytes.Buffer
-	pending []byte
-	onLine  func([]byte)
-}
-
-func (w *codexLineWriter) Write(data []byte) (int, error) {
-	w.all.Write(data)
-	w.pending = append(w.pending, data...)
-	for {
-		index := bytes.IndexByte(w.pending, '\n')
-		if index < 0 {
-			break
-		}
-		line := append([]byte(nil), w.pending[:index]...)
-		w.pending = w.pending[index+1:]
-		if w.onLine != nil {
-			w.onLine(line)
-		}
-	}
-	return len(data), nil
-}
-
-func (w *codexLineWriter) Flush() {
-	if len(w.pending) > 0 && w.onLine != nil {
-		w.onLine(append([]byte(nil), w.pending...))
-	}
-	w.pending = nil
-}
-
 func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLICommandResult, error) {
 	execCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	// Descendants must not hold output pipes open after cancellation.
@@ -1321,15 +1310,23 @@ func runCodexCLICommand(ctx context.Context, cmd CodexCLICommand) (CodexCLIComma
 		execCmd.Env = append([]string(nil), cmd.Env...)
 	}
 
-	stdout := &codexLineWriter{onLine: cmd.OnStdoutLine}
-	var stderr bytes.Buffer
+	stdout := &codexLineWriter{all: codexCaptureBuffer{limit: maxCodexStdoutBytes}, onLine: cmd.OnStdoutLine}
+	stderr := codexCaptureBuffer{limit: maxCodexStderrBytes}
 	execCmd.Stdout = stdout
 	execCmd.Stderr = &stderr
 
 	err := execCmd.Run()
 	stdout.Flush()
+	if stdout.all.truncated || stdout.lineTruncated {
+		captureErr := fmt.Errorf("codex stdout exceeded the %d-byte capture limit; response and execution evidence are incomplete", maxCodexStdoutBytes)
+		err = errors.Join(err, captureErr)
+	}
+	stderrBytes := stderr.buf.Bytes()
+	if stderr.truncated {
+		stderrBytes = append(stderrBytes, []byte("\n[stderr truncated]")...)
+	}
 	return CodexCLICommandResult{
-		Stdout: stdout.all.Bytes(),
-		Stderr: stderr.Bytes(),
+		Stdout: stdout.all.buf.Bytes(),
+		Stderr: stderrBytes,
 	}, err
 }

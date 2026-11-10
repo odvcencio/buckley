@@ -228,6 +228,8 @@ func commandReceiptForProto(receipt sessionexec.Receipt) *ipcpb.CommandReceipt {
 
 func commandAcceptanceHTTPError(err error) (int, error) {
 	switch {
+	case storage.IsStorageBudgetError(err):
+		return http.StatusInsufficientStorage, fmt.Errorf("storage budget reached; raise resources.storage_bytes or clean completed history")
 	case stdliberrors.Is(err, sessionexec.ErrValidation):
 		return http.StatusBadRequest, fmt.Errorf("invalid command")
 	case stdliberrors.Is(err, sessionexec.ErrNotFound):
@@ -253,6 +255,8 @@ func commandAcceptanceConnectError(err error) error {
 	code := connect.CodeInternal
 	message := "command acceptance failed"
 	switch {
+	case storage.IsStorageBudgetError(err):
+		code, message = connect.CodeResourceExhausted, "storage budget reached; raise resources.storage_bytes or clean completed history"
 	case stdliberrors.Is(err, sessionexec.ErrValidation):
 		code, message = connect.CodeInvalidArgument, "invalid command"
 	case stdliberrors.Is(err, sessionexec.ErrNotFound):
