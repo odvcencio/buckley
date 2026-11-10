@@ -642,6 +642,34 @@ approval:
 | `auto` | Full workspace access, approval for external operations |
 | `yolo` | Full autonomy (dangerous, use with caution) |
 
+### resources
+
+Global limits for active and paused session history. Set these in user config;
+project config cannot change them.
+
+```yaml
+resources:
+  session_memory_bytes: 8388608  # 8 MiB of retained working history per session
+  storage_bytes: 536870912      # 512 MiB per database, including owned evidence
+```
+
+Working context keeps system instructions, the original task, the latest summary
+and recent complete tool exchanges. Older transcript records remain on disk;
+resume loads a bounded view and replay uses the retained evidence. TUI scrollback,
+queued input and undo history share the session's retained-memory allowance.
+This limits retained application state, rather than the process's total RSS or a
+tool's transient allocations.
+
+Disk accounting is transactional. SQLite allocation, indexes and WAL growth also
+have limits; conservative headroom can stop writes before the configured byte
+total is reached. A full budget pauses new work without deleting active history
+or replay evidence. Raise the limit or clean completed history before resuming.
+Existing files above a newly lowered limit remain readable and are not truncated.
+Workspace files, Git objects, external tool allocations and legacy shared blobs
+are outside the database's owned budget.
+The minimum enabled limits are 64 KiB of working history and 16 MiB of disk;
+an explicit `0` disables the corresponding limit.
+
 ### memory
 
 Conversation memory and compaction.

@@ -2,6 +2,8 @@ module m31labs.dev/buckley
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	connectrpc.com/connect v1.19.1
 	github.com/PuerkitoBio/goquery v1.9.2

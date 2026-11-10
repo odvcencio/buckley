@@ -41,6 +41,10 @@ personality:
       voice:
         review: Direct, concise code review voice that cites files and line ranges.
 
+resources:
+  session_memory_bytes: 8388608
+  storage_bytes: 536870912
+
 memory:
   auto_compact_threshold: 0.9
   max_compactions: 2

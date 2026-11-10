@@ -101,6 +101,7 @@ type SubAgent struct {
 	allowedTools         map[string]struct{}
 	readOnly             bool
 	reviewSnapshot       *model.ReviewSnapshot
+	inputImages          []model.ContentPart
 	toolTier             string
 	toolless             bool
 
@@ -153,6 +154,7 @@ type SubAgentConfig struct {
 	SynthesisLead        time.Duration
 	AllowedTools         []string
 	ReviewSnapshot       *model.ReviewSnapshot
+	InputImages          []model.ContentPart
 	ToolTier             string // role_permissions tier for runtime validation
 }
 
@@ -264,6 +266,7 @@ func NewSubAgent(cfg SubAgentConfig, deps SubAgentDeps) (*SubAgent, error) {
 		allowedTools:         allowedTools,
 		readOnly:             isReadOnlyToolSet(cfg.AllowedTools) || cfg.ReviewSnapshot != nil,
 		reviewSnapshot:       cfg.ReviewSnapshot,
+		inputImages:          append([]model.ContentPart(nil), cfg.InputImages...),
 		toolTier:             cfg.ToolTier,
 		toolless:             catalogConfirmedToollessModel(deps.Models, cfg.Model),
 		client:               deps.Models,
@@ -390,9 +393,16 @@ func (a *SubAgent) Execute(ctx context.Context, task string) (*SubAgentResult, e
 		toolDefs = nil
 	}
 
+	var userContent any = task
+	if len(a.inputImages) > 0 {
+		parts := make([]model.ContentPart, 0, 1+len(a.inputImages))
+		parts = append(parts, model.ContentPart{Type: "text", Text: task})
+		parts = append(parts, a.inputImages...)
+		userContent = parts
+	}
 	messages := []model.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: task},
+		{Role: "user", Content: userContent},
 	}
 
 	result := &SubAgentResult{

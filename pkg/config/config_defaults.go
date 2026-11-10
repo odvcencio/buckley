@@ -121,6 +121,8 @@ func defaultNATSURL() string {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	cfg := &Config{
+		Retention: defaultRetentionConfig(),
+		Resources: defaultResourceConfig(),
 		Buckbot: BuckbotConfig{
 			Model:                      defaultBuckbotModel,
 			CriticModel:                defaultBuckbotCriticModel,

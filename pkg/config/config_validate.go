@@ -39,6 +39,8 @@ var configValidators = []func(*Config) error{
 	validateBuckbotPrivacyFallback,
 	validateOneshotDataPolicy,
 	validateDecisions,
+	validateRetention,
+	validateResources,
 }
 
 // Validate checks configuration values for correctness and returns an

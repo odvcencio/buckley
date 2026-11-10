@@ -21,8 +21,10 @@ func runDBCommand(args []string) error {
 		return runDBBackup(args[1:])
 	case "restore":
 		return runDBRestore(args[1:])
+	case "cleanup":
+		return runDBCleanup(args[1:])
 	default:
-		return fmt.Errorf("usage: buckley db <backup|restore> [flags]")
+		return fmt.Errorf("usage: buckley db <backup|restore|cleanup> [flags]")
 	}
 }
 

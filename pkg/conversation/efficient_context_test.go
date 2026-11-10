@@ -377,3 +377,64 @@ func TestCompactModelMessages_EnforcesBurstBudget(t *testing.T) {
 		t.Fatal("immediate tail should remain exact")
 	}
 }
+
+func TestCompactModelMessagesForRequest_ImmutableReviewRetainsExactEvidence(t *testing.T) {
+	const middle = "\nCI: Go (.) SUCCESS at head-sha\nCANOPY: complete\nEXACT MANIFEST: first.go, middle.go, last.go\nDIFF: exact-middle-hunk\n"
+	task := "review exact head-sha\n" + strings.Repeat("instruction ", 1500) + middle + strings.Repeat("diff line ", 1700) + "coverage acceptance\n"
+	history := []model.Message{
+		{Role: "system", Content: "review policy"},
+		{Role: "user", Content: task},
+		{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "old", Function: model.FunctionCall{Name: "exec_program", Arguments: "{}"}}}},
+		{Role: "tool", ToolCallID: "old", Content: strings.Repeat("unrelated old tool output ", 6000)},
+		{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "recent", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"middle.go"}`}}}},
+		{Role: "tool", ToolCallID: "recent", Content: strings.Repeat("recent evidence ", 500)},
+	}
+	for _, contextWindow := range []int{0, 32768} {
+		t.Run(fmt.Sprint(contextWindow), func(t *testing.T) {
+			req := model.ChatRequest{MaxTokens: 2048, ReviewSnapshot: &model.ReviewSnapshot{}}
+			got := CompactModelMessagesForRequest(history, req, contextWindow)
+			root := firstUserMessageIndex(got)
+			if root < 0 || got[root].Content != task {
+				t.Fatal("immutable review root prompt was excerpted")
+			}
+			if !strings.Contains(fmt.Sprint(got), middle) {
+				t.Fatal("CI, Canopy, manifest or middle diff was lost")
+			}
+			if GetContentAsString(history[3].Content) != strings.Repeat("unrelated old tool output ", 6000) {
+				t.Fatal("durable tool history mutated")
+			}
+			if got[len(got)-1].ToolCallID != "recent" || got[len(got)-1].Content != history[len(history)-1].Content {
+				t.Fatal("recent evidence tail changed")
+			}
+			if modelMessagesBytes(got) >= modelMessagesBytes(history) {
+				t.Fatal("oversized old tool evidence was not compacted")
+			}
+		})
+	}
+}
+
+func TestCompactModelMessages_ImmutableReviewRootSurvivesEmergencyCollapse(t *testing.T) {
+	task := strings.Repeat("exact immutable review evidence ", 1200)
+	history := []model.Message{
+		{Role: "system", Content: "review policy"},
+		{Role: "user", Content: task},
+		{Role: "assistant", Content: strings.Repeat("old commentary ", 1000)},
+		{Role: "tool", Content: strings.Repeat("old output ", 1000)},
+		{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "recent", Function: model.FunctionCall{Name: "read_file", Arguments: "{}"}}}},
+		{Role: "tool", ToolCallID: "recent", Content: strings.Repeat("recent evidence ", 500)},
+	}
+	opts := DefaultEfficientContextOptions()
+	opts.MaxBytes = 8 * 1024
+	opts.PreserveRootTask = true
+	got := CompactModelMessages(history, opts)
+	root := firstUserMessageIndex(got)
+	if root < 0 || got[root].Content != task {
+		t.Fatal("emergency collapse dropped immutable review root")
+	}
+	if len(got) >= len(history) {
+		t.Fatal("historical commentary did not collapse")
+	}
+	if got[len(got)-1].ToolCallID != "recent" {
+		t.Fatal("tool-call pair was lost")
+	}
+}

@@ -1561,7 +1561,7 @@ func TestController_LargeToolResultStaysInEvidence(t *testing.T) {
 	}
 }
 
-func TestController_StepEvidenceSurvivesRetentionUntilRunReleased(t *testing.T) {
+func TestController_StepEvidenceSurvivesRetentionUntilRunPruned(t *testing.T) {
 	ledger, ev, runID := newDurableControllerStores(t)
 	ctx := context.Background()
 	config := ControllerConfig{
@@ -1605,7 +1605,8 @@ func TestController_StepEvidenceSurvivesRetentionUntilRunReleased(t *testing.T) 
 		t.Fatalf("output evidence gone after sweep: %v", err)
 	}
 
-	// Pruning the run releases the pins; the next sweep reaps.
+	// Legacy runs may lack pins; their durable references still protect
+	// evidence until the run itself is pruned.
 	released, err := ev.ReleaseByReason(ctx, RunPinReason(runID))
 	if err != nil {
 		t.Fatalf("ReleaseByReason: %v", err)
@@ -1617,8 +1618,15 @@ func TestController_StepEvidenceSurvivesRetentionUntilRunReleased(t *testing.T) 
 	if err != nil {
 		t.Fatalf("second Sweep: %v", err)
 	}
-	if len(removed) == 0 {
-		t.Fatal("sweep after release removed nothing, want step evidence reaped")
+	if len(removed) != 0 {
+		t.Fatalf("sweep removed evidence of a retained run: %v", removed)
+	}
+	if _, err := ledger.DB().ExecContext(ctx, `DELETE FROM agent_runs WHERE run_id = ?`, runID); err != nil {
+		t.Fatalf("prune run: %v", err)
+	}
+	removed, err = ev.Sweep(ctx, evidence.DefaultRetentionPolicy(), future)
+	if err != nil || len(removed) == 0 {
+		t.Fatalf("sweep after pruning removed %v, error=%v", removed, err)
 	}
 }
 

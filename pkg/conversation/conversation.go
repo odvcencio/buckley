@@ -12,6 +12,7 @@ import (
 
 // Message represents a conversation message
 type Message struct {
+	storageID        int64
 	Role             string
 	Content          any // Can be string or []model.ContentPart for multimodal
 	Timestamp        time.Time
@@ -23,6 +24,7 @@ type Message struct {
 	IsTruncated      bool                    // Indicates this message was interrupted/incomplete
 	Reasoning        string                  // Reasoning/thinking content for reasoning models
 	ReasoningDetails []model.ReasoningDetail // Structured reasoning blocks for reasoning continuity
+	workingOnly      bool
 }
 
 // Conversation manages a conversation with the LLM
@@ -31,6 +33,8 @@ type Conversation struct {
 	Messages        []Message
 	TokenCount      int
 	CompactionCount int
+	historyBeforeID int64
+	memoryBlocked   error
 }
 
 const (
@@ -243,6 +247,8 @@ func (c *Conversation) Clear() {
 	c.Messages = []Message{}
 	c.TokenCount = 0
 	c.CompactionCount = 0
+	c.historyBeforeID = 0
+	c.memoryBlocked = nil
 }
 
 // estimateTokens provides a rough token estimate
@@ -294,7 +300,13 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 	if err != nil {
 		return err
 	}
+	c.historyBeforeID = 0
+	c.memoryBlocked = nil
+	c.loadStorageMessages(messages)
+	return nil
+}
 
+func (c *Conversation) loadStorageMessages(messages []storage.Message) {
 	// Convert storage messages to conversation messages
 	c.Messages = make([]Message, len(messages))
 	totalTokens := 0
@@ -302,6 +314,7 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 
 	for i, msg := range messages {
 		c.Messages[i] = Message{
+			storageID:        msg.ID,
 			Role:             msg.Role,
 			Content:          materializeMessageContent(msg),
 			Timestamp:        msg.Timestamp,
@@ -322,7 +335,6 @@ func (c *Conversation) LoadFromStorage(store *storage.Store) error {
 
 	c.TokenCount = totalTokens
 	c.CompactionCount = compactions
-	return nil
 }
 
 // SaveMessage saves a message to storage
@@ -331,20 +343,43 @@ func (c *Conversation) SaveMessage(store *storage.Store, msg Message) error {
 	if err != nil {
 		return err
 	}
-	return store.SaveMessage(&storageMsg)
+	if err := store.SaveMessage(&storageMsg); err != nil {
+		return err
+	}
+	for i := len(c.Messages) - 1; i >= 0; i-- {
+		if c.Messages[i].Timestamp.Equal(msg.Timestamp) && c.Messages[i].Role == msg.Role {
+			c.Messages[i].storageID = storageMsg.ID
+			break
+		}
+	}
+	return nil
 }
 
 // SaveAllMessages saves all messages to storage
 func (c *Conversation) SaveAllMessages(store *storage.Store) error {
-	messages := make([]storage.Message, len(c.Messages))
+	if c.memoryBlocked != nil {
+		return c.memoryBlocked
+	}
+	messages := make([]storage.Message, 0, len(c.Messages))
+	indices := make([]int, 0, len(c.Messages))
 	for i, msg := range c.Messages {
+		if msg.workingOnly || (c.historyBeforeID > 0 && msg.storageID > 0 && msg.storageID <= c.historyBeforeID) {
+			continue
+		}
 		storageMsg, err := StorageMessage(c.SessionID, msg)
 		if err != nil {
 			return fmt.Errorf("serialize message %d: %w", i, err)
 		}
-		messages[i] = storageMsg
+		messages = append(messages, storageMsg)
+		indices = append(indices, i)
 	}
-	return store.ReplaceMessages(c.SessionID, messages)
+	if err := store.ReplaceMessagesAfter(c.SessionID, c.historyBeforeID, messages); err != nil {
+		return err
+	}
+	for i, index := range indices {
+		c.Messages[index].storageID = messages[i].ID
+	}
+	return nil
 }
 
 // StorageMessage losslessly converts one conversation message into Buckley's

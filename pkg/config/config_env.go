@@ -43,7 +43,7 @@ func applyEnvOverrides(cfg *Config, configEnv map[string]string) {
 // cascade crosses top-level sections (only envCodexProvider, into
 // Models.*) access beyond their own subtree. configEnv is the
 // ~/.buckley/config.env fallback map (see loadConfigEnvVars in
-// config_load.go), consulted only for OPENROUTER_API_KEY.
+// config_load.go), consulted for provider credentials.
 type envCtx struct {
 	cfg       *Config
 	configEnv map[string]string
@@ -262,13 +262,18 @@ func envOpenAIProvider(ctx envCtx, field reflect.Value, path []string) {
 	}
 }
 
-// envAnthropicProvider applies ANTHROPIC_API_KEY, mirroring
-// envOpenAIProvider.
+// envAnthropicProvider loads the direct API credential without changing model
+// defaults. Process environment takes precedence over YAML and config.env.
 func envAnthropicProvider(ctx envCtx, field reflect.Value, path []string) {
 	p := field.Addr().Interface().(*ProviderSettings)
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 		p.APIKey = v
 		p.Enabled = true
+	} else if p.APIKey == "" {
+		if v := ctx.configEnv["ANTHROPIC_API_KEY"]; v != "" {
+			p.APIKey = v
+			p.Enabled = true
+		}
 	}
 }
 

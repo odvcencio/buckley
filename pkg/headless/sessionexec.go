@@ -185,6 +185,9 @@ func (r *Runner) drainDurableLane(lane sessionexec.Lane) bool {
 		}
 		if err != nil {
 			r.emitDurableJournalError("claim command", err)
+			if storage.IsStorageBudgetError(err) {
+				r.pauseForResourceBudget(err)
+			}
 			return true
 		}
 		r.executeDurableClaim(claimed)
@@ -337,7 +340,7 @@ func (r *Runner) executeDurableClaim(command sessionexec.Command) {
 		}
 		return
 	}
-	if work && !transcriptReady && !durableTranscriptIntegrityError(executeErr) {
+	if work && !transcriptReady && !durableTranscriptIntegrityError(executeErr) && !errors.Is(executeErr, storage.ErrSessionMemoryBudget) {
 		r.releaseDurableLease(command.Lease)
 		return
 	}
@@ -358,7 +361,11 @@ func (r *Runner) executeDurableClaim(command sessionexec.Command) {
 		completion.State = sessionexec.StateFailed
 		completion.ErrorCode = "command_failed"
 		var incomplete *agentloop.IncompleteTurnError
-		if errors.As(executeErr, &incomplete) {
+		if storage.IsStorageBudgetError(executeErr) || errors.Is(executeErr, storage.ErrSessionMemoryBudget) {
+			completion.State = sessionexec.StateBlocked
+			completion.ErrorCode = "resource_budget"
+			r.pauseForResourceBudget(executeErr)
+		} else if errors.As(executeErr, &incomplete) {
 			notice := agentloop.PresentIncompleteResult(executeErr)
 			completion.State = sessionexec.StateBlocked
 			completion.ErrorCode = notice.Code
@@ -387,6 +394,7 @@ func (r *Runner) executeDurableClaim(command sessionexec.Command) {
 		if !errors.Is(err, sessionexec.ErrLeaseStale) && !errors.Is(err, sessionexec.ErrLeaseExpired) {
 			r.releaseDurableLease(command.Lease)
 		}
+		r.pauseForResourceBudget(err)
 		return
 	}
 	r.emitDurableTerminalEvent(eventCommand, receipt, executeErr)
@@ -481,7 +489,7 @@ func (r *Runner) beginDurableTranscript(command sessionexec.Command) error {
 	loader := r.transcriptLoader
 	if loader == nil {
 		loader = func(conv *conversation.Conversation, store *storage.Store) error {
-			return conv.LoadFromStorage(store)
+			return conv.LoadWorkingSet(store, r.config.Resources.SessionMemoryBytes)
 		}
 	}
 	if err := loader(conv, r.store); err != nil {
@@ -688,6 +696,9 @@ func (r *Runner) handleDurableCommand(ctx context.Context, command sessionexec.C
 		r.setState(StatePaused)
 		return nil
 	case "resume":
+		if err := storage.CheckStorageBudget(ctx, r.store.DB(), 0, true); err != nil {
+			return err
+		}
 		if err := r.store.SetSessionStatus(r.sessionID, storage.SessionStatusActive); err != nil {
 			return err
 		}

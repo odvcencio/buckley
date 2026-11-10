@@ -285,9 +285,17 @@ func runServeCommand(args []string) error {
 		if err != nil {
 			return fmt.Errorf("initialize serve durability: %w", err)
 		}
+		if err := storage.ConfigureStorageBudget(ctx, store.DB(), appCfg.Resources.StorageBytes); err != nil {
+			return fmt.Errorf("configure storage budget: %w", err)
+		}
 		if err := durableServer.SetDurableStores(ledger, evidenceStore); err != nil {
 			return fmt.Errorf("configure serve durability: %w", err)
 		}
+		stopRetention, err := startHistoryRetention(ctx, appCfg.Retention, evidenceStore)
+		if err != nil {
+			return err
+		}
+		defer stopRetention()
 	}
 	if models != nil {
 		if registryInit, ok := server.(interface {
@@ -308,7 +316,7 @@ func runServeCommand(args []string) error {
 // openServeDurableStores composes the canonical run ledger and evidence
 // stores onto the same SQLite connection already owned by the IPC storage
 // adapter. The storage owner remains responsible for closing that connection.
-func openServeDurableStores(store *storage.Store) (runledger.Store, evidence.Store, error) {
+func openServeDurableStores(store *storage.Store) (*runledger.SQLiteStore, *evidence.SQLiteStore, error) {
 	if store == nil || store.DB() == nil {
 		return nil, nil, fmt.Errorf("storage unavailable")
 	}

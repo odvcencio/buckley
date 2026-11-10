@@ -169,7 +169,7 @@ func preservesReasoningMessages(providerID string, opts providerTransformOptions
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(providerID)) {
-	case "openrouter":
+	case "openrouter", "anthropic":
 		return true
 	default:
 		return false

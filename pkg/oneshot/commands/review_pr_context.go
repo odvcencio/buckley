@@ -1533,7 +1533,7 @@ func getPRDiffWithBudget(run prCommandRunner, target prReference, maxBytes int, 
 		maxBytes = diffsignal.ReviewDiffBudget
 	}
 	budget := maxBytes - len(truncMarker)
-	res := diffsignal.Prioritize(source.Text, budget)
+	res := diffsignal.PrioritizeForReview(source.Text, budget)
 	diff := res.Context
 	if res.Truncated {
 		diff += truncMarker
@@ -2628,7 +2628,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		audit.Add("clean local verification worktree", 0)
 	}
 
-	const agentsLimit = 10_000
+	const agentsLimit = 64 << 10
 	if ctx.PR == nil || strings.TrimSpace(ctx.PR.HeadSHA) == "" {
 		recordPRContextFailure(ctx, audit, "Root AGENTS.md", fmt.Errorf("immutable PR head was unavailable"))
 		return
@@ -2649,7 +2649,7 @@ func assemblePRAgentsContext(ctx *PRContext, audit *transparency.ContextAudit, d
 		audit.Add("AGENTS.md", 0)
 		ctx.addStatus("Root AGENTS.md", "complete", fmt.Sprintf("%d bytes", len(content)), false)
 	}
-	appendNestedPRAgentsContext(ctx, audit, deps.run, root, agentsLimit)
+	appendNestedPRAgentsContext(ctx, audit, deps.run, root, 10_000)
 }
 
 func assemblePRCanopyContext(

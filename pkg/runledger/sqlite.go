@@ -103,6 +103,10 @@ func New(dbPath string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(0)
+	if err := storage.EnableSQLiteIncrementalVacuum(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("runledger: enable incremental vacuum: %w", err)
+	}
 
 	if err := storage.EnableSQLiteWAL(db); err != nil {
 		_ = db.Close()
@@ -112,6 +116,10 @@ func New(dbPath string) (*SQLiteStore, error) {
 	if err := runMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("runledger: run migrations: %w", err)
+	}
+	if err := storage.RefreshStorageBudget(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("runledger: refresh storage budget: %w", err)
 	}
 
 	return newSQLiteStore(db), nil
@@ -135,6 +143,9 @@ func NewWithDB(db *sql.DB) (*SQLiteStore, error) {
 	}
 	if err := runMigrations(db); err != nil {
 		return nil, fmt.Errorf("runledger: run migrations: %w", err)
+	}
+	if err := storage.RefreshStorageBudget(context.Background(), db); err != nil {
+		return nil, fmt.Errorf("runledger: refresh storage budget: %w", err)
 	}
 	return newSQLiteStore(db), nil
 }
@@ -599,14 +610,19 @@ func (s *SQLiteStore) BeginStep(ctx context.Context, step ExecutionStep) (Execut
 		step.StartedAt = time.Now().UTC()
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	var res sql.Result
+	err := retryMailboxBusy(ctx, func() error {
+		var err error
+		res, err = s.db.ExecContext(ctx, `
 		INSERT INTO execution_steps (
 			run_id, task_id, step_id, kind, idempotency_key, status, attempt,
 			claim_generation, input_digest, dispatch_state, started_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, step_id) DO NOTHING
 	`, step.RunID, nullableStr(step.TaskID), step.StepID, step.Kind, step.IdempotencyKey,
-		StepStarted, step.Attempt, 1, nullableStr(step.InputDigest), StepDispatchClaimed, sqliteTimestamp(step.StartedAt))
+			StepStarted, step.Attempt, 1, nullableStr(step.InputDigest), StepDispatchClaimed, sqliteTimestamp(step.StartedAt))
+		return err
+	})
 	if err != nil {
 		return ExecutionStep{}, false, fmt.Errorf("runledger: insert execution step %s: %w", step.StepID, err)
 	}

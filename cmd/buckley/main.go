@@ -303,6 +303,26 @@ func main() {
 	}
 	defer store.Close()
 	modelManager.SetProviderThreadStore(store)
+	if cfg.Retention.Enabled || cfg.Resources.StorageBytes > 0 {
+		_, evidenceStore, err := openServeDurableStores(store)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing history cleanup: %v\n", err)
+			os.Exit(1)
+		}
+		if err := storage.ConfigureStorageBudget(context.Background(), store.DB(), cfg.Resources.StorageBytes); err != nil {
+			fmt.Fprintf(os.Stderr, "Error configuring storage budget: %v\n", err)
+			os.Exit(1)
+		}
+		stopRetention, err := startHistoryRetention(context.Background(), cfg.Retention, evidenceStore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing history cleanup: %v\n", err)
+			os.Exit(1)
+		}
+		defer stopRetention()
+	} else if err := storage.ConfigureStorageBudget(context.Background(), store.DB(), 0); err != nil {
+		fmt.Fprintf(os.Stderr, "Error disabling storage budget: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Load project context (AGENTS.md)
 	loader := projectcontext.NewLoader(cwd)
@@ -1543,6 +1563,10 @@ func initDependenciesWithReviewCritic(criticModel string, prepareReviewCritic bo
 	}
 	modelManager.SetProviderThreadStore(store)
 
+	if err := storage.ConfigureStorageBudget(context.Background(), store.DB(), cfg.Resources.StorageBytes); err != nil {
+		_ = store.Close()
+		return nil, nil, nil, fmt.Errorf("configure storage budget: %w", err)
+	}
 	return cfg, modelManager, store, nil
 }
 
@@ -1615,6 +1639,7 @@ func printHelp() {
 	fmt.Println("  migrate                          Apply database migrations")
 	fmt.Println("  db backup --out <path>           Create a consistent SQLite backup (VACUUM INTO)")
 	fmt.Println("  db restore --in <path> --force   Restore SQLite backup (stop Buckley first)")
+	fmt.Println("  db cleanup [--dry-run]          Prune completed history and unreferenced evidence")
 	fmt.Println("  resume <session-id>              Resume a previous session")
 	fmt.Println("  session export <session-id>      Export a session transcript (--format json|markdown)")
 	fmt.Println("  models refresh [--dry-run]       Merge models.dev capability/pricing metadata into the catalog cache")

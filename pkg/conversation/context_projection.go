@@ -77,6 +77,7 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 		opts := DefaultEfficientContextOptions()
 		opts.MaxBytes = maxProjectionInt(16*1024, int(float64(opts.MaxBytes)*scale))
 		opts.PinnedFromIndex = pinnedFromIndex
+		opts.PreserveRootTask = req.ReviewSnapshot != nil
 		stats.BudgetTokens = opts.MaxBytes / 4
 		projected := CompactModelMessages(messages, opts)
 		return finishProjectionStats(messages, projected, req, stats)
@@ -90,6 +91,7 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 
 	opts := adaptiveContextOptions(contextWindow, messageBudget, scale)
 	opts.PinnedFromIndex = pinnedFromIndex
+	opts.PreserveRootTask = req.ReviewSnapshot != nil
 	projected := packProjectionToRequestBudget(messages, req, requestBudget, opts)
 	return finishProjectionStats(messages, projected, req, stats)
 }
@@ -99,7 +101,17 @@ func ProjectModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 // sizeable usable context empty after a successful retry. Searching the
 // monotonic byte budget keeps as much durable evidence as the request allows.
 func packProjectionToRequestBudget(messages []model.Message, req model.ChatRequest, requestBudget int, opts EfficientContextOptions) []model.Message {
-	projected := CompactModelMessages(messages, opts)
+	baseOpts := opts
+	baseOpts.MaxBytes = 0
+	base := CompactModelMessages(messages, baseOpts)
+	protectedReasoning := unansweredToolCallIndices(base)
+	rootTaskIndex := firstUserMessageIndex(base)
+	project := func(budget int) []model.Message {
+		candidateOpts := opts
+		candidateOpts.MaxBytes = budget
+		return compactToBudget(cloneProjectionMessages(base), candidateOpts, protectedReasoning, rootTaskIndex)
+	}
+	projected := project(opts.MaxBytes)
 	if projectionFitsRequestBudget(projected, req, requestBudget) {
 		return projected
 	}
@@ -110,9 +122,7 @@ func packProjectionToRequestBudget(messages []model.Message, req model.ChatReque
 	var best []model.Message
 	for attempt := 0; attempt < 8 && low <= high; attempt++ {
 		mid := low + (high-low+1)/2
-		candidateOpts := opts
-		candidateOpts.MaxBytes = mid
-		candidate := CompactModelMessages(messages, candidateOpts)
+		candidate := project(mid)
 		if projectionFitsRequestBudget(candidate, req, requestBudget) {
 			best = candidate
 			low = mid + 1

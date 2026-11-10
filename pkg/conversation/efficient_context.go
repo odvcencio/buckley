@@ -20,6 +20,9 @@ type EfficientContextOptions struct {
 	OldAssistantBytes    int
 	KeepReasoningRecent  int
 	MaxBytes             int
+	// PreserveRootTask retains immutable review evidence, including exact
+	// changed-file manifests and CI identity, instead of excerpting its middle.
+	PreserveRootTask bool
 
 	// PinnedFromIndex marks the end of the represented prefix: every message
 	// at an index below it must pass through byte-identical — no reasoning
@@ -81,8 +84,10 @@ func CompactModelMessagesForRequestPinned(messages []model.Message, req model.Ch
 func CompactModelMessages(messages []model.Message, opts EfficientContextOptions) []model.Message {
 	if opts.RecentMessages <= 0 {
 		pinned := opts.PinnedFromIndex
+		preserveRoot := opts.PreserveRootTask
 		opts = DefaultEfficientContextOptions()
 		opts.PinnedFromIndex = pinned
+		opts.PreserveRootTask = preserveRoot
 	}
 	result := make([]model.Message, len(messages))
 	copy(result, messages)
@@ -131,9 +136,9 @@ func CompactModelMessages(messages []model.Message, opts EfficientContextOptions
 		var hasToolDigest bool
 		if msg.Role == "tool" {
 			if content, ok := msg.Content.(string); ok && content != "" {
-				identity := msg.Name + "\x00" + content
-				if signature, ok := toolCallSignatures[msg.ToolCallID]; ok {
-					identity = signature
+				identity, matched := toolCallSignatures[msg.ToolCallID]
+				if !matched {
+					identity = msg.Name + "\x00" + content
 				}
 				toolDigest = sha256.Sum256([]byte(identity))
 				hasToolDigest = true
@@ -247,6 +252,9 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 				}
 			}
 		case "user":
+			if opts.PreserveRootTask && i == rootTaskIndex {
+				continue
+			}
 			if content, ok := msg.Content.(string); ok {
 				if i == rootTaskIndex {
 					msg.Content = compactRootTaskContent(content, rootTaskBudget(opts.MaxBytes))
@@ -276,6 +284,9 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 				msg.Content = compactHistoricalContent(content, 240, "assistant response")
 			}
 		case "user":
+			if opts.PreserveRootTask && i == rootTaskIndex {
+				continue
+			}
 			if content, ok := msg.Content.(string); ok {
 				if i == rootTaskIndex {
 					msg.Content = compactRootTaskContent(content, rootTaskBudget(opts.MaxBytes))
@@ -287,12 +298,12 @@ func compactToBudget(messages []model.Message, opts EfficientContextOptions, pro
 		totalBytes += modelMessageBytes(*msg) - before
 	}
 	if totalBytes > opts.MaxBytes {
-		return collapseHistoricalPrefix(messages, opts.MaxBytes, opts.PinnedFromIndex)
+		return collapseHistoricalPrefix(messages, opts.MaxBytes, opts.PinnedFromIndex, opts.PreserveRootTask)
 	}
 	return messages
 }
 
-func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromIndex int) []model.Message {
+func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromIndex int, preserveRootTask bool) []model.Message {
 	if len(messages) <= 2 {
 		return messages
 	}
@@ -311,8 +322,9 @@ func collapseHistoricalPrefix(messages []model.Message, maxBytes, pinnedFromInde
 
 	protected := make([]model.Message, 0, tailStart)
 	collapsed := make([]model.Message, 0, tailStart)
-	for _, msg := range messages[:tailStart] {
-		if msg.Role == "system" {
+	rootTaskIndex := firstUserMessageIndex(messages)
+	for index, msg := range messages[:tailStart] {
+		if msg.Role == "system" || (preserveRootTask && index == rootTaskIndex) {
 			protected = append(protected, msg)
 		} else {
 			collapsed = append(collapsed, msg)

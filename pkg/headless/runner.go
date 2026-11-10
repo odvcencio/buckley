@@ -162,6 +162,7 @@ type Runner struct {
 	approvalChan    chan ApprovalResponse
 
 	commandQueue     chan command.SessionCommand
+	queuedBytes      int
 	commandStop      chan struct{}
 	commandStopped   chan struct{}
 	stopOnce         sync.Once
@@ -253,14 +254,6 @@ func newInertRunner(cfg RunnerConfig) (*Runner, error) {
 		idleTimeout = 30 * time.Minute
 	}
 
-	conv := conversation.New(cfg.Session.ID)
-
-	// Load existing conversation from storage
-	if err := conv.LoadFromStorage(cfg.Store); err != nil {
-		// Non-fatal - start fresh
-		conv = conversation.New(cfg.Session.ID)
-	}
-
 	tools := cfg.Tools
 	if tools == nil {
 		tools = tool.NewRegistry()
@@ -271,6 +264,10 @@ func newInertRunner(cfg RunnerConfig) (*Runner, error) {
 		baseCfg = config.DefaultConfig()
 	}
 	sessionCfg := resolveSessionConfig(baseCfg, cfg.Session)
+	conv := conversation.New(cfg.Session.ID)
+	if err := conv.LoadWorkingSet(cfg.Store, runnerWorkingMemoryBytes(sessionCfg, durable)); err != nil {
+		return nil, fmt.Errorf("restore session working history: %w", err)
+	}
 
 	projectCtx := loadRunnerProjectContext(cfg.Session)
 	var rulesEngine *rules.Engine
@@ -340,7 +337,7 @@ func newInertRunner(cfg RunnerConfig) (*Runner, error) {
 	transcriptLoader := cfg.TranscriptLoader
 	if transcriptLoader == nil {
 		transcriptLoader = func(conv *conversation.Conversation, store *storage.Store) error {
-			return conv.LoadFromStorage(store)
+			return conv.LoadWorkingSet(store, runnerWorkingMemoryBytes(sessionCfg, durable))
 		}
 	}
 	r := &Runner{
@@ -525,7 +522,9 @@ func (r *Runner) AcceptCommand(ctx context.Context, cmd command.SessionCommand) 
 		return sessionexec.Receipt{}, fmt.Errorf("headless runner unavailable")
 	}
 	if r != nil && r.durable {
-		return r.acceptDurableCommand(ctx, cmd, true, false, true)
+		receipt, err := r.acceptDurableCommand(ctx, cmd, true, false, true)
+		r.pauseForResourceBudget(err)
+		return receipt, err
 	}
 	cmd.EnsureID()
 	if err := sessionexec.ValidateCommandTaskIntent(cmd.Type, cmd.TaskIntent); err != nil {
@@ -569,11 +568,21 @@ func (r *Runner) handleLegacySessionCommand(cmd command.SessionCommand) error {
 		return r.runSessionCommand(cmd)
 	}
 
+	bytes := legacyQueuedCommandBytes(cmd)
+	r.mu.Lock()
+	limit := runnerWorkingMemoryBytes(r.config, false)
+	if limit > 0 && r.queuedBytes+bytes > limit {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: queued input is full", storage.ErrSessionMemoryBudget)
+	}
 	select {
 	case r.commandQueue <- cmd:
+		r.queuedBytes += bytes
+		r.mu.Unlock()
 		r.emitCommandEvent(EventCommandQueued, cmd, nil)
 		return nil
 	default:
+		r.mu.Unlock()
 		return fmt.Errorf("command queue full")
 	}
 }
@@ -610,6 +619,9 @@ func (r *Runner) acceptDurableCommand(ctx context.Context, cmd command.SessionCo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := storage.RecoverStorageBudgetWAL(ctx, r.store.DB()); err != nil && !storage.IsStorageBudgetError(err) {
+		return sessionexec.Receipt{}, err
+	}
 	acceptCtx, cancel := context.WithTimeout(ctx, r.durableTiming.OperationTimeout)
 	defer cancel()
 	receipt, err := r.commandJournal.Accept(acceptCtx, sessionexec.AcceptRequest{
@@ -644,6 +656,9 @@ func (r *Runner) commandLoop() {
 			if !ok {
 				return
 			}
+			r.mu.Lock()
+			r.queuedBytes = max(0, r.queuedBytes-legacyQueuedCommandBytes(cmd))
+			r.mu.Unlock()
 			if err := r.runSessionCommand(cmd); err != nil {
 				_ = r.persistSystemMessage(r.formatCommandError(err))
 			}
@@ -910,6 +925,7 @@ func (r *Runner) processUserInputWithIntent(content string, taskIntent string) e
 	userMsg := r.conv.Messages[len(r.conv.Messages)-1]
 	if err := r.conv.SaveMessage(r.store, userMsg); err != nil {
 		r.emitError("failed to save user message", err)
+		return err
 	}
 
 	// Run the conversation loop
@@ -945,6 +961,15 @@ func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *ses
 	if r.State() == StateStopped || (command == nil && r.State() == StatePaused) {
 		return nil
 	}
+	defer func() {
+		if _, err := r.conv.BoundWorkingSet(runnerWorkingMemoryBytes(r.config, r.durable)); err != nil {
+			r.pauseForResourceBudget(err)
+		}
+	}()
+	if err := storage.CheckStorageBudget(ctx, r.store.DB(), 0, true); err != nil {
+		r.pauseForResourceBudget(err)
+		return err
+	}
 
 	controller, err := r.newTurnControllerForCommand(command, taskIntent)
 	if err != nil {
@@ -960,6 +985,7 @@ func (r *Runner) runConversationLoopForCommand(ctx context.Context, command *ses
 	}
 	if err != nil {
 		draft := ""
+		r.pauseForResourceBudget(err)
 		if result != nil {
 			draft = result.Content
 		}
@@ -1134,6 +1160,12 @@ func (r *Runner) newTurnControllerForCommand(command *sessionexec.Command, taskI
 		CompletionContract: r.completionContractForCommand(command, taskIntent),
 		LifecycleObserver:  telemetry.NewAgentLoopObserver(r.telemetry),
 		BuildRequest: func(ctx context.Context, round int) (model.ChatRequest, error) {
+			if _, err := r.conv.BoundWorkingSet(runnerWorkingMemoryBytes(r.config, r.durable)); err != nil {
+				return model.ChatRequest{}, err
+			}
+			if err := storage.CheckStorageBudget(ctx, r.store.DB(), 0, true); err != nil {
+				return model.ChatRequest{}, err
+			}
 			if command != nil {
 				if err := r.currentDurableBufferError(); err != nil {
 					return model.ChatRequest{}, fmt.Errorf("durable transcript unavailable: %w", err)
@@ -2445,6 +2477,10 @@ func (r *Runner) emit(event RunnerEvent) {
 }
 
 func (r *Runner) emitError(msg string, err error) {
+	if storage.IsStorageBudgetError(err) || errors.Is(err, storage.ErrSessionMemoryBudget) {
+		r.pauseForResourceBudget(err)
+		return
+	}
 	r.setState(StateError)
 	errorText := ""
 	if err != nil {

@@ -118,6 +118,10 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	if err := scaffold(scratch, source); err != nil {
 		return Result{}, err
 	}
+	tempDir := filepath.Join(scratch, "tmp")
+	if err := os.Mkdir(tempDir, 0o700); err != nil {
+		return Result{}, fmt.Errorf("execmode: temporary directory: %w", err)
+	}
 
 	// The token outlives the program by a margin only, and the grant is
 	// the run's, not the surface's.
@@ -156,8 +160,12 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + scratch,
+		"TMPDIR=" + tempDir,
+		"TMP=" + tempDir,
+		"TEMP=" + tempDir,
+		"GOTMPDIR=" + tempDir,
 		"GOCACHE=" + goCache,
-		"GOFLAGS=-mod=mod",
+		"GOFLAGS=-mod=mod -trimpath",
 		"GOPROXY=off",
 		"BUCKLEY_CAPS_SOCKET=" + broker.SocketPath(),
 		"BUCKLEY_CAPS_TOKEN=" + broker.Token(),
