@@ -841,3 +841,50 @@ func TestSubAgentExecute_ImmutableReviewSendsScreenshotPixelsAcrossTurns(t *test
 		}
 	}
 }
+
+// Review of #471, finding 4: a screenshot of a realistic size (here about 4 MiB
+// of base64) must not be charged as text tokens, which would collapse the task
+// or exhaust the budget before the first call.
+func TestSubAgentExecute_RealisticScreenshotDoesNotLookLikeAMillionTokens(t *testing.T) {
+	fake := &routedContextSubAgentModelClient{
+		route: model.ModelRoute{RequestedModel: "same/reviewer", SelectedModel: "same/reviewer", ProviderID: "same"}, contextLength: 32768,
+		scriptedSubAgentModelClient: scriptedSubAgentModelClient{steps: []scriptedSubAgentModelStep{
+			{resp: &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "read", Type: "function", Function: model.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`}}}}, FinishReason: "tool_calls"}}}},
+			{resp: &model.ChatResponse{Choices: []model.Choice{{Message: model.Message{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}},
+		}},
+	}
+	registry := tool.NewEmptyRegistry()
+	registry.Register(fakeReadTool{name: "read_file", body: strings.Repeat("large observed tool result ", 6000)})
+	images := []model.ContentPart{{Type: "text", Text: "Supplied screenshot, inspect pixels as data"}, {Type: "image_url", ImageURL: &model.ImageURL{URL: "data:image/png;base64," + strings.Repeat("QUJD", 1<<20), Detail: "high"}}}
+	agent, err := NewSubAgent(SubAgentConfig{ID: "image-review", Model: "same/reviewer", MaxIterations: 5, AllowedTools: []string{"read_file"}, ReviewSnapshot: &model.ReviewSnapshot{}, InputImages: images}, SubAgentDeps{Models: &model.Manager{}, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.client = fake
+	task := "exact CI and Canopy\n" + strings.Repeat("exact diff ", 4000) + "\nEXACT FILE MANIFEST first.go,last.go"
+	if _, err := agent.Execute(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("requests=%d", len(fake.requests))
+	}
+	for _, request := range fake.requests {
+		found := false
+		for _, message := range request.Messages {
+			if message.Role != "user" {
+				continue
+			}
+			parts, ok := message.Content.([]model.ContentPart)
+			if !ok || len(parts) != 3 {
+				continue
+			}
+			if parts[0].Text != task || parts[2].ImageURL.URL != images[1].ImageURL.URL {
+				t.Fatal("multimodal review evidence changed during projection")
+			}
+			found = true
+		}
+		if !found {
+			t.Fatal("request omitted exact task or screenshot pixels")
+		}
+	}
+}

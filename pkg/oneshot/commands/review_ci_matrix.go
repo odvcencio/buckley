@@ -191,7 +191,7 @@ func capturePRGoMatrixReachability(run prCommandRunner, target prReference, pr *
 	if err := verifyPRHeadMergeTreeEquality(run, pr, mergeSHA); err != nil {
 		return nil, err
 	}
-	tree, err := readPRGoMatrixTree(run, pr, mergeSHA)
+	tree, symlinkedManifests, err := readPRGoMatrixTree(run, pr, mergeSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +202,16 @@ func capturePRGoMatrixReachability(run prCommandRunner, target prReference, pr *
 		}
 		if err := verifyPRGoTestFile(run, pr, mergeSHA, file); err != nil {
 			return nil, err
+		}
+		// A symlinked go.mod is still a module boundary for Go, but it is not a
+		// regular file this adapter can read: refuse every test below one.
+		for ancestor := path.Dir(file); ; ancestor = path.Dir(ancestor) {
+			if symlinkedManifests[path.Join(ancestor, "go.mod")] {
+				return nil, fmt.Errorf("changed test %s is under a symlinked go.mod (%s)", file, path.Join(ancestor, "go.mod"))
+			}
+			if ancestor == "." || ancestor == "/" {
+				break
+			}
 		}
 		dir := path.Dir(file)
 		for !tree[path.Join(dir, "go.mod")] && dir != "." {
@@ -319,31 +329,35 @@ func verifyPRHeadMergeTreeEquality(run prCommandRunner, pr *PRInfo, mergeSHA str
 	return nil
 }
 
-func readPRGoMatrixTree(run prCommandRunner, pr *PRInfo, sha string) (map[string]bool, error) {
+func readPRGoMatrixTree(run prCommandRunner, pr *PRInfo, sha string) (regular, symlinkedManifests map[string]bool, err error) {
 	output, err := run("gh", withPRAPIHostname([]string{"api", "repos/" + pr.Repository + "/git/trees/" + url.PathEscape(sha) + "?recursive=1"}, pr.Host)...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(output) > 16<<20 {
-		return nil, fmt.Errorf("snapshot tree exceeds evidence limit")
+		return nil, nil, fmt.Errorf("snapshot tree exceeds evidence limit")
 	}
 	var tree struct {
 		Truncated bool                                `json:"truncated"`
 		Entries   []struct{ Path, Mode, Type string } `json:"tree"`
 	}
 	if err := json.Unmarshal(output, &tree); err != nil || tree.Truncated {
-		return nil, fmt.Errorf("snapshot tree unavailable or truncated")
+		return nil, nil, fmt.Errorf("snapshot tree unavailable or truncated")
 	}
 	entries := map[string]bool{}
+	symlinks := map[string]bool{}
 	for _, entry := range tree.Entries {
 		if entry.Path == "go.work" || strings.HasSuffix(entry.Path, "/go.work") {
-			return nil, fmt.Errorf("Go workspace overrides need explicit reachability support")
+			return nil, nil, fmt.Errorf("Go workspace overrides need explicit reachability support")
 		}
 		if entry.Type == "blob" && (entry.Mode == "100644" || entry.Mode == "100755") {
 			entries[entry.Path] = true
 		}
+		if entry.Mode == "120000" && path.Base(entry.Path) == "go.mod" {
+			symlinks[entry.Path] = true
+		}
 	}
-	return entries, nil
+	return entries, symlinks, nil
 }
 
 func readPRGoMatrixRunIdentity(run prCommandRunner, pr *PRInfo, runID int64) (string, error) {
@@ -379,12 +393,26 @@ func readPRMatrixGoModule(run prCommandRunner, pr *PRInfo, sha, dir string) (str
 	if err != nil {
 		return "", err
 	}
+	module := ""
 	for _, line := range strings.Split(content, "\n") {
-		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "module" {
-			return fields[1], nil
+		if before, _, found := strings.Cut(line, "//"); found {
+			line = before
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == "ignore" {
+			// "ignore" removes directories from ./... , so a changed test below
+			// one is not run by the matrix job. Refuse until the exclusions are
+			// evaluated.
+			return "", fmt.Errorf("module %s has go.mod ignore directives; coverage of its tests is not proven", dir)
+		}
+		if len(fields) == 2 && fields[0] == "module" && module == "" {
+			module = fields[1]
 		}
 	}
-	return "", fmt.Errorf("module %s has no module directive", dir)
+	if module == "" {
+		return "", fmt.Errorf("module %s has no module directive", dir)
+	}
+	return module, nil
 }
 
 func provePRMatrixGoPackages(run prCommandRunner, pr *PRInfo, sha, dir, module string, files []string) ([]string, error) {

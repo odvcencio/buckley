@@ -115,3 +115,21 @@ func TestNodeOptionalPackageRequiresExplicitUnsupportedOS(t *testing.T) {
 		})
 	}
 }
+
+// Review of #471, finding 5: the distribution launcher finds its browser next
+// to itself. Copied into the runtime folder it would run a browser that is not
+// there, so it is refused with a clear message.
+func TestNodeBrowserRuntimeRefusesSelfLocatingLauncher(t *testing.T) {
+	root := t.TempDir()
+	launcher := filepath.Join(root, "google-chrome")
+	script := "#!/bin/bash\nHERE=\"$(dirname \"$(readlink -f \"$0\")\")\"\nexec \"$HERE/chrome\" \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLIDES_BROWSER", "")
+	t.Setenv("SLIDES_CHROME", launcher)
+	_, _, err := prepareNodeBrowserRuntime(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "looks for the browser next to itself") {
+		t.Fatalf("error = %v, want the launcher refused with a clear message", err)
+	}
+}

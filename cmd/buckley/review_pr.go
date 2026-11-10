@@ -309,6 +309,9 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("review deadline exhausted during initialization: %w", err)
 	}
+	if err := rejectImagesForTextOnlyProviders(imageParts, runtime.mgr.ProviderIDForModel, runtime.policy.adaptiveCodexModel, runtime.modelID, runtime.criticModel); err != nil {
+		return err
+	}
 
 	if !quietMode {
 		printReviewModelSelection(runtime)
@@ -1164,4 +1167,29 @@ func printPRReview(reviewText string, prInfo *commands.PRInfo) {
 	}
 	termOut.Newline()
 	fmt.Println(reviewText)
+}
+
+// textOnlyReviewProviders cannot carry image attachments: the Codex CLI
+// transport turns each message into text and drops image parts, so a review
+// would run without the pixels while the caller believes it saw them.
+var textOnlyReviewProviders = map[string]bool{"codex": true}
+
+// rejectImagesForTextOnlyProviders refuses --image when the primary or the
+// critic model runs on a provider that cannot carry images, and names it.
+func rejectImagesForTextOnlyProviders(images []model.ContentPart, providerOf func(string) string, adaptiveCodex bool, models ...string) error {
+	if len(images) == 0 {
+		return nil
+	}
+	if adaptiveCodex {
+		return fmt.Errorf("--image is not supported with the codex provider: its transport drops image attachments; choose a model on another provider")
+	}
+	for _, id := range models {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if provider := providerOf(id); textOnlyReviewProviders[provider] {
+			return fmt.Errorf("--image is not supported with the %s provider (model %s): its transport drops image attachments; choose a model on another provider", provider, id)
+		}
+	}
+	return nil
 }

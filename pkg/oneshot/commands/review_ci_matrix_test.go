@@ -138,6 +138,9 @@ func matrixTestRunner(t *testing.T, mode string) (prCommandRunner, *PRInfo, []st
 						if mode == "no-source" && file == "deck.go" {
 							continue
 						}
+						if mode == "symlink-go-mod" && file == "go.mod" && dir == "examples/gophercon2026" {
+							modeValue = "120000"
+						}
 						entries = append(entries, map[string]string{"path": path.Join(dir, file), "mode": modeValue, "type": "blob"})
 					}
 				}
@@ -156,6 +159,9 @@ func matrixTestRunner(t *testing.T, mode string) (prCommandRunner, *PRInfo, []st
 				return []byte(content), nil
 			case strings.Contains(endpoint, "/contents/"):
 				if strings.Contains(endpoint, "/go.mod?") {
+					if mode == "go-mod-ignore" {
+						return []byte("module example.dev/slides\ngo 1.26.0\n\nignore ./broken\n"), nil
+					}
 					return []byte("module example.dev/slides\ngo 1.26.0\n"), nil
 				}
 				if mode == "test-build-tag" && strings.Contains(endpoint, "_test.go?") {
@@ -209,7 +215,7 @@ func TestCapturePRGoMatrixReachability_ExactRequiredModules(t *testing.T) {
 }
 
 func TestCapturePRGoMatrixReachability_FailsClosed(t *testing.T) {
-	for _, mode := range []string{"merge-tree-drift", "merge-parent-drift", "unsafe-workflow", "wrong-module", "unrequired-module", "failed-check", "wrong-repository", "stale-head", "stale-base", "wrong-workflow", "skipped-test", "symlink-test", "truncated-tree", "go-work", "test-build-tag"} {
+	for _, mode := range []string{"merge-tree-drift", "merge-parent-drift", "unsafe-workflow", "wrong-module", "unrequired-module", "failed-check", "wrong-repository", "stale-head", "stale-base", "wrong-workflow", "skipped-test", "symlink-test", "truncated-tree", "go-work", "test-build-tag", "go-mod-ignore", "symlink-go-mod"} {
 		t.Run(mode, func(t *testing.T) {
 			run, pr, files := matrixTestRunner(t, mode)
 			target := prReference{Number: pr.Number, Host: pr.Host, Repository: pr.Repository}

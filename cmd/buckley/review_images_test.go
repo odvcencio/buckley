@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/model"
 )
 
 func TestLoadReviewImages_CapturesExplicitPixels(t *testing.T) {
@@ -111,5 +113,32 @@ func TestParseReviewPRCommandOptions_RepeatableImagesAfterPR(t *testing.T) {
 	}
 	if options.prRef != "2" || !options.post || len(options.imagePaths) != 2 || options.imagePaths[0] != "first screenshot.png" || options.imagePaths[1] != "second.png" {
 		t.Fatalf("options=%+v", options)
+	}
+}
+
+// Review of #471, finding 3: the Codex transport drops image parts, so --image
+// must be refused for it, with the provider named.
+func TestRejectImagesForTextOnlyProviders(t *testing.T) {
+	images := []model.ContentPart{{Type: "image_url", ImageURL: &model.ImageURL{URL: "data:image/png;base64,AAAA"}}}
+	providerOf := func(id string) string {
+		if strings.HasPrefix(id, "codex/") {
+			return "codex"
+		}
+		return "openrouter"
+	}
+	if err := rejectImagesForTextOnlyProviders(images, providerOf, false, "codex/gpt-6.1-sol", ""); err == nil || !strings.Contains(err.Error(), "codex provider") {
+		t.Fatalf("a Codex primary was accepted or the provider is not named: %v", err)
+	}
+	if err := rejectImagesForTextOnlyProviders(images, providerOf, false, "anthropic/claude", "codex/critic"); err == nil || !strings.Contains(err.Error(), "codex/critic") {
+		t.Fatalf("a Codex critic was accepted: %v", err)
+	}
+	if err := rejectImagesForTextOnlyProviders(images, providerOf, true, "auto"); err == nil {
+		t.Fatal("the adaptive Codex selector was accepted")
+	}
+	if err := rejectImagesForTextOnlyProviders(images, providerOf, false, "anthropic/claude", ""); err != nil {
+		t.Fatalf("an image-capable provider was refused: %v", err)
+	}
+	if err := rejectImagesForTextOnlyProviders(nil, providerOf, false, "codex/gpt-6.1-sol"); err != nil {
+		t.Fatalf("a review without images was refused: %v", err)
 	}
 }

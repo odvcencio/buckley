@@ -4,8 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// selfLocatingScriptRe finds a launcher script that looks for files next to
+// itself (as the distribution launcher /usr/bin/google-chrome does with
+// "$(dirname "$(readlink -f "$0")")"). Copied into the private runtime folder,
+// such a script would look for its browser there and fail.
+var selfLocatingScriptRe = regexp.MustCompile(`\$0\b|\$\{0[}:#%/]|BASH_SOURCE|\breadlink\b|\bdirname\b|\brealpath\b`)
 
 // NodeVerificationPackagePath resolves only manifests inside the immutable
 // snapshot, using the same package promotion as the actual verifier.
@@ -50,6 +57,9 @@ func prepareNodeBrowserRuntime(runtimeDir string) ([]string, map[string]string, 
 				return nil, nil, err
 			}
 			if strings.HasPrefix(string(content), "#!") {
+				if selfLocatingScriptRe.Match(content) {
+					return nil, nil, fmt.Errorf("%s selects %s, a launcher script that looks for the browser next to itself; it cannot be copied into the private runtime. Select the browser binary itself, or a wrapper script that runs it by absolute path", key, selected)
+				}
 				copied := filepath.Join(runtimeDir, strings.ToLower(key))
 				if err := os.WriteFile(copied, content, 0o700); err != nil {
 					return nil, nil, err
