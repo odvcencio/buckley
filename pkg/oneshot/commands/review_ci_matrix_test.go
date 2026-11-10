@@ -165,6 +165,15 @@ func matrixTestRunner(t *testing.T, mode string) (prCommandRunner, *PRInfo, []st
 					if mode == "go-mod-ignore-block" {
 						return []byte("module example.dev/slides\ngo 1.26.0\n\nignore(\n\t./broken\n)\n"), nil
 					}
+					if mode == "go-mod-ignore-cr" {
+						return []byte("module example.dev/slides\ngo 1.26.0\n\nignore\r ./broken\n"), nil
+					}
+					if mode == "go-mod-ignore-cr-block" {
+						return []byte("module example.dev/slides\r\ngo 1.26.0\r\n\r\nignore\r(\r\n\t./broken\r\n)\r\n"), nil
+					}
+					if mode == "go-mod-ignore-tab" {
+						return []byte("module example.dev/slides\ngo 1.26.0\n\nignore\t./broken\n"), nil
+					}
 					if mode == "go-mod-ignore-spaced-block" {
 						return []byte("module example.dev/slides\ngo 1.26.0\n\nignore (\n\t./broken\n)\n"), nil
 					}
@@ -221,7 +230,7 @@ func TestCapturePRGoMatrixReachability_ExactRequiredModules(t *testing.T) {
 }
 
 func TestCapturePRGoMatrixReachability_FailsClosed(t *testing.T) {
-	for _, mode := range []string{"merge-tree-drift", "merge-parent-drift", "unsafe-workflow", "wrong-module", "unrequired-module", "failed-check", "wrong-repository", "stale-head", "stale-base", "wrong-workflow", "skipped-test", "symlink-test", "truncated-tree", "go-work", "test-build-tag", "go-mod-ignore", "go-mod-ignore-block", "go-mod-ignore-spaced-block", "symlink-go-mod"} {
+	for _, mode := range []string{"merge-tree-drift", "merge-parent-drift", "unsafe-workflow", "wrong-module", "unrequired-module", "failed-check", "wrong-repository", "stale-head", "stale-base", "wrong-workflow", "skipped-test", "symlink-test", "truncated-tree", "go-work", "test-build-tag", "go-mod-ignore", "go-mod-ignore-block", "go-mod-ignore-spaced-block", "go-mod-ignore-cr", "go-mod-ignore-cr-block", "go-mod-ignore-tab", "symlink-go-mod"} {
 		t.Run(mode, func(t *testing.T) {
 			run, pr, files := matrixTestRunner(t, mode)
 			target := prReference{Number: pr.Number, Host: pr.Host, Repository: pr.Repository}

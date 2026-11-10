@@ -187,7 +187,7 @@ func TestRunReviewPRCommand_CallsTheImageProviderGuard(t *testing.T) {
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "rejectImagesForTextOnlyProviders" {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "checkReviewImages" {
 					found = true
 				}
 			}
@@ -195,6 +195,23 @@ func TestRunReviewPRCommand_CallsTheImageProviderGuard(t *testing.T) {
 		})
 	}
 	if !found {
-		t.Fatal("runReviewPRCommand no longer calls rejectImagesForTextOnlyProviders: --image would reach a transport that drops it")
+		t.Fatal("runReviewPRCommand no longer calls checkReviewImages: --image would reach a transport that drops it")
+	}
+}
+
+// Behaviour of the command's guard on a runtime (review of #471, third round):
+// the adaptive Codex selector is refused with an image and accepted without.
+func TestCheckReviewImages_UsesTheRuntimeSelection(t *testing.T) {
+	images := []model.ContentPart{{Type: "image_url", ImageURL: &model.ImageURL{URL: "data:image/png;base64,AAAA"}}}
+	codex := &reviewCommandRuntime{policy: automatedReviewOptions{adaptiveCodexModel: true}, modelID: "auto"}
+	if err := checkReviewImages(images, codex); err == nil || !strings.Contains(err.Error(), "codex provider") {
+		t.Fatalf("adaptive Codex runtime with an image: %v", err)
+	}
+	if err := checkReviewImages(nil, codex); err != nil {
+		t.Fatalf("no images: %v", err)
+	}
+	plain := &reviewCommandRuntime{modelID: "openrouter/x"}
+	if err := checkReviewImages(images, plain); err != nil {
+		t.Fatalf("a runtime with an unknown provider was refused: %v", err)
 	}
 }

@@ -442,7 +442,7 @@ func provePRMatrixGoPackages(run prCommandRunner, pr *PRInfo, sha, dir, module s
 }
 
 // isGoModDirective reports whether a go.mod line starts with the directive. Go's
-// lexer ends the keyword at a space or at a parenthesis, so "ignore(" opens a
+// lexer ends the keyword at a space, a tab, a carriage return or a parenthesis, so "ignore(" opens a
 // block just as "ignore (" does.
 func isGoModDirective(line, directive string) bool {
 	line = strings.TrimSpace(line)
@@ -450,5 +450,6 @@ func isGoModDirective(line, directive string) bool {
 		return false
 	}
 	rest := line[len(directive):]
-	return rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '('
+	// Go's go.mod lexer treats space, tab and carriage return alike.
+	return rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\r' || rest[0] == '('
 }

@@ -309,7 +309,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("review deadline exhausted during initialization: %w", err)
 	}
-	if err := rejectImagesForTextOnlyProviders(imageParts, runtime.mgr.ProviderIDForModel, runtime.policy.adaptiveCodexModel, runtime.modelID, runtime.criticModel); err != nil {
+	if err := checkReviewImages(imageParts, runtime); err != nil {
 		return err
 	}
 
@@ -1194,4 +1194,10 @@ func rejectImagesForTextOnlyProviders(images []model.ContentPart, providerOf fun
 		}
 	}
 	return nil
+}
+
+// checkReviewImages applies the image guard to the runtime of a review: its
+// primary model, its critic and the adaptive Codex selector.
+func checkReviewImages(images []model.ContentPart, runtime *reviewCommandRuntime) error {
+	return rejectImagesForTextOnlyProviders(images, runtime.mgr.ProviderIDForModel, runtime.policy.adaptiveCodexModel, runtime.modelID, runtime.criticModel)
 }
