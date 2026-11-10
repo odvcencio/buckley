@@ -266,7 +266,7 @@ func sectionTexts(raw json.RawMessage) map[string]string {
 // templateBody renders the body in the template's shape. It returns the
 // author sections that no template section took, for the caller to place
 // after the template.
-func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection) (string, []AuthorSection) {
+func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerified string) (string, []AuthorSection) {
 	var b strings.Builder
 	if t.Preamble != "" {
 		b.WriteString(t.Preamble + "\n\n")
@@ -284,6 +284,11 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection) (string, 
 		text := strings.Join(supplied, "\n\n")
 		if text == "" && s.Open {
 			text = commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
+		}
+		if strings.TrimSpace(text) == "" && notVerified != "" && sectionKind(s.Heading) == SectionNotVerified {
+			// The template's own slot for what was not verified, left empty:
+			// it states that the author gave nothing, as the body would.
+			text = notVerified
 		}
 		switch {
 		case strings.TrimSpace(text) == "":

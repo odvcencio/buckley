@@ -98,12 +98,18 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 // template holds the heading keys of the pull request template.
 func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 	kindOf := func(heading string) string {
+		// The five carried kinds come first, so that "Testing" and "Test plan"
+		// keep one kind and the order of the notes. A template heading that
+		// names none of them is the fallback.
+		if kind := sectionKind(heading); kind != "" {
+			return kind
+		}
 		if key := headingKey(heading); template[key] {
 			return headingKindPrefix + key
 		}
-		return sectionKind(heading)
+		return ""
 	}
-	lines := strings.Split(strings.ReplaceAll(note.Text, "\r\n", "\n"), "\n")
+	lines := strings.Split(stripHTMLComments(strings.ReplaceAll(note.Text, "\r\n", "\n")), "\n")
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
@@ -295,4 +301,57 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 		}
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+}
+
+// stripHTMLComments removes HTML comments from a note, outside code fences. A
+// heading inside a comment must not start a carried section, and commented-out
+// text must not be published. Line breaks inside a removed comment stay, so
+// that the rest of the note keeps its layout.
+func stripHTMLComments(text string) string {
+	if !strings.Contains(text, "<!--") {
+		return text
+	}
+	var out strings.Builder
+	inFence, inComment := false, false
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if !inComment {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				inFence = !inFence
+			}
+		}
+		if inFence && !inComment {
+			out.WriteString(line)
+		} else {
+			rest := line
+			var kept strings.Builder
+			for rest != "" {
+				if inComment {
+					end := strings.Index(rest, "-->")
+					if end < 0 {
+						rest = ""
+						break
+					}
+					rest = rest[end+3:]
+					inComment = false
+					continue
+				}
+				start := strings.Index(rest, "<!--")
+				if start < 0 {
+					kept.WriteString(rest)
+					rest = ""
+					break
+				}
+				kept.WriteString(rest[:start])
+				rest = rest[start+4:]
+				inComment = true
+			}
+			out.WriteString(kept.String())
+		}
+		if i < len(lines)-1 {
+			out.WriteString("\n")
+		}
+	}
+	return out.String()
 }

@@ -98,6 +98,11 @@ func (pr *PRResult) DropUnbackedTesting(src PRSources) []string {
 	pr.Testing = kept
 
 	for _, key := range sortedKeys(pr.Sections) {
+		// Only a Testing section lists steps. A Summary bullet that names a
+		// command describes the change, and code must not delete it.
+		if sectionKind(strings.ReplaceAll(key, "_", " ")) != SectionTesting {
+			continue
+		}
 		var lines []string
 		for _, line := range strings.Split(pr.Sections[key], "\n") {
 			if item := strings.TrimSpace(line); listItemRe.MatchString(item) && !backed(listItemRe.ReplaceAllString(item, "")) {
@@ -131,10 +136,20 @@ func stepCommands(step string) []string {
 			commands = append(commands, span[1])
 		}
 	}
+	text := trimBulletMarker(step)
 	if len(spans) > 0 {
+		// A span that is not the whole command (an argument in code format)
+		// must not hide the command before it.
+		if before, _, _ := strings.Cut(text, "`"); strings.TrimSpace(before) != "" {
+			if loc := commandTailRe.FindStringIndex(before); loc != nil {
+				before = before[:loc[0]]
+			}
+			if isCommand(before, false) {
+				commands = append(commands, strings.TrimSpace(before))
+			}
+		}
 		return commands
 	}
-	text := trimBulletMarker(step)
 	if fields := strings.Fields(text); len(fields) > 0 && strings.HasPrefix(fields[0], "-") {
 		// A step that starts with a flag: the flag is what must have a
 		// source. The words after it may describe what the flag does.

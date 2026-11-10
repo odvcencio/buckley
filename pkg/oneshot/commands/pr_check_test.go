@@ -121,3 +121,34 @@ func TestUnbackedClaims(t *testing.T) {
 		t.Errorf("claims = %q, want none for single digits", claims)
 	}
 }
+
+// Review of #468, finding 3: a backtick span that is not the command must not
+// hide the command before it.
+func TestStepCommands_UnrelatedBacktickSpanDoesNotHideTheCommand(t *testing.T) {
+	pr := PRResult{Testing: StringList{"go test ./missing -run `TestFoo`"}}
+	dropped := pr.DropUnbackedTesting(PRSources{All: "nothing relevant"})
+	if len(dropped) != 1 || len(pr.Testing) != 0 {
+		t.Fatalf("dropped = %q, kept = %q; the unsourced command must go", dropped, pr.Testing)
+	}
+	// A sourced command with a code-formatted argument stays.
+	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`"}}
+	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run `TestFoo`"}); len(dropped) != 0 {
+		t.Fatalf("dropped a sourced step: %q", dropped)
+	}
+}
+
+// Finding 4: only Testing sections lose unsourced steps; a Summary bullet that
+// names a command is a description of the change.
+func TestDropUnbackedTesting_LeavesOtherSectionsAlone(t *testing.T) {
+	pr := PRResult{Sections: map[string]string{
+		"summary": "- Expose `buckley inspect` for diagnostics",
+		"testing": "- `go test ./missing`",
+	}}
+	dropped := pr.DropUnbackedTesting(PRSources{All: "x"})
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "go test ./missing") {
+		t.Fatalf("dropped = %q", dropped)
+	}
+	if pr.Sections["summary"] != "- Expose `buckley inspect` for diagnostics" {
+		t.Errorf("summary = %q", pr.Sections["summary"])
+	}
+}

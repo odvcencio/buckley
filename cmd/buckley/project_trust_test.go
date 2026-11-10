@@ -728,3 +728,39 @@ func runTrustCommandVerbs(t *testing.T) []string {
 	}
 	return verbs
 }
+
+// Review of #468, finding 2 and review of #470, finding 1: with standard
+// output redirected, the trust dialog and the project path go to standard
+// error, not into the redirected file.
+func TestPromptProjectTrust_RedirectedStdoutGetsNothing(t *testing.T) {
+	previousTerminal := stdoutIsTerminalFn
+	stdoutIsTerminalFn = func() bool { return false }
+	t.Cleanup(func() { stdoutIsTerminalFn = previousTerminal })
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	previousStdin := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() { os.Stdin = previousStdin })
+
+	var status projectTrustStatus
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() { status, err = promptProjectTrust("/some/project") })
+	})
+	if err != nil || status != projectTrustTrusted {
+		t.Fatalf("status = %v, err = %v", status, err)
+	}
+	if stdout != "" {
+		t.Errorf("redirected stdout received the trust dialog: %q", stdout)
+	}
+	if !strings.Contains(stderr, "/some/project") || !strings.Contains(stderr, "Trust this project?") {
+		t.Errorf("stderr lacks the dialog: %q", stderr)
+	}
+}

@@ -999,8 +999,18 @@ func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
 		path, err = filepath.Abs(path)
 	}
 	if err == nil {
+		// A second update within the same second must not overwrite the first
+		// copy, which may hold the hand-edited text: create a unique file.
 		if err = os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
-			err = os.WriteFile(path, []byte(formatPRText(previous)), 0o644)
+			var file *os.File
+			file, err = os.CreateTemp(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), ".md")+"-*.md")
+			if err == nil {
+				path = file.Name()
+				_, err = file.WriteString(formatPRText(previous))
+				if closeErr := file.Close(); err == nil {
+					err = closeErr
+				}
+			}
 		}
 	}
 	if err != nil {
