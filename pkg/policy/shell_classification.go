@@ -30,7 +30,7 @@ var buckleyStartupValueFlags = map[string]bool{
 	"--agent": true, "--tools": true,
 	"--max-tool-calls": true, "--max-elapsed": true,
 	"--max-output-tokens": true, "--budget": true,
-	"--read-root": true, "--task-intent": true,
+	"--read-root": true, "--task-intent": true, "--effort": true,
 }
 
 // buckleyStateCommands are the buckley commands, written as the words that
