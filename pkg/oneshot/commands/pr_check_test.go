@@ -177,6 +177,44 @@ func TestDropUnbackedTesting_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T
 
 // Review of #468, third round: flags after the last code span are part of the
 // command.
+// The rule for a command written with code spans: the command is the step up
+// to the first token that cannot belong to a command line (a lone "-" or "--",
+// a dash, a colon before a space, a parenthesis, a plain word that is no flag
+// value); it is compared as a whole with the sources. Reviews of #468 to #470,
+// rounds two to four.
+func TestDropUnbackedTesting_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, step string
+		kept               bool
+	}{
+		{"unsourced flag after the last span", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` -race", false},
+		{"sourced flag after the last span, then prose", "go test ./pkg -run TestFoo -race", "go test ./pkg -run `TestFoo` -race passed locally", true},
+		{"prose after the span", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` passed locally", true},
+		{"lone hyphen is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` - passed locally", true},
+		{"lone double hyphen is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` -- passed locally", true},
+		{"em dash is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` \u2014 passed locally", true},
+		{"colon is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo`: passed locally", true},
+		{"parenthesis is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` (passed locally)", true},
+		{"flag after the boundary is prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` - passed with -race", true},
+		{"separate flag value kept, sourced", "go test ./pkg -run TestFoo -count 1", "go test ./pkg -run `TestFoo` -count 1", true},
+		{"flag after a separate flag value", "go test ./pkg -run TestFoo -count 1", "go test ./pkg -run `TestFoo` -count 1 -race", false},
+		{"flag after a flag with an equals sign", "go test ./pkg -run TestFoo -count=1", "go test ./pkg -run `TestFoo` -count=1 -race", false},
+		{"flag after a word value and prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` passed locally with -race", false},
+		{"flag after a second span", "go test ./pkg -run TestFoo -tags integration", "go test ./pkg -run `TestFoo` -tags `integration` -race", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := PRResult{Testing: StringList{tc.step}}
+			dropped := pr.DropUnbackedTesting(PRSources{All: tc.source})
+			if tc.kept && (len(dropped) != 0 || len(pr.Testing) != 1) {
+				t.Errorf("dropped a sourced step %q: dropped = %q", tc.step, dropped)
+			}
+			if !tc.kept && (len(dropped) != 1 || len(pr.Testing) != 0) {
+				t.Errorf("kept an unsourced step %q: dropped = %q, kept = %q", tc.step, dropped, pr.Testing)
+			}
+		})
+	}
+}
+
 func TestDropUnbackedTesting_FlagAfterTheLastSpanIsPartOfTheCommand(t *testing.T) {
 	src := PRSources{All: "go test ./pkg -run TestFoo"}
 	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race"}}

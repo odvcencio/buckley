@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -149,5 +150,42 @@ func TestRunPRCommand_StrictRefusesAnUnsupportedFlagAfterTheLastSpan(t *testing.
 		if strings.Join(call[:2], " ") == "pr create" {
 			t.Fatal("gh pr create ran although --strict refused")
 		}
+	}
+}
+
+// Review of #468 to #470, round four: under --strict a prose separator after
+// the last span does not fail a sourced step, and a flag after a separate flag
+// value still does.
+func TestRunPRCommand_StrictCommandBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, notes, step string
+		refused           bool
+	}{
+		{"hyphen is prose", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestFoo` - passed locally", false},
+		{"unsourced flag after a separate value", "Ran go test ./pkg -run TestFoo -count 1 and it passed.\n", "go test ./pkg -run `TestFoo` -count 1 -race", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPRRepo(t)
+			r.commit(t, "feature", "f.txt")
+			r.park(t)
+			stubPRDependencies(t, func() error { return nil })
+			stubGh(t)
+			installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+			stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":["+strconv.Quote(tc.step)+"]}")
+			dir := t.TempDir()
+			writeFile(t, dir, "notes.md", tc.notes)
+			var err error
+			stderr := captureStderr(t, func() {
+				captureStdout(t, func() {
+					err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
+				})
+			})
+			if tc.refused && (!strings.Contains(stderr, "left out the testing step") || err == nil || !strings.Contains(err.Error(), "--strict")) {
+				t.Errorf("stderr = %q, error = %v, want the step left out and --strict refusing", stderr, err)
+			}
+			if !tc.refused && (strings.Contains(stderr, "left out the testing step") || err != nil) {
+				t.Errorf("stderr = %q, error = %v, want the sourced step kept", stderr, err)
+			}
+		})
 	}
 }

@@ -410,15 +410,13 @@ func TestSanitizePRNote_RemovesEveryCommentWhereverItIs(t *testing.T) {
 			if strings.Contains(clean, token) || strings.Contains(clean, "<!--") {
 				t.Errorf("the comment survived:\n%s", clean)
 			}
-			for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: clean}}) {
+			note, _, err := NewPRNote(RawPRNote{Path: "n.md", Text: text})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range AuthorSections([]PRNote{note}) {
 				if strings.Contains(s.Body, token) {
 					t.Errorf("section %q carries the token: %q", s.Heading, s.Body)
-				}
-			}
-			// Sections are also safe when the raw text reaches them.
-			for _, s := range AuthorSections([]PRNote{{Path: "n.md", Text: text}}) {
-				if strings.Contains(s.Body, token) {
-					t.Errorf("raw text: section %q carries the token: %q", s.Heading, s.Body)
 				}
 			}
 		})
@@ -446,14 +444,58 @@ func TestSanitizePRNote_UnclosedOpenerIsAnError(t *testing.T) {
 }
 
 // A later Not verified section survives a closed comment, and the comment's
-// line breaks do not move the sections.
+// line breaks do not move the sections. The sanitized text is exact.
 func TestSanitizePRNote_LaterSectionsSurviveAClosedComment(t *testing.T) {
-	text := "## Testing\n\n- `printf '<!--' x -->` and <!-- hidden --> text\n\n## Not verified\n\n- Windows\n"
+	text := "## Testing\n\n- `printf '<!--' x -->` and <!-- hidden\nline --> text\n\n## Not verified\n\n- Windows\n"
 	clean, err := SanitizePRNote(text)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nv := sectionsByKind(AuthorSections([]PRNote{{Path: "n.md", Text: clean}}))[SectionNotVerified]; !strings.Contains(nv, "Windows") {
+	// The first comment runs from the opener inside the code span to the
+	// closing marker; the second holds one line break, which stays.
+	want := "## Testing\n\n- `printf '` and \n text\n\n## Not verified\n\n- Windows\n"
+	if clean != want {
+		t.Fatalf("sanitized = %q, want %q", clean, want)
+	}
+	note, _, err := NewPRNote(RawPRNote{Path: "n.md", Text: text})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nv := sectionsByKind(AuthorSections([]PRNote{note}))[SectionNotVerified]; !strings.Contains(nv, "Windows") {
 		t.Fatalf("the Not verified section was lost: %q\n%s", nv, clean)
+	}
+}
+
+// Removing a comment must not make a new opener out of the characters around
+// it: the note is refused with the line, and nothing after it is dropped in
+// silence (reviews of #468, #469 and #470, round four).
+func TestNewPRNote_AJoinedOpenerIsRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		text string
+		line int
+	}{
+		"in a code fence":  {"## Evidence\n\n```html\n<!<!-- remove me -->-- keep this example\n```\n\n## Not verified\n\n- Windows\n", 4},
+		"in inline code":   {"## Evidence\n\n`<<!-- remove me -->!--`\n\n## Not verified\n\n- Windows was not tested.\n", 3},
+		"text after it":    {"## Evidence\n\n`<<!-- hidden -->!--` keep this text\n\n## Not verified\n\n- Windows was not tested.\n", 3},
+		"after a line gap": {"a\n<!--\nb\n-->\n<!<!-- x -->--\n", 5},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := NewPRNote(RawPRNote{Path: "n.md", Text: tc.text})
+			want := fmt.Sprintf("line %d", tc.line)
+			if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "&lt;!--") {
+				t.Fatalf("error = %v, want one naming %s and the &lt;!-- alternative", err, want)
+			}
+		})
+	}
+}
+
+// Section extraction reads the sanitized text as it is. A "<!--" in it (made
+// here by hand; NewPRNote never lets one through) is text, not a comment to
+// strip a second time.
+func TestAuthorSections_NeverScansForCommentsAgain(t *testing.T) {
+	note := PRNote{Path: "n.md", Text: "## Evidence\n\n`<!--` keep this text\n\n## Not verified\n\n- Windows was not tested.\n"}
+	got := sectionsByKind(AuthorSections([]PRNote{note}))
+	if !strings.Contains(got[SectionEvidence], "keep this text") || !strings.Contains(got[SectionNotVerified], "Windows") {
+		t.Fatalf("sections = %q, want the evidence text and the Not verified section", got)
 	}
 }

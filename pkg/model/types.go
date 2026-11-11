@@ -973,10 +973,24 @@ func estimateContentPartBytes(part ContentPart) int {
 	return n
 }
 
+// estimatedImageTokens is the input-token charge for one inline image. It is an
+// estimate, not a measurement: providers bill an image by its pixel size, not
+// by the length of its base64 text. Published tile and area rules give about
+// 800 to 1,600 tokens for a full screenshot at high detail (for example a
+// 1,568-pixel image at roughly 1,600 tokens), so the larger figure is used to
+// err toward more context pressure than too little.
+const estimatedImageTokens = 1600
+
 func estimateImageURLBytes(img ImageURL) int {
 	n := 2
 	fields := 1
-	n += jsonKeyValueBytes("url", jsonStringBytes(img.URL))
+	if strings.HasPrefix(img.URL, "data:") {
+		// An inline image: charge the fixed estimate (tokens are counted as
+		// bytes/4 by the callers), not the base64 text.
+		n += jsonKeyValueBytes("url", estimatedImageTokens*4)
+	} else {
+		n += jsonKeyValueBytes("url", jsonStringBytes(img.URL))
+	}
 	if img.Detail != "" {
 		n += jsonKeyValueBytes("detail", jsonStringBytes(img.Detail))
 		fields++
