@@ -105,7 +105,7 @@ func TestPRFormatBodyNeverEmitsCloseDirectives(t *testing.T) {
 		Testing: []string{"go test ./... (resolves #33)"},
 		Issues:  []string{"14", "#15"},
 	}
-	body := pr.FormatBody()
+	body := pr.Body(PRBodyOptions{})
 
 	for _, banned := range []string{"Closes #", "closes #", "Fixes #", "fixes #", "resolves #"} {
 		if strings.Contains(body, banned) {
@@ -127,7 +127,7 @@ func TestPRFormatBodyTrimsModelSuppliedBulletMarkers(t *testing.T) {
 		Changes: []string{"- Already-bulleted change", "* Star-bulleted change", "Plain change"},
 		Testing: []string{"- go test ./..."},
 	}
-	body := pr.FormatBody()
+	body := pr.Body(PRBodyOptions{})
 	for _, banned := range []string{"- - ", "- * "} {
 		if strings.Contains(body, banned) {
 			t.Fatalf("body contains doubled list marker %q:\n%s", banned, body)
@@ -142,13 +142,13 @@ func TestPRFormatBodyTrimsModelSuppliedBulletMarkers(t *testing.T) {
 
 func TestPRFormatBodyOmitsEmptyTesting(t *testing.T) {
 	pr := PRResult{Action: "document", Title: "readme", Summary: "Docs only.", Changes: []string{"Update README"}}
-	body := pr.FormatBody()
+	body := pr.Body(PRBodyOptions{})
 	if strings.Contains(body, "## Testing") {
 		t.Fatalf("body must omit empty Testing section:\n%s", body)
 	}
 
 	pr.Testing = []string{"go test ./..."}
-	if body = pr.FormatBody(); !strings.Contains(body, "## Testing") {
+	if body = pr.Body(PRBodyOptions{}); !strings.Contains(body, "## Testing") {
 		t.Fatalf("body must include Testing when steps exist:\n%s", body)
 	}
 }
@@ -211,7 +211,7 @@ func TestPRBuildPromptIncludesAuthorSuppliedContextNotes(t *testing.T) {
 		"git_diff:main": "+ real diff content",
 	}}
 
-	prompt := PRDefinition{ContextNotes: "Slice 2 of 4: extracted the retry budget guard.\nVerified with go test ./pkg/retry/..."}.BuildPrompt(ctx)
+	prompt := PRDefinition{ContextNotes: PRPromptNotes{text: "Slice 2 of 4: extracted the retry budget guard.\nVerified with go test ./pkg/retry/..."}}.BuildPrompt(ctx)
 	for _, want := range []string{"Slice 2 of 4: extracted the retry budget guard.", "Verified with go test ./pkg/retry/..."} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing author-supplied context note %q:\n%s", want, prompt)

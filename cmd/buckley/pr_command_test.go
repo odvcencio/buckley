@@ -129,9 +129,20 @@ func TestParsePRCommandOptionsHonorsEnvironment(t *testing.T) {
 	}
 }
 
+// promptNotes loads the --context-file paths and renders them as the prompt
+// carries them.
+func promptNotes(paths []string) (string, error) {
+	notes, err := loadPRNotes(paths)
+	if err != nil {
+		return "", err
+	}
+	text, _ := prNotesPrompt(notes)
+	return text.String(), nil
+}
+
 // TestLoadPRContextNotesConcatenatesLabeledFiles reproduces Important-5:
 // `buckley pr` has no way to accept author-supplied steering notes (slice
-// breakdown, verification evidence). loadPRContextNotes reads each
+// breakdown, verification evidence). loadPRNotes reads each
 // --context-file path and concatenates them, labeled by path.
 func TestLoadPRContextNotesConcatenatesLabeledFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -144,13 +155,13 @@ func TestLoadPRContextNotesConcatenatesLabeledFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := loadPRContextNotes([]string{pathA, pathB})
+	got, err := promptNotes([]string{pathA, pathB})
 	if err != nil {
-		t.Fatalf("loadPRContextNotes: %v", err)
+		t.Fatalf("promptNotes: %v", err)
 	}
 	for _, want := range []string{pathA, "Slice 1: extract the retry guard.", pathB, "Verified with go test ./pkg/retry/..."} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("loadPRContextNotes output missing %q:\n%s", want, got)
+			t.Fatalf("promptNotes output missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -158,12 +169,12 @@ func TestLoadPRContextNotesConcatenatesLabeledFiles(t *testing.T) {
 // TestLoadPRContextNotesEmptyWhenNoFiles asserts the zero-flag case returns
 // an empty string, so BuildPrompt's Author Notes section stays omitted.
 func TestLoadPRContextNotesEmptyWhenNoFiles(t *testing.T) {
-	got, err := loadPRContextNotes(nil)
+	got, err := promptNotes(nil)
 	if err != nil {
-		t.Fatalf("loadPRContextNotes: %v", err)
+		t.Fatalf("promptNotes: %v", err)
 	}
 	if got != "" {
-		t.Fatalf("loadPRContextNotes(nil) = %q, want empty", got)
+		t.Fatalf("promptNotes(nil) = %q, want empty", got)
 	}
 }
 
@@ -171,9 +182,9 @@ func TestLoadPRContextNotesEmptyWhenNoFiles(t *testing.T) {
 // --context-file path silently vanishing into an empty section: the author
 // explicitly asked for this file's content to steer the PR.
 func TestLoadPRContextNotesErrorsOnMissingFile(t *testing.T) {
-	_, err := loadPRContextNotes([]string{"/no/such/file/here.md"})
+	_, err := promptNotes([]string{"/no/such/file/here.md"})
 	if err == nil {
-		t.Fatal("loadPRContextNotes with a missing file: want error, got nil")
+		t.Fatal("promptNotes with a missing file: want error, got nil")
 	}
 }
 
@@ -187,12 +198,12 @@ func TestLoadPRContextNotesBoundsTotalSize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := loadPRContextNotes([]string{path})
+	got, err := promptNotes([]string{path})
 	if err != nil {
-		t.Fatalf("loadPRContextNotes: %v", err)
+		t.Fatalf("promptNotes: %v", err)
 	}
 	if len(got) > prContextNotesMaxBytes+500 { // slack for path label + truncation marker
-		t.Fatalf("loadPRContextNotes output %d bytes exceeds the %d-byte budget by more than the label/marker allow", len(got), prContextNotesMaxBytes)
+		t.Fatalf("promptNotes output %d bytes exceeds the %d-byte budget by more than the label/marker allow", len(got), prContextNotesMaxBytes)
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Fatalf("oversized context notes missing an explicit truncation marker:\n%.500s", got)
@@ -1032,7 +1043,7 @@ func testPRPlan(ghHead string) *prPlan {
 	}
 }
 
-var testPRResult = &commands.PRResult{Action: "add", Title: "thing", Summary: "Adds a thing.", Changes: []string{"Add it"}}
+var testPRResult = prText{Title: "add: thing", Body: "## Summary\n\nAdds a thing.\n\n## Changes\n\n- Add it"}
 
 func TestCreatePR_ReturnsTheURLGhPrints(t *testing.T) {
 	gh := newPreflightGh([]byte("[]"))

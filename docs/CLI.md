@@ -339,13 +339,26 @@ buckley pr [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
+| `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
+| `--body-file <file>` | Post `<file>` as it is, without a model call. A first line `Title: ...` is the title; the rest is the body |
+| `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
+| `--yes` | Skip the confirmation prompt |
 | `--head <branch>` | Branch the PR comes from (default: the checked-out branch). `owner:branch` names a fork's branch; `owner` must own the repository of the push remote (`BUCKLEY_REMOTE_NAME`, default `origin`) |
 | `--base` | Base branch. Default: `BUCKLEY_PR_BASE`; else the remote's default branch (`refs/remotes/<remote>/HEAD`, which `git remote set-head <remote> --auto` refreshes); else `main`, `master` or `develop` on the remote, then the same names locally. An error when none exists |
 | `-C <dir>` / `--dir <dir>` | Run as if started in `<dir>`, like `git -C`. Relative `--context-file`, `--config` and `--agent` (`BUCKLEY_AGENT`) paths resolve against the directory you launched in, so a file in the target repository cannot stand in for them. Uppercase `-C`: lowercase `-c` selects the config file |
 | `--push=false` | Do not push the head branch before creating the PR |
+| `--draft` | Create the PR as a draft |
+| `--no-update` | Fail instead of replacing the title and body of an open PR for the head |
+| `--diff-budget <bytes>` | Byte budget for the diff in the prompt (default 300000) |
+| `--require-verification` / `--require-receipt` / `--no-require-verification` | Set the Buckbot verification label on the PR |
+| `--verbose` | Show the context audit and the model's reasoning |
+| `--cost=false` | Do not print the token and cost lines |
+| `--context-file <path>` | Author notes for the PR; repeatable, oldest first. See [Author notes](#author-notes) |
+| `--template=false` | Keep Buckley's own sections when the repository has a pull request template. See [Pull request template](#pull-request-template) |
+| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns). Default: warn. See [Checks against the sources](#checks-against-the-sources) |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
-| `--effort <level>` | Override reasoning effort |
+| `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
 
 **Environment Variables:**
 - `BUCKLEY_MODEL_PR` - Override model for PR generation
@@ -362,6 +375,152 @@ buckley pr --dry-run          # Preview PR title and body
 buckley pr --base develop     # Target specific base branch
 buckley pr --head feature -C ~/work/repo --yes   # PR for a branch another process has checked out
 ```
+
+#### Review the text, then post that text
+
+Each run asks the model again, so the text of a dry run is not the text a later
+run would post. To post what you read:
+
+```bash
+buckley pr --dry-run --output pr.md --context-file pr-notes.md   # 1. write the text
+$EDITOR pr.md                                                     # 2. read it, change it
+buckley pr --yes --body-file pr.md                                # 3. post that file
+```
+
+`--output` writes `Title: <title>`, a blank line and the body. `--body-file`
+reads the same form and makes no model call, so it needs no provider key; the
+head and base checks, the push and the open-PR lookup run as usual. `--title`
+replaces the title in either mode. `--body-file` cannot be combined with
+`--context-file`. Under `-C`, both paths resolve against the directory you
+launched in.
+
+#### Output for scripts
+
+When standard output is a terminal, `buckley pr` shows a progress spinner, a
+header, a preview box and the text. When it is a file or a pipe, standard output
+holds the text once, as `--output` writes it, and then, after a real run, the
+PR's URL on a line of its own:
+
+```text
+Title: add(api): retry budget
+
+## Summary
+...
+https://github.com/owner/repo/pull/12
+```
+
+Progress, the model line, warnings and the cost go to stderr, each as one plain
+line: no spinner frames, no cursor escapes, no box. So `buckley pr --dry-run >
+pr.md` writes a file that `--body-file pr.md` posts.
+
+#### Pull request template
+
+When the repository has a pull request template, the body follows it. Buckley
+reads `.github/PULL_REQUEST_TEMPLATE.md`, `PULL_REQUEST_TEMPLATE.md` or
+`docs/PULL_REQUEST_TEMPLATE.md` (also in lower case) from the base branch, where
+GitHub reads it, and from the head branch when the base has none. An uncommitted
+template is not read. `--template=false` keeps Buckley's own sections.
+
+- The template's headings, checkboxes, comments and fixed text are written as
+  they are. Buckley does not tick a checkbox: only the author can say that a
+  check ran.
+- A section that has only comments under its heading asks for text. The model
+  writes one text for each such section, guided by the comments, and that text
+  replaces them. A section the model leaves empty stays as the template has it.
+- A section of a notes file whose heading equals a template heading fills that
+  section word for word (see [Author notes](#author-notes)). So does a Testing,
+  Counters, Evidence, Not verified or Known gaps section when a template heading
+  names that kind. Under a checklist, the author's text goes below the
+  checkboxes, unless the author restated the checklist.
+- Author sections that no template heading takes, the Not verified statement,
+  breaking changes and related issues follow the template.
+- A template without a place for text (only checklists, or no headings) follows
+  Buckley's own sections unchanged.
+
+#### Author notes
+
+`--context-file` gives the model notes that the diff cannot show: why the change
+exists, what was run, what was measured. The model reads them as data, not as
+instructions, and reads at most 16,000 bytes of them; `buckley pr` warns when it
+cuts them.
+
+A model rewrites what it reads, so the parts that must not change are copied by
+code. A section of a notes file reaches the PR body word for word, under the
+author's heading, when the heading names one of these:
+
+| Section | Headings that select it |
+|---------|-------------------------|
+| Testing | starts with `Testing`, `Tests`, `Test plan`, `Verification`, `Validation`, `How to verify` or `How to test` |
+| Counters | contains the word `counters` |
+| Evidence | contains the word `evidence` |
+| Not verified | contains `not verified`, `unverified`, `not verify`, `not tested`, `untested`, `not measured`, `not validated` or `not checked` |
+| Known gaps | contains `known gaps`, `known limitations` or `known issues`, or is `Gaps` or `Limitations` |
+
+A section starts at a Markdown heading (`## Evidence`) and ends at the next
+heading of the same or a higher level. A short label on a line of its own
+(`Evidence` above a list, or `Not verified:`) also starts one; it ends at the
+next heading or the next such label. An author Testing section replaces the
+testing steps the model writes. When no notes file has a Not verified section,
+the body always says that the author stated nothing, also when the model wrote
+text of its own for a Not verified slot of the template (that text follows the
+statement).
+
+HTML comments (`<!-- ... -->`) in a notes file are never sent to the model and
+never published. Buckley removes every comment when it reads the file, wherever
+it is: in prose, in inline code and in a fenced code block. The model, the
+carried sections and the sources that the text is checked against all see the
+note without them. A `<!--` that has no closing `-->` is an error that names the
+file and the line: close the comment, or write the opener another way (for
+example `&lt;!--`) when it is meant as text. The same error applies when removing
+a comment would join the characters around it into a new `<!--` (for example
+`<!<!-- x -->--`): the text after it cannot be trusted, so the file is refused
+instead of being cut. Comments are removed once, when the file is read. Other
+text in a carried section is copied word for word.
+
+When two files have a section of the same kind, the body carries both, in the
+order of the files. A later file never replaces an earlier one, so remove a
+stale section from its file. The prompt still tells the model that a later note
+is the current one for the text it writes.
+
+```bash
+buckley pr --dry-run --context-file handoff.md --context-file pr-notes.md
+```
+
+#### Checks against the sources
+
+The sources of a PR text are the author's notes, the commit messages, the diff,
+the file list and `AGENTS.md`. After the model answers, `buckley pr` compares
+what it wrote with them:
+
+- **The command check is a warning.** For a testing step that names a command
+  (a backtick span that starts with a program such as `go`, `make` or a script
+  path, or a step that starts with such a program in plain text, with its
+  arguments in code format when it has any: ``go test ./pkg -run `TestFoo` ``),
+  `buckley pr` looks for the command in the sources, with inline code marks
+  ignored on both sides. When it does not find it, stderr names the step and the
+  command text it could not find. The step stays in the body as written, and
+  `--strict` does not fail on this warning. The check reads prose with a
+  heuristic: it takes the text up to a lone `-` or `--`, a dash, a colon before
+  a space, a semicolon, a parenthesis, or a plain word that is not a flag, a
+  path or a flag value (such as `1` in `-count 1`; a trailing sentence period
+  does not make a flag value). A flag in a code span after prose is checked on
+  its own. It can miss an unsourced command and can warn about a sourced one.
+  An unformatted plain-word flag value such as `-tags integration` ends the
+  command; later flags before an explicit prose separator may be checked
+  separately. To get exact testing steps, put the
+  commands you ran in a Testing section of a notes file: such a section is
+  copied by code, word for word.
+- A word that states a decision (`rejected`, `approved`, `decided`, `ruled out`,
+  `agreed`, `abandoned`, `dismissed`, `declined`) gets a warning when neither the
+  notes nor the commit messages use that word.
+- A number of two or more digits gets a warning when it appears nowhere in the
+  sources.
+
+Code cannot rewrite a sentence, so these are warnings on stderr and the text
+stays as the model wrote it. A command in the running text of a template
+section is a command warning too. With `--strict` the decision and number
+warnings are errors: nothing is pushed or created, and a dry run exits
+non-zero. Command warnings never are.
 
 The evidence that buckley gathers for the PR text comes from commits. The diff,
 commit log, file list, `AGENTS.md` and `.gitattributes` are read from the head
@@ -409,7 +568,12 @@ owner), because `gh` lists PRs by branch name only. Neither the PR for whichever
 branch the worktree has checked out nor a PR from a same-named branch of
 another repository is edited, and in a fork checkout your own PR is the one
 found. An explicit `--base` that differs from the open PR's base is refused, not
-retargeted; `--no-update` refuses any open PR for the head. If `gh pr create`
+retargeted; `--no-update` refuses any open PR for the head. Before an update
+replaces the title and body of an open PR, `buckley pr` tries to save the text
+it replaces under the git directory as `buckley/pr-<number>-<time>-<random>.md`
+(the random part keeps two saves in one second apart) and stderr names the
+file; `buckley pr --yes --body-file <that file>` puts it back. When the copy
+cannot be written, a warning says so and the update goes on without a copy. If `gh pr create`
 prints no PR URL, `buckley pr` fails instead of labeling a PR it cannot name.
 
 ### pr merge

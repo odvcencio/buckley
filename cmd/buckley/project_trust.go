@@ -315,12 +315,24 @@ func ensureProjectTrust(cfg *config.Config, workDir string) (projectTrustStatus,
 	return status, root, nil
 }
 
+// trustPromptWriter is where the trust dialog is written: standard output for
+// a person at a terminal, standard error whenever standard output is a file or
+// a pipe, so that the dialog and the project path never end up in redirected
+// output (`buckley pr --dry-run > pr.md`).
+func trustPromptWriter() io.Writer {
+	if stdoutIsTerminalFn() {
+		return os.Stdout
+	}
+	return os.Stderr
+}
+
 func promptProjectTrust(projectRoot string) (projectTrustStatus, error) {
-	fmt.Println("Project trust check")
-	fmt.Printf("  Path: %s\n", projectRoot)
-	fmt.Println("  Trusted projects keep your configured autonomy.")
-	fmt.Println("  Restricted projects are capped to approval=safe and trust_level=conservative.")
-	fmt.Print("Trust this project? [y/N]: ")
+	out := trustPromptWriter()
+	fmt.Fprintln(out, "Project trust check")
+	fmt.Fprintf(out, "  Path: %s\n", projectRoot)
+	fmt.Fprintln(out, "  Trusted projects keep your configured autonomy.")
+	fmt.Fprintln(out, "  Restricted projects are capped to approval=safe and trust_level=conservative.")
+	fmt.Fprint(out, "Trust this project? [y/N]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -330,10 +342,10 @@ func promptProjectTrust(projectRoot string) (projectTrustStatus, error) {
 
 	switch strings.ToLower(strings.TrimSpace(input)) {
 	case "y", "yes":
-		fmt.Println("Project marked trusted.")
+		fmt.Fprintln(out, "Project marked trusted.")
 		return projectTrustTrusted, nil
 	default:
-		fmt.Println("Project marked restricted.")
+		fmt.Fprintln(out, "Project marked restricted.")
 		return projectTrustRestricted, nil
 	}
 }
