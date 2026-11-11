@@ -63,7 +63,7 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use for the merge message (default: BUCKLEY_MODEL_PR or models.utility.pr)")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_PR, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "time limit for generating the text, retries included (default: BUCKLEY_TIMEOUT_PR, BUCKLEY_ONESHOT_TIMEOUT, or 5m)")
 
 	if err := fs.Parse(args); err != nil {
 		return prMergeCommandOptions{}, err
@@ -93,6 +93,10 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 	if err != nil {
 		return prMergeCommandOptions{}, err
 	}
+	generationTimeout, err := resolveOneshotTimeout("pr", *timeout)
+	if err != nil {
+		return prMergeCommandOptions{}, err
+	}
 	backend, err := resolveOneshotBackend("pr", *backendFlag)
 	if err != nil {
 		return prMergeCommandOptions{}, err
@@ -108,7 +112,7 @@ func parsePRMergeOptions(args []string) (prMergeCommandOptions, error) {
 		model:        *modelFlag,
 		effort:       effort,
 		backend:      backend,
-		timeout:      *timeout,
+		timeout:      generationTimeout,
 	}, nil
 }
 

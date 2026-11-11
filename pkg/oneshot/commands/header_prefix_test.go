@@ -98,11 +98,7 @@ func TestHeaderRepair_PrefixConflicts(t *testing.T) {
 			"fix(clamp)!: clamp negative values to zero",
 			"fix(clamp): update: clamp negative values to zero",
 			"fix(clamp):",
-			"fix(clamp): fix the clamp",
 		} {
-			if def.Name() == "pr" && strings.HasSuffix(subject, "fix the clamp") {
-				continue
-			}
 			t.Run(def.Name()+"/"+subject, func(t *testing.T) {
 				fields := map[string]any{"action": "fix", "scope": "clamp", "subject": subject, "title": subject,
 					"body": []string{"Clamp values."}, "summary": "Keep values in range.", "changes": []string{"Clamp values."}}
@@ -116,5 +112,25 @@ func TestHeaderRepair_PrefixConflicts(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A repeated prefix in front of a subject that repeats the verb: Repair takes
+// the prefix away, and validation then names the verb rule, which only the
+// model can satisfy. Before, the prefix stayed and the model was told about
+// the prefix alone.
+func TestHeaderRepair_RepeatedPrefixBeforeARepeatedVerb(t *testing.T) {
+	def := CommitDefinition{}
+	raw, _ := json.Marshal(map[string]any{"action": "fix", "scope": "clamp", "subject": "fix(clamp): fix the clamp", "body": []string{"Clamp values."}})
+	repaired, repairs := def.Repair(raw)
+	if len(repairs) != 1 || repairs[0] != "removed repeated header prefix" {
+		t.Fatalf("repairs = %q", repairs)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(repaired, &fields); err != nil || fields["subject"] != "fix the clamp" || fields["scope"] != "clamp" {
+		t.Fatalf("repaired = %s", repaired)
+	}
+	if err := def.Validate(repaired); err == nil || !strings.Contains(err.Error(), "subject repeats the action") {
+		t.Fatalf("Validate(repaired) = %v, want the verb rule", err)
 	}
 }

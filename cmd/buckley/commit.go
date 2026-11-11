@@ -52,6 +52,8 @@ type commitRunResult struct {
 	Trace        *transparency.Trace
 	ContextAudit *transparency.ContextAudit
 	Error        error
+	// Repairs says what code changed in the message after the model wrote it.
+	Repairs []string
 }
 
 type commitRunner interface {
@@ -79,7 +81,24 @@ type commitCommandOptions struct {
 	force          bool
 	forceWithLease bool
 	dir            string
+	// breaking is the BREAKING CHANGE trailer policy: breakingAuto, breakingKeep
+	// or breakingNever.
+	breaking string
+	// allowMixed says that generated and source files are staged together on
+	// purpose, so the warning about that is not printed.
+	allowMixed bool
 }
+
+// Values of --breaking.
+const (
+	// breakingAuto keeps the trailer the model asks for, unless no changed
+	// file can be part of what outside users depend on.
+	breakingAuto = "auto"
+	// breakingKeep keeps the trailer whenever the model asks for it.
+	breakingKeep = "keep"
+	// breakingNever leaves the trailer out.
+	breakingNever = "never"
+)
 
 type commitCommandRuntime struct {
 	backend   string
@@ -107,6 +126,7 @@ func (r *frameworkCommitRunner) Run(ctx context.Context) (*commitRunResult, erro
 	result := &commitRunResult{
 		Trace:        fwResult.Trace,
 		ContextAudit: fwResult.ContextAudit,
+		Repairs:      fwResult.Repairs,
 	}
 	if fwResult.Value != nil {
 		if cr, ok := fwResult.Value.(*commands.CommitResult); ok {
@@ -133,7 +153,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_COMMIT or models.utility.commit for API backend)")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_COMMIT, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_COMMIT_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "time limit for generating the text, retries included (default: BUCKLEY_TIMEOUT_COMMIT, BUCKLEY_ONESHOT_TIMEOUT, or 5m)")
 	var pathsFlag []string
 	fs.Func("paths", "scope commit to these literal file or directory paths (repeatable); preserves filename whitespace and leaves other staged files staged", func(value string) error {
 		if value == "" {
@@ -146,6 +166,8 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	squashFlag := fs.String("squash", "", "squash all commits since the merge-base with this ref into one commit")
 	force := fs.Bool("force", false, "with --squash: allow squashing a protected branch (main/master)")
 	forceWithLease := fs.Bool("force-with-lease", false, "with --squash: push the rewritten branch (git push --force-with-lease)")
+	allowMixed := fs.Bool("allow-mixed", false, "do not warn when the commit holds generated files next to source files: they belong together")
+	breaking := fs.String("breaking", breakingAuto, "BREAKING CHANGE trailer: auto drops it only when every changed file is a test, a fixture or documentation; keep trusts the model; never leaves it out")
 	var dir string
 	const dirUsage = "run as if started in this directory, like git -C (uppercase; lowercase -c selects the config file). " +
 		"The commit takes everything staged in that repository, so a repository another process is staging into gets that work committed: " +
@@ -163,6 +185,15 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 	effort, err := resolveOneshotEffort("commit", *effortFlag)
 	if err != nil {
 		return commitCommandOptions{}, err
+	}
+	generationTimeout, err := resolveOneshotTimeout("commit", *timeout)
+	if err != nil {
+		return commitCommandOptions{}, err
+	}
+	switch *breaking {
+	case breakingAuto, breakingKeep, breakingNever:
+	default:
+		return commitCommandOptions{}, fmt.Errorf("unsupported --breaking %q (use auto, keep, or never)", *breaking)
 	}
 	backend, err := resolveOneshotBackend("commit", *backendFlag)
 	if err != nil {
@@ -182,7 +213,7 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 		model:          *modelFlag,
 		effort:         effort,
 		backend:        backend,
-		timeout:        *timeout,
+		timeout:        generationTimeout,
 		paths:          append([]string(nil), pathsFlag...),
 		exclusive:      *exclusive,
 		filesToStage:   fs.Args(),
@@ -190,6 +221,8 @@ func parseCommitCommandOptions(args []string) (commitCommandOptions, error) {
 		force:          *force,
 		forceWithLease: *forceWithLease,
 		dir:            dir,
+		breaking:       *breaking,
+		allowMixed:     *allowMixed,
 	}
 	return opts, nil
 }
@@ -327,9 +360,11 @@ func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commi
 	if err != nil {
 		return nil
 	}
-	if stats.Mixed() && !quietMode {
-		termOut.Warn("commit mixes %d generated file(s) with %d source file(s); commit them separately so the message can describe the source change",
-			len(stats.GeneratedPaths), len(stats.SourcePaths))
+	sourceCount := len(stats.SourcePaths)
+	stats = withoutTestDataGenerated(stats)
+	if build := stats.GeneratedPaths; len(build) > 0 && sourceCount > 0 && !quietMode && !opts.allowMixed {
+		termOut.Warn("commit mixes %d generated file(s) (%s) with %d source file(s); commit them separately so the message can describe the source change, or pass --allow-mixed when they belong together",
+			len(build), previewPaths(build, 3), sourceCount)
 	}
 	cr := commands.GeneratedCommit(stats)
 	if cr == nil {
@@ -339,6 +374,64 @@ func generatedCommitRuntime(opts commitCommandOptions, state repoOpState) *commi
 		ledger: transparency.NewCostLedger(),
 		runner: fixedCommitRunner{commit: cr},
 	}
+}
+
+// withoutTestDataGenerated moves test data (golden files, snapshots) from the
+// generated paths to the source paths. They change with the code they test, so
+// a commit of golden files alone needs a model-written message, and the fixed
+// "regenerate ... no hand-written changes" message must not be chosen for it.
+func withoutTestDataGenerated(stats oneshot.DiffStats) oneshot.DiffStats {
+	build := buildOutput(stats.GeneratedPaths)
+	if len(build) == len(stats.GeneratedPaths) {
+		return stats
+	}
+	kept := map[string]bool{}
+	for _, path := range build {
+		kept[path] = true
+	}
+	moved := append([]string(nil), stats.SourcePaths...)
+	for _, path := range stats.GeneratedPaths {
+		if !kept[path] {
+			moved = append(moved, path)
+		}
+	}
+	stats.GeneratedPaths, stats.SourcePaths = build, moved
+	return stats
+}
+
+// buildOutput returns the generated paths that are build output. It leaves out
+// test data: golden files and snapshots change with the code they test, and a
+// commit without them fails its own tests. The diff reader classes a golden
+// file with one long line as minified, which is how three golden JSON files
+// beside 19 source files drew the "commit them separately" warning.
+func buildOutput(generated []string) []string {
+	var out []string
+	for _, path := range generated {
+		if !isTestData(path) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// isTestData reports a path that holds expected test output: under testdata/
+// or __snapshots__/, or named *.golden or *.snap.
+func isTestData(path string) bool {
+	path = filepath.ToSlash(path)
+	if strings.HasSuffix(path, ".golden") || strings.HasSuffix(path, ".snap") {
+		return true
+	}
+	elements := strings.Split(path, "/")
+	dirs := elements[:len(elements)-1]
+	return hasElement(dirs, "testdata") || hasElement(dirs, "__snapshots__")
+}
+
+// previewPaths joins up to limit paths and counts the rest.
+func previewPaths(paths []string, limit int) string {
+	if len(paths) <= limit {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(paths[:limit], ", "), len(paths)-limit)
 }
 
 func prepareCommitIndex(opts commitCommandOptions) error {
@@ -484,7 +577,89 @@ func runCommitGeneration(ctx context.Context, runner commitRunner, opts commitCo
 	if err != nil {
 		return nil, fmt.Errorf("commit generation failed: %w", err)
 	}
+	for _, repair := range result.Repairs {
+		fmt.Fprintf(os.Stderr, "buckley: changed the generated message: %s\n", repair)
+	}
+	applyBreakingPolicy(result.Commit, opts)
 	return result, nil
+}
+
+// applyBreakingPolicy decides whether the commit keeps the BREAKING CHANGE
+// trailer the model asked for. A model sets the flag for any change that
+// callers inside the repository must follow: a commit that touched only an
+// internal Go package got "BREAKING CHANGE: ... callers must supply lex tables
+// instead" (2026-11-09). Whether outside users can be affected at all is a
+// fact that git supplies, so code checks it (ADR 0015, decision 5).
+func applyBreakingPolicy(cr *commands.CommitResult, opts commitCommandOptions) {
+	// Options that were not parsed from flags carry no policy: `buckley pr
+	// merge` builds its own, and its message is not about the staged files.
+	if cr == nil || !cr.Breaking || opts.breaking == breakingKeep || opts.breaking == "" {
+		return
+	}
+	if opts.breaking == breakingNever {
+		cr.Breaking = false
+		return
+	}
+	files, err := stagedFilesMatchingPaths(opts.paths)
+	if len(opts.paths) == 0 {
+		files, err = listStagedFiles()
+	}
+	if err != nil || len(files) == 0 || !onlyTestsFixturesOrDocs(files) {
+		return
+	}
+	cr.Breaking = false
+	fmt.Fprintln(os.Stderr, "buckley: left out the BREAKING CHANGE trailer: every changed file is a test, a fixture or documentation. "+
+		"To drop it for other files too, commit with --breaking=never")
+}
+
+// onlyTestsFixturesOrDocs reports whether every changed file is a test, a
+// fixture or documentation. Only then can a breaking claim be dropped without
+// asking: no production code changed. Production code can break a user even
+// when other modules cannot import it (removing a flag from internal/cli, or an
+// internal change that alters what a command does), so it keeps the claim.
+// documentationFileNames are file names (without or with an extension such as
+// .txt) that hold documentation wherever they sit.
+var documentationFileNames = map[string]bool{
+	"license": true, "licence": true, "copying": true, "notice": true, "authors": true,
+	"contributors": true, "changelog": true, "changes": true, "readme": true,
+	"contributing": true, "code_of_conduct": true, "security": true,
+}
+
+// documentationExtensions are the only extensions that, with a name from
+// documentationFileNames, make a file documentation (README.txt). Any other
+// extension (security.go, license.go, changes.py) is code.
+var documentationExtensions = map[string]bool{".md": true, ".mdx": true, ".txt": true, ".rst": true, ".adoc": true}
+
+func onlyTestsFixturesOrDocs(files []string) bool {
+	for _, file := range files {
+		slash := filepath.ToSlash(file)
+		elements := strings.Split(slash, "/")
+		dirs := elements[:len(elements)-1]
+		base := strings.ToLower(elements[len(elements)-1])
+		ext := strings.ToLower(filepath.Ext(base))
+		switch {
+		case isTestData(slash):
+		case hasElement(dirs, "testdata"), hasElement(dirs, "fixtures"), hasElement(dirs, "fixture"):
+		case strings.HasSuffix(slash, "_test.go"):
+		// Documentation by its path or its name. A bare ".txt" is not enough:
+		// CMakeLists.txt and requirements.txt are build inputs.
+		case ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".adoc":
+		case hasElement(dirs, "docs") || hasElement(dirs, "doc"):
+		case documentationFileNames[base] || (documentationExtensions[ext] && documentationFileNames[strings.TrimSuffix(base, ext)]):
+		default:
+			return false
+		}
+	}
+	return len(files) > 0
+}
+
+func hasElement(elements []string, name string) bool {
+	for _, element := range elements {
+		if element == name {
+			return true
+		}
+	}
+	return false
 }
 
 func renderCommitGenerationResult(opts commitCommandOptions, result *commitRunResult, ledger *transparency.CostLedger, metadata commitmsg.ChangeMetadata) (string, error) {
@@ -545,7 +720,17 @@ func handleCommitPrompt(message string, runner commitRunner, ctx context.Context
 		return "commit", message
 
 	case "r", "regenerate":
-		result, err := runCommitGeneration(ctx, runner, opts)
+		// ctx carries the deadline of the first generation, which started
+		// before the message was shown. A person can read for longer than
+		// that, and the regeneration then failed at once with "context
+		// deadline exceeded". Each regeneration gets its own time limit.
+		timeout := opts.timeout
+		if timeout <= 0 {
+			timeout = defaultOneshotTimeout
+		}
+		regenCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		result, err := runCommitGeneration(regenCtx, runner, opts)
+		cancel()
 		if err != nil {
 			termOut.Error("Regeneration failed: %v", err)
 			return "regenerate", message // Keep old message
@@ -668,8 +853,12 @@ func printReasoning(reasoning string) {
 	termOut.Dim("%s", strings.Join(displayLines, "\n"))
 }
 
+// printCommitMessage shows the message styled on a terminal and raw
+// otherwise. The choice follows standard output, where the message goes. It
+// followed standard input, so `buckley commit --dry-run > msg.txt` typed at a
+// terminal wrote the styled block (label, border, wrapped lines) into the file.
 func printCommitMessage(message string) {
-	if stdinIsTerminalFn() {
+	if stdoutIsTerminalFn() {
 		// In a TTY, show styled commit message
 		termOut.Newline()
 		termOut.CommitMessage(message)

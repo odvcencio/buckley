@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
@@ -136,12 +138,16 @@ type mergeCommitDefinition struct {
 	source, target string
 	subjects       []string
 	resolutions    []string
+	// noConflicts is true only when git's MERGE_MSG was read and lists no
+	// conflicts. When the file is missing the prompt says nothing about conflicts.
+	noConflicts bool
 }
 
 func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 	var b strings.Builder
 	b.WriteString(prompts.MergeNoteProseBlock() + "\n\n")
 	fmt.Fprintf(&b, "## Merge\n\nMerging %s into %s.\n\n", d.source, d.target)
+	fmt.Fprintf(&b, "Buckley writes the header itself: \"merge(<scope>): Merge %s into %s\". Supply the scope and the body. The action and the subject you send are not used.\n\n", d.source, d.target)
 	if len(d.subjects) > 0 {
 		b.WriteString("## Incoming commits\n\n")
 		for _, s := range d.subjects {
@@ -155,9 +161,75 @@ func (d mergeCommitDefinition) BuildPrompt(ctx *oneshot.Context) string {
 			b.WriteString("- " + r + "\n")
 		}
 		b.WriteString("\n")
+	} else if d.noConflicts {
+		// Without this line a model that is told "Merging A into B" invented
+		// a conflict and its resolution (live check, 10 November 2026). It is
+		// said only when git's record was read: missing information is not
+		// a clean merge.
+		b.WriteString("## Conflicts\n\nThere were no conflicts in this merge. Do not mention conflicts or how they were resolved.\n\n")
 	}
 	b.WriteString(d.CommitDefinition.BuildPrompt(ctx))
 	return b.String()
+}
+
+// unusedMergeSubject stands in for the model's subject when a merge result is
+// checked. It passes every subject rule, and it is too short for the
+// removed-name check to look at.
+const unusedMergeSubject = "x"
+
+// forChecks returns the tool arguments as the merge commit uses them: the
+// scope, body and issues the model sent, under the fixed action.
+//
+// completeMergeWithRunner replaces the action and the subject after
+// generation, so the checks must not judge what the model wrote there. Told
+// "Merging A into B", a model answers with the action "merge" and git's own
+// subject "Merge A into B". As a generated subject that breaks three rules at
+// once: a capital first letter, a repeated action verb, and with a long branch
+// name a header over 72 characters. The run then failed after three attempts
+// on text that was never going to be committed, and passed on a later try
+// when the model happened to word the subject differently.
+func (d mergeCommitDefinition) forChecks(raw json.RawMessage) json.RawMessage {
+	return d.withFixedHeader(raw, unusedMergeSubject)
+}
+
+// forLeakChecks returns the arguments with the header that is committed: the
+// action "merge" and the subject "Merge <source> into <target>". Branch names
+// can hold an email address or a private term, and Buckley inserts them into
+// the header after generation, so the leak checks must read them.
+func (d mergeCommitDefinition) forLeakChecks(raw json.RawMessage) json.RawMessage {
+	return d.withFixedHeader(raw, fmt.Sprintf("Merge %s into %s", d.source, d.target))
+}
+
+func (d mergeCommitDefinition) withFixedHeader(raw json.RawMessage, subject string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	// A tool call whose arguments are "null" decodes without error to a nil
+	// map; assigning to it would panic. Leave it for validation to reject.
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return raw
+	}
+	fields["action"], _ = json.Marshal("merge")
+	fields["subject"], _ = json.Marshal(subject)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func (d mergeCommitDefinition) Validate(raw json.RawMessage) error {
+	return d.CommitDefinition.Validate(d.forChecks(raw))
+}
+
+func (d mergeCommitDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {
+	return d.CommitDefinition.Repair(d.forChecks(raw))
+}
+
+func (d mergeCommitDefinition) ValidateWithContext(ctx *oneshot.Context, raw json.RawMessage) error {
+	return d.CommitDefinition.ValidateWithContext(ctx, d.forLeakChecks(raw))
+}
+
+func (d mergeCommitDefinition) PolicyFacts(ctx *oneshot.Context, raw json.RawMessage) (*oneshot.PolicyRequest, error) {
+	return d.CommitDefinition.PolicyFacts(ctx, d.forLeakChecks(raw))
 }
 
 // squashMsgCommitDefinition wraps commands.CommitDefinition, adding the
@@ -219,7 +291,7 @@ func commitSubjectsBetween(from, to string) ([]string, error) {
 	return subjects, nil
 }
 
-// mergeConflictFiles parses the "# Conflicts:" section git appends to
+// mergeConflictFilesKnown parses the "# Conflicts:" section git appends to
 // MERGE_MSG (or REVERT_HEAD's MERGE_MSG) when a merge/revert/cherry-pick
 // stops on conflicts. Format (observed, git 2.x):
 //
@@ -228,33 +300,38 @@ func commitSubjectsBetween(from, to string) ([]string, error) {
 //	# Conflicts:
 //	#	path/one
 //	#	path/two
-func mergeConflictFiles(gitDir string) []string {
+//
+// conflictsHeaderRe finds git's "Conflicts:" line under any comment character
+// (core.commentChar can be "#", ";", "@" and others).
+var conflictsHeaderRe = regexp.MustCompile(`^(\S)\s?Conflicts:\s*$`)
+
+// mergeConflictFilesKnown is mergeConflictFiles plus whether the answer is
+// known. known is false when MERGE_MSG is missing or empty, so that a missing
+// record is never read as a merge without conflicts.
+func mergeConflictFilesKnown(gitDir string) (files []string, known bool) {
 	msg := readGitDirFile(gitDir, "MERGE_MSG")
-	if msg == "" {
-		return nil
+	if strings.TrimSpace(msg) == "" {
+		return nil, false
 	}
-	lines := strings.Split(msg, "\n")
-	var files []string
-	inSection := false
-	for _, line := range lines {
+	comment := ""
+	for _, line := range strings.Split(msg, "\n") {
 		trimmed := strings.TrimRight(line, "\r")
-		if strings.HasPrefix(trimmed, "# Conflicts:") {
-			inSection = true
+		if comment == "" {
+			if m := conflictsHeaderRe.FindStringSubmatch(trimmed); m != nil {
+				comment = m[1]
+			}
 			continue
 		}
-		if !inSection {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "#") {
+		if !strings.HasPrefix(trimmed, comment) {
 			break
 		}
-		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, comment))
 		if path == "" {
 			continue
 		}
 		files = append(files, path)
 	}
-	return files
+	return files, true
 }
 
 // analyzeConflictResolutions compares each conflicted file's resolved
@@ -313,10 +390,11 @@ func runCompleteMerge(opts commitCommandOptions, state repoOpState) error {
 	if err != nil {
 		return err
 	}
-	conflictFiles := mergeConflictFiles(state.GitDir)
+	conflictFiles, conflictsKnown := mergeConflictFilesKnown(state.GitDir)
 	resolutions := analyzeConflictResolutions(conflictFiles, "HEAD", state.MergeHead)
 
-	def := mergeCommitDefinition{source: source, target: target, subjects: subjects, resolutions: resolutions}
+	def := mergeCommitDefinition{source: source, target: target, subjects: subjects, resolutions: resolutions,
+		noConflicts: conflictsKnown && len(conflictFiles) == 0}
 
 	runtime, cleanup, err := newCommitCommandRuntime(opts, def)
 	defer cleanup()
@@ -341,6 +419,7 @@ func runCompleteMerge(opts commitCommandOptions, state repoOpState) error {
 // package's dependency-injection style (commitRunner is already an
 // interface for this purpose; see frameworkCommitRunner in commit.go).
 func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, runner commitRunner, ledger *transparency.CostLedger, source, target string) error {
+	runner = mergeHeaderRunner{commitRunner: runner, source: source, target: target}
 	result, err := runCommitGeneration(ctx, runner, opts)
 	if err != nil {
 		return err
@@ -353,8 +432,6 @@ func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, run
 		return fmt.Errorf("no merge commit message generated")
 	}
 
-	result.Commit.Action = "merge"
-	result.Commit.Subject = fmt.Sprintf("Merge %s into %s", source, target)
 	message := result.Commit.Format()
 
 	printCommitMessage(message)
@@ -386,6 +463,24 @@ func completeMergeWithRunner(opts commitCommandOptions, ctx context.Context, run
 		return pushChanges(opts.compactOutput, false)
 	}
 	return nil
+}
+
+// mergeHeaderRunner gives every message of the wrapped runner the fixed merge
+// header. The header was set once, after the first generation, so a message
+// regenerated at the confirmation prompt ([r]) kept the model's own action and
+// subject and the merge was committed without the merge grammar.
+type mergeHeaderRunner struct {
+	commitRunner
+	source, target string
+}
+
+func (r mergeHeaderRunner) Run(ctx context.Context) (*commitRunResult, error) {
+	result, err := r.commitRunner.Run(ctx)
+	if result != nil && result.Commit != nil {
+		result.Commit.Action = "merge"
+		result.Commit.Subject = fmt.Sprintf("Merge %s into %s", r.source, r.target)
+	}
+	return result, err
 }
 
 // runCompleteCherryPick finishes an in-progress `git cherry-pick` after

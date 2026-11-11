@@ -50,6 +50,8 @@ type prCommandOptions struct {
 	template bool
 	// title replaces the title, generated or read from bodyFile.
 	title string
+	// breaking is the --breaking policy: auto, keep or never.
+	breaking string
 	// output is a file that receives the title and body as shown.
 	output string
 	// bodyFile is a file whose title and body are posted as they are, without
@@ -109,12 +111,13 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	modelFlag := fs.String("model", "", "model to use (default: BUCKLEY_MODEL_PR or models.utility.pr for API backend)")
 	effortFlag := fs.String("effort", "", "reasoning effort: low, medium, high, xhigh, or max (default: BUCKLEY_EFFORT_PR, BUCKLEY_ONESHOT_EFFORT, or config)")
 	backendFlag := fs.String("backend", "", "backend to use: api, codex, or claude (default: BUCKLEY_PR_BACKEND, BUCKLEY_ONESHOT_BACKEND, or api)")
-	timeout := fs.Duration("timeout", 2*time.Minute, "timeout for model request")
+	timeout := fs.Duration("timeout", 0, "time limit for generating the text, retries included (default: BUCKLEY_TIMEOUT_PR, BUCKLEY_ONESHOT_TIMEOUT, or 5m)")
 	diffBudget := fs.Int("diff-budget", diffsignal.PRDiffBudget, "total byte budget for gathered diff context (default: PR-scale budget, larger than the commit-message default)")
 	var contextFileFlag stringSliceFlag
 	fs.Var(&contextFileFlag, "context-file", "path to a file of author-supplied notes for the PR (repeatable, oldest first: the model treats a later note as current, but a section of the same kind in an earlier file stays in the body). The model reads the notes as data, not instructions. Sections headed Testing, Counters, Evidence, Not verified or Known gaps are copied into the PR body word for word")
 	noUpdate := fs.Bool("no-update", false, "fail instead of silently overwriting an existing open PR's title/body")
 	draft := fs.Bool("draft", false, "create the PR as a draft (passed through to gh pr create --draft)")
+	breaking := fs.String("breaking", breakingAuto, "Breaking Changes section: auto drops it only when every changed file is a test, a fixture or documentation; keep trusts the model; never leaves it out")
 	title := fs.String("title", "", "use this PR title instead of the generated one or the one in --body-file")
 	output := fs.String("output", "", "also write the title and body to this file, in the form --body-file reads; with --dry-run this saves the text for review")
 	bodyFile := fs.String("body-file", "", "post this file as it is, without a model call: a first line \"Title: ...\" is the title and the rest is the body (the form --output writes)")
@@ -142,9 +145,18 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	if err != nil {
 		return prCommandOptions{}, err
 	}
+	generationTimeout, err := resolveOneshotTimeout("pr", *timeout)
+	if err != nil {
+		return prCommandOptions{}, err
+	}
 	verificationLabel, err := verificationFlagMode(*requireVerification, *requireReceipt, *noRequireVerification)
 	if err != nil {
 		return prCommandOptions{}, err
+	}
+	switch *breaking {
+	case breakingAuto, breakingKeep, breakingNever:
+	default:
+		return prCommandOptions{}, fmt.Errorf("unsupported --breaking %q (use auto, keep, or never)", *breaking)
 	}
 	if strings.ContainsAny(*title, "\r\n") {
 		return prCommandOptions{}, errors.New("--title must be one line")
@@ -163,7 +175,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		model:             *modelFlag,
 		effort:            effort,
 		backend:           backend,
-		timeout:           *timeout,
+		timeout:           generationTimeout,
 		diffBudget:        *diffBudget,
 		contextFiles:      append([]string(nil), contextFileFlag...),
 		noUpdate:          *noUpdate,
@@ -171,6 +183,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 		strict:            *strict,
 		template:          *template,
 		title:             strings.TrimSpace(*title),
+		breaking:          *breaking,
 		output:            *output,
 		bodyFile:          *bodyFile,
 		head:              *headFlag,
@@ -525,6 +538,9 @@ func prRunResultFromFramework(fwResult *oneshot.RunResult) *prRunResult {
 	}
 	result.Trace = fwResult.Trace
 	result.ContextAudit = fwResult.ContextAudit
+	for _, repair := range fwResult.Repairs {
+		prWarnf("changed the generated text: %s", repair)
+	}
 	if fwResult.Value == nil {
 		return result
 	}
@@ -565,6 +581,7 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 		}
 	}
 	claims := checkPRAgainstSources(result.PR, commands.NewPRSources(notes, result.Context))
+	applyPRBreakingPolicy(result.PR, result.Context, opts.breaking)
 	text := prText{Title: opts.title, Body: result.PR.Body(commands.PRBodyOptions{
 		Sections:         sections,
 		StateNotVerified: true,
@@ -1019,4 +1036,25 @@ func updatePR(run ghCommandRunner, url, title, body string) error {
 	}
 	spinner.StopWithSuccess(fmt.Sprintf("PR updated: %s", url))
 	return nil
+}
+
+// applyPRBreakingPolicy is the rule of `buckley commit --breaking`: auto drops
+// the Breaking Changes section only when every changed file is a test, a
+// fixture or documentation; keep trusts the model; never leaves it out.
+func applyPRBreakingPolicy(pr *commands.PRResult, ctx *oneshot.Context, policy string) {
+	if pr == nil || !pr.Breaking || policy == breakingKeep {
+		return
+	}
+	if policy == breakingNever {
+		pr.Breaking = false
+		return
+	}
+	if ctx == nil {
+		return
+	}
+	files := append(append([]string(nil), ctx.Diff.SourcePaths...), ctx.Diff.GeneratedPaths...)
+	if onlyTestsFixturesOrDocs(files) {
+		pr.Breaking = false
+		prWarnf("left out the Breaking Changes section: every changed file is a test, a fixture or documentation; to drop it for other files too, pass --breaking=never")
+	}
 }

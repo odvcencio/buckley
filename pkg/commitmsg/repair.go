@@ -23,7 +23,7 @@ func ValidateHeader(action, scope, subject string, limit int) error {
 	}
 	header := composeHeader(action, scope, subject)
 	if n := utf8.RuneCountInString(header); n > limit {
-		return fmt.Errorf("header exceeds %d characters (%d)", limit, n)
+		return &HeaderTooLongError{Limit: limit, Length: n}
 	}
 	if scope != strings.Join(strings.Fields(scope), " ") || subject != strings.Join(strings.Fields(subject), " ") {
 		return fmt.Errorf("header contains extra whitespace")
@@ -95,58 +95,95 @@ func RepairHeader(action, scope, subject string, limit int) (string, string, []s
 	if fits() {
 		return scope, subject, repairs
 	}
+	// Order of the remedies: keep the scope and shorten the subject first
+	// (filler words, a trailing qualifier, then whole words from the end). Drop
+	// the scope only when the subject would otherwise fall below
+	// minSubjectWords words. A subject that was already shorter is not held to it.
+	startWords := len(strings.Fields(subject))
 	if scope != "" {
+		kept, keptRepairs := shortenSubject(action, scope, subject, limit)
+		// The retained header must fit: a long scope can leave no room even
+		// for a one-word subject, and then the scope goes.
+		fitsWithScope := utf8.RuneCountInString(composeHeader(action, scope, kept)) <= limit
+		if n := len(strings.Fields(kept)); fitsWithScope && (n >= minSubjectWords || n >= startWords) {
+			return scope, kept, append(repairs, keptRepairs...)
+		}
 		scope = ""
 		repairs = append(repairs, "dropped scope")
 	}
-	if fits() {
-		return scope, subject, repairs
+	subject, more := shortenSubject(action, scope, subject, limit)
+	return scope, subject, append(repairs, more...)
+}
+
+// minSubjectWords is the fewest subject words that a cut may leave before the
+// scope is given up instead.
+const minSubjectWords = 4
+
+// trailingFunctionWords cannot end a subject: a cut that leaves one reads as
+// broken ("rebuild the lex steps from").
+var trailingFunctionWords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "but": true, "nor": true,
+	"to": true, "from": true, "for": true, "with": true, "of": true, "in": true, "on": true,
+	"at": true, "by": true, "into": true, "onto": true, "via": true, "as": true, "than": true,
+	"that": true, "which": true, "while": true, "when": true,
+}
+
+// shortenSubject makes the header fit the limit with the given scope. It
+// removes articles, then a trailing qualifier, then words from the end, and
+// the cut always ends on a content word. If only the leading verb is left, the
+// cut keeps that verb alone rather than a dangling function word.
+func shortenSubject(action, scope, subject string, limit int) (string, []string) {
+	var repairs []string
+	fits := func(sub string) bool { return utf8.RuneCountInString(composeHeader(action, scope, sub)) <= limit }
+	if fits(subject) {
+		return subject, repairs
 	}
+	originalWords := len(strings.Fields(subject))
 	// Remove articles inside the subject, but retain its leading action word.
 	words := strings.Fields(subject)
-	for i := len(words) - 1; i > 0 && !fits(); i-- {
+	for i := len(words) - 1; i > 0 && !fits(strings.Join(words, " ")); i-- {
 		switch words[i] {
 		case "the", "a", "an":
 			words = append(words[:i], words[i+1:]...)
-			subject = strings.Join(words, " ")
 		}
 	}
-	if subject != cleanSubject && len(words) < len(strings.Fields(cleanSubject)) {
+	if len(words) < originalWords {
 		repairs = append(repairs, "removed filler words")
 	}
-	if fits() {
-		return scope, subject, repairs
+	subject = strings.Join(words, " ")
+	if fits(subject) {
+		return subject, repairs
 	}
 	for _, qualifier := range []string{" for now", " as needed", " where possible", " when needed"} {
 		if strings.HasSuffix(subject, qualifier) {
 			subject = strings.TrimSuffix(subject, qualifier)
 			repairs = append(repairs, "removed trailing qualifier")
-			if fits() {
-				return scope, subject, repairs
+			if fits(subject) {
+				return subject, repairs
 			}
 		}
 	}
-	budget := limit - utf8.RuneCountInString(action) - 2
-	if budget < 1 {
-		return scope, subject, repairs
-	}
 	words = strings.Fields(subject)
-	for len(words) > 1 && !fits() {
-		words = words[:len(words)-1]
-		// A cut before the next list item must not leave a dangling conjunction.
-		for len(words) > 1 && (words[len(words)-1] == "and" || words[len(words)-1] == "or") {
-			words = words[:len(words)-1]
-		}
-		subject = strings.Join(words, " ")
+	n := len(words)
+	for n > 1 && !fits(strings.Join(words[:n], " ")) {
+		n--
 	}
-	if !fits() {
+	for n > 1 && trailingFunctionWords[strings.ToLower(words[n-1])] {
+		n--
+	}
+	subject = strings.Join(words[:n], " ")
+	if !fits(subject) {
 		// A single token can exceed the entire budget. A rune cut is the only
 		// way to retain model text and guarantee that length cannot block a commit.
+		budget := limit - utf8.RuneCountInString(composeHeader(action, scope, ""))
+		if budget < 1 {
+			return subject, repairs
+		}
 		subject = string([]rune(subject)[:budget])
 	}
 	subject = strings.TrimRight(subject, " .")
-	repairs = append(repairs, "shortened subject")
-	return scope, subject, repairs
+	repairs = append(repairs, fmt.Sprintf("cut the subject from %d to %d words", originalWords, len(strings.Fields(subject))))
+	return subject, repairs
 }
 
 func nestedHeaderPrefix(subject string) []string {
@@ -173,17 +210,17 @@ func RepairBody(body []string) ([]string, []string) {
 	out := make([]string, len(body))
 	copy(out, body)
 	var repairs []string
-	shortened := false
 	for i, bullet := range out {
 		normalized := NormalizeBullet(bullet)
-		if len(strings.Fields(normalized)) <= MaxBulletWords {
+		words := len(strings.Fields(normalized))
+		if words <= MaxBulletWords {
 			continue
 		}
 		out[i] = shortenBullet(normalized)
-		shortened = true
-	}
-	if shortened {
-		repairs = append(repairs, "shortened long bullets")
+		// Say which bullet lost text and how much. A cut at a clause break can
+		// remove a fact ("two heuristics ..., and two more ..." became "two
+		// heuristics"), and the author can only check it when told where.
+		repairs = append(repairs, fmt.Sprintf("cut bullet %d from %d to %d words; check that it still says what changed", i+1, words, len(strings.Fields(out[i]))))
 	}
 	kept, nonEmpty := 0, 0
 	for _, bullet := range out {
@@ -204,7 +241,7 @@ func RepairBody(body []string) ([]string, []string) {
 			}
 		}
 		out = trimmed
-		repairs = append(repairs, "dropped extra bullets")
+		repairs = append(repairs, fmt.Sprintf("dropped %d bullet(s) beyond the limit of %d", nonEmpty-MaxBullets, MaxBullets))
 	}
 	return out, repairs
 }

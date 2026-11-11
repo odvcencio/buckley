@@ -8,16 +8,19 @@ import (
 )
 
 // Repair fixes mechanical errors in a generate_commit call without another
-// model call: header format, bullets over the word limit and bullets over the
-// count limit. It returns the original arguments unless the result validates.
+// model call: header format, a header over the length limit, bullets over the
+// word limit and bullets over the count limit.
+//
+// It returns what it fixed even when another problem remains, such as a
+// subject that repeats the verb. The framework validates the result. Before,
+// Repair gave back the original arguments unless everything validated, so a
+// header of 77 characters beside any other problem was not cut, the model was
+// told about the length only, and the run could end with "header exceeds 72
+// characters (77)" although the length was never the obstacle.
 func (d CommitDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {
 	body, bodyRepairs := repairBodyArguments(raw)
-	header, headerRepairs := repairHeaderArguments(body, "subject", commitmsg.HeaderLimit, d.Validate)
-	repairs := append(bodyRepairs, headerRepairs...)
-	if len(repairs) == 0 || d.Validate(header) != nil {
-		return raw, nil
-	}
-	return header, repairs
+	header, headerRepairs := repairHeaderArguments(body, "subject", commitmsg.HeaderLimit)
+	return header, append(bodyRepairs, headerRepairs...)
 }
 
 func repairBodyArguments(raw json.RawMessage) (json.RawMessage, []string) {
@@ -42,10 +45,10 @@ func repairBodyArguments(raw json.RawMessage) (json.RawMessage, []string) {
 }
 
 func (d PRDefinition) Repair(raw json.RawMessage) (json.RawMessage, []string) {
-	return repairHeaderArguments(raw, "title", 100, d.Validate)
+	return repairHeaderArguments(raw, "title", 100)
 }
 
-func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int, validate func(json.RawMessage) error) (json.RawMessage, []string) {
+func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int) (json.RawMessage, []string) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil {
 		return raw, nil
@@ -69,8 +72,22 @@ func repairHeaderArguments(raw json.RawMessage, subjectKey string, limit int, va
 	fields["scope"], _ = json.Marshal(scope)
 	fields[subjectKey], _ = json.Marshal(subject)
 	repaired, err := json.Marshal(fields)
-	if err != nil || validate(repaired) != nil {
+	if err != nil {
 		return raw, nil
 	}
 	return repaired, repairs
+}
+
+// ShortenFirst reports whether err is only a bullet over the word limit or a
+// header over the character limit. The framework then asks the model to
+// shorten it once (the retry prompt names the limit and the current length),
+// and code cuts it only if the next answer is still too long.
+func (d CommitDefinition) ShortenFirst(err error) bool {
+	return err != nil && (commitmsg.IsBulletTooLong(err) || commitmsg.IsHeaderTooLong(err))
+}
+
+// ShortenFirst reports whether err is only a title over the 100-character
+// limit, so that the model shortens it once before code cuts it.
+func (d PRDefinition) ShortenFirst(err error) bool {
+	return err != nil && commitmsg.IsHeaderTooLong(err)
 }

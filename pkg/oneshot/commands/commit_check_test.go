@@ -69,3 +69,28 @@ func TestCheckMessageFlagsCapitalAction(t *testing.T) {
 		t.Fatalf("style = %v, want a capital action and a capital subject", r.Style)
 	}
 }
+
+// `buckley commit` completes a merge with the header "merge(<scope>): Merge
+// <source> into <target>". The subject rules flagged every such commit, so
+// `buckley commit-check --strict` rejected commits that Buckley itself wrote.
+func TestCheckMessage_MergeHeaderBuckleyWrites(t *testing.T) {
+	withPolicy(t, commitmsg.Policy{})
+	long := "merge(cgo_harness): Merge remotes/origin/main into codex/compact-correctness-qualification-20261027\n\n- Bring in the upstream harness changes.\n"
+	if report := CheckMessage(long, "", oneshot.DiffStats{}, nil); len(report.Style) != 0 || report.Failed() {
+		t.Errorf("style = %q, action = %q: the fixed merge header must pass", report.Style, report.Action)
+	}
+	if report := CheckMessage("merge: Merge feature into main\n\n- Keep the incoming version.\n", "", oneshot.DiffStats{}, nil); len(report.Style) != 0 {
+		t.Errorf("style = %q for the header without a scope", report.Style)
+	}
+
+	// The body of a merge is the author's, so its limits still apply.
+	wordy := "merge(core): Merge feature into main\n\n- " + strings.Repeat("word ", commitmsg.MaxBulletWords+1) + "\n"
+	if report := CheckMessage(wordy, "", oneshot.DiffStats{}, nil); len(report.Style) != 1 || !strings.Contains(report.Style[0], "words") {
+		t.Errorf("style = %q, want the bullet length flagged", report.Style)
+	}
+
+	// A hand-written header with the merge action is judged like any other.
+	if report := CheckMessage("merge(core): Tidy the branch.\n\n- Clean up.\n", "", oneshot.DiffStats{}, nil); len(report.Style) == 0 {
+		t.Error("a merge-action header outside the fixed form passed the subject rules")
+	}
+}

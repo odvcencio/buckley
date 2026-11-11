@@ -917,7 +917,10 @@ func TestSVGGoldenExceptionPreservesBoundsAndSuppression(t *testing.T) {
 		reason    Reason
 	}{
 		{"outside testdata", minifiedFileDiff("assets/diagram.golden.svg", 5500), ReasonMinified},
-		{"ordinary SVG", minifiedFileDiff("testdata/diagram.svg", 5500), ReasonMinified},
+		{"ordinary SVG outside testdata", minifiedFileDiff("assets/diagram.svg", 5500), ReasonMinified},
+		// Any bounded fixture is kept by the fixture rule (#469), also an
+		// ordinary SVG under testdata.
+		{"ordinary SVG fixture", minifiedFileDiff("testdata/diagram.svg", 5500), ReasonNone},
 		{"oversized", minifiedFileDiff("testdata/diagram.golden.svg", MaxFileDiffBytes), ReasonMinified},
 		{"generated", minifiedFileDiff("testdata/dist/diagram.golden.svg", 5500), ReasonGeneratedPath},
 		{"binary", binaryFileDiff("testdata/diagram.golden.svg"), ReasonBinary},
@@ -934,5 +937,39 @@ func TestSVGGoldenExceptionPreservesBoundsAndSuppression(t *testing.T) {
 	got := Prioritize(golden, 1000)
 	if !got.Truncated || len(got.Context) > 1000 || strings.Contains(got.Context, strings.Repeat("var a=1;", 100)) {
 		t.Fatalf("golden bypassed total budget: bytes=%d truncated=%v", len(got.Context), got.Truncated)
+	}
+}
+
+// Both exceptions to the minified rule hold together: a bounded test fixture
+// (any fixture path) and a bounded SVG golden are kept as source, and neither
+// one hides the other. Resolution of the merge of #468 into #469.
+func TestMinifiedExceptionsHoldTogether(t *testing.T) {
+	fixture := minifiedFileDiff("testdata/render/data.golden", 5500)
+	svg := minifiedFileDiff("testdata/render/diagram.golden.svg", 5500)
+	for name, raw := range map[string]string{"fixture": fixture, "svg golden": svg} {
+		files := Split(raw)
+		if len(files) != 1 || files[0].Reason != ReasonNone {
+			t.Errorf("%s: classification = %+v, want kept as source", name, files)
+		}
+	}
+	// Only the SVG exception applies to a segment that the capture limit cut:
+	// the fixture rule refuses a cut fixture, so the result tells which
+	// condition is the one that holds.
+	cut := Split(svg)[0]
+	cut.Reason, cut.truncated = ReasonNone, true
+	classifyBody(&cut, nil, true)
+	if cut.Reason != ReasonNone {
+		t.Errorf("cut svg golden: reason = %s, want kept by the SVG exception", cut.Reason)
+	}
+	cutFixture := Split(fixture)[0]
+	cutFixture.Reason, cutFixture.truncated = ReasonNone, true
+	classifyBody(&cutFixture, nil, true)
+	if cutFixture.Reason != ReasonMinified {
+		t.Errorf("cut fixture: reason = %s, want %s", cutFixture.Reason, ReasonMinified)
+	}
+	// Neither exception: still minified.
+	other := Split(minifiedFileDiff("assets/app.js", 5500))
+	if len(other) != 1 || other[0].Reason != ReasonMinified {
+		t.Errorf("plain minified file: %+v", other)
 	}
 }

@@ -106,3 +106,122 @@ func TestRepairBody(t *testing.T) {
 		})
 	}
 }
+
+// A cut can remove a fact: a bullet that counted "two ..., and two more ..."
+// came out as "two ...". The repair now says which bullet it cut and by how
+// much, so the author can check it.
+func TestRepairBody_SaysWhatItCut(t *testing.T) {
+	bullet := "Match C end-of-input and ill-formed UTF-8 lookahead; document two heuristics where the blob loses source detail, and two more where the scanner state is opaque"
+	out, repairs := RepairBody([]string{"Keep the guard", bullet})
+	if want := "Match C end-of-input and ill-formed UTF-8 lookahead; document two heuristics where the blob loses source detail"; out[1] != want {
+		t.Fatalf("cut bullet = %q, want %q", out[1], want)
+	}
+	if len(repairs) != 1 || repairs[0] != "cut bullet 2 from 25 to 16 words; check that it still says what changed" {
+		t.Fatalf("repairs = %q", repairs)
+	}
+
+	seven := []string{"one", "two", "three", "", "four", "five", "six", "seven"}
+	out, repairs = RepairBody(seven)
+	if len(repairs) != 1 || repairs[0] != "dropped 2 bullet(s) beyond the limit of 5" {
+		t.Fatalf("repairs = %q", repairs)
+	}
+	if kept := len(out); kept != 6 { // five bullets and the blank entry
+		t.Fatalf("kept %d entries: %q", kept, out)
+	}
+
+	if _, repairs = RepairBody([]string{"short bullet"}); len(repairs) != 0 {
+		t.Fatalf("repairs for a valid body = %q", repairs)
+	}
+}
+
+func TestRepairHeader_SaysHowMuchOfTheSubjectItCut(t *testing.T) {
+	subject := "teach the incremental parser to reuse subtrees across edits that touch only trailing whitespace and comments"
+	_, cut, repairs := RepairHeader("update", "", subject, HeaderLimit)
+	if len(cut) >= len(subject) {
+		t.Fatalf("subject was not cut: %q", cut)
+	}
+	found := false
+	for _, repair := range repairs {
+		if strings.HasPrefix(repair, "cut the subject from 16 to ") && strings.HasSuffix(repair, " words") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("repairs = %q, want the word counts of the cut", repairs)
+	}
+}
+
+func TestRepairHeader_KeepsScopeAndEndsOnAContentWord(t *testing.T) {
+	// The header the installed v0.8.4 wrote: it ended on "from".
+	subject := "rebuild C's invalid-lookahead and end-of-input lex steps from the generator's ADVANCE_MAP"
+	scope, got, repairs := RepairHeader("fix", "ccore", subject, HeaderLimit)
+	header := composeHeader("fix", scope, got)
+	if n := utf8.RuneCountInString(header); n > HeaderLimit {
+		t.Fatalf("header %q has %d characters", header, n)
+	}
+	if last := lastWord(got); trailingFunctionWords[last] {
+		t.Errorf("subject %q ends on the function word %q", got, last)
+	}
+	if scope != "ccore" {
+		t.Errorf("scope = %q, want it kept: the subject keeps %d words", scope, len(strings.Fields(got)))
+	}
+	if len(repairs) == 0 {
+		t.Error("the cut is not reported")
+	}
+}
+
+func TestRepairHeader_NeverEndsOnAFunctionWord(t *testing.T) {
+	for word := range trailingFunctionWords {
+		// Cut points land right after the function word.
+		base := "rebuild the generated lexer tables and traces " + word
+		subject := base + " extra words that push the header past the limit of seventy two"
+		_, got, _ := RepairHeader("fix", "", subject, utf8.RuneCountInString(composeHeader("fix", "", base)))
+		if last := lastWord(got); trailingFunctionWords[last] {
+			t.Errorf("after %q the subject %q ends on %q", word, got, last)
+		}
+	}
+}
+
+func TestRepairHeader_DropsScopeOnlyWhenTheSubjectWouldFallBelowFourWords(t *testing.T) {
+	scope, got, repairs := RepairHeader("fix", "a-very-long-scope-name-that-eats-the-header", "rebuild the lexer tables from the generated sources and traces", HeaderLimit)
+	if scope != "" {
+		t.Errorf("scope = %q, want it dropped: with it the subject would have fewer than 4 words (%q)", scope, got)
+	}
+	if !strings.Contains(strings.Join(repairs, ";"), "dropped scope") {
+		t.Errorf("repairs = %q", repairs)
+	}
+	if n := utf8.RuneCountInString(composeHeader("fix", scope, got)); n > HeaderLimit {
+		t.Errorf("header has %d characters", n)
+	}
+	if lastWord(got) == "from" {
+		t.Errorf("subject %q ends on a function word", got)
+	}
+}
+
+func TestRepairHeader_OnlyTheVerbSurvivesWithoutADanglingWord(t *testing.T) {
+	_, got, _ := RepairHeader("fix", "", "rebuild from "+strings.Repeat("x", 80), 20)
+	if got == "" || trailingFunctionWords[lastWord(got)] {
+		t.Errorf("subject = %q", got)
+	}
+}
+
+func lastWord(s string) string {
+	words := strings.Fields(strings.ToLower(s))
+	if len(words) == 0 {
+		return ""
+	}
+	return words[len(words)-1]
+}
+
+// Review of #469, finding 4: a scope so long that not even a one-word subject
+// fits must be dropped, not kept with an unchanged, oversized header.
+func TestRepairHeader_LongScopeWithOneWordSubjectDropsTheScope(t *testing.T) {
+	scope := strings.Repeat("s", 68)
+	gotScope, subject, repairs := RepairHeader("fix", scope, "restore", HeaderLimit)
+	if n := utf8.RuneCountInString(composeHeader("fix", gotScope, subject)); n > HeaderLimit {
+		t.Fatalf("header has %d characters: scope %q subject %q", n, gotScope, subject)
+	}
+	if gotScope != "" || !strings.Contains(strings.Join(repairs, ";"), "dropped scope") {
+		t.Errorf("scope = %q, repairs = %q", gotScope, repairs)
+	}
+}
