@@ -172,22 +172,47 @@ func templateHeadingLines(t *PRTemplate) []string {
 }
 
 // topLevelHeadings returns the headings of the given level, outside code
-// fences and HTML comments.
+// fences and HTML comments. Setext headings (text over "===" or "---") count
+// as level 1 and 2.
 func topLevelHeadings(body string, level int) []string {
 	var out []string
 	prefix := strings.Repeat("#", level) + " "
 	var fence fenceTracker
 	comment := false
-	for _, line := range strings.Split(body, "\n") {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
 		if !comment && (fence.line(line) || fence.inFence()) {
 			continue
 		}
 		if !comment && strings.HasPrefix(line, prefix) {
 			out = append(out, strings.TrimSpace(line))
 		}
+		if !comment && level <= 2 && i+1 < len(lines) && testSetext(lines, i) == level {
+			out = append(out, strings.TrimSpace(line))
+		}
 		comment = commentOpenAfter(line, comment)
 	}
 	return out
+}
+
+// testSetext is an independent reading of a setext heading for the tests: a
+// non-blank text line that starts a paragraph over a line of only "=" or "-".
+func testSetext(lines []string, i int) int {
+	under := strings.TrimSpace(lines[i+1])
+	text := strings.TrimSpace(lines[i])
+	if text == "" || under == "" || strings.HasPrefix(text, "#") || strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "`") {
+		return 0
+	}
+	if i > 0 && strings.TrimSpace(lines[i-1]) != "" && !strings.HasPrefix(lines[i-1], "#") {
+		return 0
+	}
+	switch {
+	case strings.Trim(under, "=") == "":
+		return 1
+	case strings.Trim(under, "-") == "":
+		return 2
+	}
+	return 0
 }
 
 // The section rule: a block that no section takes goes to the first section
@@ -356,5 +381,58 @@ func TestModelTextOnlyFillsTheSectionsItWasAskedFor(t *testing.T) {
 	body, _ := shapeBody(t, "## Testing\n<!-- steps -->\n## Validation\n<!-- more -->\n", "## Testing\nRan it.\n", PRResult{Sections: map[string]string{"validation": "EXTRA"}})
 	if strings.Contains(body, "EXTRA") {
 		t.Errorf("model text for a section it was not asked for reached the body:\n%s", body)
+	}
+}
+
+// Review of #478, round two, finding 1: a setext heading in a placed section is
+// converted and demoted; the body has no heading at the template's level that
+// the template lacks.
+func TestPlacedSetextHeadingsAreDemoted(t *testing.T) {
+	body, _ := shapeBody(t, "## Summary\n<!-- describe -->\n", "## Evidence\nMeasurements\n------------\nObserved output.\n\nTitle\n=====\nMore.\n\n```\nKeep\n----\n```\n", PRResult{Sections: map[string]string{"summary": "Change"}})
+	if got := topLevelHeadings(body, 2); !reflect.DeepEqual(got, []string{"## Summary"}) {
+		t.Errorf("level-2 headings = %q, body =\n%s", got, body)
+	}
+	if got := topLevelHeadings(body, 1); len(got) != 0 {
+		t.Errorf("level-1 headings = %q, body =\n%s", got, body)
+	}
+	if !strings.Contains(body, "### Evidence\n\n##### Measurements\n") || !strings.Contains(body, "\n#### Title\n") || strings.Contains(body, "------------") || strings.Contains(body, "=====") || !strings.Contains(body, "```\nKeep\n----\n```") {
+		t.Errorf("setext headings not converted, or the fence changed:\n%s", body)
+	}
+}
+
+// Setext headings are read in the other places that read headings of a
+// template. (A notes section is started by ATX headings only: a setext heading
+// inside a carried section stays in it.)
+func TestSetextHeadingsInATemplate(t *testing.T) {
+	tmpl := ParsePRTemplate("What\n====\n\n<!-- say what -->\n\nChecks\n------\n\n- [ ] Ran it\n")
+	if len(tmpl.Sections) != 2 || tmpl.Sections[0].Heading != "What" || tmpl.Sections[0].Level != 1 || !tmpl.Sections[0].Open || tmpl.Sections[1].Level != 2 || tmpl.Sections[1].HeadingLine != "Checks\n------" {
+		t.Fatalf("setext template parsed as %+v", tmpl.Sections)
+	}
+	body, _ := shapeBody(t, "What\n====\n\n<!-- say what -->\n\nChecks\n------\n\n- [ ] Ran it\n", "", PRResult{Sections: map[string]string{"what": "Does it."}})
+	if !strings.Contains(body, "What\n====\n\nDoes it.") || !strings.Contains(body, "Checks\n------\n\n- [ ] Ran it") {
+		t.Errorf("body =\n%s", body)
+	}
+}
+
+// Finding 2: a shorter or different delimiter inside a longer fence does not
+// close it, so a checkbox example in it stays fixed text.
+func TestTemplateFenceClosesOnlyWithTheSameDelimiter(t *testing.T) {
+	template := "## Summary\n<!-- describe -->\n## Example\n````md\n```\n## Sample\n- [ ] Ready\n````\n"
+	tmpl := ParsePRTemplate(template)
+	if len(tmpl.Sections) != 2 {
+		t.Fatalf("sections = %+v, want Summary and Example only", tmpl.Sections)
+	}
+	body, ws := shapeBody(t, template, "## Checklist\n- [X] Ready\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "```\n## Sample\n- [ ] Ready\n````") || !hasWarning(ws, "- [X] Ready", true) {
+		t.Errorf("body =\n%s\nwarnings = %v", body, ws)
+	}
+}
+
+// Finding 3: a checklist section that also receives prose keeps its checkbox
+// lines byte for byte except the check mark; its other guide comments go.
+func TestCheckboxLineKeepsItsCommentWhenProseArrives(t *testing.T) {
+	body, _ := shapeBody(t, "## Summary\n<!-- describe -->\n## Checklist\n<!-- tick what you did -->\n- [ ] A <!-- guide -->\n- [ ] B\n", "## Checklist\n- [x] A\nWindows was not tested.\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "- [x] A <!-- guide -->\n- [ ] B\n\nWindows was not tested.") || strings.Contains(body, "tick what you did") {
+		t.Errorf("body =\n%s", body)
 	}
 }

@@ -201,6 +201,10 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 		}
 		cur, body = nil, nil
 	}
+	// Only ATX headings (a line that starts with "#") start or end a section of
+	// the notes. A setext heading ("Title" over "-----") inside a carried
+	// section stays in it, so that no text of the author is dropped; placing the
+	// section moves such a heading below the template's (demoteHeadings).
 	for i, line := range lines {
 		if fence.line(line) {
 			// A fence delimiter belongs to the section it sits in.
@@ -231,6 +235,36 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	}
 	flush()
 	return out
+}
+
+var setextRe = regexp.MustCompile(`^ {0,3}(=+|-+)[ \t]*$`)
+
+// setextAt reports a setext heading whose text is lines[i] and whose underline
+// (a line of "=" or "-") is lines[i+1]: level 1 or 2, and the heading text. The
+// text line starts a paragraph (it follows a blank line, an ATX heading or the
+// start) and is no list item, quote, table row, fence or underline itself. The
+// caller has checked that the lines are outside a code fence.
+func setextAt(lines []string, i int) (level int, text string, ok bool) {
+	if i+1 >= len(lines) {
+		return 0, "", false
+	}
+	m := setextRe.FindStringSubmatch(lines[i+1])
+	line := lines[i]
+	if m == nil || strings.TrimSpace(line) == "" || len(line)-len(strings.TrimLeft(line, " ")) > 3 {
+		return 0, "", false
+	}
+	t := strings.TrimSpace(line)
+	if setextRe.MatchString(line) || listItemRe.MatchString(t) || strings.ContainsAny(t[:1], ">|#`~") {
+		return 0, "", false
+	}
+	if i > 0 && strings.TrimSpace(lines[i-1]) != "" && atxHeadingRe.FindStringSubmatch(lines[i-1]) == nil {
+		return 0, "", false // a continuation line of a paragraph
+	}
+	level = 2
+	if m[1][0] == '=' {
+		level = 1
+	}
+	return level, t, true
 }
 
 // labelLine reports whether lines[i] is a short label on a line of its own:
@@ -357,15 +391,23 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	var out []string
 	skipLevel := 0
 	var fence fenceTracker
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
 		if fence.line(line) {
-		} else if m := atxHeadingRe.FindStringSubmatch(line); m != nil && !fence.inFence() {
-			level := len(m[1])
-			if skipLevel > 0 && level <= skipLevel {
-				skipLevel = 0
+		} else if !fence.inFence() {
+			level, name, isHeading := 0, "", false
+			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
+				level, name, isHeading = len(m[1]), m[2], true
+			} else if l, t, ok := setextAt(lines, i); ok {
+				level, name, isHeading = l, t, true
 			}
-			if skipLevel == 0 && names[headingKey(m[2])] {
-				skipLevel = level
+			if isHeading {
+				if skipLevel > 0 && level <= skipLevel {
+					skipLevel = 0
+				}
+				if skipLevel == 0 && names[headingKey(name)] {
+					skipLevel = level
+				}
 			}
 		}
 		if skipLevel == 0 {

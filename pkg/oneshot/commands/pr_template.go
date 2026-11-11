@@ -60,6 +60,7 @@ func ParsePRTemplate(text string) *PRTemplate {
 		cur       *TemplateSection
 		guide     []string
 		inFence   bool
+		fence     fenceTracker
 		inComment bool
 		fixed     bool // the current section has a checkbox or fixed text
 	)
@@ -73,15 +74,29 @@ func ParsePRTemplate(text string) *PRTemplate {
 		cur, guide, fixed = nil, nil, false
 	}
 	keys := map[string]int{}
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !inComment && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
-			inFence = !inFence
+	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	skip := false // the underline of a setext heading was read with its text
+	for idx, line := range all {
+		if skip {
+			skip = false
+			continue
+		}
+		// A fence closes only with the same character and at least as many of
+		// them: a shorter or different delimiter inside it is text.
+		if !inComment {
+			fence.line(line)
+			inFence = fence.inFence()
 		}
 		if !inFence && !inComment {
+			level, heading, headingLine, ok := 0, "", line, false
 			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
+				level, heading, ok = len(m[1]), strings.TrimSpace(m[2]), true
+			} else if l, t, set := setextAt(all, idx); set {
+				level, heading, headingLine, ok, skip = l, t, line+"\n"+all[idx+1], true, true
+			}
+			if ok {
 				flush()
-				cur = &TemplateSection{Level: len(m[1]), Heading: strings.TrimSpace(m[2]), HeadingLine: line}
+				cur = &TemplateSection{Level: level, Heading: heading, HeadingLine: headingLine}
 				key := strings.Trim(sectionKeyRe.ReplaceAllString(strings.ToLower(cur.Heading), "_"), "_")
 				if len(key) > 40 {
 					key = strings.TrimRight(key[:40], "_")
@@ -388,7 +403,10 @@ func splitCheckboxes(text string) (others string, boxes []string) {
 }
 
 // withoutComments removes the HTML comments from lines. A line that holds only
-// comment text is dropped; comments inside a code fence are text.
+// comment text is dropped; comments inside a code fence are text. A checkbox
+// item line is kept byte for byte, its own comments included, so that only its
+// check mark can change (unless the line opens a comment that it does not
+// close: then the comment is cut so that it cannot swallow the next lines).
 func withoutComments(lines []string) []string {
 	var (
 		out       []string
@@ -397,6 +415,10 @@ func withoutComments(lines []string) []string {
 	)
 	for _, line := range lines {
 		if !inComment && (fence.line(line) || fence.inFence()) {
+			out = append(out, line)
+			continue
+		}
+		if !inComment && checkboxRe.MatchString(line) && !commentOpenAfter(line, false) {
 			out = append(out, line)
 			continue
 		}
@@ -478,38 +500,53 @@ func (t *PRTemplate) deepestLevel() int {
 }
 
 // demoteHeadings shifts the Markdown headings of text (outside code fences)
-// so that its highest heading has level top, keeping the relative nesting. A
-// heading that would pass level 6 becomes a bold line.
+// so that its highest heading has level top, keeping the relative nesting.
+// Setext headings (a text line over a line of "=" or "-") are converted to the
+// same ATX form. A heading that would pass level 6 becomes a bold line.
 func demoteHeadings(text string, top int) string {
 	lines := strings.Split(text, "\n")
+	type heading struct {
+		at, span, level int
+		text            string
+	}
+	var found []heading
 	var fence fenceTracker
 	highest := 7
-	for _, line := range lines {
-		if fence.line(line) || fence.inFence() {
+	for i := 0; i < len(lines); i++ {
+		if fence.line(lines[i]) || fence.inFence() {
 			continue
 		}
-		if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-			highest = min(highest, len(m[1]))
+		if m := atxHeadingRe.FindStringSubmatch(lines[i]); m != nil {
+			found = append(found, heading{i, 1, len(m[1]), strings.TrimSpace(m[2])})
+		} else if level, t, ok := setextAt(lines, i); ok {
+			found = append(found, heading{i, 2, level, t})
+			i++
+		} else {
+			continue
 		}
+		highest = min(highest, found[len(found)-1].level)
 	}
-	if highest == 7 {
+	if len(found) == 0 {
 		return text
 	}
-	fence = fenceTracker{}
-	for i, line := range lines {
-		if fence.line(line) || fence.inFence() {
+	var out []string
+	next := 0
+	for i := 0; i < len(lines); i++ {
+		if next < len(found) && found[next].at == i {
+			h := found[next]
+			level := h.level + top - highest
+			if level > 6 {
+				out = append(out, "**"+h.text+"**")
+			} else {
+				out = append(out, strings.Repeat("#", level)+" "+h.text)
+			}
+			i += h.span - 1
+			next++
 			continue
 		}
-		if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-			level := len(m[1]) + top - highest
-			if level > 6 {
-				lines[i] = "**" + strings.TrimSpace(m[2]) + "**"
-			} else {
-				lines[i] = strings.Repeat("#", level) + " " + strings.TrimSpace(m[2])
-			}
-		}
+		out = append(out, lines[i])
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // renderBlock writes a block as a subsection one level below the deepest

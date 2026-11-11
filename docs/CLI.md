@@ -473,17 +473,21 @@ template is not read. `--template=false` keeps Buckley's own sections.
 
 The body keeps the template's shape:
 
-1. **Headings.** The headings at the template's level are exactly the
-   template's, in its order, whether the template has sections that ask for
-   text or only fixed text and checkboxes. Buckley adds nothing after the
+1. **Headings.** For a template with at least one section that is not a pure
+   checklist, the headings at the template's level are exactly the template's,
+   in its order, whether it has sections that ask for text or only fixed text
+   and checkboxes. Buckley adds nothing after the
    template as a new top-level section. A Testing, Counters, Evidence, Not
    verified or Known gaps section of the notes that no template section takes,
    the Not verified statement, the breaking-change statement, the related
    issues, and (for a template with no section that asks for text) Buckley's own
    Summary, Changes, Testing and Review Focus are written as subsections one
    level below the template's deepest heading, at the end of one template
-   section. A heading inside such a section moves down with it, so that none
-   reaches the template's level; headings in code fences stay. At heading level
+   section. A heading inside such a section (also a setext heading, a text line over
+   a line of `=` or `-`, which becomes an ATX heading) moves down with it, so
+   that none reaches the template's level; headings in code fences stay. A
+   notes section is started by ATX headings only; a setext heading inside a
+   carried section stays in it. At heading level
    6 the label is bold text. The section is the first whose heading, guide
    comments or checkbox text has a word that starts with a keyword of the kind
    (case-insensitive):
@@ -507,10 +511,12 @@ The body keeps the template's shape:
 2. **Checkboxes.** An item is a checkbox line of the template outside code
    fences and HTML comments, in a section or before the first heading. Its
    identity is its text without inline HTML comments, white space collapsed;
-   case matters. Every item is written word for word, in the template's order.
+   case matters. Every item is written in the template's order, byte for byte except its
+   check mark (its own inline comments stay).
    A box is ticked only when the notes contain a ticked line with the same item
    text in a section the template section takes, or in a notes section headed
-   `Checklist`. A checkbox-shaped line in a fence or a comment is fixed text.
+   `Checklist`. A checkbox-shaped line in a fence (one closes only with the same
+   character and at least as many of them) or a comment is fixed text.
    A checkbox line in a section the template section takes that matches no item
    of that section is not written; stderr names it, and `--strict` makes that an
    error. The author's other lines in the section follow the checklist.
@@ -548,7 +554,10 @@ cuts them.
 
 A model rewrites what it reads, so the parts that must not change are copied by
 code. A section of a notes file reaches the PR body word for word, under the
-author's heading, when the heading names one of these:
+author's heading, when the heading names one of these (with a pull request
+template, the exceptions are checkbox lines, which are reconciled with the
+template's, and headings inside a placed section, which move down; see
+[Pull request template](#pull-request-template)):
 
 | Section | Headings that select it |
 |---------|-------------------------|
@@ -577,7 +586,8 @@ example `&lt;!--`) when it is meant as text. The same error applies when removin
 a comment would join the characters around it into a new `<!--` (for example
 `<!<!-- x -->--`): the text after it cannot be trusted, so the file is refused
 instead of being cut. Comments are removed once, when the file is read. Other
-text in a carried section is copied word for word.
+text in a carried section is copied word for word (with a template, subject
+to the checkbox and heading rules above).
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a
