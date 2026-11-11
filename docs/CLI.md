@@ -403,7 +403,7 @@ buckley pr [OPTIONS]
 | `--cost=false` | Do not print the token and cost lines |
 | `--context-file <path>` | Author notes for the PR; repeatable, oldest first. See [Author notes](#author-notes) |
 | `--template=false` | Keep Buckley's own sections when the repository has a pull request template. See [Pull request template](#pull-request-template) |
-| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns), when the body is out of the pull request template's shape, or when an author checkbox line or section has no place Default: warn. See [Checks against the sources](#checks-against-the-sources) |
+| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns), when the body is out of the pull request template's shape, or when an author checkbox line or section has no place. Default: warn. See [Checks against the sources](#checks-against-the-sources) |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
 | `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
@@ -477,7 +477,7 @@ through one reader. Markdown structure (headings, checkbox items, code blocks, c
 in model text) comes from that parser, not from line scans. Two things stay textual by design: the short-label
 rule that splits a notes file into sections (a label is a property of a line of the notes, as it always was),
 and the removal of HTML comments from a notes file when it is read, which searches the text so that it fails
-closed (see [Author notes](#author-notes)). So a heading, a checkbox item, a code block or a comment is what CommonMark says it is: a `#`
+closed (see [Author notes](#author-notes)). Structure follows Markdown++'s reading, which is CommonMark in the cases below (the exceptions are listed under "Known limits of the reader"): a `#`
 line inside a fenced or indented code block, an HTML block or a comment is text;
 a setext heading is a paragraph of one or more lines over a line of only `=` or
 only `-`; a list or a block quote is not part of a setext heading. Every line
@@ -521,18 +521,43 @@ The body keeps the template's shape:
    GitHub renders the body to HTML, and raw HTML can change what is seen although
    the Markdown tree does not show it, so three more rules apply (with a
    template): (a) in every field of the model's text, a closed HTML comment is
-   removed, and a comment opener with no closer in the same field and a raw
-   heading element (`<h1>` to `<h6>`, any case, with attributes) are written as
-   text by escaping the opening `<` as `&lt;`; one warning names the field and the
-   construct. (b) The author's text is not rewritten: an unclosed comment opener
-   in a carried notes section, or a raw heading element at or above the
-   template's deepest level, is a warning that names the section and the line,
-   and an error with `--strict`. (c) The check of the rendered body also reports
-   a comment opener with no closer, and a raw heading element at or above the
-   template's level, in HTML that the parser hands over as raw HTML (so not in a
-   code block); the body may have no more of them than the template has. Notes
-   files cannot carry a comment opener without a closer at all: reading the file
-   refuses it.
+   removed (also inside another HTML block), and a comment opener with no closer
+   in the same field and a raw heading element (`<h1>` to `<h6>`, any case, with
+   attributes) are written as text by escaping the opening `<` as `&lt;`; one
+   warning names the field and the construct. (b) The author's text is not
+   rewritten: an unclosed comment opener in a carried notes section, or a raw
+   heading element at or above the template's deepest level, is a warning that
+   names the section and the line, and an error with `--strict`. (c) The check of
+   the fully assembled body, in every layout (Buckley's own sections included),
+   reports a comment opener with no closer and a raw heading element at or above
+   the template's level, in HTML that the parser hands over as raw HTML (so not
+   in a code block); the body may have no more of them than the template has.
+   Notes files cannot carry a comment opener without a closer at all: reading the
+   file refuses it.
+
+   Known limits of the reader. Markdown++ is a superset of GitHub's Markdown, and
+   version 0.5.0 reads some inputs differently from GitHub. Until `buckley pr` can
+   ask for GitHub's reading, these are guarded without a second parser:
+   - A construct that only Markdown++ has is a blocking shape warning that names
+     the construct and the line ("Markdown++ reads this differently from
+     GitHub"), an error with `--strict`, when it is in the model's text or in the
+     final body (the template may have as many as it has itself); in the author's
+     notes it is a warning. The node types treated this way: component (an
+     upper-case tag such as `<H2 class="x">` after prose), expression (`{name}`),
+     container directive (`:::note`), admonition (`> [!NOTE]`), front matter,
+     definition list, table of contents, embed, diagram, slide and math block.
+     This guard goes away when the reader can ask mdpp for GitHub's reading.
+   - A parse error, a recovery diagnostic of the parser (a block kept as text, a
+     budget hit) or a source range that cannot be used means the structure cannot
+     be certified. A template like that stops generation with an error that names
+     it (`--template=false` is the way out); for the body it is a blocking
+     warning; for a notes file the whole note is carried as written, with a
+     warning.
+   - One known gap remains: Markdown++ 0.5.0 does not read a multi-line setext
+     heading when the document begins with an HTML block (a template that starts
+     with a comment) or a thematic break. A body containing that pattern can gain
+     a heading on GitHub without a shape warning, and `--strict` does not protect
+     those cases. It is to be fixed in Markdown++.
 
    The section for a block is the first whose heading, guide comments or
    checkbox text has a word that starts with a keyword of the kind

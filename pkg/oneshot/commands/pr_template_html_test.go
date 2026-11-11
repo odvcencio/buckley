@@ -57,11 +57,11 @@ func TestAuthorTextWithStructuralHTMLBlocks(t *testing.T) {
 	}
 	// A template that has the element itself is not accused of it.
 	tmpl := ParsePRTemplate("<h2>Title</h2>\n\n## Summary\n<!-- describe -->\n")
-	if w := tmpl.rawHTMLWarning("<h2>Title</h2>\n\n## Summary\n\nText"); w != "" {
-		t.Errorf("the template's own element: %q", w)
+	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\nText"); len(ws) != 0 {
+		t.Errorf("the template's own element: %v", ws)
 	}
-	if w := tmpl.rawHTMLWarning("<h2>Title</h2>\n\n## Summary\n\n<H2>More</H2>"); !strings.Contains(w, "raw <h2>") {
-		t.Errorf("one element more than the template: %q", w)
+	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\n<h2>More</h2>"); !hasWarning(ws, "raw <h2>", true) {
+		t.Errorf("one element more than the template: %v", ws)
 	}
 }
 
@@ -98,18 +98,28 @@ func TestBareLabelAboveATableOrAListIsKept(t *testing.T) {
 	}
 }
 
-// No author line is absent from the body unless a warning names it: for notes in
-// many shapes, every non-blank line of a carried section is in the body.
+// No author line is absent from the body unless a warning names it. The
+// expectation is written by hand for each sample (the lines of its carried
+// sections), not taken from what the splitter returned; a warning excuses a
+// missing line only when it names that line.
 func TestNoAuthorLineIsLostSilently(t *testing.T) {
-	samples := []string{
-		"## Testing\n\n- `go test ./a` passed\n- second\n\n## Evidence\n\nTitle\n---\nobserved\n\n```\n# not a heading\n```\n",
-		"Testing:\n- ran it\n\nEvidence\n| a | b |\n|---|---|\n| 1 | 2 |\n\nNot verified:\nWindows\n",
-		"## Counters\n\n| step | n |\n|---|---|\n| lex | 3 |\n\n### Detail\n\n1. one\n2. two\n\n## Known gaps\n\n> quote\n> more\n",
-		"**Evidence**\n1. first\n2. second\n\nKnown gaps\n- gap one\n",
+	samples := []struct {
+		notes string
+		lines []string // the lines of the carried sections, as the author wrote them
+	}{
+		{"## Testing\n\n- `go test ./a` passed\n- second\n\n## Evidence\n\nTitle\n---\nobserved\n\n```\n# not a heading\n```\n",
+			[]string{"- `go test ./a` passed", "- second", "Title", "observed", "```", "# not a heading"}},
+		{"Testing:\n- ran it\n\nEvidence\n| a | b |\n|---|---|\n| 1 | 2 |\n\nNot verified:\nWindows\n",
+			[]string{"- ran it", "| a | b |", "|---|---|", "| 1 | 2 |", "Windows"}},
+		{"## Counters\n\n| step | n |\n|---|---|\n| lex | 3 |\n\n### Detail\n\n1. one\n2. two\n\n## Known gaps\n\n> quote\n> more\n",
+			[]string{"| step | n |", "| lex | 3 |", "Detail", "1. one", "2. two", "> quote", "> more"}},
+		{"**Evidence**\n1. first\n2. second\n\nKnown gaps\n- gap one\n",
+			[]string{"1. first", "2. second", "- gap one"}},
+		{"> [!NOTE]\nx\n\n## Evidence\nObserved.\n", []string{"Observed."}},
 	}
 	templates := []string{"", "## Summary\n<!-- describe -->\n## Gate\n- [ ] Ready\n", "## Review\nRead.\n- [ ] Ran\n"}
-	for si, notes := range samples {
-		note, ok, err := NewPRNote(RawPRNote{Path: "n.md", Text: notes})
+	for si, sample := range samples {
+		note, ok, err := NewPRNote(RawPRNote{Path: "n.md", Text: sample.notes})
 		if err != nil || !ok {
 			t.Fatal(err)
 		}
@@ -123,23 +133,20 @@ func TestNoAuthorLineIsLostSilently(t *testing.T) {
 				sections = AuthorSections([]PRNote{note})
 			}
 			body, ws := PRResult{Action: "fix", Title: "x", Summary: "Change", Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl, Sections: sections})
-			for _, s := range sections {
-				for _, line := range strings.Split(s.Body(), "\n") {
-					want := strings.TrimSpace(line)
-					// A setext underline goes when the heading becomes an ATX line.
-					if want == "" || strings.Trim(want, "=") == "" || strings.Trim(want, "-") == "" {
-						continue
-					}
+			for _, want := range sample.lines {
+				found := false
+				for _, b := range strings.Split(body, "\n") {
 					// A heading inside a placed section moves down: compare its words.
-					found := false
-					for _, b := range strings.Split(body, "\n") {
-						if strings.TrimSpace(b) == want || strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(b), "#")) == strings.TrimSpace(strings.TrimLeft(want, "#")) {
-							found = true
-						}
+					if strings.TrimSpace(b) == want || strings.TrimSpace(strings.TrimLeft(b, "# ")) == strings.TrimSpace(strings.TrimLeft(want, "# ")) {
+						found = true
 					}
-					if !found && len(ws) == 0 {
-						t.Errorf("sample %d, template %d: the author's line %q is absent and no warning names it:\n%s", si, ti, want, body)
-					}
+				}
+				named := false
+				for _, w := range ws {
+					named = named || strings.Contains(w.Text, want)
+				}
+				if !found && !named {
+					t.Errorf("sample %d, template %d: the author's line %q is absent and no warning names it:\n%s\nwarnings %v", si, ti, want, body, ws)
 				}
 			}
 		}

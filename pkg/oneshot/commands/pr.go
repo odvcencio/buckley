@@ -180,8 +180,12 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 	if opts.Template != nil {
 		// Model text may not carry raw HTML that changes structure.
 		pr, warnings = pr.withoutStructuralHTML()
+		if why := opts.Template.Unreadable(); why != "" {
+			warnings = append(warnings, BodyWarning{Text: "the pull request template cannot be read exactly: " + why, Blocking: true})
+		}
 		for _, s := range opts.Sections {
 			warnings = append(warnings, opts.Template.authorHTMLWarnings(s)...)
+			warnings = append(warnings, authorReadWarnings(s)...)
 		}
 	}
 	modelBoxes := 0
@@ -269,9 +273,6 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		if w := opts.Template.shapeWarning(templateText); w != "" {
 			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
 		}
-		if w := opts.Template.rawHTMLWarning(templateText); w != "" {
-			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
-		}
 		modelBoxes += res.ModelBoxes
 		if !shaped {
 			for _, s := range author {
@@ -328,7 +329,31 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 	if modelBoxes > 0 {
 		warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model wrote %d checkbox line(s); they were dropped, because only the template's checklist and the author's notes can add or tick a box", modelBoxes)})
 	}
-	return strings.TrimSpace(b.String()), warnings
+	body := strings.TrimSpace(b.String())
+	if opts.Template != nil {
+		// The check covers the whole body, Buckley's own sections included, in
+		// every layout.
+		warnings = append(warnings, opts.Template.finalBodyWarnings(body)...)
+	}
+	return body, warnings
+}
+
+// authorReadWarnings says what could not be read exactly in a carried notes
+// section. The text is carried as written.
+func authorReadWarnings(s AuthorSection) []BodyWarning {
+	var out []BodyWarning
+	if s.problem != "" {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q could not be split exactly (%s); the whole note is carried as written", s.Heading(), s.problem)})
+	}
+	d := readMarkdown(s.Body())
+	if len(d.Problems) > 0 && s.problem == "" {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q could not be read exactly (%s); its text is carried as written", s.Heading(), d.Problems[0])})
+	}
+	for _, f := range d.Foreign {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has %s at its line %d; Markdown++ reads this differently from GitHub", s.Heading(), f.Name, f.Line+1)})
+		break
+	}
+	return out
 }
 
 // withLF returns a copy of the result with LF line endings in every text field,
@@ -365,11 +390,22 @@ func (pr PRResult) withLF() PRResult {
 // warning names each field and construct.
 func (pr PRResult) withoutStructuralHTML() (PRResult, []BodyWarning) {
 	var warnings []BodyWarning
+	warnModel := func(field, text string, constructs []string) {
+		for _, c := range constructs {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; %s", field, c, map[bool]string{true: "it was removed", false: "it was written as text"}[strings.Contains(c, "closed HTML comment") && !strings.Contains(c, "unclosed")])})
+		}
+		d := readMarkdown(text)
+		if len(d.Problems) > 0 {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s could not be read exactly (%s); it is written as it is", field, d.Problems[0])})
+		}
+		for _, f := range d.Foreign {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s has %s at its line %d; Markdown++ reads this differently from GitHub", field, f.Name, f.Line+1), Blocking: true})
+			break
+		}
+	}
 	fix := func(field, text string) string {
 		out, constructs := neutralizeHTML(text)
-		for _, c := range constructs {
-			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; it was written as text", field, c)})
-		}
+		warnModel(field, out, constructs)
 		return out
 	}
 	seen := map[string]bool{}
@@ -381,12 +417,14 @@ func (pr PRResult) withoutStructuralHTML() (PRResult, []BodyWarning) {
 		for i, item := range in {
 			text, constructs := neutralizeHTML(item)
 			out[i] = text
+			var fresh []string
 			for _, c := range constructs {
 				if !seen[field+c] {
 					seen[field+c] = true
-					warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; it was written as text", field, c)})
+					fresh = append(fresh, c)
 				}
 			}
+			warnModel(field, text, fresh)
 		}
 		return out
 	}
@@ -444,7 +482,8 @@ func neutralizeHTML(text string) (string, []string) {
 		if len(d.Comments) == 0 {
 			return d.text, constructs
 		}
-		text = strings.Join(stripComments(d.Lines, false), "\n")
+		note("a closed HTML comment")
+		text = strings.Join(d.withoutComments(), "\n")
 	}
 	return text, constructs
 }

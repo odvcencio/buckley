@@ -101,6 +101,24 @@ func TestRunPRCommand_WritesTheBodyInTheRepositoryTemplate(t *testing.T) {
 	}
 }
 
+// A template that Markdown++ cannot read exactly stops the command; the model is
+// not called and --template=false is the way out.
+func TestRunPRCommand_UnreadableTemplateStopsGeneration(t *testing.T) {
+	r := newPRRepo(t)
+	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", "## Summary\n<!-- describe -->\n## Checks\n- [X] "+strings.Repeat("a*b_", 5000)+"\n")
+	runGitIn(t, r.work, "push", "-q", "origin", "main")
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubPRModel(t)
+
+	var err error
+	captureStdout(t, func() { err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature"}) })
+	if err == nil || !strings.Contains(err.Error(), "cannot be read exactly") || !strings.Contains(err.Error(), "PULL_REQUEST_TEMPLATE.md") || !strings.Contains(err.Error(), "MDPP-PARSE") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRunPRCommand_TemplateFalseKeepsBuckleysSections(t *testing.T) {
 	r := newPRRepo(t)
 	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", testPRTemplate)
@@ -154,6 +172,22 @@ func TestLoadPRTemplate(t *testing.T) {
 		tmpl := loadPRTemplate(plan)
 		if tmpl == nil || len(tmpl.Sections) != 1 || tmpl.Sections[0].Heading != "Head" {
 			t.Fatalf("template = %+v, want the head's", tmpl)
+		}
+	})
+
+	t.Run("a template that Markdown++ cannot read exactly is reported with its source", func(t *testing.T) {
+		r := newPRRepo(t)
+		r.commit(t, "feature", "f.txt")
+		commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", "## Summary\n<!-- describe -->\n## Checks\n- [X] "+strings.Repeat("a*b_", 5000)+"\n")
+		r.park(t)
+
+		plan, err := preflightPR(prCommandOptions{head: "feature", dryRun: true, push: true}, nil)
+		if err != nil {
+			t.Fatalf("preflightPR: %v", err)
+		}
+		tmpl := loadPRTemplate(plan)
+		if tmpl == nil || !strings.Contains(tmpl.Unreadable(), "MDPP-PARSE") || !strings.Contains(tmpl.Source, ".github/PULL_REQUEST_TEMPLATE.md") {
+			t.Fatalf("template = %+v, Unreadable %q", tmpl, tmpl.Unreadable())
 		}
 	})
 

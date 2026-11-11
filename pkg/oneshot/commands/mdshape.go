@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -93,6 +94,40 @@ type mdDoc struct {
 	Comments  []mdComment
 	Hazards   []mdHazard // raw HTML in HTML blocks and inline HTML
 	inFence   []bool     // per line: inside a fenced code block, delimiters included
+	// Problems say why the reading cannot be trusted: a parse error, a recovery
+	// diagnostic of the parser (a block kept as text, a budget hit) or a source
+	// range that cannot be used. An empty list means the reading is exact.
+	Problems []string
+	// Foreign lists the constructs that only Markdown++ reads (not GitHub's
+	// Markdown): they are read differently by GitHub, so the shape of the text
+	// cannot be certified.
+	Foreign []mdForeign
+}
+
+// mdForeign is a Markdown++-only construct; Line is 0-based.
+type mdForeign struct {
+	Name string
+	Line int
+}
+
+// foreignNodes are the node types that Markdown++ adds to GitHub's Markdown.
+// This guard goes away when the reader can ask mdpp for GitHub's reading.
+var foreignNodes = map[mdpp.NodeType]string{
+	mdpp.NodeComponent:          "a Markdown++ component (a tag such as <H2 ...> in upper case)",
+	mdpp.NodeExpression:         "a Markdown++ expression ({...})",
+	mdpp.NodeContainerDirective: "a Markdown++ container directive (:::name)",
+	mdpp.NodeAdmonition:         "a Markdown++ admonition",
+	mdpp.NodeFrontmatter:        "Markdown++ front matter",
+	mdpp.NodeDefinitionList:     "a Markdown++ definition list",
+	mdpp.NodeTableOfContents:    "a Markdown++ table of contents",
+	mdpp.NodeAutoEmbed:          "a Markdown++ embed",
+	mdpp.NodeDiagram:            "a Markdown++ diagram",
+	mdpp.NodeSlide:              "a Markdown++ slide",
+	mdpp.NodeMathBlock:          "a Markdown++ math block",
+}
+
+func (d *mdDoc) problem(format string, args ...any) {
+	d.Problems = append(d.Problems, fmt.Sprintf(format, args...))
 }
 
 // readMarkdown parses text with Markdown++ (m31labs.dev/mdpp). Line endings are
@@ -110,19 +145,33 @@ func readMarkdown(src string) *mdDoc {
 	}
 	doc, err := mdpp.Parse([]byte(src))
 	if err != nil || doc == nil || doc.Root == nil {
+		d.problem("Markdown++ could not parse the text (%v)", err)
 		return d
+	}
+	for _, diag := range doc.Diagnostics() {
+		if strings.HasPrefix(diag.Code, "MDPP-PARSE-") {
+			d.problem("Markdown++ %s at line %d: %s", diag.Code, diag.Range.StartLine, diag.Message)
+		}
 	}
 	d.readComments(doc.Root)
 	sort.Slice(d.Comments, func(i, j int) bool { return d.Comments[i].Start < d.Comments[j].Start })
 	lists := 0
 	var walk func(n *mdpp.Node, parent *mdpp.Node, list int)
 	walk = func(n *mdpp.Node, parent *mdpp.Node, list int) {
+		if name, ok := foreignNodes[n.Type]; ok {
+			d.Foreign = append(d.Foreign, mdForeign{Name: name, Line: d.lineOf(min(max(n.Range.StartByte, 0), len(d.text)))})
+		}
+		if isBlockNode(n.Type) && !d.checkRange(n) {
+			return // its range cannot be used, so neither can anything below it
+		}
 		switch n.Type {
 		case mdpp.NodeList:
 			lists++
 			list = lists - 1
 		case mdpp.NodeHeading:
-			d.Headings = append(d.Headings, d.readHeading(n, parent == doc.Root))
+			if h, ok := d.readHeading(n, parent == doc.Root); ok {
+				d.Headings = append(d.Headings, h)
+			}
 		case mdpp.NodeTaskListItem:
 			d.addTask(n, list)
 		case mdpp.NodeCodeBlock:
@@ -189,12 +238,10 @@ func (d *mdDoc) readComments(root *mdpp.Node) {
 		}
 		switch n.Type {
 		case mdpp.NodeHTMLBlock:
-			if !strings.HasPrefix(strings.TrimLeft(d.text[from:to], " "), "<!--") {
-				break
-			}
-			// A comment block holds its comment and may hold text after the
-			// closing "-->" on the same line. The comments are the delimited spans
-			// of the block's own text.
+			// The comments of an HTML block are the delimited spans of the block's
+			// own text, wherever they sit in it: a comment block holds its comment
+			// and may hold text after the closing "-->", and any other block
+			// (<div>, <pre>) may hold comments inside it.
 			rest := from
 			for rest < to {
 				open := strings.Index(d.text[rest:to], "<!--")
@@ -246,11 +293,57 @@ func (d *mdDoc) lineSpan(first, last int) (start, stop int) {
 	return start, stop
 }
 
+// isBlockNode reports the node types that stand for a block of lines.
+func isBlockNode(t mdpp.NodeType) bool {
+	switch t {
+	case mdpp.NodeHeading, mdpp.NodeParagraph, mdpp.NodeList, mdpp.NodeListItem, mdpp.NodeTaskListItem,
+		mdpp.NodeCodeBlock, mdpp.NodeHTMLBlock, mdpp.NodeBlockquote, mdpp.NodeThematicBreak:
+		return true
+	}
+	return false
+}
+
+// checkRange rejects a source range that cannot be used: one outside the text,
+// or an empty one for a block (a block always has source text). It records a
+// problem and reports false for such a range.
+func (d *mdDoc) checkRange(n *mdpp.Node) bool {
+	r := n.Range
+	if r.StartByte < 0 || r.EndByte > len(d.text)+1 || r.EndByte <= r.StartByte { // a range may end one past the text: the line break that a last line lacks
+		d.problem("Markdown++ gave a block (node type %d) the source range %d..%d, which cannot be used (the text has %d bytes)", n.Type, r.StartByte, r.EndByte, len(d.text))
+		return false
+	}
+	return true
+}
+
+// underlineOnly reports a setext underline: up to three spaces, then only "="
+// or only "-", then optional spaces.
+func underlineOnly(line string) bool {
+	t := strings.TrimLeft(line, " ")
+	if len(line)-len(t) > 3 {
+		return false
+	}
+	t = strings.TrimRight(t, " \t")
+	return t != "" && (strings.Trim(t, "=") == "" || strings.Trim(t, "-") == "")
+}
+
 // readHeading reads a heading node. A setext heading is a heading whose range
-// spans its text lines and the underline line.
-func (d *mdDoc) readHeading(h *mdpp.Node, top bool) mdHeading {
+// spans its text lines and the underline line. The range is rejected, with a
+// problem recorded, when it fits neither form: one line that opens with "#"
+// (ATX), or several lines that end with an underline (setext).
+func (d *mdDoc) readHeading(h *mdpp.Node, top bool) (mdHeading, bool) {
 	s, e := d.nodeLines(h)
 	out := mdHeading{Level: h.Level(), Top: top, Start: s, End: e, Setext: e > s}
+	first := strings.TrimLeft(d.Lines[s], " ")
+	switch {
+	case !top:
+		// A heading inside a list item or a quote starts after the container's
+		// markers; it is not part of the text's structure and is not checked.
+	case e == s && strings.HasPrefix(first, "#") && len(d.Lines[s])-len(first) <= 3:
+	case e > s && !strings.HasPrefix(first, "#") && underlineOnly(d.Lines[e]):
+	default:
+		d.problem("Markdown++ gave a heading the source range lines %d to %d, which fits neither an ATX nor a setext heading", s+1, e+1)
+		return out, false
+	}
 	var raw strings.Builder
 	for _, c := range h.Children {
 		from, to := min(max(c.Range.StartByte, 0), len(d.text)), min(max(c.Range.EndByte, 0), len(d.text))
@@ -274,7 +367,7 @@ func (d *mdDoc) readHeading(h *mdpp.Node, top bool) mdHeading {
 		}
 	}
 	out.Text = strings.Join(parts, " ")
-	return out
+	return out, true
 }
 
 func (d *mdDoc) addTask(item *mdpp.Node, list int) {
@@ -282,7 +375,8 @@ func (d *mdDoc) addTask(item *mdpp.Node, list int) {
 	line := d.lineOf(from)
 	_, lineStop := d.lineSpan(line, line)
 	open := strings.IndexByte(d.text[from:lineStop], '[')
-	if open < 0 || from+open+2 >= len(d.text) {
+	if open < 0 || from+open+2 >= len(d.text) || d.text[from+open+2] != ']' {
+		d.problem("Markdown++ gave a task-list item at line %d a source range with no check box in it", line+1)
 		return
 	}
 	at := from + open // the "["
@@ -384,4 +478,159 @@ func removeSpans(src string, spans [][2]int) string {
 	}
 	b.WriteString(src[at:])
 	return b.String()
+}
+
+// mdFrag is a run of lines of a document with the task items and comments that
+// the whole-document parse found in them, at offsets relative to the run. The
+// run is never parsed again on its own: a fragment parsed alone can read
+// differently, and its ranges cannot be trusted as the document's.
+type mdFrag struct {
+	text     string
+	tasks    []mdTask
+	comments []mdComment
+}
+
+// fragment cuts lines first..last (inclusive) out of the document.
+func (d *mdDoc) fragment(first, last int) *mdFrag {
+	f := &mdFrag{}
+	if last < first || first < 0 || last >= len(d.Lines) {
+		return f
+	}
+	base, stop := d.lineSpan(first, last)
+	f.text = d.text[base:stop]
+	for _, t := range d.Tasks {
+		if t.Line >= first && t.Line <= last {
+			t.Line -= first
+			t.CommentEnd -= first
+			t.MarkAt -= base
+			f.tasks = append(f.tasks, t)
+		}
+	}
+	for _, c := range d.Comments {
+		if c.StartLine >= first && c.EndLine <= last {
+			c.Start -= base
+			c.Stop -= base
+			c.StartLine -= first
+			c.EndLine -= first
+			f.comments = append(f.comments, c)
+		}
+	}
+	return f
+}
+
+func (f *mdFrag) lines() []string {
+	if f.text == "" {
+		return nil
+	}
+	return strings.Split(f.text, "\n")
+}
+
+// identities returns the identities of the task items of the run.
+func (f *mdFrag) identities() map[string]bool {
+	out := map[string]bool{}
+	for _, t := range f.tasks {
+		out[t.Item] = true
+	}
+	return out
+}
+
+// taskLines returns the task item lines as written.
+func (f *mdFrag) taskLines() []string {
+	lines := f.lines()
+	var out []string
+	for _, t := range f.tasks {
+		out = append(out, lines[t.Line])
+	}
+	return out
+}
+
+// removeCommentSpans removes the comments (offsets in text) from text, except
+// those whose start is in keep, and drops the lines that a removal left empty.
+func removeCommentSpans(text string, comments []mdComment, keep map[int]bool) []string {
+	lines := strings.Split(text, "\n")
+	var out []string
+	from := 0
+	for _, line := range lines {
+		to := from + len(line)
+		var spans [][2]int
+		for _, c := range comments {
+			if keep[c.Start] || c.Stop <= from || c.Start >= to {
+				continue
+			}
+			spans = append(spans, [2]int{max(c.Start, from) - from, min(c.Stop, to) - from})
+		}
+		if len(spans) == 0 {
+			out = append(out, line)
+		} else if kept := removeSpans(line, spans); strings.TrimSpace(kept) != "" {
+			out = append(out, kept)
+		}
+		from = to + 1
+	}
+	return out
+}
+
+// pure reports a run whose lines, comments aside, are task item lines only.
+func (f *mdFrag) pure() bool {
+	if len(f.tasks) == 0 {
+		return false
+	}
+	isBox := map[int]bool{}
+	for _, t := range f.tasks {
+		isBox[t.Line] = true
+	}
+	from := 0
+	for i, line := range f.lines() {
+		to := from + len(line)
+		var spans [][2]int
+		for _, c := range f.comments {
+			if c.Stop > from && c.Start < to {
+				spans = append(spans, [2]int{max(c.Start, from) - from, min(c.Stop, to) - from})
+			}
+		}
+		if !isBox[i] && strings.TrimSpace(removeSpans(line, spans)) != "" {
+			return false
+		}
+		from = to + 1
+	}
+	return true
+}
+
+// render writes the run with the check mark of every task item set from ticks
+// (an item in ticks is ticked, any other is not; the rest of the line stays
+// byte for byte), and with the comments removed when strip is set, except those
+// attached to an item line. cleared lists the items that were ticked and are
+// not in ticks.
+func (f *mdFrag) render(ticks map[string]bool, strip bool) (lines []string, cleared []string) {
+	mark := []byte(f.text)
+	for _, t := range f.tasks {
+		switch {
+		case ticks[t.Item] && !t.Checked:
+			mark[t.MarkAt] = 'x'
+		case !ticks[t.Item] && t.Checked:
+			mark[t.MarkAt] = ' '
+			cleared = append(cleared, t.Item)
+		}
+	}
+	text := string(mark)
+	if !strip {
+		if text == "" {
+			return nil, cleared
+		}
+		return strings.Split(text, "\n"), cleared
+	}
+	attached := map[int]bool{}
+	for _, t := range f.tasks {
+		for _, c := range f.comments {
+			if c.StartLine == t.Line {
+				attached[c.Start] = true
+			}
+		}
+	}
+	return removeCommentSpans(text, f.comments, attached), cleared
+}
+
+// withoutComments returns the lines of the document with every comment removed;
+// a line that a removal left empty is dropped.
+func (d *mdDoc) withoutComments() []string {
+	return removeCommentSpans(d.text, d.Comments, nil)
 }

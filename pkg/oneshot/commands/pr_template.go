@@ -24,6 +24,23 @@ type PRTemplate struct {
 	// elements at or above the template's deepest level. The body may have no more
 	// of them than the template.
 	rawUnclosed, rawHeadings int
+
+	// Source names where the template came from (a path), for messages.
+	Source string
+
+	preFrag  *mdFrag     // the lines before the first heading, from the whole-document parse
+	problems []string    // why the reading of the template cannot be trusted (see mdDoc.Problems)
+	foreign  []mdForeign // Markdown++-only constructs in the template
+}
+
+// Unreadable returns why Markdown++ could not read the template exactly (a parse
+// error, a recovery diagnostic, a source range that cannot be used), or "".
+// Generation stops on such a template: its shape cannot be certified.
+func (t *PRTemplate) Unreadable() string {
+	if t == nil {
+		return ""
+	}
+	return strings.Join(t.problems, "; ")
 }
 
 // TemplateSection is one heading of a template and the lines under it.
@@ -41,6 +58,20 @@ type TemplateSection struct {
 	Open bool
 	// Key names the section in the model's tool call ("section_<Key>").
 	Key string
+
+	frag *mdFrag // Lines with the items and comments of the whole-document parse
+}
+
+// fragment returns the section's lines with their inventory. A section built by
+// hand, not by ParsePRTemplate, is parsed here as a document of its own.
+func (s TemplateSection) fragment() *mdFrag {
+	if s.frag != nil {
+		return s.frag
+	}
+	if len(s.Lines) == 0 {
+		return &mdFrag{}
+	}
+	return readMarkdown(strings.Join(s.Lines, "\n")).fragment(0, len(s.Lines)-1)
 }
 
 var sectionKeyRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -65,6 +96,8 @@ func ParsePRTemplate(text string) *PRTemplate {
 		pre = d.Lines[:tops[0].Start]
 	}
 	t.Preamble = trimBlankEdges(pre)
+	t.preFrag = d.fragment(0, len(pre)-1)
+	t.problems, t.foreign = d.Problems, d.Foreign
 	keys := map[string]int{}
 	for _, sec := range d.sections(0) {
 		h := sec.Heading
@@ -75,6 +108,7 @@ func ParsePRTemplate(text string) *PRTemplate {
 		}
 		if sec.Last >= sec.First {
 			s.Lines = append([]string(nil), d.Lines[sec.First:sec.Last+1]...)
+			s.frag = d.fragment(sec.First, sec.Last)
 			start, stop := d.lineSpan(sec.First, sec.Last)
 			// Comment text is guidance; anything else that is not blank makes the
 			// section fixed.
@@ -125,24 +159,52 @@ func (t *PRTemplate) countRawHTML(d *mdDoc) (unclosed, headings int) {
 	return unclosed, headings
 }
 
-// rawHTMLWarning checks the whole rendered body for raw HTML that a renderer
-// acts on although the Markdown tree does not show it: a comment opener with no
-// closer hides everything after it, and a raw heading element at or above the
-// template's level is a heading the heading check does not list. The body may
-// have no more of them than the template has. It returns "" when all is well.
-func (t *PRTemplate) rawHTMLWarning(body string) string {
+// finalBodyWarnings checks the complete rendered body, after Buckley's own
+// sections and the template are combined, in every layout. Everything here is
+// blocking: it reads the body as Markdown++ and as raw HTML.
+//
+//   - A reading problem of the parser (a parse error, a recovery diagnostic, a
+//     source range that cannot be used) means the structure cannot be certified.
+//   - A Markdown++-only construct is read differently by GitHub.
+//   - Raw HTML that a renderer acts on although the Markdown tree does not show
+//     it: a comment opener with no closer hides the text after it, and a raw
+//     heading element at or above the template's level is a heading the heading
+//     check does not list.
+//
+// The body may have no more constructs of a kind than the template has.
+func (t *PRTemplate) finalBodyWarnings(body string) []BodyWarning {
 	d := readMarkdown(body)
+	var out []BodyWarning
+	block := func(format string, args ...any) {
+		out = append(out, BodyWarning{Text: fmt.Sprintf(format, args...) + "; the body is out of the template's shape", Blocking: true})
+	}
+	if len(d.Problems) > 0 {
+		block("Markdown++ could not read the body exactly (%s)", d.Problems[0])
+	}
+	have := map[string]int{}
+	for _, f := range t.foreign {
+		have[f.Name]++
+	}
+	for _, f := range d.Foreign {
+		if have[f.Name]--; have[f.Name] < 0 {
+			block("the body has %s at line %d; Markdown++ reads this differently from GitHub", f.Name, f.Line+1)
+			break
+		}
+	}
 	deepest := t.deepestLevel()
 	unclosed, headings := t.countRawHTML(d)
 	for _, h := range d.Hazards {
 		switch {
 		case h.Unclosed && unclosed > t.rawUnclosed:
-			return fmt.Sprintf("the body has an HTML comment opener with no closer at line %d, which hides the text after it", h.Line+1)
+			block("the body has an HTML comment opener with no closer at line %d, which hides the text after it", h.Line+1)
 		case !h.Unclosed && h.Level <= deepest && headings > t.rawHeadings:
-			return fmt.Sprintf("the body has a raw <h%d> heading element at line %d, which is a heading at or above the template's level", h.Level, h.Line+1)
+			block("the body has a raw <h%d> heading element at line %d, which is a heading at or above the template's level", h.Level, h.Line+1)
+		default:
+			continue
 		}
+		break
 	}
-	return ""
+	return out
 }
 
 // authorHTMLWarnings names raw HTML in a carried author section that would hide
@@ -340,67 +402,12 @@ func splitCheckboxes(text string) (others string, boxes []mdBox) {
 	return trimBlankEdges(kept), boxes
 }
 
-// stripComments removes the HTML comments from lines. A line that holds only
-// comment text is dropped. With keepItems, the comments that start on a task
-// item's line stay with it, through the line that closes them, so that only its
-// check mark can change; independent guide comments are still removed.
-func stripComments(lines []string, keepItems bool) []string {
-	d := readMarkdown(strings.Join(lines, "\n"))
-	attached := map[int]bool{} // comments (by start offset) that stay
-	if keepItems {
-		for _, t := range d.Tasks {
-			for _, c := range d.Comments {
-				if c.StartLine == t.Line {
-					attached[c.Start] = true
-				}
-			}
-		}
-	}
-	var out []string
-	for i, line := range d.Lines {
-		from := d.lineStart[i]
-		to := from + len(line)
-		var spans [][2]int
-		for _, c := range d.Comments {
-			if attached[c.Start] || c.Stop <= from || c.Start >= to {
-				continue
-			}
-			spans = append(spans, [2]int{max(c.Start, from) - from, min(c.Stop, to) - from})
-		}
-		if len(spans) == 0 {
-			out = append(out, line)
-		} else if kept := removeSpans(line, spans); strings.TrimSpace(kept) != "" {
-			out = append(out, kept)
-		}
-	}
-	return out
-}
-
 // checkboxes returns the checkbox item lines of the section, as written.
-func (s TemplateSection) checkboxes() []string {
-	d := readMarkdown(strings.Join(s.Lines, "\n"))
-	var out []string
-	for _, t := range d.Tasks {
-		out = append(out, d.Lines[t.Line])
-	}
-	return out
-}
+func (s TemplateSection) checkboxes() []string { return s.fragment().taskLines() }
 
 // pureChecklist reports a section whose lines, comments aside, are checkbox
 // lines only: it has no place for text.
-func (s TemplateSection) pureChecklist() bool {
-	d := readMarkdown(strings.Join(stripComments(s.Lines, false), "\n"))
-	isBox := map[int]bool{}
-	for _, t := range d.Tasks {
-		isBox[t.Line] = true
-	}
-	for i, line := range d.Lines {
-		if !isBox[i] && strings.TrimSpace(line) != "" {
-			return false
-		}
-	}
-	return len(isBox) > 0
-}
+func (s TemplateSection) pureChecklist() bool { return s.fragment().pure() }
 
 // placeable reports whether some section of the template is not a pure
 // checklist, so that a block can be written at its end.
@@ -517,25 +524,6 @@ type templateResult struct {
 	ModelBoxes int // checkbox lines of the model's text that were dropped
 }
 
-// tickLines sets the check mark of every item line from ticks, the items the
-// author ticked: an item in ticks is written ticked, any other is written
-// unticked, and the rest of the line stays byte for byte. cleared lists the
-// items that the template had ticked and the author did not.
-func tickLines(lines []string, ticks map[string]bool) (out []string, cleared []string) {
-	d := readMarkdown(strings.Join(lines, "\n"))
-	mark := []byte(d.text)
-	for _, t := range d.Tasks {
-		switch {
-		case ticks[t.Item] && !t.Checked:
-			mark[t.MarkAt] = 'x'
-		case !ticks[t.Item] && t.Checked:
-			mark[t.MarkAt] = ' '
-			cleared = append(cleared, t.Item)
-		}
-	}
-	return strings.Split(string(mark), "\n"), cleared
-}
-
 // headingRef is a heading of a body or a template at some level.
 type headingRef struct {
 	Level int
@@ -611,18 +599,16 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	// One inventory of the template's items: the preamble and every section.
 	// The rendering below reads the same identities.
 	allItems := map[string]bool{}
-	addItems := func(lines []string) {
-		for item := range itemIdentities(lines) {
+	addItems := func(f *mdFrag) {
+		for item := range f.identities() {
 			allItems[item] = true
 		}
 	}
-	var preamble []string
-	if t.Preamble != "" {
-		preamble = strings.Split(t.Preamble, "\n")
-		addItems(preamble)
+	if t.preFrag != nil {
+		addItems(t.preFrag)
 	}
 	for _, s := range t.Sections {
-		addItems(s.Lines)
+		addItems(s.fragment())
 	}
 
 	// A Checklist section of the notes only ticks. Its other text is placed
@@ -674,15 +660,16 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	}
 
 	if t.Preamble != "" {
-		pre, clearedPre := tickLines(preamble, checklistTicks)
+		pre, clearedPre := t.preFrag.render(checklistTicks, false)
 		for _, item := range clearedPre {
 			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
 		}
-		b.WriteString(strings.Join(pre, "\n") + "\n\n")
+		b.WriteString(trimBlankEdges(pre) + "\n\n")
 	}
 	for i, s := range t.Sections {
 		b.WriteString(s.HeadingLine + "\n")
-		own := itemIdentities(s.Lines)
+		frag := s.fragment()
+		own := frag.identities()
 		ticks := map[string]bool{}
 		var parts []string
 		for _, a := range supplied[i] {
@@ -735,13 +722,6 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 			here = blocks[i]
 		}
 		received := strings.TrimSpace(text) != "" || len(here) > 0
-		lines := s.Lines
-		if received {
-			lines = stripComments(lines, true)
-		}
-		if s.Open && received {
-			lines = nil // an open section holds only comments: the text takes their place
-		}
 		allTicks := map[string]bool{}
 		for item := range checklistTicks {
 			allTicks[item] = true
@@ -749,7 +729,10 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		for item := range ticks {
 			allTicks[item] = true
 		}
-		section, cleared := tickLines(lines, allTicks)
+		section, cleared := frag.render(allTicks, received)
+		if s.Open && received {
+			section, cleared = nil, nil // an open section holds only comments: the text takes their place
+		}
 		for _, item := range cleared {
 			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
 		}
@@ -772,13 +755,4 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	}
 	res.Body = strings.TrimSpace(b.String())
 	return res
-}
-
-// itemIdentities returns the identities of the task items of lines.
-func itemIdentities(lines []string) map[string]bool {
-	out := map[string]bool{}
-	for _, t := range readMarkdown(strings.Join(lines, "\n")).Tasks {
-		out[t.Item] = true
-	}
-	return out
 }

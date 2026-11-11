@@ -82,7 +82,7 @@ func TestMarkdownReaderReadings(t *testing.T) {
 		{"closing hashes", "own", "## Title ##\n#NotAHeading", []string{"2:Title"}, nil},
 		{"empty heading", "own", "##\n", []string{"2:"}, nil},
 		{"tilde fence holds a box", "own", "~~~\n- [ ] x\n~~~\n- [ ] y", nil, []string{" :y"}},
-		{"box in a quote", "own", "> - [x] quoted", nil, []string{"x:quoted"}},
+		{"box in a quote", "own", "para\n\n> - [x] quoted", nil, []string{"x:quoted"}},
 		{"ordered box", "own", "1. [ ] first\n2. [x] second", nil, []string{" :first", "x:second"}},
 		{"item text spaces collapse", "own", "- [x]   A    b  ", nil, []string{"x:A b"}},
 	} {

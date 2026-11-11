@@ -260,7 +260,11 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 				prWarnf("%s is %d bytes, more than the %d a pull request template may have; the body uses Buckley's own sections", path, len(text), prTemplateMaxBytes)
 				return nil
 			}
-			return commands.ParsePRTemplate(text)
+			tmpl := commands.ParsePRTemplate(text)
+			if tmpl != nil {
+				tmpl.Source = ref + ":" + path
+			}
+			return tmpl
 		}
 	}
 	return nil
@@ -389,6 +393,10 @@ func generatePRText(opts prCommandOptions, plan *prPlan) (prText, error) {
 	var template *commands.PRTemplate
 	if opts.template {
 		template = loadPRTemplate(plan)
+		if why := template.Unreadable(); why != "" {
+			// The template's shape cannot be certified, so nothing is generated.
+			return prText{}, fmt.Errorf("the pull request template %s cannot be read exactly by Markdown++: %s; fix the template, or run with --template=false", template.Source, why)
+		}
 	}
 	// Only with a template does a notes section headed Checklist tick boxes.
 	sections := commands.AuthorSections(notes)

@@ -72,6 +72,11 @@ type AuthorSection struct {
 	heading string // the author's heading, without Markdown markers
 	body    string // the text under the heading, as written
 	source  string // path of the note it came from
+	// problem is set on a section that carries a whole note because Markdown++
+	// could not read the note's structure exactly (see noteSections).
+	problem string
+	// foreign names the Markdown++-only constructs in the text, for a warning.
+	foreign []mdForeign
 }
 
 // Kind is the kind of the section (SectionTesting and the others).
@@ -181,6 +186,12 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	// note.Text was sanitized when the note was made; it is not scanned for
 	// comments again.
 	d := readMarkdown(note.text)
+	if len(d.Problems) > 0 {
+		// Where its sections start and end cannot be told, so nothing of the note
+		// may be dropped: the whole note is carried as written, as one section, and
+		// BodyWithWarnings says so.
+		return []AuthorSection{{kind: SectionEvidence, heading: "Notes from " + note.Path, body: note.text, source: note.Path, problem: d.Problems[0]}}
+	}
 	lines := d.Lines
 	atx := map[int]mdHeading{} // the headings that start or end a section, by line
 	for _, h := range d.topHeadings() {
