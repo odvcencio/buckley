@@ -149,6 +149,9 @@ func newReasoningWireFixture(t *testing.T) (*reasoningWireFixture, *config.Confi
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	if err := mgr.RefreshProviderCatalog("openrouter"); err != nil {
+		t.Fatalf("RefreshProviderCatalog: %v", err)
+	}
 	return fixture, cfg, mgr
 }
 
