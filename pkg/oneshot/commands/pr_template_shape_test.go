@@ -172,47 +172,69 @@ func templateHeadingLines(t *PRTemplate) []string {
 }
 
 // topLevelHeadings returns the headings of the given level, outside code
-// fences and HTML comments. Setext headings (text over "===" or "---") count
-// as level 1 and 2.
+// fences and HTML comments, with a reference reading that is written for these
+// tests and shares nothing with the production recognizer: it cuts the text into
+// blocks (blank lines, fences, ATX headings and comment lines end a block) and
+// reads a block as a setext heading when its last line is an underline and it
+// has text above it that is no list item, quote or indented code.
 func topLevelHeadings(body string, level int) []string {
 	var out []string
-	prefix := strings.Repeat("#", level) + " "
-	var fence fenceTracker
-	comment := false
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		if !comment && (fence.line(line) || fence.inFence()) {
-			continue
+	var block []string
+	fenced := ""
+	flush := func() {
+		defer func() { block = nil }()
+		if len(block) < 2 {
+			return
 		}
-		if !comment && strings.HasPrefix(line, prefix) {
-			out = append(out, strings.TrimSpace(line))
+		under := strings.TrimRight(block[len(block)-1], " \t")
+		trimmed := strings.TrimLeft(under, " ")
+		if len(under)-len(trimmed) > 3 || trimmed == "" {
+			return
 		}
-		if !comment && level <= 2 && i+1 < len(lines) && testSetext(lines, i) == level {
-			out = append(out, strings.TrimSpace(line))
+		want := 0
+		switch {
+		case strings.Trim(trimmed, "=") == "":
+			want = 1
+		case strings.Trim(trimmed, "-") == "":
+			want = 2
 		}
-		comment = commentOpenAfter(line, comment)
+		first := block[0]
+		if want == level && !strings.HasPrefix(first, "    ") && !strings.HasPrefix(strings.TrimSpace(first), "> ") && !strings.HasPrefix(strings.TrimSpace(first), "- ") && !strings.HasPrefix(strings.TrimSpace(first), "* ") {
+			out = append(out, strings.TrimSpace(strings.Join(block[:len(block)-1], " ")))
+		}
 	}
+	inComment := false
+	for _, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case fenced != "":
+			if strings.HasPrefix(t, fenced) && strings.Trim(t, fenced[:1]) == "" {
+				fenced = ""
+			}
+		case inComment:
+			inComment = !strings.Contains(line, "-->")
+		case strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"):
+			flush()
+			fenced = strings.Repeat(t[:1], len(t)-len(strings.TrimLeft(t, t[:1])))
+		case strings.HasPrefix(t, "<!--"):
+			flush()
+			inComment = !strings.Contains(line, "-->")
+		case t == "":
+			flush()
+		case strings.HasPrefix(line, strings.Repeat("#", level)+" "):
+			flush()
+			out = append(out, strings.TrimSpace(line))
+		case strings.HasPrefix(t, "#"):
+			flush()
+		default:
+			block = append(block, line)
+			if len(block) > 1 && strings.Trim(t, "=") == "" || len(block) > 1 && strings.Trim(t, "-") == "" {
+				flush() // an underline ends its paragraph
+			}
+		}
+	}
+	flush()
 	return out
-}
-
-// testSetext is an independent reading of a setext heading for the tests: a
-// non-blank text line that starts a paragraph over a line of only "=" or "-".
-func testSetext(lines []string, i int) int {
-	under := strings.TrimSpace(lines[i+1])
-	text := strings.TrimSpace(lines[i])
-	if text == "" || under == "" || strings.HasPrefix(text, "#") || strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "`") {
-		return 0
-	}
-	if i > 0 && strings.TrimSpace(lines[i-1]) != "" && !strings.HasPrefix(lines[i-1], "#") {
-		return 0
-	}
-	switch {
-	case strings.Trim(under, "=") == "":
-		return 1
-	case strings.Trim(under, "-") == "":
-		return 2
-	}
-	return 0
 }
 
 // The section rule: a block that no section takes goes to the first section
@@ -433,6 +455,128 @@ func TestTemplateFenceClosesOnlyWithTheSameDelimiter(t *testing.T) {
 func TestCheckboxLineKeepsItsCommentWhenProseArrives(t *testing.T) {
 	body, _ := shapeBody(t, "## Summary\n<!-- describe -->\n## Checklist\n<!-- tick what you did -->\n- [ ] A <!-- guide -->\n- [ ] B\n", "## Checklist\n- [x] A\nWindows was not tested.\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
 	if !strings.Contains(body, "- [x] A <!-- guide -->\n- [ ] B\n\nWindows was not tested.") || strings.Contains(body, "tick what you did") {
+		t.Errorf("body =\n%s", body)
+	}
+}
+
+// The setext cases follow the setext section of the CommonMark specification.
+// Each expected reading is written out here, apart from the production code.
+func TestSetextRecognizerFollowsCommonMark(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"one-line level 2", "Title\n---\nText", "### Title\nText"},
+		{"one-line level 1", "Title\n===\nText", "### Title\nText"},
+		{"multi-line paragraph", "Intro\nMeasurements\n---\nObserved", "### Intro Measurements\nObserved"},
+		{"multi-line paragraph over =", "Intro\nMeasurements\n=\nObserved", "### Intro Measurements\nObserved"},
+		{"one-character underline", "Title\n-\nText", "### Title\nText"},
+		{"underline indented three spaces", "Title\n   ---\nText", "### Title\nText"},
+		{"underline indented four spaces is text", "Title\n    ---\nText", "Title\n    ---\nText"},
+		{"title indented four spaces is code", "    Title\n---\nText", "    Title\n---\nText"},
+		{"after a closing fence", "```\ncode\n```\nTitle\n---\nText", "```\ncode\n```\n### Title\nText"},
+		{"title starting with inline code", "`Measurements`\n---\nText", "### `Measurements`\nText"},
+		{"after an ATX heading", "## Top\nTitle\n---\nText", "### Top\n### Title\nText"},
+		{"after a comment line", "<!-- note -->\nTitle\n---\nText", "<!-- note -->\n### Title\nText"},
+		{"list item is no heading", "- item\n---\nText", "- item\n---\nText"},
+		{"list item continuation is no heading", "- item\n  more\n---\nText", "- item\n  more\n---\nText"},
+		{"block quote is no heading", "> quote\n---\nText", "> quote\n---\nText"},
+		{"dashes after a blank line are a break", "Text\n\n---\nAfter", "Text\n\n---\nAfter"},
+		{"fenced setext stays", "```\nKeep\n----\n```", "```\nKeep\n----\n```"},
+		{"two levels keep their order", "A\n=\n\nB\n-", "### A\n\n#### B"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := demoteHeadings(tc.in, 3); got != tc.want {
+				t.Errorf("demoteHeadings(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// The reference reader used by the tests agrees on the headings it counts.
+	if got := topLevelHeadings("Intro\nMeasurements\n---\nText", 2); !reflect.DeepEqual(got, []string{"Intro Measurements"}) {
+		t.Errorf("reference reading = %q", got)
+	}
+}
+
+// Template parsing reads setext headings with the same recognizer: the comment
+// line between them ends the first paragraph.
+func TestTemplateSetextAfterACommentLine(t *testing.T) {
+	tmpl := ParsePRTemplate("What\n=\n<!-- guide -->\nChecks\n-\n- [ ] Ran it\n")
+	if len(tmpl.Sections) != 2 || tmpl.Sections[0].Heading != "What" || tmpl.Sections[1].Heading != "Checks" || tmpl.Sections[1].Level != 2 {
+		t.Fatalf("sections = %+v", tmpl.Sections)
+	}
+}
+
+// The three-line paragraph of the review: one demoted heading.
+func TestPlacedMultiLineSetextParagraph(t *testing.T) {
+	body, _ := shapeBody(t, "## Summary\n<!-- describe -->\n", "## Evidence\nIntro\nMeasurements\n---\nObserved output.\n", PRResult{Sections: map[string]string{"summary": "Change"}})
+	if got := topLevelHeadings(body, 2); !reflect.DeepEqual(got, []string{"## Summary"}) {
+		t.Errorf("level-2 headings = %q\n%s", got, body)
+	}
+	if !strings.Contains(body, "### Evidence\n\n#### Intro Measurements\nObserved output.") {
+		t.Errorf("body =\n%s", body)
+	}
+}
+
+// The last check of the shape names a heading that is extra or missing.
+func TestShapeWarningNamesTheOutOfShapeHeading(t *testing.T) {
+	tmpl := ParsePRTemplate("## Summary\n<!-- a -->\n## Checks\n- [ ] Ran it\n")
+	ok := "## Summary\n\nText\n\n## Checks\n\n- [ ] Ran it\n\n### Evidence\n\nx"
+	if w := tmpl.shapeWarning(ok); w != "" {
+		t.Errorf("a body in shape warns: %q", w)
+	}
+	for body, want := range map[string]string{
+		"## Summary\n\nText\n\n## Extra\n\n## Checks\n":   `"extra"`,
+		"## Summary\n\nText\n":                            `lacks the template heading "checks"`,
+		"## Summary\n\nText\n\n## Checks\n\nMore\n----\n": `"more"`, // a setext heading at level 2
+	} {
+		if w := tmpl.shapeWarning(body); !strings.Contains(w, want) {
+			t.Errorf("shapeWarning(%q) = %q, want it to name %s", body, w, want)
+		}
+	}
+}
+
+// A template item that is ticked in the template is written ticked only when the
+// notes tick it; otherwise it is cleared, with one warning that names it.
+func TestPreTickedTemplateItemsFollowTheAuthor(t *testing.T) {
+	template := "- [X] Pre <!-- why -->\n\n## Summary\n<!-- describe -->\n## Checklist\n- [x] A\n- [ ] B\n"
+	model := PRResult{Sections: map[string]string{"summary": "Change"}}
+	for name, tc := range map[string]struct {
+		notes      string
+		wantA, pre string
+		warned     []string
+	}{
+		"no notes":            {"", "- [ ] A", "- [ ] Pre <!-- why -->", []string{"A", "Pre"}},
+		"unticked author":     {"## Checklist\n- [ ] A\n- [ ] Pre\n", "- [ ] A", "- [ ] Pre <!-- why -->", []string{"A", "Pre"}},
+		"ticked author":       {"## Checklist\n- [x] A\n- [x] Pre\n", "- [x] A", "- [X] Pre <!-- why -->", nil},
+		"uppercase tick kept": {"## Checklist\n- [X] A\n- [X] Pre\n", "- [x] A", "- [X] Pre <!-- why -->", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, ws := shapeBody(t, template, tc.notes, model)
+			if !strings.Contains(body, tc.wantA+"\n- [ ] B") || !strings.HasPrefix(body, tc.pre+"\n") {
+				t.Errorf("body =\n%s", body)
+			}
+			var got []string
+			for _, w := range ws {
+				if strings.Contains(w.Text, "cleared because the notes do not tick it") {
+					got = append(got, strings.Fields(strings.SplitN(w.Text, `"`, 3)[1])[0])
+				}
+			}
+			if !reflect.DeepEqual(got, func() []string {
+				if tc.warned == nil {
+					return nil
+				}
+				return []string{tc.warned[1], tc.warned[0]}
+			}()) {
+				t.Errorf("cleared warnings = %q, want %q", got, tc.warned)
+			}
+		})
+	}
+}
+
+// A checkbox comment that spans lines stays with its line when prose arrives;
+// an independent guide comment goes.
+func TestCheckboxCommentSpanningLinesStaysAttached(t *testing.T) {
+	body, _ := shapeBody(t, "## Summary\n<!-- describe -->\n## Checklist\n- [ ] A <!-- first\nsecond -->\n- [ ] B\n<!-- guide\nmore -->\n", "## Checklist\n- [x] A\nWindows was not tested.\n", PRResult{Sections: map[string]string{"summary": "Change"}})
+	if !strings.Contains(body, "- [x] A <!-- first\nsecond -->\n- [ ] B\n\nWindows was not tested.") || strings.Contains(body, "guide") {
 		t.Errorf("body =\n%s", body)
 	}
 }

@@ -75,10 +75,13 @@ func ParsePRTemplate(text string) *PRTemplate {
 	}
 	keys := map[string]int{}
 	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	skip := false // the underline of a setext heading was read with its text
+	setext := map[int]setextHeading{}
+	for _, h := range setextHeadings(all) {
+		setext[h.Start] = h
+	}
+	skipTo := -1 // the last line of a setext heading that was read with its first
 	for idx, line := range all {
-		if skip {
-			skip = false
+		if idx <= skipTo {
 			continue
 		}
 		// A fence closes only with the same character and at least as many of
@@ -91,8 +94,8 @@ func ParsePRTemplate(text string) *PRTemplate {
 			level, heading, headingLine, ok := 0, "", line, false
 			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
 				level, heading, ok = len(m[1]), strings.TrimSpace(m[2]), true
-			} else if l, t, set := setextAt(all, idx); set {
-				level, heading, headingLine, ok, skip = l, t, line+"\n"+all[idx+1], true, true
+			} else if h, set := setext[idx]; set {
+				level, heading, headingLine, ok, skipTo = h.Level, h.Text, strings.Join(all[h.Start:h.End+1], "\n"), true, h.End
 			}
 			if ok {
 				flush()
@@ -403,23 +406,34 @@ func splitCheckboxes(text string) (others string, boxes []string) {
 }
 
 // withoutComments removes the HTML comments from lines. A line that holds only
-// comment text is dropped; comments inside a code fence are text. A checkbox
-// item line is kept byte for byte, its own comments included, so that only its
-// check mark can change (unless the line opens a comment that it does not
-// close: then the comment is cut so that it cannot swallow the next lines).
-func withoutComments(lines []string) []string {
+// comment text is dropped; comments inside a code fence are text. With
+// keepItems, a checkbox item line is kept byte for byte together with the
+// comment attached to it, through the line that closes the comment, so that
+// only its check mark can change; independent guide comments are still removed.
+func withoutComments(lines []string, keepItems bool) []string {
 	var (
 		out       []string
 		inComment bool
+		attached  bool // inside a comment that belongs to a kept item line
 		fence     fenceTracker
 	)
 	for _, line := range lines {
+		if attached {
+			out = append(out, line)
+			if inComment = commentOpenAfter(line, true); !inComment {
+				attached = false
+			}
+			continue
+		}
 		if !inComment && (fence.line(line) || fence.inFence()) {
 			out = append(out, line)
 			continue
 		}
-		if !inComment && checkboxRe.MatchString(line) && !commentOpenAfter(line, false) {
+		if keepItems && !inComment && checkboxRe.MatchString(line) {
 			out = append(out, line)
+			if inComment = commentOpenAfter(line, false); inComment {
+				attached = true
+			}
 			continue
 		}
 		rest, hadComment := line, false
@@ -463,7 +477,7 @@ func (s TemplateSection) checkboxes() []string {
 // pureChecklist reports a section whose lines, comments aside, are checkbox
 // lines only: it has no place for text.
 func (s TemplateSection) pureChecklist() bool {
-	lines := withoutComments(s.Lines)
+	lines := withoutComments(s.Lines, false)
 	boxes := 0
 	for i, on := range itemLines(lines) {
 		switch {
@@ -510,6 +524,10 @@ func demoteHeadings(text string, top int) string {
 		text            string
 	}
 	var found []heading
+	setext := map[int]setextHeading{}
+	for _, h := range setextHeadings(lines) {
+		setext[h.Start] = h
+	}
 	var fence fenceTracker
 	highest := 7
 	for i := 0; i < len(lines); i++ {
@@ -518,9 +536,9 @@ func demoteHeadings(text string, top int) string {
 		}
 		if m := atxHeadingRe.FindStringSubmatch(lines[i]); m != nil {
 			found = append(found, heading{i, 1, len(m[1]), strings.TrimSpace(m[2])})
-		} else if level, t, ok := setextAt(lines, i); ok {
-			found = append(found, heading{i, 2, level, t})
-			i++
+		} else if h, ok := setext[i]; ok {
+			found = append(found, heading{i, h.End - h.Start + 1, h.Level, h.Text})
+			i = h.End
 		} else {
 			continue
 		}
@@ -597,20 +615,95 @@ type templateResult struct {
 	ModelBoxes int // checkbox lines of the model's text that were dropped
 }
 
-// tickLines ticks the unticked item lines whose identity is in ticks. The
-// other lines stay as they are.
-func tickLines(lines []string, ticks map[string]bool) []string {
-	out := make([]string, len(lines))
+var checkMarkRe = regexp.MustCompile(`^(\s*[-*+]\s+\[)[ xX](\])`)
+
+// tickLines sets the check mark of every item line from ticks, the items the
+// author ticked: an item in ticks is written ticked, any other is written
+// unticked, and the rest of the line stays byte for byte. cleared lists the
+// items that the template had ticked and the author did not.
+func tickLines(lines []string, ticks map[string]bool) (out []string, cleared []string) {
+	out = make([]string, len(lines))
 	copy(out, lines)
 	for i, on := range itemLines(lines) {
 		if !on {
 			continue
 		}
-		if ticked, item, ok := checkboxItem(lines[i]); ok && !ticked && ticks[item] {
-			out[i] = strings.Replace(lines[i], "[ ]", "[x]", 1)
+		ticked, item, ok := checkboxItem(lines[i])
+		switch {
+		case !ok:
+		case ticks[item] && !ticked:
+			out[i] = checkMarkRe.ReplaceAllString(lines[i], "${1}x${2}")
+		case !ticks[item] && ticked:
+			out[i] = checkMarkRe.ReplaceAllString(lines[i], "${1} ${2}")
+			cleared = append(cleared, item)
 		}
 	}
+	return out, cleared
+}
+
+// headingRef is a heading of a body or a template at some level.
+type headingRef struct {
+	Level int
+	Key   string
+}
+
+// bodyHeadings reads the ATX and setext headings of text, outside code fences
+// and HTML comments, with the shared recognizer.
+func bodyHeadings(text string) []headingRef {
+	lines := strings.Split(text, "\n")
+	setext := map[int]setextHeading{}
+	for _, h := range setextHeadings(lines) {
+		setext[h.Start] = h
+	}
+	var (
+		out     []headingRef
+		fence   fenceTracker
+		comment bool
+	)
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if !comment && (fence.line(line) || fence.inFence()) {
+			continue
+		}
+		if !comment {
+			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
+				out = append(out, headingRef{len(m[1]), headingKey(m[2])})
+			} else if h, ok := setext[i]; ok {
+				out = append(out, headingRef{h.Level, headingKey(h.Text)})
+				i = h.End
+				continue
+			}
+		}
+		comment = commentOpenAfter(line, comment)
+	}
 	return out
+}
+
+// shapeWarning compares the headings of the rendered body that sit at the
+// template's levels with the template's headings, in order. It returns a
+// sentence naming the extra or missing heading, or "" when they agree.
+func (t *PRTemplate) shapeWarning(body string) string {
+	deepest := t.deepestLevel()
+	var want, got []headingRef
+	for _, s := range t.Sections {
+		want = append(want, headingRef{s.Level, headingKey(s.Heading)})
+	}
+	for _, h := range bodyHeadings(body) {
+		if h.Level <= deepest {
+			got = append(got, h)
+		}
+	}
+	for i := 0; i < len(want) || i < len(got); i++ {
+		switch {
+		case i >= len(got):
+			return fmt.Sprintf("the body lacks the template heading %q", want[i].Key)
+		case i >= len(want):
+			return fmt.Sprintf("the body has the heading %q, which the template does not have", got[i].Key)
+		case want[i] != got[i]:
+			return fmt.Sprintf("the body has the heading %q where the template has %q", got[i].Key, want[i].Key)
+		}
+	}
+	return ""
 }
 
 // templateBody renders the body in the template's shape. The template's
@@ -714,7 +807,11 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	}
 
 	if t.Preamble != "" {
-		b.WriteString(strings.Join(tickLines(preamble, checklistTicks), "\n") + "\n\n")
+		pre, clearedPre := tickLines(preamble, checklistTicks)
+		for _, item := range clearedPre {
+			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
+		}
+		b.WriteString(strings.Join(pre, "\n") + "\n\n")
 	}
 	for i, s := range t.Sections {
 		b.WriteString(s.HeadingLine + "\n")
@@ -774,7 +871,7 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		received := strings.TrimSpace(text) != "" || len(here) > 0
 		lines := s.Lines
 		if received {
-			lines = withoutComments(lines)
+			lines = withoutComments(lines, true)
 		}
 		if s.Open && received {
 			lines = nil // an open section holds only comments: the text takes their place
@@ -786,7 +883,10 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		for item := range ticks {
 			allTicks[item] = true
 		}
-		section := tickLines(lines, allTicks)
+		section, cleared := tickLines(lines, allTicks)
+		for _, item := range cleared {
+			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
+		}
 		if !received {
 			// Nothing to add: the section is the template's, with the ticks.
 			b.WriteString(strings.Join(section, "\n") + "\n")

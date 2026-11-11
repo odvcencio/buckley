@@ -254,6 +254,12 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		res := pr.templateBody(opts.Template, author, fallback, extras)
 		templateText, author = res.Body, res.Left
 		warnings = append(warnings, res.Warnings...)
+		// A last check of the shape: read the rendered template's headings with
+		// the shared recognizer. A path that placed text so that a heading
+		// appears or disappears shows here instead of going unseen.
+		if w := opts.Template.shapeWarning(templateText); w != "" {
+			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
+		}
 		modelBoxes += res.ModelBoxes
 		if !shaped {
 			for _, s := range author {

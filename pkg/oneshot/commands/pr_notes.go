@@ -237,34 +237,99 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	return out
 }
 
-var setextRe = regexp.MustCompile(`^ {0,3}(=+|-+)[ \t]*$`)
+var (
+	setextRe = regexp.MustCompile(`^ {0,3}(=+|-+)[ \t]*$`)
+)
 
-// setextAt reports a setext heading whose text is lines[i] and whose underline
-// (a line of "=" or "-") is lines[i+1]: level 1 or 2, and the heading text. The
-// text line starts a paragraph (it follows a blank line, an ATX heading or the
-// start) and is no list item, quote, table row, fence or underline itself. The
-// caller has checked that the lines are outside a code fence.
-func setextAt(lines []string, i int) (level int, text string, ok bool) {
-	if i+1 >= len(lines) {
-		return 0, "", false
+// isThematicBreak reports a line of three or more "-", "*" or "_" (one kind,
+// spaces allowed between) with up to three leading spaces.
+func isThematicBreak(line string) bool {
+	if len(line)-len(strings.TrimLeft(line, " ")) > 3 {
+		return false
 	}
-	m := setextRe.FindStringSubmatch(lines[i+1])
-	line := lines[i]
-	if m == nil || strings.TrimSpace(line) == "" || len(line)-len(strings.TrimLeft(line, " ")) > 3 {
-		return 0, "", false
+	var mark rune
+	n := 0
+	for _, r := range line {
+		switch {
+		case r == ' ' || r == '\t':
+		case (r == '-' || r == '*' || r == '_') && (mark == 0 || mark == r):
+			mark = r
+			n++
+		default:
+			return false
+		}
 	}
-	t := strings.TrimSpace(line)
-	if setextRe.MatchString(line) || listItemRe.MatchString(t) || strings.ContainsAny(t[:1], ">|#`~") {
-		return 0, "", false
+	return n >= 3
+}
+
+// setextHeading is a setext heading: a paragraph (lines Start to End-1) over
+// an underline of "=" (level 1) or "-" (level 2) on line End.
+type setextHeading struct {
+	Start, End int
+	Level      int
+	Text       string // the paragraph lines joined with single spaces
+}
+
+// setextHeadings is the one recognizer of setext headings. It follows the
+// CommonMark rules for the cases it handles:
+//
+//   - An underline is a line, outside code fences, of only "=" or only "-",
+//     with up to three leading spaces and optional trailing spaces.
+//   - It makes a heading when the line before it is paragraph text. The text is
+//     the whole paragraph: the run of lines back to its first line. A paragraph
+//     starts after a blank line, a code fence, an ATX heading, a thematic break,
+//     an HTML comment line, or the start of the text.
+//   - It makes no heading when the paragraph belongs to a list item or a block
+//     quote (its first line starts with a list marker or ">") or is indented
+//     four or more spaces. Such lines stay as they are.
+//   - An underline with no paragraph above it is a thematic break or text.
+func setextHeadings(lines []string) []setextHeading {
+	var (
+		out       []setextHeading
+		fence     fenceTracker
+		comment   bool
+		paraStart = -1
+	)
+	for i, line := range lines {
+		if fence.line(line) || fence.inFence() {
+			paraStart = -1
+			continue
+		}
+		wasComment := comment
+		comment = commentOpenAfter(line, comment)
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case wasComment || strings.HasPrefix(trimmed, "<!--"):
+			paraStart = -1 // an HTML comment line is no paragraph text
+		case trimmed == "":
+			paraStart = -1
+		case atxHeadingRe.MatchString(line):
+			paraStart = -1
+		case setextRe.MatchString(line) && paraStart >= 0:
+			first := lines[paraStart]
+			indented := len(first)-len(strings.TrimLeft(first, " ")) >= 4
+			ft := strings.TrimSpace(first)
+			if !indented && !listItemRe.MatchString(ft) && !strings.HasPrefix(ft, ">") {
+				level := 2
+				if strings.TrimSpace(line)[0] == '=' {
+					level = 1
+				}
+				parts := make([]string, 0, i-paraStart)
+				for _, l := range lines[paraStart:i] {
+					parts = append(parts, strings.TrimSpace(l))
+				}
+				out = append(out, setextHeading{Start: paraStart, End: i, Level: level, Text: strings.Join(parts, " ")})
+			}
+			paraStart = -1
+		case isThematicBreak(line):
+			paraStart = -1
+		default:
+			if paraStart < 0 {
+				paraStart = i
+			}
+		}
 	}
-	if i > 0 && strings.TrimSpace(lines[i-1]) != "" && atxHeadingRe.FindStringSubmatch(lines[i-1]) == nil {
-		return 0, "", false // a continuation line of a paragraph
-	}
-	level = 2
-	if m[1][0] == '=' {
-		level = 1
-	}
-	return level, t, true
+	return out
 }
 
 // labelLine reports whether lines[i] is a short label on a line of its own:
@@ -392,14 +457,20 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	skipLevel := 0
 	var fence fenceTracker
 	lines := strings.Split(text, "\n")
-	for i, line := range lines {
+	setext := map[int]setextHeading{}
+	for _, h := range setextHeadings(lines) {
+		setext[h.Start] = h
+	}
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		span := 1
 		if fence.line(line) {
 		} else if !fence.inFence() {
 			level, name, isHeading := 0, "", false
 			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
 				level, name, isHeading = len(m[1]), m[2], true
-			} else if l, t, ok := setextAt(lines, i); ok {
-				level, name, isHeading = l, t, true
+			} else if h, ok := setext[i]; ok {
+				level, name, isHeading, span = h.Level, h.Text, true, h.End-h.Start+1
 			}
 			if isHeading {
 				if skipLevel > 0 && level <= skipLevel {
@@ -411,8 +482,9 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 			}
 		}
 		if skipLevel == 0 {
-			out = append(out, line)
+			out = append(out, lines[i:i+span]...)
 		}
+		i += span - 1
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }

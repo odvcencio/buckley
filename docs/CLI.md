@@ -483,12 +483,20 @@ The body keeps the template's shape:
    issues, and (for a template with no section that asks for text) Buckley's own
    Summary, Changes, Testing and Review Focus are written as subsections one
    level below the template's deepest heading, at the end of one template
-   section. A heading inside such a section (also a setext heading, a text line over
-   a line of `=` or `-`, which becomes an ATX heading) moves down with it, so
-   that none reaches the template's level; headings in code fences stay. A
-   notes section is started by ATX headings only; a setext heading inside a
-   carried section stays in it. At heading level
-   6 the label is bold text. The section is the first whose heading, guide
+   section. A heading inside such a section moves down with it, so that none
+   reaches the template's level; headings in code fences stay. A setext
+   heading is a whole paragraph (the run of lines back to the paragraph's first
+   line, which starts after a blank line, a fence, an ATX heading, a thematic
+   break or a comment line) over a line of only `=` or only `-`; it becomes one
+   ATX heading with the lines joined by single spaces, and the underline goes. A
+   paragraph that is part of a list item or a block quote, or indented four
+   spaces, is left as it is. Among Markdown headings, only ATX headings delimit
+   notes sections; short labels can also start sections, and a setext heading
+   inside a carried section stays in it. At heading level 6 the label is bold
+   text. After rendering, `buckley pr` reads the body's headings at the
+   template's levels (ATX and setext) and compares them with the template's;
+   an extra or missing heading is a warning that names it, and an error with
+   `--strict`. The section is the first whose heading, guide
    comments or checkbox text has a word that starts with a keyword of the kind
    (case-insensitive):
 
@@ -512,10 +520,14 @@ The body keeps the template's shape:
    fences and HTML comments, in a section or before the first heading. Its
    identity is its text without inline HTML comments, white space collapsed;
    case matters. Every item is written in the template's order, byte for byte except its
-   check mark (its own inline comments stay).
-   A box is ticked only when the notes contain a ticked line with the same item
-   text in a section the template section takes, or in a notes section headed
-   `Checklist`. A checkbox-shaped line in a fence (one closes only with the same
+   check mark; the comment attached to the item line stays with it, also when it
+   spans lines, while independent guide comments of a section that received text
+   go. The check mark of every item comes from the notes: it is ticked when the
+   notes contain a ticked line with the same item text in a section the
+   template section takes, or in a notes section headed `Checklist`, and
+   otherwise unticked. An item that the template has ticked (`[x]` or `[X]`)
+   and the notes do not tick is cleared, with a warning that names it
+   (`--strict` does not fail on it). A checkbox-shaped line in a fence (one closes only with the same
    character and at least as many of them) or a comment is fixed text.
    A checkbox line in a section the template section takes that matches no item
    of that section is not written; stderr names it, and `--strict` makes that an
@@ -530,8 +542,9 @@ The body keeps the template's shape:
    author wrote them. The model's checkbox lines are dropped everywhere, with one
    warning that counts them: the model never ticks, adds or removes a checkbox.
 3. **Fixed text.** The template's fixed text is written word for word, except
-   that a blank line may be added or removed at the edge of a section and line
-   endings are normalized. The guide comments of a section that received text
+   that a blank line may be added or removed at the edge of a section, line
+   endings are normalized, and trailing white space at the end of the body is
+   trimmed. The guide comments of a section that received text
    are left out; a section that received nothing stays as the template has it.
 4. **Open sections.** A section that has only comments under its heading asks
    for text. A notes section whose heading equals the template heading fills it
@@ -567,7 +580,7 @@ template's, and headings inside a placed section, which move down; see
 | Not verified | contains `not verified`, `unverified`, `not verify`, `not tested`, `untested`, `not measured`, `not validated` or `not checked` |
 | Known gaps | contains `known gaps`, `known limitations` or `known issues`, or is `Gaps` or `Limitations` |
 
-A section starts at a Markdown heading (`## Evidence`) and ends at the next
+A section starts at an ATX heading (`## Evidence`) and ends at the next ATX
 heading of the same or a higher level. A short label on a line of its own
 (`Evidence` above a list, or `Not verified:`) also starts one; it ends at the
 next heading or the next such label. An author Testing section replaces the
