@@ -147,11 +147,11 @@ func headingKey(heading string) string {
 // section: the headings are the same, or the template heading names the
 // section's kind ("Testing" takes an author's "Test plan").
 func (s TemplateSection) takes(a AuthorSection) bool {
-	if headingKey(s.Heading) == headingKey(a.Heading) {
+	if headingKey(s.Heading) == headingKey(a.Heading()) {
 		return true
 	}
 	kind := sectionKind(s.Heading)
-	return kind != "" && kind == a.Kind
+	return kind != "" && kind == a.Kind()
 }
 
 // hasCheckbox reports whether text has a Markdown checkbox line.
@@ -278,7 +278,7 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		for i, a := range author {
 			if !taken[i] && s.takes(a) {
 				taken[i] = true
-				supplied = append(supplied, a.Body)
+				supplied = append(supplied, a.Body())
 			}
 		}
 		text := strings.Join(supplied, "\n\n")

@@ -211,7 +211,7 @@ func TestPRBuildPromptIncludesAuthorSuppliedContextNotes(t *testing.T) {
 		"git_diff:main": "+ real diff content",
 	}}
 
-	prompt := PRDefinition{ContextNotes: "Slice 2 of 4: extracted the retry budget guard.\nVerified with go test ./pkg/retry/..."}.BuildPrompt(ctx)
+	prompt := PRDefinition{ContextNotes: PRPromptNotes{text: "Slice 2 of 4: extracted the retry budget guard.\nVerified with go test ./pkg/retry/..."}}.BuildPrompt(ctx)
 	for _, want := range []string{"Slice 2 of 4: extracted the retry budget guard.", "Verified with go test ./pkg/retry/..."} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing author-supplied context note %q:\n%s", want, prompt)

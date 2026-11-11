@@ -19,21 +19,21 @@ func TestNewPRSources_SeparatesTheRecordFromTheRest(t *testing.T) {
 		}},
 	)
 	for _, want := range []string{"note text", "commit subject"} {
-		if !strings.Contains(src.Record, want) {
-			t.Errorf("Record lacks %q: %q", want, src.Record)
+		if !strings.Contains(src.record, want) {
+			t.Errorf("Record lacks %q: %q", want, src.record)
 		}
 	}
 	for _, unwanted := range []string{"diff line", "file.go", "guideline text"} {
-		if strings.Contains(src.Record, unwanted) {
-			t.Errorf("Record has %q, which records no decision: %q", unwanted, src.Record)
+		if strings.Contains(src.record, unwanted) {
+			t.Errorf("Record has %q, which records no decision: %q", unwanted, src.record)
 		}
 	}
 	for _, want := range []string{"note text", "commit subject", "diff line", "file.go", "guideline text"} {
-		if !strings.Contains(src.All, want) {
+		if !strings.Contains(src.all, want) {
 			t.Errorf("All lacks %q", want)
 		}
 	}
-	if empty := NewPRSources(nil, nil); empty.Record != "" || empty.All != "" {
+	if empty := NewPRSources(nil, nil); empty.record != "" || empty.all != "" {
 		t.Errorf("NewPRSources(nil, nil) = %+v, want empty", empty)
 	}
 }
@@ -42,7 +42,7 @@ func TestNewPRSources_SeparatesTheRecordFromTheRest(t *testing.T) {
 // test that does not exist, a script path with half its directory name
 // missing, and a flag fragment.
 func TestUnsourcedCommands(t *testing.T) {
-	src := PRSources{All: strings.Join([]string{
+	src := PRSources{all: strings.Join([]string{
 		"Ran go test ./internal/ccore -run TestGolden -count=1 on Linux.",
 		"Use -count=1 for every run.",
 		"- `bash cgo_harness/docker/run_single_grammar_parity.sh <grammar>`",
@@ -99,7 +99,7 @@ func TestUnbackedClaims(t *testing.T) {
 		Testing: StringList{"81 tests pass"},
 	}
 
-	claims := pr.UnbackedClaims(PRSources{Record: notes, All: notes + "\n+ the parser rejects any byte no leaf covers"})
+	claims := pr.UnbackedClaims(PRSources{record: notes, all: notes + "\n+ the parser rejects any byte no leaf covers"})
 	want := []string{
 		`the text says "rejected", but the author's notes and the commits record no such decision`,
 		"the text has the number 37, which is not in the notes, the commits or the diff",
@@ -111,7 +111,7 @@ func TestUnbackedClaims(t *testing.T) {
 
 	// A decision that the record states has a source, whatever its form.
 	recorded := notes + "\nWe reject alternative A: it doubles the table size."
-	for _, claim := range pr.UnbackedClaims(PRSources{Record: recorded, All: recorded}) {
+	for _, claim := range pr.UnbackedClaims(PRSources{record: recorded, all: recorded}) {
 		if strings.Contains(claim, "rejected") {
 			t.Errorf("claim %q although the notes record the decision", claim)
 		}
@@ -126,13 +126,13 @@ func TestUnbackedClaims(t *testing.T) {
 // hide the command before it.
 func TestStepCommands_UnrelatedBacktickSpanDoesNotHideTheCommand(t *testing.T) {
 	pr := PRResult{Testing: StringList{"go test ./missing -run `TestFoo`"}}
-	warnings := pr.UnsourcedCommands(PRSources{All: "nothing relevant"})
+	warnings := pr.UnsourcedCommands(PRSources{all: "nothing relevant"})
 	if len(warnings) != 1 || len(pr.Testing) != 1 {
 		t.Fatalf("warnings = %q, kept = %q; the unsourced command warns and the step stays", warnings, pr.Testing)
 	}
 	// A sourced command with a code-formatted argument stays.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`"}}
-	if warnings := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run `TestFoo`"}); len(warnings) != 0 {
+	if warnings := pr.UnsourcedCommands(PRSources{all: "go test ./pkg -run `TestFoo`"}); len(warnings) != 0 {
 		t.Fatalf("warned about a sourced step: %q", warnings)
 	}
 }
@@ -144,7 +144,7 @@ func TestUnsourcedCommands_LeavesOtherSectionsAlone(t *testing.T) {
 		"summary": "- Expose `buckley inspect` for diagnostics",
 		"testing": "- `go test ./missing`",
 	}}
-	warnings := pr.UnsourcedCommands(PRSources{All: "x"})
+	warnings := pr.UnsourcedCommands(PRSources{all: "x"})
 	// The Testing step and the command in the summary both warn; neither is changed.
 	if len(warnings) != 2 || !strings.Contains(warnings[0], "go test ./missing") || !strings.Contains(warnings[1], "buckley inspect") {
 		t.Fatalf("warnings = %q", warnings)
@@ -157,7 +157,7 @@ func TestUnsourcedCommands_LeavesOtherSectionsAlone(t *testing.T) {
 // Review of #468, second round, finding 4: the whole command is compared, with
 // inline code marks normalised on both sides.
 func TestUnsourcedCommands_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T) {
-	src := PRSources{All: "go test ./pkg -run TestFoo"}
+	src := PRSources{all: "go test ./pkg -run TestFoo"}
 	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestMissing`"}}
 	if warnings := pr.UnsourcedCommands(src); len(warnings) != 1 || len(pr.Testing) != 1 {
 		t.Fatalf("warnings = %q, kept = %q: the unsupported argument passed", warnings, pr.Testing)
@@ -165,13 +165,13 @@ func TestUnsourcedCommands_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T) 
 	// The same command with a supported argument stays, whichever side has the marks.
 	for _, all := range []string{"go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo`"} {
 		pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`", "go test ./pkg -run TestFoo"}}
-		if warnings := pr.UnsourcedCommands(PRSources{All: all}); len(warnings) != 0 {
+		if warnings := pr.UnsourcedCommands(PRSources{all: all}); len(warnings) != 0 {
 			t.Errorf("source %q: warned %q", all, warnings)
 		}
 	}
 	// Flags between two spans stay part of the command; prose after it does not.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestA` -count=1 `TestB` passed locally"}}
-	if warnings := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run TestA -count=1 TestB"}); len(warnings) != 0 {
+	if warnings := pr.UnsourcedCommands(PRSources{all: "go test ./pkg -run TestA -count=1 TestB"}); len(warnings) != 0 {
 		t.Errorf("warned %q", warnings)
 	}
 }
@@ -209,7 +209,7 @@ func TestUnsourcedCommands_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := PRResult{Testing: StringList{tc.step}}
-			warnings := pr.UnsourcedCommands(PRSources{All: tc.source})
+			warnings := pr.UnsourcedCommands(PRSources{all: tc.source})
 			if len(pr.Testing) != 1 {
 				t.Errorf("the step %q was changed or dropped: %q", tc.step, pr.Testing)
 			}
@@ -224,14 +224,14 @@ func TestUnsourcedCommands_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testing.
 }
 
 func TestUnsourcedCommands_FlagAfterTheLastSpanIsPartOfTheCommand(t *testing.T) {
-	src := PRSources{All: "go test ./pkg -run TestFoo"}
+	src := PRSources{all: "go test ./pkg -run TestFoo"}
 	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race"}}
 	if warnings := pr.UnsourcedCommands(src); len(warnings) != 1 || len(pr.Testing) != 1 {
 		t.Fatalf("warnings = %q, kept = %q: the unsupported -race passed", warnings, pr.Testing)
 	}
 	// Prose after the flags is not part of the command.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race passed locally"}}
-	if dropped := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run TestFoo -race"}); len(dropped) != 0 {
+	if dropped := pr.UnsourcedCommands(PRSources{all: "go test ./pkg -run TestFoo -race"}); len(dropped) != 0 {
 		t.Fatalf("warned about a sourced step: %q", dropped)
 	}
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` passed locally"}}

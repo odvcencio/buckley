@@ -137,7 +137,7 @@ func promptNotes(paths []string) (string, error) {
 		return "", err
 	}
 	text, _ := prNotesPrompt(notes)
-	return text, nil
+	return text.String(), nil
 }
 
 // TestLoadPRContextNotesConcatenatesLabeledFiles reproduces Important-5:
