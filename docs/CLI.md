@@ -355,7 +355,7 @@ buckley pr [OPTIONS]
 | `--cost=false` | Do not print the token and cost lines |
 | `--context-file <path>` | Author notes for the PR; repeatable, oldest first. See [Author notes](#author-notes) |
 | `--template=false` | Keep Buckley's own sections when the repository has a pull request template. See [Pull request template](#pull-request-template) |
-| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source. Default: warn. See [Checks against the sources](#checks-against-the-sources) |
+| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns). Default: warn. See [Checks against the sources](#checks-against-the-sources) |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
 | `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
@@ -492,30 +492,36 @@ The sources of a PR text are the author's notes, the commit messages, the diff,
 the file list and `AGENTS.md`. After the model answers, `buckley pr` compares
 what it wrote with them:
 
-- A testing step that names a command stays only when the sources contain that
-  whole command. A command is a backtick span that starts with a program (such
-  as `go`, `make` or a script path), or a step that starts with such a program
-  in plain text, with its arguments in code format when it has any
-  (``go test ./pkg -run `TestFoo` ``). Inline code marks are ignored on both
-  sides. The command is the text of the step up to the first token that cannot
-  belong to a command line: a lone `-` or `--`, a dash, a colon before a space,
-  a semicolon, a parenthesis, or a plain word that is not a flag, a path or the
-  value of the flag before it (such as `1` in `-count 1`). Flags and flag
-  values before that point are part of the command. A flag that comes later,
-  before the boundary, needs a source of its own; everything after the boundary
-  is prose. Steps that name no command are not checked. Other steps are left out,
-  and a warning names each one; with `--strict` a left-out step is an error. Put the commands you ran in a Testing section of a
-  notes file to have them copied instead.
+- **The command check is a warning.** For a testing step that names a command
+  (a backtick span that starts with a program such as `go`, `make` or a script
+  path, or a step that starts with such a program in plain text, with its
+  arguments in code format when it has any: ``go test ./pkg -run `TestFoo` ``),
+  `buckley pr` looks for the command in the sources, with inline code marks
+  ignored on both sides. When it does not find it, stderr names the step and the
+  command text it could not find. The step stays in the body as written, and
+  `--strict` does not fail on this warning. The check reads prose with a
+  heuristic: it takes the text up to a lone `-` or `--`, a dash, a colon before
+  a space, a semicolon, a parenthesis, or a plain word that is not a flag, a
+  path or a flag value (such as `1` in `-count 1`; a trailing sentence period
+  does not make a flag value). A flag in a code span after prose is checked on
+  its own. It can miss an unsourced command and can warn about a sourced one.
+  Known limits: after a plain word, only flags are looked at, so a plain
+  (unformatted) value such as `-tags integration` ends the command, and the text
+  after it is compared flag by flag; a flag value that is a plain word or a file
+  name without a path ends the command. To get exact testing steps, put the
+  commands you ran in a Testing section of a notes file: such a section is
+  copied by code, word for word.
 - A word that states a decision (`rejected`, `approved`, `decided`, `ruled out`,
   `agreed`, `abandoned`, `dismissed`, `declined`) gets a warning when neither the
   notes nor the commit messages use that word.
 - A number of two or more digits gets a warning when it appears nowhere in the
   sources.
 
-Code cannot rewrite a sentence, so the last two are warnings on stderr and the
-text stays as the model wrote it. A command in the running text of a template
-section is also a warning. With `--strict` all of these are errors: nothing is
-pushed or created, and a dry run exits non-zero.
+Code cannot rewrite a sentence, so these are warnings on stderr and the text
+stays as the model wrote it. A command in the running text of a template
+section is a command warning too. With `--strict` the decision and number
+warnings are errors: nothing is pushed or created, and a dry run exits
+non-zero. Command warnings never are.
 
 The evidence that buckley gathers for the PR text comes from commits. The diff,
 commit log, file list, `AGENTS.md` and `.gitattributes` are read from the head

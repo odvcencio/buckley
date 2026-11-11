@@ -28,7 +28,7 @@ type PRSources struct {
 func NewPRSources(notes []PRNote, ctx *oneshot.Context) PRSources {
 	var record, rest strings.Builder
 	for _, note := range notes {
-		record.WriteString(note.Text + "\n")
+		record.WriteString(note.Text() + "\n")
 	}
 	if ctx != nil {
 		for label, text := range ctx.Sources {
@@ -76,47 +76,55 @@ var decisionWords = []struct{ said, source *regexp.Regexp }{
 	{regexp.MustCompile(`(?i)\bdeclined\b`), regexp.MustCompile(`(?i)\bdeclin`)},
 }
 
-// DropUnbackedTesting removes the testing steps that name a command which the
-// sources do not contain as written, and returns the removed steps. A step
-// that names no command stays. In the text for a template section, a list item
-// is a step.
-func (pr *PRResult) DropUnbackedTesting(src PRSources) []string {
+// UnsourcedCommands lists, as sentences for the author, the commands in the
+// text that the sources do not contain as written: a command in a testing step
+// (the whole command, as stepCommands reads it) and a command in a backtick
+// span of a section's running text. The check is advisory. It changes nothing:
+// a step stays in the body, and it can miss an unsourced command or warn about
+// a sourced one, because it reads prose with a heuristic. Testing steps that
+// the author wrote in a Testing section are copied by code and never reach it.
+func (pr PRResult) UnsourcedCommands(src PRSources) []string {
 	all := normalizeCommandText(src.All)
-	backed := func(step string) bool {
+	missing := func(step string) string {
 		for _, command := range stepCommands(step) {
 			if !strings.Contains(all, normalizeCommandText(command)) {
-				return false
+				return command
 			}
 		}
-		return true
+		return ""
 	}
-	var kept, dropped StringList
-	for _, step := range pr.Testing {
-		if backed(step) {
-			kept = append(kept, step)
-		} else {
-			dropped = append(dropped, strings.TrimSpace(step))
+	var warnings []string
+	warned := map[string]bool{}
+	step := func(text string) {
+		if command := missing(text); command != "" {
+			warned[normalizeCommandText(command)] = true
+			warnings = append(warnings, fmt.Sprintf("the testing step %q names the command %q, which is not in the notes, the commits, the diff or the project guidelines; the step stays in the text", strings.TrimSpace(text), normalizeCommandText(command)))
 		}
 	}
-	pr.Testing = kept
-
+	for _, text := range pr.Testing {
+		step(text)
+	}
 	for _, key := range sortedKeys(pr.Sections) {
 		// Only a Testing section lists steps. A Summary bullet that names a
-		// command describes the change, and code must not delete it.
+		// command describes the change.
 		if sectionKind(strings.ReplaceAll(key, "_", " ")) != SectionTesting {
 			continue
 		}
-		var lines []string
 		for _, line := range strings.Split(pr.Sections[key], "\n") {
-			if item := strings.TrimSpace(line); listItemRe.MatchString(item) && !backed(listItemRe.ReplaceAllString(item, "")) {
-				dropped = append(dropped, item)
-				continue
+			if item := strings.TrimSpace(line); listItemRe.MatchString(item) {
+				step(listItemRe.ReplaceAllString(item, ""))
 			}
-			lines = append(lines, line)
 		}
-		pr.Sections[key] = strings.Join(lines, "\n")
 	}
-	return dropped
+	for _, key := range sortedKeys(pr.Sections) {
+		for _, span := range backtickSpanRe.FindAllStringSubmatch(pr.Sections[key], -1) {
+			if norm := normalizeCommandText(span[1]); isCommand(span[1], false) && !warned[norm] && !strings.Contains(all, norm) {
+				warned[norm] = true
+				warnings = append(warnings, fmt.Sprintf("the text names the command `%s`, which is not in the notes, the commits, the diff or the project guidelines", span[1]))
+			}
+		}
+	}
+	return warnings
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -190,9 +198,8 @@ func isCommand(text string, flagStart bool) bool {
 	return commandPrograms[first] && len(fields) > 1
 }
 
-// UnbackedClaims lists what the model's prose states without a source: a
-// command in the running text of a template section, a word that states a
-// decision when the notes and commits have no such word, and a number of two
+// UnbackedClaims lists what the model's prose states without a source: a word
+// that states a decision when the notes and commits have no such word, and a number of two
 // or more digits that appears nowhere in the sources. Each entry
 // is a sentence for the author; the text is left as it is, because code cannot
 // rewrite prose.
@@ -204,15 +211,6 @@ func (pr PRResult) UnbackedClaims(src PRSources) []string {
 	prose := strings.Join(parts, "\n")
 	var claims []string
 
-	// A command in running text cannot be cut out like a list item can.
-	all := normalizeCommandText(src.All)
-	for _, key := range sortedKeys(pr.Sections) {
-		for _, span := range backtickSpanRe.FindAllStringSubmatch(pr.Sections[key], -1) {
-			if isCommand(span[1], false) && !strings.Contains(all, normalizeCommandText(span[1])) {
-				claims = append(claims, fmt.Sprintf("the text names the command `%s`, which is not in the notes, the commits, the diff or the project guidelines", span[1]))
-			}
-		}
-	}
 	for _, word := range decisionWords {
 		if said := word.said.FindString(prose); said != "" && !word.source.MatchString(src.Record) {
 			claims = append(claims, fmt.Sprintf("the text says %q, but the author's notes and the commits record no such decision", said))
@@ -262,18 +260,26 @@ func plainCommandWithSpans(text string) (command string, stray []string) {
 		return strings.TrimSpace(before[:loc[0]]), nil
 	}
 	parts := []string{strings.TrimSpace(before)}
+	ended := false
 	for {
 		span, after, found := strings.Cut(rest, "`")
 		if !found {
 			break
 		}
-		parts = append(parts, span)
+		if ended {
+			// After prose, a flag in a code span is still a flag that was run.
+			if isFlagWord(span) {
+				stray = append(stray, span)
+			}
+		} else {
+			parts = append(parts, span)
+		}
 		next, more, ok := strings.Cut(after, "`")
 		boundary := false
 		if loc := commandTailRe.FindStringIndex(next); loc != nil {
 			next, boundary = next[:loc[0]], true
 		}
-		ended, afterFlag := false, false
+		afterFlag := false
 		for _, word := range strings.Fields(next) {
 			switch {
 			case word == "-" || word == "--":
@@ -293,7 +299,7 @@ func plainCommandWithSpans(text string) (command string, stray []string) {
 			}
 			afterFlag = false
 		}
-		if ended || boundary || !ok {
+		if boundary || !ok {
 			break
 		}
 		rest = more
@@ -315,7 +321,8 @@ func isFlagWord(word string) bool {
 // isFlagValue reports whether word can be the separate value of a flag: it has
 // a digit or one of "/.=,_" in it. A plain word is prose.
 func isFlagValue(word string) bool {
-	return strings.ContainsAny(word, "0123456789/.=,_")
+	// Sentence punctuation alone does not make a value: "passed." is prose.
+	return strings.ContainsAny(strings.TrimRight(word, ".,;:!?"), "0123456789/.=,_")
 }
 
 // normalizeCommandText prepares text for comparing a command with its sources:

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRunPRCommand_LeavesOutTestingStepsWithoutASource(t *testing.T) {
+func TestRunPRCommand_WarnsAboutTestingStepsWithoutASource(t *testing.T) {
 	r := newPRRepo(t)
 	r.commit(t, "feature", "f.txt")
 	r.park(t)
@@ -30,11 +30,12 @@ func TestRunPRCommand_LeavesOutTestingStepsWithoutASource(t *testing.T) {
 	if !strings.Contains(out, "## Testing\n\n- `go test ./pkg/feature -count=1`\n") {
 		t.Errorf("the step whose command is in the notes is missing:\n%s", out)
 	}
-	if strings.Contains(out, "benchfixtures") {
-		t.Errorf("the invented step is in the text:\n%s", out)
+	// The command check is advisory: the step stays, and stderr names it.
+	if !strings.Contains(out, "benchfixtures") {
+		t.Errorf("the check dropped the step; it must only warn:\n%s", out)
 	}
-	if !strings.Contains(stderr, "left out the testing step") || !strings.Contains(stderr, "benchfixtures") {
-		t.Errorf("stderr does not name the step that was left out:\n%s", stderr)
+	if !strings.Contains(stderr, "testing step") || !strings.Contains(stderr, "benchfixtures") || !strings.Contains(stderr, "stays in the text") {
+		t.Errorf("stderr does not name the step with the unsourced command:\n%s", stderr)
 	}
 }
 
@@ -92,77 +93,19 @@ func TestRunPRCommand_ADecisionWithoutASourceWarnsOrStops(t *testing.T) {
 	}
 }
 
-// Review of #468, second round, finding 4: a testing step with an unsupported
-// argument is left out, and --strict refuses it before gh runs.
-func TestRunPRCommand_StrictRefusesAnUnsupportedTestingStep(t *testing.T) {
-	r := newPRRepo(t)
-	r.commit(t, "feature", "f.txt")
-	r.park(t)
-	stubPRDependencies(t, func() error { return nil })
-	stubGh(t)
-	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
-	stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":[\"go test ./pkg -run `TestMissing`\"]}")
-	dir := t.TempDir()
-	writeFile(t, dir, "notes.md", "Ran go test ./pkg -run TestFoo and it passed.\n")
-
-	var err error
-	stderr := captureStderr(t, func() {
-		captureStdout(t, func() {
-			err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
-		})
-	})
-	if !strings.Contains(stderr, "left out the testing step") {
-		t.Errorf("the step was not left out:\n%s", stderr)
-	}
-	if err == nil || !strings.Contains(err.Error(), "--strict") {
-		t.Fatalf("error = %v, want the --strict refusal", err)
-	}
-	for _, call := range g.calls(t) {
-		if strings.Join(call[:2], " ") == "pr create" {
-			t.Fatal("gh pr create ran although --strict refused")
-		}
-	}
-}
-
-// Review of #468, third round: --strict fails on an unsupported flag after the
-// last code span too.
-func TestRunPRCommand_StrictRefusesAnUnsupportedFlagAfterTheLastSpan(t *testing.T) {
-	r := newPRRepo(t)
-	r.commit(t, "feature", "f.txt")
-	r.park(t)
-	stubPRDependencies(t, func() error { return nil })
-	stubGh(t)
-	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
-	stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":[\"go test ./pkg -run `TestFoo` -race\"]}")
-	dir := t.TempDir()
-	writeFile(t, dir, "notes.md", "Ran go test ./pkg -run TestFoo and it passed.\n")
-
-	var err error
-	stderr := captureStderr(t, func() {
-		captureStdout(t, func() {
-			err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
-		})
-	})
-	if !strings.Contains(stderr, "left out the testing step") || err == nil || !strings.Contains(err.Error(), "--strict") {
-		t.Fatalf("stderr = %q, error = %v, want the step left out and --strict refusing", stderr, err)
-	}
-	for _, call := range g.calls(t) {
-		if strings.Join(call[:2], " ") == "pr create" {
-			t.Fatal("gh pr create ran although --strict refused")
-		}
-	}
-}
-
-// Review of #468 to #470, round four: under --strict a prose separator after
-// the last span does not fail a sourced step, and a flag after a separate flag
-// value still does.
-func TestRunPRCommand_StrictCommandBoundary(t *testing.T) {
+// The command check is a warning (decision of the fifth review round): a
+// command warning never fails --strict, and the step stays in the body.
+func TestRunPRCommand_StrictIgnoresACommandWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name, notes, step string
-		refused           bool
+		warns             bool
 	}{
-		{"hyphen is prose", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestFoo` - passed locally", false},
+		{"unsourced argument", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestMissing`", true},
+		{"unsourced flag after the span", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestFoo` -race", true},
 		{"unsourced flag after a separate value", "Ran go test ./pkg -run TestFoo -count 1 and it passed.\n", "go test ./pkg -run `TestFoo` -count 1 -race", true},
+		{"flag in a code span after prose (fifth review)", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestFoo` passed locally with `-race`", true},
+		{"hyphen is prose", "Ran go test ./pkg -run TestFoo and it passed.\n", "go test ./pkg -run `TestFoo` - passed locally", false},
+		{"sentence period after a flag (fifth review)", "Ran go test ./pkg -run TestFoo -race and it passed.\n", "go test ./pkg -run `TestFoo` -race passed.", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newPRRepo(t)
@@ -170,7 +113,7 @@ func TestRunPRCommand_StrictCommandBoundary(t *testing.T) {
 			r.park(t)
 			stubPRDependencies(t, func() error { return nil })
 			stubGh(t)
-			installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+			g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
 			stubPRModelWith(t, "{\"action\":\"add\",\"title\":\"feature file\",\"summary\":\"Adds a file.\",\"changes\":[\"Add f.txt\"],\"testing\":["+strconv.Quote(tc.step)+"]}")
 			dir := t.TempDir()
 			writeFile(t, dir, "notes.md", tc.notes)
@@ -180,11 +123,15 @@ func TestRunPRCommand_StrictCommandBoundary(t *testing.T) {
 					err = runPRCommand([]string{"--yes", "--cost=false", "--strict", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")})
 				})
 			})
-			if tc.refused && (!strings.Contains(stderr, "left out the testing step") || err == nil || !strings.Contains(err.Error(), "--strict")) {
-				t.Errorf("stderr = %q, error = %v, want the step left out and --strict refusing", stderr, err)
+			if err != nil {
+				t.Fatalf("--strict failed on a command warning: %v\n%s", err, stderr)
 			}
-			if !tc.refused && (strings.Contains(stderr, "left out the testing step") || err != nil) {
-				t.Errorf("stderr = %q, error = %v, want the sourced step kept", stderr, err)
+			if got := strings.Contains(stderr, "stays in the text"); got != tc.warns {
+				t.Errorf("warned = %v, want %v\n%s", got, tc.warns, stderr)
+			}
+			body := ghBodyArg(t, g, "pr create")
+			if !strings.Contains(body, strings.ReplaceAll(tc.step, "`", "`")) {
+				t.Errorf("the step is not in the body as written:\n%s", body)
 			}
 		})
 	}
