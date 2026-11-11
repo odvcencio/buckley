@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,5 +259,45 @@ func TestLoadPRNotes_UnclosedCommentIsRefused(t *testing.T) {
 	_, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
 	if err == nil || !strings.Contains(err.Error(), "n.md") || !strings.Contains(err.Error(), "line 3") || !strings.Contains(err.Error(), "&lt;!--") {
 		t.Fatalf("error = %v, want one naming the file, line 3 and the alternative", err)
+	}
+}
+
+// The three inputs of the fourth reviews: a removed comment joins characters
+// into a new opener. The file is refused with its name and line, or the later
+// section survives in the prompt, the sources and the carried sections; never
+// a silent loss.
+func TestLoadPRNotes_AJoinedOpenerIsRefusedNotTruncated(t *testing.T) {
+	inputs := map[string]struct {
+		text string
+		line int
+	}{
+		"468 fence":  {"## Evidence\n\n```html\n<!<!-- remove me -->-- keep this example\n```\n\n## Not verified\n\n- Windows\n", 4},
+		"469 inline": {"## Evidence\n\n`<<!-- remove me -->!--`\n\n## Not verified\n\n- Windows was not tested.\n", 3},
+		"470 inline": {"## Evidence\n\n`<<!-- hidden -->!--` keep this text\n\n## Not verified\n\n- Windows was not tested.\n", 3},
+	}
+	for name, tc := range inputs {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "n.md", tc.text)
+			loaded, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+			if err != nil {
+				want := fmt.Sprintf("line %d", tc.line)
+				if !strings.Contains(err.Error(), "n.md") || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "&lt;!--") {
+					t.Fatalf("error = %v, want one naming the file, %s and the alternative", err, want)
+				}
+				return
+			}
+			prompt, _ := prNotesPrompt(loaded)
+			sources := commands.NewPRSources(loaded, nil)
+			var carried string
+			for _, s := range commands.AuthorSections(loaded) {
+				carried += s.Body + "\n"
+			}
+			for what, text := range map[string]string{"prompt": prompt, "record": sources.Record, "sections": carried} {
+				if !strings.Contains(text, "Windows") {
+					t.Errorf("the %s lost the Not verified text without an error: %q", what, text)
+				}
+			}
+		})
 	}
 }

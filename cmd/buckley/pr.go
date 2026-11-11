@@ -194,16 +194,17 @@ func loadPRNotes(paths []string) ([]commands.PRNote, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read --context-file %s: %w", path, err)
 		}
-		// Comments are removed once, here, so that the prompt, the carried
-		// sections and the sources the text is checked against all see the same
-		// note: commented-out text reaches none of them, also inside code. An
-		// unclosed comment is an error.
-		clean, err := commands.SanitizePRNote(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		// Comments are removed once, here (commands.NewPRNote), so that the
+		// prompt, the carried sections and the sources the text is checked
+		// against all see the same note: commented-out text reaches none of
+		// them, also inside code. An unclosed comment, or one whose removal
+		// joins a new opener, is an error.
+		note, ok, err := commands.NewPRNote(commands.RawPRNote{Path: path, Text: string(data)})
 		if err != nil {
 			return nil, fmt.Errorf("--context-file %s: %w", path, err)
 		}
-		if text := strings.TrimSpace(clean); text != "" {
-			notes = append(notes, commands.PRNote{Path: path, Text: text})
+		if ok {
+			notes = append(notes, note)
 		}
 	}
 	return notes, nil
