@@ -12,7 +12,7 @@ import (
 func sectionsByKind(sections []AuthorSection) map[string]string {
 	out := map[string]string{}
 	for _, s := range sections {
-		out[s.Kind] += s.Heading + "\n" + s.Body + "\n"
+		out[s.Kind()] += s.Heading() + "\n" + s.Body() + "\n"
 	}
 	return out
 }
@@ -74,8 +74,8 @@ func TestAuthorSections_Headings(t *testing.T) {
 		t.Errorf("carried kinds = %v, want only %d kinds: \"What and why\" and \"Design notes\" are background", got, len(want))
 	}
 	for _, s := range sections {
-		if s.Source != "notes.md" {
-			t.Errorf("section %q source = %q, want notes.md", s.Heading, s.Source)
+		if s.Source() != "notes.md" {
+			t.Errorf("section %q source = %q, want notes.md", s.Heading(), s.Source())
 		}
 	}
 }
@@ -138,8 +138,8 @@ func TestAuthorSections_KeepsBothSectionsInFileOrder(t *testing.T) {
 	sections := AuthorSections([]PRNote{older, newer})
 	var notVerified []string
 	for _, s := range sections {
-		if s.Kind == SectionNotVerified {
-			notVerified = append(notVerified, s.Body)
+		if s.Kind() == SectionNotVerified {
+			notVerified = append(notVerified, s.Body())
 		}
 	}
 	if len(notVerified) != 2 || !strings.Contains(notVerified[0], "TestScanOrigins fails") || !strings.Contains(notVerified[1], "CI itself did not run") {
@@ -153,8 +153,8 @@ func TestAuthorSections_KeepsBothSectionsInFileOrder(t *testing.T) {
 	sections = AuthorSections([]PRNote{newer, older})
 	notVerified = nil
 	for _, s := range sections {
-		if s.Kind == SectionNotVerified {
-			notVerified = append(notVerified, s.Body)
+		if s.Kind() == SectionNotVerified {
+			notVerified = append(notVerified, s.Body())
 		}
 	}
 	if len(notVerified) != 2 || !strings.Contains(notVerified[0], "CI itself did not run") {
@@ -203,10 +203,10 @@ func TestPRBody_CarriesAuthorSectionsWordForWord(t *testing.T) {
 		Testing: StringList{"go test ./internal/benchfixtures -run Ledger", "bash cgo_h/docker/run_single_grammar_parity.sh <grammar>"},
 	}
 	body := pr.Body(PRBodyOptions{StateNotVerified: true, HasNotes: true, Sections: []AuthorSection{
-		{Kind: SectionTesting, Heading: "Testing", Body: testing},
-		{Kind: SectionCounters, Heading: "Counters", Body: counters},
-		{Kind: SectionNotVerified, Heading: "Not verified", Body: "- Parity on Windows."},
-		{Kind: SectionKnownGaps, Heading: "Known gaps", Body: "Alternatives A and B were not taken here; the owner decides."},
+		{kind: SectionTesting, heading: "Testing", body: testing},
+		{kind: SectionCounters, heading: "Counters", body: counters},
+		{kind: SectionNotVerified, heading: "Not verified", body: "- Parity on Windows."},
+		{kind: SectionKnownGaps, heading: "Known gaps", body: "Alternatives A and B were not taken here; the owner decides."},
 	}})
 
 	want := "## Summary\n\nPorts the automaton.\n\n" +
@@ -240,7 +240,7 @@ func TestPRBody_StatesWhatWasNotVerified(t *testing.T) {
 		t.Errorf("with notes that lack the section the body must say so:\n%s", withNotes)
 	}
 	authored := pr.Body(PRBodyOptions{StateNotVerified: true, HasNotes: true, Sections: []AuthorSection{
-		{Kind: SectionNotVerified, Heading: "Not measured", Body: "WASM output."},
+		{kind: SectionNotVerified, heading: "Not measured", body: "WASM output."},
 	}})
 	if !strings.Contains(authored, "## Not measured\n\nWASM output.") || strings.Contains(authored, "Buckley wrote") {
 		t.Errorf("the author's section must stand alone, under the author's heading:\n%s", authored)
@@ -314,7 +314,7 @@ func TestStringList_ArrayInsideAString(t *testing.T) {
 func TestPRBuildPrompt_NotesRules(t *testing.T) {
 	ctx := &oneshot.Context{Sources: map[string]string{"git_diff:main": "+ diff"}}
 
-	plain := PRDefinition{ContextNotes: "Slice 2 of 4."}.BuildPrompt(ctx)
+	plain := PRDefinition{ContextNotes: PRPromptNotes{text: "Slice 2 of 4."}}.BuildPrompt(ctx)
 	for _, want := range []string{"the later note is current", "Copy numbers, commands, paths and names exactly", "are not decisions, rejections or results"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("prompt lacks the rule %q:\n%s", want, plain)
@@ -324,9 +324,9 @@ func TestPRBuildPrompt_NotesRules(t *testing.T) {
 		t.Errorf("prompt names carried sections although there are none:\n%s", plain)
 	}
 
-	carried := PRDefinition{ContextNotes: "notes", AuthorSections: []AuthorSection{
-		{Kind: SectionCounters, Heading: "Counters", Body: "x"},
-		{Kind: SectionTesting, Heading: "Test plan", Body: "y"},
+	carried := PRDefinition{ContextNotes: PRPromptNotes{text: "notes"}, AuthorSections: []AuthorSection{
+		{kind: SectionCounters, heading: "Counters", body: "x"},
+		{kind: SectionTesting, heading: "Test plan", body: "y"},
 	}}.BuildPrompt(ctx)
 	for _, want := range []string{"word for word: Counters; Test plan.", "Leave the testing field empty"} {
 		if !strings.Contains(carried, want) {
@@ -340,7 +340,7 @@ func TestPRBuildPrompt_NotesRules(t *testing.T) {
 }
 
 func TestWithoutCarriedSections_DropsPastedCopies(t *testing.T) {
-	carried := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified"}, {Kind: SectionKnownGaps, Heading: "Known gaps"}}
+	carried := []AuthorSection{{kind: SectionNotVerified, heading: "Not verified"}, {kind: SectionKnownGaps, heading: "Known gaps"}}
 	text := "Look at pr_notes.go first.\n\n## Testing\n\n- go test passes\n\n## Not verified\n\n- CI\n\n### sub\n\nmore\n\n## Known gaps\n\n- none\n"
 	got := withoutCarriedSections(text, carried)
 	want := "Look at pr_notes.go first.\n\n## Testing\n\n- go test passes"
@@ -358,7 +358,7 @@ func TestWithoutCarriedSections_DropsPastedCopies(t *testing.T) {
 
 func TestPRBody_ModelCopyOfCarriedSectionIsNotRepeated(t *testing.T) {
 	template := ParsePRTemplate("## What changed\n<!-- x -->\n\n## Notes for Reviewers\n<!-- y -->\n")
-	carried := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified", Body: "- CI did not run"}}
+	carried := []AuthorSection{{kind: SectionNotVerified, heading: "Not verified", body: "- CI did not run"}}
 	pr := PRResult{Action: "add", Title: "x", Sections: map[string]string{
 		"what_changed": "Did it.", "notes_for_reviewers": "Look here.\n\n## Not verified\n\n- CI did not run\n"}}
 	body := pr.Body(PRBodyOptions{Sections: carried, Template: template})
@@ -373,12 +373,12 @@ func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
 	older := PRNote{Path: "old.md", text: "## Testing\n\nolder result\n"}
 	newer := PRNote{Path: "new.md", text: "## Test plan\n\nnewer result\n"}
 	sections := AuthorSections([]PRNote{older, newer}, "Testing")
-	if len(sections) != 2 || sections[0].Body != "older result" || sections[1].Body != "newer result" {
+	if len(sections) != 2 || sections[0].Body() != "older result" || sections[1].Body() != "newer result" {
 		t.Fatalf("sections = %+v, want older then newer", sections)
 	}
 	for _, s := range sections {
-		if s.Kind != SectionTesting {
-			t.Errorf("section %q has kind %q, want %q", s.Heading, s.Kind, SectionTesting)
+		if s.Kind() != SectionTesting {
+			t.Errorf("section %q has kind %q, want %q", s.Heading(), s.Kind(), SectionTesting)
 		}
 	}
 }
@@ -415,8 +415,8 @@ func TestSanitizePRNote_RemovesEveryCommentWhereverItIs(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, s := range AuthorSections([]PRNote{note}) {
-				if strings.Contains(s.Body, token) {
-					t.Errorf("section %q carries the token: %q", s.Heading, s.Body)
+				if strings.Contains(s.Body(), token) {
+					t.Errorf("section %q carries the token: %q", s.Heading(), s.Body())
 				}
 			}
 		})

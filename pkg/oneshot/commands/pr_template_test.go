@@ -123,7 +123,7 @@ func TestPRBody_FollowsTheTemplate(t *testing.T) {
 		Issues: StringList{"12"},
 	}
 	body := pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true, HasNotes: true, Sections: []AuthorSection{
-		{Kind: SectionCounters, Heading: "Counters", Body: "| lex steps | 1,204 | 1,204 |"},
+		{kind: SectionCounters, heading: "Counters", body: "| lex steps | 1,204 | 1,204 |"},
 	}})
 
 	wantStart := "## What does this PR do?\n\nPorts the lex automaton into the core package. Refs #14.\n\n" +
@@ -164,9 +164,9 @@ func TestPRBody_TemplateTakesTheAuthorsSections(t *testing.T) {
 		"notes_for_reviewers": "Look at the guard first.",
 	}}
 	author := []AuthorSection{
-		{Kind: SectionTesting, Heading: "Test plan", Body: "- `./scripts/test.sh` passed"},
-		{Kind: headingKindPrefix + "what changed", Heading: "What changed", Body: "The guard now covers the retry path."},
-		{Kind: SectionKnownGaps, Heading: "Known gaps", Body: "Windows is not covered."},
+		{kind: SectionTesting, heading: "Test plan", body: "- `./scripts/test.sh` passed"},
+		{kind: headingKindPrefix + "what changed", heading: "What changed", body: "The guard now covers the retry path."},
+		{kind: SectionKnownGaps, heading: "Known gaps", body: "Windows is not covered."},
 	}
 
 	body := pr.Body(PRBodyOptions{Template: tmpl, Sections: author})
@@ -182,13 +182,13 @@ func TestPRBody_TemplateTakesTheAuthorsSections(t *testing.T) {
 	// Text for a checklist section goes under the checklist. A checklist that
 	// the author restated replaces the template's.
 	under := pr.Body(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
-		{Kind: headingKindPrefix + "summary", Heading: "Summary", Body: "Tests are in guard_test.go."},
+		{kind: headingKindPrefix + "summary", heading: "Summary", body: "Tests are in guard_test.go."},
 	}})
 	if !strings.HasPrefix(under, "## Summary\n- [ ] Includes tests or rationale for why tests are unnecessary\n- [ ] References relevant issues/links\n\nTests are in guard_test.go.\n\n### What changed") {
 		t.Errorf("author text is not under the checklist:\n%s", under)
 	}
 	ticked := pr.Body(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
-		{Kind: headingKindPrefix + "summary", Heading: "Summary", Body: "- [x] Includes tests\n- [x] References #12"},
+		{kind: headingKindPrefix + "summary", heading: "Summary", body: "- [x] Includes tests\n- [x] References #12"},
 	}})
 	if !strings.HasPrefix(ticked, "## Summary\n\n- [x] Includes tests\n- [x] References #12\n\n### What changed") || strings.Contains(ticked, "- [ ]") {
 		t.Errorf("the author's checklist does not replace the template's:\n%s", ticked)
@@ -222,7 +222,7 @@ func TestPRBody_TemplateWithItsOwnNotVerifiedSection(t *testing.T) {
 	}
 
 	// An author section fills the slot and no statement is added.
-	author := []AuthorSection{{Kind: SectionNotVerified, Heading: "Not verified", Body: "- CI did not run"}}
+	author := []AuthorSection{{kind: SectionNotVerified, heading: "Not verified", body: "- CI did not run"}}
 	body = pr.Body(PRBodyOptions{Template: tmpl, StateNotVerified: true, HasNotes: true, Sections: author})
 	if strings.Contains(body, "do not say what was left unverified") || !strings.Contains(body, "CI did not run") {
 		t.Fatalf("body =\n%s", body)
@@ -272,7 +272,7 @@ func TestPRTool_AsksForTheOpenTemplateSections(t *testing.T) {
 	}
 
 	// A section the author wrote is not asked of the model.
-	def.AuthorSections = []AuthorSection{{Kind: headingKindPrefix + "why this approach", Heading: "Why this approach?", Body: "x"}}
+	def.AuthorSections = []AuthorSection{{kind: headingKindPrefix + "why this approach", heading: "Why this approach?", body: "x"}}
 	if _, ok := def.Tool().Parameters.Properties["section_why_this_approach"]; ok {
 		t.Error("the tool asks the model for a section the author wrote")
 	}
@@ -322,7 +322,7 @@ func TestPRValidateAndUnmarshal_Template(t *testing.T) {
 }
 
 func TestUnsourcedCommands_TemplateSections(t *testing.T) {
-	src := PRSources{All: "Ran `./scripts/test.sh` on Linux."}
+	src := PRSources{all: "Ran `./scripts/test.sh` on Linux."}
 	text := "Checked on Linux:\n- `./scripts/test.sh` passed\n- `go test ./internal/benchfixtures -run Ledger`\n\nAlso ran `make lint` by hand."
 	pr := PRResult{Sections: map[string]string{"testing": text}}
 
