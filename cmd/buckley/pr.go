@@ -231,17 +231,25 @@ func loadPRNotes(paths []string) ([]commands.PRNote, error) {
 // that the caller can tell the author instead of dropping them in silence.
 func prNotesPrompt(notes []commands.PRNote) (text string, cut int) {
 	var b strings.Builder
+	// A note that NewPRNote did not make has no text and is left out.
+	var made []commands.PRNote
+	for _, note := range notes {
+		if note.Text() != "" {
+			made = append(made, note)
+		}
+	}
+	notes = made
 	for i, note := range notes {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
 		switch {
 		case len(notes) == 1:
-			fmt.Fprintf(&b, "### %s\n\n%s", note.Path, note.Text)
+			fmt.Fprintf(&b, "### %s\n\n%s", note.Path, note.Text())
 		case i == len(notes)-1:
-			fmt.Fprintf(&b, "### Note %d of %d, the latest: %s\n\n%s", i+1, len(notes), note.Path, note.Text)
+			fmt.Fprintf(&b, "### Note %d of %d, the latest: %s\n\n%s", i+1, len(notes), note.Path, note.Text())
 		default:
-			fmt.Fprintf(&b, "### Note %d of %d: %s\n\n%s", i+1, len(notes), note.Path, note.Text)
+			fmt.Fprintf(&b, "### Note %d of %d: %s\n\n%s", i+1, len(notes), note.Path, note.Text())
 		}
 	}
 
@@ -633,22 +641,20 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 }
 
 // checkPRAgainstSources compares the model's text with what it was written
-// from. It removes each testing step whose command the sources do not contain
-// as written, and says so. It warns about decisions and numbers that have no
-// source, and returns how many of those there are: code cannot rewrite prose,
-// so the author decides, or --strict stops the run.
+// from. It warns about decisions and numbers that have no source, and returns
+// how many of those there are: code cannot rewrite prose, so the author
+// decides, or --strict stops the run. A command that no source contains is a
+// warning only. It never changes the text and --strict ignores it, because the
+// check reads prose with a heuristic.
 func checkPRAgainstSources(pr *commands.PRResult, src commands.PRSources) (claims int) {
-	dropped := pr.DropUnbackedTesting(src)
-	for _, step := range dropped {
-		prWarnf("left out the testing step %q: its command is not in the notes, the commits, the diff or the project guidelines", step)
+	for _, warning := range pr.UnsourcedCommands(src) {
+		prWarnf("%s", warning)
 	}
 	unbacked := pr.UnbackedClaims(src)
 	for _, claim := range unbacked {
 		prWarnf("%s", claim)
 	}
-	// A testing step that named a command nothing supports counts too: --strict
-	// stops on it, because the step is a claim that something was run.
-	return len(unbacked) + len(dropped)
+	return len(unbacked)
 }
 
 // prBackupNow supplies the time in the name of a saved copy. Tests replace it.
