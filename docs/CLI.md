@@ -472,8 +472,8 @@ GitHub reads it, and from the head branch when the base has none. An uncommitted
 template is not read. `--template=false` keeps Buckley's own sections.
 
 Buckley reads the Markdown of the template, of the notes and of the model's text
-with one CommonMark parser (goldmark, with the GitHub task-list extension). It
-does not scan lines for `#`, fences or comments itself. So a heading, a
+with Markdown++ (`m31labs.dev/mdpp`), the organisation's CommonMark-based parser,
+through one reader. It does not scan lines for `#`, fences or comments itself. So a heading, a
 checkbox item, a code block or a comment is what CommonMark says it is: a `#`
 line inside a fenced or indented code block, an HTML block or a comment is text;
 a setext heading is a paragraph of one or more lines over a line of only `=` or

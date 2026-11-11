@@ -197,6 +197,13 @@ func (w fragmentWriter) text(n int) string {
 	parts := make([]string, n)
 	for i := range parts {
 		parts[i] = w.fragment()
+		// mdpp v0.5.0 does not read a multi-line setext heading in a document
+		// that begins with a thematic break or an HTML block (known difference 1,
+		// a defect in mdpp that is reported: see mdpp-differences.md in the
+		// lane's notes), so no generated text starts with one.
+		if i == 0 && (isBreak(parts[i]) || strings.HasPrefix(parts[i], "<!--")) {
+			parts[i] = w.phrase()
+		}
 	}
 	return strings.Join(parts, w.pick("\n\n", "\n\n", "\n"))
 }
@@ -322,3 +329,5 @@ func containsLine(lines []string, line string) bool {
 	}
 	return false
 }
+
+func isBreak(s string) bool { return s == "***" || s == "___" || s == "- - -" }

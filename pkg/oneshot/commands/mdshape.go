@@ -3,19 +3,13 @@ package commands
 import (
 	"sort"
 	"strings"
-	"sync"
 
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
-	extast "github.com/yuin/goldmark/extension/ast"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
+	"m31labs.dev/mdpp"
 )
 
 // This file is the one reader of Markdown structure in the pull request code.
-// It parses text with a CommonMark parser (goldmark, with its GitHub task-list
-// extension) and reports what the parser found, with source line numbers.
+// It parses text with Markdown++ (m31labs.dev/mdpp), a CommonMark parser built
+// on gotreesitter, and reports what the parser found, with source line numbers.
 // Nothing else decides what a heading, a list item, a code block or a comment
 // is: template parsing, checkbox ticking, the demotion of placed text, the
 // carried-section filter and the final check of the body's shape all ask this
@@ -75,7 +69,8 @@ type mdComment struct {
 	Block              bool
 }
 
-// mdBlock is a child of the document, in order.
+// mdBlock is a block of the document at any depth, in order of its first
+// line (a container before its children).
 type mdBlock struct {
 	Kind       string // heading, paragraph, list, code, html, quote, break
 	Start, End int
@@ -94,75 +89,8 @@ type mdDoc struct {
 	Blocks    []mdBlock
 }
 
-const (
-	attrStart = "mdshape-start"
-	attrEnd   = "mdshape-end"
-)
-
-// lineRecorder wraps a goldmark block parser to record the first and the last
-// line of every block it opens. The parser does not keep source positions
-// itself.
-type lineRecorder struct{ parser.BlockParser }
-
-func (p lineRecorder) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
-	line, _ := reader.Position()
-	node, state := p.BlockParser.Open(parent, reader, pc)
-	if node != nil {
-		node.SetAttributeString(attrStart, line)
-		node.SetAttributeString(attrEnd, line)
-	}
-	return node, state
-}
-
-func (p lineRecorder) Continue(node ast.Node, reader text.Reader, pc parser.Context) parser.State {
-	state := p.BlockParser.Continue(node, reader, pc)
-	// A line that continues a block belongs to it. The closing fence of a fenced
-	// code block and the closing line of an HTML block of the kinds that have
-	// one close their block and belong to it too.
-	closing := false
-	switch v := node.(type) {
-	case *ast.FencedCodeBlock:
-		closing = true
-	case *ast.HTMLBlock:
-		closing = v.HasClosure()
-	}
-	if state&parser.Close == 0 || closing {
-		line, _ := reader.Position()
-		node.SetAttributeString(attrEnd, line)
-	}
-	return state
-}
-
-var (
-	mdOnce   sync.Once
-	mdParser goldmark.Markdown
-)
-
-func markdownParser() goldmark.Markdown {
-	mdOnce.Do(func() {
-		blocks := parser.DefaultBlockParsers()
-		for i := range blocks {
-			blocks[i].Value = lineRecorder{blocks[i].Value.(parser.BlockParser)}
-		}
-		mdParser = goldmark.New(
-			goldmark.WithParser(parser.NewParser(
-				parser.WithBlockParsers(blocks...),
-				parser.WithInlineParsers(parser.DefaultInlineParsers()...),
-				parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
-			)),
-			goldmark.WithExtensions(extension.TaskList),
-		)
-	})
-	return mdParser
-}
-
-func nodeLine(n ast.Node, name string) (int, bool) {
-	v, ok := n.AttributeString(name)
-	line, isInt := v.(int)
-	return line, ok && isInt
-}
-
-// readMarkdown parses text. Line endings are normalized first.
+// readMarkdown parses text with Markdown++ (m31labs.dev/mdpp). Line endings are
+// normalized first, so the byte offsets of the parse are offsets in d.text.
 func readMarkdown(src string) *mdDoc {
 	src = normalizeNewlines(src)
 	d := &mdDoc{text: src}
@@ -173,83 +101,82 @@ func readMarkdown(src string) *mdDoc {
 		d.lineStart[i] = off
 		off += len(l) + 1
 	}
-	source := []byte(src)
-	root := markdownParser().Parser().Parse(text.NewReader(source))
-
-	d.readComments(root)
-	lists := map[ast.Node]int{}
-	_ = ast.Walk(root, func(n ast.Node, enter bool) (ast.WalkStatus, error) {
-		if !enter {
-			return ast.WalkContinue, nil
-		}
-		switch v := n.(type) {
-		case *ast.List:
-			lists[n] = len(lists)
-		case *ast.Heading:
-			if h, ok := d.readHeading(v); ok {
-				d.Headings = append(d.Headings, h)
-			}
-		case *ast.ListItem:
-			d.addTask(v, lists)
-		case *ast.FencedCodeBlock:
-			if s, e, ok := d.blockRange(n); ok {
-				d.Code = append(d.Code, mdCode{Start: s, End: e, Fenced: true})
-			}
-		case *ast.CodeBlock:
-			if s, e, ok := d.blockRange(n); ok {
-				d.Code = append(d.Code, mdCode{Start: s, End: e})
-			}
-		case *ast.HTMLBlock:
-			if s, e, ok := d.blockRange(n); ok {
-				d.HTML = append(d.HTML, mdHTML{Start: s, End: e, Comment: v.HTMLBlockType == ast.HTMLBlockType2})
-			}
-		}
-		return ast.WalkContinue, nil
-	})
-	for c := root.FirstChild(); c != nil; c = c.NextSibling() {
-		kind := ""
-		switch c.(type) {
-		case *ast.Heading:
-			kind = "heading"
-		case *ast.Paragraph, *ast.TextBlock:
-			kind = "paragraph"
-		case *ast.List:
-			kind = "list"
-		case *ast.FencedCodeBlock, *ast.CodeBlock:
-			kind = "code"
-		case *ast.HTMLBlock:
-			kind = "html"
-		case *ast.Blockquote:
-			kind = "quote"
-		case *ast.ThematicBreak:
-			kind = "break"
-		default:
-			kind = "other"
-		}
-		if h, isHeading := c.(*ast.Heading); isHeading {
-			if hd, ok := d.readHeading(h); ok {
-				d.Blocks = append(d.Blocks, mdBlock{Kind: kind, Start: hd.Start, End: hd.End})
-			}
-		} else if s, e, ok := d.blockRange(c); ok {
+	doc, err := mdpp.Parse([]byte(src))
+	if err != nil || doc == nil || doc.Root == nil {
+		return d
+	}
+	d.readComments(doc.Root)
+	sort.Slice(d.Comments, func(i, j int) bool { return d.Comments[i].Start < d.Comments[j].Start })
+	lists := 0
+	var walk func(n *mdpp.Node, parent *mdpp.Node, list int)
+	walk = func(n *mdpp.Node, parent *mdpp.Node, list int) {
+		if kind := blockKind(n.Type); kind != "" {
+			s, e := d.nodeLines(n)
 			d.Blocks = append(d.Blocks, mdBlock{Kind: kind, Start: s, End: e})
 		}
+		switch n.Type {
+		case mdpp.NodeList:
+			lists++
+			list = lists - 1
+		case mdpp.NodeHeading:
+			d.Headings = append(d.Headings, d.readHeading(n, parent == doc.Root))
+		case mdpp.NodeTaskListItem:
+			d.addTask(n, list)
+		case mdpp.NodeCodeBlock:
+			s, e := d.nodeLines(n)
+			d.Code = append(d.Code, mdCode{Start: s, End: e, Fenced: d.fencedAt(s)})
+		case mdpp.NodeHTMLBlock:
+			s, e := d.nodeLines(n)
+			d.HTML = append(d.HTML, mdHTML{Start: s, End: e, Comment: strings.HasPrefix(strings.TrimLeft(d.Lines[s], " "), "<!--")})
+		}
+		for _, c := range n.Children {
+			walk(c, n, list)
+		}
 	}
+	walk(doc.Root, nil, 0)
+	sort.SliceStable(d.Blocks, func(i, j int) bool { return d.Blocks[i].Start < d.Blocks[j].Start })
 	sort.Slice(d.Headings, func(i, j int) bool { return d.Headings[i].Start < d.Headings[j].Start })
 	sort.Slice(d.Tasks, func(i, j int) bool { return d.Tasks[i].MarkAt < d.Tasks[j].MarkAt })
 	return d
 }
 
-// blockRange returns the first and last line the wrapper recorded for a block.
-func (d *mdDoc) blockRange(n ast.Node) (start, end int, ok bool) {
-	start, ok1 := nodeLine(n, attrStart)
-	end, ok2 := nodeLine(n, attrEnd)
-	if !ok1 || !ok2 {
-		return 0, 0, false
+func blockKind(t mdpp.NodeType) string {
+	switch t {
+	case mdpp.NodeHeading:
+		return "heading"
+	case mdpp.NodeParagraph:
+		return "paragraph"
+	case mdpp.NodeList:
+		return "list"
+	case mdpp.NodeListItem, mdpp.NodeTaskListItem:
+		return "item"
+	case mdpp.NodeCodeBlock:
+		return "code"
+	case mdpp.NodeHTMLBlock:
+		return "html"
+	case mdpp.NodeBlockquote:
+		return "quote"
+	case mdpp.NodeThematicBreak:
+		return "break"
 	}
-	if end < start {
-		end = start
-	}
-	return start, min(end, len(d.Lines)-1), true
+	return ""
+}
+
+// nodeLines returns the first and last line (0-based) of a node. A node's byte
+// range usually ends after its last line break, so the last line is the one
+// that holds the byte before the end.
+func (d *mdDoc) nodeLines(n *mdpp.Node) (start, end int) {
+	from := min(max(n.Range.StartByte, 0), len(d.text))
+	to := min(max(n.Range.EndByte, from), len(d.text))
+	start = d.lineOf(from)
+	end = d.lineOf(max(from, to-1))
+	return start, min(end, len(d.Lines)-1)
+}
+
+// fencedAt reports a code block whose first line opens with a fence.
+func (d *mdDoc) fencedAt(line int) bool {
+	t := strings.TrimLeft(d.Lines[line], " ")
+	return len(d.Lines[line])-len(t) <= 3 && (strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"))
 }
 
 // lineOf returns the 0-based line that holds a byte offset.
@@ -257,64 +184,50 @@ func (d *mdDoc) lineOf(off int) int {
 	return max(0, sort.Search(len(d.lineStart), func(i int) bool { return d.lineStart[i] > off })-1)
 }
 
-func (d *mdDoc) readComments(root ast.Node) {
+func (d *mdDoc) readComments(root *mdpp.Node) {
 	add := func(start, stop int, block bool) {
 		raw := d.text[start:stop]
-		inner := strings.TrimPrefix(raw, "<!--")
-		inner = strings.TrimSuffix(inner, "-->")
+		inner := strings.TrimSuffix(strings.TrimPrefix(raw, "<!--"), "-->")
 		d.Comments = append(d.Comments, mdComment{
 			Start: start, Stop: stop,
 			StartLine: d.lineOf(start), EndLine: d.lineOf(max(start, stop-1)),
 			Text: strings.TrimSpace(inner), Block: block,
 		})
 	}
-	_ = ast.Walk(root, func(n ast.Node, enter bool) (ast.WalkStatus, error) {
-		if !enter {
-			return ast.WalkContinue, nil
+	root.Walk(func(n *mdpp.Node) bool {
+		from, to := min(max(n.Range.StartByte, 0), len(d.text)), min(max(n.Range.EndByte, 0), len(d.text))
+		if to < from {
+			return true
 		}
-		switch v := n.(type) {
-		case *ast.HTMLBlock:
-			if v.HTMLBlockType != ast.HTMLBlockType2 {
+		switch n.Type {
+		case mdpp.NodeHTMLBlock:
+			if !strings.HasPrefix(strings.TrimLeft(d.text[from:to], " "), "<!--") {
 				break
 			}
 			// A comment block holds its comment and may hold text after the
 			// closing "-->" on the same line. The comments are the delimited spans
 			// of the block's own text.
-			ls := v.Lines()
-			if ls.Len() == 0 {
-				break
-			}
-			first, last := ls.At(0).Start, ls.At(ls.Len()-1).Stop
-			if v.HasClosure() {
-				last = max(last, v.ClosureLine.Stop)
-			}
-			rest := first
-			for rest < last {
-				open := strings.Index(d.text[rest:last], "<!--")
+			rest := from
+			for rest < to {
+				open := strings.Index(d.text[rest:to], "<!--")
 				if open < 0 {
 					break
 				}
 				open += rest
-				stop := last
-				if end := strings.Index(d.text[open+4:last], "-->"); end >= 0 {
+				stop := to
+				if end := strings.Index(d.text[open+4:to], "-->"); end >= 0 {
 					stop = open + 4 + end + 3
 				}
 				add(open, stop, true)
 				rest = stop
 			}
-		case *ast.RawHTML:
-			segs := v.Segments
-			if segs.Len() == 0 {
-				break
-			}
-			start, stop := segs.At(0).Start, segs.At(segs.Len()-1).Stop
-			if strings.HasPrefix(d.text[start:stop], "<!--") {
-				add(start, stop, false)
+		case mdpp.NodeHTMLInline:
+			if strings.HasPrefix(d.text[from:to], "<!--") {
+				add(from, to, false)
 			}
 		}
-		return ast.WalkContinue, nil
+		return true
 	})
-	sort.Slice(d.Comments, func(i, j int) bool { return d.Comments[i].Start < d.Comments[j].Start })
 }
 
 // outsideComments returns the part of d.text[start:stop] that is outside
@@ -345,55 +258,54 @@ func (d *mdDoc) lineSpan(first, last int) (start, stop int) {
 	return start, stop
 }
 
-// readHeading reads a heading node. A setext heading is recorded at its
-// underline, so its first line comes from its text lines.
-func (d *mdDoc) readHeading(h *ast.Heading) (mdHeading, bool) {
-	s, e, ok := d.blockRange(h)
-	if !ok {
-		return mdHeading{}, false
-	}
-	out := mdHeading{Level: h.Level, Top: h.Parent() != nil && h.Parent().Kind() == ast.KindDocument, Start: s, End: e}
-	ls := h.Lines()
-	var parts []string
-	for i := 0; i < ls.Len(); i++ {
-		seg := ls.At(i)
-		parts = append(parts, strings.TrimSpace(d.outsideComments(seg.Start, seg.Stop)))
-	}
-	if ls.Len() > 0 {
-		if first := d.lineOf(ls.At(0).Start); first < e {
-			out.Setext, out.Start = true, first
+// readHeading reads a heading node. A setext heading is a heading whose range
+// spans its text lines and the underline line.
+func (d *mdDoc) readHeading(h *mdpp.Node, top bool) mdHeading {
+	s, e := d.nodeLines(h)
+	out := mdHeading{Level: h.Level(), Top: top, Start: s, End: e, Setext: e > s}
+	var raw strings.Builder
+	for _, c := range h.Children {
+		from, to := min(max(c.Range.StartByte, 0), len(d.text)), min(max(c.Range.EndByte, 0), len(d.text))
+		switch {
+		case c.Type == mdpp.NodeHTMLInline && strings.HasPrefix(d.text[from:max(from, to)], "<!--"):
+			// a comment in a heading is not part of its text
+		case to > from:
+			raw.WriteString(d.text[from:to])
+		case c.Type == mdpp.NodeSoftBreak:
+			raw.WriteString("\n")
+		default:
+			// mdpp gives some text nodes (those holding punctuation such as "?")
+			// no range; their literal is the text.
+			raw.WriteString(c.Text())
 		}
 	}
-	out.Text = strings.TrimSpace(strings.Join(parts, " "))
-	return out, true
+	var parts []string
+	for _, line := range strings.Split(raw.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	out.Text = strings.Join(parts, " ")
+	return out
 }
 
-func (d *mdDoc) addTask(item *ast.ListItem, lists map[ast.Node]int) {
-	tb := item.FirstChild()
-	if tb == nil || tb.FirstChild() == nil {
-		return
-	}
-	box, ok := tb.FirstChild().(*extast.TaskCheckBox)
-	if !ok || tb.Lines().Len() == 0 {
-		return
-	}
-	at := tb.Lines().At(0).Start // the "["
-	line := d.lineOf(at)
+func (d *mdDoc) addTask(item *mdpp.Node, list int) {
+	from := min(max(item.Range.StartByte, 0), len(d.text))
+	line := d.lineOf(from)
 	_, lineStop := d.lineSpan(line, line)
+	open := strings.IndexByte(d.text[from:lineStop], '[')
+	if open < 0 || from+open+2 >= len(d.text) {
+		return
+	}
+	at := from + open // the "["
 	t := mdTask{
-		Line: line, Checked: box.IsChecked, MarkAt: at + 1,
+		Line: line, Checked: item.Attr("checked") == "true", MarkAt: at + 1, List: list,
 		Item:       strings.Join(strings.Fields(d.outsideComments(min(at+3, lineStop), lineStop)), " "),
 		CommentEnd: line,
 	}
 	for _, c := range d.Comments {
 		if c.StartLine == line {
 			t.CommentEnd = max(t.CommentEnd, c.EndLine)
-		}
-	}
-	for p := item.Parent(); p != nil; p = p.Parent() {
-		if n, ok := lists[p]; ok {
-			t.List = n
-			break
 		}
 	}
 	d.Tasks = append(d.Tasks, t)

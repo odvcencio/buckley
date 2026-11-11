@@ -254,6 +254,9 @@ func labelLine(d *mdDoc, i int) (string, bool) {
 	if strings.ContainsAny(text[:1], "|`~") {
 		return "", false
 	}
+	// The line is unindented and follows a blank line, so a paragraph that
+	// starts on it is not part of a list item or a quote, wherever the parser
+	// nests it.
 	block := -1
 	for n, b := range d.Blocks {
 		if b.Start == i && (b.Kind == "paragraph" || b.Kind == "heading") {
@@ -273,12 +276,22 @@ func labelLine(d *mdDoc, i int) (string, bool) {
 		return text, true
 	}
 	b := d.Blocks[block]
-	if b.Kind != "paragraph" || b.End != i || block+1 >= len(d.Blocks) {
+	if b.Kind != "paragraph" || b.End != i {
 		return "", false
 	}
-	next := d.Blocks[block+1]
+	nextAt := -1
+	for n := block + 1; n < len(d.Blocks); n++ {
+		if d.Blocks[n].Start > b.End {
+			nextAt = n
+			break
+		}
+	}
+	if nextAt < 0 {
+		return "", false
+	}
+	next := d.Blocks[nextAt]
 	switch next.Kind {
-	case "list":
+	case "list", "item":
 		return text, true
 	case "code":
 		for _, c := range d.Code {
