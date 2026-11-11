@@ -215,6 +215,21 @@ func Prioritize(raw string, maxBytes int) Result {
 	return prioritizeCore(raw, maxBytes, MaxFileDiffBytes, nil, nil)
 }
 
+// PrioritizeForReview preserves complete source files when their combined diff
+// fits the explicit review budget. A representative per-file excerpt is useful
+// for commit messages, but cannot support a complete review. Low-signal filters,
+// the total output budget and the hard raw-input ceiling remain unchanged.
+func PrioritizeForReview(raw string, maxBytes int) Result {
+	if maxBytes <= 0 {
+		maxBytes = ReviewDiffBudget
+	}
+	perFileCap := maxBytes
+	if perFileCap > MaxParseBytes {
+		perFileCap = MaxParseBytes
+	}
+	return prioritizeCore(raw, maxBytes, perFileCap, nil, nil)
+}
+
 // PrioritizeForPR is Prioritize with two adjustments the `buckley pr` path
 // needs that other callers (commit, review) do not:
 //
@@ -984,9 +999,30 @@ func classifyBody(fd *FileDiff, generated func(string) bool, minified bool) {
 		fd.Reason = ReasonGeneratedPath
 	case hasGeneratedHeader(fd.Segment):
 		fd.Reason = ReasonGeneratedHeader
-	case minified && !isBoundedFixture(fd):
+	case minified && !isBoundedFixture(fd) && !isBoundedSVGGolden(fd):
 		fd.Reason = ReasonMinified
 	}
+}
+
+// isBoundedSVGGolden retains test expectations whose SVG path data naturally
+// contains long lines. A small readable golden is review evidence, even when
+// the generic minification heuristic mistakes its geometry for a bundle.
+// The normal per-file and total budgets still apply; larger artifacts remain
+// summarized, as do binary, unavailable, or generated-path segments above.
+func isBoundedSVGGolden(fd *FileDiff) bool {
+	if len(fd.Segment) > MaxFileDiffBytes {
+		return false
+	}
+	lower := strings.ToLower(fd.Path)
+	if !strings.HasSuffix(lower, ".golden.svg") {
+		return false
+	}
+	for _, segment := range strings.Split(lower, "/") {
+		if segment == "testdata" {
+			return true
+		}
+	}
+	return false
 }
 
 // isGeneratedPath reports whether the path matches common built-artifact

@@ -521,8 +521,11 @@ it is: in prose, in inline code and in a fenced code block. The model, the
 carried sections and the sources that the text is checked against all see the
 note without them. A `<!--` that has no closing `-->` is an error that names the
 file and the line: close the comment, or write the opener another way (for
-example `&lt;!--`) when it is meant as text. Other text in a carried section is
-copied word for word.
+example `&lt;!--`) when it is meant as text. The same error applies when removing
+a comment would join the characters around it into a new `<!--` (for example
+`<!<!-- x -->--`): the text after it cannot be trusted, so the file is refused
+instead of being cut. Comments are removed once, when the file is read. Other
+text in a carried section is copied word for word.
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a
@@ -544,7 +547,13 @@ what it wrote with them:
   as `go`, `make` or a script path), or a step that starts with such a program
   in plain text, with its arguments in code format when it has any
   (``go test ./pkg -run `TestFoo` ``). Inline code marks are ignored on both
-  sides. Steps that name no command are not checked. Other steps are left out,
+  sides. The command is the text of the step up to the first token that cannot
+  belong to a command line: a lone `-` or `--`, a dash, a colon before a space,
+  a semicolon, a parenthesis, or a plain word that is not a flag, a path or the
+  value of the flag before it (such as `1` in `-count 1`). Flags and flag
+  values before that point are part of the command. A flag that comes later,
+  before the boundary, needs a source of its own; everything after the boundary
+  is prose. Steps that name no command are not checked. Other steps are left out,
   and a warning names each one; with `--strict` a left-out step is an error. Put the commands you ran in a Testing section of a
   notes file to have them copied instead.
 - A word that states a decision (`rejected`, `approved`, `decided`, `ruled out`,
@@ -747,6 +756,19 @@ ledger. `--in-depth` is a shorthand for `--depth in-depth`; `standard`,
 `detailed`, and `exhaustive` are accepted aliases for the corresponding modes.
 No-test gates are typed as not applicable; required unavailable evidence fails
 the pass instead of being silently counted as passing evidence.
+
+Screenshots: `buckley review-pr 123 --image before.png --image after.png`
+attaches up to five local PNG, JPEG or GIF files (10 MiB each, 20 MiB in total)
+to the review as pixels. Buckley reads each file once, when the command starts,
+and sends the same bytes with every model call of that review. A symlink, a
+directory, a URL or a file that is not an image is refused. Text inside an
+image and the captions are treated as data, not as instructions.
+`--image` works only when the primary model and the critic model run on a provider
+that carries the pixels. The Codex, native Anthropic, Google and Ollama providers
+turn each message into text today, so Buckley refuses `--image` for them and
+names the provider, instead of running a review that never saw the image. An
+inline image is counted as a fixed 1,600 input tokens, an estimate, not by the
+length of its file.
 
 Verification: `buckley verify run|record|list` manage receipts, and
 `buckley buckbot ... --require-verification=none|receipt|receipt-or-ci` sets

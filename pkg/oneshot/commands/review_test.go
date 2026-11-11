@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3415,5 +3416,28 @@ func assertNestedAgentsChain(t *testing.T, content, parentGuidance, childGuidanc
 	child := strings.Index(content, "### src/deep/AGENTS.md")
 	if parent < 0 || child < 0 || parent > child {
 		t.Fatalf("instruction chain is not ordered from shallow to deep:\n%s", content)
+	}
+}
+
+func TestRemoteCIDeeperReviewCollectsSnapshotCoverageForCritic(t *testing.T) {
+	files := []string{"diagram.go", "cmd/sirena/main.go", "layout/families.go", "render/svg/svg.go", "render/scene3d/choreography.go"}
+	for _, depth := range []string{"balanced", "in-depth"} {
+		t.Run(depth, func(t *testing.T) {
+			def := withPassingTestCIAdmission(t, ReviewPRDef{ChangedFiles: files, CIStatus: "passing (1/1)", CIProvenance: prCISourceHead, Depth: depth})
+			requests := def.AgentEvidenceRequests()
+			if !assert.Len(t, requests, 5) {
+				t.FailNow()
+			}
+			execution := &oneshot.AgentResult{ProviderID: "openai"}
+			for i, request := range requests {
+				assert.Equal(t, "run_verification", request.Tool)
+				assert.Equal(t, "test", request.Parameters["kind"])
+				execution.ToolCalls = append(execution.ToolCalls, oneshot.AgentToolCall{ID: fmt.Sprintf("host-evidence-%d", i+1), Name: request.Tool, Success: true, Data: map[string]any{"kind": "test", "language": "go", "path": request.Parameters["path"], "status": "PASS", "exit_code": 0}})
+			}
+			declined := &ReviewAgentResult{Parsed: &ParsedReview{Approved: false, BuildStatus: "PASS", TestStatus: "PASS", BuildVerification: VerificationPass, TestVerification: VerificationPass}}
+			assert.NoError(t, def.ValidateAgentExecution(declined, execution))
+			execution.ToolCalls = execution.ToolCalls[1:]
+			assert.ErrorContains(t, def.ValidateAgentExecution(declined, execution), "does not cover changed source paths")
+		})
 	}
 }

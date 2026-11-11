@@ -40,6 +40,7 @@ type reviewPRCommandOptions struct {
 	timeout              time.Duration
 	outputFile           string
 	prRef                string
+	imagePaths           []string
 	budgetUSD            float64
 	noBudget             bool
 	maxTurns             int
@@ -77,6 +78,14 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 	evidenceTimeout := fs.Duration("evidence-timeout", 0, "cap on host verification before the model runs (0 = half of the time left; the model keeps at least a quarter)")
 	maxSupportingContext := fs.Int("max-context-tokens", 0, "maximum supporting-context tokens; diff and evidence IDs are protected (0 = Buckbot default)")
 	maxRetries := fs.Int("max-validation-attempts", 0, "maximum schema-validation attempts (0 = Buckbot default)")
+	var imagePaths []string
+	fs.Func("image", "attach one explicitly supplied local PNG, JPEG, or GIF screenshot (repeatable; maximum 5)", func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("--image requires a local screenshot path")
+		}
+		imagePaths = append(imagePaths, value)
+		return nil
+	})
 	depthFlag := fs.String("depth", string(reviewDepthSpot), "review depth: spot, balanced, or in-depth")
 	inDepth := fs.Bool("in-depth", false, "alias for --depth in-depth")
 	singlePass := fs.Bool("single-pass", false, "force one review pass even if the diff would otherwise fan out into shards")
@@ -133,6 +142,7 @@ func parseReviewPRCommandOptions(args []string) (reviewPRCommandOptions, error) 
 		timeout:              *timeout,
 		outputFile:           *outputFile,
 		prRef:                fs.Arg(0),
+		imagePaths:           imagePaths,
 		budgetUSD:            *budgetUSD,
 		noBudget:             *noBudget,
 		maxTurns:             *maxTurns,
@@ -256,6 +266,10 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	imageParts, err := loadReviewImages(opts.imagePaths)
+	if err != nil {
+		return err
+	}
 	reviewTimeout, timeoutWarning := resolvePostedReviewTimeout(opts.timeout, opts.post, hostedReviewCeiling(os.Getenv))
 	if timeoutWarning != "" {
 		fmt.Fprintln(os.Stderr, timeoutWarning)
@@ -295,6 +309,9 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("review deadline exhausted during initialization: %w", err)
 	}
+	if err := checkReviewImages(imageParts, runtime); err != nil {
+		return err
+	}
 
 	if !quietMode {
 		printReviewModelSelection(runtime)
@@ -308,6 +325,7 @@ func runReviewPRCommand(args []string) (returnErr error) {
 	}
 
 	policy := runtime.policy.withOverrides(automatedReviewOptions{
+		imageParts:                 imageParts,
 		maxIterations:              opts.maxTurns,
 		maxIterationsExplicit:      opts.maxTurns > 0,
 		maxToolCalls:               opts.maxToolCalls,
@@ -432,6 +450,7 @@ func postCompletedPRReview(ctx context.Context, prInfo *commands.PRInfo, reviewT
 const defaultShardConcurrency = 4
 
 type automatedReviewOptions struct {
+	imageParts                 []model.ContentPart
 	maxIterations              int
 	maxIterationsExplicit      bool
 	maxToolCalls               int
@@ -662,6 +681,9 @@ func (defaults automatedReviewOptions) withOverrides(overrides automatedReviewOp
 			defaults.criticReserveUSD = overrides.maxCostUSD * 0.12
 		}
 	}
+	if len(overrides.imageParts) > 0 {
+		defaults.imageParts = overrides.imageParts
+	}
 	if overrides.forceSinglePass {
 		defaults.forceSinglePass = true
 	}
@@ -801,6 +823,7 @@ func runPRReviewWithOptions(ctx context.Context, prRef string, framework *onesho
 	opts = boundPRApprovalCritic(opts, reviewDef)
 	fwResult, runErr := framework.RunAgent(ctx, reviewDef, oneshot.AgentRunOpts{
 		UserPrompt:               userPrompt,
+		ImageParts:               opts.imageParts,
 		Audit:                    audit,
 		MaxRetries:               opts.maxRetries,
 		MaxIterations:            opts.maxIterations,
@@ -969,6 +992,7 @@ func runPRReviewSharded(
 		}
 		fwResult, runErr := framework.RunAgent(shardCtx, reviewDef, oneshot.AgentRunOpts{
 			UserPrompt:              prompt,
+			ImageParts:              opts.imageParts,
 			MaxRetries:              opts.maxRetries,
 			MaxIterations:           shardOpts.maxIterations,
 			MaxToolCalls:            shardOpts.maxToolCalls,
@@ -1143,4 +1167,37 @@ func printPRReview(reviewText string, prInfo *commands.PRInfo) {
 	}
 	termOut.Newline()
 	fmt.Println(reviewText)
+}
+
+// textOnlyReviewProviders cannot carry image attachments yet: the Codex CLI,
+// native Anthropic, Google and Ollama transports turn each message into text
+// (messageContentToText) and drop image parts, so a review would run without
+// the pixels while the caller believes it saw them. Remove a provider from this
+// list when its image conversion exists.
+var textOnlyReviewProviders = map[string]bool{"codex": true, "anthropic": true, "google": true, "ollama": true}
+
+// rejectImagesForTextOnlyProviders refuses --image when the primary or the
+// critic model runs on a provider that cannot carry images, and names it.
+func rejectImagesForTextOnlyProviders(images []model.ContentPart, providerOf func(string) string, adaptiveCodex bool, models ...string) error {
+	if len(images) == 0 {
+		return nil
+	}
+	if adaptiveCodex {
+		return fmt.Errorf("--image is not supported with the codex provider: its transport drops image attachments; choose a model on another provider")
+	}
+	for _, id := range models {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if provider := providerOf(id); textOnlyReviewProviders[provider] {
+			return fmt.Errorf("--image is not supported with the %s provider (model %s): its transport drops image attachments; choose a model on another provider", provider, id)
+		}
+	}
+	return nil
+}
+
+// checkReviewImages applies the image guard to the runtime of a review: its
+// primary model, its critic and the adaptive Codex selector.
+func checkReviewImages(images []model.ContentPart, runtime *reviewCommandRuntime) error {
+	return rejectImagesForTextOnlyProviders(images, runtime.mgr.ProviderIDForModel, runtime.policy.adaptiveCodexModel, runtime.modelID, runtime.criticModel)
 }

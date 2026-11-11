@@ -55,8 +55,11 @@ var (
 	backtickSpanRe = regexp.MustCompile("`([^`]+)`")
 	envAssignRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 	// commandTailRe marks where prose starts after a command that is not in
-	// backticks: "make test (81 pass)", "go vet: clean", "go vet - clean".
-	commandTailRe = regexp.MustCompile(`\s+\(|\s+[—–-]\s+|:\s+|;\s+`)
+	// backticks: "make test (81 pass)", "go vet: clean", "go vet - clean". It
+	// is also the boundary of a command written with code spans: a lone "-" or
+	// "--" before a space, an em or en dash, a colon before a space, a
+	// semicolon, or a parenthesis. What follows the boundary is prose.
+	commandTailRe = regexp.MustCompile(`\s+\(|\s+(?:[—–]|--?)\s+|:\s+|;\s+`)
 	numberRe      = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
 )
 
@@ -142,8 +145,11 @@ func stepCommands(step string) []string {
 		// ("go test ./pkg -run `TestFoo`") is one command: its prefix and every
 		// code span that follows it directly, flags between them included.
 		if before, _, _ := strings.Cut(text, "`"); strings.TrimSpace(before) != "" {
-			if full := plainCommandWithSpans(text); isCommand(full, false) {
+			if full, stray := plainCommandWithSpans(text); isCommand(full, false) {
 				commands = append(commands, full)
+				// A flag that comes after prose is no part of the command
+				// text, but it still states what was run: it needs a source.
+				commands = append(commands, stray...)
 			}
 		}
 		return commands
@@ -239,13 +245,21 @@ func squeezeSpaces(s string) string {
 }
 
 // plainCommandWithSpans returns the command a step writes in plain text with
-// its arguments in code format, backticks removed: the text before the first
-// span, then each span, with the flag-like words between spans, until prose
-// starts.
-func plainCommandWithSpans(text string) string {
+// its arguments in code format, backticks removed, and the flags that the step
+// states after the command ended.
+//
+// The rule: the command is the text of the step up to the first token that
+// cannot belong to a command line. That is the boundary of commandTailRe (a
+// lone "-" or "--", an em or en dash, a colon before a space, a semicolon, a
+// parenthesis), or a word that is neither a flag, a path, nor the value of the
+// flag before it (a value has a digit or one of "/.=,_" in it: "-count 1",
+// "-timeout 30s"). The command, with the spans unwrapped, is compared as a
+// whole with the sources. Past that word, every other flag up to the boundary
+// is returned in stray: it was run, so it needs a source too.
+func plainCommandWithSpans(text string) (command string, stray []string) {
 	before, rest, _ := strings.Cut(text, "`")
 	if loc := commandTailRe.FindStringIndex(before); loc != nil {
-		return strings.TrimSpace(before[:loc[0]])
+		return strings.TrimSpace(before[:loc[0]]), nil
 	}
 	parts := []string{strings.TrimSpace(before)}
 	for {
@@ -255,23 +269,53 @@ func plainCommandWithSpans(text string) string {
 		}
 		parts = append(parts, span)
 		next, more, ok := strings.Cut(after, "`")
-		// Flags and paths after a span belong to the command, also after the
-		// last span ("-run `TestFoo` -race"); the first other word is prose
-		// and ends the command.
-		stop := false
-		for _, word := range strings.Fields(next) {
-			if !strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "./") && !strings.HasPrefix(word, "../") {
-				stop = true
-				break
-			}
-			parts = append(parts, word)
+		boundary := false
+		if loc := commandTailRe.FindStringIndex(next); loc != nil {
+			next, boundary = next[:loc[0]], true
 		}
-		if stop || !ok {
+		ended, afterFlag := false, false
+		for _, word := range strings.Fields(next) {
+			switch {
+			case word == "-" || word == "--":
+				boundary, ended = true, true
+			case ended:
+				if isFlagWord(word) {
+					stray = append(stray, word)
+				}
+			case isFlagWord(word):
+				parts = append(parts, word)
+				afterFlag = !strings.Contains(word, "=")
+				continue
+			case strings.HasPrefix(word, "./") || strings.HasPrefix(word, "../") || (afterFlag && isFlagValue(word)):
+				parts = append(parts, word)
+			default:
+				ended = true
+			}
+			afterFlag = false
+		}
+		if ended || boundary || !ok {
 			break
 		}
 		rest = more
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(parts, " "), stray
+}
+
+// isFlagWord reports whether word is a command-line flag such as "-race" or
+// "--strict" (not a lone dash and not a negative number).
+func isFlagWord(word string) bool {
+	trimmed := strings.TrimLeft(word, "-")
+	if len(word)-len(trimmed) == 0 || len(word)-len(trimmed) > 2 || trimmed == "" {
+		return false
+	}
+	c := trimmed[0]
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// isFlagValue reports whether word can be the separate value of a flag: it has
+// a digit or one of "/.=,_" in it. A plain word is prose.
+func isFlagValue(word string) bool {
+	return strings.ContainsAny(word, "0123456789/.=,_")
 }
 
 // normalizeCommandText prepares text for comparing a command with its sources:

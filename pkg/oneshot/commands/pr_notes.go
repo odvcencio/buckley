@@ -6,10 +6,32 @@ import (
 	"strings"
 )
 
-// PRNote is one author-supplied file from `buckley pr --context-file`.
-type PRNote struct {
+// RawPRNote is one author-supplied file from `buckley pr --context-file`, as
+// read from disk. It may hold HTML comments. Nothing but NewPRNote reads it.
+type RawPRNote struct {
 	Path string
 	Text string
+}
+
+// PRNote is a note whose comments are gone. NewPRNote is the only place that
+// removes comments, and it removes them once: the prompt, the carried
+// sections and the sources all read Text as it is and never scan it for
+// comments again. A second removal could join characters into a new "<!--" and
+// drop text that was outside the original comment.
+type PRNote struct {
+	Path string
+	Text string // sanitized, trimmed; never empty when made by NewPRNote
+}
+
+// NewPRNote sanitizes a raw note once. ok is false when nothing is left. The
+// error names the line of an unclosed or newly joined "<!--".
+func NewPRNote(raw RawPRNote) (note PRNote, ok bool, err error) {
+	clean, err := SanitizePRNote(strings.ReplaceAll(raw.Text, "\r\n", "\n"))
+	if err != nil {
+		return PRNote{}, false, err
+	}
+	text := strings.TrimSpace(clean)
+	return PRNote{Path: raw.Path, Text: text}, text != "", nil
 }
 
 // Kinds of author sections that the PR body carries word for word. A model
@@ -110,8 +132,9 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		}
 		return ""
 	}
-	sanitized, _ := stripHTMLComments(strings.ReplaceAll(note.Text, "\r\n", "\n"))
-	lines := strings.Split(sanitized, "\n")
+	// note.Text was sanitized when the note was made; it is not scanned for
+	// comments again.
+	lines := strings.Split(strings.ReplaceAll(note.Text, "\r\n", "\n"), "\n")
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
@@ -351,13 +374,20 @@ func (f *fenceTracker) line(text string) bool {
 // closed. Line breaks inside a removed comment stay, so that the rest of the
 // note keeps its layout.
 //
-// A "<!--" with no closing "-->" is an error that names the line of the opener:
+// A "<!--" with no closing "-->" is an error that names the line of the opener,
+// and so is a "<!--" that the removal itself creates:
 // the rest of the note cannot be trusted. Write the opener another way (for
 // example "&lt;!--") when it is meant as text.
 func SanitizePRNote(text string) (string, error) {
 	out, unclosed := stripHTMLComments(text)
 	if unclosed > 0 {
 		return "", fmt.Errorf("line %d: \"<!--\" has no closing \"-->\"; close the comment, or write the opener another way (for example \"&lt;!--\") if it is meant as text", unclosed)
+	}
+	// Removing a comment can join the characters around it into a new opener
+	// ("<!<!-- x -->--"). The text after it cannot be trusted either, and a
+	// second removal would drop it without a word: refuse the note.
+	if i := strings.Index(out, "<!--"); i >= 0 {
+		return "", fmt.Errorf("line %d: removing a comment leaves a new \"<!--\" made of the characters around it; write the opener another way (for example \"&lt;!--\") if it is meant as text", 1+strings.Count(out[:i], "\n"))
 	}
 	return out, nil
 }
