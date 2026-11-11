@@ -10,7 +10,7 @@ import (
 
 func TestNewPRSources_SeparatesTheRecordFromTheRest(t *testing.T) {
 	src := NewPRSources(
-		[]PRNote{{Path: "n.md", Text: "note text"}},
+		[]PRNote{{Path: "n.md", text: "note text"}},
 		&oneshot.Context{Sources: map[string]string{
 			"git_log:refs/remotes/origin/main":   "abc123 commit subject",
 			"git_diff:refs/remotes/origin/main":  "+diff line",
@@ -41,7 +41,7 @@ func TestNewPRSources_SeparatesTheRecordFromTheRest(t *testing.T) {
 // The three dropped steps are the ones a small model wrote on 2026-11-09: a
 // test that does not exist, a script path with half its directory name
 // missing, and a flag fragment.
-func TestDropUnbackedTesting(t *testing.T) {
+func TestUnsourcedCommands(t *testing.T) {
 	src := PRSources{All: strings.Join([]string{
 		"Ran go test ./internal/ccore -run TestGolden -count=1 on Linux.",
 		"Use -count=1 for every run.",
@@ -62,31 +62,31 @@ func TestDropUnbackedTesting(t *testing.T) {
 		"-count=1 keeps the test cache out of the run",
 	}}
 
-	dropped := pr.DropUnbackedTesting(src)
-	wantDropped := []string{
+	before := append(StringList(nil), pr.Testing...)
+	warnings := pr.UnsourcedCommands(src)
+	wantWarned := []string{
 		"`go test ./internal/benchfixtures -run Ledger`",
 		"bash cgo_h/docker/run_single_grammar_parity.sh <grammar>",
 		"-count-1 (use -count=1)",
 	}
-	if !reflect.DeepEqual(dropped, wantDropped) {
-		t.Errorf("dropped = %q\nwant      %q", dropped, wantDropped)
+	if len(warnings) != len(wantWarned) {
+		t.Fatalf("warnings = %q, want one for each of %q", warnings, wantWarned)
 	}
-	if len(pr.Testing) != 7 {
-		t.Errorf("kept %d steps, want 7: %q", len(pr.Testing), pr.Testing)
-	}
-	for _, step := range pr.Testing {
-		for _, gone := range wantDropped {
-			if step == gone {
-				t.Errorf("step %q is still in the list", step)
-			}
+	for i, step := range wantWarned {
+		if !strings.Contains(warnings[i], step) || !strings.Contains(warnings[i], "stays in the text") {
+			t.Errorf("warning %d = %q, want it to name %q and say the step stays", i, warnings[i], step)
 		}
+	}
+	// The check is advisory: no step is dropped or rewritten.
+	if !reflect.DeepEqual(pr.Testing, before) {
+		t.Errorf("the testing steps changed: %q", pr.Testing)
 	}
 }
 
-func TestDropUnbackedTesting_NothingToDrop(t *testing.T) {
+func TestUnsourcedCommands_NothingToDrop(t *testing.T) {
 	pr := PRResult{}
-	if dropped := pr.DropUnbackedTesting(PRSources{}); len(dropped) != 0 || pr.Testing != nil {
-		t.Fatalf("dropped = %q, testing = %q", dropped, pr.Testing)
+	if warnings := pr.UnsourcedCommands(PRSources{}); len(warnings) != 0 || pr.Testing != nil {
+		t.Fatalf("warnings = %q, testing = %q", warnings, pr.Testing)
 	}
 }
 
@@ -126,27 +126,28 @@ func TestUnbackedClaims(t *testing.T) {
 // hide the command before it.
 func TestStepCommands_UnrelatedBacktickSpanDoesNotHideTheCommand(t *testing.T) {
 	pr := PRResult{Testing: StringList{"go test ./missing -run `TestFoo`"}}
-	dropped := pr.DropUnbackedTesting(PRSources{All: "nothing relevant"})
-	if len(dropped) != 1 || len(pr.Testing) != 0 {
-		t.Fatalf("dropped = %q, kept = %q; the unsourced command must go", dropped, pr.Testing)
+	warnings := pr.UnsourcedCommands(PRSources{All: "nothing relevant"})
+	if len(warnings) != 1 || len(pr.Testing) != 1 {
+		t.Fatalf("warnings = %q, kept = %q; the unsourced command warns and the step stays", warnings, pr.Testing)
 	}
 	// A sourced command with a code-formatted argument stays.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`"}}
-	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run `TestFoo`"}); len(dropped) != 0 {
-		t.Fatalf("dropped a sourced step: %q", dropped)
+	if warnings := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run `TestFoo`"}); len(warnings) != 0 {
+		t.Fatalf("warned about a sourced step: %q", warnings)
 	}
 }
 
 // Finding 4: only Testing sections lose unsourced steps; a Summary bullet that
 // names a command is a description of the change.
-func TestDropUnbackedTesting_LeavesOtherSectionsAlone(t *testing.T) {
+func TestUnsourcedCommands_LeavesOtherSectionsAlone(t *testing.T) {
 	pr := PRResult{Sections: map[string]string{
 		"summary": "- Expose `buckley inspect` for diagnostics",
 		"testing": "- `go test ./missing`",
 	}}
-	dropped := pr.DropUnbackedTesting(PRSources{All: "x"})
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "go test ./missing") {
-		t.Fatalf("dropped = %q", dropped)
+	warnings := pr.UnsourcedCommands(PRSources{All: "x"})
+	// The Testing step and the command in the summary both warn; neither is changed.
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "go test ./missing") || !strings.Contains(warnings[1], "buckley inspect") {
+		t.Fatalf("warnings = %q", warnings)
 	}
 	if pr.Sections["summary"] != "- Expose `buckley inspect` for diagnostics" {
 		t.Errorf("summary = %q", pr.Sections["summary"])
@@ -155,23 +156,23 @@ func TestDropUnbackedTesting_LeavesOtherSectionsAlone(t *testing.T) {
 
 // Review of #468, second round, finding 4: the whole command is compared, with
 // inline code marks normalised on both sides.
-func TestDropUnbackedTesting_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T) {
+func TestUnsourcedCommands_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T) {
 	src := PRSources{All: "go test ./pkg -run TestFoo"}
 	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestMissing`"}}
-	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 1 || len(pr.Testing) != 0 {
-		t.Fatalf("dropped = %q, kept = %q: the unsupported argument passed", dropped, pr.Testing)
+	if warnings := pr.UnsourcedCommands(src); len(warnings) != 1 || len(pr.Testing) != 1 {
+		t.Fatalf("warnings = %q, kept = %q: the unsupported argument passed", warnings, pr.Testing)
 	}
 	// The same command with a supported argument stays, whichever side has the marks.
 	for _, all := range []string{"go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo`"} {
 		pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo`", "go test ./pkg -run TestFoo"}}
-		if dropped := pr.DropUnbackedTesting(PRSources{All: all}); len(dropped) != 0 {
-			t.Errorf("source %q: dropped %q", all, dropped)
+		if warnings := pr.UnsourcedCommands(PRSources{All: all}); len(warnings) != 0 {
+			t.Errorf("source %q: warned %q", all, warnings)
 		}
 	}
 	// Flags between two spans stay part of the command; prose after it does not.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestA` -count=1 `TestB` passed locally"}}
-	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run TestA -count=1 TestB"}); len(dropped) != 0 {
-		t.Errorf("dropped %q", dropped)
+	if warnings := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run TestA -count=1 TestB"}); len(warnings) != 0 {
+		t.Errorf("warned %q", warnings)
 	}
 }
 
@@ -182,7 +183,7 @@ func TestDropUnbackedTesting_ArgumentInCodeFormatIsPartOfTheCommand(t *testing.T
 // a dash, a colon before a space, a parenthesis, a plain word that is no flag
 // value); it is compared as a whole with the sources. Reviews of #468 to #470,
 // rounds two to four.
-func TestDropUnbackedTesting_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testing.T) {
+func TestUnsourcedCommands_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name, source, step string
 		kept               bool
@@ -200,34 +201,41 @@ func TestDropUnbackedTesting_CommandEndsAtTheFirstTokenThatIsNoCommand(t *testin
 		{"flag after a separate flag value", "go test ./pkg -run TestFoo -count 1", "go test ./pkg -run `TestFoo` -count 1 -race", false},
 		{"flag after a flag with an equals sign", "go test ./pkg -run TestFoo -count=1", "go test ./pkg -run `TestFoo` -count=1 -race", false},
 		{"flag after a word value and prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` passed locally with -race", false},
+		// Fifth review: a flag in a code span after prose is checked on its own.
+		{"code-formatted flag after prose", "go test ./pkg -run TestFoo", "go test ./pkg -run `TestFoo` passed locally with `-race`", false},
+		// Fifth review: sentence punctuation alone is no flag value.
+		{"sentence period after a flag", "go test ./pkg -run TestFoo -race", "go test ./pkg -run `TestFoo` -race passed.", true},
 		{"flag after a second span", "go test ./pkg -run TestFoo -tags integration", "go test ./pkg -run `TestFoo` -tags `integration` -race", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := PRResult{Testing: StringList{tc.step}}
-			dropped := pr.DropUnbackedTesting(PRSources{All: tc.source})
-			if tc.kept && (len(dropped) != 0 || len(pr.Testing) != 1) {
-				t.Errorf("dropped a sourced step %q: dropped = %q", tc.step, dropped)
+			warnings := pr.UnsourcedCommands(PRSources{All: tc.source})
+			if len(pr.Testing) != 1 {
+				t.Errorf("the step %q was changed or dropped: %q", tc.step, pr.Testing)
 			}
-			if !tc.kept && (len(dropped) != 1 || len(pr.Testing) != 0) {
-				t.Errorf("kept an unsourced step %q: dropped = %q, kept = %q", tc.step, dropped, pr.Testing)
+			if tc.kept && len(warnings) != 0 {
+				t.Errorf("warned about a sourced step %q: %q", tc.step, warnings)
+			}
+			if !tc.kept && len(warnings) != 1 {
+				t.Errorf("no warning for an unsourced step %q: %q", tc.step, warnings)
 			}
 		})
 	}
 }
 
-func TestDropUnbackedTesting_FlagAfterTheLastSpanIsPartOfTheCommand(t *testing.T) {
+func TestUnsourcedCommands_FlagAfterTheLastSpanIsPartOfTheCommand(t *testing.T) {
 	src := PRSources{All: "go test ./pkg -run TestFoo"}
 	pr := PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race"}}
-	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 1 || len(pr.Testing) != 0 {
-		t.Fatalf("dropped = %q, kept = %q: the unsupported -race passed", dropped, pr.Testing)
+	if warnings := pr.UnsourcedCommands(src); len(warnings) != 1 || len(pr.Testing) != 1 {
+		t.Fatalf("warnings = %q, kept = %q: the unsupported -race passed", warnings, pr.Testing)
 	}
 	// Prose after the flags is not part of the command.
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` -race passed locally"}}
-	if dropped := pr.DropUnbackedTesting(PRSources{All: "go test ./pkg -run TestFoo -race"}); len(dropped) != 0 {
-		t.Fatalf("dropped a sourced step: %q", dropped)
+	if dropped := pr.UnsourcedCommands(PRSources{All: "go test ./pkg -run TestFoo -race"}); len(dropped) != 0 {
+		t.Fatalf("warned about a sourced step: %q", dropped)
 	}
 	pr = PRResult{Testing: StringList{"go test ./pkg -run `TestFoo` passed locally"}}
-	if dropped := pr.DropUnbackedTesting(src); len(dropped) != 0 {
+	if dropped := pr.UnsourcedCommands(src); len(dropped) != 0 {
 		t.Fatalf("prose was read as part of the command: %q", dropped)
 	}
 }

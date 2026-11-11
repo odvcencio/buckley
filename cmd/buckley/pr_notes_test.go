@@ -168,12 +168,12 @@ func TestRunPRCommand_WarnsAboutCutNotesAndKeepsBothSections(t *testing.T) {
 }
 
 func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
-	one, cut := prNotesPrompt([]commands.PRNote{{Path: "a.md", Text: "alpha"}})
+	one, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha")})
 	if one != "### a.md\n\nalpha" || cut != 0 {
 		t.Fatalf("one note = %q (cut %d)", one, cut)
 	}
 
-	two, cut := prNotesPrompt([]commands.PRNote{{Path: "a.md", Text: "alpha"}, {Path: "b.md", Text: "beta"}})
+	two, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha"), testNote(t, "b.md", "beta")})
 	want := "### Note 1 of 2: a.md\n\nalpha\n\n### Note 2 of 2, the latest: b.md\n\nbeta"
 	if two != want || cut != 0 {
 		t.Fatalf("two notes = %q (cut %d), want %q", two, cut, want)
@@ -181,7 +181,7 @@ func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
 
 	// A cut never splits a multi-byte character and is reported in bytes.
 	long := strings.Repeat("é", prContextNotesMaxBytes)
-	text, cut := prNotesPrompt([]commands.PRNote{{Path: "long.md", Text: long}})
+	text, cut := prNotesPrompt([]commands.PRNote{testNote(t, "long.md", long)})
 	if cut == 0 || !strings.HasSuffix(text, "\n... (truncated)") {
 		t.Fatalf("cut = %d, suffix of text = %q", cut, text[len(text)-20:])
 	}
@@ -194,7 +194,7 @@ func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
 
 	// With line breaks in reach, the cut falls on one.
 	lines := strings.Repeat("0123456789abcde\n", prContextNotesMaxBytes/8)
-	text, _ = prNotesPrompt([]commands.PRNote{{Path: "lines.md", Text: lines}})
+	text, _ = prNotesPrompt([]commands.PRNote{testNote(t, "lines.md", lines)})
 	if !strings.HasSuffix(text, "0123456789abcde\n... (truncated)") {
 		t.Fatalf("the cut is not at a line end: %q", text[len(text)-40:])
 	}
@@ -211,7 +211,7 @@ func TestLoadPRNotes_KeepsOrderAndSkipsEmptyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPRNotes: %v", err)
 	}
-	if len(notes) != 2 || notes[0].Text != "second" || notes[1].Text != "first" {
+	if len(notes) != 2 || notes[0].Text() != "second" || notes[1].Text() != "first" {
 		t.Fatalf("notes = %+v, want b.md then a.md", notes)
 	}
 }
@@ -279,25 +279,38 @@ func TestLoadPRNotes_AJoinedOpenerIsRefusedNotTruncated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, dir, "n.md", tc.text)
-			loaded, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
-			if err != nil {
-				want := fmt.Sprintf("line %d", tc.line)
-				if !strings.Contains(err.Error(), "n.md") || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "&lt;!--") {
-					t.Fatalf("error = %v, want one naming the file, %s and the alternative", err, want)
-				}
-				return
-			}
-			prompt, _ := prNotesPrompt(loaded)
-			sources := commands.NewPRSources(loaded, nil)
-			var carried string
-			for _, s := range commands.AuthorSections(loaded) {
-				carried += s.Body + "\n"
-			}
-			for what, text := range map[string]string{"prompt": prompt, "record": sources.Record, "sections": carried} {
-				if !strings.Contains(text, "Windows") {
-					t.Errorf("the %s lost the Not verified text without an error: %q", what, text)
-				}
+			_, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+			want := fmt.Sprintf("line %d", tc.line)
+			if err == nil || !strings.Contains(err.Error(), "n.md") || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "&lt;!--") {
+				t.Fatalf("error = %v, want a refusal naming the file, %s and the alternative", err, want)
 			}
 		})
 	}
+}
+
+// A note built by hand (a struct literal or the zero value) carries no text:
+// the constructor is the only way to a usable note (review of #468, round five).
+// A Go caller can set the path only, so its text cannot bypass the sanitizer.
+func TestPRNote_AStructLiteralCarriesNoText(t *testing.T) {
+	hand := []commands.PRNote{{Path: "notes.md"}, {}}
+	if hand[0].Text() != "" {
+		t.Fatalf("Text() = %q, want empty", hand[0].Text())
+	}
+	prompt, _ := prNotesPrompt(hand)
+	sources := commands.NewPRSources(hand, nil)
+	sections := commands.AuthorSections(hand)
+	body := commands.PRResult{}.Body(commands.PRBodyOptions{Sections: sections})
+	if prompt != "" || sources.Record != "" && strings.TrimSpace(sources.Record) != "" || len(sections) != 0 || strings.Contains(body, "Evidence") {
+		t.Errorf("a hand-built note reached prompt %q, sources %q, sections %v, body %q", prompt, sources.Record, sections, body)
+	}
+}
+
+// testNote makes a note the only way a caller can: through NewPRNote.
+func testNote(t *testing.T, path, text string) commands.PRNote {
+	t.Helper()
+	note, ok, err := commands.NewPRNote(commands.RawPRNote{Path: path, Text: text})
+	if err != nil || !ok {
+		t.Fatalf("NewPRNote(%q): ok=%v err=%v", path, ok, err)
+	}
+	return note
 }

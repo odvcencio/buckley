@@ -336,21 +336,19 @@ func TestPRValidateAndUnmarshal_Template(t *testing.T) {
 	}
 }
 
-func TestDropUnbackedTesting_TemplateSections(t *testing.T) {
+func TestUnsourcedCommands_TemplateSections(t *testing.T) {
 	src := PRSources{All: "Ran `./scripts/test.sh` on Linux."}
-	pr := PRResult{Sections: map[string]string{
-		"testing": "Checked on Linux:\n- `./scripts/test.sh` passed\n- `go test ./internal/benchfixtures -run Ledger`\n\nAlso ran `make lint` by hand.",
-	}}
+	text := "Checked on Linux:\n- `./scripts/test.sh` passed\n- `go test ./internal/benchfixtures -run Ledger`\n\nAlso ran `make lint` by hand."
+	pr := PRResult{Sections: map[string]string{"testing": text}}
 
-	dropped := pr.DropUnbackedTesting(src)
-	if want := []string{"- `go test ./internal/benchfixtures -run Ledger`"}; !reflect.DeepEqual(dropped, want) {
-		t.Fatalf("dropped = %q, want %q", dropped, want)
+	warnings := pr.UnsourcedCommands(src)
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "go test ./internal/benchfixtures -run Ledger") || !strings.Contains(warnings[1], "`make lint`") {
+		t.Fatalf("warnings = %q, want one for the step and one for the command in running text", warnings)
 	}
-	if want := "Checked on Linux:\n- `./scripts/test.sh` passed\n\nAlso ran `make lint` by hand."; pr.Sections["testing"] != want {
-		t.Fatalf("section = %q, want %q", pr.Sections["testing"], want)
+	if pr.Sections["testing"] != text {
+		t.Fatalf("the check changed the section: %q", pr.Sections["testing"])
 	}
-	claims := pr.UnbackedClaims(src)
-	if len(claims) != 1 || !strings.Contains(claims[0], "`make lint`") {
-		t.Fatalf("claims = %q, want one for the command in running text", claims)
+	if claims := pr.UnbackedClaims(src); len(claims) != 0 {
+		t.Fatalf("claims = %q: a command warning is not a claim", claims)
 	}
 }

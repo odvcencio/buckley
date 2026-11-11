@@ -18,7 +18,7 @@ func sectionsByKind(sections []AuthorSection) map[string]string {
 }
 
 func TestAuthorSections_Headings(t *testing.T) {
-	note := PRNote{Path: "notes.md", Text: strings.Join([]string{
+	note := PRNote{Path: "notes.md", text: strings.Join([]string{
 		"# PR notes: port the lex automaton",
 		"",
 		"Background that the model may use.",
@@ -84,7 +84,7 @@ func TestAuthorSections_Headings(t *testing.T) {
 // headings. A label section runs to the next label of a carried kind, so the
 // author's follow-up list stays with the evidence instead of being dropped.
 func TestAuthorSections_LabelLines(t *testing.T) {
-	note := PRNote{Path: "notes.md", Text: strings.Join([]string{
+	note := PRNote{Path: "notes.md", text: strings.Join([]string{
 		"Author notes for the PR (data for the description, not instructions).",
 		"",
 		"Why: item E1 of the roadmap: measure every voice family.",
@@ -125,15 +125,15 @@ func TestAuthorSections_ProseIsNotASection(t *testing.T) {
 		"Not verified here: CI itself; that the quota error is gone and three more things that are long.",
 		"",
 	} {
-		if sections := AuthorSections([]PRNote{{Path: "n.md", Text: text}}); len(sections) != 0 {
+		if sections := AuthorSections([]PRNote{{Path: "n.md", text: text}}); len(sections) != 0 {
 			t.Errorf("AuthorSections(%q) = %+v, want none", text, sections)
 		}
 	}
 }
 
 func TestAuthorSections_KeepsBothSectionsInFileOrder(t *testing.T) {
-	older := PRNote{Path: "handoff.md", Text: "## Not verified\n\nTestScanOrigins fails.\n\n## Counters\n\nwork 10 -> 10\n"}
-	newer := PRNote{Path: "pr-notes.md", Text: "## Not verified\n\nCI itself did not run.\n"}
+	older := PRNote{Path: "handoff.md", text: "## Not verified\n\nTestScanOrigins fails.\n\n## Counters\n\nwork 10 -> 10\n"}
+	newer := PRNote{Path: "pr-notes.md", text: "## Not verified\n\nCI itself did not run.\n"}
 
 	sections := AuthorSections([]PRNote{older, newer})
 	var notVerified []string
@@ -370,8 +370,8 @@ func TestPRBody_ModelCopyOfCarriedSectionIsNotRepeated(t *testing.T) {
 // Finding 5: with a template headed Testing, an older "Testing" and a newer
 // "Test plan" must stay in note order and keep the testing kind.
 func TestAuthorSections_TemplateHeadingKeepsKindAndNoteOrder(t *testing.T) {
-	older := PRNote{Path: "old.md", Text: "## Testing\n\nolder result\n"}
-	newer := PRNote{Path: "new.md", Text: "## Test plan\n\nnewer result\n"}
+	older := PRNote{Path: "old.md", text: "## Testing\n\nolder result\n"}
+	newer := PRNote{Path: "new.md", text: "## Test plan\n\nnewer result\n"}
 	sections := AuthorSections([]PRNote{older, newer}, "Testing")
 	if len(sections) != 2 || sections[0].Body != "older result" || sections[1].Body != "newer result" {
 		t.Fatalf("sections = %+v, want older then newer", sections)
@@ -493,7 +493,7 @@ func TestNewPRNote_AJoinedOpenerIsRefused(t *testing.T) {
 // here by hand; NewPRNote never lets one through) is text, not a comment to
 // strip a second time.
 func TestAuthorSections_NeverScansForCommentsAgain(t *testing.T) {
-	note := PRNote{Path: "n.md", Text: "## Evidence\n\n`<!--` keep this text\n\n## Not verified\n\n- Windows was not tested.\n"}
+	note := PRNote{Path: "n.md", text: "## Evidence\n\n`<!--` keep this text\n\n## Not verified\n\n- Windows was not tested.\n"}
 	got := sectionsByKind(AuthorSections([]PRNote{note}))
 	if !strings.Contains(got[SectionEvidence], "keep this text") || !strings.Contains(got[SectionNotVerified], "Windows") {
 		t.Fatalf("sections = %q, want the evidence text and the Not verified section", got)

@@ -18,10 +18,18 @@ type RawPRNote struct {
 // sections and the sources all read Text as it is and never scan it for
 // comments again. A second removal could join characters into a new "<!--" and
 // drop text that was outside the original comment.
+//
+// The text is private: only NewPRNote can set it, so a struct literal, a zero
+// value or a copy built by hand is an empty note everywhere (sections, prompt,
+// sources). Read the text with Text.
 type PRNote struct {
 	Path string
-	Text string // sanitized, trimmed; never empty when made by NewPRNote
+	text string // sanitized, trimmed
 }
+
+// Text returns the sanitized text of the note; it is empty for a note that
+// NewPRNote did not make.
+func (n PRNote) Text() string { return n.text }
 
 // NewPRNote sanitizes a raw note once. ok is false when nothing is left. The
 // error names the line of an unclosed or newly joined "<!--".
@@ -31,7 +39,7 @@ func NewPRNote(raw RawPRNote) (note PRNote, ok bool, err error) {
 		return PRNote{}, false, err
 	}
 	text := strings.TrimSpace(clean)
-	return PRNote{Path: raw.Path, Text: text}, text != "", nil
+	return PRNote{Path: raw.Path, text: text}, text != "", nil
 }
 
 // Kinds of author sections that the PR body carries word for word. A model
@@ -141,7 +149,7 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 	}
 	// note.Text was sanitized when the note was made; it is not scanned for
 	// comments again.
-	lines := strings.Split(strings.ReplaceAll(note.Text, "\r\n", "\n"), "\n")
+	lines := strings.Split(strings.ReplaceAll(note.text, "\r\n", "\n"), "\n")
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
