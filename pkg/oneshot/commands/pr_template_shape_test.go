@@ -28,12 +28,12 @@ func shapeFixture(t *testing.T) (*PRTemplate, string, []AuthorSection) {
 	return tmpl, string(text), TemplateAuthorSections([]PRNote{note}, tmpl)
 }
 
+// checkboxLines returns the task-list item lines of text, as the reader finds them.
 func checkboxLines(body string) []string {
+	d := readMarkdown(body)
 	var out []string
-	for _, line := range strings.Split(body, "\n") {
-		if checkboxRe.MatchString(line) {
-			out = append(out, line)
-		}
+	for _, task := range d.Tasks {
+		out = append(out, d.Lines[task.Line])
 	}
 	return out
 }
@@ -171,69 +171,20 @@ func templateHeadingLines(t *PRTemplate) []string {
 	return out
 }
 
-// topLevelHeadings returns the headings of the given level, outside code
-// fences and HTML comments, with a reference reading that is written for these
-// tests and shares nothing with the production recognizer: it cuts the text into
-// blocks (blank lines, fences, ATX headings and comment lines end a block) and
-// reads a block as a setext heading when its last line is an underline and it
-// has text above it that is no list item, quote or indented code.
+// topLevelHeadings returns the top-level headings of the given level as the
+// reader finds them: "## Text" for an ATX heading, the text alone for a setext
+// heading.
 func topLevelHeadings(body string, level int) []string {
 	var out []string
-	var block []string
-	fenced := ""
-	flush := func() {
-		defer func() { block = nil }()
-		if len(block) < 2 {
-			return
-		}
-		under := strings.TrimRight(block[len(block)-1], " \t")
-		trimmed := strings.TrimLeft(under, " ")
-		if len(under)-len(trimmed) > 3 || trimmed == "" {
-			return
-		}
-		want := 0
+	for _, h := range readMarkdown(body).topHeadings() {
 		switch {
-		case strings.Trim(trimmed, "=") == "":
-			want = 1
-		case strings.Trim(trimmed, "-") == "":
-			want = 2
-		}
-		first := block[0]
-		if want == level && !strings.HasPrefix(first, "    ") && !strings.HasPrefix(strings.TrimSpace(first), "> ") && !strings.HasPrefix(strings.TrimSpace(first), "- ") && !strings.HasPrefix(strings.TrimSpace(first), "* ") {
-			out = append(out, strings.TrimSpace(strings.Join(block[:len(block)-1], " ")))
-		}
-	}
-	inComment := false
-	for _, line := range strings.Split(body, "\n") {
-		t := strings.TrimSpace(line)
-		switch {
-		case fenced != "":
-			if strings.HasPrefix(t, fenced) && strings.Trim(t, fenced[:1]) == "" {
-				fenced = ""
-			}
-		case inComment:
-			inComment = !strings.Contains(line, "-->")
-		case strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"):
-			flush()
-			fenced = strings.Repeat(t[:1], len(t)-len(strings.TrimLeft(t, t[:1])))
-		case strings.HasPrefix(t, "<!--"):
-			flush()
-			inComment = !strings.Contains(line, "-->")
-		case t == "":
-			flush()
-		case strings.HasPrefix(line, strings.Repeat("#", level)+" "):
-			flush()
-			out = append(out, strings.TrimSpace(line))
-		case strings.HasPrefix(t, "#"):
-			flush()
+		case h.Level != level:
+		case h.Setext:
+			out = append(out, h.Text)
 		default:
-			block = append(block, line)
-			if len(block) > 1 && strings.Trim(t, "=") == "" || len(block) > 1 && strings.Trim(t, "-") == "" {
-				flush() // an underline ends its paragraph
-			}
+			out = append(out, strings.Repeat("#", level)+" "+h.Text)
 		}
 	}
-	flush()
 	return out
 }
 

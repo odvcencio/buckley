@@ -471,33 +471,51 @@ reads `.github/PULL_REQUEST_TEMPLATE.md`, `PULL_REQUEST_TEMPLATE.md` or
 GitHub reads it, and from the head branch when the base has none. An uncommitted
 template is not read. `--template=false` keeps Buckley's own sections.
 
+Buckley reads the Markdown of the template, of the notes and of the model's text
+with one CommonMark parser (goldmark, with the GitHub task-list extension). It
+does not scan lines for `#`, fences or comments itself. So a heading, a
+checkbox item, a code block or a comment is what CommonMark says it is: a `#`
+line inside a fenced or indented code block, an HTML block or a comment is text;
+a setext heading is a paragraph of one or more lines over a line of only `=` or
+only `-`; a list or a block quote is not part of a setext heading. Every line
+ending is read as LF before anything else happens, and the body is written with
+LF.
+
 The body keeps the template's shape:
 
 1. **Headings.** For a template with at least one section that is not a pure
-   checklist, the headings at the template's level are exactly the template's,
-   in its order, whether it has sections that ask for text or only fixed text
-   and checkboxes. Buckley adds nothing after the
-   template as a new top-level section. A Testing, Counters, Evidence, Not
-   verified or Known gaps section of the notes that no template section takes,
-   the Not verified statement, the breaking-change statement, the related
-   issues, and (for a template with no section that asks for text) Buckley's own
-   Summary, Changes, Testing and Review Focus are written as subsections one
-   level below the template's deepest heading, at the end of one template
-   section. A heading inside such a section moves down with it, so that none
-   reaches the template's level; headings in code fences stay. A setext
-   heading is a whole paragraph (the run of lines back to the paragraph's first
-   line, which starts after a blank line, a fence, an ATX heading, a thematic
-   break or a comment line) over a line of only `=` or only `-`; it becomes one
-   ATX heading with the lines joined by single spaces, and the underline goes. A
-   paragraph that is part of a list item or a block quote, or indented four
-   spaces, is left as it is. Among Markdown headings, only ATX headings delimit
-   notes sections; short labels can also start sections, and a setext heading
-   inside a carried section stays in it. At heading level 6 the label is bold
-   text. After rendering, `buckley pr` reads the body's headings at the
-   template's levels (ATX and setext) and compares them with the template's;
-   an extra or missing heading is a warning that names it, and an error with
-   `--strict`. The section is the first whose heading, guide
-   comments or checkbox text has a word that starts with a keyword of the kind
+   checklist, the top-level headings of the body (ATX or setext, at the
+   template's levels) are the template's top-level headings, in its order. This
+   holds whether the template has sections that ask for text or only fixed text
+   and checkboxes. Buckley adds nothing after the template as a new top-level
+   section. A Testing, Counters, Evidence, Not verified or Known gaps section of
+   the notes that no template section takes, the Not verified statement, the
+   breaking-change statement, the related issues, and (for a template with no
+   section that asks for text) Buckley's own Summary, Changes, Testing and
+   Review Focus are written as subsections one level below the template's
+   deepest heading, at the end of one template section. Every top-level heading
+   of the text placed there moves down so that the highest sits below the
+   template's deepest heading, keeping the relative nesting: an ATX heading
+   changes its `#` markers in place, and a setext heading becomes one ATX line
+   (its lines joined by single spaces; the underline goes). A heading that the
+   parser reads inside a code block, an HTML block, a comment, a list item or a
+   block quote is not a heading of the body and is left as it is. At heading
+   level 6 the label is bold text. Among the Markdown headings of a notes file,
+   only ATX headings delimit notes sections; short labels can also start
+   sections, and a setext heading inside a carried section stays in it.
+
+   After rendering, `buckley pr` reads the body with the same parser and
+   compares its top-level headings at the template's levels with the
+   template's, read the same way. An extra or a missing heading is a warning
+   that names it, and an error with `--strict`. This also catches text that
+   changes how the parser reads what follows it: an unclosed code fence, an
+   unclosed comment or an unclosed `<pre>` block in the notes or in the model's
+   text swallows the template headings after it, and the check reports them as
+   missing. If the template itself has an HTML block that swallows a heading,
+   the parser reads that heading as text in the template and in the body alike.
+
+   The section for a block is the first whose heading, guide comments or
+   checkbox text has a word that starts with a keyword of the kind
    (case-insensitive):
 
    | Kind | Keywords |
@@ -516,22 +534,23 @@ The body keeps the template's shape:
    makes that an error. The generated Not verified statement also warns in that
    case, but `--strict` does not fail on it, because only the author can fix an
    author section that has no place.
-2. **Checkboxes.** An item is a checkbox line of the template outside code
-   fences and HTML comments, in a section or before the first heading. Its
-   identity is its text without inline HTML comments, white space collapsed;
-   case matters. Every item is written in the template's order, byte for byte except its
-   check mark; the comment attached to the item line stays with it, also when it
-   spans lines, while independent guide comments of a section that received text
-   go. The check mark of every item comes from the notes: it is ticked when the
-   notes contain a ticked line with the same item text in a section the
-   template section takes, or in a notes section headed `Checklist`, and
-   otherwise unticked. An item that the template has ticked (`[x]` or `[X]`)
-   and the notes do not tick is cleared, with a warning that names it
-   (`--strict` does not fail on it). A checkbox-shaped line in a fence (one closes only with the same
-   character and at least as many of them) or a comment is fixed text.
-   A checkbox line in a section the template section takes that matches no item
-   of that section is not written; stderr names it, and `--strict` makes that an
-   error. The author's other lines in the section follow the checklist.
+2. **Checkboxes.** An item is a task-list item as the parser reads it
+   (`- [ ]`, `* [x]`, `+ [X]`, `1. [ ]`, also nested), in a section or before
+   the first heading. A checkbox-shaped line in a code block, an HTML block or
+   a comment is fixed text, because the parser does not read it as an item. An
+   item's identity is the rest of its first line without HTML comments, white
+   space collapsed; case matters. Every item is written in the template's order,
+   byte for byte except its check mark. A comment that starts on the item's
+   line stays with it, also when it spans lines; independent guide comments of
+   a section that received text go. The check mark of every item comes from the
+   notes: it is ticked when the notes contain a ticked item with the same
+   identity in a section the template section takes, or in a notes section
+   headed `Checklist`, and otherwise unticked. An item that the template has
+   ticked (`[x]` or `[X]`) and the notes do not tick is cleared, with a warning
+   that names it (`--strict` does not fail on it). A checkbox line in a section
+   the template section takes that matches no item of that section is not
+   written; stderr names it, and `--strict` makes that an error. The author's
+   other lines in the section follow the checklist.
    A notes section headed `Checklist` counts only when a template is used (with
    `--template=false` or no template it is an ordinary section). It only ticks;
    its other text goes after the checklist of a template section with the same
@@ -543,9 +562,11 @@ The body keeps the template's shape:
    warning that counts them: the model never ticks, adds or removes a checkbox.
 3. **Fixed text.** The template's fixed text is written word for word, except
    that a blank line may be added or removed at the edge of a section, line
-   endings are normalized, and trailing white space at the end of the body is
-   trimmed. The guide comments of a section that received text
+   endings are normalized to LF, and trailing white space at the end of the body
+   is trimmed. The guide comments of a section that received text
    are left out; a section that received nothing stays as the template has it.
+   (Removing a comment can change how the parser reads the lines around it; the
+   final check reports a heading that appears this way.)
 4. **Open sections.** A section that has only comments under its heading asks
    for text. A notes section whose heading equals the template heading fills it
    word for word (see [Author notes](#author-notes)); so does a section of the
@@ -580,8 +601,9 @@ template's, and headings inside a placed section, which move down; see
 | Not verified | contains `not verified`, `unverified`, `not verify`, `not tested`, `untested`, `not measured`, `not validated` or `not checked` |
 | Known gaps | contains `known gaps`, `known limitations` or `known issues`, or is `Gaps` or `Limitations` |
 
-A section starts at an ATX heading (`## Evidence`) and ends at the next ATX
-heading of the same or a higher level. A short label on a line of its own
+A section starts at an ATX heading (`## Evidence`) that the parser reads at the
+top level (not one inside a code block, an HTML block, a list or a quote) and
+ends at the next such heading of the same or a higher level. A short label on a line of its own
 (`Evidence` above a list, or `Not verified:`) also starts one; it ends at the
 next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,

@@ -173,6 +173,7 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 // no template section takes is written one level below the template's headings,
 // at the end of the section that placeFor chooses.
 func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) {
+	pr = pr.withLF()
 	var b strings.Builder
 	var warnings []BodyWarning
 	modelBoxes := 0
@@ -317,6 +318,32 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model wrote %d checkbox line(s); they were dropped, because only the template's checklist and the author's notes can add or tick a box", modelBoxes)})
 	}
 	return strings.TrimSpace(b.String()), warnings
+}
+
+// withLF returns a copy of the result with LF line endings in every text field,
+// so that no reader of Markdown structure sees a carriage return.
+func (pr PRResult) withLF() PRResult {
+	list := func(in StringList) StringList {
+		if in == nil {
+			return nil
+		}
+		out := make(StringList, len(in))
+		for i, s := range in {
+			out[i] = normalizeNewlines(s)
+		}
+		return out
+	}
+	pr.Summary = normalizeNewlines(pr.Summary)
+	pr.ReviewersHint = normalizeNewlines(pr.ReviewersHint)
+	pr.Changes, pr.Testing, pr.Issues = list(pr.Changes), list(pr.Testing), list(pr.Issues)
+	if pr.Sections != nil {
+		sections := make(map[string]string, len(pr.Sections))
+		for k, v := range pr.Sections {
+			sections[k] = normalizeNewlines(v)
+		}
+		pr.Sections = sections
+	}
+	return pr
 }
 
 // prBullets renders one "- " line per item and leaves out an item that render

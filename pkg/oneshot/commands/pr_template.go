@@ -37,122 +37,69 @@ type TemplateSection struct {
 	Key string
 }
 
-var (
-	checkboxRe   = regexp.MustCompile(`^\s*[-*+]\s+\[[ xX]\]`)
-	sectionKeyRe = regexp.MustCompile(`[^a-z0-9]+`)
-)
+var sectionKeyRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 // sectionFieldPrefix starts the name of a tool argument that carries the text
 // of one template section.
 const sectionFieldPrefix = "section_"
 
-// ParsePRTemplate splits a template at its Markdown headings. Headings inside
-// a code block or an HTML comment are text. It returns nil for a blank
-// template.
+// ParsePRTemplate splits a template at its top-level headings, as a Markdown
+// parser reads them (mdshape.go). A heading inside a code block, an HTML block
+// or a comment is text. It returns nil for a blank template.
 func ParsePRTemplate(text string) *PRTemplate {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = normalizeNewlines(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
+	d := readMarkdown(strings.TrimRight(text, "\n"))
 	t := &PRTemplate{}
-	var (
-		preamble  []string
-		cur       *TemplateSection
-		guide     []string
-		inFence   bool
-		fence     fenceTracker
-		inComment bool
-		fixed     bool // the current section has a checkbox or fixed text
-	)
-	flush := func() {
-		if cur == nil {
-			return
-		}
-		cur.Guide = strings.TrimSpace(strings.Join(guide, "\n"))
-		cur.Open = !fixed
-		t.Sections = append(t.Sections, *cur)
-		cur, guide, fixed = nil, nil, false
+	tops := d.topHeadings()
+	pre := d.Lines
+	if len(tops) > 0 {
+		pre = d.Lines[:tops[0].Start]
 	}
+	t.Preamble = trimBlankEdges(pre)
 	keys := map[string]int{}
-	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	setext := map[int]setextHeading{}
-	for _, h := range setextHeadings(all) {
-		setext[h.Start] = h
+	for _, sec := range d.sections(0) {
+		h := sec.Heading
+		s := TemplateSection{
+			Level:       h.Level,
+			Heading:     h.Text,
+			HeadingLine: strings.Join(d.Lines[h.Start:h.End+1], "\n"),
+		}
+		if sec.Last >= sec.First {
+			s.Lines = append([]string(nil), d.Lines[sec.First:sec.Last+1]...)
+			start, stop := d.lineSpan(sec.First, sec.Last)
+			// Comment text is guidance; anything else that is not blank makes the
+			// section fixed.
+			s.Open = strings.TrimSpace(d.outsideComments(start, stop)) == ""
+			var guide []string
+			for _, c := range d.Comments {
+				if c.Start >= start && c.Stop <= stop {
+					for _, l := range strings.Split(c.Text, "\n") {
+						if l = strings.TrimSpace(l); l != "" {
+							guide = append(guide, l)
+						}
+					}
+				}
+			}
+			s.Guide = strings.Join(guide, "\n")
+		} else {
+			s.Open = true
+		}
+		key := strings.Trim(sectionKeyRe.ReplaceAllString(strings.ToLower(s.Heading), "_"), "_")
+		if len(key) > 40 {
+			key = strings.TrimRight(key[:40], "_")
+		}
+		if key == "" {
+			key = "section"
+		}
+		if keys[key]++; keys[key] > 1 {
+			key += "_" + string(rune('0'+keys[key]))
+		}
+		s.Key = key
+		t.Sections = append(t.Sections, s)
 	}
-	skipTo := -1 // the last line of a setext heading that was read with its first
-	for idx, line := range all {
-		if idx <= skipTo {
-			continue
-		}
-		// A fence closes only with the same character and at least as many of
-		// them: a shorter or different delimiter inside it is text.
-		if !inComment {
-			fence.line(line)
-			inFence = fence.inFence()
-		}
-		if !inFence && !inComment {
-			level, heading, headingLine, ok := 0, "", line, false
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				level, heading, ok = len(m[1]), strings.TrimSpace(m[2]), true
-			} else if h, set := setext[idx]; set {
-				level, heading, headingLine, ok, skipTo = h.Level, h.Text, strings.Join(all[h.Start:h.End+1], "\n"), true, h.End
-			}
-			if ok {
-				flush()
-				cur = &TemplateSection{Level: level, Heading: heading, HeadingLine: headingLine}
-				key := strings.Trim(sectionKeyRe.ReplaceAllString(strings.ToLower(cur.Heading), "_"), "_")
-				if len(key) > 40 {
-					key = strings.TrimRight(key[:40], "_")
-				}
-				if key == "" {
-					key = "section"
-				}
-				if keys[key]++; keys[key] > 1 {
-					key += "_" + string(rune('0'+keys[key]))
-				}
-				cur.Key = key
-				continue
-			}
-		}
-		// Classify the line: comment text is guidance, anything else that is
-		// not blank makes the section fixed. Comments are followed in the
-		// preamble too, so that a heading inside one stays text.
-		var lineGuide []string
-		lineFixed := false
-		rest := line
-		for rest != "" {
-			if inComment {
-				end := strings.Index(rest, "-->")
-				if end < 0 {
-					lineGuide = append(lineGuide, strings.TrimSpace(rest))
-					break
-				}
-				lineGuide = append(lineGuide, strings.TrimSpace(rest[:end]))
-				rest, inComment = rest[end+3:], false
-				continue
-			}
-			start := strings.Index(rest, "<!--")
-			if inFence || start < 0 {
-				if strings.TrimSpace(rest) != "" {
-					lineFixed = true
-				}
-				break
-			}
-			if strings.TrimSpace(rest[:start]) != "" {
-				lineFixed = true
-			}
-			rest, inComment = rest[start+4:], true
-		}
-		if cur == nil {
-			preamble = append(preamble, line)
-			continue
-		}
-		cur.Lines = append(cur.Lines, line)
-		guide = append(guide, lineGuide...)
-		fixed = fixed || lineFixed
-	}
-	flush()
-	t.Preamble = trimBlankEdges(preamble)
 	return t
 }
 
@@ -308,96 +255,26 @@ type extraBlock struct {
 	Body    string
 }
 
-var checkboxItemRe = regexp.MustCompile(`^\s*[-*+]\s+\[([ xX])\]\s*(.*)$`)
-
-// stripInlineComments removes the HTML comments of one line; a comment that
-// the line does not close removes the rest.
-func stripInlineComments(line string) string {
-	var out strings.Builder
-	rest := line
-	for {
-		start := strings.Index(rest, "<!--")
-		if start < 0 {
-			out.WriteString(rest)
-			return out.String()
-		}
-		out.WriteString(rest[:start])
-		end := strings.Index(rest[start+4:], "-->")
-		if end < 0 {
-			return out.String()
-		}
-		rest = rest[start+4+end+3:]
-	}
+// mdBox is a checkbox line that splitCheckboxes took out of a text.
+type mdBox struct {
+	Line    string // the line as written
+	Checked bool
+	Item    string // identity: the text with comments removed and white space collapsed
 }
 
-// checkboxItem reads a checkbox line: whether it is ticked and its item
-// identity: the text with inline HTML comments removed and white space
-// collapsed. The inventory of a template and the rendering use this one
-// identity. ok is false for any other line.
-func checkboxItem(line string) (ticked bool, item string, ok bool) {
-	m := checkboxItemRe.FindStringSubmatch(stripInlineComments(line))
-	if m == nil {
-		return false, "", false
+// splitCheckboxes separates the task-list item lines of text, as the parser
+// reads them (so not those in code blocks, HTML blocks or comments), from the
+// other lines.
+func splitCheckboxes(text string) (others string, boxes []mdBox) {
+	d := readMarkdown(text)
+	isBox := map[int]mdTask{}
+	for _, t := range d.Tasks {
+		isBox[t.Line] = t
 	}
-	return m[1] != " ", strings.Join(strings.Fields(m[2]), " "), true
-}
-
-// commentOpenAfter reports whether an HTML comment is still open after line.
-func commentOpenAfter(line string, open bool) bool {
-	rest := line
-	for rest != "" {
-		if open {
-			end := strings.Index(rest, "-->")
-			if end < 0 {
-				return true
-			}
-			rest, open = rest[end+3:], false
-			continue
-		}
-		start := strings.Index(rest, "<!--")
-		if start < 0 {
-			return false
-		}
-		rest, open = rest[start+4:], true
-	}
-	return open
-}
-
-// itemLines marks the lines of a template that are checkbox items: checkbox
-// lines outside code fences and outside HTML comments. A checkbox-shaped line
-// in a fence or a comment is fixed text.
-func itemLines(lines []string) []bool {
-	flags := make([]bool, len(lines))
-	var (
-		fence   fenceTracker
-		comment bool
-	)
-	for i, line := range lines {
-		if !comment && (fence.line(line) || fence.inFence()) {
-			continue
-		}
-		if !comment && checkboxRe.MatchString(line) {
-			flags[i] = true
-		}
-		comment = commentOpenAfter(line, comment)
-	}
-	return flags
-}
-
-// splitCheckboxes separates the checkbox lines of text (outside code fences)
-// from the other lines.
-func splitCheckboxes(text string) (others string, boxes []string) {
-	var (
-		kept  []string
-		fence fenceTracker
-	)
-	for _, line := range strings.Split(text, "\n") {
-		if fence.line(line) || fence.inFence() {
-			kept = append(kept, line)
-			continue
-		}
-		if _, _, ok := checkboxItem(line); ok {
-			boxes = append(boxes, line)
+	var kept []string
+	for i, line := range d.Lines {
+		if t, ok := isBox[i]; ok {
+			boxes = append(boxes, mdBox{Line: line, Checked: t.Checked, Item: t.Item})
 			continue
 		}
 		kept = append(kept, line)
@@ -405,59 +282,37 @@ func splitCheckboxes(text string) (others string, boxes []string) {
 	return trimBlankEdges(kept), boxes
 }
 
-// withoutComments removes the HTML comments from lines. A line that holds only
-// comment text is dropped; comments inside a code fence are text. With
-// keepItems, a checkbox item line is kept byte for byte together with the
-// comment attached to it, through the line that closes the comment, so that
-// only its check mark can change; independent guide comments are still removed.
-func withoutComments(lines []string, keepItems bool) []string {
-	var (
-		out       []string
-		inComment bool
-		attached  bool // inside a comment that belongs to a kept item line
-		fence     fenceTracker
-	)
-	for _, line := range lines {
-		if attached {
-			out = append(out, line)
-			if inComment = commentOpenAfter(line, true); !inComment {
-				attached = false
-			}
-			continue
-		}
-		if !inComment && (fence.line(line) || fence.inFence()) {
-			out = append(out, line)
-			continue
-		}
-		if keepItems && !inComment && checkboxRe.MatchString(line) {
-			out = append(out, line)
-			if inComment = commentOpenAfter(line, false); inComment {
-				attached = true
-			}
-			continue
-		}
-		rest, hadComment := line, false
-		var kept strings.Builder
-		for rest != "" {
-			if inComment {
-				end := strings.Index(rest, "-->")
-				if end < 0 {
-					rest, hadComment = "", true
-					break
+// stripComments removes the HTML comments from lines. A line that holds only
+// comment text is dropped. With keepItems, the comments that start on a task
+// item's line stay with it, through the line that closes them, so that only its
+// check mark can change; independent guide comments are still removed.
+func stripComments(lines []string, keepItems bool) []string {
+	d := readMarkdown(strings.Join(lines, "\n"))
+	attached := map[int]bool{} // comments (by start offset) that stay
+	if keepItems {
+		for _, t := range d.Tasks {
+			for _, c := range d.Comments {
+				if c.StartLine == t.Line {
+					attached[c.Start] = true
 				}
-				rest, inComment, hadComment = rest[end+3:], false, true
+			}
+		}
+	}
+	var out []string
+	for i, line := range d.Lines {
+		from := d.lineStart[i]
+		to := from + len(line)
+		var spans [][2]int
+		for _, c := range d.Comments {
+			if attached[c.Start] || c.Stop <= from || c.Start >= to {
 				continue
 			}
-			start := strings.Index(rest, "<!--")
-			if start < 0 {
-				kept.WriteString(rest)
-				break
-			}
-			kept.WriteString(rest[:start])
-			rest, inComment, hadComment = rest[start+4:], true, true
+			spans = append(spans, [2]int{max(c.Start, from) - from, min(c.Stop, to) - from})
 		}
-		if text := kept.String(); !hadComment || strings.TrimSpace(text) != "" {
-			out = append(out, text)
+		if len(spans) == 0 {
+			out = append(out, line)
+		} else if kept := removeSpans(line, spans); strings.TrimSpace(kept) != "" {
+			out = append(out, kept)
 		}
 	}
 	return out
@@ -465,11 +320,10 @@ func withoutComments(lines []string, keepItems bool) []string {
 
 // checkboxes returns the checkbox item lines of the section, as written.
 func (s TemplateSection) checkboxes() []string {
+	d := readMarkdown(strings.Join(s.Lines, "\n"))
 	var out []string
-	for i, on := range itemLines(s.Lines) {
-		if on {
-			out = append(out, s.Lines[i])
-		}
+	for _, t := range d.Tasks {
+		out = append(out, d.Lines[t.Line])
 	}
 	return out
 }
@@ -477,17 +331,17 @@ func (s TemplateSection) checkboxes() []string {
 // pureChecklist reports a section whose lines, comments aside, are checkbox
 // lines only: it has no place for text.
 func (s TemplateSection) pureChecklist() bool {
-	lines := withoutComments(s.Lines, false)
-	boxes := 0
-	for i, on := range itemLines(lines) {
-		switch {
-		case on:
-			boxes++
-		case strings.TrimSpace(lines[i]) != "":
+	d := readMarkdown(strings.Join(stripComments(s.Lines, false), "\n"))
+	isBox := map[int]bool{}
+	for _, t := range d.Tasks {
+		isBox[t.Line] = true
+	}
+	for i, line := range d.Lines {
+		if !isBox[i] && strings.TrimSpace(line) != "" {
 			return false
 		}
 	}
-	return boxes > 0
+	return len(isBox) > 0
 }
 
 // placeable reports whether some section of the template is not a pure
@@ -513,56 +367,46 @@ func (t *PRTemplate) deepestLevel() int {
 	return level
 }
 
-// demoteHeadings shifts the Markdown headings of text (outside code fences)
-// so that its highest heading has level top, keeping the relative nesting.
-// Setext headings (a text line over a line of "=" or "-") are converted to the
-// same ATX form. A heading that would pass level 6 becomes a bold line.
+// demoteHeadings shifts the top-level headings of text, as the parser reads
+// them (so none in a code block, an HTML block or a comment), so that the
+// highest has level top, keeping the relative nesting. An ATX heading changes
+// its markers in place; a setext heading (a text over a line of "=" or "-")
+// becomes one ATX line. A heading that would pass level 6 becomes a bold line.
 func demoteHeadings(text string, top int) string {
-	lines := strings.Split(text, "\n")
-	type heading struct {
-		at, span, level int
-		text            string
-	}
-	var found []heading
-	setext := map[int]setextHeading{}
-	for _, h := range setextHeadings(lines) {
-		setext[h.Start] = h
-	}
-	var fence fenceTracker
+	d := readMarkdown(text)
+	var found []mdHeading
 	highest := 7
-	for i := 0; i < len(lines); i++ {
-		if fence.line(lines[i]) || fence.inFence() {
-			continue
-		}
-		if m := atxHeadingRe.FindStringSubmatch(lines[i]); m != nil {
-			found = append(found, heading{i, 1, len(m[1]), strings.TrimSpace(m[2])})
-		} else if h, ok := setext[i]; ok {
-			found = append(found, heading{i, h.End - h.Start + 1, h.Level, h.Text})
-			i = h.End
-		} else {
-			continue
-		}
-		highest = min(highest, found[len(found)-1].level)
+	for _, h := range d.topHeadings() {
+		found = append(found, h)
+		highest = min(highest, h.Level)
 	}
 	if len(found) == 0 {
-		return text
+		return d.text
 	}
 	var out []string
 	next := 0
-	for i := 0; i < len(lines); i++ {
-		if next < len(found) && found[next].at == i {
-			h := found[next]
-			level := h.level + top - highest
-			if level > 6 {
-				out = append(out, "**"+h.text+"**")
-			} else {
-				out = append(out, strings.Repeat("#", level)+" "+h.text)
-			}
-			i += h.span - 1
-			next++
+	for i := 0; i < len(d.Lines); i++ {
+		if next >= len(found) || found[next].Start != i {
+			out = append(out, d.Lines[i])
 			continue
 		}
-		out = append(out, lines[i])
+		h := found[next]
+		next++
+		level := h.Level + top - highest
+		switch {
+		case level > 6:
+			if h.Text != "" {
+				out = append(out, "**"+h.Text+"**")
+			}
+		case h.Setext:
+			out = append(out, strings.Repeat("#", level)+" "+h.Text)
+		default:
+			line := d.Lines[i]
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			marks := len(line[indent:]) - len(strings.TrimLeft(line[indent:], "#"))
+			out = append(out, line[:indent]+strings.Repeat("#", level)+line[indent+marks:])
+		}
+		i = h.End
 	}
 	return strings.Join(out, "\n")
 }
@@ -615,30 +459,23 @@ type templateResult struct {
 	ModelBoxes int // checkbox lines of the model's text that were dropped
 }
 
-var checkMarkRe = regexp.MustCompile(`^(\s*[-*+]\s+\[)[ xX](\])`)
-
 // tickLines sets the check mark of every item line from ticks, the items the
 // author ticked: an item in ticks is written ticked, any other is written
 // unticked, and the rest of the line stays byte for byte. cleared lists the
 // items that the template had ticked and the author did not.
 func tickLines(lines []string, ticks map[string]bool) (out []string, cleared []string) {
-	out = make([]string, len(lines))
-	copy(out, lines)
-	for i, on := range itemLines(lines) {
-		if !on {
-			continue
-		}
-		ticked, item, ok := checkboxItem(lines[i])
+	d := readMarkdown(strings.Join(lines, "\n"))
+	mark := []byte(d.text)
+	for _, t := range d.Tasks {
 		switch {
-		case !ok:
-		case ticks[item] && !ticked:
-			out[i] = checkMarkRe.ReplaceAllString(lines[i], "${1}x${2}")
-		case !ticks[item] && ticked:
-			out[i] = checkMarkRe.ReplaceAllString(lines[i], "${1} ${2}")
-			cleared = append(cleared, item)
+		case ticks[t.Item] && !t.Checked:
+			mark[t.MarkAt] = 'x'
+		case !ticks[t.Item] && t.Checked:
+			mark[t.MarkAt] = ' '
+			cleared = append(cleared, t.Item)
 		}
 	}
-	return out, cleared
+	return strings.Split(string(mark), "\n"), cleared
 }
 
 // headingRef is a heading of a body or a template at some level.
@@ -647,34 +484,11 @@ type headingRef struct {
 	Key   string
 }
 
-// bodyHeadings reads the ATX and setext headings of text, outside code fences
-// and HTML comments, with the shared recognizer.
+// bodyHeadings reads the top-level headings of text, as the parser reads them.
 func bodyHeadings(text string) []headingRef {
-	lines := strings.Split(text, "\n")
-	setext := map[int]setextHeading{}
-	for _, h := range setextHeadings(lines) {
-		setext[h.Start] = h
-	}
-	var (
-		out     []headingRef
-		fence   fenceTracker
-		comment bool
-	)
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		if !comment && (fence.line(line) || fence.inFence()) {
-			continue
-		}
-		if !comment {
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				out = append(out, headingRef{len(m[1]), headingKey(m[2])})
-			} else if h, ok := setext[i]; ok {
-				out = append(out, headingRef{h.Level, headingKey(h.Text)})
-				i = h.End
-				continue
-			}
-		}
-		comment = commentOpenAfter(line, comment)
+	var out []headingRef
+	for _, h := range readMarkdown(text).topHeadings() {
+		out = append(out, headingRef{h.Level, headingKey(h.Text)})
 	}
 	return out
 }
@@ -740,12 +554,8 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	// The rendering below reads the same identities.
 	allItems := map[string]bool{}
 	addItems := func(lines []string) {
-		for i, on := range itemLines(lines) {
-			if on {
-				if _, item, ok := checkboxItem(lines[i]); ok {
-					allItems[item] = true
-				}
-			}
+		for item := range itemIdentities(lines) {
+			allItems[item] = true
 		}
 	}
 	var preamble []string
@@ -766,12 +576,11 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 			continue
 		}
 		others, boxes := splitCheckboxes(a.Body())
-		for _, line := range boxes {
-			ticked, item, _ := checkboxItem(line)
-			if !allItems[item] {
-				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(line), a.Heading())
-			} else if ticked {
-				checklistTicks[item] = true
+		for _, box := range boxes {
+			if !allItems[box.Item] {
+				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(box.Line), a.Heading())
+			} else if box.Checked {
+				checklistTicks[box.Item] = true
 			}
 		}
 		if !taken[j] && strings.TrimSpace(others) != "" {
@@ -826,15 +635,14 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 			case len(own) > 0:
 				// The template's checklist stands as the template wrote it. The
 				// author's boxes only tick; the author's other lines follow.
-				var boxes []string
+				var boxes []mdBox
 				text, boxes = splitCheckboxes(a.Body())
-				for _, line := range boxes {
-					ticked, item, _ := checkboxItem(line)
+				for _, box := range boxes {
 					switch {
-					case !own[item]:
-						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(line), a.Heading(), s.Heading)
-					case ticked:
-						ticks[item] = true
+					case !own[box.Item]:
+						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(box.Line), a.Heading(), s.Heading)
+					case box.Checked:
+						ticks[box.Item] = true
 					}
 				}
 			}
@@ -845,12 +653,12 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		text := strings.Join(parts, "\n\n")
 		if text == "" && s.Open && len(supplied[i]) == 0 && modelKeys[s.Key] {
 			model := commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
-			var dropped []string
+			var dropped []mdBox
 			text, dropped = splitCheckboxes(model) // the model never adds a checkbox
 			res.ModelBoxes += len(dropped)
 		}
 		if text != "" {
-			text = demoteHeadings(text, s.Level+1)
+			text = demoteHeadings(text, t.deepestLevel()+1)
 		}
 		if notVerified != "" && sectionKind(s.Heading) == SectionNotVerified && len(supplied[i]) == 0 {
 			// The template's own slot for what was not verified, and no author
@@ -871,7 +679,7 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		received := strings.TrimSpace(text) != "" || len(here) > 0
 		lines := s.Lines
 		if received {
-			lines = withoutComments(lines, true)
+			lines = stripComments(lines, true)
 		}
 		if s.Open && received {
 			lines = nil // an open section holds only comments: the text takes their place
@@ -908,15 +716,11 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	return res
 }
 
-// itemIdentities returns the identities of the item lines of a section.
+// itemIdentities returns the identities of the task items of lines.
 func itemIdentities(lines []string) map[string]bool {
 	out := map[string]bool{}
-	for i, on := range itemLines(lines) {
-		if on {
-			if _, item, ok := checkboxItem(lines[i]); ok {
-				out[item] = true
-			}
-		}
+	for _, t := range readMarkdown(strings.Join(lines, "\n")).Tasks {
+		out[t.Item] = true
 	}
 	return out
 }

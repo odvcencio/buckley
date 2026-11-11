@@ -86,11 +86,7 @@ func (s AuthorSection) Body() string { return s.body }
 // Source is the path of the note the section came from.
 func (s AuthorSection) Source() string { return s.source }
 
-var (
-	atxHeadingRe = regexp.MustCompile(`^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$`)
-	listItemRe   = regexp.MustCompile(`^(?:[-*+]|\d{1,3}[.)])[ \t]`)
-	wordRe       = regexp.MustCompile(`[a-z0-9]+`)
-)
+var wordRe = regexp.MustCompile(`[a-z0-9]+`)
 
 // headingKindPrefix starts the kind of a section that was selected by a
 // heading of the pull request template instead of by one of the fixed kinds.
@@ -184,13 +180,19 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	}
 	// note.Text was sanitized when the note was made; it is not scanned for
 	// comments again.
-	lines := strings.Split(strings.ReplaceAll(note.text, "\r\n", "\n"), "\n")
+	d := readMarkdown(note.text)
+	lines := d.Lines
+	atx := map[int]mdHeading{} // the headings that start or end a section, by line
+	for _, h := range d.topHeadings() {
+		if !h.Setext {
+			atx[h.Start] = h
+		}
+	}
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
 		curLevel int // heading level of cur; 0 when cur started at a label
 		body     []string
-		fence    fenceTracker
 	)
 	flush := func() {
 		if cur == nil {
@@ -206,27 +208,22 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	// section stays in it, so that no text of the author is dropped; placing the
 	// section moves such a heading below the template's (demoteHeadings).
 	for i, line := range lines {
-		if fence.line(line) {
-			// A fence delimiter belongs to the section it sits in.
-		} else if !fence.inFence() {
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				level := len(m[1])
-				if cur != nil && curLevel > 0 && level > curLevel {
-					body = append(body, line) // a sub-heading of the carried section
-					continue
-				}
-				flush()
-				if kind := kindOf(m[2]); kind != "" {
-					cur, curLevel = &AuthorSection{kind: kind, heading: plainHeading(m[2]), source: note.Path}, level
-				}
+		if h, ok := atx[i]; ok {
+			if cur != nil && curLevel > 0 && h.Level > curLevel {
+				body = append(body, line) // a sub-heading of the carried section
 				continue
 			}
-			if label, ok := labelLine(lines, i); ok && (cur == nil || curLevel == 0) {
-				if kind := kindOf(label); kind != "" {
-					flush()
-					cur, curLevel = &AuthorSection{kind: kind, heading: label, source: note.Path}, 0
-					continue
-				}
+			flush()
+			if kind := kindOf(h.Text); kind != "" {
+				cur, curLevel = &AuthorSection{kind: kind, heading: plainHeading(h.Text), source: note.Path}, h.Level
+			}
+			continue
+		}
+		if label, ok := labelLine(d, i); ok && (cur == nil || curLevel == 0) {
+			if kind := kindOf(label); kind != "" {
+				flush()
+				cur, curLevel = &AuthorSection{kind: kind, heading: label, source: note.Path}, 0
+				continue
 			}
 		}
 		if cur != nil {
@@ -237,117 +234,33 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	return out
 }
 
-var (
-	setextRe = regexp.MustCompile(`^ {0,3}(=+|-+)[ \t]*$`)
-)
-
-// isThematicBreak reports a line of three or more "-", "*" or "_" (one kind,
-// spaces allowed between) with up to three leading spaces.
-func isThematicBreak(line string) bool {
-	if len(line)-len(strings.TrimLeft(line, " ")) > 3 {
-		return false
-	}
-	var mark rune
-	n := 0
-	for _, r := range line {
-		switch {
-		case r == ' ' || r == '\t':
-		case (r == '-' || r == '*' || r == '_') && (mark == 0 || mark == r):
-			mark = r
-			n++
-		default:
-			return false
-		}
-	}
-	return n >= 3
-}
-
-// setextHeading is a setext heading: a paragraph (lines Start to End-1) over
-// an underline of "=" (level 1) or "-" (level 2) on line End.
-type setextHeading struct {
-	Start, End int
-	Level      int
-	Text       string // the paragraph lines joined with single spaces
-}
-
-// setextHeadings is the one recognizer of setext headings. It follows the
-// CommonMark rules for the cases it handles:
-//
-//   - An underline is a line, outside code fences, of only "=" or only "-",
-//     with up to three leading spaces and optional trailing spaces.
-//   - It makes a heading when the line before it is paragraph text. The text is
-//     the whole paragraph: the run of lines back to its first line. A paragraph
-//     starts after a blank line, a code fence, an ATX heading, a thematic break,
-//     an HTML comment line, or the start of the text.
-//   - It makes no heading when the paragraph belongs to a list item or a block
-//     quote (its first line starts with a list marker or ">") or is indented
-//     four or more spaces. Such lines stay as they are.
-//   - An underline with no paragraph above it is a thematic break or text.
-func setextHeadings(lines []string) []setextHeading {
-	var (
-		out       []setextHeading
-		fence     fenceTracker
-		comment   bool
-		paraStart = -1
-	)
-	for i, line := range lines {
-		if fence.line(line) || fence.inFence() {
-			paraStart = -1
-			continue
-		}
-		wasComment := comment
-		comment = commentOpenAfter(line, comment)
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case wasComment || strings.HasPrefix(trimmed, "<!--"):
-			paraStart = -1 // an HTML comment line is no paragraph text
-		case trimmed == "":
-			paraStart = -1
-		case atxHeadingRe.MatchString(line):
-			paraStart = -1
-		case setextRe.MatchString(line) && paraStart >= 0:
-			first := lines[paraStart]
-			indented := len(first)-len(strings.TrimLeft(first, " ")) >= 4
-			ft := strings.TrimSpace(first)
-			if !indented && !listItemRe.MatchString(ft) && !strings.HasPrefix(ft, ">") {
-				level := 2
-				if strings.TrimSpace(line)[0] == '=' {
-					level = 1
-				}
-				parts := make([]string, 0, i-paraStart)
-				for _, l := range lines[paraStart:i] {
-					parts = append(parts, strings.TrimSpace(l))
-				}
-				out = append(out, setextHeading{Start: paraStart, End: i, Level: level, Text: strings.Join(parts, " ")})
-			}
-			paraStart = -1
-		case isThematicBreak(line):
-			paraStart = -1
-		default:
-			if paraStart < 0 {
-				paraStart = i
-			}
-		}
-	}
-	return out
-}
-
-// labelLine reports whether lines[i] is a short label on a line of its own:
-// it follows a blank line (or starts the note), has at most eight words and no
-// sentence punctuation at its end, and either ends with a colon or stands
-// directly above a list, a table or a code block.
-func labelLine(lines []string, i int) (string, bool) {
-	line := lines[i]
-	if line != strings.TrimLeft(line, " \t") || (i > 0 && strings.TrimSpace(lines[i-1]) != "") {
+// labelLine reports whether line i is a short label on a line of its own: the
+// first line of a paragraph (as the parser reads it) that follows a blank line
+// (or starts the note), has at most eight words and no sentence punctuation at
+// its end, and either ends with a colon or stands alone directly above a list, a
+// table or a code fence. A line inside a code block or an HTML block, or in a
+// list or a quote, is not a label.
+func labelLine(d *mdDoc, i int) (string, bool) {
+	line := d.Lines[i]
+	if line != strings.TrimLeft(line, " \t") || (i > 0 && !d.blankLine(i-1)) {
 		return "", false
 	}
 	text := strings.TrimSpace(line)
-	if text == "" || listItemRe.MatchString(text) {
+	if text == "" {
 		return "", false
 	}
-	// A list item, quote, table row, heading or code fence is not a label.
-	// "**Evidence**" is: bold is the usual way to write one.
-	if strings.ContainsAny(text[:1], "-*+>|#`~") && !strings.HasPrefix(text, "**") {
+	// A table row or a code fence is not a label. "**Evidence**" is: bold is the
+	// usual way to write one.
+	if strings.ContainsAny(text[:1], "|`~") {
+		return "", false
+	}
+	block := -1
+	for n, b := range d.Blocks {
+		if b.Start == i && (b.Kind == "paragraph" || b.Kind == "heading") {
+			block = n
+		}
+	}
+	if block < 0 {
 		return "", false
 	}
 	text = strings.TrimSpace(strings.Trim(text, "*_"))
@@ -359,12 +272,22 @@ func labelLine(lines []string, i int) (string, bool) {
 	if colon {
 		return text, true
 	}
-	for _, next := range lines[i+1:] {
-		next = strings.TrimSpace(next)
-		if next == "" {
-			continue
+	b := d.Blocks[block]
+	if b.Kind != "paragraph" || b.End != i || block+1 >= len(d.Blocks) {
+		return "", false
+	}
+	next := d.Blocks[block+1]
+	switch next.Kind {
+	case "list":
+		return text, true
+	case "code":
+		for _, c := range d.Code {
+			if c.Start == next.Start && c.Fenced {
+				return text, true
+			}
 		}
-		return text, listItemRe.MatchString(next) || strings.HasPrefix(next, "|") || strings.HasPrefix(next, "```") || strings.HasPrefix(next, "~~~")
+	case "paragraph":
+		return text, strings.HasPrefix(strings.TrimSpace(d.Lines[next.Start]), "|")
 	}
 	return "", false
 }
@@ -453,82 +376,32 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	for _, s := range carried {
 		names[headingKey(s.heading)] = true
 	}
+	d := readMarkdown(text)
 	var out []string
 	skipLevel := 0
-	var fence fenceTracker
-	lines := strings.Split(text, "\n")
-	setext := map[int]setextHeading{}
-	for _, h := range setextHeadings(lines) {
-		setext[h.Start] = h
-	}
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		span := 1
-		if fence.line(line) {
-		} else if !fence.inFence() {
-			level, name, isHeading := 0, "", false
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				level, name, isHeading = len(m[1]), m[2], true
-			} else if h, ok := setext[i]; ok {
-				level, name, isHeading, span = h.Level, h.Text, true, h.End-h.Start+1
+	next := 0
+	tops := d.topHeadings()
+	for i := 0; i < len(d.Lines); i++ {
+		if next < len(tops) && tops[next].Start == i {
+			h := tops[next]
+			next++
+			if skipLevel > 0 && h.Level <= skipLevel {
+				skipLevel = 0
 			}
-			if isHeading {
-				if skipLevel > 0 && level <= skipLevel {
-					skipLevel = 0
-				}
-				if skipLevel == 0 && names[headingKey(name)] {
-					skipLevel = level
-				}
+			if skipLevel == 0 && names[headingKey(h.Text)] {
+				skipLevel = h.Level
 			}
+			if skipLevel == 0 {
+				out = append(out, d.Lines[h.Start:h.End+1]...)
+			}
+			i = h.End
+			continue
 		}
 		if skipLevel == 0 {
-			out = append(out, lines[i:i+span]...)
+			out = append(out, d.Lines[i])
 		}
-		i += span - 1
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
-}
-
-// fenceTracker follows Markdown code fences: a fence opens with three or more
-// backticks or tildes (up to three spaces of indent) and closes only with the
-// same character, at least as many of them, and nothing else on the line. A
-// shorter or different delimiter inside the fence is text.
-type fenceTracker struct {
-	char  byte
-	count int
-}
-
-// inFence reports whether a fence is open.
-func (f *fenceTracker) inFence() bool { return f.count > 0 }
-
-// line updates the state for one line and reports whether the line is a fence
-// delimiter (an opening or closing one).
-func (f *fenceTracker) line(text string) bool {
-	trimmed := strings.TrimLeft(text, " ")
-	if len(text)-len(trimmed) > 3 || trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
-		return false
-	}
-	char := trimmed[0]
-	run := 0
-	for run < len(trimmed) && trimmed[run] == char {
-		run++
-	}
-	if run < 3 {
-		return false
-	}
-	rest := strings.TrimSpace(trimmed[run:])
-	if f.count == 0 {
-		if char == '`' && strings.Contains(rest, "`") {
-			return false // an inline span, not a fence
-		}
-		f.char, f.count = char, run
-		return true
-	}
-	if char == f.char && run >= f.count && rest == "" {
-		f.char, f.count = 0, 0
-		return true
-	}
-	return false
 }
 
 // SanitizePRNote removes every HTML comment (<!-- ... -->) from a note, wherever
