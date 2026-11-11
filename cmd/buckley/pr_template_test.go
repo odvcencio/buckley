@@ -292,3 +292,30 @@ func TestRunPRCommand_TemplateShapeFalseIsUnchanged(t *testing.T) {
 		t.Errorf("the template was used although --template=false:\n%s\n%s", body, stderr)
 	}
 }
+
+// Review of #478: with --template=false a notes section headed Checklist is an
+// ordinary section, so the sections nested in it still reach the body.
+func TestRunPRCommand_TemplateFalseKeepsASectionHeadedChecklist(t *testing.T) {
+	template := readShapeFixture(t, "pr_template_shape.md")
+	notes := "## Checklist\n\n- [x] Ready\n\n### Testing\n\n- Manual check passed.\n\n### Not verified\n\n- Windows was not tested.\n"
+	_, stderr, body, err := shapeRun(t, template, notes, "--template=false", "--strict")
+	if err != nil {
+		t.Fatalf("runPRCommand: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(body, "Manual check passed.") || !strings.Contains(body, "Windows was not tested.") {
+		t.Errorf("a nested section was lost with --template=false:\n%s", body)
+	}
+}
+
+// The generated Not verified statement of a checklist-only template warns on
+// stderr, and --strict does not refuse it (only an author section that cannot
+// be placed does).
+func TestRunPRCommand_TemplateShapeChecklistOnlyFallbackWarns(t *testing.T) {
+	_, stderr, body, err := shapeRun(t, "## Checklist\n\n- [ ] Tests ran\n", "", "--strict")
+	if err != nil {
+		t.Fatalf("--strict refused the generated fallback: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "Not verified") || !strings.Contains(body, "## Not verified") {
+		t.Errorf("stderr = %q, body =\n%s", stderr, body)
+	}
+}

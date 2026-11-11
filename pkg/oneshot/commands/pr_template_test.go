@@ -83,7 +83,7 @@ func TestParsePRTemplate(t *testing.T) {
 	if len(early.Sections) != 1 || early.Sections[0].Heading != "Real" || !early.Sections[0].Open || !strings.Contains(early.Preamble, "## not a heading") {
 		t.Errorf("a heading inside a comment in the preamble was read as a section: %+v", early)
 	}
-	if got, _, _ := (PRResult{}).templateBody(early, nil, "", nil); !strings.Contains(got, "\n## Real ##\n") {
+	if got := (PRResult{}).templateBody(early, nil, "", nil).Body; !strings.Contains(got, "\n## Real ##\n") {
 		t.Errorf("the heading line is not written as the template has it:\n%s", got)
 	}
 
@@ -101,7 +101,8 @@ func TestPRBody_UnfilledTemplateIsTheTemplate(t *testing.T) {
 		if name == "checklists" {
 			text, tmpl = checklistTemplate(t)
 		}
-		got, rest, _ := PRResult{}.templateBody(tmpl, nil, "", nil)
+		res := PRResult{}.templateBody(tmpl, nil, "", nil)
+		got, rest := res.Body, res.Left
 		if got != strings.TrimSpace(text) {
 			t.Errorf("%s: rendered template differs from the file:\n--- got\n%s\n--- want\n%s", name, got, strings.TrimSpace(text))
 		}
@@ -205,8 +206,8 @@ func TestPRBody_TemplateTakesTheAuthorsSections(t *testing.T) {
 	if !strings.HasPrefix(ticked, "## Summary\n- [x] Includes tests or rationale for why tests are unnecessary\n- [ ] References relevant issues/links\n\n### What changed") || strings.Contains(ticked, "References #12") {
 		t.Errorf("the template's checklist is not kept word for word:\n%s", ticked)
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "- [x] References #12") {
-		t.Errorf("warnings = %q, want one naming the unmatched line", warnings)
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Text, "- [x] References #12") {
+		t.Errorf("warnings = %v, want one naming the unmatched line", warnings)
 	}
 }
 

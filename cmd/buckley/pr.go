@@ -305,18 +305,6 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 	return nil
 }
 
-// templateHeadings lists the headings of a template; nil has none.
-func templateHeadings(template *commands.PRTemplate) []string {
-	if template == nil {
-		return nil
-	}
-	headings := make([]string, 0, len(template.Sections))
-	for _, section := range template.Sections {
-		headings = append(headings, section.Heading)
-	}
-	return headings
-}
-
 // prContextOpts derives the git-diff gathering options for a PR run: a
 // PR-scale byte budget (diffsignal.PRDiffBudget by default, overridable via
 // --diff-budget) and PR-specific ranking (source first, tests next,
@@ -441,7 +429,11 @@ func generatePRText(opts prCommandOptions, plan *prPlan) (prText, error) {
 	if opts.template {
 		template = loadPRTemplate(plan)
 	}
-	sections := commands.AuthorSections(notes, templateHeadings(template)...)
+	// Only with a template does a notes section headed Checklist tick boxes.
+	sections := commands.AuthorSections(notes)
+	if template != nil {
+		sections = commands.TemplateAuthorSections(notes, template)
+	}
 
 	runtime, cleanup, err := newPRCommandRuntimeFn(opts)
 	defer cleanup()
@@ -632,9 +624,11 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 	// section with no place in a checklist-only template, are the author's to
 	// fix: --strict stops on them like on a claim without a source.
 	for _, warning := range shapeWarnings {
-		prWarnf("%s", warning)
+		prWarnf("%s", warning.Text)
+		if warning.Blocking {
+			claims++
+		}
 	}
-	claims += len(shapeWarnings)
 	text := prText{Title: opts.title, Body: body}
 	if text.Title == "" {
 		text.Title = result.PR.Header()

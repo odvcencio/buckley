@@ -25,11 +25,7 @@ func shapeFixture(t *testing.T) (*PRTemplate, string, []AuthorSection) {
 	if err != nil || !ok {
 		t.Fatalf("NewPRNote: ok=%v err=%v", ok, err)
 	}
-	var headings []string
-	for _, s := range tmpl.Sections {
-		headings = append(headings, s.Heading)
-	}
-	return tmpl, string(text), AuthorSections([]PRNote{note}, headings...)
+	return tmpl, string(text), TemplateAuthorSections([]PRNote{note}, tmpl)
 }
 
 func checkboxLines(body string) []string {
@@ -101,7 +97,7 @@ func TestTemplateShape_KeepsHeadingsCheckboxesAndFixedText(t *testing.T) {
 	}
 	// Guide comments of a section that received text are left out; a section
 	// that received nothing keeps them.
-	if strings.Contains(body, "Say what changes for a user") || strings.Contains(body, "Give the reason") {
+	if strings.Contains(body, "Say what changes for a user") || strings.Contains(body, "Give the reason") || strings.Contains(body, "Name the exact commands") || strings.Contains(sectionOf(body, "Performance"), "Counters or timings") {
 		t.Errorf("the guide comment of a filled section is still there:\n%s", body)
 	}
 	if !strings.Contains(sectionOf(body, "Performance"), "Counters or timings") && strings.Contains(sectionOf(body, "Performance"), "<!--") {
@@ -175,14 +171,21 @@ func templateHeadingLines(t *PRTemplate) []string {
 	return out
 }
 
-// topLevelHeadings returns the headings of the given level, outside code.
+// topLevelHeadings returns the headings of the given level, outside code
+// fences and HTML comments.
 func topLevelHeadings(body string, level int) []string {
 	var out []string
 	prefix := strings.Repeat("#", level) + " "
+	var fence fenceTracker
+	comment := false
 	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, prefix) {
+		if !comment && (fence.line(line) || fence.inFence()) {
+			continue
+		}
+		if !comment && strings.HasPrefix(line, prefix) {
 			out = append(out, strings.TrimSpace(line))
 		}
+		comment = commentOpenAfter(line, comment)
 	}
 	return out
 }
@@ -214,5 +217,144 @@ func TestTemplateShape_PlacementRule(t *testing.T) {
 	}
 	if strings.Contains(sectionOf(body, "Boxes"), "###") {
 		t.Errorf("a pure checklist took a block:\n%s", body)
+	}
+}
+
+// shapeBody renders notes into a template and returns the body and the warning
+// texts. The model wrote summary text for the sections it is asked for.
+func shapeBody(t *testing.T, template, notes string, pr PRResult) (string, []BodyWarning) {
+	t.Helper()
+	tmpl := ParsePRTemplate(template)
+	var sections []AuthorSection
+	if notes != "" {
+		note, ok, err := NewPRNote(RawPRNote{Path: "n.md", Text: notes})
+		if err != nil || !ok {
+			t.Fatalf("NewPRNote: %v %v", ok, err)
+		}
+		sections = TemplateAuthorSections([]PRNote{note}, tmpl)
+	}
+	return pr.BodyWithWarnings(PRBodyOptions{Template: tmpl, Sections: sections, StateNotVerified: true, HasNotes: notes != ""})
+}
+
+func hasWarning(ws []BodyWarning, part string, blocking bool) bool {
+	for _, w := range ws {
+		if strings.Contains(w.Text, part) && w.Blocking == blocking {
+			return true
+		}
+	}
+	return false
+}
+
+// Review of #478, finding 1: without a template a notes section headed
+// Checklist is an ordinary section, so the sections nested in it stay.
+func TestChecklistWithoutATemplateIsAnOrdinarySection(t *testing.T) {
+	note, _, _ := NewPRNote(RawPRNote{Path: "n.md", Text: "## Checklist\n\n- [x] Ready\n\n### Testing\n\n- Manual check passed.\n\n### Not verified\n\n- Windows was not tested.\n"})
+	got := sectionsByKind(AuthorSections([]PRNote{note}))
+	if !strings.Contains(got[SectionTesting], "Manual check passed.") || !strings.Contains(got[SectionNotVerified], "Windows") {
+		t.Fatalf("sections = %q, want Testing and Not verified", got)
+	}
+}
+
+// Finding 2: text in a Checklist section that is not a checkbox is written
+// after the checklist when the template has a Checklist section, else placed
+// as a section of no known kind; in a checklist-only template it is named.
+func TestChecklistTextIsNeverLost(t *testing.T) {
+	notes := "## Checklist\n- [x] Ready\nWindows was not tested.\n"
+	body, ws := shapeBody(t, "## Summary\n<!-- describe -->\n## Checklist\n- [ ] Ready\n", notes, PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "- [x] Ready\n\nWindows was not tested.") || hasWarning(ws, "", true) {
+		t.Errorf("same-heading section: body =\n%s\nwarnings = %v", body, ws)
+	}
+	body, ws = shapeBody(t, "## Summary\n<!-- describe -->\n## Gate\n- [ ] Ready\n", notes, PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "- [x] Ready") || !strings.Contains(body, "Windows was not tested.") {
+		t.Errorf("placed section: body =\n%s", body)
+	}
+	if !strings.Contains(sectionOf(body, "Summary"), "### Checklist\n\nWindows was not tested.") {
+		t.Errorf("the text is not placed under the last section that is not a checklist:\n%s", body)
+	}
+	_, ws = shapeBody(t, "## Gate\n- [ ] Ready\n", notes, PRResult{})
+	if !hasWarning(ws, `"Checklist"`, true) {
+		t.Errorf("a checklist-only template: warnings = %v, want a blocking one naming Checklist", ws)
+	}
+}
+
+// Findings 3, 7 and 8: one inventory of items; a checkbox-shaped line in a code
+// fence is fixed text, a line in the preamble is an item, and an inline comment
+// does not change an item's identity.
+func TestTemplateItemInventory(t *testing.T) {
+	fenced := "## Summary\n<!-- describe -->\n\n## Example\n```md\n## Sample\n- [ ] Ready\n```\n"
+	body, ws := shapeBody(t, fenced, "## Checklist\n- [X] Ready\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "```md\n## Sample\n- [ ] Ready\n```") || !hasWarning(ws, "- [X] Ready", true) {
+		t.Errorf("fenced example: body =\n%s\nwarnings = %v", body, ws)
+	}
+	pre := "- [ ] License acknowledged\n\n## Summary\n<!-- describe -->\n"
+	body, ws = shapeBody(t, pre, "## Checklist\n- [X] License acknowledged\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.HasPrefix(body, "- [x] License acknowledged\n\n## Summary") || len(ws) != 0 {
+		t.Errorf("preamble item: body =\n%s\nwarnings = %v", body, ws)
+	}
+	inline := "## Summary\n<!-- describe -->\n## Checklist\n- [ ] A <!-- guide -->\n"
+	body, ws = shapeBody(t, inline, "## Checklist\n- [x] A\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if !strings.Contains(body, "- [x] A <!-- guide -->") || len(ws) != 0 {
+		t.Errorf("inline comment: body =\n%s\nwarnings = %v", body, ws)
+	}
+}
+
+// Finding 4: a template with fixed text and no open section keeps exactly its
+// own top-level headings; Buckley's sections are placed inside it.
+func TestFixedTextTemplateKeepsItsHeadings(t *testing.T) {
+	body, ws := shapeBody(t, "## Review\nRead the diff.\n- [ ] Tests ran\n", "", PRResult{Summary: "Change", Changes: StringList{"Update the guard"}})
+	if got := topLevelHeadings(body, 2); !reflect.DeepEqual(got, []string{"## Review"}) {
+		t.Errorf("headings = %q, body =\n%s", got, body)
+	}
+	if !strings.Contains(body, "### Summary\n\nChange") || !strings.Contains(body, "### Changes\n\n- Update the guard") || !strings.Contains(body, "Read the diff.") {
+		t.Errorf("body =\n%s", body)
+	}
+	_ = ws
+}
+
+// Finding 5 and the level limit: the headings inside a placed section move below
+// the template's headings; headings in code fences stay.
+func TestPlacedHeadingsStayBelowTheTemplate(t *testing.T) {
+	body, _ := shapeBody(t, "## Summary\n<!-- overview -->\n### Details\n<!-- testing evidence -->\n", "## Evidence\n### Measurements\nObserved output.\n```\n# keep\n```\n", PRResult{Sections: map[string]string{"summary": "Does it."}})
+	if got := topLevelHeadings(body, 3); !reflect.DeepEqual(got, []string{"### Details"}) {
+		t.Errorf("level-3 headings = %q, body =\n%s", got, body)
+	}
+	if !strings.Contains(body, "#### Evidence") || !strings.Contains(body, "##### Measurements") || !strings.Contains(body, "```\n# keep\n```") {
+		t.Errorf("body =\n%s", body)
+	}
+	deep, _ := shapeBody(t, "###### Details\n<!-- describe -->\n", "## Evidence\n### Measurements\nSeen.\n", PRResult{Sections: map[string]string{"details": "Does it."}})
+	if !strings.Contains(deep, "**Evidence**") || !strings.Contains(deep, "**Measurements**") || strings.Contains(deep, "####### ") {
+		t.Errorf("level 6 template: body =\n%s", deep)
+	}
+}
+
+// Finding 6: the author's own checkbox lines in a section with no checkboxes
+// and in a placed section are written as written; the model's are dropped with
+// one warning that counts them.
+func TestAuthorAndModelCheckboxLines(t *testing.T) {
+	body, ws := shapeBody(t, "## Summary\n<!-- describe -->\n## Gate\n- [ ] Existing\n", "## Summary\n- [x] Mine\n\n## Evidence\n- [x] Also mine\n", PRResult{})
+	if !strings.Contains(body, "- [x] Mine") || !strings.Contains(body, "- [x] Also mine") || len(ws) != 0 {
+		t.Errorf("author lists: body =\n%s\nwarnings = %v", body, ws)
+	}
+	body, ws = shapeBody(t, "## Summary\n<!-- describe -->\n## Gate\n- [ ] Existing\n", "", PRResult{Sections: map[string]string{"summary": "Does it.\n- [x] Existing\n- [ ] Extra"}})
+	if strings.Contains(body, "[x] Existing") || strings.Contains(body, "Extra") || !hasWarning(ws, "2 checkbox", false) {
+		t.Errorf("model lists: body =\n%s\nwarnings = %v", body, ws)
+	}
+}
+
+// Finding 9: the generated Not verified statement of a checklist-only template
+// warns, and does not block.
+func TestGeneratedNotVerifiedInAChecklistOnlyTemplateWarns(t *testing.T) {
+	_, ws := shapeBody(t, "## Checklist\n- [ ] Ready\n", "", PRResult{})
+	if !hasWarning(ws, "Not verified", false) {
+		t.Errorf("warnings = %v, want a non-blocking one naming Not verified", ws)
+	}
+}
+
+// The model's text reaches only the sections it was asked for: an open section
+// that an author section fills by kind gets nothing from the model.
+func TestModelTextOnlyFillsTheSectionsItWasAskedFor(t *testing.T) {
+	body, _ := shapeBody(t, "## Testing\n<!-- steps -->\n## Validation\n<!-- more -->\n", "## Testing\nRan it.\n", PRResult{Sections: map[string]string{"validation": "EXTRA"}})
+	if strings.Contains(body, "EXTRA") {
+		t.Errorf("model text for a section it was not asked for reached the body:\n%s", body)
 	}
 }

@@ -474,13 +474,18 @@ template is not read. `--template=false` keeps Buckley's own sections.
 The body keeps the template's shape:
 
 1. **Headings.** The headings at the template's level are exactly the
-   template's, in its order. Buckley adds nothing after the template as a new
-   top-level section. A Testing, Counters, Evidence, Not verified or Known gaps
-   section of the notes that no template section takes, the Not verified
-   statement, the breaking-change statement and the related issues are written
-   as subsections one level below the template's deepest heading, at the end of
-   one template section. The section is the first whose heading, guide comments
-   or checkbox text has a word that starts with a keyword of the kind
+   template's, in its order, whether the template has sections that ask for
+   text or only fixed text and checkboxes. Buckley adds nothing after the
+   template as a new top-level section. A Testing, Counters, Evidence, Not
+   verified or Known gaps section of the notes that no template section takes,
+   the Not verified statement, the breaking-change statement, the related
+   issues, and (for a template with no section that asks for text) Buckley's own
+   Summary, Changes, Testing and Review Focus are written as subsections one
+   level below the template's deepest heading, at the end of one template
+   section. A heading inside such a section moves down with it, so that none
+   reaches the template's level; headings in code fences stay. At heading level
+   6 the label is bold text. The section is the first whose heading, guide
+   comments or checkbox text has a word that starts with a keyword of the kind
    (case-insensitive):
 
    | Kind | Keywords |
@@ -492,31 +497,47 @@ The body keeps the template's shape:
    | Related issues | `issue`, `relat`, `link` |
 
    When no section has a keyword (or the kind has none), the block goes to the
-   end of the last template section that is not a pure checklist. When every
-   section is a pure checklist, the block follows Buckley's own sections as a
-   top-level section (the template stays last), `buckley pr` warns on stderr
-   and names the notes section, and `--strict` makes that an error.
-2. **Checkboxes.** Every checkbox line of the template is written word for
-   word, in the template's order. A box is ticked only when the notes contain a
-   ticked checkbox line with the same item text (white space collapsed, case
-   matters) in a section the template section takes, or in a notes section
-   headed `Checklist`. A checkbox line of the notes that matches no template
-   item is not written; stderr names it, and `--strict` makes that an error.
-   The author's other lines in the section follow the checklist. The model's
-   text never ticks, adds or removes a checkbox. In a template section without
-   checkboxes, the author's text is written as it is.
-3. **Fixed text.** The template's fixed text is written word for word. The guide
-   comments of a section that received text are left out; a section that
-   received nothing stays as the template has it.
+   end of the last template section that is not a pure checklist. Only when
+   every section is a pure checklist does the block follow Buckley's own
+   sections as a top-level section (the template stays last). Then
+   `buckley pr` warns on stderr and names the notes section, and `--strict`
+   makes that an error. The generated Not verified statement also warns in that
+   case, but `--strict` does not fail on it, because only the author can fix an
+   author section that has no place.
+2. **Checkboxes.** An item is a checkbox line of the template outside code
+   fences and HTML comments, in a section or before the first heading. Its
+   identity is its text without inline HTML comments, white space collapsed;
+   case matters. Every item is written word for word, in the template's order.
+   A box is ticked only when the notes contain a ticked line with the same item
+   text in a section the template section takes, or in a notes section headed
+   `Checklist`. A checkbox-shaped line in a fence or a comment is fixed text.
+   A checkbox line in a section the template section takes that matches no item
+   of that section is not written; stderr names it, and `--strict` makes that an
+   error. The author's other lines in the section follow the checklist.
+   A notes section headed `Checklist` counts only when a template is used (with
+   `--template=false` or no template it is an ordinary section). It only ticks;
+   its other text goes after the checklist of a template section with the same
+   heading, else it is placed like a section of no known kind, or, when the
+   template is only checklists, named in a warning (an error with `--strict`).
+   In a template section without checkboxes, and in a placed section, the
+   author's checkbox lines are the author's own list and are written as the
+   author wrote them. The model's checkbox lines are dropped everywhere, with one
+   warning that counts them: the model never ticks, adds or removes a checkbox.
+3. **Fixed text.** The template's fixed text is written word for word, except
+   that a blank line may be added or removed at the edge of a section and line
+   endings are normalized. The guide comments of a section that received text
+   are left out; a section that received nothing stays as the template has it.
 4. **Open sections.** A section that has only comments under its heading asks
    for text. A notes section whose heading equals the template heading fills it
    word for word (see [Author notes](#author-notes)); so does a section of the
    kind that the heading names. Otherwise the model writes one text for it,
    guided by the comments, and that text replaces them. A section the model
-   leaves empty stays as the template has it.
+   leaves empty stays as the template has it. Text the model writes for a
+   section that a notes section already fills is ignored.
 
-A template without a place for text (only checklists, or no headings) follows
-Buckley's own sections unchanged. `--template=false` ignores the template.
+A template in which every section is a pure checklist (or that has no headings)
+follows Buckley's own sections; the author's ticks still apply to it.
+`--template=false` ignores the template.
 
 #### Author notes
 

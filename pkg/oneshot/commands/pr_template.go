@@ -274,6 +274,13 @@ var kindKeywords = map[string][]string{
 	kindIssues:         {"issue", "relat", "link"},
 }
 
+// BodyWarning is something the author should know about the body. Blocking
+// warnings are errors under --strict.
+type BodyWarning struct {
+	Text     string
+	Blocking bool
+}
+
 // extraBlock is text that no template section takes: an author section of the
 // notes, or a statement that Buckley writes. The template's shape stays as it
 // is, so the block becomes a subsection of one template section.
@@ -285,14 +292,78 @@ type extraBlock struct {
 
 var checkboxItemRe = regexp.MustCompile(`^\s*[-*+]\s+\[([ xX])\]\s*(.*)$`)
 
-// checkboxItem reads a checkbox line: whether it is ticked and its item text
-// with white space collapsed. ok is false for any other line.
+// stripInlineComments removes the HTML comments of one line; a comment that
+// the line does not close removes the rest.
+func stripInlineComments(line string) string {
+	var out strings.Builder
+	rest := line
+	for {
+		start := strings.Index(rest, "<!--")
+		if start < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		out.WriteString(rest[:start])
+		end := strings.Index(rest[start+4:], "-->")
+		if end < 0 {
+			return out.String()
+		}
+		rest = rest[start+4+end+3:]
+	}
+}
+
+// checkboxItem reads a checkbox line: whether it is ticked and its item
+// identity: the text with inline HTML comments removed and white space
+// collapsed. The inventory of a template and the rendering use this one
+// identity. ok is false for any other line.
 func checkboxItem(line string) (ticked bool, item string, ok bool) {
-	m := checkboxItemRe.FindStringSubmatch(line)
+	m := checkboxItemRe.FindStringSubmatch(stripInlineComments(line))
 	if m == nil {
 		return false, "", false
 	}
 	return m[1] != " ", strings.Join(strings.Fields(m[2]), " "), true
+}
+
+// commentOpenAfter reports whether an HTML comment is still open after line.
+func commentOpenAfter(line string, open bool) bool {
+	rest := line
+	for rest != "" {
+		if open {
+			end := strings.Index(rest, "-->")
+			if end < 0 {
+				return true
+			}
+			rest, open = rest[end+3:], false
+			continue
+		}
+		start := strings.Index(rest, "<!--")
+		if start < 0 {
+			return false
+		}
+		rest, open = rest[start+4:], true
+	}
+	return open
+}
+
+// itemLines marks the lines of a template that are checkbox items: checkbox
+// lines outside code fences and outside HTML comments. A checkbox-shaped line
+// in a fence or a comment is fixed text.
+func itemLines(lines []string) []bool {
+	flags := make([]bool, len(lines))
+	var (
+		fence   fenceTracker
+		comment bool
+	)
+	for i, line := range lines {
+		if !comment && (fence.line(line) || fence.inFence()) {
+			continue
+		}
+		if !comment && checkboxRe.MatchString(line) {
+			flags[i] = true
+		}
+		comment = commentOpenAfter(line, comment)
+	}
+	return flags
 }
 
 // splitCheckboxes separates the checkbox lines of text (outside code fences)
@@ -356,12 +427,12 @@ func withoutComments(lines []string) []string {
 	return out
 }
 
-// checkboxes returns the checkbox lines of the section, as written.
+// checkboxes returns the checkbox item lines of the section, as written.
 func (s TemplateSection) checkboxes() []string {
 	var out []string
-	for _, line := range withoutComments(s.Lines) {
-		if checkboxRe.MatchString(line) {
-			out = append(out, line)
+	for i, on := range itemLines(s.Lines) {
+		if on {
+			out = append(out, s.Lines[i])
 		}
 	}
 	return out
@@ -370,12 +441,13 @@ func (s TemplateSection) checkboxes() []string {
 // pureChecklist reports a section whose lines, comments aside, are checkbox
 // lines only: it has no place for text.
 func (s TemplateSection) pureChecklist() bool {
+	lines := withoutComments(s.Lines)
 	boxes := 0
-	for _, line := range withoutComments(s.Lines) {
+	for i, on := range itemLines(lines) {
 		switch {
-		case checkboxRe.MatchString(line):
+		case on:
 			boxes++
-		case strings.TrimSpace(line) != "":
+		case strings.TrimSpace(lines[i]) != "":
 			return false
 		}
 	}
@@ -396,14 +468,60 @@ func (t *PRTemplate) placeable() bool {
 	return false
 }
 
-// subsectionLevel is the heading level of an added block: one below the
-// deepest heading of the template.
-func (t *PRTemplate) subsectionLevel() int {
+// deepestLevel is the level of the deepest heading of the template.
+func (t *PRTemplate) deepestLevel() int {
 	level := 1
 	for _, s := range t.Sections {
 		level = max(level, s.Level)
 	}
-	return min(level+1, 6)
+	return level
+}
+
+// demoteHeadings shifts the Markdown headings of text (outside code fences)
+// so that its highest heading has level top, keeping the relative nesting. A
+// heading that would pass level 6 becomes a bold line.
+func demoteHeadings(text string, top int) string {
+	lines := strings.Split(text, "\n")
+	var fence fenceTracker
+	highest := 7
+	for _, line := range lines {
+		if fence.line(line) || fence.inFence() {
+			continue
+		}
+		if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
+			highest = min(highest, len(m[1]))
+		}
+	}
+	if highest == 7 {
+		return text
+	}
+	fence = fenceTracker{}
+	for i, line := range lines {
+		if fence.line(line) || fence.inFence() {
+			continue
+		}
+		if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
+			level := len(m[1]) + top - highest
+			if level > 6 {
+				lines[i] = "**" + strings.TrimSpace(m[2]) + "**"
+			} else {
+				lines[i] = strings.Repeat("#", level) + " " + strings.TrimSpace(m[2])
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderBlock writes a block as a subsection one level below the deepest
+// heading of the template. At level 6 the label is bold text, because a
+// Markdown heading cannot go deeper; headings inside the block move below it.
+func (t *PRTemplate) renderBlock(block extraBlock) string {
+	level := t.deepestLevel() + 1
+	body := demoteHeadings(strings.Trim(block.Body, "\n"), level+1)
+	if level > 6 {
+		return "**" + block.Heading + "**\n\n" + body
+	}
+	return strings.Repeat("#", level) + " " + block.Heading + "\n\n" + body
 }
 
 // hasWordPrefix reports whether text has a word that starts with the keyword
@@ -434,21 +552,48 @@ func (t *PRTemplate) placeFor(kind string) int {
 	return -1
 }
 
+// templateResult is what templateBody returns.
+type templateResult struct {
+	Body       string
+	Left       []AuthorSection // author sections that nothing placed (see templateBody)
+	Warnings   []BodyWarning
+	ModelBoxes int // checkbox lines of the model's text that were dropped
+}
+
+// tickLines ticks the unticked item lines whose identity is in ticks. The
+// other lines stay as they are.
+func tickLines(lines []string, ticks map[string]bool) []string {
+	out := make([]string, len(lines))
+	copy(out, lines)
+	for i, on := range itemLines(lines) {
+		if !on {
+			continue
+		}
+		if ticked, item, ok := checkboxItem(lines[i]); ok && !ticked && ticks[item] {
+			out[i] = strings.Replace(lines[i], "[ ]", "[x]", 1)
+		}
+	}
+	return out
+}
+
 // templateBody renders the body in the template's shape. The template's
 // headings stay as they are, in order. Its checkbox lines and fixed text are
 // written word for word; a box is ticked only when the notes tick the same
 // item (in a section the template section takes, or in a section headed
-// Checklist). The guide comments of a section that received text are left
-// out. A block that no template section takes (see extras) becomes a
-// subsection at the end of the section chosen by placeFor.
+// Checklist, which only ticks). The guide comments of a section that received
+// text are left out. A block that no template section takes (see extras)
+// becomes a subsection at the end of the section chosen by placeFor, with its
+// own headings moved below the template's.
 //
 // When extras is nil, or the template is only checklists, the author sections
-// that no template section took are returned for the caller to place. The
-// warnings name checkbox lines of the notes that match no template item.
-func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerified string, extras func(leftover []AuthorSection) []extraBlock) (body string, rest []AuthorSection, warnings []string) {
+// that no template section took are returned in Left for the caller to place.
+// The warnings name checkbox lines of the notes that match no template item
+// and Checklist text that has no place.
+func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerified string, extras func(leftover []AuthorSection) []extraBlock) templateResult {
+	var res templateResult
 	var b strings.Builder
-	if t.Preamble != "" {
-		b.WriteString(t.Preamble + "\n\n")
+	warn := func(blocking bool, format string, args ...any) {
+		res.Warnings = append(res.Warnings, BodyWarning{Text: fmt.Sprintf(format, args...), Blocking: blocking})
 	}
 	taken := make([]bool, len(author))
 	supplied := make([][]AuthorSection, len(t.Sections))
@@ -461,63 +606,90 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		}
 	}
 
-	// Every item of the template, and the items the notes tick in a Checklist
-	// section.
+	// One inventory of the template's items: the preamble and every section.
+	// The rendering below reads the same identities.
 	allItems := map[string]bool{}
-	for _, s := range t.Sections {
-		for _, line := range s.checkboxes() {
-			if _, item, ok := checkboxItem(line); ok {
-				allItems[item] = true
+	addItems := func(lines []string) {
+		for i, on := range itemLines(lines) {
+			if on {
+				if _, item, ok := checkboxItem(lines[i]); ok {
+					allItems[item] = true
+				}
 			}
 		}
 	}
+	var preamble []string
+	if t.Preamble != "" {
+		preamble = strings.Split(t.Preamble, "\n")
+		addItems(preamble)
+	}
+	for _, s := range t.Sections {
+		addItems(s.Lines)
+	}
+
+	// A Checklist section of the notes only ticks. Its other text is placed
+	// like a section of no known kind, or named in a warning.
 	checklistTicks := map[string]bool{}
-	for _, a := range author {
+	var checklistBlocks []extraBlock
+	for j, a := range author {
 		if a.Kind != SectionChecklist {
 			continue
 		}
-		_, boxes := splitCheckboxes(a.Body)
+		others, boxes := splitCheckboxes(a.Body)
 		for _, line := range boxes {
 			ticked, item, _ := checkboxItem(line)
 			if !allItems[item] {
-				warnings = append(warnings, fmt.Sprintf("the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(line), a.Heading))
+				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(line), a.Heading)
 			} else if ticked {
 				checklistTicks[item] = true
 			}
 		}
+		if !taken[j] && strings.TrimSpace(others) != "" {
+			checklistBlocks = append(checklistBlocks, extraBlock{Heading: a.Heading, Body: others})
+		}
 	}
 
-	var leftover []AuthorSection
 	for j, a := range author {
 		if !taken[j] && a.Kind != SectionChecklist {
-			leftover = append(leftover, a)
+			res.Left = append(res.Left, a)
 		}
 	}
 	var blocks [][]extraBlock
 	if extras != nil && t.placeable() {
 		blocks = make([][]extraBlock, len(t.Sections))
-		for _, block := range extras(leftover) {
+		all := append(extras(res.Left), checklistBlocks...)
+		for _, block := range all {
 			if i := t.placeFor(block.Kind); i >= 0 {
 				blocks[i] = append(blocks[i], block)
 			}
 		}
-		leftover = nil
+		res.Left = nil
+	} else {
+		for _, block := range checklistBlocks {
+			warn(true, "the template has only checklists, so the text of the notes section %q has no place and is not written", block.Heading)
+		}
 	}
 
+	// The model writes only the open sections that no author section fills.
+	modelKeys := map[string]bool{}
+	for _, s := range t.modelSections(author) {
+		modelKeys[s.Key] = true
+	}
+
+	if t.Preamble != "" {
+		b.WriteString(strings.Join(tickLines(preamble, checklistTicks), "\n") + "\n\n")
+	}
 	for i, s := range t.Sections {
 		b.WriteString(s.HeadingLine + "\n")
-		own := s.checkboxes()
+		own := itemIdentities(s.Lines)
 		ticks := map[string]bool{}
-		items := map[string]bool{}
-		for _, line := range own {
-			if _, item, ok := checkboxItem(line); ok {
-				items[item] = true
-			}
-		}
 		var parts []string
 		for _, a := range supplied[i] {
 			text := a.Body
-			if len(own) > 0 && a.Kind != SectionChecklist {
+			switch {
+			case a.Kind == SectionChecklist:
+				text, _ = splitCheckboxes(a.Body) // its boxes were read above
+			case len(own) > 0:
 				// The template's checklist stands as the template wrote it. The
 				// author's boxes only tick; the author's other lines follow.
 				var boxes []string
@@ -525,23 +697,26 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 				for _, line := range boxes {
 					ticked, item, _ := checkboxItem(line)
 					switch {
-					case !items[item]:
-						warnings = append(warnings, fmt.Sprintf("the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(line), a.Heading, s.Heading))
+					case !own[item]:
+						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(line), a.Heading, s.Heading)
 					case ticked:
 						ticks[item] = true
 					}
 				}
-			} else if a.Kind == SectionChecklist {
-				text = ""
 			}
 			if strings.TrimSpace(text) != "" {
 				parts = append(parts, text)
 			}
 		}
 		text := strings.Join(parts, "\n\n")
-		if text == "" && s.Open && len(supplied[i]) == 0 {
+		if text == "" && s.Open && len(supplied[i]) == 0 && modelKeys[s.Key] {
 			model := commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
-			text, _ = splitCheckboxes(model) // the model never adds a checkbox
+			var dropped []string
+			text, dropped = splitCheckboxes(model) // the model never adds a checkbox
+			res.ModelBoxes += len(dropped)
+		}
+		if text != "" {
+			text = demoteHeadings(text, s.Level+1)
 		}
 		if notVerified != "" && sectionKind(s.Heading) == SectionNotVerified && len(supplied[i]) == 0 {
 			// The template's own slot for what was not verified, and no author
@@ -555,11 +730,11 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 			}
 		}
 
-		received := strings.TrimSpace(text) != "" || len(blocks) > 0 && len(blocks[i]) > 0
 		var here []extraBlock
 		if len(blocks) > 0 {
 			here = blocks[i]
 		}
+		received := strings.TrimSpace(text) != "" || len(here) > 0
 		lines := s.Lines
 		if received {
 			lines = withoutComments(lines)
@@ -567,13 +742,14 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		if s.Open && received {
 			lines = nil // an open section holds only comments: the text takes their place
 		}
-		var section []string
-		for _, line := range lines {
-			if ticked, item, ok := checkboxItem(line); ok && !ticked && (ticks[item] || checklistTicks[item]) {
-				line = strings.Replace(line, "[ ]", "[x]", 1)
-			}
-			section = append(section, line)
+		allTicks := map[string]bool{}
+		for item := range checklistTicks {
+			allTicks[item] = true
 		}
+		for item := range ticks {
+			allTicks[item] = true
+		}
+		section := tickLines(lines, allTicks)
 		if !received {
 			// Nothing to add: the section is the template's, with the ticks.
 			b.WriteString(strings.Join(section, "\n") + "\n")
@@ -584,12 +760,26 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 			out += "\n\n" + text
 		}
 		for _, block := range here {
-			out += "\n\n" + strings.Repeat("#", t.subsectionLevel()) + " " + block.Heading + "\n\n" + strings.Trim(block.Body, "\n")
+			out += "\n\n" + t.renderBlock(block)
 		}
 		if s.Open {
 			out = "\n" + strings.TrimLeft(out, "\n")
 		}
 		b.WriteString(out + "\n\n")
 	}
-	return strings.TrimSpace(b.String()), leftover, warnings
+	res.Body = strings.TrimSpace(b.String())
+	return res
+}
+
+// itemIdentities returns the identities of the item lines of a section.
+func itemIdentities(lines []string) map[string]bool {
+	out := map[string]bool{}
+	for i, on := range itemLines(lines) {
+		if on {
+			if _, item, ok := checkboxItem(lines[i]); ok {
+				out[item] = true
+			}
+		}
+	}
+	return out
 }

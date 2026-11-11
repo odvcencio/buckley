@@ -93,6 +93,24 @@ const headingKindPrefix = "heading:"
 // kind, the body keeps all of them, in the order of the notes and then of the
 // file. A later note never replaces an earlier one.
 func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
+	return authorSections(notes, headings, false)
+}
+
+// TemplateAuthorSections is AuthorSections for a run that uses the pull
+// request template t. Only here does a notes section headed "Checklist" tick
+// the template's checkboxes (see SectionChecklist); without a template it is
+// an ordinary section, as it was before.
+func TemplateAuthorSections(notes []PRNote, t *PRTemplate) []AuthorSection {
+	var headings []string
+	if t != nil {
+		for _, s := range t.Sections {
+			headings = append(headings, s.Heading)
+		}
+	}
+	return authorSections(notes, headings, t != nil)
+}
+
+func authorSections(notes []PRNote, headings []string, checklist bool) []AuthorSection {
 	var sections []AuthorSection
 	template := map[string]bool{}
 	for _, heading := range headings {
@@ -105,7 +123,7 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 	for _, note := range notes {
 		found := map[string][]AuthorSection{}
 		var foundKinds []string
-		for _, s := range noteSections(note, template) {
+		for _, s := range noteSections(note, template, checklist) {
 			if len(found[s.Kind]) == 0 {
 				foundKinds = append(foundKinds, s.Kind)
 			}
@@ -131,7 +149,7 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 
 // noteSections splits one note into its carried sections, in file order.
 // template holds the heading keys of the pull request template.
-func noteSections(note PRNote, template map[string]bool) []AuthorSection {
+func noteSections(note PRNote, template map[string]bool, checklist bool) []AuthorSection {
 	kindOf := func(heading string) string {
 		// The five carried kinds come first, so that "Testing" and "Test plan"
 		// keep one kind and the order of the notes. A template heading that
@@ -139,7 +157,7 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		if kind := sectionKind(heading); kind != "" {
 			return kind
 		}
-		if headingKey(heading) == "checklist" {
+		if checklist && headingKey(heading) == "checklist" {
 			return SectionChecklist
 		}
 		if key := headingKey(heading); template[key] {

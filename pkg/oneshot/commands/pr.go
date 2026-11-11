@@ -171,24 +171,37 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 // shape: its headings, in order, and nothing added after them. A section that
 // no template section takes is written one level below the template's headings,
 // at the end of the section that placeFor chooses.
-func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []string) {
+func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) {
 	var b strings.Builder
-	var warnings []string
+	var warnings []BodyWarning
+	modelBoxes := 0
+	// With a template the model never adds a checkbox: its checkbox lines are
+	// dropped and counted.
+	modelText := func(text string) string {
+		if opts.Template == nil {
+			return text
+		}
+		kept, dropped := splitCheckboxes(text)
+		modelBoxes += len(dropped)
+		return kept
+	}
 	section := func(heading, text string) {
 		if text = strings.Trim(text, "\n"); strings.TrimSpace(text) != "" {
 			b.WriteString("## " + heading + "\n\n" + text + "\n\n")
 		}
 	}
 	bullets := func(items []string) string {
-		return prBullets(items, func(s string) string {
+		return modelText(prBullets(items, func(s string) string {
 			return commitmsg.NeutralizeCloseDirectives(trimBulletMarker(s))
-		})
+		}))
 	}
 	// The template takes the author sections that belong under its headings.
-	// What it does not take is placed inside it (shaped), or carried below, by
+	// What it does not take is placed inside it (shaped: some section is not a
+	// pure checklist, with or without a place for text), or carried below, by
 	// kind, when the template is only checklists.
 	author, templateText := opts.Sections, ""
 	shaped := opts.Template.placeable()
+	open := opts.Template.hasOpenSection()
 	if opts.Template != nil {
 		fallback := ""
 		if opts.StateNotVerified && !hasSection(opts.Sections, SectionNotVerified) {
@@ -198,38 +211,52 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []string) {
 		if shaped {
 			extras = func(left []AuthorSection) []extraBlock {
 				var blocks []extraBlock
-				add := func(kind string) {
+				if !open {
+					// The template has fixed text but no place for the model's text:
+					// Buckley's own sections go inside it too.
+					add := func(kind, heading, text string) {
+						if strings.TrimSpace(text) != "" {
+							blocks = append(blocks, extraBlock{Kind: kind, Heading: heading, Body: text})
+						}
+					}
+					add("summary", "Summary", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary))))
+					add("changes", "Changes", bullets(pr.Changes))
+					if !hasSection(opts.Sections, SectionTesting) {
+						add(SectionTesting, "Testing", bullets(pr.Testing))
+					}
+					add("review_focus", "Review Focus", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint))))
+				}
+				carried := func(kind string) {
 					for _, s := range left {
 						if s.Kind == kind {
 							blocks = append(blocks, extraBlock{Kind: kind, Heading: s.Heading, Body: s.Body})
 						}
 					}
 				}
-				add(SectionTesting)
-				add(SectionCounters)
-				add(SectionEvidence)
+				carried(SectionTesting)
+				carried(SectionCounters)
+				carried(SectionEvidence)
 				if pr.Breaking {
 					blocks = append(blocks, extraBlock{Kind: kindBreaking, Heading: "Breaking Changes", Body: "This PR contains breaking changes. Please review carefully."})
 				}
-				add(SectionNotVerified)
+				carried(SectionNotVerified)
 				if !hasSection(opts.Sections, SectionNotVerified) && !opts.Template.hasKind(SectionNotVerified) && opts.StateNotVerified {
 					blocks = append(blocks, extraBlock{Kind: SectionNotVerified, Heading: "Not verified", Body: fallback})
 				}
-				add(SectionKnownGaps)
+				carried(SectionKnownGaps)
 				if text := prBullets(pr.Issues, commitmsg.IssueRefLine); strings.TrimSpace(text) != "" {
 					blocks = append(blocks, extraBlock{Kind: kindIssues, Heading: "Related Issues", Body: text})
 				}
 				return blocks
 			}
 		}
-		var w []string
-		templateText, author, w = pr.templateBody(opts.Template, author, fallback, extras)
-		warnings = append(warnings, w...)
+		res := pr.templateBody(opts.Template, author, fallback, extras)
+		templateText, author = res.Body, res.Left
+		warnings = append(warnings, res.Warnings...)
+		modelBoxes += res.ModelBoxes
 		if !shaped {
 			for _, s := range author {
-				if s.Kind != SectionChecklist {
-					warnings = append(warnings, fmt.Sprintf("the template has only checklists, so the notes section %q is written outside the template", s.Heading))
-				}
+				warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the template has only checklists, so the notes section %q is written outside the template", s.Heading), Blocking: true})
 			}
 		}
 	}
@@ -241,23 +268,18 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []string) {
 		}
 	}
 
-	open := opts.Template.hasOpenSection()
 	switch {
-	case open:
+	case shaped:
+		// The template is the whole body: its top-level headings and nothing else.
 		b.WriteString(templateText + "\n\n")
 	default:
-		section("Summary", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary)))
+		section("Summary", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary))))
 		section("Changes", bullets(pr.Changes))
 	}
-	if shaped {
-		// The template carries the author's sections itself.
-		if !open && !hasSection(opts.Sections, SectionTesting) {
-			section("Testing", bullets(pr.Testing))
-		}
-	} else {
+	if !shaped {
 		if hasSection(opts.Sections, SectionTesting) {
 			carry(SectionTesting)
-		} else if !open {
+		} else {
 			section("Testing", bullets(pr.Testing))
 		}
 		carry(SectionCounters)
@@ -272,17 +294,21 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []string) {
 			// The template has its own place for this, filled or left as it is.
 		case opts.StateNotVerified:
 			section("Not verified", notVerifiedFallback(opts.HasNotes))
+			if opts.Template != nil {
+				// Not blocking: only an author section that cannot be placed fails --strict.
+				warnings = append(warnings, BodyWarning{Text: "the template has only checklists, so the generated Not verified statement is written outside the template"})
+			}
 		}
 		carry(SectionKnownGaps)
 		section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
-	}
-	if !open {
-		section("Review Focus", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint)))
+		section("Review Focus", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint))))
 		if templateText != "" {
 			b.WriteString(templateText + "\n\n")
 		}
 	}
-
+	if modelBoxes > 0 {
+		warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model wrote %d checkbox line(s); they were dropped, because only the template's checklist and the author's notes can add or tick a box", modelBoxes)})
+	}
 	return strings.TrimSpace(b.String()), warnings
 }
 
