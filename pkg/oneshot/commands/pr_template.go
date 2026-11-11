@@ -148,11 +148,11 @@ func headingKey(heading string) string {
 // section: the headings are the same, or the template heading names the
 // section's kind ("Testing" takes an author's "Test plan").
 func (s TemplateSection) takes(a AuthorSection) bool {
-	if headingKey(s.Heading) == headingKey(a.Heading) {
+	if headingKey(s.Heading) == headingKey(a.Heading()) {
 		return true
 	}
 	kind := sectionKind(s.Heading)
-	return kind != "" && kind == a.Kind
+	return kind != "" && kind == a.Kind()
 }
 
 // modelSections returns the open sections that no author section fills. The
@@ -632,25 +632,25 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	checklistTicks := map[string]bool{}
 	var checklistBlocks []extraBlock
 	for j, a := range author {
-		if a.Kind != SectionChecklist {
+		if a.Kind() != SectionChecklist {
 			continue
 		}
-		others, boxes := splitCheckboxes(a.Body)
+		others, boxes := splitCheckboxes(a.Body())
 		for _, line := range boxes {
 			ticked, item, _ := checkboxItem(line)
 			if !allItems[item] {
-				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(line), a.Heading)
+				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(line), a.Heading())
 			} else if ticked {
 				checklistTicks[item] = true
 			}
 		}
 		if !taken[j] && strings.TrimSpace(others) != "" {
-			checklistBlocks = append(checklistBlocks, extraBlock{Heading: a.Heading, Body: others})
+			checklistBlocks = append(checklistBlocks, extraBlock{Heading: a.Heading(), Body: others})
 		}
 	}
 
 	for j, a := range author {
-		if !taken[j] && a.Kind != SectionChecklist {
+		if !taken[j] && a.Kind() != SectionChecklist {
 			res.Left = append(res.Left, a)
 		}
 	}
@@ -685,20 +685,20 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		ticks := map[string]bool{}
 		var parts []string
 		for _, a := range supplied[i] {
-			text := a.Body
+			text := a.Body()
 			switch {
-			case a.Kind == SectionChecklist:
-				text, _ = splitCheckboxes(a.Body) // its boxes were read above
+			case a.Kind() == SectionChecklist:
+				text, _ = splitCheckboxes(a.Body()) // its boxes were read above
 			case len(own) > 0:
 				// The template's checklist stands as the template wrote it. The
 				// author's boxes only tick; the author's other lines follow.
 				var boxes []string
-				text, boxes = splitCheckboxes(a.Body)
+				text, boxes = splitCheckboxes(a.Body())
 				for _, line := range boxes {
 					ticked, item, _ := checkboxItem(line)
 					switch {
 					case !own[item]:
-						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(line), a.Heading, s.Heading)
+						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(line), a.Heading(), s.Heading)
 					case ticked:
 						ticks[item] = true
 					}

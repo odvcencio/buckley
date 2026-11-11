@@ -197,10 +197,10 @@ func TestTemplateShape_PlacementRule(t *testing.T) {
 	tmpl := ParsePRTemplate("## Summary\n\n<!-- what -->\n\n## Gate\n\n- [ ] Run the benchmark suite\n\n## Notes\n\nFixed words.\n\n## Boxes\n\n- [ ] one\n")
 	pr := PRResult{Action: "fix", Title: "x", Breaking: true, Sections: map[string]string{"summary": "Does it."}}
 	body := pr.Body(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
-		{Kind: SectionCounters, Heading: "Counters", Body: "work 10 -> 10"},
-		{Kind: SectionTesting, Heading: "Testing", Body: "ran it"},
-		{Kind: SectionNotVerified, Heading: "Not verified", Body: "Windows"},
-		{Kind: SectionKnownGaps, Heading: "Known gaps", Body: "none known"},
+		{kind: SectionCounters, heading: "Counters", body: "work 10 -> 10"},
+		{kind: SectionTesting, heading: "Testing", body: "ran it"},
+		{kind: SectionNotVerified, heading: "Not verified", body: "Windows"},
+		{kind: SectionKnownGaps, heading: "Known gaps", body: "none known"},
 	}})
 	if got, want := topLevelHeadings(body, 2), templateHeadingLines(tmpl); !reflect.DeepEqual(got, want) {
 		t.Errorf("top-level headings = %q, want the template's %q", got, want)
