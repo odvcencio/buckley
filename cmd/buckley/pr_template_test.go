@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func TestRunPRCommand_WritesTheBodyInTheRepositoryTemplate(t *testing.T) {
 		"## Correctness\n\n" +
 		"- [ ] Focused package or unit tests ran for the touched behavior\n" +
 		"- [ ] Documented anything intentionally left unvalidated in this PR\n\n" +
-		"## Not verified\n\nThe author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
+		"### Not verified\n\nThe author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
 	if body != want {
 		t.Fatalf("the body gh received =\n%s\n\nwant\n%s", body, want)
 	}
@@ -187,4 +188,107 @@ func TestLoadPRTemplate(t *testing.T) {
 			t.Fatalf("template = %+v, want nil: PR evidence comes from commits", tmpl)
 		}
 	})
+}
+
+// shapeRun commits the template, writes the notes and runs buckley pr with
+// the extra flags. It returns what the command printed, the body that gh
+// received (empty when no pull request was created) and the error.
+func shapeRun(t *testing.T, template, notes string, flags ...string) (stdout, stderr, body string, err error) {
+	t.Helper()
+	r := newPRRepo(t)
+	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", template)
+	runGitIn(t, r.work, "push", "-q", "origin", "main")
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubGh(t)
+	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	stubPRModelRecordingTool(t, `{"action":"add","title":"feature file","section_what_does_this_pr_do":"Adds the feature file.","section_why_this_approach":"Readers dominate.","summary":"Adds the feature file.","changes":["Add f.txt"]}`)
+	dir := t.TempDir()
+	writeFile(t, dir, "notes.md", notes)
+	args := append([]string{"--yes", "--cost=false", "--head", "feature", "--context-file", filepath.Join(dir, "notes.md")}, flags...)
+	stderr = captureStderr(t, func() {
+		stdout = captureStdout(t, func() { err = runPRCommand(args) })
+	})
+	for _, call := range g.calls(t) {
+		if strings.Join(call[:2], " ") == "pr create" {
+			body = ghBodyArg(t, g, "pr create")
+		}
+	}
+	return stdout, stderr, body, err
+}
+
+func readShapeFixture(t *testing.T, name string) string {
+	t.Helper()
+	// Other tests change the working directory, so find the file from this one.
+	_, here, _, _ := runtime.Caller(0)
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "pkg", "oneshot", "commands", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// A checkbox line of the notes that is no item of the template is not
+// written; stderr names it, and --strict refuses (template shape, B2).
+func TestRunPRCommand_TemplateShapeWarnsOnAnUnmatchedCheckbox(t *testing.T) {
+	template, notes := readShapeFixture(t, "pr_template_shape.md"), readShapeFixture(t, "pr_notes_shape.md")
+
+	_, stderr, body, err := shapeRun(t, template, notes)
+	if err != nil {
+		t.Fatalf("runPRCommand: %v", err)
+	}
+	if !strings.Contains(stderr, "- [x] Added a changelog entry") || !strings.Contains(stderr, "matches no item of the template") {
+		t.Errorf("stderr does not name the unmatched checkbox line: %q", stderr)
+	}
+	if strings.Contains(body, "Added a changelog entry") || !strings.Contains(body, "## Due diligence") || strings.Contains(body, "\n## Testing\n") {
+		t.Errorf("the body does not keep the template's shape:\n%s", body)
+	}
+
+	_, stderr, body, err = shapeRun(t, template, notes, "--strict")
+	if err == nil || !strings.Contains(err.Error(), "--strict") || body != "" || !strings.Contains(stderr, "matches no item of the template") {
+		t.Errorf("--strict: error = %v, body = %q, stderr = %q; want a refusal before gh", err, body, stderr)
+	}
+}
+
+// A template of checklists only has no place for the author's Testing
+// section: it follows the template as before, stderr names the section, and
+// --strict refuses (template shape, B1c).
+func TestRunPRCommand_TemplateShapeChecklistOnly(t *testing.T) {
+	template := "## Checklist\n\n- [ ] Tests ran\n- [ ] Docs updated\n"
+	notes := "## Testing\n\n- `go test ./cache` passed\n"
+
+	_, stderr, body, err := shapeRun(t, template, notes)
+	if err != nil {
+		t.Fatalf("runPRCommand: %v", err)
+	}
+	if !strings.Contains(stderr, `"Testing"`) || !strings.Contains(stderr, "only checklists") {
+		t.Errorf("stderr does not name the section: %q", stderr)
+	}
+	if !strings.Contains(body, "## Testing\n\n- `go test ./cache` passed") || !strings.Contains(body, "## Checklist\n\n- [ ] Tests ran") {
+		t.Errorf("the body lost the section or the template:\n%s", body)
+	}
+
+	_, stderr, body, err = shapeRun(t, template, notes, "--strict")
+	if err == nil || !strings.Contains(err.Error(), "--strict") || body != "" {
+		t.Errorf("--strict: error = %v, body = %q, stderr = %q; want a refusal before gh", err, body, stderr)
+	}
+}
+
+// --template=false ignores the template: Buckley's own sections, the notes'
+// sections as top-level sections, no warning about checkboxes.
+func TestRunPRCommand_TemplateShapeFalseIsUnchanged(t *testing.T) {
+	template, notes := readShapeFixture(t, "pr_template_shape.md"), readShapeFixture(t, "pr_notes_shape.md")
+	_, stderr, body, err := shapeRun(t, template, notes, "--template=false", "--strict")
+	if err != nil {
+		t.Fatalf("runPRCommand: %v\n%s", err, stderr)
+	}
+	for _, want := range []string{"## Summary\n\nAdds the feature file.", "## Testing\n\n- `go test ./cache -run TestSplitCacheReaders -count=1` passed", "## Counters\n", "## Not verified\n\n- Windows was not tried."} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Due diligence") || strings.Contains(stderr, "matches no item") {
+		t.Errorf("the template was used although --template=false:\n%s\n%s", body, stderr)
+	}
 }

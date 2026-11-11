@@ -471,21 +471,52 @@ reads `.github/PULL_REQUEST_TEMPLATE.md`, `PULL_REQUEST_TEMPLATE.md` or
 GitHub reads it, and from the head branch when the base has none. An uncommitted
 template is not read. `--template=false` keeps Buckley's own sections.
 
-- The template's headings, checkboxes, comments and fixed text are written as
-  they are. Buckley does not tick a checkbox: only the author can say that a
-  check ran.
-- A section that has only comments under its heading asks for text. The model
-  writes one text for each such section, guided by the comments, and that text
-  replaces them. A section the model leaves empty stays as the template has it.
-- A section of a notes file whose heading equals a template heading fills that
-  section word for word (see [Author notes](#author-notes)). So does a Testing,
-  Counters, Evidence, Not verified or Known gaps section when a template heading
-  names that kind. Under a checklist, the author's text goes below the
-  checkboxes, unless the author restated the checklist.
-- Author sections that no template heading takes, the Not verified statement,
-  breaking changes and related issues follow the template.
-- A template without a place for text (only checklists, or no headings) follows
-  Buckley's own sections unchanged.
+The body keeps the template's shape:
+
+1. **Headings.** The headings at the template's level are exactly the
+   template's, in its order. Buckley adds nothing after the template as a new
+   top-level section. A Testing, Counters, Evidence, Not verified or Known gaps
+   section of the notes that no template section takes, the Not verified
+   statement, the breaking-change statement and the related issues are written
+   as subsections one level below the template's deepest heading, at the end of
+   one template section. The section is the first whose heading, guide comments
+   or checkbox text has a word that starts with a keyword of the kind
+   (case-insensitive):
+
+   | Kind | Keywords |
+   |------|----------|
+   | Testing, Evidence | `test`, `validat`, `verif`, `correct` |
+   | Counters | `counter`, `perf`, `benchmark` |
+   | Not verified, Known gaps | `unvalidated`, `not verified`, `unverified`, `unsure`, `risk`, `limit`, `gap` |
+   | Breaking changes | `break`, `compat` |
+   | Related issues | `issue`, `relat`, `link` |
+
+   When no section has a keyword (or the kind has none), the block goes to the
+   end of the last template section that is not a pure checklist. When every
+   section is a pure checklist, the block follows Buckley's own sections as a
+   top-level section (the template stays last), `buckley pr` warns on stderr
+   and names the notes section, and `--strict` makes that an error.
+2. **Checkboxes.** Every checkbox line of the template is written word for
+   word, in the template's order. A box is ticked only when the notes contain a
+   ticked checkbox line with the same item text (white space collapsed, case
+   matters) in a section the template section takes, or in a notes section
+   headed `Checklist`. A checkbox line of the notes that matches no template
+   item is not written; stderr names it, and `--strict` makes that an error.
+   The author's other lines in the section follow the checklist. The model's
+   text never ticks, adds or removes a checkbox. In a template section without
+   checkboxes, the author's text is written as it is.
+3. **Fixed text.** The template's fixed text is written word for word. The guide
+   comments of a section that received text are left out; a section that
+   received nothing stays as the template has it.
+4. **Open sections.** A section that has only comments under its heading asks
+   for text. A notes section whose heading equals the template heading fills it
+   word for word (see [Author notes](#author-notes)); so does a section of the
+   kind that the heading names. Otherwise the model writes one text for it,
+   guided by the comments, and that text replaces them. A section the model
+   leaves empty stays as the template has it.
+
+A template without a place for text (only checklists, or no headings) follows
+Buckley's own sections unchanged. `--template=false` ignores the template.
 
 #### Author notes
 

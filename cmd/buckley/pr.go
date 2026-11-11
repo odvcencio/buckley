@@ -614,12 +614,20 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 	}
 	claims := checkPRAgainstSources(result.PR, commands.NewPRSources(notes, result.Context))
 	applyPRBreakingPolicy(result.PR, result.Context, opts.breaking)
-	text := prText{Title: opts.title, Body: result.PR.Body(commands.PRBodyOptions{
+	body, shapeWarnings := result.PR.BodyWithWarnings(commands.PRBodyOptions{
 		Sections:         sections,
 		StateNotVerified: true,
 		HasNotes:         len(notes) > 0,
 		Template:         template,
-	})}
+	})
+	// A checkbox line of the notes that the template does not have, and a
+	// section with no place in a checklist-only template, are the author's to
+	// fix: --strict stops on them like on a claim without a source.
+	for _, warning := range shapeWarnings {
+		prWarnf("%s", warning)
+	}
+	claims += len(shapeWarnings)
+	text := prText{Title: opts.title, Body: body}
 	if text.Title == "" {
 		text.Title = result.PR.Header()
 	}

@@ -43,6 +43,10 @@ const (
 	SectionEvidence    = "evidence"
 	SectionNotVerified = "not_verified"
 	SectionKnownGaps   = "known_gaps"
+	// SectionChecklist is a notes section headed "Checklist". The body never
+	// carries it; its ticked checkbox lines tick the same items of the
+	// pull request template.
+	SectionChecklist = "checklist"
 )
 
 // sectionOrder is the order in which carried sections appear in the body.
@@ -114,7 +118,7 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 			sections = append(sections, byKind[kind]...)
 		}
 	}
-	return sections
+	return append(sections, byKind[SectionChecklist]...)
 }
 
 // noteSections splits one note into its carried sections, in file order.
@@ -126,6 +130,9 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		// names none of them is the fallback.
 		if kind := sectionKind(heading); kind != "" {
 			return kind
+		}
+		if headingKey(heading) == "checklist" {
+			return SectionChecklist
 		}
 		if key := headingKey(heading); template[key] {
 			return headingKindPrefix + key

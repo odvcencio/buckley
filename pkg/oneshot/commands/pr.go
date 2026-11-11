@@ -159,21 +159,79 @@ type PRBodyOptions struct {
 // and a section without content are left out: no filler headings and no empty
 // "- " lines. Author sections are written exactly as the author wrote them.
 func (pr PRResult) Body(opts PRBodyOptions) string {
+	body, _ := pr.BodyWithWarnings(opts)
+	return body
+}
+
+// BodyWithWarnings is Body and the warnings for the author: a checkbox line of
+// the notes that matches no item of the template, and an author section that
+// has no place because the template is only checklists.
+//
+// With a template that has a place for text, the body keeps the template's
+// shape: its headings, in order, and nothing added after them. A section that
+// no template section takes is written one level below the template's headings,
+// at the end of the section that placeFor chooses.
+func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []string) {
 	var b strings.Builder
+	var warnings []string
 	section := func(heading, text string) {
 		if text = strings.Trim(text, "\n"); strings.TrimSpace(text) != "" {
 			b.WriteString("## " + heading + "\n\n" + text + "\n\n")
 		}
 	}
-	// The template takes the author sections that belong under its headings;
-	// the rest are carried below, by kind.
+	bullets := func(items []string) string {
+		return prBullets(items, func(s string) string {
+			return commitmsg.NeutralizeCloseDirectives(trimBulletMarker(s))
+		})
+	}
+	// The template takes the author sections that belong under its headings.
+	// What it does not take is placed inside it (shaped), or carried below, by
+	// kind, when the template is only checklists.
 	author, templateText := opts.Sections, ""
+	shaped := opts.Template.placeable()
 	if opts.Template != nil {
 		fallback := ""
 		if opts.StateNotVerified && !hasSection(opts.Sections, SectionNotVerified) {
 			fallback = notVerifiedFallback(opts.HasNotes)
 		}
-		templateText, author = pr.templateBody(opts.Template, author, fallback)
+		var extras func([]AuthorSection) []extraBlock
+		if shaped {
+			extras = func(left []AuthorSection) []extraBlock {
+				var blocks []extraBlock
+				add := func(kind string) {
+					for _, s := range left {
+						if s.Kind == kind {
+							blocks = append(blocks, extraBlock{Kind: kind, Heading: s.Heading, Body: s.Body})
+						}
+					}
+				}
+				add(SectionTesting)
+				add(SectionCounters)
+				add(SectionEvidence)
+				if pr.Breaking {
+					blocks = append(blocks, extraBlock{Kind: kindBreaking, Heading: "Breaking Changes", Body: "This PR contains breaking changes. Please review carefully."})
+				}
+				add(SectionNotVerified)
+				if !hasSection(opts.Sections, SectionNotVerified) && !opts.Template.hasKind(SectionNotVerified) && opts.StateNotVerified {
+					blocks = append(blocks, extraBlock{Kind: SectionNotVerified, Heading: "Not verified", Body: fallback})
+				}
+				add(SectionKnownGaps)
+				if text := prBullets(pr.Issues, commitmsg.IssueRefLine); strings.TrimSpace(text) != "" {
+					blocks = append(blocks, extraBlock{Kind: kindIssues, Heading: "Related Issues", Body: text})
+				}
+				return blocks
+			}
+		}
+		var w []string
+		templateText, author, w = pr.templateBody(opts.Template, author, fallback, extras)
+		warnings = append(warnings, w...)
+		if !shaped {
+			for _, s := range author {
+				if s.Kind != SectionChecklist {
+					warnings = append(warnings, fmt.Sprintf("the template has only checklists, so the notes section %q is written outside the template", s.Heading))
+				}
+			}
+		}
 	}
 	carry := func(kind string) {
 		for _, s := range author {
@@ -182,39 +240,42 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 			}
 		}
 	}
-	bullets := func(items []string) string {
-		return prBullets(items, func(s string) string {
-			return commitmsg.NeutralizeCloseDirectives(trimBulletMarker(s))
-		})
-	}
 
 	open := opts.Template.hasOpenSection()
-	if open {
+	switch {
+	case open:
 		b.WriteString(templateText + "\n\n")
-	} else {
+	default:
 		section("Summary", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary)))
 		section("Changes", bullets(pr.Changes))
 	}
-	if hasSection(opts.Sections, SectionTesting) {
-		carry(SectionTesting)
-	} else if !open {
-		section("Testing", bullets(pr.Testing))
+	if shaped {
+		// The template carries the author's sections itself.
+		if !open && !hasSection(opts.Sections, SectionTesting) {
+			section("Testing", bullets(pr.Testing))
+		}
+	} else {
+		if hasSection(opts.Sections, SectionTesting) {
+			carry(SectionTesting)
+		} else if !open {
+			section("Testing", bullets(pr.Testing))
+		}
+		carry(SectionCounters)
+		carry(SectionEvidence)
+		if pr.Breaking {
+			section("Breaking Changes", "This PR contains breaking changes. Please review carefully.")
+		}
+		switch {
+		case hasSection(opts.Sections, SectionNotVerified):
+			carry(SectionNotVerified)
+		case opts.Template.hasKind(SectionNotVerified):
+			// The template has its own place for this, filled or left as it is.
+		case opts.StateNotVerified:
+			section("Not verified", notVerifiedFallback(opts.HasNotes))
+		}
+		carry(SectionKnownGaps)
+		section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
 	}
-	carry(SectionCounters)
-	carry(SectionEvidence)
-	if pr.Breaking {
-		section("Breaking Changes", "This PR contains breaking changes. Please review carefully.")
-	}
-	switch {
-	case hasSection(opts.Sections, SectionNotVerified):
-		carry(SectionNotVerified)
-	case opts.Template.hasKind(SectionNotVerified):
-		// The template has its own place for this, filled or left as it is.
-	case opts.StateNotVerified:
-		section("Not verified", notVerifiedFallback(opts.HasNotes))
-	}
-	carry(SectionKnownGaps)
-	section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
 	if !open {
 		section("Review Focus", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint)))
 		if templateText != "" {
@@ -222,7 +283,7 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 		}
 	}
 
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), warnings
 }
 
 // prBullets renders one "- " line per item and leaves out an item that render
