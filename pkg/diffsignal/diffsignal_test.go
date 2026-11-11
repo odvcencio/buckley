@@ -894,3 +894,45 @@ func TestSplitWithGeneratedAttr(t *testing.T) {
 		t.Fatalf("LowSignal=%d context=%q", res.LowSignal, res.Context)
 	}
 }
+
+func TestPrioritizeBoundedSVGGoldens(t *testing.T) {
+	golden := minifiedFileDiff("testdata/render/diagram.golden.svg", 5500)
+	for name, prioritize := range map[string]func(string, int) Result{"review": Prioritize, "pr": PrioritizeForPR} {
+		t.Run(name, func(t *testing.T) {
+			got := prioritize(golden, ReviewDiffBudget)
+			if got.LowSignal != 0 || got.Truncated || got.Context != strings.TrimSpace(golden) {
+				t.Fatalf("bounded golden hunks lost: lowSignal=%d truncated=%v", got.LowSignal, got.Truncated)
+			}
+		})
+	}
+	shards := PrioritizeShards(golden, ReviewDiffBudget)
+	if len(shards.Shards) != 1 || !strings.Contains(shards.Shards[0].Context, strings.Repeat("var a=1;", 20)) {
+		t.Fatal("review shard lost bounded golden contents")
+	}
+}
+
+func TestSVGGoldenExceptionPreservesBoundsAndSuppression(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		reason    Reason
+	}{
+		{"outside testdata", minifiedFileDiff("assets/diagram.golden.svg", 5500), ReasonMinified},
+		{"ordinary SVG", minifiedFileDiff("testdata/diagram.svg", 5500), ReasonMinified},
+		{"oversized", minifiedFileDiff("testdata/diagram.golden.svg", MaxFileDiffBytes), ReasonMinified},
+		{"generated", minifiedFileDiff("testdata/dist/diagram.golden.svg", 5500), ReasonGeneratedPath},
+		{"binary", binaryFileDiff("testdata/diagram.golden.svg"), ReasonBinary},
+		{"unavailable", "diff --git a/testdata/diagram.golden.svg b/testdata/diagram.golden.svg\n" + UnavailableMarker + "\n", ReasonUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := Split(tc.raw)
+			if len(files) != 1 || files[0].Reason != tc.reason {
+				t.Fatalf("classification = %+v, want %s", files, tc.reason)
+			}
+		})
+	}
+	golden := minifiedFileDiff("testdata/diagram.golden.svg", 5500)
+	got := Prioritize(golden, 1000)
+	if !got.Truncated || len(got.Context) > 1000 || strings.Contains(got.Context, strings.Repeat("var a=1;", 100)) {
+		t.Fatalf("golden bypassed total budget: bytes=%d truncated=%v", len(got.Context), got.Truncated)
+	}
+}

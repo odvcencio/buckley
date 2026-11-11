@@ -707,6 +707,19 @@ ledger. `--in-depth` is a shorthand for `--depth in-depth`; `standard`,
 No-test gates are typed as not applicable; required unavailable evidence fails
 the pass instead of being silently counted as passing evidence.
 
+Screenshots: `buckley review-pr 123 --image before.png --image after.png`
+attaches up to five local PNG, JPEG or GIF files (10 MiB each, 20 MiB in total)
+to the review as pixels. Buckley reads each file once, when the command starts,
+and sends the same bytes with every model call of that review. A symlink, a
+directory, a URL or a file that is not an image is refused. Text inside an
+image and the captions are treated as data, not as instructions.
+`--image` works only when the primary model and the critic model run on a provider
+that carries the pixels. The Codex, native Anthropic, Google and Ollama providers
+turn each message into text today, so Buckley refuses `--image` for them and
+names the provider, instead of running a review that never saw the image. An
+inline image is counted as a fixed 1,600 input tokens, an estimate, not by the
+length of its file.
+
 Verification: `buckley verify run|record|list` manage receipts, and
 `buckley buckbot ... --require-verification=none|receipt|receipt-or-ci` sets
 the evidence a review needs before it starts (exit 16 when missing, 17 when

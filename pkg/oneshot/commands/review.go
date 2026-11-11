@@ -233,7 +233,10 @@ func (d ReviewPRDef) AllowedTools() []string {
 }
 
 func (d ReviewPRDef) AgentEvidenceRequests() []oneshot.AgentEvidenceRequest {
-	if d.SuppliedEvidenceOnly || d.authoritativeRemoteCIPasses() {
+	// Deeper reviews validate source coverage even when an independent critic
+	// declines a provisional approval. Collect real snapshot evidence before
+	// either phase so that a tool-free remote-CI critic can complete its verdict.
+	if d.SuppliedEvidenceOnly || (d.authoritativeRemoteCIPasses() && !reviewDepthNeedsVerification(d.Depth)) {
 		return nil
 	}
 	return reviewVerificationEvidenceRequests(d.ChangedFiles)
