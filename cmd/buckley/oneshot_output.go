@@ -16,7 +16,16 @@ import (
 func printOneShotFailure(responseText string, err error) int {
 	var partial *partialStreamTurnError
 	var incomplete *agentloop.IncompleteTurnError
+	var noAnswer *oneShotNoAnswerError
 	switch {
+	case errors.As(err, &noAnswer):
+		// The run and its one retry ended at the output cap with no answer
+		// text. Say why and what to change; never print reasoning here.
+		notice := agentloop.PresentIncompleteResult(err)
+		fmt.Printf("\n[%s]\n", noAnswer.Message())
+		fmt.Fprintln(os.Stderr, noAnswer.CauseLine())
+		fmt.Fprintf(os.Stderr, "One-shot status: incomplete (exit=1; code=%s; stop_reason=%q; preserved_output_bytes=%d)\n", notice.Code, oneShotFailureStopReason(err), len(responseText))
+		return 1
 	case errors.As(err, &partial) && responseText != "":
 		fmt.Print(responseText)
 		if !strings.HasSuffix(responseText, "\n") {

@@ -1132,6 +1132,9 @@ type acpLoopState struct {
 	pendingModelUsage             *model.Usage
 	currentDraftDeliveryAttempted bool
 	currentObservedToolDelta      bool
+	// truncation tracks the one retry after a completion that ended at its
+	// output cap without answer text (one-shot mode only).
+	truncation oneShotTruncationState
 }
 
 // runACPLoop drives one ACP prompt turn through the shared turn engine
@@ -1196,16 +1199,20 @@ type acpLoopLimits struct {
 	VerificationDepth       string
 	MaxVerificationAttempts int
 	MaxElapsedSeconds       int
-	MaxCostUSD              float64
-	LifecycleObserver       agentloop.LifecycleObserver
-	LifecycleSessionID      string
-	TurnID                  string
-	RunID                   string
-	ParentRunID             string
-	TaskID                  string
-	ParentSessionID         string
-	ChildContract           bool
-	TaskIntent              agentloop.TaskIntent
+	// truncatedEmptyRetries is how many times a completion that ended at its
+	// output cap with no answer text and no tool call is retried. Zero (the
+	// default) keeps the old behavior; only one-shot mode sets it.
+	truncatedEmptyRetries int
+	MaxCostUSD            float64
+	LifecycleObserver     agentloop.LifecycleObserver
+	LifecycleSessionID    string
+	TurnID                string
+	RunID                 string
+	ParentRunID           string
+	TaskID                string
+	ParentSessionID       string
+	ChildContract         bool
+	TaskIntent            agentloop.TaskIntent
 }
 
 // runACPLoopWithStepCap is the internal one-shot variant that applies a
@@ -1311,6 +1318,28 @@ func runACPLoopWithLimits(
 		}
 		result, err := ctrl.Run(ctx)
 		lifecycleResult = result
+		var truncIncomplete *agentloop.IncompleteTurnError
+		if result != nil && (err == nil || errors.As(err, &truncIncomplete)) {
+			cause := err
+			if cause == nil {
+				cause = result.RequireConclusive()
+			}
+			if cause != nil && result.FinishReason == agentloop.FinishReasonInvalidCompletion && state.truncation.last.emptyTruncation() {
+				if state.truncation.retries < limits.truncatedEmptyRetries {
+					state.truncation.keepReasoning()
+					providerID := state.route.ProviderID
+					supported := mgr != nil && mgr.SupportsReasoningForRoute(state.route)
+					override, budget, effort := planTruncationRetryReasoning(state.truncation.last, providerID, supported)
+					state.truncation.override, state.truncation.retryBudget, state.truncation.retryEffort = override, budget, effort
+					state.truncation.retries++
+					conv.AddUserMessage(truncationRetryInstruction)
+					continue
+				}
+				if noAnswer := state.truncation.noAnswerErrorFor(result, cause, limits, workDir); noAnswer != nil {
+					return "", noAnswer
+				}
+			}
+		}
 		if err != nil {
 			var incomplete *agentloop.IncompleteTurnError
 			if errors.As(err, &incomplete) && result != nil {
@@ -1550,6 +1579,10 @@ func newACPLoopController(
 		state.toolTurnEnabled = toolTurn.Enabled
 		state.allowedTools = toolTurn.AllowedTools
 		req := buildACPChatRequestForRoute(cfg, mgr, engine, conv, modelID, state.route, toolTurn, limits)
+		if state.truncation.override != nil {
+			override := *state.truncation.override
+			req.Reasoning = &override
+		}
 		if state.toolsCatalogConfirmedUnavailable {
 			req.ToolsCatalogConfirmedUnavailable = true
 			req.Messages = append(req.Messages, model.Message{
@@ -1605,6 +1638,7 @@ func newACPLoopController(
 		turn, err := streamACPTurnWithDelivery(ctx, mgr, req, modelStream, deferModelDelivery)
 		state.currentObservedToolDelta = turn.ObservedToolDelta
 		resp := buildACPStreamChatResponse(req, turn)
+		state.truncation.recordLastResponse(req, resp, turn.ObservedToolDelta)
 		usageForUpdate := turn.Usage
 		if usageForUpdate == nil && resp.Usage.Estimated {
 			estimated := resp.Usage

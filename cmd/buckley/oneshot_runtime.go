@@ -115,6 +115,11 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		limits.noChangeExpected = true
 	}
 	limits = applyOneShotPersistence(cfg, limits, os.Stderr)
+	if !limits.ChildContract {
+		// A completion that ends at the output cap with no answer text is
+		// retried once with less reasoning, then reported with its cause.
+		limits.truncatedEmptyRetries = 1
+	}
 	if err := validateSourceTextRequirements(limits.RequiredSourceText); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1

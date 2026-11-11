@@ -163,3 +163,35 @@ func TestOneShotFinalResponse_BoundedCaptureRepair(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteOneShot_TruncatedWithoutTextTwiceExplainsCause(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("BUCKLEY_SKILLS_PATH", t.TempDir())
+	fixture, cfg, mgr := newTruncationFixture(t, truncationReply{reasoning: "endless thought", finish: "length"})
+
+	code := -1
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			code = executeOneShot("Answer briefly.", cfg, mgr, nil, nil, oneShotOptions{
+				ModelOverride: "vendor/model",
+				AllowedTools:  []string{},
+				Caps:          oneShotCaps{MaxOutputTokens: 16000, Set: map[string]bool{"--max-output-tokens": true}},
+			})
+		})
+	})
+	if code != 1 || fixture.count() != 2 {
+		t.Fatalf("code=%d requests=%d stdout=%q stderr=%q, want exit 1 after one retry", code, fixture.count(), stdout, stderr)
+	}
+	for _, want := range []string{"lower the reasoning effort (--effort low)", "raise --max-output-tokens (now 16000)", "shorten the prompt"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks remedy %q: %q", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "endless thought") {
+		t.Errorf("reasoning text reached standard output: %q", stdout)
+	}
+	if !strings.Contains(stderr, "One-shot cause: no_answer_text finish=length output_cap=16000") || !strings.Contains(stderr, "retries=1") || !strings.Contains(stderr, "One-shot status: incomplete (exit=1;") {
+		t.Errorf("stderr lacks the cause or status line: %q", stderr)
+	}
+}
