@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/diffsignal"
@@ -223,50 +222,12 @@ func loadPRNotes(paths []string) ([]commands.PRNote, error) {
 	return notes, nil
 }
 
-// prNotesPrompt renders the notes for the prompt, each labeled by its path
-// and, when there are several, by its position, because a later note is the
-// current one. The text is bounded to prContextNotesMaxBytes; the size bound
-// truncates rather than errors, since a legitimate note that merely ran long
-// is still useful context. cut is the number of bytes that were left out, so
-// that the caller can tell the author instead of dropping them in silence.
-func prNotesPrompt(notes []commands.PRNote) (text string, cut int) {
-	var b strings.Builder
-	// A note that NewPRNote did not make has no text and is left out.
-	var made []commands.PRNote
-	for _, note := range notes {
-		if note.Text() != "" {
-			made = append(made, note)
-		}
-	}
-	notes = made
-	for i, note := range notes {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		switch {
-		case len(notes) == 1:
-			fmt.Fprintf(&b, "### %s\n\n%s", note.Path, note.Text())
-		case i == len(notes)-1:
-			fmt.Fprintf(&b, "### Note %d of %d, the latest: %s\n\n%s", i+1, len(notes), note.Path, note.Text())
-		default:
-			fmt.Fprintf(&b, "### Note %d of %d: %s\n\n%s", i+1, len(notes), note.Path, note.Text())
-		}
-	}
-
-	out := b.String()
-	if len(out) <= prContextNotesMaxBytes {
-		return out, 0
-	}
-	// Cut at the end of a line when there is one in the last part of the
-	// budget, and never inside a UTF-8 sequence.
-	keep := prContextNotesMaxBytes
-	if i := strings.LastIndexByte(out[:keep], '\n'); i > keep/2 {
-		keep = i
-	}
-	for keep > 0 && !utf8.RuneStart(out[keep]) {
-		keep--
-	}
-	return out[:keep] + "\n... (truncated)", len(out) - keep
+// prNotesPrompt renders the notes for the prompt (commands.NewPRPromptNotes),
+// bounded to prContextNotesMaxBytes. cut is the number of bytes that were left
+// out, so that the caller can tell the author instead of dropping them in
+// silence.
+func prNotesPrompt(notes []commands.PRNote) (commands.PRPromptNotes, int) {
+	return commands.NewPRPromptNotes(notes, prContextNotesMaxBytes)
 }
 
 // prTemplatePaths are the places where GitHub looks for a repository's single
@@ -539,7 +500,7 @@ func newPRCommandRuntime(opts prCommandOptions) (*prCommandRuntime, func(), erro
 	}, cleanup, nil
 }
 
-func runPRGeneration(ctx context.Context, framework *oneshot.Framework, plan *prPlan, diffBudget int, contextNotes string, sections []commands.AuthorSection, template *commands.PRTemplate) (*prRunResult, error) {
+func runPRGeneration(ctx context.Context, framework *oneshot.Framework, plan *prPlan, diffBudget int, contextNotes commands.PRPromptNotes, sections []commands.AuthorSection, template *commands.PRTemplate) (*prRunResult, error) {
 	spinner := terminal.NewSpinnerWithOutput(prStatusWriter(), "Generating PR...")
 	spinner.Start()
 
@@ -615,7 +576,7 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 	}
 
 	for _, section := range sections {
-		if section.Kind == commands.SectionTesting {
+		if section.Kind() == commands.SectionTesting {
 			// The author's testing record replaces the model's steps.
 			result.PR.Testing = nil
 		}

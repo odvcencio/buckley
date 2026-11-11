@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // RawPRNote is one author-supplied file from `buckley pr --context-file`, as
@@ -58,12 +59,28 @@ var sectionOrder = []string{SectionTesting, SectionCounters, SectionEvidence, Se
 
 // AuthorSection is one part of an author note that the PR body carries word
 // for word.
+//
+// The fields are private: only AuthorSections makes a section with text, from
+// notes that passed NewPRNote. A struct literal or a zero value is an empty
+// section everywhere. Read a section with its accessors.
 type AuthorSection struct {
-	Kind    string
-	Heading string // the author's heading, without Markdown markers
-	Body    string // the text under the heading, as written
-	Source  string // path of the note it came from
+	kind    string
+	heading string // the author's heading, without Markdown markers
+	body    string // the text under the heading, as written
+	source  string // path of the note it came from
 }
+
+// Kind is the kind of the section (SectionTesting and the others).
+func (s AuthorSection) Kind() string { return s.kind }
+
+// Heading is the author's heading, without Markdown markers.
+func (s AuthorSection) Heading() string { return s.heading }
+
+// Body is the text under the heading, as written.
+func (s AuthorSection) Body() string { return s.body }
+
+// Source is the path of the note the section came from.
+func (s AuthorSection) Source() string { return s.source }
 
 var (
 	atxHeadingRe = regexp.MustCompile(`^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$`)
@@ -102,10 +119,10 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 		found := map[string][]AuthorSection{}
 		var foundKinds []string
 		for _, s := range noteSections(note, template) {
-			if len(found[s.Kind]) == 0 {
-				foundKinds = append(foundKinds, s.Kind)
+			if len(found[s.kind]) == 0 {
+				foundKinds = append(foundKinds, s.kind)
 			}
-			found[s.Kind] = append(found[s.Kind], s)
+			found[s.kind] = append(found[s.kind], s)
 		}
 		for _, kind := range foundKinds {
 			if len(byKind[kind]) == 0 {
@@ -154,7 +171,7 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		if cur == nil {
 			return
 		}
-		if cur.Body = trimBlankEdges(body); cur.Body != "" {
+		if cur.body = trimBlankEdges(body); cur.body != "" {
 			out = append(out, *cur)
 		}
 		cur, body = nil, nil
@@ -171,14 +188,14 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 				}
 				flush()
 				if kind := kindOf(m[2]); kind != "" {
-					cur, curLevel = &AuthorSection{Kind: kind, Heading: plainHeading(m[2]), Source: note.Path}, level
+					cur, curLevel = &AuthorSection{kind: kind, heading: plainHeading(m[2]), source: note.Path}, level
 				}
 				continue
 			}
 			if label, ok := labelLine(lines, i); ok && (cur == nil || curLevel == 0) {
 				if kind := kindOf(label); kind != "" {
 					flush()
-					cur, curLevel = &AuthorSection{Kind: kind, Heading: label, Source: note.Path}, 0
+					cur, curLevel = &AuthorSection{kind: kind, heading: label, source: note.Path}, 0
 					continue
 				}
 			}
@@ -284,14 +301,14 @@ func trimBlankEdges(lines []string) string {
 func carriedHeadings(sections []AuthorSection) []string {
 	var out []string
 	for _, s := range sections {
-		out = append(out, s.Heading)
+		out = append(out, s.heading)
 	}
 	return out
 }
 
 func hasSection(sections []AuthorSection, kind string) bool {
 	for _, s := range sections {
-		if s.Kind == kind {
+		if s.kind == kind {
 			return true
 		}
 	}
@@ -310,7 +327,7 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	}
 	names := map[string]bool{}
 	for _, s := range carried {
-		names[headingKey(s.Heading)] = true
+		names[headingKey(s.heading)] = true
 	}
 	var out []string
 	skipLevel := 0
@@ -427,4 +444,56 @@ func stripHTMLComments(text string) (string, int) {
 		line += newlines
 		rest = body[end+3:]
 	}
+}
+
+// PRPromptNotes is the text of the author's notes as the prompt shows it. Only
+// NewPRPromptNotes makes one, from notes that passed NewPRNote, so a raw string
+// cannot reach the prompt as author-note text. The zero value is no notes.
+type PRPromptNotes struct{ text string }
+
+// String returns the rendered notes; it is empty for the zero value.
+func (n PRPromptNotes) String() string { return n.text }
+
+// NewPRPromptNotes renders the notes for the prompt, each labeled by its path
+// and, when there are several, by its position, because a later note is the
+// current one. The text is bounded to maxBytes; the size bound truncates rather
+// than errors, since a legitimate note that merely ran long is still useful
+// context. cut is the number of bytes that were left out. A note that
+// NewPRNote did not make has no text and is left out. The text is not scanned
+// for comments again.
+func NewPRPromptNotes(notes []PRNote, maxBytes int) (n PRPromptNotes, cut int) {
+	var made []PRNote
+	for _, note := range notes {
+		if note.Text() != "" {
+			made = append(made, note)
+		}
+	}
+	var b strings.Builder
+	for i, note := range made {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		switch {
+		case len(made) == 1:
+			fmt.Fprintf(&b, "### %s\n\n%s", note.Path, note.Text())
+		case i == len(made)-1:
+			fmt.Fprintf(&b, "### Note %d of %d, the latest: %s\n\n%s", i+1, len(made), note.Path, note.Text())
+		default:
+			fmt.Fprintf(&b, "### Note %d of %d: %s\n\n%s", i+1, len(made), note.Path, note.Text())
+		}
+	}
+	out := b.String()
+	if len(out) <= maxBytes {
+		return PRPromptNotes{text: out}, 0
+	}
+	// Cut at the end of a line when there is one in the last part of the
+	// budget, and never inside a UTF-8 sequence.
+	keep := maxBytes
+	if i := strings.LastIndexByte(out[:keep], '\n'); i > keep/2 {
+		keep = i
+	}
+	for keep > 0 && !utf8.RuneStart(out[keep]) {
+		keep--
+	}
+	return PRPromptNotes{text: out[:keep] + "\n... (truncated)"}, len(out) - keep
 }

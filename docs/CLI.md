@@ -555,10 +555,9 @@ what it wrote with them:
   path or a flag value (such as `1` in `-count 1`; a trailing sentence period
   does not make a flag value). A flag in a code span after prose is checked on
   its own. It can miss an unsourced command and can warn about a sourced one.
-  Known limits: after a plain word, only flags are looked at, so a plain
-  (unformatted) value such as `-tags integration` ends the command, and the text
-  after it is compared flag by flag; a flag value that is a plain word or a file
-  name without a path ends the command. To get exact testing steps, put the
+  An unformatted plain-word flag value such as `-tags integration` ends the
+  command; later flags before an explicit prose separator may be checked
+  separately. To get exact testing steps, put the
   commands you ran in a Testing section of a notes file: such a section is
   copied by code, word for word.
 - A word that states a decision (`rejected`, `approved`, `decided`, `ruled out`,

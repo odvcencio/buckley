@@ -168,12 +168,14 @@ func TestRunPRCommand_WarnsAboutCutNotesAndKeepsBothSections(t *testing.T) {
 }
 
 func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
-	one, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha")})
+	oneN, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha")})
+	one := oneN.String()
 	if one != "### a.md\n\nalpha" || cut != 0 {
 		t.Fatalf("one note = %q (cut %d)", one, cut)
 	}
 
-	two, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha"), testNote(t, "b.md", "beta")})
+	twoN, cut := prNotesPrompt([]commands.PRNote{testNote(t, "a.md", "alpha"), testNote(t, "b.md", "beta")})
+	two := twoN.String()
 	want := "### Note 1 of 2: a.md\n\nalpha\n\n### Note 2 of 2, the latest: b.md\n\nbeta"
 	if two != want || cut != 0 {
 		t.Fatalf("two notes = %q (cut %d), want %q", two, cut, want)
@@ -181,7 +183,8 @@ func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
 
 	// A cut never splits a multi-byte character and is reported in bytes.
 	long := strings.Repeat("é", prContextNotesMaxBytes)
-	text, cut := prNotesPrompt([]commands.PRNote{testNote(t, "long.md", long)})
+	textN, cut := prNotesPrompt([]commands.PRNote{testNote(t, "long.md", long)})
+	text := textN.String()
 	if cut == 0 || !strings.HasSuffix(text, "\n... (truncated)") {
 		t.Fatalf("cut = %d, suffix of text = %q", cut, text[len(text)-20:])
 	}
@@ -194,7 +197,8 @@ func TestPRNotesPrompt_LabelsTheOrderAndReportsTheCut(t *testing.T) {
 
 	// With line breaks in reach, the cut falls on one.
 	lines := strings.Repeat("0123456789abcde\n", prContextNotesMaxBytes/8)
-	text, _ = prNotesPrompt([]commands.PRNote{testNote(t, "lines.md", lines)})
+	textN, _ = prNotesPrompt([]commands.PRNote{testNote(t, "lines.md", lines)})
+	text = textN.String()
 	if !strings.HasSuffix(text, "0123456789abcde\n... (truncated)") {
 		t.Fatalf("the cut is not at a line end: %q", text[len(text)-40:])
 	}
@@ -234,13 +238,14 @@ func TestLoadPRNotes_CommentedTextReachesNothing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			prompt, _ := prNotesPrompt(loaded)
+			promptN, _ := prNotesPrompt(loaded)
+			prompt := promptN.String()
 			sources := commands.NewPRSources(loaded, nil)
 			var carried string
 			for _, s := range commands.AuthorSections(loaded) {
-				carried += s.Body
+				carried += s.Body()
 			}
-			for what, text := range map[string]string{"prompt": prompt, "sections": carried, "record": sources.Record, "all": sources.All} {
+			for what, text := range map[string]string{"prompt": prompt, "sections": carried, "record": sources.Record(), "all": sources.All()} {
 				if strings.Contains(text, token) || strings.Contains(text, "98765") || strings.Contains(text, "go test ./hidden") {
 					t.Errorf("the %s holds commented-out text: %q", what, text)
 				}
@@ -288,20 +293,50 @@ func TestLoadPRNotes_AJoinedOpenerIsRefusedNotTruncated(t *testing.T) {
 	}
 }
 
-// A note built by hand (a struct literal or the zero value) carries no text:
-// the constructor is the only way to a usable note (review of #468, round five).
-// A Go caller can set the path only, so its text cannot bypass the sanitizer.
-func TestPRNote_AStructLiteralCarriesNoText(t *testing.T) {
+// Every exported input that takes author-note text is made from validated
+// notes: a struct literal or a zero value of PRNote, AuthorSection,
+// PRPromptNotes or PRSources carries no text into BuildPrompt, Body or the
+// sources (reviews of #468, rounds five and six). From outside the package a
+// literal can set the path only; the text fields are private.
+func TestHandBuiltNoteInputsCarryNoText(t *testing.T) {
 	hand := []commands.PRNote{{Path: "notes.md"}, {}}
 	if hand[0].Text() != "" {
 		t.Fatalf("Text() = %q, want empty", hand[0].Text())
 	}
-	prompt, _ := prNotesPrompt(hand)
+	promptNotes, _ := prNotesPrompt(hand)
 	sources := commands.NewPRSources(hand, nil)
 	sections := commands.AuthorSections(hand)
+	zeroSections := []commands.AuthorSection{{}, {}}
+	body := commands.PRResult{}.Body(commands.PRBodyOptions{Sections: append(sections, zeroSections...)})
+	prompt := commands.PRDefinition{ContextNotes: commands.PRPromptNotes{}, AuthorSections: zeroSections}.BuildPrompt(&oneshot.Context{})
+	if promptNotes.String() != "" || strings.TrimSpace(sources.Record()) != "" || len(sections) != 0 || strings.Contains(body, "Evidence") || strings.Contains(prompt, "Author Notes") {
+		t.Errorf("a hand-built value reached prompt %q, sources %q, sections %v, body %q, BuildPrompt %q", promptNotes, sources.Record(), sections, body, prompt)
+	}
+	if zeroSections[0].Body() != "" || zeroSections[0].Heading() != "" || zeroSections[0].Kind() != "" {
+		t.Errorf("a zero AuthorSection holds text: %+v", zeroSections[0])
+	}
+	if (commands.PRSources{}).All() != "" {
+		t.Error("a zero PRSources holds text")
+	}
+}
+
+// The CLI path still carries a loaded note word for word: its section reaches
+// the body and the prompt, and nothing sanitizes it a second time.
+func TestLoadedNoteReachesBodyAndPromptWordForWord(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "n.md", "## Evidence\n\nRan `go test ./cache`; 412 of 412 passed. <!-- private -->\n\n## Not verified\n\n- Windows\n")
+	loaded, err := loadPRNotes([]string{filepath.Join(dir, "n.md")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections := commands.AuthorSections(loaded)
 	body := commands.PRResult{}.Body(commands.PRBodyOptions{Sections: sections})
-	if prompt != "" || sources.Record != "" && strings.TrimSpace(sources.Record) != "" || len(sections) != 0 || strings.Contains(body, "Evidence") {
-		t.Errorf("a hand-built note reached prompt %q, sources %q, sections %v, body %q", prompt, sources.Record, sections, body)
+	promptNotes, _ := prNotesPrompt(loaded)
+	prompt := commands.PRDefinition{ContextNotes: promptNotes, AuthorSections: sections}.BuildPrompt(&oneshot.Context{})
+	for what, text := range map[string]string{"body": body, "prompt": prompt} {
+		if !strings.Contains(text, "Ran `go test ./cache`; 412 of 412 passed. ") || !strings.Contains(text, "- Windows") || strings.Contains(text, "private") {
+			t.Errorf("the %s does not carry the loaded note word for word (comment removed once):\n%s", what, text)
+		}
 	}
 }
 

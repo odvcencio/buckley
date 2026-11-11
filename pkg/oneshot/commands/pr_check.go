@@ -18,10 +18,16 @@ import (
 type PRSources struct {
 	// Record is where decisions are written down: the notes and the commit
 	// messages.
-	Record string
+	record string
 	// All is Record plus the diff, the file list and the project guidelines.
-	All string
+	all string
 }
+
+// Record is where decisions are written down: the notes and the commit messages.
+func (s PRSources) Record() string { return s.record }
+
+// All is Record plus the diff, the file list and the project guidelines.
+func (s PRSources) All() string { return s.all }
 
 // NewPRSources collects the sources for notes and the context gathered for a
 // PR definition. ctx may be nil.
@@ -39,7 +45,7 @@ func NewPRSources(notes []PRNote, ctx *oneshot.Context) PRSources {
 			}
 		}
 	}
-	return PRSources{Record: record.String(), All: record.String() + rest.String()}
+	return PRSources{record: record.String(), all: record.String() + rest.String()}
 }
 
 // commandPrograms are first words that make a testing step a command.
@@ -84,7 +90,7 @@ var decisionWords = []struct{ said, source *regexp.Regexp }{
 // a sourced one, because it reads prose with a heuristic. Testing steps that
 // the author wrote in a Testing section are copied by code and never reach it.
 func (pr PRResult) UnsourcedCommands(src PRSources) []string {
-	all := normalizeCommandText(src.All)
+	all := normalizeCommandText(src.all)
 	missing := func(step string) string {
 		for _, command := range stepCommands(step) {
 			if !strings.Contains(all, normalizeCommandText(command)) {
@@ -212,13 +218,13 @@ func (pr PRResult) UnbackedClaims(src PRSources) []string {
 	var claims []string
 
 	for _, word := range decisionWords {
-		if said := word.said.FindString(prose); said != "" && !word.source.MatchString(src.Record) {
+		if said := word.said.FindString(prose); said != "" && !word.source.MatchString(src.record) {
 			claims = append(claims, fmt.Sprintf("the text says %q, but the author's notes and the commits record no such decision", said))
 		}
 	}
 
 	known := map[string]bool{}
-	for _, n := range numberRe.FindAllString(src.All, -1) {
+	for _, n := range numberRe.FindAllString(src.all, -1) {
 		known[plainNumber(n)] = true
 	}
 	seen := map[string]bool{}
