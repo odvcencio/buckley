@@ -3,6 +3,7 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -176,6 +177,13 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 	pr = pr.withLF()
 	var b strings.Builder
 	var warnings []BodyWarning
+	if opts.Template != nil {
+		// Model text may not carry raw HTML that changes structure.
+		pr, warnings = pr.withoutStructuralHTML()
+		for _, s := range opts.Sections {
+			warnings = append(warnings, opts.Template.authorHTMLWarnings(s)...)
+		}
+	}
 	modelBoxes := 0
 	// With a template the model never adds a checkbox: its checkbox lines are
 	// dropped and counted.
@@ -261,6 +269,9 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		if w := opts.Template.shapeWarning(templateText); w != "" {
 			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
 		}
+		if w := opts.Template.rawHTMLWarning(templateText); w != "" {
+			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
+		}
 		modelBoxes += res.ModelBoxes
 		if !shaped {
 			for _, s := range author {
@@ -344,6 +355,98 @@ func (pr PRResult) withLF() PRResult {
 		pr.Sections = sections
 	}
 	return pr
+}
+
+// withoutStructuralHTML returns the result with the raw HTML removed from its
+// model text fields that would change what a renderer shows: a closed HTML
+// comment is removed (the model has no reason to hide text); a comment opener
+// with no closer in the same field, and a raw heading element (h1 to h6, any
+// case, with attributes), have their opening "<" written as "&lt;". One
+// warning names each field and construct.
+func (pr PRResult) withoutStructuralHTML() (PRResult, []BodyWarning) {
+	var warnings []BodyWarning
+	fix := func(field, text string) string {
+		out, constructs := neutralizeHTML(text)
+		for _, c := range constructs {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; it was written as text", field, c)})
+		}
+		return out
+	}
+	seen := map[string]bool{}
+	list := func(field string, in StringList) StringList {
+		if in == nil {
+			return nil
+		}
+		out := make(StringList, len(in))
+		for i, item := range in {
+			text, constructs := neutralizeHTML(item)
+			out[i] = text
+			for _, c := range constructs {
+				if !seen[field+c] {
+					seen[field+c] = true
+					warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; it was written as text", field, c)})
+				}
+			}
+		}
+		return out
+	}
+	pr.Summary = fix("summary", pr.Summary)
+	pr.ReviewersHint = fix("reviewers_hint", pr.ReviewersHint)
+	pr.Changes, pr.Testing, pr.Issues = list("changes", pr.Changes), list("testing", pr.Testing), list("issues", pr.Issues)
+	if pr.Sections != nil {
+		keys := make([]string, 0, len(pr.Sections))
+		for k := range pr.Sections {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		sections := make(map[string]string, len(pr.Sections))
+		for _, k := range keys {
+			sections[k] = fix(sectionFieldPrefix+k, pr.Sections[k])
+		}
+		pr.Sections = sections
+	}
+	return pr, warnings
+}
+
+// neutralizeHTML applies the rules of withoutStructuralHTML to one text. The
+// constructs it names are "an unclosed HTML comment opener" and "a raw heading
+// element".
+func neutralizeHTML(text string) (string, []string) {
+	var constructs []string
+	note := func(c string) {
+		for _, have := range constructs {
+			if have == c {
+				return
+			}
+		}
+		constructs = append(constructs, c)
+	}
+	// Removing a comment can join characters into a new opener, so go round until
+	// the text is stable.
+	for round := 0; round < 8; round++ {
+		d := readMarkdown(text)
+		if len(d.Hazards) > 0 {
+			offsets := make([]int, 0, len(d.Hazards))
+			for _, h := range d.Hazards {
+				if h.Unclosed {
+					note("an unclosed HTML comment opener")
+				} else {
+					note("a raw heading element")
+				}
+				offsets = append(offsets, h.Start)
+			}
+			sort.Sort(sort.Reverse(sort.IntSlice(offsets)))
+			for _, at := range offsets {
+				text = text[:at] + "&lt;" + text[at+1:]
+			}
+			continue
+		}
+		if len(d.Comments) == 0 {
+			return d.text, constructs
+		}
+		text = strings.Join(stripComments(d.Lines, false), "\n")
+	}
+	return text, constructs
 }
 
 // prBullets renders one "- " line per item and leaves out an item that render

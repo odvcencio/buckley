@@ -18,6 +18,12 @@ type PRTemplate struct {
 	// Preamble is the text before the first heading.
 	Preamble string
 	Sections []TemplateSection
+
+	// rawUnclosed and rawHeadings count the raw HTML in the template that a
+	// renderer acts on (see mdHazard): comment openers with no closer, and heading
+	// elements at or above the template's deepest level. The body may have no more
+	// of them than the template.
+	rawUnclosed, rawHeadings int
 }
 
 // TemplateSection is one heading of a template and the lines under it.
@@ -100,7 +106,59 @@ func ParsePRTemplate(text string) *PRTemplate {
 		s.Key = key
 		t.Sections = append(t.Sections, s)
 	}
+	t.rawUnclosed, t.rawHeadings = t.countRawHTML(d)
 	return t
+}
+
+// countRawHTML counts the hazards of d: comment openers with no closer, and raw
+// heading elements at or above the template's deepest level.
+func (t *PRTemplate) countRawHTML(d *mdDoc) (unclosed, headings int) {
+	deepest := t.deepestLevel()
+	for _, h := range d.Hazards {
+		switch {
+		case h.Unclosed:
+			unclosed++
+		case h.Level <= deepest:
+			headings++
+		}
+	}
+	return unclosed, headings
+}
+
+// rawHTMLWarning checks the whole rendered body for raw HTML that a renderer
+// acts on although the Markdown tree does not show it: a comment opener with no
+// closer hides everything after it, and a raw heading element at or above the
+// template's level is a heading the heading check does not list. The body may
+// have no more of them than the template has. It returns "" when all is well.
+func (t *PRTemplate) rawHTMLWarning(body string) string {
+	d := readMarkdown(body)
+	deepest := t.deepestLevel()
+	unclosed, headings := t.countRawHTML(d)
+	for _, h := range d.Hazards {
+		switch {
+		case h.Unclosed && unclosed > t.rawUnclosed:
+			return fmt.Sprintf("the body has an HTML comment opener with no closer at line %d, which hides the text after it", h.Line+1)
+		case !h.Unclosed && h.Level <= deepest && headings > t.rawHeadings:
+			return fmt.Sprintf("the body has a raw <h%d> heading element at line %d, which is a heading at or above the template's level", h.Level, h.Line+1)
+		}
+	}
+	return ""
+}
+
+// authorHTMLWarnings names raw HTML in a carried author section that would hide
+// or forge structure. The author's text is not rewritten.
+func (t *PRTemplate) authorHTMLWarnings(s AuthorSection) []BodyWarning {
+	var out []BodyWarning
+	deepest := t.deepestLevel()
+	for _, h := range readMarkdown(s.Body()).Hazards {
+		switch {
+		case h.Unclosed:
+			out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has an HTML comment opener with no closer at its line %d; it would hide the text after it", s.Heading(), h.Line+1), Blocking: true})
+		case h.Level <= deepest:
+			out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has a raw <h%d> heading element at its line %d; it would add a heading at or above the template's level", s.Heading(), h.Level, h.Line+1), Blocking: true})
+		}
+	}
+	return out
 }
 
 // headingKey reduces a heading to its words, so that "What changed" in a

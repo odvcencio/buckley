@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -69,11 +70,15 @@ type mdComment struct {
 	Block              bool
 }
 
-// mdBlock is a block of the document at any depth, in order of its first
-// line (a container before its children).
-type mdBlock struct {
-	Kind       string // heading, paragraph, list, code, html, quote, break
-	Start, End int
+// mdHazard is raw HTML that a renderer acts on although the Markdown tree does
+// not show it: a comment opener with no closer, which hides the rest of the
+// rendered page, or a raw heading element. Start is a byte offset; Line is
+// 0-based.
+type mdHazard struct {
+	Unclosed bool // else a raw heading element
+	Level    int  // of the heading element
+	Start    int
+	Line     int
 }
 
 // mdDoc is what the parser found in a text.
@@ -86,7 +91,8 @@ type mdDoc struct {
 	Code      []mdCode
 	HTML      []mdHTML
 	Comments  []mdComment
-	Blocks    []mdBlock
+	Hazards   []mdHazard // raw HTML in HTML blocks and inline HTML
+	inFence   []bool     // per line: inside a fenced code block, delimiters included
 }
 
 // readMarkdown parses text with Markdown++ (m31labs.dev/mdpp). Line endings are
@@ -95,6 +101,7 @@ func readMarkdown(src string) *mdDoc {
 	src = normalizeNewlines(src)
 	d := &mdDoc{text: src}
 	d.Lines = strings.Split(src, "\n")
+	d.inFence = make([]bool, len(d.Lines))
 	d.lineStart = make([]int, len(d.Lines))
 	off := 0
 	for i, l := range d.Lines {
@@ -110,10 +117,6 @@ func readMarkdown(src string) *mdDoc {
 	lists := 0
 	var walk func(n *mdpp.Node, parent *mdpp.Node, list int)
 	walk = func(n *mdpp.Node, parent *mdpp.Node, list int) {
-		if kind := blockKind(n.Type); kind != "" {
-			s, e := d.nodeLines(n)
-			d.Blocks = append(d.Blocks, mdBlock{Kind: kind, Start: s, End: e})
-		}
 		switch n.Type {
 		case mdpp.NodeList:
 			lists++
@@ -124,7 +127,15 @@ func readMarkdown(src string) *mdDoc {
 			d.addTask(n, list)
 		case mdpp.NodeCodeBlock:
 			s, e := d.nodeLines(n)
-			d.Code = append(d.Code, mdCode{Start: s, End: e, Fenced: d.fencedAt(s)})
+			fenced := d.fencedAt(s)
+			d.Code = append(d.Code, mdCode{Start: s, End: e, Fenced: fenced})
+			for i := s; fenced && i <= e; i++ {
+				d.inFence[i] = true
+			}
+		case mdpp.NodeHTMLBlock, mdpp.NodeHTMLInline:
+			d.addHazards(n)
+		}
+		switch n.Type {
 		case mdpp.NodeHTMLBlock:
 			s, e := d.nodeLines(n)
 			d.HTML = append(d.HTML, mdHTML{Start: s, End: e, Comment: strings.HasPrefix(strings.TrimLeft(d.Lines[s], " "), "<!--")})
@@ -134,32 +145,9 @@ func readMarkdown(src string) *mdDoc {
 		}
 	}
 	walk(doc.Root, nil, 0)
-	sort.SliceStable(d.Blocks, func(i, j int) bool { return d.Blocks[i].Start < d.Blocks[j].Start })
 	sort.Slice(d.Headings, func(i, j int) bool { return d.Headings[i].Start < d.Headings[j].Start })
 	sort.Slice(d.Tasks, func(i, j int) bool { return d.Tasks[i].MarkAt < d.Tasks[j].MarkAt })
 	return d
-}
-
-func blockKind(t mdpp.NodeType) string {
-	switch t {
-	case mdpp.NodeHeading:
-		return "heading"
-	case mdpp.NodeParagraph:
-		return "paragraph"
-	case mdpp.NodeList:
-		return "list"
-	case mdpp.NodeListItem, mdpp.NodeTaskListItem:
-		return "item"
-	case mdpp.NodeCodeBlock:
-		return "code"
-	case mdpp.NodeHTMLBlock:
-		return "html"
-	case mdpp.NodeBlockquote:
-		return "quote"
-	case mdpp.NodeThematicBreak:
-		return "break"
-	}
-	return ""
 }
 
 // nodeLines returns the first and last line (0-based) of a node. A node's byte
@@ -353,8 +341,36 @@ func (d *mdDoc) sections(level int) []mdSection {
 	return out
 }
 
-// blankLine reports a line of white space only.
-func (d *mdDoc) blankLine(i int) bool { return strings.TrimSpace(d.Lines[i]) == "" }
+var headingTagRe = regexp.MustCompile(`^<[hH]([1-6])[\s/>]`)
+
+// addHazards scans the source text of an HTML node, which the parser handed
+// over as raw HTML, for the two constructs a renderer acts on: a comment opener
+// with no closer, and a heading element.
+func (d *mdDoc) addHazards(n *mdpp.Node) {
+	from, to := min(max(n.Range.StartByte, 0), len(d.text)), min(max(n.Range.EndByte, 0), len(d.text))
+	if to <= from {
+		return
+	}
+	t := d.text[from:to]
+	for i := 0; i < len(t); i++ {
+		if t[i] != '<' {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(t[i:], "<!--"):
+			end := strings.Index(t[i+4:], "-->")
+			if end < 0 {
+				d.Hazards = append(d.Hazards, mdHazard{Unclosed: true, Start: from + i, Line: d.lineOf(from + i)})
+				return
+			}
+			i += 4 + end + 2
+		default:
+			if m := headingTagRe.FindStringSubmatch(t[i:]); m != nil {
+				d.Hazards = append(d.Hazards, mdHazard{Level: int(m[1][0] - '0'), Start: from + i, Line: d.lineOf(from + i)})
+			}
+		}
+	}
+}
 
 // removeSpans returns text without the byte ranges in spans (sorted, apart).
 func removeSpans(src string, spans [][2]int) string {

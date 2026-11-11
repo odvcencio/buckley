@@ -35,7 +35,7 @@ func (n PRNote) Text() string { return n.text }
 // NewPRNote sanitizes a raw note once. ok is false when nothing is left. The
 // error names the line of an unclosed or newly joined "<!--".
 func NewPRNote(raw RawPRNote) (note PRNote, ok bool, err error) {
-	clean, err := SanitizePRNote(strings.ReplaceAll(raw.Text, "\r\n", "\n"))
+	clean, err := SanitizePRNote(normalizeNewlines(raw.Text))
 	if err != nil {
 		return PRNote{}, false, err
 	}
@@ -234,36 +234,27 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 	return out
 }
 
-// labelLine reports whether line i is a short label on a line of its own: the
-// first line of a paragraph (as the parser reads it) that follows a blank line
-// (or starts the note), has at most eight words and no sentence punctuation at
-// its end, and either ends with a colon or stands alone directly above a list, a
-// table or a code fence. A line inside a code block or an HTML block, or in a
-// list or a quote, is not a label.
+// labelLine reports whether lines[i] is a short label on a line of its own: it
+// follows a blank line (or starts the note), has at most eight words and no
+// sentence punctuation at its end, and either ends with a colon or stands
+// directly above a list, a table or a code fence. This is a property of the line
+// in the notes, by the rule that existed before the parser came in; it does not
+// depend on how the parser groups the label and the lines after it into blocks
+// (a table or a numbered list right under a label is one paragraph to the
+// parser). A line inside a fenced code block is not a label.
 func labelLine(d *mdDoc, i int) (string, bool) {
-	line := d.Lines[i]
-	if line != strings.TrimLeft(line, " \t") || (i > 0 && !d.blankLine(i-1)) {
+	lines := d.Lines
+	line := lines[i]
+	if d.inFence[i] || line != strings.TrimLeft(line, " \t") || (i > 0 && strings.TrimSpace(lines[i-1]) != "") {
 		return "", false
 	}
 	text := strings.TrimSpace(line)
-	if text == "" {
+	if text == "" || listItemRe.MatchString(text) {
 		return "", false
 	}
-	// A table row or a code fence is not a label. "**Evidence**" is: bold is the
-	// usual way to write one.
-	if strings.ContainsAny(text[:1], "|`~") {
-		return "", false
-	}
-	// The line is unindented and follows a blank line, so a paragraph that
-	// starts on it is not part of a list item or a quote, wherever the parser
-	// nests it.
-	block := -1
-	for n, b := range d.Blocks {
-		if b.Start == i && (b.Kind == "paragraph" || b.Kind == "heading") {
-			block = n
-		}
-	}
-	if block < 0 {
+	// A list item, quote, table row, heading or code fence is not a label.
+	// "**Evidence**" is: bold is the usual way to write one.
+	if strings.ContainsAny(text[:1], "-*+>|#`~") && !strings.HasPrefix(text, "**") {
 		return "", false
 	}
 	text = strings.TrimSpace(strings.Trim(text, "*_"))
@@ -275,32 +266,12 @@ func labelLine(d *mdDoc, i int) (string, bool) {
 	if colon {
 		return text, true
 	}
-	b := d.Blocks[block]
-	if b.Kind != "paragraph" || b.End != i {
-		return "", false
-	}
-	nextAt := -1
-	for n := block + 1; n < len(d.Blocks); n++ {
-		if d.Blocks[n].Start > b.End {
-			nextAt = n
-			break
+	for _, next := range lines[i+1:] {
+		next = strings.TrimSpace(next)
+		if next == "" {
+			continue
 		}
-	}
-	if nextAt < 0 {
-		return "", false
-	}
-	next := d.Blocks[nextAt]
-	switch next.Kind {
-	case "list", "item":
-		return text, true
-	case "code":
-		for _, c := range d.Code {
-			if c.Start == next.Start && c.Fenced {
-				return text, true
-			}
-		}
-	case "paragraph":
-		return text, strings.HasPrefix(strings.TrimSpace(d.Lines[next.Start]), "|")
+		return text, listItemRe.MatchString(next) || strings.HasPrefix(next, "|") || strings.HasPrefix(next, "```") || strings.HasPrefix(next, "~~~")
 	}
 	return "", false
 }

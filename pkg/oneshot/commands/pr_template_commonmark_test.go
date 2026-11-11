@@ -121,18 +121,6 @@ func TestFenceMarkerInACommentOpensNoFence(t *testing.T) {
 	}
 }
 
-// The final check runs in the body path and blocks under --strict: a heading
-// that placed text opens at the template's level is a blocking warning.
-func TestShapeCheckIsWiredIntoTheBody(t *testing.T) {
-	// "Evidence" has no kind keyword in this template and lands in the last
-	// section; its unclosed fence cannot add a heading, but a model text that
-	// opens an unclosed comment swallows the next heading.
-	_, ws := shapeBody(t, "## Summary\n<!-- describe -->\n## Checks\n- [ ] A\n", "", PRResult{Sections: map[string]string{"summary": "<!-- never closed\ntext"}})
-	if !hasWarning(ws, `lacks the template heading "checks"`, true) {
-		t.Errorf("warnings = %v, want a blocking one naming the lost heading", ws)
-	}
-}
-
 // The notes name a few templates' worth of structure; the property test below
 // writes random notes and model text and checks the shape of the body.
 type fragmentWriter struct{ r *rand.Rand }
