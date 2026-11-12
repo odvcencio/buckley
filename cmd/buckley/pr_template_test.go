@@ -90,7 +90,7 @@ func TestRunPRCommand_WritesTheBodyInTheRepositoryTemplate(t *testing.T) {
 		"## Correctness\n\n" +
 		"- [ ] Focused package or unit tests ran for the touched behavior\n" +
 		"- [ ] Documented anything intentionally left unvalidated in this PR\n\n" +
-		"### Not verified\n\nThe author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
+		"### Not verified\n\nThe author supplied no notes. This text is written from the commits and the diff, and no check was run to write it."
 	if body != want {
 		t.Fatalf("the body gh received =\n%s\n\nwant\n%s", body, want)
 	}
@@ -378,5 +378,55 @@ func TestRunPRCommand_TemplateWithAHashSetextHeadingIsUsed(t *testing.T) {
 	}
 	if !strings.Contains(out, "#tag\nmore\n---\n\n- [ ] Done") || !strings.Contains(out, "Adds the feature file.") {
 		t.Errorf("the body lost the template's heading or box:\n%s", out)
+	}
+}
+
+// The text that reaches a pull request is tool-neutral: with the gotreesitter
+// template, with and without notes, the body and the title carry no tool,
+// vendor or model name, and no attribution.
+func TestRunPRCommand_BodyNamesNoToolOrAttribution(t *testing.T) {
+	_, thisFile, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "..", "..", "pkg", "oneshot", "commands", "testdata", "gotreesitter_pr_template.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, notes := range map[string]string{
+		"no notes":                   "",
+		"notes without Not verified": "## Evidence\n\nRan the focused tests.\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newPRRepo(t)
+			commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", string(raw))
+			runGitIn(t, r.work, "push", "-q", "origin", "main")
+			r.commit(t, "feature", "f.txt")
+			r.park(t)
+			stubPRDependencies(t, func() error { return nil })
+			stubPRModelRecordingTool(t, `{"action":"add","title":"feature file","section_what_does_this_pr_do":"Adds the feature file.","section_why_this_approach":"It is the smallest change."}`)
+			outFile := filepath.Join(t.TempDir(), "pr.md")
+			args := []string{"--dry-run", "--cost=false", "--head", "feature", "--output", outFile}
+			if notes != "" {
+				notesFile := filepath.Join(t.TempDir(), "notes.md")
+				if err := os.WriteFile(notesFile, []byte(notes), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--context-file", notesFile)
+			}
+			captureStdout(t, func() { err = runPRCommand(args) })
+			if err != nil {
+				t.Fatalf("runPRCommand: %v", err)
+			}
+			text, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(text), "### Not verified") {
+				t.Fatalf("the text has no Not verified statement:\n%s", text)
+			}
+			for _, word := range []string{"Buckley", "buckley", "Generated with", "Co-Authored-By", "Claude", "Codex", "GPT", "test-model", "Anthropic", "OpenAI"} {
+				if strings.Contains(string(text), word) {
+					t.Errorf("the text contains %q:\n%s", word, text)
+				}
+			}
+		})
 	}
 }

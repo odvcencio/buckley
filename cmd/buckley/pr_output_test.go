@@ -40,7 +40,7 @@ func TestRunPRCommand_DryRunStdoutIsTheTextAndNothingElse(t *testing.T) {
 	want := "Title: add: feature file\n\n" +
 		"## Summary\n\nAdds the feature file.\n\n" +
 		"## Changes\n\n- Add f.txt\n\n" +
-		"## Not verified\n\nThe author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing.\n"
+		"## Not verified\n\nThe author supplied no notes. This text is written from the commits and the diff, and no check was run to write it.\n"
 	if out != want {
 		t.Fatalf("stdout =\n%q\nwant\n%q", out, want)
 	}
@@ -73,7 +73,7 @@ func TestRunPRCommand_RealRunStdoutIsTheTextThenTheURL(t *testing.T) {
 		t.Fatalf("runPRCommand: %v", err)
 	}
 
-	if !strings.HasPrefix(out, "Title: add: feature file\n\n## Summary\n") || !strings.HasSuffix(out, "ran nothing.\nhttps://github.com/o/r/pull/12\n") {
+	if !strings.HasPrefix(out, "Title: add: feature file\n\n## Summary\n") || !strings.HasSuffix(out, "to write it.\nhttps://github.com/o/r/pull/12\n") {
 		t.Fatalf("stdout must be the text and then the PR's URL on its own line:\n%q", out)
 	}
 	if strings.Count(out, "## Summary") != 1 {

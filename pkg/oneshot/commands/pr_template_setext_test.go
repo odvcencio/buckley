@@ -19,9 +19,11 @@ func TestSetextUnderlineTheReaderMissesIsBlocked(t *testing.T) {
 		"after a leading thematic break": "***\n\nT\nU\n=\n\n## Summary\n\nText",
 		"a dash underline":               "<!-- c -->\n\nT\nU\n---\n\n## Summary\n\nText",
 	} {
-		// CommonMark (an independent reader) shows an extra heading.
-		if got := goldmarkHeadings(body); len(got) < 2 {
-			t.Fatalf("%s: goldmark headings = %v, the case has no hidden heading", name, got)
+		// By CommonMark's definition (section 4.3, setext headings) the last line
+		// is an underline of the paragraph lines above it: a heading the reader
+		// does not list.
+		if last := strings.Split(strings.TrimRight(body[:strings.Index(body, "\n\n## Summary")], "\n"), "\n"); !isSetextUnderline(last[len(last)-1]) {
+			t.Fatalf("%s: the case has no setext underline", name)
 		}
 		ws := tmpl.finalBodyWarnings(body, nil)
 		if blockingWarning(ws) == "" && tmpl.shapeWarning(body) == "" {
@@ -76,8 +78,16 @@ func TestSetextGuardHasNoFalseAlarm(t *testing.T) {
 }
 
 // In model text the line is made text: a backslash before its first character.
-// CommonMark (goldmark) then reads a paragraph and no heading, and the reader
-// agrees with it.
+// Two rules of the CommonMark specification, with no renderer involved:
+//   - section 4.3 (setext headings): an underline is a line of only "=" or only
+//     "-" characters after up to three spaces, with optional trailing spaces; and
+//   - section 2.4 (backslash escapes): a backslash before an ASCII punctuation
+//     character ("=" and "-" are) escapes it, so the character is literal text.
+//
+// So the rewritten line is not an underline (it holds a backslash), the
+// backslash escapes the character after it, and what is left of the paragraph
+// has no heading. The rendered result was not checked with an independent
+// renderer.
 func TestModelTextUnderlineBecomesText(t *testing.T) {
 	for name, in := range map[string]string{
 		"leading thematic break": "***\n\nT\nU\n=",
@@ -85,28 +95,55 @@ func TestModelTextUnderlineBecomesText(t *testing.T) {
 		"dash underline":         "***\n\nT\nU\n---",
 	} {
 		before := readMarkdown(in)
-		out, constructs := neutralizeHTML(in)
 		if len(before.Underlines) == 0 {
-			// The reader reads this one correctly; it is a heading, and demoteHeadings
-			// handles it. The inventories agree.
-			if got, want := len(readMarkdown(in).topHeadings()), len(goldmarkHeadings(in)); got != want {
-				t.Errorf("%s: reader %d headings, goldmark %d, and nothing is flagged", name, got, want)
-			}
-			continue
+			t.Fatalf("%s: the reader no longer misses this heading", name)
 		}
-		if len(constructs) == 0 || !strings.Contains(strings.Join(constructs, ";"), "setext underline") {
+		out, constructs := neutralizeHTML(in)
+		if !strings.Contains(strings.Join(constructs, ";"), "setext underline") {
 			t.Errorf("%s: constructs = %v", name, constructs)
 		}
-		if got := goldmarkHeadings(out); len(got) != 0 {
-			t.Errorf("%s: goldmark still reads headings %v in %q", name, got, out)
+		inLines, outLines := strings.Split(in, "\n"), strings.Split(out, "\n")
+		if len(inLines) != len(outLines) {
+			t.Fatalf("%s: line count changed: %q", name, out)
+		}
+		for i, line := range inLines {
+			got := outLines[i]
+			if !isSetextUnderline(line) {
+				if got != line {
+					t.Errorf("%s: line %d changed from %q to %q", name, i, line, got)
+				}
+				continue
+			}
+			if isSetextUnderline(got) {
+				t.Errorf("%s: line %d is still an underline: %q", name, i, got)
+			}
+			if got != `\`+line {
+				t.Errorf("%s: line %d = %q, want a backslash before %q", name, i, got, line)
+			}
+			if c := line[0]; !(c == '=' || c == '-') || !isASCIIPunct(c) {
+				t.Errorf("%s: %q does not start with an escapable character", name, line)
+			}
 		}
 		if d := readMarkdown(out); len(d.Underlines) != 0 || len(d.topHeadings()) != 0 {
 			t.Errorf("%s: the reader still finds a hazard in %q", name, out)
 		}
-		if !strings.Contains(out, `\=`) && !strings.Contains(out, `\-`) {
-			t.Errorf("%s: no backslash in %q", name, out)
-		}
 	}
+}
+
+// isSetextUnderline is CommonMark's definition (section 4.3): up to three
+// spaces, then only "=" or only "-", then optional trailing spaces.
+func isSetextUnderline(line string) bool {
+	t := strings.TrimLeft(line, " ")
+	if len(line)-len(t) > 3 {
+		return false
+	}
+	t = strings.TrimRight(t, " ")
+	return t != "" && (strings.Trim(t, "=") == "" || strings.Trim(t, "-") == "")
+}
+
+// isASCIIPunct is the ASCII punctuation set of CommonMark section 2.4.
+func isASCIIPunct(c byte) bool {
+	return strings.IndexByte("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", c) >= 0
 }
 
 // The model's text is warned about, once per field.
@@ -157,9 +194,6 @@ func TestSetextHeadingThatBeginsWithAHash(t *testing.T) {
 		d := readMarkdown(src)
 		if len(d.Problems) != 0 {
 			t.Errorf("%s: problems %v", name, d.Problems)
-		}
-		if got := goldmarkHeadings(src); len(got) != 2 {
-			t.Fatalf("%s: goldmark headings %v", name, got)
 		}
 		tops := d.topHeadings()
 		if len(tops) != 2 {

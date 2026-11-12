@@ -102,7 +102,7 @@ func TestRunPRCommand_AuthorSectionsReachTheBodyGhReceives(t *testing.T) {
 			t.Errorf("the body gh received lacks the author's text %q:\n%s", want, body)
 		}
 	}
-	for _, unwanted := range []string{"benchfixtures", "cgo_h/docker", "Related Issues", "Buckley wrote this text"} {
+	for _, unwanted := range []string{"benchfixtures", "cgo_h/docker", "Related Issues", "no check was run to write it"} {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("the body gh received has %q:\n%s", unwanted, body)
 		}

@@ -4,26 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/text"
 )
-
-// goldmarkHeadings lists the headings that are children of the document, as
-// "h<level>", the way CommonMark (goldmark) reads them. It is an independent
-// reader: nothing here calls readMarkdown.
-func goldmarkHeadings(src string) []string {
-	var out []string
-	b := []byte(src)
-	root := goldmark.New().Parser().Parse(text.NewReader(b))
-	for n := root.FirstChild(); n != nil; n = n.NextSibling() {
-		if h, ok := n.(*ast.Heading); ok {
-			out = append(out, "h"+string(rune('0'+h.Level)))
-		}
-	}
-	return out
-}
 
 func readGotreesitterTemplate(t *testing.T) string {
 	t.Helper()

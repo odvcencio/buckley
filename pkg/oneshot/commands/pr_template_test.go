@@ -140,7 +140,7 @@ func TestPRBody_FollowsTheTemplate(t *testing.T) {
 	}
 	for _, want := range []string{
 		"- [ ] Engine PR: before-and-after deterministic counters are in the PR body\n\n### Counters\n\n| lex steps | 1,204 | 1,204 |\n\n## Performance",
-		"\n\n### Not verified\n\nThe author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing.\n\n### Related Issues\n\n- Refs #12",
+		"\n\n### Not verified\n\nThe author's notes do not say what was left unverified. This text is written from the notes, the commits and the diff, and no check was run to write it.\n\n### Related Issues\n\n- Refs #12",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body lacks %q:\n%s", want, body)

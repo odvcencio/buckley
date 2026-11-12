@@ -689,7 +689,10 @@ next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,
 the body always says that the author stated nothing, also when the model wrote
 text of its own for a Not verified slot of the template (that text follows the
-statement).
+statement). The statement is plain text that names no tool, vendor or model: it
+says that the notes name nothing as unverified (or that there were no notes),
+that the text is written from the notes, the commits and the diff, and that no
+check was run to write it.
 
 HTML comments (`<!-- ... -->`) in a notes file are never sent to the model and
 never published. Buckley removes every comment when it reads the file, wherever

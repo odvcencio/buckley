@@ -830,7 +830,7 @@ func (PRDefinition) Unmarshal(result json.RawMessage) (any, error) {
 // section when the author wrote none.
 func notVerifiedFallback(hasNotes bool) string {
 	if hasNotes {
-		return "The author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing."
+		return "The author's notes do not say what was left unverified. This text is written from the notes, the commits and the diff, and no check was run to write it."
 	}
-	return "The author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
+	return "The author supplied no notes. This text is written from the commits and the diff, and no check was run to write it."
 }
