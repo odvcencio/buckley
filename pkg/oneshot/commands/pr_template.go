@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/tools"
@@ -115,7 +116,7 @@ func ParsePRTemplate(text string) *PRTemplate {
 			start, stop := d.lineSpan(sec.First, sec.Last)
 			// Comment text is guidance; anything else that is not blank makes the
 			// section fixed.
-			s.Open = strings.TrimSpace(d.outsideComments(start, stop)) == ""
+			s.Open = blankText(d.outsideComments(start, stop))
 			var guide []string
 			for _, c := range d.Comments {
 				if c.Start >= start && c.Stop <= stop {
@@ -602,35 +603,55 @@ type boxRecord struct {
 	Where   string // the words of that heading, for messages
 }
 
-// boxLine normalizes a checkbox line for comparison: the check mark is the one
-// thing that may differ, and a text's first line loses its indentation and its
-// end white space because the body is trimmed.
-func boxLine(line string, markCol int, firstLine bool) string {
+// boxLine masks the check mark of a checkbox line: the one character in the
+// brackets becomes a space. Nothing else changes: the list marker, the
+// indentation, the text and any trailing spaces stay, because they are part of
+// the line (two trailing spaces are a hard break). Only the edges of the whole
+// text are special, because the body is trimmed: the first non-blank line of a
+// text loses its leading white space (trimLeft) and the last its trailing white
+// space (trimRight).
+func boxLine(line string, markCol int, trimLeft, trimRight bool) string {
 	if markCol >= 0 && markCol < len(line) {
 		line = line[:markCol] + " " + line[markCol+1:]
 	}
-	if firstLine {
-		return strings.TrimSpace(line)
+	if trimLeft {
+		line = strings.TrimLeftFunc(line, unicode.IsSpace)
 	}
-	return strings.TrimRight(line, " \t")
+	if trimRight {
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+	}
+	return line
+}
+
+// edgeLines returns the index of the first and of the last line that is not
+// blank for strings.TrimSpace (which trims the body), or -1.
+func edgeLines(lines []string) (first, last int) {
+	first, last = -1, -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	return first, last
 }
 
 // boxRecords lists the checkbox lines of the run, as the whole-document parse
-// found them. lead says the run starts the document.
-func (f *mdFrag) boxRecords(section int, where string, lead bool) []boxRecord {
+// found them. lead says the run starts the document and tail that it ends it.
+func (f *mdFrag) boxRecords(section int, where string, lead, tail bool) []boxRecord {
 	lines := f.lines()
 	starts := make([]int, len(lines))
-	off, first := 0, -1
+	off := 0
 	for i, l := range lines {
 		starts[i] = off
 		off += len(l) + 1
-		if lead && first < 0 && strings.TrimSpace(l) != "" {
-			first = i
-		}
 	}
+	first, last := edgeLines(lines)
 	var out []boxRecord
 	for _, t := range f.tasks {
-		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line], t.Line == first), Section: section, Where: where})
+		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line], lead && t.Line == first, tail && t.Line == last), Section: section, Where: where})
 	}
 	return out
 }
@@ -640,10 +661,10 @@ func (f *mdFrag) boxRecords(section int, where string, lead bool) []boxRecord {
 func (t *PRTemplate) boxRecords() []boxRecord {
 	var out []boxRecord
 	if t.preFrag != nil {
-		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading", true)...)
+		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading", true, len(t.Sections) == 0)...)
 	}
 	for i, s := range t.Sections {
-		out = append(out, s.fragment().boxRecords(i, s.Heading, false)...)
+		out = append(out, s.fragment().boxRecords(i, s.Heading, false, i == len(t.Sections)-1)...)
 	}
 	return out
 }
@@ -657,16 +678,10 @@ func (d *mdDoc) boxRecords(deepest int) []boxRecord {
 			heads = append(heads, h)
 		}
 	}
-	first := -1
-	for i, l := range d.Lines {
-		if strings.TrimSpace(l) != "" {
-			first = i
-			break
-		}
-	}
+	first, last := edgeLines(d.Lines)
 	var out []boxRecord
 	for _, t := range d.Tasks {
-		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line], t.Line == first), Section: -1, Where: "the text before the first heading"}
+		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line], t.Line == first, t.Line == last), Section: -1, Where: "the text before the first heading"}
 		for i, h := range heads {
 			if h.Start < t.Line {
 				r.Section, r.Where = i, h.Text

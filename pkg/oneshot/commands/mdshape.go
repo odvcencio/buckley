@@ -215,6 +215,12 @@ func readMarkdown(src string) *mdDoc {
 	return d
 }
 
+// blankText reports a text that is blank by CommonMark (section 2.1): it holds
+// only spaces and tabs (and line endings, for a text of several lines). U+00A0
+// and the other Unicode spaces are content, so strings.TrimSpace does not decide
+// this.
+func blankText(s string) bool { return strings.Trim(s, " \t\n") == "" }
+
 // findUnderlines records the lines that GitHub may render as the underline of a
 // heading although the parser does not. Markdown++ 0.5.0 misreads a multi-line
 // setext heading ("T", "U", "=") that follows a leading HTML block or a thematic
@@ -228,10 +234,13 @@ func readMarkdown(src string) *mdDoc {
 // they are never recorded.
 func (d *mdDoc) findUnderlines() {
 	for i := 1; i < len(d.Lines); i++ {
-		if !underlineOnly(d.Lines[i]) || strings.TrimSpace(d.Lines[i-1]) == "" {
+		if !underlineOnly(d.Lines[i]) || blankText(d.Lines[i-1]) {
 			continue
 		}
-		if kind, ok := d.topKind[i-1]; !ok || kind != mdpp.NodeParagraph {
+		// A line the parser puts in no block (it dropped it from its source
+		// ranges, as it does a line of only U+00A0) is paragraph text to the
+		// specification, so it counts as a paragraph line here.
+		if kind, ok := d.topKind[i-1]; ok && kind != mdpp.NodeParagraph {
 			continue
 		}
 		if kind, ok := d.topKind[i]; ok && kind == mdpp.NodeHeading {
@@ -616,7 +625,7 @@ func removeCommentSpans(text string, comments []mdComment, keep map[int]bool) []
 		}
 		if len(spans) == 0 {
 			out = append(out, line)
-		} else if kept := removeSpans(line, spans); strings.TrimSpace(kept) != "" {
+		} else if kept := removeSpans(line, spans); !blankText(kept) {
 			out = append(out, kept)
 		}
 		from = to + 1
@@ -642,7 +651,7 @@ func (f *mdFrag) pure() bool {
 				spans = append(spans, [2]int{max(c.Start, from) - from, min(c.Stop, to) - from})
 			}
 		}
-		if !isBox[i] && strings.TrimSpace(removeSpans(line, spans)) != "" {
+		if !isBox[i] && !blankText(removeSpans(line, spans)) {
 			return false
 		}
 		from = to + 1

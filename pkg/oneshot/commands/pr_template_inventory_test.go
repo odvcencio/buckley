@@ -120,3 +120,45 @@ func TestGotreesitterTemplateBodyHasNoWarning(t *testing.T) {
 		t.Errorf("the body has %d checkbox lines, want 20", got)
 	}
 }
+
+// Review of #478, round eight, finding 2. The comparison is exact: after the one
+// character inside the brackets is masked (space, x or X), the two lines must be
+// byte for byte equal, with the list marker, the indentation and the trailing
+// spaces. Two trailing spaces are a hard break, so they are content. The one
+// exception is the edge of the whole text, which the body trims.
+func TestCheckboxComparisonIsExact(t *testing.T) {
+	tmpl := ParsePRTemplate("## Summary\n<!-- describe -->\n\n## Checks\n- [ ] A  \n  continued\n- [ ] B\n- [X] C\n")
+	body := func(checks string) string { return "## Summary\n\nText\n\n## Checks\n" + checks }
+	const same = "- [ ] A  \n  continued\n- [ ] B\n- [X] C"
+	for name, tc := range map[string]struct {
+		checks string
+		ok     bool
+	}{
+		"identical":                       {same, true},
+		"x for a space, x for X":          {"- [x] A  \n  continued\n- [X] B\n- [x] C", true},
+		"trailing spaces dropped":         {"- [ ] A\n  continued\n- [ ] B\n- [X] C", false},
+		"trailing space added":            {"- [ ] A  \n  continued\n- [ ] B \n- [X] C", false},
+		"one trailing space":              {"- [ ] A \n  continued\n- [ ] B\n- [X] C", false},
+		"a different list marker":         {"- [ ] A  \n  continued\n* [ ] B\n- [X] C", false},
+		"a different indentation":         {"- [ ] A  \n  continued\n  - [ ] B\n- [X] C", false},
+		"a word added after the text":     {"- [ ] A  \n  continued\n- [ ] B now\n- [X] C", false},
+		"a changed character in the text": {"- [ ] A  \n  continued\n- [ ] D\n- [X] C", false},
+		"a tab for the space after":       {"- [ ] A  \n  continued\n-\t[ ] B\n- [X] C", false},
+	} {
+		ws := tmpl.finalBodyWarnings(body(tc.checks), nil)
+		if got := blockingWarning(ws); tc.ok && got != "" {
+			t.Errorf("%s: blocked: %q", name, got)
+		} else if !tc.ok && !strings.Contains(got, "checkbox line") {
+			t.Errorf("%s: not blocked by a checkbox warning (warnings %v)", name, ws)
+		}
+	}
+	// A template that ends with an item with trailing spaces: the body is trimmed
+	// at its end, which is the only place where trailing spaces may go.
+	edge := ParsePRTemplate("## Checks\n- [ ] A\n- [ ] Z  \n")
+	if got := blockingWarning(edge.finalBodyWarnings("## Checks\n- [ ] A\n- [x] Z", nil)); got != "" {
+		t.Errorf("edge of the text: %q", got)
+	}
+	if got := blockingWarning(edge.finalBodyWarnings("## Checks\n- [ ] A \n- [x] Z", nil)); !strings.Contains(got, "checkbox line") {
+		t.Errorf("trailing space inside the text is accepted: %q", got)
+	}
+}

@@ -149,12 +149,51 @@ func isASCIIPunct(c byte) bool {
 // The model's text is warned about, once per field.
 func TestModelTextUnderlineIsWarned(t *testing.T) {
 	_, ws := PRResult{Summary: "***\n\nT\nU\n="}.withoutStructuralHTML()
-	got := false
 	for _, w := range ws {
-		got = got || strings.Contains(w.Text, "setext underline")
+		if strings.Contains(w.Text, "setext underline") {
+			return
+		}
 	}
-	if readMarkdown("***\n\nT\nU\n=").Underlines != nil && !got {
-		t.Errorf("warnings = %v", ws)
+	t.Errorf("warnings = %v, want one about the setext underline", ws)
+}
+
+// Review of #478, round eight, finding 1. A blank line is a line of only spaces
+// and tabs (CommonMark section 2.1); U+00A0 and the other Unicode spaces are
+// content. So "T", a line holding one U+00A0, and "=" are one paragraph over an
+// underline: a level-1 heading. The parser drops the U+00A0 line from its block
+// ranges, and strings.TrimSpace calls it blank, so the guard missed it.
+func TestNonBreakingSpaceLineIsParagraphText(t *testing.T) {
+	for name, gap := range map[string]string{"U+00A0": "\u00a0", "U+2003": "\u2003"} {
+		model := "***\n\nT\n" + gap + "\n="
+		if d := readMarkdown(model); !reflect.DeepEqual(d.Underlines, []int{4}) {
+			t.Errorf("%s: Underlines = %v for %q", name, d.Underlines, model)
+		}
+		// The review's pair: the template, and the model's summary.
+		template := "<!-- c -->\n\n## Summary\n<!-- describe -->\n"
+		body, ws := shapeBody(t, template, "", PRResult{Sections: map[string]string{"summary": model}})
+		if !hasWarning(ws, "setext underline", false) {
+			t.Errorf("%s: no warning about the rewritten line; warnings %v", name, ws)
+		}
+		lines := strings.Split(body, "\n")
+		if got := lines[len(lines)-1]; got != "" && isSetextUnderline(got) {
+			t.Errorf("%s: the body still ends with an underline line %q", name, got)
+		}
+		if !strings.Contains(body, "\n"+gap+"\n\\=") {
+			t.Errorf("%s: the underline is not escaped in\n%q", name, body)
+		}
+		// The assembled body itself, as the final check sees it.
+		assembled := "<!-- c -->\n\n## Summary\n\n" + model
+		if got := blockingWarning(ParsePRTemplate(template).finalBodyWarnings(assembled, nil)); !strings.Contains(got, "setext underline") {
+			t.Errorf("%s: final check = %q", name, got)
+		}
+	}
+	// A line of spaces and tabs is blank: the underline is a thematic break or
+	// text after a blank line, as before.
+	if d := readMarkdown("T\n \t \n---"); len(d.Underlines) != 0 {
+		t.Errorf("a space-and-tab line is blank: Underlines = %v", d.Underlines)
+	}
+	if !blankText(" \t\n") || blankText("\u00a0") || blankText("\u2003") {
+		t.Error("blankText")
 	}
 }
 

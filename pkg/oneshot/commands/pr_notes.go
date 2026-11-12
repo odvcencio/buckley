@@ -256,7 +256,7 @@ func noteSections(note PRNote, template map[string]bool, checklist bool) []Autho
 func labelLine(d *mdDoc, i int) (string, bool) {
 	lines := d.Lines
 	line := lines[i]
-	if d.inFence[i] || line != strings.TrimLeft(line, " \t") || (i > 0 && strings.TrimSpace(lines[i-1]) != "") {
+	if d.inFence[i] || line != strings.TrimLeft(line, " \t") || (i > 0 && !blankText(lines[i-1])) {
 		return "", false
 	}
 	text := strings.TrimSpace(line)
@@ -330,10 +330,10 @@ func plainHeading(heading string) string {
 // trimBlankEdges joins lines and drops the blank lines at both ends. It keeps
 // the indentation of the first line, which a nested list or a code block needs.
 func trimBlankEdges(lines []string) string {
-	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+	for len(lines) > 0 && blankText(lines[0]) {
 		lines = lines[1:]
 	}
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+	for len(lines) > 0 && blankText(lines[len(lines)-1]) {
 		lines = lines[:len(lines)-1]
 	}
 	return strings.Join(lines, "\n")

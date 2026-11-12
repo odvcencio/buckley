@@ -36,6 +36,7 @@ func newPRRepoOwnedBy(t *testing.T, owner string) prRepo {
 	// scratch repositories of these tests.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_COUNT", "0")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("BUCKLEY_REMOTE_NAME", "")
 	t.Setenv(envPRBase, "")

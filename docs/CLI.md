@@ -473,8 +473,8 @@ template is not read. `--template=false` keeps Buckley's own sections.
 
 Buckley reads the Markdown of the template, of the notes and of the model's text
 with Markdown++ (`m31labs.dev/mdpp`), the organisation's CommonMark-based parser,
-through one reader. Markdown structure (headings, checkbox items, code blocks, comments in the template and
-in model text) comes from that parser, not from line scans. Three things stay textual by design: the short-label
+through one reader. Markdown++ selects the structural nodes (headings, checkbox items, code blocks, comments in the template and
+in model text), not line scans. The adapter around it also validates the syntax of a heading's source range, identifies the fence style of a code block, locates the check mark in a task item, and inspects the text of the HTML that the parser hands over (comment delimiters, heading tags). Three things stay textual by design: the short-label
 rule that splits a notes file into sections (a label is a property of a line of the notes, as it always was),
 the removal of HTML comments from a notes file when it is read, which searches the text so that it fails
 closed (see [Author notes](#author-notes)), and the one form test of a setext underline (a line of only `=` or only `-`,
@@ -570,18 +570,25 @@ The body keeps the template's shape:
      that the notes' headings come from the parser (a heading-looking line
      inside an HTML block no longer splits a section; an empty ATX heading can
      end one) and every line ending in a model field or a notes file is read
-     as LF.
+     as LF. The fixed Not verified statement names no tool (see [Author notes](#author-notes)).
    - Markdown++ 0.5.0 does not read a multi-line setext heading when the
      document begins with an HTML block (a template that starts with a comment)
      or a thematic break: it reports a paragraph where GitHub renders a heading.
-     Until Buckley requires a Markdown++ release that reads it, a guard that does
-     not depend on the parser's reading applies. A line with the form of a setext
-     underline (only `=` or only `-`, up to three leading spaces, optional
-     trailing spaces), directly below a non-blank line that the parser reports as
-     part of a paragraph at the top level of the text, and that the parser does
-     not report as part of a heading, is a hazard. A code block, a table, front
-     matter, a list item, a block quote, and a thematic break after a blank line
-     are other nodes and never match. In the model's text the line is made text
+     Until Buckley requires a Markdown++ release that reads it, a guard applies. It
+     depends on the parser's paragraph classification and source ranges; only
+     the test for the form of an underline (only `=` or only `-`, up to three
+     leading spaces, optional trailing spaces) is independent of them. A line with
+     that form, directly below a line that is not blank, is a hazard when the
+     parser reports that line above as part of a paragraph at the top level of
+     the text or in no block at all, and does not report the underline as part of
+     a heading. A blank line holds only spaces and tabs (CommonMark section 2.1);
+     a line of only U+00A0 or another Unicode space is paragraph text, and the
+     parser leaves it out of its block ranges, so it counts as a paragraph line.
+     A code block, a table, front matter, a list item, a block quote, and a
+     thematic break after a blank line, as Markdown++ recognizes them, are other
+     nodes and never match. The guard can raise a false alarm where Markdown++
+     misses an HTML block that interrupts a paragraph (`T`, then `<pre>`, then
+     `=`); it then refuses a path that was safe, never the reverse. In the model's text the line is made text
      by a backslash before its first character (`=` becomes `\=`, `---` becomes
      `\---`), with a warning; CommonMark then reads a paragraph. In a carried
      notes section, in the final body and in the template, it is a blocking
@@ -615,7 +622,12 @@ The body keeps the template's shape:
    space collapsed; case matters. Every item is written in the template's order,
    byte for byte except its check mark, and the final check verifies it: the
    body's checkbox lines are the template's lines, in the same order, each under
-   the same heading, with only the check mark different. The checkbox lines of
+   the same heading. After the one character inside the brackets (space, `x` or
+   `X`) is masked, the two lines must be byte for byte equal, with the list
+   marker, the indentation and any trailing spaces (two trailing spaces are a
+   hard break, so they are content). Only the edges of the whole text are
+   trimmed, as the body is: the first line's leading white space and the last
+   line's trailing white space. The checkbox lines of
    the author's notes may be added. A mismatch is a blocking warning that names
    the line. A line that the template hides behind a comment on the same line
    (`<!-- guide -->- [ ] A`) is not an item of the template; when the comment is
