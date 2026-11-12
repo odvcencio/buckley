@@ -67,6 +67,8 @@ var (
 	// semicolon, or a parenthesis. What follows the boundary is prose.
 	commandTailRe = regexp.MustCompile(`\s+\(|\s+(?:[—–]|--?)\s+|:\s+|;\s+`)
 	numberRe      = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
+	// listItemRe reads a bullet or a numbered item of a testing note.
+	listItemRe = regexp.MustCompile(`^(?:[-*+]|\d{1,3}[.)])[ \t]`)
 )
 
 // decisionWords pair the words that state a decision with the stem that the

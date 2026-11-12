@@ -252,7 +252,7 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 			continue
 		}
 		for _, path := range prTemplatePaths {
-			text, err := gitOutput("show", ref+":"+path)
+			text, err := gitOutputRaw("show", ref+":"+path) // untrimmed: the template guard looks at its first line
 			if err != nil {
 				continue
 			}
@@ -260,22 +260,14 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 				prWarnf("%s is %d bytes, more than the %d a pull request template may have; the body uses Buckley's own sections", path, len(text), prTemplateMaxBytes)
 				return nil
 			}
-			return commands.ParsePRTemplate(text)
+			tmpl := commands.ParsePRTemplate(text)
+			if tmpl != nil {
+				tmpl.Source = ref + ":" + path
+			}
+			return tmpl
 		}
 	}
 	return nil
-}
-
-// templateHeadings lists the headings of a template; nil has none.
-func templateHeadings(template *commands.PRTemplate) []string {
-	if template == nil {
-		return nil
-	}
-	headings := make([]string, 0, len(template.Sections))
-	for _, section := range template.Sections {
-		headings = append(headings, section.Heading)
-	}
-	return headings
 }
 
 // prContextOpts derives the git-diff gathering options for a PR run: a
@@ -401,8 +393,16 @@ func generatePRText(opts prCommandOptions, plan *prPlan) (prText, error) {
 	var template *commands.PRTemplate
 	if opts.template {
 		template = loadPRTemplate(plan)
+		if why := template.Unreadable(); why != "" {
+			// The template's shape cannot be certified, so nothing is generated.
+			return prText{}, fmt.Errorf("the pull request template %s cannot be used: %s; fix the template, or run with --template=false", template.Source, why)
+		}
 	}
-	sections := commands.AuthorSections(notes, templateHeadings(template)...)
+	// Only with a template does a notes section headed Checklist tick boxes.
+	sections := commands.AuthorSections(notes)
+	if template != nil {
+		sections = commands.TemplateAuthorSections(notes, template)
+	}
 
 	runtime, cleanup, err := newPRCommandRuntimeFn(opts)
 	defer cleanup()
@@ -430,15 +430,25 @@ func formatPRText(text prText) string {
 	return "Title: " + text.Title + "\n\n" + text.Body + "\n"
 }
 
+// trimPRBody trims a body at both ends with the one character set that every
+// trim of a body uses (commands.BodyEdgeWhitespace): spaces, tabs and line
+// breaks. strings.TrimSpace would also remove U+00A0 and other Unicode spaces,
+// which can change how the first or the last block is read.
+func trimPRBody(s string) string { return strings.Trim(s, commands.BodyEdgeWhitespace) }
+
 // parsePRText reads the file form of a PR text. A first line that starts with
-// "Title:" is the title; without one the whole content is the body.
+// "Title:" is the title; without one the whole content is the body. Spaces, tabs
+// and line breaks at both ends of the body are trimmed, and CRLF becomes LF. For a body made from a pull request
+// template this only removes blank lines at the start: a template whose first
+// non-blank line is indented is refused when it is read (ParsePRTemplate), so
+// the first non-blank line of such a body is at column 0.
 func parsePRText(content string) prText {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	first, rest, _ := strings.Cut(content, "\n")
 	if title, ok := strings.CutPrefix(first, "Title:"); ok {
-		return prText{Title: strings.TrimSpace(title), Body: strings.TrimSpace(rest)}
+		return prText{Title: strings.TrimSpace(title), Body: trimPRBody(rest)}
 	}
-	return prText{Body: strings.TrimSpace(content)}
+	return prText{Body: trimPRBody(content)}
 }
 
 // readPRText reads the text that --body-file names. title, when set, replaces
@@ -583,12 +593,22 @@ func renderPRGenerationResult(opts prCommandOptions, plan *prPlan, result *prRun
 	}
 	claims := checkPRAgainstSources(result.PR, commands.NewPRSources(notes, result.Context))
 	applyPRBreakingPolicy(result.PR, result.Context, opts.breaking)
-	text := prText{Title: opts.title, Body: result.PR.Body(commands.PRBodyOptions{
+	body, shapeWarnings := result.PR.BodyWithWarnings(commands.PRBodyOptions{
 		Sections:         sections,
 		StateNotVerified: true,
 		HasNotes:         len(notes) > 0,
 		Template:         template,
-	})}
+	})
+	// A checkbox line of the notes that the template does not have, and a
+	// section with no place in a checklist-only template, are the author's to
+	// fix: --strict stops on them like on a claim without a source.
+	for _, warning := range shapeWarnings {
+		prWarnf("%s", warning.Text)
+		if warning.Blocking {
+			claims++
+		}
+	}
+	text := prText{Title: opts.title, Body: body}
 	if text.Title == "" {
 		text.Title = result.PR.Header()
 	}
@@ -988,7 +1008,7 @@ func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
 	if json.Unmarshal(out, &current) != nil {
 		return
 	}
-	previous := prText{Title: strings.TrimSpace(current.Title), Body: strings.TrimSpace(strings.ReplaceAll(current.Body, "\r\n", "\n"))}
+	previous := prText{Title: strings.TrimSpace(current.Title), Body: trimPRBody(strings.ReplaceAll(current.Body, "\r\n", "\n"))}
 	if previous.Body == "" || previous == next {
 		return
 	}

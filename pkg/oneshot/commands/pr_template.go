@@ -2,8 +2,10 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"m31labs.dev/buckley/pkg/commitmsg"
 	"m31labs.dev/buckley/pkg/tools"
@@ -17,6 +19,29 @@ type PRTemplate struct {
 	// Preamble is the text before the first heading.
 	Preamble string
 	Sections []TemplateSection
+
+	// rawUnclosed and rawHeadings count the raw HTML in the template that a
+	// renderer acts on (see mdHazard): comment openers with no closer, and heading
+	// elements at or above the template's deepest level. The body may have no more
+	// of them than the template.
+	rawUnclosed, rawHeadings int
+
+	// Source names where the template came from (a path), for messages.
+	Source string
+
+	preFrag  *mdFrag     // the lines before the first heading, from the whole-document parse
+	problems []string    // why the reading of the template cannot be trusted (see mdDoc.Problems)
+	foreign  []mdForeign // Markdown++-only constructs in the template
+}
+
+// Unreadable returns why Markdown++ could not read the template exactly (a parse
+// error, a recovery diagnostic, a source range that cannot be used), or "".
+// Generation stops on such a template: its shape cannot be certified.
+func (t *PRTemplate) Unreadable() string {
+	if t == nil {
+		return ""
+	}
+	return strings.Join(t.problems, "; ")
 }
 
 // TemplateSection is one heading of a template and the lines under it.
@@ -34,107 +59,225 @@ type TemplateSection struct {
 	Open bool
 	// Key names the section in the model's tool call ("section_<Key>").
 	Key string
+
+	frag *mdFrag // Lines with the items and comments of the whole-document parse
 }
 
-var (
-	checkboxRe   = regexp.MustCompile(`^\s*[-*+]\s+\[[ xX]\]`)
-	sectionKeyRe = regexp.MustCompile(`[^a-z0-9]+`)
-)
+// fragment returns the section's lines with their inventory. A section built by
+// hand, not by ParsePRTemplate, is parsed here as a document of its own.
+func (s TemplateSection) fragment() *mdFrag {
+	if s.frag != nil {
+		return s.frag
+	}
+	if len(s.Lines) == 0 {
+		return &mdFrag{}
+	}
+	return readMarkdown(strings.Join(s.Lines, "\n")).fragment(0, len(s.Lines)-1)
+}
+
+var sectionKeyRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 // sectionFieldPrefix starts the name of a tool argument that carries the text
 // of one template section.
 const sectionFieldPrefix = "section_"
 
-// ParsePRTemplate splits a template at its Markdown headings. Headings inside
-// a code block or an HTML comment are text. It returns nil for a blank
-// template.
+// ParsePRTemplate splits a template at its top-level headings, as a Markdown
+// parser reads them (mdshape.go). A heading inside a code block, an HTML block
+// or a comment is text. It returns nil for a blank template.
 func ParsePRTemplate(text string) *PRTemplate {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = normalizeNewlines(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
+	d := readMarkdown(strings.TrimRight(text, "\n"))
 	t := &PRTemplate{}
-	var (
-		preamble  []string
-		cur       *TemplateSection
-		guide     []string
-		inFence   bool
-		inComment bool
-		fixed     bool // the current section has a checkbox or fixed text
-	)
-	flush := func() {
-		if cur == nil {
-			return
-		}
-		cur.Guide = strings.TrimSpace(strings.Join(guide, "\n"))
-		cur.Open = !fixed
-		t.Sections = append(t.Sections, *cur)
-		cur, guide, fixed = nil, nil, false
+	tops := d.topHeadings()
+	pre := d.Lines
+	if len(tops) > 0 {
+		pre = d.Lines[:tops[0].Start]
 	}
-	keys := map[string]int{}
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !inComment && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
-			inFence = !inFence
-		}
-		if !inFence && !inComment {
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				flush()
-				cur = &TemplateSection{Level: len(m[1]), Heading: strings.TrimSpace(m[2]), HeadingLine: line}
-				key := strings.Trim(sectionKeyRe.ReplaceAllString(strings.ToLower(cur.Heading), "_"), "_")
-				if len(key) > 40 {
-					key = strings.TrimRight(key[:40], "_")
-				}
-				if key == "" {
-					key = "section"
-				}
-				if keys[key]++; keys[key] > 1 {
-					key += "_" + string(rune('0'+keys[key]))
-				}
-				cur.Key = key
-				continue
-			}
-		}
-		// Classify the line: comment text is guidance, anything else that is
-		// not blank makes the section fixed. Comments are followed in the
-		// preamble too, so that a heading inside one stays text.
-		var lineGuide []string
-		lineFixed := false
-		rest := line
-		for rest != "" {
-			if inComment {
-				end := strings.Index(rest, "-->")
-				if end < 0 {
-					lineGuide = append(lineGuide, strings.TrimSpace(rest))
-					break
-				}
-				lineGuide = append(lineGuide, strings.TrimSpace(rest[:end]))
-				rest, inComment = rest[end+3:], false
-				continue
-			}
-			start := strings.Index(rest, "<!--")
-			if inFence || start < 0 {
-				if strings.TrimSpace(rest) != "" {
-					lineFixed = true
-				}
-				break
-			}
-			if strings.TrimSpace(rest[:start]) != "" {
-				lineFixed = true
-			}
-			rest, inComment = rest[start+4:], true
-		}
-		if cur == nil {
-			preamble = append(preamble, line)
+	t.Preamble = trimBlankEdges(pre)
+	t.preFrag = d.fragment(0, len(pre)-1)
+	t.problems, t.foreign = d.Problems, d.Foreign
+	// A template whose first non-blank line is indented is not usable. The body
+	// is trimmed at its start in places (a saved --output file read back by
+	// --body-file) and there the indentation of that line would go, which can
+	// change how its block is read (an indented code block becomes a heading).
+	// With a first line at column 0, trimming the start removes blank lines only,
+	// the one edge normalization that is allowed. Blank lines before the first
+	// line are fine; blank means only spaces and tabs.
+	for _, line := range d.Lines {
+		if blankText(line) {
 			continue
 		}
-		cur.Lines = append(cur.Lines, line)
-		guide = append(guide, lineGuide...)
-		fixed = fixed || lineFixed
+		if line[0] == ' ' || line[0] == '\t' {
+			t.problems = append(t.problems, "the template's first line is indented; Buckley cannot keep such a line when a body is trimmed (remove the indentation of the first non-blank line, or start the template with a heading or a paragraph at column 0)")
+		}
+		break
 	}
-	flush()
-	t.Preamble = trimBlankEdges(preamble)
+	for _, line := range d.Underlines {
+		t.problems = append(t.problems, underlineProblem(line))
+	}
+	keys := map[string]int{}
+	for _, sec := range d.sections(0) {
+		h := sec.Heading
+		s := TemplateSection{
+			Level:       h.Level,
+			Heading:     h.Text,
+			HeadingLine: strings.Join(d.Lines[h.Start:h.End+1], "\n"),
+		}
+		if sec.Last >= sec.First {
+			s.Lines = append([]string(nil), d.Lines[sec.First:sec.Last+1]...)
+			s.frag = d.fragment(sec.First, sec.Last)
+			start, stop := d.lineSpan(sec.First, sec.Last)
+			// Comment text is guidance; anything else that is not blank makes the
+			// section fixed.
+			s.Open = blankText(d.outsideComments(start, stop))
+			var guide []string
+			for _, c := range d.Comments {
+				if c.Start >= start && c.Stop <= stop {
+					for _, l := range strings.Split(c.Text, "\n") {
+						if l = strings.TrimSpace(l); l != "" {
+							guide = append(guide, l)
+						}
+					}
+				}
+			}
+			s.Guide = strings.Join(guide, "\n")
+		} else {
+			s.Open = true
+		}
+		key := strings.Trim(sectionKeyRe.ReplaceAllString(strings.ToLower(s.Heading), "_"), "_")
+		if len(key) > 40 {
+			key = strings.TrimRight(key[:40], "_")
+		}
+		if key == "" {
+			key = "section"
+		}
+		if keys[key]++; keys[key] > 1 {
+			key += "_" + string(rune('0'+keys[key]))
+		}
+		s.Key = key
+		t.Sections = append(t.Sections, s)
+	}
+	t.rawUnclosed, t.rawHeadings = t.countRawHTML(d)
 	return t
+}
+
+// underlineProblem says why the line (0-based) of a text cannot be certified.
+func underlineProblem(line int) string {
+	return fmt.Sprintf("line %d has the form of a setext underline under a paragraph line, but Markdown++ does not read a heading there, and GitHub may", line+1)
+}
+
+// countRawHTML counts the hazards of d: comment openers with no closer, and raw
+// heading elements at or above the template's deepest level.
+func (t *PRTemplate) countRawHTML(d *mdDoc) (unclosed, headings int) {
+	deepest := t.deepestLevel()
+	for _, h := range d.Hazards {
+		switch {
+		case h.Unclosed:
+			unclosed++
+		case h.Level <= deepest:
+			headings++
+		}
+	}
+	return unclosed, headings
+}
+
+// finalBodyWarnings checks the complete rendered body, after Buckley's own
+// sections and the template are combined, in every layout. Everything here is
+// blocking: it reads the body as Markdown++ and as raw HTML.
+//
+//   - A reading problem of the parser (a parse error, a recovery diagnostic, a
+//     source range that cannot be used) means the structure cannot be certified.
+//
+//   - A Markdown++-only construct is read differently by GitHub.
+//
+//   - Raw HTML that a renderer acts on although the Markdown tree does not show
+//     it: a comment opener with no closer hides the text after it, and a raw
+//     heading element at or above the template's level is a heading the heading
+//     check does not list.
+//
+//   - A line with the form of a setext underline under a paragraph line that the
+//     parser does not read as a heading: Markdown++ 0.5.0 misses a multi-line
+//     setext heading after a leading HTML block or thematic break, GitHub does
+//     not, so no reading of the parser can certify the headings there.
+//
+//   - The checkbox lines must be the template's, word for word and in order, each
+//     under the template's heading (checkboxWarning); only the check mark may
+//     differ, and the lines of the author's own notes (author) may be added.
+//
+// The body may have no more constructs of a kind than the template has.
+func (t *PRTemplate) finalBodyWarnings(body string, author []AuthorSection) []BodyWarning {
+	d := readMarkdown(body)
+	var out []BodyWarning
+	block := func(format string, args ...any) {
+		out = append(out, BodyWarning{Text: fmt.Sprintf(format, args...) + "; the body is out of the template's shape", Blocking: true})
+	}
+	if len(d.Problems) > 0 {
+		block("Markdown++ could not read the body exactly (%s)", d.Problems[0])
+	}
+	if len(d.Underlines) > 0 {
+		block("%s", underlineProblem(d.Underlines[0]))
+	}
+	// The assembled body, read again, has the template's headings: the same
+	// ones, in the same order, and no other heading at the template's levels.
+	// Whatever a transformation did to the text on the way (trimming, moving,
+	// demoting), this is what GitHub shows. With no section to put text in, the
+	// body starts with Buckley's own sections, which this check cannot compare;
+	// the template's own part is compared where it is rendered.
+	if t.placeable() {
+		if w := t.shapeWarning(body); w != "" {
+			block("%s", w)
+		}
+	}
+	if w := t.checkboxWarning(body, author, t.placeable()); w != "" {
+		block("%s", w)
+	}
+	have := map[string]int{}
+	for _, f := range t.foreign {
+		have[f.Name]++
+	}
+	for _, f := range d.Foreign {
+		if have[f.Name]--; have[f.Name] < 0 {
+			block("the body has %s at line %d; Markdown++ reads this differently from GitHub", f.Name, f.Line+1)
+			break
+		}
+	}
+	deepest := t.deepestLevel()
+	unclosed, headings := t.countRawHTML(d)
+	for _, h := range d.Hazards {
+		switch {
+		case h.Unclosed && unclosed > t.rawUnclosed:
+			block("the body has an HTML comment opener with no closer at line %d, which hides the text after it", h.Line+1)
+		case !h.Unclosed && h.Level <= deepest && headings > t.rawHeadings:
+			block("the body has a raw <h%d> heading element at line %d, which is a heading at or above the template's level", h.Level, h.Line+1)
+		default:
+			continue
+		}
+		break
+	}
+	return out
+}
+
+// authorHTMLWarnings names raw HTML in a carried author section that would hide
+// or forge structure. The author's text is not rewritten.
+func (t *PRTemplate) authorHTMLWarnings(s AuthorSection) []BodyWarning {
+	var out []BodyWarning
+	deepest := t.deepestLevel()
+	d := readMarkdown(s.Body())
+	for _, line := range d.Underlines {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q: %s", s.Heading(), underlineProblem(line)), Blocking: true})
+	}
+	for _, h := range d.Hazards {
+		switch {
+		case h.Unclosed:
+			out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has an HTML comment opener with no closer at its line %d; it would hide the text after it", s.Heading(), h.Line+1), Blocking: true})
+		case h.Level <= deepest:
+			out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has a raw <h%d> heading element at its line %d; it would add a heading at or above the template's level", s.Heading(), h.Level, h.Line+1), Blocking: true})
+		}
+	}
+	return out
 }
 
 // headingKey reduces a heading to its words, so that "What changed" in a
@@ -152,16 +295,6 @@ func (s TemplateSection) takes(a AuthorSection) bool {
 	}
 	kind := sectionKind(s.Heading)
 	return kind != "" && kind == a.Kind()
-}
-
-// hasCheckbox reports whether text has a Markdown checkbox line.
-func hasCheckbox(text string) bool {
-	for _, line := range strings.Split(text, "\n") {
-		if checkboxRe.MatchString(line) {
-			return true
-		}
-	}
-	return false
 }
 
 // modelSections returns the open sections that no author section fills. The
@@ -263,29 +396,526 @@ func sectionTexts(raw json.RawMessage) map[string]string {
 	return out
 }
 
-// templateBody renders the body in the template's shape. It returns the
-// author sections that no template section took, for the caller to place
-// after the template.
-func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerified string) (string, []AuthorSection) {
-	var b strings.Builder
-	if t.Preamble != "" {
-		b.WriteString(t.Preamble + "\n\n")
+// Kinds of text that Buckley adds to a template that has no place for it.
+const (
+	kindBreaking = "breaking"
+	kindIssues   = "issues"
+)
+
+// kindKeywords start the words that make a template section the place for a
+// block of the kind (case-insensitive, word prefixes). The first template
+// section whose heading, guide comments or checkbox text has one of them
+// takes the block as a subsection.
+var kindKeywords = map[string][]string{
+	SectionTesting:     {"test", "validat", "verif", "correct"},
+	SectionEvidence:    {"test", "validat", "verif", "correct"},
+	SectionCounters:    {"counter", "perf", "benchmark"},
+	SectionNotVerified: {"unvalidated", "not verified", "unverified", "unsure", "risk", "limit", "gap"},
+	SectionKnownGaps:   {"unvalidated", "not verified", "unverified", "unsure", "risk", "limit", "gap"},
+	kindBreaking:       {"break", "compat"},
+	kindIssues:         {"issue", "relat", "link"},
+}
+
+// BodyWarning is something the author should know about the body. Blocking
+// warnings are errors under --strict.
+type BodyWarning struct {
+	Text     string
+	Blocking bool
+}
+
+// extraBlock is text that no template section takes: an author section of the
+// notes, or a statement that Buckley writes. The template's shape stays as it
+// is, so the block becomes a subsection of one template section.
+type extraBlock struct {
+	Kind    string
+	Heading string
+	Body    string
+}
+
+// mdBox is a checkbox line that splitCheckboxes took out of a text.
+type mdBox struct {
+	Line    string // the line as written
+	Checked bool
+	Item    string // identity: the text with comments removed and white space collapsed
+}
+
+// splitCheckboxes separates the task-list item lines of text, as the parser
+// reads them (so not those in code blocks, HTML blocks or comments), from the
+// other lines.
+func splitCheckboxes(text string) (others string, boxes []mdBox) {
+	d := readMarkdown(text)
+	isBox := map[int]mdTask{}
+	for _, t := range d.Tasks {
+		isBox[t.Line] = t
 	}
-	taken := make([]bool, len(author))
+	var kept []string
+	for i, line := range d.Lines {
+		if t, ok := isBox[i]; ok {
+			boxes = append(boxes, mdBox{Line: line, Checked: t.Checked, Item: t.Item})
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return trimBlankEdges(kept), boxes
+}
+
+// checkboxes returns the checkbox item lines of the section, as written.
+func (s TemplateSection) checkboxes() []string { return s.fragment().taskLines() }
+
+// pureChecklist reports a section whose lines, comments aside, are checkbox
+// lines only: it has no place for text.
+func (s TemplateSection) pureChecklist() bool { return s.fragment().pure() }
+
+// placeable reports whether some section of the template is not a pure
+// checklist, so that a block can be written at its end.
+func (t *PRTemplate) placeable() bool {
+	if t == nil {
+		return false
+	}
 	for _, s := range t.Sections {
-		b.WriteString(s.HeadingLine + "\n")
-		var supplied []string
-		for i, a := range author {
-			if !taken[i] && s.takes(a) {
-				taken[i] = true
-				supplied = append(supplied, a.Body())
+		if !s.pureChecklist() {
+			return true
+		}
+	}
+	return false
+}
+
+// deepestLevel is the level of the deepest heading of the template.
+func (t *PRTemplate) deepestLevel() int {
+	level := 1
+	for _, s := range t.Sections {
+		level = max(level, s.Level)
+	}
+	return level
+}
+
+// demoteHeadings shifts the top-level headings of text, as the parser reads
+// them (so none in a code block, an HTML block or a comment), so that the
+// highest has level top, keeping the relative nesting. An ATX heading changes
+// its markers in place; a setext heading (a text over a line of "=" or "-")
+// becomes one ATX line. A heading that would pass level 6 becomes a bold line.
+func demoteHeadings(text string, top int) string {
+	d := readMarkdown(text)
+	var found []mdHeading
+	highest := 7
+	for _, h := range d.topHeadings() {
+		found = append(found, h)
+		highest = min(highest, h.Level)
+	}
+	if len(found) == 0 {
+		return d.text
+	}
+	var out []string
+	next := 0
+	for i := 0; i < len(d.Lines); i++ {
+		if next >= len(found) || found[next].Start != i {
+			out = append(out, d.Lines[i])
+			continue
+		}
+		h := found[next]
+		next++
+		level := h.Level + top - highest
+		switch {
+		case level > 6:
+			if h.Text != "" {
+				out = append(out, "**"+h.Text+"**")
+			}
+		case h.Setext:
+			out = append(out, strings.Repeat("#", level)+" "+h.Text)
+		default:
+			line := d.Lines[i]
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			marks := len(line[indent:]) - len(strings.TrimLeft(line[indent:], "#"))
+			out = append(out, line[:indent]+strings.Repeat("#", level)+line[indent+marks:])
+		}
+		i = h.End
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderBlock writes a block as a subsection one level below the deepest
+// heading of the template. At level 6 the label is bold text, because a
+// Markdown heading cannot go deeper; headings inside the block move below it.
+func (t *PRTemplate) renderBlock(block extraBlock) string {
+	level := t.deepestLevel() + 1
+	body := demoteHeadings(strings.Trim(block.Body, "\n"), level+1)
+	if level > 6 {
+		return "**" + block.Heading + "**\n\n" + body
+	}
+	return strings.Repeat("#", level) + " " + block.Heading + "\n\n" + body
+}
+
+// hasWordPrefix reports whether text has a word that starts with the keyword
+// (a keyword of several words must start at a word and follow word by word).
+func hasWordPrefix(text, keyword string) bool {
+	words := " " + strings.Join(wordRe.FindAllString(strings.ToLower(text), -1), " ")
+	return strings.Contains(words, " "+keyword)
+}
+
+// placeFor returns the index of the template section that takes a block of
+// the kind: the first whose heading, guide comments or checkbox text has a
+// keyword of the kind; else the last section that is not a pure checklist.
+// It is -1 when every section is a pure checklist.
+func (t *PRTemplate) placeFor(kind string) int {
+	for i, s := range t.Sections {
+		haystack := s.Heading + "\n" + s.Guide + "\n" + strings.Join(s.checkboxes(), "\n")
+		for _, keyword := range kindKeywords[kind] {
+			if hasWordPrefix(haystack, keyword) {
+				return i
 			}
 		}
-		text := strings.Join(supplied, "\n\n")
-		if text == "" && s.Open {
-			text = commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
+	}
+	for i := len(t.Sections) - 1; i >= 0; i-- {
+		if !t.Sections[i].pureChecklist() {
+			return i
 		}
-		if notVerified != "" && sectionKind(s.Heading) == SectionNotVerified && len(supplied) == 0 {
+	}
+	return -1
+}
+
+// templateResult is what templateBody returns.
+type templateResult struct {
+	Body       string
+	Left       []AuthorSection // author sections that nothing placed (see templateBody)
+	Warnings   []BodyWarning
+	ModelBoxes int // checkbox lines of the model's text that were dropped
+}
+
+// headingRef is a heading of a body or a template at some level.
+type headingRef struct {
+	Level int
+	Key   string
+}
+
+// bodyHeadings reads the top-level headings of text, as the parser reads them.
+func bodyHeadings(text string) []headingRef {
+	var out []headingRef
+	for _, h := range readMarkdown(text).topHeadings() {
+		out = append(out, headingRef{h.Level, headingKey(h.Text)})
+	}
+	return out
+}
+
+// shapeWarning compares the headings of the rendered body that sit at the
+// template's levels with the template's headings, in order. It returns a
+// sentence naming the extra or missing heading, or "" when they agree.
+func (t *PRTemplate) shapeWarning(body string) string {
+	deepest := t.deepestLevel()
+	var want, got []headingRef
+	for _, s := range t.Sections {
+		want = append(want, headingRef{s.Level, headingKey(s.Heading)})
+	}
+	for _, h := range bodyHeadings(body) {
+		if h.Level <= deepest {
+			got = append(got, h)
+		}
+	}
+	for i := 0; i < len(want) || i < len(got); i++ {
+		switch {
+		case i >= len(got):
+			return fmt.Sprintf("the body lacks the template heading %q", want[i].Key)
+		case i >= len(want):
+			return fmt.Sprintf("the body has the heading %q, which the template does not have", got[i].Key)
+		case want[i] != got[i]:
+			return fmt.Sprintf("the body has the heading %q where the template has %q", got[i].Key, want[i].Key)
+		}
+	}
+	return ""
+}
+
+// boxRecord is a checkbox line of a text and where it stands.
+type boxRecord struct {
+	Line    string // the line as written, its check mark replaced by a space, trailing white space out
+	Section int    // -1 before the first heading; else the index among the headings of the template's levels
+	Where   string // the words of that heading, for messages
+	// Last says that the line is the last non-blank line of the text. Only a
+	// body's records set it: the end of the body is trimmed, so that line loses
+	// its trailing white space. Nothing is trimmed at the start.
+	Last bool
+}
+
+// boxLine masks the check mark of a checkbox line: the one character in the
+// brackets becomes a space. Nothing else changes: the list marker, the
+// indentation, the text and any trailing spaces stay, because they are part of
+// the line (two trailing spaces are a hard break).
+func boxLine(line string, markCol int) string {
+	if markCol >= 0 && markCol < len(line) {
+		line = line[:markCol] + " " + line[markCol+1:]
+	}
+	return line
+}
+
+// edgeLines returns the index of the first and of the last line that is not
+// blank for strings.TrimSpace (which trims the body), or -1.
+func edgeLines(lines []string) (first, last int) {
+	first, last = -1, -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	return first, last
+}
+
+// boxRecords lists the checkbox lines of the run, as the whole-document parse
+// found them, with their white space as written. The template's records are
+// never trimmed: whether an edge of the final body trims a line depends on where
+// the line ends up, and only the body's records know that (Last).
+func (f *mdFrag) boxRecords(section int, where string) []boxRecord {
+	lines := f.lines()
+	starts := make([]int, len(lines))
+	off := 0
+	for i, l := range lines {
+		starts[i] = off
+		off += len(l) + 1
+	}
+	var out []boxRecord
+	for _, t := range f.tasks {
+		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line]), Section: section, Where: where})
+	}
+	return out
+}
+
+// boxRecords lists the checkbox lines of the template: the text before the first
+// heading, then each section in order.
+func (t *PRTemplate) boxRecords() []boxRecord {
+	var out []boxRecord
+	if t.preFrag != nil {
+		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading")...)
+	}
+	for i, s := range t.Sections {
+		out = append(out, s.fragment().boxRecords(i, s.Heading)...)
+	}
+	return out
+}
+
+// boxRecords lists the checkbox lines of a text. Each stands in the section of
+// the last top-level heading at or above level deepest before it.
+func (d *mdDoc) boxRecords(deepest int) []boxRecord {
+	var heads []mdHeading
+	for _, h := range d.topHeadings() {
+		if h.Level <= deepest {
+			heads = append(heads, h)
+		}
+	}
+	_, last := edgeLines(d.Lines)
+	var out []boxRecord
+	for _, t := range d.Tasks {
+		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line]), Section: -1, Where: "the text before the first heading", Last: t.Line == last}
+		for i, h := range heads {
+			if h.Start < t.Line {
+				r.Section, r.Where = i, h.Text
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// checkboxWarning compares the checkbox lines of the body with the template's:
+// the same lines, word for word, in the same order, each under the same heading
+// (when bySection is set); only the check mark may differ. The checkbox lines of
+// the author's own notes may be added anywhere. It returns a sentence naming the
+// first difference, or "" when they agree.
+//
+// A line the template hides in a comment or an HTML block is not a checkbox of
+// the template, and the same line in the body, where the comment is gone, is one:
+// that shows here as a line the template does not have.
+func (t *PRTemplate) checkboxWarning(body string, author []AuthorSection, bySection bool) string {
+	d := readMarkdown(body)
+	if len(d.Problems) > 0 {
+		return "" // reported as a reading problem; the task list cannot be trusted
+	}
+	want, got := t.boxRecords(), d.boxRecords(t.deepestLevel())
+	owned := map[string]int{}
+	for _, a := range author {
+		for _, r := range readMarkdown(a.Body()).boxRecords(0) {
+			owned[strings.TrimSpace(r.Line)]++
+		}
+	}
+	// The end of the body is trimmed, so its last line may differ from the
+	// template's line by trailing white space, and only there.
+	same := func(g, w boxRecord) bool {
+		gl, wl := g.Line, w.Line
+		if g.Last {
+			gl, wl = strings.TrimRightFunc(gl, unicode.IsSpace), strings.TrimRightFunc(wl, unicode.IsSpace)
+		}
+		return gl == wl && (!bySection || g.Section == w.Section)
+	}
+	j := 0
+	for i := 0; i < len(got); i++ {
+		switch {
+		case j < len(want) && same(got[i], want[j]):
+			j++
+		case owned[strings.TrimSpace(got[i].Line)] > 0:
+			owned[strings.TrimSpace(got[i].Line)]--
+		default:
+			for _, later := range want[min(j+1, len(want)):] {
+				if same(got[i], later) {
+					return fmt.Sprintf("the body lacks the template checkbox line %q under %q", strings.TrimSpace(want[j].Line), want[j].Where)
+				}
+			}
+			if j < len(want) {
+				return fmt.Sprintf("the body has the checkbox line %q under %q where the template has %q under %q", strings.TrimSpace(got[i].Line), got[i].Where, strings.TrimSpace(want[j].Line), want[j].Where)
+			}
+			return fmt.Sprintf("the body has the checkbox line %q under %q, which the template does not have", strings.TrimSpace(got[i].Line), got[i].Where)
+		}
+	}
+	if j < len(want) {
+		return fmt.Sprintf("the body lacks the template checkbox line %q under %q", strings.TrimSpace(want[j].Line), want[j].Where)
+	}
+	return ""
+}
+
+// templateBody renders the body in the template's shape. The template's
+// headings stay as they are, in order. Its checkbox lines and fixed text are
+// written word for word; a box is ticked only when the notes tick the same
+// item (in a section the template section takes, or in a section headed
+// Checklist, which only ticks). The guide comments of a section that received
+// text are left out. A block that no template section takes (see extras)
+// becomes a subsection at the end of the section chosen by placeFor, with its
+// own headings moved below the template's.
+//
+// When extras is nil, or the template is only checklists, the author sections
+// that no template section took are returned in Left for the caller to place.
+// The warnings name checkbox lines of the notes that match no template item
+// and Checklist text that has no place.
+func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerified string, extras func(leftover []AuthorSection) []extraBlock) templateResult {
+	var res templateResult
+	var b strings.Builder
+	warn := func(blocking bool, format string, args ...any) {
+		res.Warnings = append(res.Warnings, BodyWarning{Text: fmt.Sprintf(format, args...), Blocking: blocking})
+	}
+	taken := make([]bool, len(author))
+	supplied := make([][]AuthorSection, len(t.Sections))
+	for i, s := range t.Sections {
+		for j, a := range author {
+			if !taken[j] && s.takes(a) {
+				taken[j] = true
+				supplied[i] = append(supplied[i], a)
+			}
+		}
+	}
+
+	// One inventory of the template's items: the preamble and every section.
+	// The rendering below reads the same identities.
+	allItems := map[string]bool{}
+	addItems := func(f *mdFrag) {
+		for item := range f.identities() {
+			allItems[item] = true
+		}
+	}
+	if t.preFrag != nil {
+		addItems(t.preFrag)
+	}
+	for _, s := range t.Sections {
+		addItems(s.fragment())
+	}
+
+	// A Checklist section of the notes only ticks. Its other text is placed
+	// like a section of no known kind, or named in a warning.
+	checklistTicks := map[string]bool{}
+	var checklistBlocks []extraBlock
+	for j, a := range author {
+		if a.Kind() != SectionChecklist {
+			continue
+		}
+		others, boxes := splitCheckboxes(a.Body())
+		for _, box := range boxes {
+			if !allItems[box.Item] {
+				warn(true, "the checkbox line %q in the notes section %q matches no item of the template; it is not written", strings.TrimSpace(box.Line), a.Heading())
+			} else if box.Checked {
+				checklistTicks[box.Item] = true
+			}
+		}
+		if !taken[j] && strings.TrimSpace(others) != "" {
+			checklistBlocks = append(checklistBlocks, extraBlock{Heading: a.Heading(), Body: others})
+		}
+	}
+
+	for j, a := range author {
+		if !taken[j] && a.Kind() != SectionChecklist {
+			res.Left = append(res.Left, a)
+		}
+	}
+	var blocks [][]extraBlock
+	if extras != nil && t.placeable() {
+		blocks = make([][]extraBlock, len(t.Sections))
+		all := append(extras(res.Left), checklistBlocks...)
+		for _, block := range all {
+			if i := t.placeFor(block.Kind); i >= 0 {
+				blocks[i] = append(blocks[i], block)
+			}
+		}
+		res.Left = nil
+	} else {
+		for _, block := range checklistBlocks {
+			warn(true, "the template has only checklists, so the text of the notes section %q has no place and is not written", block.Heading)
+		}
+	}
+
+	// The model writes only the open sections that no author section fills.
+	modelKeys := map[string]bool{}
+	for _, s := range t.modelSections(author) {
+		modelKeys[s.Key] = true
+	}
+
+	if t.Preamble != "" {
+		pre, clearedPre := t.preFrag.render(checklistTicks, false)
+		for _, item := range clearedPre {
+			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
+		}
+		// Blank lines at the start stay: a leading blank line and indentation can
+		// be what makes the first block an indented code block. Only the blank
+		// lines at the end go.
+		for len(pre) > 0 && blankText(pre[len(pre)-1]) {
+			pre = pre[:len(pre)-1]
+		}
+		b.WriteString(strings.Join(pre, "\n") + "\n\n")
+	}
+	for i, s := range t.Sections {
+		b.WriteString(s.HeadingLine + "\n")
+		frag := s.fragment()
+		own := frag.identities()
+		ticks := map[string]bool{}
+		var parts []string
+		for _, a := range supplied[i] {
+			text := a.Body()
+			switch {
+			case a.Kind() == SectionChecklist:
+				text, _ = splitCheckboxes(a.Body()) // its boxes were read above
+			case len(own) > 0:
+				// The template's checklist stands as the template wrote it. The
+				// author's boxes only tick; the author's other lines follow.
+				var boxes []mdBox
+				text, boxes = splitCheckboxes(a.Body())
+				for _, box := range boxes {
+					switch {
+					case !own[box.Item]:
+						warn(true, "the checkbox line %q in the notes section %q matches no item of the template section %q; it is not written", strings.TrimSpace(box.Line), a.Heading(), s.Heading)
+					case box.Checked:
+						ticks[box.Item] = true
+					}
+				}
+			}
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		text := strings.Join(parts, "\n\n")
+		if text == "" && s.Open && len(supplied[i]) == 0 && modelKeys[s.Key] {
+			model := commitmsg.NeutralizeCloseDirectives(strings.Trim(withoutCarriedSections(pr.Sections[s.Key], author), "\n"))
+			var dropped []mdBox
+			text, dropped = splitCheckboxes(model) // the model never adds a checkbox
+			res.ModelBoxes += len(dropped)
+		}
+		if text != "" {
+			text = demoteHeadings(text, t.deepestLevel()+1)
+		}
+		if notVerified != "" && sectionKind(s.Heading) == SectionNotVerified && len(supplied[i]) == 0 {
 			// The template's own slot for what was not verified, and no author
 			// section fills it: the slot says that the author gave nothing, also
 			// when the model wrote text of its own. That text follows the
@@ -296,23 +926,46 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 				text = notVerified
 			}
 		}
-		switch {
-		case strings.TrimSpace(text) == "":
-			// Nothing to add: the section stays as the template has it.
-			b.WriteString(strings.Join(s.Lines, "\n") + "\n")
-		case s.Open || hasCheckbox(text):
-			// An open section takes the text in place of its comments. A
-			// checklist that the author restated stands as the author wrote it.
-			b.WriteString("\n" + text + "\n\n")
-		default:
-			b.WriteString(strings.TrimRight(strings.Join(s.Lines, "\n"), "\n") + "\n\n" + text + "\n\n")
+
+		var here []extraBlock
+		if len(blocks) > 0 {
+			here = blocks[i]
 		}
-	}
-	var rest []AuthorSection
-	for i, a := range author {
-		if !taken[i] {
-			rest = append(rest, a)
+		received := strings.TrimSpace(text) != "" || len(here) > 0
+		allTicks := map[string]bool{}
+		for item := range checklistTicks {
+			allTicks[item] = true
 		}
+		for item := range ticks {
+			allTicks[item] = true
+		}
+		section, cleared := frag.render(allTicks, received)
+		if s.Open && received {
+			section, cleared = nil, nil // an open section holds only comments: the text takes their place
+		}
+		for _, item := range cleared {
+			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
+		}
+		if !received {
+			// Nothing to add: the section is the template's, with the ticks.
+			b.WriteString(strings.Join(section, "\n") + "\n")
+			continue
+		}
+		out := strings.TrimRight(strings.Join(section, "\n"), "\n")
+		if strings.TrimSpace(text) != "" {
+			out += "\n\n" + text
+		}
+		for _, block := range here {
+			out += "\n\n" + t.renderBlock(block)
+		}
+		if s.Open {
+			out = "\n" + strings.TrimLeft(out, "\n")
+		}
+		b.WriteString(out + "\n\n")
 	}
-	return strings.TrimSpace(b.String()), rest
+	// Only line breaks go: the white space of the first and last line belongs to
+	// the template's lines, and the assembled body is trimmed once, at its own
+	// edges (BodyWithWarnings).
+	res.Body = strings.TrimRight(b.String(), "\n")
+	return res
 }

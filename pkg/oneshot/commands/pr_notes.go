@@ -35,7 +35,7 @@ func (n PRNote) Text() string { return n.text }
 // NewPRNote sanitizes a raw note once. ok is false when nothing is left. The
 // error names the line of an unclosed or newly joined "<!--".
 func NewPRNote(raw RawPRNote) (note PRNote, ok bool, err error) {
-	clean, err := SanitizePRNote(strings.ReplaceAll(raw.Text, "\r\n", "\n"))
+	clean, err := SanitizePRNote(normalizeNewlines(raw.Text))
 	if err != nil {
 		return PRNote{}, false, err
 	}
@@ -52,6 +52,10 @@ const (
 	SectionEvidence    = "evidence"
 	SectionNotVerified = "not_verified"
 	SectionKnownGaps   = "known_gaps"
+	// SectionChecklist is a notes section headed "Checklist". The body never
+	// carries it; its ticked checkbox lines tick the same items of the
+	// pull request template.
+	SectionChecklist = "checklist"
 )
 
 // sectionOrder is the order in which carried sections appear in the body.
@@ -68,6 +72,11 @@ type AuthorSection struct {
 	heading string // the author's heading, without Markdown markers
 	body    string // the text under the heading, as written
 	source  string // path of the note it came from
+	// problem is set on a section that carries a whole note because Markdown++
+	// could not read the note's structure exactly (see noteSections).
+	problem string
+	// foreign names the Markdown++-only constructs in the text, for a warning.
+	foreign []mdForeign
 }
 
 // Kind is the kind of the section (SectionTesting and the others).
@@ -82,11 +91,7 @@ func (s AuthorSection) Body() string { return s.body }
 // Source is the path of the note the section came from.
 func (s AuthorSection) Source() string { return s.source }
 
-var (
-	atxHeadingRe = regexp.MustCompile(`^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$`)
-	listItemRe   = regexp.MustCompile(`^(?:[-*+]|\d{1,3}[.)])[ \t]`)
-	wordRe       = regexp.MustCompile(`[a-z0-9]+`)
-)
+var wordRe = regexp.MustCompile(`[a-z0-9]+`)
 
 // headingKindPrefix starts the kind of a section that was selected by a
 // heading of the pull request template instead of by one of the fixed kinds.
@@ -106,6 +111,24 @@ const headingKindPrefix = "heading:"
 // kind, the body keeps all of them, in the order of the notes and then of the
 // file. A later note never replaces an earlier one.
 func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
+	return authorSections(notes, headings, false)
+}
+
+// TemplateAuthorSections is AuthorSections for a run that uses the pull
+// request template t. Only here does a notes section headed "Checklist" tick
+// the template's checkboxes (see SectionChecklist); without a template it is
+// an ordinary section, as it was before.
+func TemplateAuthorSections(notes []PRNote, t *PRTemplate) []AuthorSection {
+	var headings []string
+	if t != nil {
+		for _, s := range t.Sections {
+			headings = append(headings, s.Heading)
+		}
+	}
+	return authorSections(notes, headings, t != nil)
+}
+
+func authorSections(notes []PRNote, headings []string, checklist bool) []AuthorSection {
 	var sections []AuthorSection
 	template := map[string]bool{}
 	for _, heading := range headings {
@@ -118,7 +141,7 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 	for _, note := range notes {
 		found := map[string][]AuthorSection{}
 		var foundKinds []string
-		for _, s := range noteSections(note, template) {
+		for _, s := range noteSections(note, template, checklist) {
 			if len(found[s.kind]) == 0 {
 				foundKinds = append(foundKinds, s.kind)
 			}
@@ -139,18 +162,21 @@ func AuthorSections(notes []PRNote, headings ...string) []AuthorSection {
 			sections = append(sections, byKind[kind]...)
 		}
 	}
-	return sections
+	return append(sections, byKind[SectionChecklist]...)
 }
 
 // noteSections splits one note into its carried sections, in file order.
 // template holds the heading keys of the pull request template.
-func noteSections(note PRNote, template map[string]bool) []AuthorSection {
+func noteSections(note PRNote, template map[string]bool, checklist bool) []AuthorSection {
 	kindOf := func(heading string) string {
 		// The five carried kinds come first, so that "Testing" and "Test plan"
 		// keep one kind and the order of the notes. A template heading that
 		// names none of them is the fallback.
 		if kind := sectionKind(heading); kind != "" {
 			return kind
+		}
+		if checklist && headingKey(heading) == "checklist" {
+			return SectionChecklist
 		}
 		if key := headingKey(heading); template[key] {
 			return headingKindPrefix + key
@@ -159,13 +185,25 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 	}
 	// note.Text was sanitized when the note was made; it is not scanned for
 	// comments again.
-	lines := strings.Split(strings.ReplaceAll(note.text, "\r\n", "\n"), "\n")
+	d := readMarkdown(note.text)
+	if len(d.Problems) > 0 {
+		// Where its sections start and end cannot be told, so nothing of the note
+		// may be dropped: the whole note is carried as written, as one section, and
+		// BodyWithWarnings says so.
+		return []AuthorSection{{kind: SectionEvidence, heading: "Notes from " + note.Path, body: note.text, source: note.Path, problem: d.Problems[0]}}
+	}
+	lines := d.Lines
+	atx := map[int]mdHeading{} // the headings that start or end a section, by line
+	for _, h := range d.topHeadings() {
+		if !h.Setext {
+			atx[h.Start] = h
+		}
+	}
 	var (
 		out      []AuthorSection
 		cur      *AuthorSection
 		curLevel int // heading level of cur; 0 when cur started at a label
 		body     []string
-		fence    fenceTracker
 	)
 	flush := func() {
 		if cur == nil {
@@ -176,28 +214,27 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 		}
 		cur, body = nil, nil
 	}
+	// Only ATX headings (a line that starts with "#") start or end a section of
+	// the notes. A setext heading ("Title" over "-----") inside a carried
+	// section stays in it, so that no text of the author is dropped; placing the
+	// section moves such a heading below the template's (demoteHeadings).
 	for i, line := range lines {
-		if fence.line(line) {
-			// A fence delimiter belongs to the section it sits in.
-		} else if !fence.inFence() {
-			if m := atxHeadingRe.FindStringSubmatch(line); m != nil {
-				level := len(m[1])
-				if cur != nil && curLevel > 0 && level > curLevel {
-					body = append(body, line) // a sub-heading of the carried section
-					continue
-				}
-				flush()
-				if kind := kindOf(m[2]); kind != "" {
-					cur, curLevel = &AuthorSection{kind: kind, heading: plainHeading(m[2]), source: note.Path}, level
-				}
+		if h, ok := atx[i]; ok {
+			if cur != nil && curLevel > 0 && h.Level > curLevel {
+				body = append(body, line) // a sub-heading of the carried section
 				continue
 			}
-			if label, ok := labelLine(lines, i); ok && (cur == nil || curLevel == 0) {
-				if kind := kindOf(label); kind != "" {
-					flush()
-					cur, curLevel = &AuthorSection{kind: kind, heading: label, source: note.Path}, 0
-					continue
-				}
+			flush()
+			if kind := kindOf(h.Text); kind != "" {
+				cur, curLevel = &AuthorSection{kind: kind, heading: plainHeading(h.Text), source: note.Path}, h.Level
+			}
+			continue
+		}
+		if label, ok := labelLine(d, i); ok && (cur == nil || curLevel == 0) {
+			if kind := kindOf(label); kind != "" {
+				flush()
+				cur, curLevel = &AuthorSection{kind: kind, heading: label, source: note.Path}, 0
+				continue
 			}
 		}
 		if cur != nil {
@@ -208,13 +245,18 @@ func noteSections(note PRNote, template map[string]bool) []AuthorSection {
 	return out
 }
 
-// labelLine reports whether lines[i] is a short label on a line of its own:
-// it follows a blank line (or starts the note), has at most eight words and no
+// labelLine reports whether lines[i] is a short label on a line of its own: it
+// follows a blank line (or starts the note), has at most eight words and no
 // sentence punctuation at its end, and either ends with a colon or stands
-// directly above a list, a table or a code block.
-func labelLine(lines []string, i int) (string, bool) {
+// directly above a list, a table or a code fence. This is a property of the line
+// in the notes, by the rule that existed before the parser came in; it does not
+// depend on how the parser groups the label and the lines after it into blocks
+// (a table or a numbered list right under a label is one paragraph to the
+// parser). A line inside a fenced code block is not a label.
+func labelLine(d *mdDoc, i int) (string, bool) {
+	lines := d.Lines
 	line := lines[i]
-	if line != strings.TrimLeft(line, " \t") || (i > 0 && strings.TrimSpace(lines[i-1]) != "") {
+	if d.inFence[i] || line != strings.TrimLeft(line, " \t") || (i > 0 && !blankText(lines[i-1])) {
 		return "", false
 	}
 	text := strings.TrimSpace(line)
@@ -236,10 +278,10 @@ func labelLine(lines []string, i int) (string, bool) {
 		return text, true
 	}
 	for _, next := range lines[i+1:] {
-		next = strings.TrimSpace(next)
-		if next == "" {
-			continue
+		if blankText(next) {
+			continue // blank by CommonMark: only spaces and tabs
 		}
+		next = strings.TrimSpace(next)
 		return text, listItemRe.MatchString(next) || strings.HasPrefix(next, "|") || strings.HasPrefix(next, "```") || strings.HasPrefix(next, "~~~")
 	}
 	return "", false
@@ -288,10 +330,10 @@ func plainHeading(heading string) string {
 // trimBlankEdges joins lines and drops the blank lines at both ends. It keeps
 // the indentation of the first line, which a nested list or a code block needs.
 func trimBlankEdges(lines []string) string {
-	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+	for len(lines) > 0 && blankText(lines[0]) {
 		lines = lines[1:]
 	}
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+	for len(lines) > 0 && blankText(lines[len(lines)-1]) {
 		lines = lines[:len(lines)-1]
 	}
 	return strings.Join(lines, "\n")
@@ -329,67 +371,32 @@ func withoutCarriedSections(text string, carried []AuthorSection) string {
 	for _, s := range carried {
 		names[headingKey(s.heading)] = true
 	}
+	d := readMarkdown(text)
 	var out []string
 	skipLevel := 0
-	var fence fenceTracker
-	for _, line := range strings.Split(text, "\n") {
-		if fence.line(line) {
-		} else if m := atxHeadingRe.FindStringSubmatch(line); m != nil && !fence.inFence() {
-			level := len(m[1])
-			if skipLevel > 0 && level <= skipLevel {
+	next := 0
+	tops := d.topHeadings()
+	for i := 0; i < len(d.Lines); i++ {
+		if next < len(tops) && tops[next].Start == i {
+			h := tops[next]
+			next++
+			if skipLevel > 0 && h.Level <= skipLevel {
 				skipLevel = 0
 			}
-			if skipLevel == 0 && names[headingKey(m[2])] {
-				skipLevel = level
+			if skipLevel == 0 && names[headingKey(h.Text)] {
+				skipLevel = h.Level
 			}
+			if skipLevel == 0 {
+				out = append(out, d.Lines[h.Start:h.End+1]...)
+			}
+			i = h.End
+			continue
 		}
 		if skipLevel == 0 {
-			out = append(out, line)
+			out = append(out, d.Lines[i])
 		}
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
-}
-
-// fenceTracker follows Markdown code fences: a fence opens with three or more
-// backticks or tildes (up to three spaces of indent) and closes only with the
-// same character, at least as many of them, and nothing else on the line. A
-// shorter or different delimiter inside the fence is text.
-type fenceTracker struct {
-	char  byte
-	count int
-}
-
-// inFence reports whether a fence is open.
-func (f *fenceTracker) inFence() bool { return f.count > 0 }
-
-// line updates the state for one line and reports whether the line is a fence
-// delimiter (an opening or closing one).
-func (f *fenceTracker) line(text string) bool {
-	trimmed := strings.TrimLeft(text, " ")
-	if len(text)-len(trimmed) > 3 || trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
-		return false
-	}
-	char := trimmed[0]
-	run := 0
-	for run < len(trimmed) && trimmed[run] == char {
-		run++
-	}
-	if run < 3 {
-		return false
-	}
-	rest := strings.TrimSpace(trimmed[run:])
-	if f.count == 0 {
-		if char == '`' && strings.Contains(rest, "`") {
-			return false // an inline span, not a fence
-		}
-		f.char, f.count = char, run
-		return true
-	}
-	if char == f.char && run >= f.count && rest == "" {
-		f.char, f.count = 0, 0
-		return true
-	}
-	return false
 }
 
 // SanitizePRNote removes every HTML comment (<!-- ... -->) from a note, wherever

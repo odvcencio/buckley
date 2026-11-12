@@ -3,6 +3,7 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -152,6 +153,13 @@ type PRBodyOptions struct {
 	Template *PRTemplate
 }
 
+// BodyEdgeWhitespace is the white space that is trimmed at the end of a body made
+// from a pull request template, and at both ends of a body that is read back
+// from a saved file (--body-file): spaces, tabs and line breaks, nothing else.
+// A Unicode space (U+00A0) is content: it can be what keeps "## x" a paragraph
+// or "---" text, so no code may trim it from a body.
+const BodyEdgeWhitespace = " \t\r\n"
+
 // Body generates the PR body in markdown format.
 //
 // Free-text bullets are sanitized for stray GitHub close directives and
@@ -160,21 +168,142 @@ type PRBodyOptions struct {
 // and a section without content are left out: no filler headings and no empty
 // "- " lines. Author sections are written exactly as the author wrote them.
 func (pr PRResult) Body(opts PRBodyOptions) string {
+	body, _ := pr.BodyWithWarnings(opts)
+	return body
+}
+
+// BodyWithWarnings is Body and the warnings for the author: a checkbox line of
+// the notes that matches no item of the template, and an author section that
+// has no place because the template is only checklists.
+//
+// With a template that has a place for text, the body keeps the template's
+// shape: its headings, in order, and nothing added after them. A section that
+// no template section takes is written one level below the template's headings,
+// at the end of the section that placeFor chooses.
+func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) {
+	pr = pr.withLF()
 	var b strings.Builder
+	var warnings []BodyWarning
+	if opts.Template != nil {
+		// Model text may not carry raw HTML that changes structure.
+		pr, warnings = pr.withoutStructuralHTML()
+		if why := opts.Template.Unreadable(); why != "" {
+			warnings = append(warnings, BodyWarning{Text: "the pull request template cannot be used: " + why, Blocking: true})
+		}
+		for _, s := range opts.Sections {
+			warnings = append(warnings, opts.Template.authorHTMLWarnings(s)...)
+			warnings = append(warnings, authorReadWarnings(s)...)
+		}
+	}
+	if opts.Template == nil {
+		// Without a template the notes are carried as before, except that a note
+		// that Markdown++ cannot split exactly is carried whole. Say so.
+		for _, s := range opts.Sections {
+			warnings = append(warnings, wholeNoteWarning(s)...)
+		}
+	}
+	modelBoxes := 0
+	// With a template the model never adds a checkbox: its checkbox lines are
+	// dropped and counted.
+	modelText := func(text string) string {
+		if opts.Template == nil {
+			return text
+		}
+		kept, dropped := splitCheckboxes(text)
+		modelBoxes += len(dropped)
+		return kept
+	}
 	section := func(heading, text string) {
 		if text = strings.Trim(text, "\n"); strings.TrimSpace(text) != "" {
 			b.WriteString("## " + heading + "\n\n" + text + "\n\n")
 		}
 	}
-	// The template takes the author sections that belong under its headings;
-	// the rest are carried below, by kind.
+	bullets := func(items []string) string {
+		return modelText(prBullets(items, func(s string) string {
+			return commitmsg.NeutralizeCloseDirectives(trimBulletMarker(s))
+		}))
+	}
+	// The template takes the author sections that belong under its headings.
+	// What it does not take is placed inside it (shaped: some section is not a
+	// pure checklist, with or without a place for text), or carried below, by
+	// kind, when the template is only checklists.
 	author, templateText := opts.Sections, ""
+	shaped := opts.Template.placeable()
+	open := opts.Template.hasOpenSection()
 	if opts.Template != nil {
 		fallback := ""
 		if opts.StateNotVerified && !hasSection(opts.Sections, SectionNotVerified) {
 			fallback = notVerifiedFallback(opts.HasNotes)
 		}
-		templateText, author = pr.templateBody(opts.Template, author, fallback)
+		var extras func([]AuthorSection) []extraBlock
+		if shaped {
+			extras = func(left []AuthorSection) []extraBlock {
+				var blocks []extraBlock
+				if !open {
+					// The template has fixed text but no place for the model's text:
+					// Buckley's own sections go inside it too.
+					add := func(kind, heading, text string) {
+						if strings.TrimSpace(text) != "" {
+							blocks = append(blocks, extraBlock{Kind: kind, Heading: heading, Body: text})
+						}
+					}
+					add("summary", "Summary", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary))))
+					add("changes", "Changes", bullets(pr.Changes))
+					if !hasSection(opts.Sections, SectionTesting) {
+						add(SectionTesting, "Testing", bullets(pr.Testing))
+					}
+					add("review_focus", "Review Focus", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint))))
+				}
+				carried := func(kind string) {
+					for _, s := range left {
+						if s.Kind() == kind {
+							blocks = append(blocks, extraBlock{Kind: kind, Heading: s.Heading(), Body: s.Body()})
+						}
+					}
+				}
+				carried(SectionTesting)
+				carried(SectionCounters)
+				carried(SectionEvidence)
+				if pr.Breaking {
+					blocks = append(blocks, extraBlock{Kind: kindBreaking, Heading: "Breaking Changes", Body: "This PR contains breaking changes. Please review carefully."})
+				}
+				carried(SectionNotVerified)
+				if !hasSection(opts.Sections, SectionNotVerified) && !opts.Template.hasKind(SectionNotVerified) && opts.StateNotVerified {
+					blocks = append(blocks, extraBlock{Kind: SectionNotVerified, Heading: "Not verified", Body: fallback})
+				}
+				carried(SectionKnownGaps)
+				if text := prBullets(pr.Issues, commitmsg.IssueRefLine); strings.TrimSpace(text) != "" {
+					blocks = append(blocks, extraBlock{Kind: kindIssues, Heading: "Related Issues", Body: text})
+				}
+				return blocks
+			}
+		}
+		res := pr.templateBody(opts.Template, author, fallback, extras)
+		templateText, author = res.Body, res.Left
+		warnings = append(warnings, res.Warnings...)
+		// A last check of the shape: read the rendered template's headings with
+		// the shared recognizer. A path that placed text so that a heading
+		// appears or disappears shows here instead of going unseen.
+		// With a place for text the body is the template's text, and the final
+		// check below compares its headings; the comparison here is for the
+		// layout where Buckley's own sections come first.
+		if w := opts.Template.shapeWarning(templateText); w != "" && !shaped {
+			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
+		}
+		if !shaped {
+			// The body also holds Buckley's own sections before the template, so the
+			// final check compares lines and order only; the template's own text is
+			// compared with its sections here.
+			if w := opts.Template.checkboxWarning(templateText, opts.Sections, true); w != "" {
+				warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
+			}
+		}
+		modelBoxes += res.ModelBoxes
+		if !shaped {
+			for _, s := range author {
+				warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the template has only checklists, so the notes section %q is written outside the template", s.Heading()), Blocking: true})
+			}
+		}
 	}
 	carry := func(kind string) {
 		for _, s := range author {
@@ -183,47 +312,230 @@ func (pr PRResult) Body(opts PRBodyOptions) string {
 			}
 		}
 	}
-	bullets := func(items []string) string {
-		return prBullets(items, func(s string) string {
-			return commitmsg.NeutralizeCloseDirectives(trimBulletMarker(s))
-		})
-	}
 
-	open := opts.Template.hasOpenSection()
-	if open {
+	switch {
+	case shaped:
+		// The template is the whole body: its top-level headings and nothing else.
 		b.WriteString(templateText + "\n\n")
-	} else {
-		section("Summary", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary)))
+	default:
+		section("Summary", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.Summary))))
 		section("Changes", bullets(pr.Changes))
 	}
-	if hasSection(opts.Sections, SectionTesting) {
-		carry(SectionTesting)
-	} else if !open {
-		section("Testing", bullets(pr.Testing))
-	}
-	carry(SectionCounters)
-	carry(SectionEvidence)
-	if pr.Breaking {
-		section("Breaking Changes", "This PR contains breaking changes. Please review carefully.")
-	}
-	switch {
-	case hasSection(opts.Sections, SectionNotVerified):
-		carry(SectionNotVerified)
-	case opts.Template.hasKind(SectionNotVerified):
-		// The template has its own place for this, filled or left as it is.
-	case opts.StateNotVerified:
-		section("Not verified", notVerifiedFallback(opts.HasNotes))
-	}
-	carry(SectionKnownGaps)
-	section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
-	if !open {
-		section("Review Focus", commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint)))
+	if !shaped {
+		if hasSection(opts.Sections, SectionTesting) {
+			carry(SectionTesting)
+		} else {
+			section("Testing", bullets(pr.Testing))
+		}
+		carry(SectionCounters)
+		carry(SectionEvidence)
+		if pr.Breaking {
+			section("Breaking Changes", "This PR contains breaking changes. Please review carefully.")
+		}
+		switch {
+		case hasSection(opts.Sections, SectionNotVerified):
+			carry(SectionNotVerified)
+		case opts.Template.hasKind(SectionNotVerified):
+			// The template has its own place for this, filled or left as it is.
+		case opts.StateNotVerified:
+			section("Not verified", notVerifiedFallback(opts.HasNotes))
+			if opts.Template != nil {
+				// Not blocking: only an author section that cannot be placed fails --strict.
+				warnings = append(warnings, BodyWarning{Text: "the template has only checklists, so the generated Not verified statement is written outside the template"})
+			}
+		}
+		carry(SectionKnownGaps)
+		section("Related Issues", prBullets(pr.Issues, commitmsg.IssueRefLine))
+		section("Review Focus", modelText(commitmsg.NeutralizeCloseDirectives(strings.TrimSpace(pr.ReviewersHint))))
 		if templateText != "" {
 			b.WriteString(templateText + "\n\n")
 		}
 	}
+	if modelBoxes > 0 {
+		warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model wrote %d checkbox line(s); they were dropped, because only the template's checklist and the author's notes can add or tick a box", modelBoxes)})
+	}
+	body := strings.TrimSpace(b.String())
+	if opts.Template != nil {
+		// With a template nothing is trimmed at the start of the body: the
+		// indentation of its first line can be what makes a block code. Only
+		// the end is trimmed.
+		body = strings.TrimRight(b.String(), BodyEdgeWhitespace)
+		// The check covers the whole body, Buckley's own sections included, in
+		// every layout.
+		warnings = append(warnings, opts.Template.finalBodyWarnings(body, opts.Sections)...)
+	}
+	return body, warnings
+}
 
-	return strings.TrimSpace(b.String())
+// wholeNoteWarning names a note that is carried whole because Markdown++ could
+// not split it exactly. It is the one warning of the notes that applies with and
+// without a template.
+func wholeNoteWarning(s AuthorSection) []BodyWarning {
+	if s.problem == "" {
+		return nil
+	}
+	return []BodyWarning{{Text: fmt.Sprintf("the notes section %q could not be split exactly (%s); the whole note is carried as written", s.Heading(), s.problem)}}
+}
+
+// authorReadWarnings says what could not be read exactly in a carried notes
+// section. The text is carried as written.
+func authorReadWarnings(s AuthorSection) []BodyWarning {
+	out := wholeNoteWarning(s)
+	d := readMarkdown(s.Body())
+	if len(d.Problems) > 0 && s.problem == "" {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q could not be read exactly (%s); its text is carried as written", s.Heading(), d.Problems[0])})
+	}
+	for _, f := range d.Foreign {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has %s at its line %d; Markdown++ reads this differently from GitHub", s.Heading(), f.Name, f.Line+1)})
+		break
+	}
+	return out
+}
+
+// withLF returns a copy of the result with LF line endings in every text field,
+// so that no reader of Markdown structure sees a carriage return.
+func (pr PRResult) withLF() PRResult {
+	list := func(in StringList) StringList {
+		if in == nil {
+			return nil
+		}
+		out := make(StringList, len(in))
+		for i, s := range in {
+			out[i] = normalizeNewlines(s)
+		}
+		return out
+	}
+	pr.Summary = normalizeNewlines(pr.Summary)
+	pr.ReviewersHint = normalizeNewlines(pr.ReviewersHint)
+	pr.Changes, pr.Testing, pr.Issues = list(pr.Changes), list(pr.Testing), list(pr.Issues)
+	if pr.Sections != nil {
+		sections := make(map[string]string, len(pr.Sections))
+		for k, v := range pr.Sections {
+			sections[k] = normalizeNewlines(v)
+		}
+		pr.Sections = sections
+	}
+	return pr
+}
+
+// withoutStructuralHTML returns the result with the raw HTML removed from its
+// model text fields that would change what a renderer shows: a closed HTML
+// comment is removed (the model has no reason to hide text); a comment opener
+// with no closer in the same field, and a raw heading element (h1 to h6, any
+// case, with attributes), have their opening "<" written as "&lt;". One
+// warning names each field and construct.
+func (pr PRResult) withoutStructuralHTML() (PRResult, []BodyWarning) {
+	var warnings []BodyWarning
+	warnModel := func(field, text string, constructs []string) {
+		for _, c := range constructs {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s had %s; %s", field, c, map[bool]string{true: "it was removed", false: "it was written as text"}[strings.Contains(c, "closed HTML comment") && !strings.Contains(c, "unclosed")])})
+		}
+		d := readMarkdown(text)
+		if len(d.Problems) > 0 {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s could not be read exactly (%s); it is written as it is", field, d.Problems[0])})
+		}
+		for _, f := range d.Foreign {
+			warnings = append(warnings, BodyWarning{Text: fmt.Sprintf("the model's text for %s has %s at its line %d; Markdown++ reads this differently from GitHub", field, f.Name, f.Line+1), Blocking: true})
+			break
+		}
+	}
+	fix := func(field, text string) string {
+		out, constructs := neutralizeHTML(text)
+		warnModel(field, out, constructs)
+		return out
+	}
+	seen := map[string]bool{}
+	list := func(field string, in StringList) StringList {
+		if in == nil {
+			return nil
+		}
+		out := make(StringList, len(in))
+		for i, item := range in {
+			text, constructs := neutralizeHTML(item)
+			out[i] = text
+			var fresh []string
+			for _, c := range constructs {
+				if !seen[field+c] {
+					seen[field+c] = true
+					fresh = append(fresh, c)
+				}
+			}
+			warnModel(field, text, fresh)
+		}
+		return out
+	}
+	pr.Summary = fix("summary", pr.Summary)
+	pr.ReviewersHint = fix("reviewers_hint", pr.ReviewersHint)
+	pr.Changes, pr.Testing, pr.Issues = list("changes", pr.Changes), list("testing", pr.Testing), list("issues", pr.Issues)
+	if pr.Sections != nil {
+		keys := make([]string, 0, len(pr.Sections))
+		for k := range pr.Sections {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		sections := make(map[string]string, len(pr.Sections))
+		for _, k := range keys {
+			sections[k] = fix(sectionFieldPrefix+k, pr.Sections[k])
+		}
+		pr.Sections = sections
+	}
+	return pr, warnings
+}
+
+// neutralizeHTML applies the rules of withoutStructuralHTML to one text. The
+// constructs it names are "an unclosed HTML comment opener" and "a raw heading
+// element".
+func neutralizeHTML(text string) (string, []string) {
+	var constructs []string
+	note := func(c string) {
+		for _, have := range constructs {
+			if have == c {
+				return
+			}
+		}
+		constructs = append(constructs, c)
+	}
+	// Removing a comment can join characters into a new opener, so go round until
+	// the text is stable.
+	for round := 0; round < 8; round++ {
+		d := readMarkdown(text)
+		if len(d.Hazards) > 0 {
+			offsets := make([]int, 0, len(d.Hazards))
+			for _, h := range d.Hazards {
+				if h.Unclosed {
+					note("an unclosed HTML comment opener")
+				} else {
+					note("a raw heading element")
+				}
+				offsets = append(offsets, h.Start)
+			}
+			sort.Sort(sort.Reverse(sort.IntSlice(offsets)))
+			for _, at := range offsets {
+				text = text[:at] + "&lt;" + text[at+1:]
+			}
+			continue
+		}
+		if len(d.Comments) == 0 {
+			if len(d.Underlines) == 0 {
+				return d.text, constructs
+			}
+			// A line that GitHub may render as a heading underline although the
+			// parser shows a paragraph: a backslash before its first character
+			// makes it text ("\===", "\---"). It is no longer an underline, so the
+			// paragraph stays a paragraph; the line is shown with the characters.
+			note("a setext underline line that the parser does not read as a heading")
+			lines := d.Lines
+			for _, at := range d.Underlines {
+				indent := len(lines[at]) - len(strings.TrimLeft(lines[at], " "))
+				lines[at] = lines[at][:indent] + `\` + lines[at][indent:]
+			}
+			text = strings.Join(lines, "\n")
+			continue
+		}
+		note("a closed HTML comment")
+		text = strings.Join(d.withoutComments(), "\n")
+	}
+	return text, constructs
 }
 
 // prBullets renders one "- " line per item and leaves out an item that render
@@ -532,7 +844,7 @@ func (PRDefinition) Unmarshal(result json.RawMessage) (any, error) {
 // section when the author wrote none.
 func notVerifiedFallback(hasNotes bool) string {
 	if hasNotes {
-		return "The author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing."
+		return "The author's notes do not say what was left unverified. This text is written from the notes, the commits and the diff, and no check was run to write it."
 	}
-	return "The author supplied no notes. Buckley wrote this text from the commits and the diff, and ran nothing."
+	return "The author supplied no notes. This text is written from the commits and the diff, and no check was run to write it."
 }

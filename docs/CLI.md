@@ -387,7 +387,7 @@ buckley pr [OPTIONS]
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
 | `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
-| `--body-file <file>` | Post `<file>` as it is, without a model call. A first line `Title: ...` is the title; the rest is the body |
+| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. Spaces, tabs and line breaks at both ends of the body are trimmed and CRLF becomes LF; nothing else changes (a Unicode space such as U+00A0 is content and stays) |
 | `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
 | `--breaking <auto\|keep\|never>` | Breaking Changes section policy (default `auto`), the same rule as for `buckley commit`. See [Breaking changes](#breaking-changes) |
 | `--yes` | Skip the confirmation prompt |
@@ -403,7 +403,7 @@ buckley pr [OPTIONS]
 | `--cost=false` | Do not print the token and cost lines |
 | `--context-file <path>` | Author notes for the PR; repeatable, oldest first. See [Author notes](#author-notes) |
 | `--template=false` | Keep Buckley's own sections when the repository has a pull request template. See [Pull request template](#pull-request-template) |
-| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns). Default: warn. See [Checks against the sources](#checks-against-the-sources) |
+| `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns), when the body is out of the pull request template's shape, or when an author checkbox line or section has no place. Default: warn. See [Checks against the sources](#checks-against-the-sources) |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
 | `--effort <level>` | Override reasoning effort. No effect for a model that cannot reason and answer a required tool call in one request (`qwen/qwen3.8-flash` on OpenRouter); stderr then says so |
@@ -470,22 +470,226 @@ reads `.github/PULL_REQUEST_TEMPLATE.md`, `PULL_REQUEST_TEMPLATE.md` or
 `docs/PULL_REQUEST_TEMPLATE.md` (also in lower case) from the base branch, where
 GitHub reads it, and from the head branch when the base has none. An uncommitted
 template is not read. `--template=false` keeps Buckley's own sections.
+A template whose first non-blank line starts with a space or a tab (blank lines
+before it are fine) is refused before the model is called, with a message that
+says so: a body is trimmed at its start in places (see `--body-file`), and
+that would remove the indentation of the line and could change how its block
+is read. Start the template with a heading, a comment or a paragraph at column 0.
 
-- The template's headings, checkboxes, comments and fixed text are written as
-  they are. Buckley does not tick a checkbox: only the author can say that a
-  check ran.
-- A section that has only comments under its heading asks for text. The model
-  writes one text for each such section, guided by the comments, and that text
-  replaces them. A section the model leaves empty stays as the template has it.
-- A section of a notes file whose heading equals a template heading fills that
-  section word for word (see [Author notes](#author-notes)). So does a Testing,
-  Counters, Evidence, Not verified or Known gaps section when a template heading
-  names that kind. Under a checklist, the author's text goes below the
-  checkboxes, unless the author restated the checklist.
-- Author sections that no template heading takes, the Not verified statement,
-  breaking changes and related issues follow the template.
-- A template without a place for text (only checklists, or no headings) follows
-  Buckley's own sections unchanged.
+Buckley reads the Markdown of the template, of the notes and of the model's text
+with Markdown++ (`m31labs.dev/mdpp`), the organisation's CommonMark-based parser,
+through one reader. Markdown++ selects the structural nodes (headings, checkbox items, code blocks, comments in the template and
+in model text), not line scans. The adapter around it also validates the syntax of a heading's source range, identifies the fence style of a code block, locates the check mark in a task item, and inspects the text of the HTML that the parser hands over (comment delimiters, heading tags). Three things stay textual by design: the short-label
+rule that splits a notes file into sections (a label is a property of a line of the notes, as it always was),
+the removal of HTML comments from a notes file when it is read, which searches the text so that it fails
+closed (see [Author notes](#author-notes)), and the one form test of a setext underline (a line of only `=` or only `-`,
+up to three leading spaces) in the guard described under "Known limits of the reader". Structure follows Markdown++'s reading, which is CommonMark in the cases below (the exceptions are listed under "Known limits of the reader"): a `#`
+line inside a fenced or indented code block, an HTML block or a comment is text;
+a setext heading is a paragraph of one or more lines over a line of only `=` or
+only `-`; a list or a block quote is not part of a setext heading. Every line
+ending (LF, CRLF or a lone CR) is turned into LF when a template, a notes file or
+a model field enters Buckley, before anything reads it, and the body is written
+with LF.
+
+The body keeps the template's shape:
+
+1. **Headings.** For a template with at least one section that is not a pure
+   checklist, the top-level headings of the body (ATX or setext, at the
+   template's levels) are the template's top-level headings, in its order. This
+   holds whether the template has sections that ask for text or only fixed text
+   and checkboxes. Buckley adds nothing after the template as a new top-level
+   section. A Testing, Counters, Evidence, Not verified or Known gaps section of
+   the notes that no template section takes, the Not verified statement, the
+   breaking-change statement, the related issues, and (for a template with no
+   section that asks for text) Buckley's own Summary, Changes, Testing and
+   Review Focus are written as subsections one level below the template's
+   deepest heading, at the end of one template section. Every top-level heading
+   of the text placed there moves down so that the highest sits below the
+   template's deepest heading, keeping the relative nesting: an ATX heading
+   changes its `#` markers in place, and a setext heading becomes one ATX line
+   (its lines joined by single spaces; the underline goes). A heading that the
+   parser reads inside a code block, an HTML block, a comment, a list item or a
+   block quote is not a heading of the body and is left as it is. At heading
+   level 6 the label is bold text. Among the Markdown headings of a notes file,
+   only ATX headings delimit notes sections; short labels can also start
+   sections, and a setext heading inside a carried section stays in it.
+
+   After rendering, `buckley pr` reads the body with the same parser and
+   compares its top-level headings at the template's levels with the
+   template's, read the same way, and its checkbox lines with the template's
+   (see "Checkboxes" below). An extra or a missing heading, and a changed,
+   missing, extra, moved or reordered checkbox line, is a warning that names
+   it, and an error with `--strict`. This catches text that changes
+   how the parser reads what follows it: an unclosed code fence or an unclosed
+   `<pre>` block in the notes or in the model's text swallows the template
+   headings after it, and the check reports them as missing. If the template
+   itself has an HTML block that swallows a heading, the parser reads that
+   heading as text in the template and in the body alike.
+
+   GitHub renders the body to HTML, and raw HTML can change what is seen although
+   the Markdown tree does not show it, so three more rules apply (with a
+   template): (a) in every field of the model's text, a closed HTML comment is
+   removed (also inside another HTML block), and a comment opener with no closer
+   in the same field and a raw heading element (`<h1>` to `<h6>`, with
+   attributes) that the parser hands over as raw HTML are written as text by
+   escaping the opening `<` as `&lt;`; one warning names the field and the
+   construct. An upper-case tag that the parser reads as a Markdown++ component
+   (such as `<H2 class="x">` after prose) is not raw HTML to the parser and is not
+   escaped: it is a blocking warning (see the first item under "Known limits of
+   the reader"). A line that GitHub may render as a setext underline although the
+   parser shows a paragraph is made text by a backslash before its first
+   character (the same warning, and also under "Known limits"). (b) The author's text is not
+   rewritten: an unclosed comment opener in a carried notes section, or a raw
+   heading element at or above the template's deepest level, is a warning that
+   names the section and the line, and an error with `--strict`. (c) The check of
+   the fully assembled body, in every layout (Buckley's own sections included),
+   reports a comment opener with no closer and a raw heading element at or above
+   the template's level, in HTML that the parser hands over as raw HTML (so not
+   in a code block); the body may have no more of them than the template has.
+   For a template with a place for text it also reads the assembled body again
+   and compares its top-level headings with the template's (the same headings,
+   in order, and no other at the template's levels), whatever happened to the
+   text on the way.
+   It also compares the checkbox lines of the body with the template's and
+   blocks a setext-underline hazard (see "Known limits").
+   Notes files cannot carry a comment opener without a closer at all: reading the
+   file refuses it.
+
+   Known limits of the reader. Markdown++ is a superset of GitHub's Markdown, and
+   version 0.5.0 reads some inputs differently from GitHub. Until `buckley pr` can
+   ask for GitHub's reading, these are guarded without a second parser:
+   - A construct that only Markdown++ has is a blocking shape warning that names
+     the construct and the line ("Markdown++ reads this differently from
+     GitHub"), an error with `--strict`, when it is in the model's text or in the
+     final body (the template may have as many as it has itself); in the author's
+     notes it is a warning. The node types treated this way: component (an
+     upper-case tag such as `<H2 class="x">` after prose), expression (`{name}`),
+     container directive (`:::note`), admonition (`> [!NOTE]`), front matter,
+     definition list, table of contents, embed, diagram, slide and math block.
+     This guard goes away when the reader can ask mdpp for GitHub's reading.
+   - A parse error, a recovery diagnostic of the parser (a block kept as text, a
+     budget hit) or a source range that cannot be used means the structure cannot
+     be certified. A template like that stops generation with an error that names
+     it (`--template=false` is the way out); for the body it is a blocking
+     warning. A notes file that cannot be split exactly is carried whole under
+     the heading `Notes from <file>`, as written, with a non-blocking warning
+     that names it; this holds with and without a template, and without a
+     template it is the one place where a note that selects no section reaches
+     the body. The layout without a template is otherwise as before, except
+     that the notes' headings come from the parser (a heading-looking line
+     inside an HTML block no longer splits a section; an empty ATX heading can
+     end one), every line ending in a model field or a notes file is read
+     as LF, and a blank line is a line of only spaces and tabs (a line of only
+     U+00A0 is text), which also decides the label rule and the blank lines
+     trimmed at the edges of a carried section. The fixed Not verified statement names no tool (see [Author notes](#author-notes)).
+   - Markdown++ 0.5.0 does not read a multi-line setext heading when the
+     document begins with an HTML block (a template that starts with a comment)
+     or a thematic break: it reports a paragraph where GitHub renders a heading.
+     Until Buckley requires a Markdown++ release that reads it, a guard applies. It
+     depends on the parser's paragraph classification and source ranges; only
+     the test for the form of an underline (only `=` or only `-`, up to three
+     leading spaces, optional trailing spaces) is independent of them. A line with
+     that form, directly below a line that is not blank, is a hazard when the
+     parser reports that line above as part of a paragraph at the top level of
+     the text or in no block at all, and does not report the underline as part of
+     a heading. A blank line holds only spaces and tabs (CommonMark section 2.1);
+     a line of only U+00A0 or another Unicode space is paragraph text, and the
+     parser leaves it out of its block ranges, so it counts as a paragraph line.
+     A code block, a table, front matter, a list item, a block quote, and a
+     thematic break after a blank line, as Markdown++ recognizes them, are other
+     nodes and never match. The guard can raise a false alarm where Markdown++
+     misses an HTML block that interrupts a paragraph (`T`, then `<pre>`, then
+     `=`); it then refuses a path that was safe, never the reverse. In the model's text the line is made text
+     by a backslash before its first character (`=` becomes `\=`, `---` becomes
+     `\---`), with a warning; CommonMark then reads a paragraph. In a carried
+     notes section, in the final body and in the template, it is a blocking
+     warning (for the template, generation stops).
+
+   The section for a block is the first whose heading, guide comments or
+   checkbox text has a word that starts with a keyword of the kind
+   (case-insensitive):
+
+   | Kind | Keywords |
+   |------|----------|
+   | Testing, Evidence | `test`, `validat`, `verif`, `correct` |
+   | Counters | `counter`, `perf`, `benchmark` |
+   | Not verified, Known gaps | `unvalidated`, `not verified`, `unverified`, `unsure`, `risk`, `limit`, `gap` |
+   | Breaking changes | `break`, `compat` |
+   | Related issues | `issue`, `relat`, `link` |
+
+   When no section has a keyword (or the kind has none), the block goes to the
+   end of the last template section that is not a pure checklist. Only when
+   every section is a pure checklist does the block follow Buckley's own
+   sections as a top-level section (the template stays last). Then
+   `buckley pr` warns on stderr and names the notes section, and `--strict`
+   makes that an error. The generated Not verified statement also warns in that
+   case, but `--strict` does not fail on it, because only the author can fix an
+   author section that has no place.
+2. **Checkboxes.** An item is a task-list item as the parser reads it
+   (`- [ ]`, `* [x]`, `+ [X]`, `1. [ ]`, also nested), in a section or before
+   the first heading. A checkbox-shaped line in a code block, an HTML block or
+   a comment is fixed text, because the parser does not read it as an item. An
+   item's identity is the rest of its first line without HTML comments, white
+   space collapsed; case matters. Every item is written in the template's order,
+   byte for byte except its check mark, and the final check verifies it: the
+   body's checkbox lines are the template's lines, in the same order, each under
+   the same heading. After the one character inside the brackets (space, `x` or
+   `X`) is masked, the two lines must be byte for byte equal, with the list
+   marker, the indentation and any trailing spaces (two trailing spaces are a
+   hard break, so they are content). The white space at the end of the body is trimmed, so the
+   last line may lose its trailing white space. Whether a template line is the
+   last line depends on where it ends up in the body, not on where it stands in
+   the template: a template that ends with an item with trailing
+   spaces keeps them when generated text follows the item. The checkbox lines of
+   the author's notes may be added. A mismatch is a blocking warning that names
+   the line. A line that the template hides behind a comment on the same line
+   (`<!-- guide -->- [ ] A`) is not an item of the template; when the comment is
+   removed from a section that received text, the line becomes an item, and the
+   check blocks it. A comment that starts on the item's
+   line stays with it, also when it spans lines; independent guide comments of
+   a section that received text go. The check mark of every item comes from the
+   notes: it is ticked when the notes contain a ticked item with the same
+   identity in a section the template section takes, or in a notes section
+   headed `Checklist`, and otherwise unticked. An item that the template has
+   ticked (`[x]` or `[X]`) and the notes do not tick is cleared, with a warning
+   that names it (`--strict` does not fail on it). A checkbox line in a section
+   the template section takes that matches no item of that section is not
+   written; stderr names it, and `--strict` makes that an error. The author's
+   other lines in the section follow the checklist.
+   A notes section headed `Checklist` counts only when a template is used (with
+   `--template=false` or no template it is an ordinary section). It only ticks;
+   its other text goes after the checklist of a template section with the same
+   heading, else it is placed like a section of no known kind, or, when the
+   template is only checklists, named in a warning (an error with `--strict`).
+   In a template section without checkboxes, and in a placed section, the
+   author's checkbox lines are the author's own list and are written as the
+   author wrote them. The model's checkbox lines are dropped everywhere, with one
+   warning that counts them: the model never ticks, adds or removes a checkbox.
+3. **Fixed text.** The template's fixed text is written word for word, except
+   that a blank line may be added or removed at the edge of a section, line
+   endings are normalized to LF, and the end of the body is
+   trimmed. The start of a body made from a template is not trimmed when it is
+   generated, and at the end spaces, tabs and line breaks are trimmed. The first
+   non-blank line of a template is at column 0 (see above), so trimming the
+   start with the same set, as `--body-file` does, can only remove blank lines.
+   One definition of edge white space applies to every trim of a body: spaces,
+   tabs and line breaks. A Unicode space such as U+00A0 is content and is never
+   trimmed from a body made from a template. Without a template, white space at
+   both ends of the body is trimmed as before. The guide comments of a section that received text
+   are left out; a section that received nothing stays as the template has it.
+   (Removing a comment can change how the parser reads the lines around it; the
+   final check reports a heading that appears this way.)
+4. **Open sections.** A section that has only comments under its heading asks
+   for text. A notes section whose heading equals the template heading fills it
+   word for word (see [Author notes](#author-notes)); so does a section of the
+   kind that the heading names. Otherwise the model writes one text for it,
+   guided by the comments, and that text replaces them. A section the model
+   leaves empty stays as the template has it. Text the model writes for a
+   section that a notes section already fills is ignored.
+
+A template in which every section is a pure checklist (or that has no headings)
+follows Buckley's own sections; the author's ticks still apply to it.
+`--template=false` ignores the template.
 
 #### Author notes
 
@@ -496,7 +700,10 @@ cuts them.
 
 A model rewrites what it reads, so the parts that must not change are copied by
 code. A section of a notes file reaches the PR body word for word, under the
-author's heading, when the heading names one of these:
+author's heading, when the heading names one of these (with a pull request
+template, the exceptions are checkbox lines, which are reconciled with the
+template's, and headings inside a placed section, which move down; see
+[Pull request template](#pull-request-template)):
 
 | Section | Headings that select it |
 |---------|-------------------------|
@@ -506,14 +713,18 @@ author's heading, when the heading names one of these:
 | Not verified | contains `not verified`, `unverified`, `not verify`, `not tested`, `untested`, `not measured`, `not validated` or `not checked` |
 | Known gaps | contains `known gaps`, `known limitations` or `known issues`, or is `Gaps` or `Limitations` |
 
-A section starts at a Markdown heading (`## Evidence`) and ends at the next
-heading of the same or a higher level. A short label on a line of its own
+A section starts at an ATX heading (`## Evidence`) that the parser reads at the
+top level (not one inside a code block, an HTML block, a list or a quote) and
+ends at the next such heading of the same or a higher level. A short label on a line of its own
 (`Evidence` above a list, or `Not verified:`) also starts one; it ends at the
 next heading or the next such label. An author Testing section replaces the
 testing steps the model writes. When no notes file has a Not verified section,
 the body always says that the author stated nothing, also when the model wrote
 text of its own for a Not verified slot of the template (that text follows the
-statement).
+statement). The statement is plain text that names no tool, vendor or model: it
+says that the notes name nothing as unverified (or that there were no notes),
+that the text is written from the notes, the commits and the diff, and that no
+check was run to write it.
 
 HTML comments (`<!-- ... -->`) in a notes file are never sent to the model and
 never published. Buckley removes every comment when it reads the file, wherever
@@ -525,7 +736,8 @@ example `&lt;!--`) when it is meant as text. The same error applies when removin
 a comment would join the characters around it into a new `<!--` (for example
 `<!<!-- x -->--`): the text after it cannot be trusted, so the file is refused
 instead of being cut. Comments are removed once, when the file is read. Other
-text in a carried section is copied word for word.
+text in a carried section is copied word for word (with a template, subject
+to the checkbox and heading rules above).
 
 When two files have a section of the same kind, the body carries both, in the
 order of the files. A later file never replaces an earlier one, so remove a

@@ -83,7 +83,7 @@ func TestParsePRTemplate(t *testing.T) {
 	if len(early.Sections) != 1 || early.Sections[0].Heading != "Real" || !early.Sections[0].Open || !strings.Contains(early.Preamble, "## not a heading") {
 		t.Errorf("a heading inside a comment in the preamble was read as a section: %+v", early)
 	}
-	if got, _ := (PRResult{}).templateBody(early, nil, ""); !strings.Contains(got, "\n## Real ##\n") {
+	if got := (PRResult{}).templateBody(early, nil, "", nil).Body; !strings.Contains(got, "\n## Real ##\n") {
 		t.Errorf("the heading line is not written as the template has it:\n%s", got)
 	}
 
@@ -101,7 +101,8 @@ func TestPRBody_UnfilledTemplateIsTheTemplate(t *testing.T) {
 		if name == "checklists" {
 			text, tmpl = checklistTemplate(t)
 		}
-		got, rest := PRResult{}.templateBody(tmpl, nil, "")
+		res := PRResult{}.templateBody(tmpl, nil, "", nil)
+		got, rest := res.Body, res.Left
 		if got != strings.TrimSpace(text) {
 			t.Errorf("%s: rendered template differs from the file:\n--- got\n%s\n--- want\n%s", name, got, strings.TrimSpace(text))
 		}
@@ -132,12 +133,18 @@ func TestPRBody_FollowsTheTemplate(t *testing.T) {
 	if !strings.HasPrefix(body, wantStart) {
 		t.Fatalf("body does not start with the filled template:\n%s", body)
 	}
-	wantEnd := "- [ ] Called out anything I'm unsure about or want a second opinion on\n\n" +
-		"## Counters\n\n| lex steps | 1,204 | 1,204 |\n\n" +
-		"## Not verified\n\nThe author's notes do not say what was left unverified. Buckley wrote this text from the notes, the commits and the diff, and ran nothing.\n\n" +
-		"## Related Issues\n\n- Refs #12"
-	if !strings.HasSuffix(body, wantEnd) {
-		t.Fatalf("body does not end with the carried sections:\n%s", body)
+	// Nothing is added after the template: the headings are the template's,
+	// and the carried sections are subsections one level below them.
+	if got, want := topLevelHeadings(body, 2), templateHeadingLines(tmpl); !reflect.DeepEqual(got, want) {
+		t.Errorf("headings = %q, template has %q", got, want)
+	}
+	for _, want := range []string{
+		"- [ ] Engine PR: before-and-after deterministic counters are in the PR body\n\n### Counters\n\n| lex steps | 1,204 | 1,204 |\n\n## Performance",
+		"\n\n### Not verified\n\nThe author's notes do not say what was left unverified. This text is written from the notes, the commits and the diff, and no check was run to write it.\n\n### Related Issues\n\n- Refs #12",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body lacks %q:\n%s", want, body)
+		}
 	}
 	if got, want := strings.Count(body, "- [ ]"), strings.Count(text, "- [ ]"); got != want {
 		t.Errorf("body has %d unticked checkboxes, the template has %d", got, want)
@@ -150,7 +157,12 @@ func TestPRBody_FollowsTheTemplate(t *testing.T) {
 			t.Errorf("body has %q", unwanted)
 		}
 	}
-	for _, kept := range []string{"## this heading is inside a comment", "Review your own diff before requesting review."} {
+	// Correctness received a carried section, so its guide comments are left
+	// out; the other sections keep theirs.
+	if strings.Contains(body, "## this heading is inside a comment") {
+		t.Error("the guide comments of a section that received text are kept")
+	}
+	for _, kept := range []string{"Review your own diff before requesting review."} {
 		if !strings.Contains(body, kept) {
 			t.Errorf("body lost the template's own text %q", kept)
 		}
@@ -174,24 +186,28 @@ func TestPRBody_TemplateTakesTheAuthorsSections(t *testing.T) {
 		"### What changed\n\nThe guard now covers the retry path.\n\n" +
 		"### Testing\n\n- `./scripts/test.sh` passed\n\n" +
 		"### Notes for Reviewers\n\nLook at the guard first.\n\n" +
-		"## Known gaps\n\nWindows is not covered."
+		"#### Known gaps\n\nWindows is not covered."
 	if body != want {
 		t.Fatalf("body =\n%s\n\nwant\n%s", body, want)
 	}
 
-	// Text for a checklist section goes under the checklist. A checklist that
-	// the author restated replaces the template's.
+	// Text for a checklist section goes under the checklist.
 	under := pr.Body(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
 		{kind: headingKindPrefix + "summary", heading: "Summary", body: "Tests are in guard_test.go."},
 	}})
 	if !strings.HasPrefix(under, "## Summary\n- [ ] Includes tests or rationale for why tests are unnecessary\n- [ ] References relevant issues/links\n\nTests are in guard_test.go.\n\n### What changed") {
 		t.Errorf("author text is not under the checklist:\n%s", under)
 	}
-	ticked := pr.Body(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
-		{kind: headingKindPrefix + "summary", heading: "Summary", body: "- [x] Includes tests\n- [x] References #12"},
+	// A checklist that the author restated only ticks the template's own
+	// lines; a line that is no item of the template is not written.
+	ticked, warnings := pr.BodyWithWarnings(PRBodyOptions{Template: tmpl, Sections: []AuthorSection{
+		{kind: headingKindPrefix + "summary", heading: "Summary", body: "- [x] Includes tests or rationale for why tests are unnecessary\n- [x] References #12"},
 	}})
-	if !strings.HasPrefix(ticked, "## Summary\n\n- [x] Includes tests\n- [x] References #12\n\n### What changed") || strings.Contains(ticked, "- [ ]") {
-		t.Errorf("the author's checklist does not replace the template's:\n%s", ticked)
+	if !strings.HasPrefix(ticked, "## Summary\n- [x] Includes tests or rationale for why tests are unnecessary\n- [ ] References relevant issues/links\n\n### What changed") || strings.Contains(ticked, "References #12") {
+		t.Errorf("the template's checklist is not kept word for word:\n%s", ticked)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Text, "- [x] References #12") {
+		t.Errorf("warnings = %v, want one naming the unmatched line", warnings)
 	}
 }
 
