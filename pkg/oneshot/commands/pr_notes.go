@@ -278,10 +278,10 @@ func labelLine(d *mdDoc, i int) (string, bool) {
 		return text, true
 	}
 	for _, next := range lines[i+1:] {
-		next = strings.TrimSpace(next)
-		if next == "" {
-			continue
+		if blankText(next) {
+			continue // blank by CommonMark: only spaces and tabs
 		}
+		next = strings.TrimSpace(next)
 		return text, listItemRe.MatchString(next) || strings.HasPrefix(next, "|") || strings.HasPrefix(next, "```") || strings.HasPrefix(next, "~~~")
 	}
 	return "", false

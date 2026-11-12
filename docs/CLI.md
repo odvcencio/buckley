@@ -569,8 +569,10 @@ The body keeps the template's shape:
      the body. The layout without a template is otherwise as before, except
      that the notes' headings come from the parser (a heading-looking line
      inside an HTML block no longer splits a section; an empty ATX heading can
-     end one) and every line ending in a model field or a notes file is read
-     as LF. The fixed Not verified statement names no tool (see [Author notes](#author-notes)).
+     end one), every line ending in a model field or a notes file is read
+     as LF, and a blank line is a line of only spaces and tabs (a line of only
+     U+00A0 is text), which also decides the label rule and the blank lines
+     trimmed at the edges of a carried section. The fixed Not verified statement names no tool (see [Author notes](#author-notes)).
    - Markdown++ 0.5.0 does not read a multi-line setext heading when the
      document begins with an HTML block (a template that starts with a comment)
      or a thematic break: it reports a paragraph where GitHub renders a heading.
@@ -625,9 +627,12 @@ The body keeps the template's shape:
    the same heading. After the one character inside the brackets (space, `x` or
    `X`) is masked, the two lines must be byte for byte equal, with the list
    marker, the indentation and any trailing spaces (two trailing spaces are a
-   hard break, so they are content). Only the edges of the whole text are
-   trimmed, as the body is: the first line's leading white space and the last
-   line's trailing white space. The checkbox lines of
+   hard break, so they are content). Only the edges of the final
+   assembled body are trimmed, as the body is: the leading white space of its
+   first line and the trailing white space of its last line. Whether a template
+   line is at an edge depends on where it ends up in the body, not on where it
+   stands in the template: a template that ends with an item with trailing
+   spaces keeps them when generated text follows the item. The checkbox lines of
    the author's notes may be added. A mismatch is a blocking warning that names
    the line. A line that the template hides behind a comment on the same line
    (`<!-- guide -->- [ ] A`) is not an item of the template; when the comment is

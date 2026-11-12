@@ -162,3 +162,37 @@ func TestCheckboxComparisonIsExact(t *testing.T) {
 		t.Errorf("trailing space inside the text is accepted: %q", got)
 	}
 }
+
+// Review of #478, round nine, finding 1. The template's last line is a checkbox
+// with two trailing spaces (a hard break). The generated Summary follows it, so
+// the line is no longer at the body's edge and keeps its spaces. Trimming is
+// decided by the line's place in the final body, not by its place in the
+// template.
+func TestCheckboxAtTheTemplateEdgeIsComparedByItsPlaceInTheBody(t *testing.T) {
+	const template = "## Summary\nFixed.\n- [ ] A  \n"
+	tmpl := ParsePRTemplate(template)
+
+	// Generation: the box keeps its spaces, and nothing blocks.
+	body, ws := PRResult{Summary: "Change"}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+	if want := "## Summary\nFixed.\n- [ ] A  \n\n### Summary\n\nChange"; body != want {
+		t.Fatalf("body = %q, want %q", body, want)
+	}
+	if got := blockingWarning(ws); got != "" {
+		t.Errorf("a correct body is refused: %q", got)
+	}
+
+	// Final comparison, the correct body: accepted. The same body with the two
+	// spaces removed: refused, because the line is no longer at the body's edge.
+	if got := blockingWarning(tmpl.finalBodyWarnings(body, nil)); got != "" {
+		t.Errorf("final check refuses the correct body: %q", got)
+	}
+	changed := strings.Replace(body, "- [ ] A  \n", "- [ ] A\n", 1)
+	if got := blockingWarning(tmpl.finalBodyWarnings(changed, nil)); !strings.Contains(got, "checkbox line") {
+		t.Errorf("final check accepts a body whose box lost its trailing spaces: %q", got)
+	}
+
+	// At the body's own edge the trimming is allowed, and only there.
+	if got := blockingWarning(tmpl.finalBodyWarnings("## Summary\nFixed.\n- [ ] A", nil)); got != "" {
+		t.Errorf("edge of the body: %q", got)
+	}
+}

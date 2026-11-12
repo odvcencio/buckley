@@ -601,24 +601,19 @@ type boxRecord struct {
 	Line    string // the line as written, its check mark replaced by a space, trailing white space out
 	Section int    // -1 before the first heading; else the index among the headings of the template's levels
 	Where   string // the words of that heading, for messages
+	// First and Last say that the line is the first or the last non-blank line of
+	// the text. Only a body's records set them: the body is trimmed, so these two
+	// lines lose their leading and their trailing white space.
+	First, Last bool
 }
 
 // boxLine masks the check mark of a checkbox line: the one character in the
 // brackets becomes a space. Nothing else changes: the list marker, the
 // indentation, the text and any trailing spaces stay, because they are part of
-// the line (two trailing spaces are a hard break). Only the edges of the whole
-// text are special, because the body is trimmed: the first non-blank line of a
-// text loses its leading white space (trimLeft) and the last its trailing white
-// space (trimRight).
-func boxLine(line string, markCol int, trimLeft, trimRight bool) string {
+// the line (two trailing spaces are a hard break).
+func boxLine(line string, markCol int) string {
 	if markCol >= 0 && markCol < len(line) {
 		line = line[:markCol] + " " + line[markCol+1:]
-	}
-	if trimLeft {
-		line = strings.TrimLeftFunc(line, unicode.IsSpace)
-	}
-	if trimRight {
-		line = strings.TrimRightFunc(line, unicode.IsSpace)
 	}
 	return line
 }
@@ -639,8 +634,10 @@ func edgeLines(lines []string) (first, last int) {
 }
 
 // boxRecords lists the checkbox lines of the run, as the whole-document parse
-// found them. lead says the run starts the document and tail that it ends it.
-func (f *mdFrag) boxRecords(section int, where string, lead, tail bool) []boxRecord {
+// found them, with their white space as written. The template's records are
+// never trimmed: whether an edge of the final body trims a line depends on where
+// the line ends up, and only the body's records know that (First, Last).
+func (f *mdFrag) boxRecords(section int, where string) []boxRecord {
 	lines := f.lines()
 	starts := make([]int, len(lines))
 	off := 0
@@ -648,10 +645,9 @@ func (f *mdFrag) boxRecords(section int, where string, lead, tail bool) []boxRec
 		starts[i] = off
 		off += len(l) + 1
 	}
-	first, last := edgeLines(lines)
 	var out []boxRecord
 	for _, t := range f.tasks {
-		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line], lead && t.Line == first, tail && t.Line == last), Section: section, Where: where})
+		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line]), Section: section, Where: where})
 	}
 	return out
 }
@@ -661,10 +657,10 @@ func (f *mdFrag) boxRecords(section int, where string, lead, tail bool) []boxRec
 func (t *PRTemplate) boxRecords() []boxRecord {
 	var out []boxRecord
 	if t.preFrag != nil {
-		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading", true, len(t.Sections) == 0)...)
+		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading")...)
 	}
 	for i, s := range t.Sections {
-		out = append(out, s.fragment().boxRecords(i, s.Heading, false, i == len(t.Sections)-1)...)
+		out = append(out, s.fragment().boxRecords(i, s.Heading)...)
 	}
 	return out
 }
@@ -681,7 +677,7 @@ func (d *mdDoc) boxRecords(deepest int) []boxRecord {
 	first, last := edgeLines(d.Lines)
 	var out []boxRecord
 	for _, t := range d.Tasks {
-		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line], t.Line == first, t.Line == last), Section: -1, Where: "the text before the first heading"}
+		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line]), Section: -1, Where: "the text before the first heading", First: t.Line == first, Last: t.Line == last}
 		for i, h := range heads {
 			if h.Start < t.Line {
 				r.Section, r.Where = i, h.Text
@@ -713,7 +709,18 @@ func (t *PRTemplate) checkboxWarning(body string, author []AuthorSection, bySect
 			owned[strings.TrimSpace(r.Line)]++
 		}
 	}
-	same := func(a, b boxRecord) bool { return a.Line == b.Line && (!bySection || a.Section == b.Section) }
+	// The body is trimmed, so a line at its edge may differ from the template's
+	// line by that edge's white space, and only there.
+	same := func(g, w boxRecord) bool {
+		gl, wl := g.Line, w.Line
+		if g.First {
+			gl, wl = strings.TrimLeftFunc(gl, unicode.IsSpace), strings.TrimLeftFunc(wl, unicode.IsSpace)
+		}
+		if g.Last {
+			gl, wl = strings.TrimRightFunc(gl, unicode.IsSpace), strings.TrimRightFunc(wl, unicode.IsSpace)
+		}
+		return gl == wl && (!bySection || g.Section == w.Section)
+	}
 	j := 0
 	for i := 0; i < len(got); i++ {
 		switch {

@@ -44,3 +44,22 @@ func TestNoTemplateLayoutKeepsMainsOutputAndWarnsOnTheWholeNoteFallback(t *testi
 		t.Errorf("warnings = %v, want the whole-note warning", ws)
 	}
 }
+
+// Review of #478, round nine (can follow): a following line holding only U+00A0
+// is content (CommonMark section 2.1), so "Evidence" is not a bare label above
+// a list.
+func TestLabelLookaheadKeepsANonBreakingSpaceLineAsContent(t *testing.T) {
+	sections := func(text string) []AuthorSection {
+		note, ok, err := NewPRNote(RawPRNote{Path: "n.md", Text: text})
+		if err != nil || !ok {
+			t.Fatalf("NewPRNote: %v %v", ok, err)
+		}
+		return AuthorSections([]PRNote{note})
+	}
+	if got := sections("Evidence\n \t\n- record\n"); len(got) != 1 || got[0].Kind() != SectionEvidence {
+		t.Errorf("a blank line (spaces and tab) between the label and the list: sections = %v", got)
+	}
+	if got := sections("Evidence\n\u00a0\n- record\n"); len(got) != 0 {
+		t.Errorf("a U+00A0 line is content, so Evidence is no label: sections = %v", got)
+	}
+}
