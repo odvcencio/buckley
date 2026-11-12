@@ -2,6 +2,7 @@ package commands
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -225,5 +226,58 @@ func TestIndentedCheckboxAtTheTemplateEdgeKeepsItsWhiteSpaceInTheBody(t *testing
 				t.Errorf("%s: a body that lost the indentation is accepted: %q", tc.name, stripped)
 			}
 		}
+	}
+}
+
+// Review of #478, round eleven. The template starts with a blank line and an
+// indented code block whose text looks like a heading. The final body is read
+// again and must have the template's structure, so two things hold: the block
+// is still a code block in the body (the leading blank line and the indentation
+// are kept; only the end of the body is trimmed), and the final check compares
+// the headings of the assembled body, so a body that lost the indentation by
+// any path is refused.
+func TestLeadingIndentedCodeBlockIsKeptAndTheFinalBodyIsCompared(t *testing.T) {
+	cases := []struct {
+		name, template string
+		code           string // the code line, as it stands in the template
+		stripped       string // the same line with the indentation removed
+		wantTask       bool   // the unindented line reads as a checkbox
+	}{
+		{"heading-looking code", "\n    ## Example\n\n## Summary\n<!-- Describe the change. -->\n", "    ## Example", "## Example", false},
+		{"checkbox-looking code", "\n    - [ ] X\n\n## Summary\n<!-- Describe the change. -->\n", "    - [ ] X", "- [ ] X", true},
+	}
+	for _, tc := range cases {
+		tmpl := ParsePRTemplate(tc.template)
+		if why := tmpl.Unreadable(); why != "" {
+			t.Fatalf("%s: the template is unreadable: %s", tc.name, why)
+		}
+		body, ws := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+		if got := blockingWarning(ws); got != "" {
+			t.Errorf("%s: a correct body is refused: %q\nbody %q", tc.name, got, body)
+		}
+		d := readMarkdown(body)
+		if len(d.Problems) != 0 || len(d.Code) != 1 || len(d.Tasks) != 0 {
+			t.Errorf("%s: read again, the body has problems %v, %d code blocks, %d checkbox items:\n%q", tc.name, d.Problems, len(d.Code), len(d.Tasks), body)
+		}
+		if got, want := shapeNames(body, 2), []string{"2:summary"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: headings = %q, want %q", tc.name, got, want)
+		}
+		if !strings.HasPrefix(body, "\n"+tc.code+"\n") {
+			t.Errorf("%s: the body does not start with the blank line and the indented block: %q", tc.name, body)
+		}
+		// By hand, the body without the indentation: refused, by the heading or
+		// the checkbox comparison.
+		bad := strings.Replace(body, tc.code, tc.stripped, 1)
+		if got := blockingWarning(tmpl.finalBodyWarnings(bad, nil)); got == "" {
+			t.Errorf("%s: a body without the indentation is accepted:\n%q", tc.name, bad)
+		}
+	}
+
+	// Nothing is trimmed at the start of a body made from a template: the
+	// indentation of a fixed paragraph stays as the template has it.
+	tmpl := ParsePRTemplate("  Fixed paragraph.\n\n## Summary\n<!-- describe -->\n")
+	body, _ := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+	if !strings.HasPrefix(body, "  Fixed paragraph.\n\n## Summary") {
+		t.Errorf("body = %q", body)
 	}
 }

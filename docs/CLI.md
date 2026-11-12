@@ -541,6 +541,10 @@ The body keeps the template's shape:
    reports a comment opener with no closer and a raw heading element at or above
    the template's level, in HTML that the parser hands over as raw HTML (so not
    in a code block); the body may have no more of them than the template has.
+   For a template with a place for text it also reads the assembled body again
+   and compares its top-level headings with the template's (the same headings,
+   in order, and no other at the template's levels), whatever happened to the
+   text on the way.
    It also compares the checkbox lines of the body with the template's and
    blocks a setext-underline hazard (see "Known limits").
    Notes files cannot carry a comment opener without a closer at all: reading the
@@ -627,11 +631,12 @@ The body keeps the template's shape:
    the same heading. After the one character inside the brackets (space, `x` or
    `X`) is masked, the two lines must be byte for byte equal, with the list
    marker, the indentation and any trailing spaces (two trailing spaces are a
-   hard break, so they are content). Only the edges of the final
-   assembled body are trimmed, as the body is: the leading white space of its
-   first line and the trailing white space of its last line. Whether a template
-   line is at an edge depends on where it ends up in the body, not on where it
-   stands in the template: a template that ends with an item with trailing
+   hard break, so they are content). With a template, nothing
+   is trimmed at the start of the body (the indentation of its first line can be
+   what makes a block code), and the white space at its end is trimmed, so the
+   last line may lose its trailing white space. Whether a template line is the
+   last line depends on where it ends up in the body, not on where it stands in
+   the template: a template that ends with an item with trailing
    spaces keeps them when generated text follows the item. The checkbox lines of
    the author's notes may be added. A mismatch is a blocking warning that names
    the line. A line that the template hides behind a comment on the same line
@@ -659,8 +664,10 @@ The body keeps the template's shape:
    warning that counts them: the model never ticks, adds or removes a checkbox.
 3. **Fixed text.** The template's fixed text is written word for word, except
    that a blank line may be added or removed at the edge of a section, line
-   endings are normalized to LF, and trailing white space at the end of the body
-   is trimmed. The guide comments of a section that received text
+   endings are normalized to LF, and the white space at the end of the body is
+   trimmed (a body made from a template keeps its start as the template has it,
+   leading blank lines and indentation included; without a template, white space
+   at both ends of the body is trimmed as before). The guide comments of a section that received text
    are left out; a section that received nothing stays as the template has it.
    (Removing a comment can change how the parser reads the lines around it; the
    final check reports a heading that appears this way.)

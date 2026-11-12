@@ -204,6 +204,17 @@ func (t *PRTemplate) finalBodyWarnings(body string, author []AuthorSection) []Bo
 	if len(d.Underlines) > 0 {
 		block("%s", underlineProblem(d.Underlines[0]))
 	}
+	// The assembled body, read again, has the template's headings: the same
+	// ones, in the same order, and no other heading at the template's levels.
+	// Whatever a transformation did to the text on the way (trimming, moving,
+	// demoting), this is what GitHub shows. With no section to put text in, the
+	// body starts with Buckley's own sections, which this check cannot compare;
+	// the template's own part is compared where it is rendered.
+	if t.placeable() {
+		if w := t.shapeWarning(body); w != "" {
+			block("%s", w)
+		}
+	}
 	if w := t.checkboxWarning(body, author, t.placeable()); w != "" {
 		block("%s", w)
 	}
@@ -601,10 +612,10 @@ type boxRecord struct {
 	Line    string // the line as written, its check mark replaced by a space, trailing white space out
 	Section int    // -1 before the first heading; else the index among the headings of the template's levels
 	Where   string // the words of that heading, for messages
-	// First and Last say that the line is the first or the last non-blank line of
-	// the text. Only a body's records set them: the body is trimmed, so these two
-	// lines lose their leading and their trailing white space.
-	First, Last bool
+	// Last says that the line is the last non-blank line of the text. Only a
+	// body's records set it: the end of the body is trimmed, so that line loses
+	// its trailing white space. Nothing is trimmed at the start.
+	Last bool
 }
 
 // boxLine masks the check mark of a checkbox line: the one character in the
@@ -636,7 +647,7 @@ func edgeLines(lines []string) (first, last int) {
 // boxRecords lists the checkbox lines of the run, as the whole-document parse
 // found them, with their white space as written. The template's records are
 // never trimmed: whether an edge of the final body trims a line depends on where
-// the line ends up, and only the body's records know that (First, Last).
+// the line ends up, and only the body's records know that (Last).
 func (f *mdFrag) boxRecords(section int, where string) []boxRecord {
 	lines := f.lines()
 	starts := make([]int, len(lines))
@@ -674,10 +685,10 @@ func (d *mdDoc) boxRecords(deepest int) []boxRecord {
 			heads = append(heads, h)
 		}
 	}
-	first, last := edgeLines(d.Lines)
+	_, last := edgeLines(d.Lines)
 	var out []boxRecord
 	for _, t := range d.Tasks {
-		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line]), Section: -1, Where: "the text before the first heading", First: t.Line == first, Last: t.Line == last}
+		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line]), Section: -1, Where: "the text before the first heading", Last: t.Line == last}
 		for i, h := range heads {
 			if h.Start < t.Line {
 				r.Section, r.Where = i, h.Text
@@ -709,13 +720,10 @@ func (t *PRTemplate) checkboxWarning(body string, author []AuthorSection, bySect
 			owned[strings.TrimSpace(r.Line)]++
 		}
 	}
-	// The body is trimmed, so a line at its edge may differ from the template's
-	// line by that edge's white space, and only there.
+	// The end of the body is trimmed, so its last line may differ from the
+	// template's line by trailing white space, and only there.
 	same := func(g, w boxRecord) bool {
 		gl, wl := g.Line, w.Line
-		if g.First {
-			gl, wl = strings.TrimLeftFunc(gl, unicode.IsSpace), strings.TrimLeftFunc(wl, unicode.IsSpace)
-		}
 		if g.Last {
 			gl, wl = strings.TrimRightFunc(gl, unicode.IsSpace), strings.TrimRightFunc(wl, unicode.IsSpace)
 		}
@@ -844,7 +852,13 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		for _, item := range clearedPre {
 			warn(false, "the template item %q is ticked in the template, cleared because the notes do not tick it", item)
 		}
-		b.WriteString(trimBlankEdges(pre) + "\n\n")
+		// Blank lines at the start stay: a leading blank line and indentation can
+		// be what makes the first block an indented code block. Only the blank
+		// lines at the end go.
+		for len(pre) > 0 && blankText(pre[len(pre)-1]) {
+			pre = pre[:len(pre)-1]
+		}
+		b.WriteString(strings.Join(pre, "\n") + "\n\n")
 	}
 	for i, s := range t.Sections {
 		b.WriteString(s.HeadingLine + "\n")

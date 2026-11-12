@@ -277,7 +277,10 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		// A last check of the shape: read the rendered template's headings with
 		// the shared recognizer. A path that placed text so that a heading
 		// appears or disappears shows here instead of going unseen.
-		if w := opts.Template.shapeWarning(templateText); w != "" {
+		// With a place for text the body is the template's text, and the final
+		// check below compares its headings; the comparison here is for the
+		// layout where Buckley's own sections come first.
+		if w := opts.Template.shapeWarning(templateText); w != "" && !shaped {
 			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
 		}
 		if !shaped {
@@ -346,6 +349,10 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 	}
 	body := strings.TrimSpace(b.String())
 	if opts.Template != nil {
+		// With a template nothing is trimmed at the start of the body: the
+		// indentation of its first line can be what makes a block code. Only
+		// the end is trimmed.
+		body = strings.TrimRight(b.String(), " \t\r\n")
 		// The check covers the whole body, Buckley's own sections included, in
 		// every layout.
 		warnings = append(warnings, opts.Template.finalBodyWarnings(body, opts.Sections)...)
