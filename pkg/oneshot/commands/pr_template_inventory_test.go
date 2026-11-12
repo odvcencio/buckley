@@ -2,7 +2,6 @@ package commands
 
 import (
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -198,86 +197,69 @@ func TestCheckboxAtTheTemplateEdgeIsComparedByItsPlaceInTheBody(t *testing.T) {
 	}
 }
 
-// Review of #478, round ten. templateBody keeps the white space of the
-// template's first and last lines; the assembled body is trimmed once, at its
-// own edges. So an indented checkbox that ends up inside the body keeps its
-// indentation, and Buckley's own output draws no checkbox warning.
-func TestIndentedCheckboxAtTheTemplateEdgeKeepsItsWhiteSpaceInTheBody(t *testing.T) {
-	cases := []struct {
-		name, template, want string // want: part of the body
-	}{
-		{"one indented checkbox, text generated before it", "  - [ ] A  \n", "Change\n\n  - [ ] A"},
-		{"indented checkbox preamble, checklist-only sections", "  - [ ] P  \n\n## Checks\n- [ ] B\n", "Change\n\n  - [ ] P  \n"},
-		{"last line is an indented checkbox, text generated after it", "## Summary\nFixed.\n  - [ ] A  \n", "## Summary\nFixed.\n  - [ ] A  \n\n### Summary\n\nChange"},
+// Review of #478, rounds ten to thirteen. A template whose first non-blank line
+// is indented is refused when it is read: trimming the start of a body (a saved
+// file read back by --body-file) would remove that indentation and could change
+// how the first block is read. The refusal comes before any model call. A
+// template whose first non-blank line is at column 0 is fine, also after blank
+// lines.
+func TestTemplateWithAnIndentedFirstLineIsRefused(t *testing.T) {
+	for name, template := range map[string]string{
+		"indented checkbox":           "  - [ ] A  \n",
+		"leading indented code block": "\n    ## Example\n\n## Summary\n<!-- Describe the change. -->\n",
+		"indented checkbox first":     "  - [ ] P  \n\n## Checks\n- [ ] B\n",
+		"indented paragraph":          "  Fixed paragraph.\n\n## Summary\n<!-- describe -->\n",
+		"tab":                         "\t- [ ] A\n",
+	} {
+		tmpl := ParsePRTemplate(template)
+		why := tmpl.Unreadable()
+		if !strings.Contains(why, "the template's first line is indented") || !strings.Contains(why, "column 0") {
+			t.Errorf("%s: Unreadable() = %q", name, why)
+		}
+		_, ws := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+		if !hasWarning(ws, "the pull request template cannot be used", true) {
+			t.Errorf("%s: warnings = %v", name, ws)
+		}
 	}
-	for _, tc := range cases {
-		tmpl := ParsePRTemplate(tc.template)
-		body, ws := PRResult{Summary: "Change"}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
-		if got := blockingWarning(ws); got != "" {
-			t.Errorf("%s: Buckley's own output is refused: %q\nbody %q", tc.name, got, body)
-		}
-		if !strings.Contains(body, tc.want) {
-			t.Errorf("%s: body = %q, want it to contain %q", tc.name, body, tc.want)
-		}
-		// The same body with the indentation removed is refused.
-		if strings.Contains(body, "  - [ ]") {
-			stripped := strings.Replace(body, "  - [ ]", "- [ ]", 1)
-			if got := blockingWarning(tmpl.finalBodyWarnings(stripped, nil)); !strings.Contains(got, "checkbox line") {
-				t.Errorf("%s: a body that lost the indentation is accepted: %q", tc.name, stripped)
-			}
+	for name, template := range map[string]string{
+		"blank lines, then a paragraph at column 0": "\n\nFixed paragraph.\n\n## Summary\n<!-- describe -->\n",
+		"spaces-only line, then a heading":          " \t \n## Summary\n<!-- describe -->\n",
+		"indentation later is fine":                 "## Summary\nFixed.\n  - [ ] A  \n",
+	} {
+		if why := ParsePRTemplate(template).Unreadable(); why != "" {
+			t.Errorf("%s: refused: %s", name, why)
 		}
 	}
 }
 
-// Review of #478, round eleven. The template starts with a blank line and an
-// indented code block whose text looks like a heading. The final body is read
-// again and must have the template's structure, so two things hold: the block
-// is still a code block in the body (the leading blank line and the indentation
-// are kept; only the end of the body is trimmed), and the final check compares
-// the headings of the assembled body, so a body that lost the indentation by
-// any path is refused.
-func TestLeadingIndentedCodeBlockIsKeptAndTheFinalBodyIsCompared(t *testing.T) {
-	cases := []struct {
-		name, template string
-		code           string // the code line, as it stands in the template
-		stripped       string // the same line with the indentation removed
-		wantTask       bool   // the unindented line reads as a checkbox
-	}{
-		{"heading-looking code", "\n    ## Example\n\n## Summary\n<!-- Describe the change. -->\n", "    ## Example", "## Example", false},
-		{"checkbox-looking code", "\n    - [ ] X\n\n## Summary\n<!-- Describe the change. -->\n", "    - [ ] X", "- [ ] X", true},
+// An indented checkbox that is not the first line stays as the template has it,
+// also when it is the last line and generated text follows it.
+func TestIndentedCheckboxAtTheTemplateEdgeKeepsItsWhiteSpaceInTheBody(t *testing.T) {
+	tmpl := ParsePRTemplate("## Summary\nFixed.\n  - [ ] A  \n")
+	body, ws := PRResult{Summary: "Change"}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+	if got := blockingWarning(ws); got != "" {
+		t.Errorf("Buckley's own output is refused: %q\nbody %q", got, body)
 	}
-	for _, tc := range cases {
-		tmpl := ParsePRTemplate(tc.template)
-		if why := tmpl.Unreadable(); why != "" {
-			t.Fatalf("%s: the template is unreadable: %s", tc.name, why)
-		}
-		body, ws := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
-		if got := blockingWarning(ws); got != "" {
-			t.Errorf("%s: a correct body is refused: %q\nbody %q", tc.name, got, body)
-		}
-		d := readMarkdown(body)
-		if len(d.Problems) != 0 || len(d.Code) != 1 || len(d.Tasks) != 0 {
-			t.Errorf("%s: read again, the body has problems %v, %d code blocks, %d checkbox items:\n%q", tc.name, d.Problems, len(d.Code), len(d.Tasks), body)
-		}
-		if got, want := shapeNames(body, 2), []string{"2:summary"}; !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: headings = %q, want %q", tc.name, got, want)
-		}
-		if !strings.HasPrefix(body, "\n"+tc.code+"\n") {
-			t.Errorf("%s: the body does not start with the blank line and the indented block: %q", tc.name, body)
-		}
-		// By hand, the body without the indentation: refused, by the heading or
-		// the checkbox comparison.
-		bad := strings.Replace(body, tc.code, tc.stripped, 1)
-		if got := blockingWarning(tmpl.finalBodyWarnings(bad, nil)); got == "" {
-			t.Errorf("%s: a body without the indentation is accepted:\n%q", tc.name, bad)
-		}
-	}
-
-	// Nothing is trimmed at the start of a body made from a template: the
-	// indentation of a fixed paragraph stays as the template has it.
-	tmpl := ParsePRTemplate("  Fixed paragraph.\n\n## Summary\n<!-- describe -->\n")
-	body, _ := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
-	if !strings.HasPrefix(body, "  Fixed paragraph.\n\n## Summary") {
+	if !strings.Contains(body, "  - [ ] A  \n") {
 		t.Errorf("body = %q", body)
+	}
+	stripped := strings.Replace(body, "  - [ ]", "- [ ]", 1)
+	if got := blockingWarning(tmpl.finalBodyWarnings(stripped, nil)); !strings.Contains(got, "checkbox line") {
+		t.Errorf("a body that lost the indentation is accepted: %q", stripped)
+	}
+}
+
+// The final body is read again and its headings are compared with the template's
+// whatever happened to the text on the way. Here a code block that looks like a
+// heading is put at the start of a body by hand.
+func TestFinalBodyHeadingsAreComparedAfterATransformation(t *testing.T) {
+	tmpl := ParsePRTemplate("\n\nFixed paragraph.\n\n## Summary\n<!-- Describe the change. -->\n")
+	body, ws := PRResult{Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+	if got := blockingWarning(ws); got != "" || !strings.HasPrefix(body, "\n\nFixed paragraph.") && !strings.HasPrefix(body, "Fixed paragraph.") {
+		t.Fatalf("a template that starts with blank lines is refused: %q\n%q", got, body)
+	}
+	bad := "## Example\n\n" + body
+	if got := blockingWarning(tmpl.finalBodyWarnings(bad, nil)); !strings.Contains(got, "example") {
+		t.Errorf("an extra heading is accepted: %q", got)
 	}
 }

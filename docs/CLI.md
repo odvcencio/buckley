@@ -387,7 +387,7 @@ buckley pr [OPTIONS]
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
 | `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
-| `--body-file <file>` | Post `<file>` as it is, without a model call. A first line `Title: ...` is the title; the rest is the body |
+| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. White space at both ends of the body is trimmed (line endings become LF); nothing else changes |
 | `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
 | `--breaking <auto\|keep\|never>` | Breaking Changes section policy (default `auto`), the same rule as for `buckley commit`. See [Breaking changes](#breaking-changes) |
 | `--yes` | Skip the confirmation prompt |
@@ -470,6 +470,11 @@ reads `.github/PULL_REQUEST_TEMPLATE.md`, `PULL_REQUEST_TEMPLATE.md` or
 `docs/PULL_REQUEST_TEMPLATE.md` (also in lower case) from the base branch, where
 GitHub reads it, and from the head branch when the base has none. An uncommitted
 template is not read. `--template=false` keeps Buckley's own sections.
+A template whose first non-blank line starts with a space or a tab (blank lines
+before it are fine) is refused before the model is called, with a message that
+says so: a body is trimmed at its start in places (see `--body-file`), and
+that would remove the indentation of the line and could change how its block
+is read. Start the template with a heading, a comment or a paragraph at column 0.
 
 Buckley reads the Markdown of the template, of the notes and of the model's text
 with Markdown++ (`m31labs.dev/mdpp`), the organisation's CommonMark-based parser,
@@ -631,9 +636,7 @@ The body keeps the template's shape:
    the same heading. After the one character inside the brackets (space, `x` or
    `X`) is masked, the two lines must be byte for byte equal, with the list
    marker, the indentation and any trailing spaces (two trailing spaces are a
-   hard break, so they are content). With a template, nothing
-   is trimmed at the start of the body (the indentation of its first line can be
-   what makes a block code), and the white space at its end is trimmed, so the
+   hard break, so they are content). The white space at the end of the body is trimmed, so the
    last line may lose its trailing white space. Whether a template line is the
    last line depends on where it ends up in the body, not on where it stands in
    the template: a template that ends with an item with trailing
@@ -665,9 +668,11 @@ The body keeps the template's shape:
 3. **Fixed text.** The template's fixed text is written word for word, except
    that a blank line may be added or removed at the edge of a section, line
    endings are normalized to LF, and the white space at the end of the body is
-   trimmed (a body made from a template keeps its start as the template has it,
-   leading blank lines and indentation included; without a template, white space
-   at both ends of the body is trimmed as before). The guide comments of a section that received text
+   trimmed. The start of a body made from a template is not trimmed when it is
+   generated; the first non-blank line of a template is at column 0 (see above),
+   so trimming the start, as `--body-file` does, can only remove blank lines.
+   Without a template, white space at both ends of the body is trimmed as
+   before. The guide comments of a section that received text
    are left out; a section that received nothing stays as the template has it.
    (Removing a comment can change how the parser reads the lines around it; the
    final check reports a heading that appears this way.)

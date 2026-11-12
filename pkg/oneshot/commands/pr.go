@@ -181,7 +181,7 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		// Model text may not carry raw HTML that changes structure.
 		pr, warnings = pr.withoutStructuralHTML()
 		if why := opts.Template.Unreadable(); why != "" {
-			warnings = append(warnings, BodyWarning{Text: "the pull request template cannot be read exactly: " + why, Blocking: true})
+			warnings = append(warnings, BodyWarning{Text: "the pull request template cannot be used: " + why, Blocking: true})
 		}
 		for _, s := range opts.Sections {
 			warnings = append(warnings, opts.Template.authorHTMLWarnings(s)...)

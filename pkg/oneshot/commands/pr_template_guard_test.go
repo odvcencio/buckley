@@ -37,7 +37,7 @@ func TestUnreadableTemplateStopsGeneration(t *testing.T) {
 		t.Fatalf("Unreadable() = %q, want a parser diagnostic", why)
 	}
 	_, ws := PRResult{Sections: map[string]string{"summary": "x"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
-	if !hasWarning(ws, "cannot be read exactly", true) {
+	if !hasWarning(ws, "cannot be used", true) {
 		t.Errorf("warnings = %v", ws)
 	}
 }

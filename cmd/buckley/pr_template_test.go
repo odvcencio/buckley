@@ -120,7 +120,7 @@ func TestRunPRCommand_UnreadableTemplateStopsGeneration(t *testing.T) {
 
 	var err error
 	captureStdout(t, func() { err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature"}) })
-	if err == nil || !strings.Contains(err.Error(), "cannot be read exactly") || !strings.Contains(err.Error(), "PULL_REQUEST_TEMPLATE.md") || !strings.Contains(err.Error(), "MDPP-PARSE") {
+	if err == nil || !strings.Contains(err.Error(), "cannot be used") || !strings.Contains(err.Error(), "PULL_REQUEST_TEMPLATE.md") || !strings.Contains(err.Error(), "MDPP-PARSE") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -426,6 +426,36 @@ func TestRunPRCommand_BodyNamesNoToolOrAttribution(t *testing.T) {
 				if strings.Contains(string(text), word) {
 					t.Errorf("the text contains %q:\n%s", word, text)
 				}
+			}
+		})
+	}
+}
+
+// A template whose first non-blank line is indented stops the command before
+// the model is called, with a message that says what is wrong.
+func TestRunPRCommand_IndentedFirstLineStopsGeneration(t *testing.T) {
+	for name, template := range map[string]string{
+		"checkbox":   "  - [ ] A  \n",
+		"code block": "\n    ## Example\n\n## Summary\n<!-- Describe the change. -->\n",
+		"paragraph":  "  Fixed paragraph.\n\n## Summary\n<!-- describe -->\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newPRRepo(t)
+			commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", template)
+			runGitIn(t, r.work, "push", "-q", "origin", "main")
+			r.commit(t, "feature", "f.txt")
+			r.park(t)
+			stubPRDependencies(t, func() error { return nil })
+			previous := newPRCommandRuntimeFn
+			t.Cleanup(func() { newPRCommandRuntimeFn = previous })
+			newPRCommandRuntimeFn = func(prCommandOptions) (*prCommandRuntime, func(), error) {
+				t.Error("the model runtime was built for a template with an indented first line")
+				return nil, func() {}, fmt.Errorf("must not be called")
+			}
+			var err error
+			captureStdout(t, func() { err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature"}) })
+			if err == nil || !strings.Contains(err.Error(), "the template's first line is indented") || !strings.Contains(err.Error(), "--template=false") {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}

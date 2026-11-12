@@ -99,6 +99,22 @@ func ParsePRTemplate(text string) *PRTemplate {
 	t.Preamble = trimBlankEdges(pre)
 	t.preFrag = d.fragment(0, len(pre)-1)
 	t.problems, t.foreign = d.Problems, d.Foreign
+	// A template whose first non-blank line is indented is not usable. The body
+	// is trimmed at its start in places (a saved --output file read back by
+	// --body-file) and there the indentation of that line would go, which can
+	// change how its block is read (an indented code block becomes a heading).
+	// With a first line at column 0, trimming the start removes blank lines only,
+	// the one edge normalization that is allowed. Blank lines before the first
+	// line are fine; blank means only spaces and tabs.
+	for _, line := range d.Lines {
+		if blankText(line) {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			t.problems = append(t.problems, "the template's first line is indented; Buckley cannot keep such a line when a body is trimmed (remove the indentation of the first non-blank line, or start the template with a heading or a paragraph at column 0)")
+		}
+		break
+	}
 	for _, line := range d.Underlines {
 		t.problems = append(t.problems, underlineProblem(line))
 	}

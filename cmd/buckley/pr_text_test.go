@@ -13,10 +13,23 @@ func TestFormatAndParsePRText_RoundTrip(t *testing.T) {
 		{Title: "add(api): retry budget", Body: "## Summary\n\nAdds the budget.\n\n## Changes\n\n- One"},
 		{Title: "fix: handle \"Title: x\" lines", Body: "Title: not the title\n\n| a | b |\n|---|---|"},
 		{Title: "document: readme", Body: "One line."},
+		{Title: "add: template body", Body: "## Summary\n\nChange\n\n- [ ] A  \n  continued\n- [x] B"},
 	} {
 		if got := parsePRText(formatPRText(text)); got != text {
 			t.Errorf("round trip of %+v = %+v", text, got)
 		}
+	}
+
+	// A body that starts with blank lines (a template may start that way): after
+	// the round trip its blank lines at the start are gone and nothing else
+	// changed, so its top-level headings and checkbox lines are the same.
+	lead := prText{Title: "add: x", Body: "\n\n## Summary\n\nChange\n\n- [ ] A  \n- [X] B"}
+	got := parsePRText(formatPRText(lead))
+	if want := strings.TrimLeft(lead.Body, "\n"); got.Body != want || got.Title != lead.Title {
+		t.Errorf("round trip of a body with leading blank lines = %+v, want body %q", got, want)
+	}
+	if !strings.HasPrefix(got.Body, "## Summary") || !strings.Contains(got.Body, "- [ ] A  \n- [X] B") {
+		t.Errorf("headings or checkbox lines changed: %q", got.Body)
 	}
 
 	if got := parsePRText("Title:  spaced title  \r\n\r\nBody with CRLF.\r\n"); got != (prText{Title: "spaced title", Body: "Body with CRLF."}) {

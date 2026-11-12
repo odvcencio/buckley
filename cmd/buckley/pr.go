@@ -252,7 +252,7 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 			continue
 		}
 		for _, path := range prTemplatePaths {
-			text, err := gitOutput("show", ref+":"+path)
+			text, err := gitOutputRaw("show", ref+":"+path) // untrimmed: the template guard looks at its first line
 			if err != nil {
 				continue
 			}
@@ -395,7 +395,7 @@ func generatePRText(opts prCommandOptions, plan *prPlan) (prText, error) {
 		template = loadPRTemplate(plan)
 		if why := template.Unreadable(); why != "" {
 			// The template's shape cannot be certified, so nothing is generated.
-			return prText{}, fmt.Errorf("the pull request template %s cannot be read exactly by Markdown++: %s; fix the template, or run with --template=false", template.Source, why)
+			return prText{}, fmt.Errorf("the pull request template %s cannot be used: %s; fix the template, or run with --template=false", template.Source, why)
 		}
 	}
 	// Only with a template does a notes section headed Checklist tick boxes.
@@ -431,7 +431,11 @@ func formatPRText(text prText) string {
 }
 
 // parsePRText reads the file form of a PR text. A first line that starts with
-// "Title:" is the title; without one the whole content is the body.
+// "Title:" is the title; without one the whole content is the body. White space
+// at both ends of the body is trimmed. For a body made from a pull request
+// template this only removes blank lines at the start: a template whose first
+// non-blank line is indented is refused when it is read (ParsePRTemplate), so
+// the first non-blank line of such a body is at column 0.
 func parsePRText(content string) prText {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	first, rest, _ := strings.Cut(content, "\n")
