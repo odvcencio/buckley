@@ -188,6 +188,13 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 			warnings = append(warnings, authorReadWarnings(s)...)
 		}
 	}
+	if opts.Template == nil {
+		// Without a template the notes are carried as before, except that a note
+		// that Markdown++ cannot split exactly is carried whole. Say so.
+		for _, s := range opts.Sections {
+			warnings = append(warnings, wholeNoteWarning(s)...)
+		}
+	}
 	modelBoxes := 0
 	// With a template the model never adds a checkbox: its checkbox lines are
 	// dropped and counted.
@@ -273,6 +280,14 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		if w := opts.Template.shapeWarning(templateText); w != "" {
 			warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
 		}
+		if !shaped {
+			// The body also holds Buckley's own sections before the template, so the
+			// final check compares lines and order only; the template's own text is
+			// compared with its sections here.
+			if w := opts.Template.checkboxWarning(templateText, opts.Sections, true); w != "" {
+				warnings = append(warnings, BodyWarning{Text: w + "; the body is out of the template's shape", Blocking: true})
+			}
+		}
 		modelBoxes += res.ModelBoxes
 		if !shaped {
 			for _, s := range author {
@@ -333,18 +348,25 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 	if opts.Template != nil {
 		// The check covers the whole body, Buckley's own sections included, in
 		// every layout.
-		warnings = append(warnings, opts.Template.finalBodyWarnings(body)...)
+		warnings = append(warnings, opts.Template.finalBodyWarnings(body, opts.Sections)...)
 	}
 	return body, warnings
+}
+
+// wholeNoteWarning names a note that is carried whole because Markdown++ could
+// not split it exactly. It is the one warning of the notes that applies with and
+// without a template.
+func wholeNoteWarning(s AuthorSection) []BodyWarning {
+	if s.problem == "" {
+		return nil
+	}
+	return []BodyWarning{{Text: fmt.Sprintf("the notes section %q could not be split exactly (%s); the whole note is carried as written", s.Heading(), s.problem)}}
 }
 
 // authorReadWarnings says what could not be read exactly in a carried notes
 // section. The text is carried as written.
 func authorReadWarnings(s AuthorSection) []BodyWarning {
-	var out []BodyWarning
-	if s.problem != "" {
-		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q could not be split exactly (%s); the whole note is carried as written", s.Heading(), s.problem)})
-	}
+	out := wholeNoteWarning(s)
 	d := readMarkdown(s.Body())
 	if len(d.Problems) > 0 && s.problem == "" {
 		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q could not be read exactly (%s); its text is carried as written", s.Heading(), d.Problems[0])})
@@ -480,7 +502,21 @@ func neutralizeHTML(text string) (string, []string) {
 			continue
 		}
 		if len(d.Comments) == 0 {
-			return d.text, constructs
+			if len(d.Underlines) == 0 {
+				return d.text, constructs
+			}
+			// A line that GitHub may render as a heading underline although the
+			// parser shows a paragraph: a backslash before its first character
+			// makes it text ("\===", "\---"). It is no longer an underline, so the
+			// paragraph stays a paragraph; the line is shown with the characters.
+			note("a setext underline line that the parser does not read as a heading")
+			lines := d.Lines
+			for _, at := range d.Underlines {
+				indent := len(lines[at]) - len(strings.TrimLeft(lines[at], " "))
+				lines[at] = lines[at][:indent] + `\` + lines[at][indent:]
+			}
+			text = strings.Join(lines, "\n")
+			continue
 		}
 		note("a closed HTML comment")
 		text = strings.Join(d.withoutComments(), "\n")

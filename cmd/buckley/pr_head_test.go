@@ -32,6 +32,11 @@ func newPRRepoOwnedBy(t *testing.T, owner string) prRepo {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// A global or injected Git setting (commit.gpgsign, hooks) must not reach the
+	// scratch repositories of these tests.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("BUCKLEY_REMOTE_NAME", "")
 	t.Setenv(envPRBase, "")
 

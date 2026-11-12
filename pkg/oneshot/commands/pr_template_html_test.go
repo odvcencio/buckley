@@ -57,10 +57,10 @@ func TestAuthorTextWithStructuralHTMLBlocks(t *testing.T) {
 	}
 	// A template that has the element itself is not accused of it.
 	tmpl := ParsePRTemplate("<h2>Title</h2>\n\n## Summary\n<!-- describe -->\n")
-	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\nText"); len(ws) != 0 {
+	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\nText", nil); len(ws) != 0 {
 		t.Errorf("the template's own element: %v", ws)
 	}
-	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\n<h2>More</h2>"); !hasWarning(ws, "raw <h2>", true) {
+	if ws := tmpl.finalBodyWarnings("<h2>Title</h2>\n\n## Summary\n\n<h2>More</h2>", nil); !hasWarning(ws, "raw <h2>", true) {
 		t.Errorf("one element more than the template: %v", ws)
 	}
 }
@@ -108,11 +108,11 @@ func TestNoAuthorLineIsLostSilently(t *testing.T) {
 		lines []string // the lines of the carried sections, as the author wrote them
 	}{
 		{"## Testing\n\n- `go test ./a` passed\n- second\n\n## Evidence\n\nTitle\n---\nobserved\n\n```\n# not a heading\n```\n",
-			[]string{"- `go test ./a` passed", "- second", "Title", "observed", "```", "# not a heading"}},
+			[]string{"- `go test ./a` passed", "- second", "H:Title", "observed", "```", "# not a heading"}},
 		{"Testing:\n- ran it\n\nEvidence\n| a | b |\n|---|---|\n| 1 | 2 |\n\nNot verified:\nWindows\n",
 			[]string{"- ran it", "| a | b |", "|---|---|", "| 1 | 2 |", "Windows"}},
 		{"## Counters\n\n| step | n |\n|---|---|\n| lex | 3 |\n\n### Detail\n\n1. one\n2. two\n\n## Known gaps\n\n> quote\n> more\n",
-			[]string{"| step | n |", "| lex | 3 |", "Detail", "1. one", "2. two", "> quote", "> more"}},
+			[]string{"| step | n |", "| lex | 3 |", "H:Detail", "1. one", "2. two", "> quote", "> more"}},
 		{"**Evidence**\n1. first\n2. second\n\nKnown gaps\n- gap one\n",
 			[]string{"1. first", "2. second", "- gap one"}},
 		{"> [!NOTE]\nx\n\n## Evidence\nObserved.\n", []string{"Observed."}},
@@ -134,10 +134,14 @@ func TestNoAuthorLineIsLostSilently(t *testing.T) {
 			}
 			body, ws := PRResult{Action: "fix", Title: "x", Summary: "Change", Sections: map[string]string{"summary": "Change"}}.BodyWithWarnings(PRBodyOptions{Template: tmpl, Sections: sections})
 			for _, want := range sample.lines {
+				// "H:" marks a heading of the notes: it may move down in a placed
+				// section, so its words are compared. Every other line is compared
+				// exactly (a "# ..." line in a code block stays as written).
+				heading := strings.HasPrefix(want, "H:")
+				want = strings.TrimPrefix(want, "H:")
 				found := false
 				for _, b := range strings.Split(body, "\n") {
-					// A heading inside a placed section moves down: compare its words.
-					if strings.TrimSpace(b) == want || strings.TrimSpace(strings.TrimLeft(b, "# ")) == strings.TrimSpace(strings.TrimLeft(want, "# ")) {
+					if strings.TrimSpace(b) == want || (heading && strings.TrimSpace(strings.TrimLeft(b, "# ")) == want) {
 						found = true
 					}
 				}

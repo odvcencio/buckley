@@ -92,8 +92,14 @@ type mdDoc struct {
 	Code      []mdCode
 	HTML      []mdHTML
 	Comments  []mdComment
-	Hazards   []mdHazard // raw HTML in HTML blocks and inline HTML
-	inFence   []bool     // per line: inside a fenced code block, delimiters included
+	Hazards   []mdHazard            // raw HTML in HTML blocks and inline HTML
+	inFence   []bool                // per line: inside a fenced code block, delimiters included
+	topKind   map[int]mdpp.NodeType // per line: the type of the child of the document that holds it
+	// Underlines lists the lines (0-based) that have the form of a setext
+	// underline and stand directly below a paragraph line, although the parser
+	// does not show them as the end of a heading. GitHub may render a heading
+	// there; see findUnderlines.
+	Underlines []int
 	// Problems say why the reading cannot be trusted: a parse error, a recovery
 	// diagnostic of the parser (a block kept as text, a budget hit) or a source
 	// range that cannot be used. An empty list means the reading is exact.
@@ -138,6 +144,7 @@ func readMarkdown(src string) *mdDoc {
 	d.Lines = strings.Split(src, "\n")
 	d.inFence = make([]bool, len(d.Lines))
 	d.lineStart = make([]int, len(d.Lines))
+	d.topKind = map[int]mdpp.NodeType{}
 	off := 0
 	for i, l := range d.Lines {
 		d.lineStart[i] = off
@@ -163,6 +170,14 @@ func readMarkdown(src string) *mdDoc {
 		}
 		if isBlockNode(n.Type) && !d.checkRange(n) {
 			return // its range cannot be used, so neither can anything below it
+		}
+		if parent == doc.Root && n.Range.EndByte > n.Range.StartByte && n.Range.StartByte >= 0 && n.Range.StartByte <= len(d.text) {
+			first, last := d.nodeLines(n)
+			for i := first; i <= last; i++ {
+				if _, seen := d.topKind[i]; !seen {
+					d.topKind[i] = n.Type
+				}
+			}
 		}
 		switch n.Type {
 		case mdpp.NodeList:
@@ -196,7 +211,34 @@ func readMarkdown(src string) *mdDoc {
 	walk(doc.Root, nil, 0)
 	sort.Slice(d.Headings, func(i, j int) bool { return d.Headings[i].Start < d.Headings[j].Start })
 	sort.Slice(d.Tasks, func(i, j int) bool { return d.Tasks[i].MarkAt < d.Tasks[j].MarkAt })
+	d.findUnderlines()
 	return d
+}
+
+// findUnderlines records the lines that GitHub may render as the underline of a
+// heading although the parser does not. Markdown++ 0.5.0 misreads a multi-line
+// setext heading ("T", "U", "=") that follows a leading HTML block or a thematic
+// break: it reports a paragraph, GitHub renders a heading. This guard does not
+// depend on that reading. The reader decides what each line belongs to; the one
+// thing decided from the raw line is that it has the form of an underline (see
+// underlineOnly). A line is recorded when it has that form, the line above it
+// is not blank and belongs to a paragraph that is a child of the document, and
+// the line itself is not part of a heading. Code blocks, tables, front matter,
+// list items, quotes and a thematic break after a blank line are other nodes, so
+// they are never recorded.
+func (d *mdDoc) findUnderlines() {
+	for i := 1; i < len(d.Lines); i++ {
+		if !underlineOnly(d.Lines[i]) || strings.TrimSpace(d.Lines[i-1]) == "" {
+			continue
+		}
+		if kind, ok := d.topKind[i-1]; !ok || kind != mdpp.NodeParagraph {
+			continue
+		}
+		if kind, ok := d.topKind[i]; ok && kind == mdpp.NodeHeading {
+			continue
+		}
+		d.Underlines = append(d.Underlines, i)
+	}
 }
 
 // nodeLines returns the first and last line (0-based) of a node. A node's byte
@@ -326,6 +368,17 @@ func underlineOnly(line string) bool {
 	return t != "" && (strings.Trim(t, "=") == "" || strings.Trim(t, "-") == "")
 }
 
+// atxOpener reports a line that opens an ATX heading: up to three spaces, one to
+// six "#" characters, then a space, a tab or the end of the line. "#tag" does not.
+func atxOpener(line string) bool {
+	t := strings.TrimLeft(line, " ")
+	if len(line)-len(t) > 3 {
+		return false
+	}
+	marks := len(t) - len(strings.TrimLeft(t, "#"))
+	return marks >= 1 && marks <= 6 && (marks == len(t) || t[marks] == ' ' || t[marks] == '\t')
+}
+
 // readHeading reads a heading node. A setext heading is a heading whose range
 // spans its text lines and the underline line. The range is rejected, with a
 // problem recorded, when it fits neither form: one line that opens with "#"
@@ -333,13 +386,15 @@ func underlineOnly(line string) bool {
 func (d *mdDoc) readHeading(h *mdpp.Node, top bool) (mdHeading, bool) {
 	s, e := d.nodeLines(h)
 	out := mdHeading{Level: h.Level(), Top: top, Start: s, End: e, Setext: e > s}
-	first := strings.TrimLeft(d.Lines[s], " ")
 	switch {
 	case !top:
 		// A heading inside a list item or a quote starts after the container's
 		// markers; it is not part of the text's structure and is not checked.
-	case e == s && strings.HasPrefix(first, "#") && len(d.Lines[s])-len(first) <= 3:
-	case e > s && !strings.HasPrefix(first, "#") && underlineOnly(d.Lines[e]):
+	case e == s && atxOpener(d.Lines[s]):
+	case e > s && !atxOpener(d.Lines[s]) && underlineOnly(d.Lines[e]):
+		// Text that merely begins with "#" ("#tag") is not an opener, so a setext
+		// heading may start with it. A valid opener cannot start a setext text:
+		// the ATX heading takes the line and the range would be too long.
 	default:
 		d.problem("Markdown++ gave a heading the source range lines %d to %d, which fits neither an ATX nor a setext heading", s+1, e+1)
 		return out, false

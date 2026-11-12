@@ -98,6 +98,9 @@ func ParsePRTemplate(text string) *PRTemplate {
 	t.Preamble = trimBlankEdges(pre)
 	t.preFrag = d.fragment(0, len(pre)-1)
 	t.problems, t.foreign = d.Problems, d.Foreign
+	for _, line := range d.Underlines {
+		t.problems = append(t.problems, underlineProblem(line))
+	}
 	keys := map[string]int{}
 	for _, sec := range d.sections(0) {
 		h := sec.Heading
@@ -144,6 +147,11 @@ func ParsePRTemplate(text string) *PRTemplate {
 	return t
 }
 
+// underlineProblem says why the line (0-based) of a text cannot be certified.
+func underlineProblem(line int) string {
+	return fmt.Sprintf("line %d has the form of a setext underline under a paragraph line, but Markdown++ does not read a heading there, and GitHub may", line+1)
+}
+
 // countRawHTML counts the hazards of d: comment openers with no closer, and raw
 // heading elements at or above the template's deepest level.
 func (t *PRTemplate) countRawHTML(d *mdDoc) (unclosed, headings int) {
@@ -165,14 +173,25 @@ func (t *PRTemplate) countRawHTML(d *mdDoc) (unclosed, headings int) {
 //
 //   - A reading problem of the parser (a parse error, a recovery diagnostic, a
 //     source range that cannot be used) means the structure cannot be certified.
+//
 //   - A Markdown++-only construct is read differently by GitHub.
+//
 //   - Raw HTML that a renderer acts on although the Markdown tree does not show
 //     it: a comment opener with no closer hides the text after it, and a raw
 //     heading element at or above the template's level is a heading the heading
 //     check does not list.
 //
+//   - A line with the form of a setext underline under a paragraph line that the
+//     parser does not read as a heading: Markdown++ 0.5.0 misses a multi-line
+//     setext heading after a leading HTML block or thematic break, GitHub does
+//     not, so no reading of the parser can certify the headings there.
+//
+//   - The checkbox lines must be the template's, word for word and in order, each
+//     under the template's heading (checkboxWarning); only the check mark may
+//     differ, and the lines of the author's own notes (author) may be added.
+//
 // The body may have no more constructs of a kind than the template has.
-func (t *PRTemplate) finalBodyWarnings(body string) []BodyWarning {
+func (t *PRTemplate) finalBodyWarnings(body string, author []AuthorSection) []BodyWarning {
 	d := readMarkdown(body)
 	var out []BodyWarning
 	block := func(format string, args ...any) {
@@ -180,6 +199,12 @@ func (t *PRTemplate) finalBodyWarnings(body string) []BodyWarning {
 	}
 	if len(d.Problems) > 0 {
 		block("Markdown++ could not read the body exactly (%s)", d.Problems[0])
+	}
+	if len(d.Underlines) > 0 {
+		block("%s", underlineProblem(d.Underlines[0]))
+	}
+	if w := t.checkboxWarning(body, author, t.placeable()); w != "" {
+		block("%s", w)
 	}
 	have := map[string]int{}
 	for _, f := range t.foreign {
@@ -212,7 +237,11 @@ func (t *PRTemplate) finalBodyWarnings(body string) []BodyWarning {
 func (t *PRTemplate) authorHTMLWarnings(s AuthorSection) []BodyWarning {
 	var out []BodyWarning
 	deepest := t.deepestLevel()
-	for _, h := range readMarkdown(s.Body()).Hazards {
+	d := readMarkdown(s.Body())
+	for _, line := range d.Underlines {
+		out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q: %s", s.Heading(), underlineProblem(line)), Blocking: true})
+	}
+	for _, h := range d.Hazards {
 		switch {
 		case h.Unclosed:
 			out = append(out, BodyWarning{Text: fmt.Sprintf("the notes section %q has an HTML comment opener with no closer at its line %d; it would hide the text after it", s.Heading(), h.Line+1), Blocking: true})
@@ -562,6 +591,135 @@ func (t *PRTemplate) shapeWarning(body string) string {
 		case want[i] != got[i]:
 			return fmt.Sprintf("the body has the heading %q where the template has %q", got[i].Key, want[i].Key)
 		}
+	}
+	return ""
+}
+
+// boxRecord is a checkbox line of a text and where it stands.
+type boxRecord struct {
+	Line    string // the line as written, its check mark replaced by a space, trailing white space out
+	Section int    // -1 before the first heading; else the index among the headings of the template's levels
+	Where   string // the words of that heading, for messages
+}
+
+// boxLine normalizes a checkbox line for comparison: the check mark is the one
+// thing that may differ, and a text's first line loses its indentation and its
+// end white space because the body is trimmed.
+func boxLine(line string, markCol int, firstLine bool) string {
+	if markCol >= 0 && markCol < len(line) {
+		line = line[:markCol] + " " + line[markCol+1:]
+	}
+	if firstLine {
+		return strings.TrimSpace(line)
+	}
+	return strings.TrimRight(line, " \t")
+}
+
+// boxRecords lists the checkbox lines of the run, as the whole-document parse
+// found them. lead says the run starts the document.
+func (f *mdFrag) boxRecords(section int, where string, lead bool) []boxRecord {
+	lines := f.lines()
+	starts := make([]int, len(lines))
+	off, first := 0, -1
+	for i, l := range lines {
+		starts[i] = off
+		off += len(l) + 1
+		if lead && first < 0 && strings.TrimSpace(l) != "" {
+			first = i
+		}
+	}
+	var out []boxRecord
+	for _, t := range f.tasks {
+		out = append(out, boxRecord{Line: boxLine(lines[t.Line], t.MarkAt-starts[t.Line], t.Line == first), Section: section, Where: where})
+	}
+	return out
+}
+
+// boxRecords lists the checkbox lines of the template: the text before the first
+// heading, then each section in order.
+func (t *PRTemplate) boxRecords() []boxRecord {
+	var out []boxRecord
+	if t.preFrag != nil {
+		out = append(out, t.preFrag.boxRecords(-1, "the text before the first heading", true)...)
+	}
+	for i, s := range t.Sections {
+		out = append(out, s.fragment().boxRecords(i, s.Heading, false)...)
+	}
+	return out
+}
+
+// boxRecords lists the checkbox lines of a text. Each stands in the section of
+// the last top-level heading at or above level deepest before it.
+func (d *mdDoc) boxRecords(deepest int) []boxRecord {
+	var heads []mdHeading
+	for _, h := range d.topHeadings() {
+		if h.Level <= deepest {
+			heads = append(heads, h)
+		}
+	}
+	first := -1
+	for i, l := range d.Lines {
+		if strings.TrimSpace(l) != "" {
+			first = i
+			break
+		}
+	}
+	var out []boxRecord
+	for _, t := range d.Tasks {
+		r := boxRecord{Line: boxLine(d.Lines[t.Line], t.MarkAt-d.lineStart[t.Line], t.Line == first), Section: -1, Where: "the text before the first heading"}
+		for i, h := range heads {
+			if h.Start < t.Line {
+				r.Section, r.Where = i, h.Text
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// checkboxWarning compares the checkbox lines of the body with the template's:
+// the same lines, word for word, in the same order, each under the same heading
+// (when bySection is set); only the check mark may differ. The checkbox lines of
+// the author's own notes may be added anywhere. It returns a sentence naming the
+// first difference, or "" when they agree.
+//
+// A line the template hides in a comment or an HTML block is not a checkbox of
+// the template, and the same line in the body, where the comment is gone, is one:
+// that shows here as a line the template does not have.
+func (t *PRTemplate) checkboxWarning(body string, author []AuthorSection, bySection bool) string {
+	d := readMarkdown(body)
+	if len(d.Problems) > 0 {
+		return "" // reported as a reading problem; the task list cannot be trusted
+	}
+	want, got := t.boxRecords(), d.boxRecords(t.deepestLevel())
+	owned := map[string]int{}
+	for _, a := range author {
+		for _, r := range readMarkdown(a.Body()).boxRecords(0) {
+			owned[strings.TrimSpace(r.Line)]++
+		}
+	}
+	same := func(a, b boxRecord) bool { return a.Line == b.Line && (!bySection || a.Section == b.Section) }
+	j := 0
+	for i := 0; i < len(got); i++ {
+		switch {
+		case j < len(want) && same(got[i], want[j]):
+			j++
+		case owned[strings.TrimSpace(got[i].Line)] > 0:
+			owned[strings.TrimSpace(got[i].Line)]--
+		default:
+			for _, later := range want[min(j+1, len(want)):] {
+				if same(got[i], later) {
+					return fmt.Sprintf("the body lacks the template checkbox line %q under %q", strings.TrimSpace(want[j].Line), want[j].Where)
+				}
+			}
+			if j < len(want) {
+				return fmt.Sprintf("the body has the checkbox line %q under %q where the template has %q under %q", strings.TrimSpace(got[i].Line), got[i].Where, strings.TrimSpace(want[j].Line), want[j].Where)
+			}
+			return fmt.Sprintf("the body has the checkbox line %q under %q, which the template does not have", strings.TrimSpace(got[i].Line), got[i].Where)
+		}
+	}
+	if j < len(want) {
+		return fmt.Sprintf("the body lacks the template checkbox line %q under %q", strings.TrimSpace(want[j].Line), want[j].Where)
 	}
 	return ""
 }

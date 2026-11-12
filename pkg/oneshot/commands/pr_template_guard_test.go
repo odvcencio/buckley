@@ -93,7 +93,7 @@ func TestMarkdownPlusPlusOnlyConstructsAreGuarded(t *testing.T) {
 	}
 	// A template that has the construct itself is not accused of it.
 	tmpl := ParsePRTemplate("## Summary\n<!-- describe -->\n\nUse {name} in the title.\n")
-	if ws := tmpl.finalBodyWarnings("## Summary\n\nText\n\nUse {name} in the title.\n"); len(ws) != 0 {
+	if ws := tmpl.finalBodyWarnings("## Summary\n\nText\n\nUse {name} in the title.\n", nil); len(ws) != 0 {
 		t.Errorf("the template's own construct: %v", ws)
 	}
 }

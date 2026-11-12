@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -110,7 +111,12 @@ func TestRunPRCommand_UnreadableTemplateStopsGeneration(t *testing.T) {
 	r.commit(t, "feature", "f.txt")
 	r.park(t)
 	stubPRDependencies(t, func() error { return nil })
-	stubPRModel(t)
+	previous := newPRCommandRuntimeFn
+	t.Cleanup(func() { newPRCommandRuntimeFn = previous })
+	newPRCommandRuntimeFn = func(prCommandOptions) (*prCommandRuntime, func(), error) {
+		t.Error("the model runtime was built for a template that cannot be read")
+		return nil, func() {}, fmt.Errorf("must not be called")
+	}
 
 	var err error
 	captureStdout(t, func() { err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature"}) })
@@ -351,5 +357,26 @@ func TestRunPRCommand_TemplateShapeChecklistOnlyFallbackWarns(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "Not verified") || !strings.Contains(body, "## Not verified") {
 		t.Errorf("stderr = %q, body =\n%s", stderr, body)
+	}
+}
+
+// Review of #478, round seven, finding 3: a template whose setext heading text
+// begins with "#" is a valid template; the command does not refuse it.
+func TestRunPRCommand_TemplateWithAHashSetextHeadingIsUsed(t *testing.T) {
+	r := newPRRepo(t)
+	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", "## What\n<!-- describe -->\n\n#tag\nmore\n---\n\n- [ ] Done\n")
+	runGitIn(t, r.work, "push", "-q", "origin", "main")
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubPRModelRecordingTool(t, `{"action":"add","title":"feature file","section_what":"Adds the feature file."}`)
+
+	var err error
+	out := captureStdout(t, func() { err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature"}) })
+	if err != nil {
+		t.Fatalf("runPRCommand: %v", err)
+	}
+	if !strings.Contains(out, "#tag\nmore\n---\n\n- [ ] Done") || !strings.Contains(out, "Adds the feature file.") {
+		t.Errorf("the body lost the template's heading or box:\n%s", out)
 	}
 }
