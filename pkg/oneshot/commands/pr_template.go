@@ -933,6 +933,9 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 		}
 		b.WriteString(out + "\n\n")
 	}
-	res.Body = strings.TrimSpace(b.String())
+	// Only line breaks go: the white space of the first and last line belongs to
+	// the template's lines, and the assembled body is trimmed once, at its own
+	// edges (BodyWithWarnings).
+	res.Body = strings.TrimRight(b.String(), "\n")
 	return res
 }

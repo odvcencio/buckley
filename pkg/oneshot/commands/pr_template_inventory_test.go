@@ -196,3 +196,34 @@ func TestCheckboxAtTheTemplateEdgeIsComparedByItsPlaceInTheBody(t *testing.T) {
 		t.Errorf("edge of the body: %q", got)
 	}
 }
+
+// Review of #478, round ten. templateBody keeps the white space of the
+// template's first and last lines; the assembled body is trimmed once, at its
+// own edges. So an indented checkbox that ends up inside the body keeps its
+// indentation, and Buckley's own output draws no checkbox warning.
+func TestIndentedCheckboxAtTheTemplateEdgeKeepsItsWhiteSpaceInTheBody(t *testing.T) {
+	cases := []struct {
+		name, template, want string // want: part of the body
+	}{
+		{"one indented checkbox, text generated before it", "  - [ ] A  \n", "Change\n\n  - [ ] A"},
+		{"indented checkbox preamble, checklist-only sections", "  - [ ] P  \n\n## Checks\n- [ ] B\n", "Change\n\n  - [ ] P  \n"},
+		{"last line is an indented checkbox, text generated after it", "## Summary\nFixed.\n  - [ ] A  \n", "## Summary\nFixed.\n  - [ ] A  \n\n### Summary\n\nChange"},
+	}
+	for _, tc := range cases {
+		tmpl := ParsePRTemplate(tc.template)
+		body, ws := PRResult{Summary: "Change"}.BodyWithWarnings(PRBodyOptions{Template: tmpl})
+		if got := blockingWarning(ws); got != "" {
+			t.Errorf("%s: Buckley's own output is refused: %q\nbody %q", tc.name, got, body)
+		}
+		if !strings.Contains(body, tc.want) {
+			t.Errorf("%s: body = %q, want it to contain %q", tc.name, body, tc.want)
+		}
+		// The same body with the indentation removed is refused.
+		if strings.Contains(body, "  - [ ]") {
+			stripped := strings.Replace(body, "  - [ ]", "- [ ]", 1)
+			if got := blockingWarning(tmpl.finalBodyWarnings(stripped, nil)); !strings.Contains(got, "checkbox line") {
+				t.Errorf("%s: a body that lost the indentation is accepted: %q", tc.name, stripped)
+			}
+		}
+	}
+}
