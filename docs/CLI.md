@@ -474,10 +474,11 @@ template is not read. `--template=false` keeps Buckley's own sections.
 Buckley reads the Markdown of the template, of the notes and of the model's text
 with Markdown++ (`m31labs.dev/mdpp`), the organisation's CommonMark-based parser,
 through one reader. Markdown structure (headings, checkbox items, code blocks, comments in the template and
-in model text) comes from that parser, not from line scans. Two things stay textual by design: the short-label
+in model text) comes from that parser, not from line scans. Three things stay textual by design: the short-label
 rule that splits a notes file into sections (a label is a property of a line of the notes, as it always was),
-and the removal of HTML comments from a notes file when it is read, which searches the text so that it fails
-closed (see [Author notes](#author-notes)). Structure follows Markdown++'s reading, which is CommonMark in the cases below (the exceptions are listed under "Known limits of the reader"): a `#`
+the removal of HTML comments from a notes file when it is read, which searches the text so that it fails
+closed (see [Author notes](#author-notes)), and the one form test of a setext underline (a line of only `=` or only `-`,
+up to three leading spaces) in the guard described under "Known limits of the reader". Structure follows Markdown++'s reading, which is CommonMark in the cases below (the exceptions are listed under "Known limits of the reader"): a `#`
 line inside a fenced or indented code block, an HTML block or a comment is text;
 a setext heading is a paragraph of one or more lines over a line of only `=` or
 only `-`; a list or a block quote is not part of a setext heading. Every line
@@ -510,8 +511,10 @@ The body keeps the template's shape:
 
    After rendering, `buckley pr` reads the body with the same parser and
    compares its top-level headings at the template's levels with the
-   template's, read the same way. An extra or a missing heading is a warning
-   that names it, and an error with `--strict`. This catches text that changes
+   template's, read the same way, and its checkbox lines with the template's
+   (see "Checkboxes" below). An extra or a missing heading, and a changed,
+   missing, extra, moved or reordered checkbox line, is a warning that names
+   it, and an error with `--strict`. This catches text that changes
    how the parser reads what follows it: an unclosed code fence or an unclosed
    `<pre>` block in the notes or in the model's text swallows the template
    headings after it, and the check reports them as missing. If the template
@@ -522,9 +525,15 @@ The body keeps the template's shape:
    the Markdown tree does not show it, so three more rules apply (with a
    template): (a) in every field of the model's text, a closed HTML comment is
    removed (also inside another HTML block), and a comment opener with no closer
-   in the same field and a raw heading element (`<h1>` to `<h6>`, any case, with
-   attributes) are written as text by escaping the opening `<` as `&lt;`; one
-   warning names the field and the construct. (b) The author's text is not
+   in the same field and a raw heading element (`<h1>` to `<h6>`, with
+   attributes) that the parser hands over as raw HTML are written as text by
+   escaping the opening `<` as `&lt;`; one warning names the field and the
+   construct. An upper-case tag that the parser reads as a Markdown++ component
+   (such as `<H2 class="x">` after prose) is not raw HTML to the parser and is not
+   escaped: it is a blocking warning (see the first item under "Known limits of
+   the reader"). A line that GitHub may render as a setext underline although the
+   parser shows a paragraph is made text by a backslash before its first
+   character (the same warning, and also under "Known limits"). (b) The author's text is not
    rewritten: an unclosed comment opener in a carried notes section, or a raw
    heading element at or above the template's deepest level, is a warning that
    names the section and the line, and an error with `--strict`. (c) The check of
@@ -532,6 +541,8 @@ The body keeps the template's shape:
    reports a comment opener with no closer and a raw heading element at or above
    the template's level, in HTML that the parser hands over as raw HTML (so not
    in a code block); the body may have no more of them than the template has.
+   It also compares the checkbox lines of the body with the template's and
+   blocks a setext-underline hazard (see "Known limits").
    Notes files cannot carry a comment opener without a closer at all: reading the
    file refuses it.
 
@@ -551,13 +562,30 @@ The body keeps the template's shape:
      budget hit) or a source range that cannot be used means the structure cannot
      be certified. A template like that stops generation with an error that names
      it (`--template=false` is the way out); for the body it is a blocking
-     warning; for a notes file the whole note is carried as written, with a
-     warning.
-   - One known gap remains: Markdown++ 0.5.0 does not read a multi-line setext
-     heading when the document begins with an HTML block (a template that starts
-     with a comment) or a thematic break. A body containing that pattern can gain
-     a heading on GitHub without a shape warning, and `--strict` does not protect
-     those cases. It is to be fixed in Markdown++.
+     warning. A notes file that cannot be split exactly is carried whole under
+     the heading `Notes from <file>`, as written, with a non-blocking warning
+     that names it; this holds with and without a template, and without a
+     template it is the one place where a note that selects no section reaches
+     the body. The layout without a template is otherwise as before, except
+     that the notes' headings come from the parser (a heading-looking line
+     inside an HTML block no longer splits a section; an empty ATX heading can
+     end one) and every line ending in a model field or a notes file is read
+     as LF.
+   - Markdown++ 0.5.0 does not read a multi-line setext heading when the
+     document begins with an HTML block (a template that starts with a comment)
+     or a thematic break: it reports a paragraph where GitHub renders a heading.
+     Until Buckley requires a Markdown++ release that reads it, a guard that does
+     not depend on the parser's reading applies. A line with the form of a setext
+     underline (only `=` or only `-`, up to three leading spaces, optional
+     trailing spaces), directly below a non-blank line that the parser reports as
+     part of a paragraph at the top level of the text, and that the parser does
+     not report as part of a heading, is a hazard. A code block, a table, front
+     matter, a list item, a block quote, and a thematic break after a blank line
+     are other nodes and never match. In the model's text the line is made text
+     by a backslash before its first character (`=` becomes `\=`, `---` becomes
+     `\---`), with a warning; CommonMark then reads a paragraph. In a carried
+     notes section, in the final body and in the template, it is a blocking
+     warning (for the template, generation stops).
 
    The section for a block is the first whose heading, guide comments or
    checkbox text has a word that starts with a keyword of the kind
@@ -585,7 +613,14 @@ The body keeps the template's shape:
    a comment is fixed text, because the parser does not read it as an item. An
    item's identity is the rest of its first line without HTML comments, white
    space collapsed; case matters. Every item is written in the template's order,
-   byte for byte except its check mark. A comment that starts on the item's
+   byte for byte except its check mark, and the final check verifies it: the
+   body's checkbox lines are the template's lines, in the same order, each under
+   the same heading, with only the check mark different. The checkbox lines of
+   the author's notes may be added. A mismatch is a blocking warning that names
+   the line. A line that the template hides behind a comment on the same line
+   (`<!-- guide -->- [ ] A`) is not an item of the template; when the comment is
+   removed from a section that received text, the line becomes an item, and the
+   check blocks it. A comment that starts on the item's
    line stays with it, also when it spans lines; independent guide comments of
    a section that received text go. The check mark of every item comes from the
    notes: it is ticked when the notes contain a ticked item with the same
