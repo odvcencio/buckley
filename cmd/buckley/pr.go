@@ -430,9 +430,15 @@ func formatPRText(text prText) string {
 	return "Title: " + text.Title + "\n\n" + text.Body + "\n"
 }
 
+// trimPRBody trims a body at both ends with the one character set that every
+// trim of a body uses (commands.BodyEdgeWhitespace): spaces, tabs and line
+// breaks. strings.TrimSpace would also remove U+00A0 and other Unicode spaces,
+// which can change how the first or the last block is read.
+func trimPRBody(s string) string { return strings.Trim(s, commands.BodyEdgeWhitespace) }
+
 // parsePRText reads the file form of a PR text. A first line that starts with
-// "Title:" is the title; without one the whole content is the body. White space
-// at both ends of the body is trimmed. For a body made from a pull request
+// "Title:" is the title; without one the whole content is the body. Spaces, tabs
+// and line breaks at both ends of the body are trimmed, and CRLF becomes LF. For a body made from a pull request
 // template this only removes blank lines at the start: a template whose first
 // non-blank line is indented is refused when it is read (ParsePRTemplate), so
 // the first non-blank line of such a body is at column 0.
@@ -440,9 +446,9 @@ func parsePRText(content string) prText {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	first, rest, _ := strings.Cut(content, "\n")
 	if title, ok := strings.CutPrefix(first, "Title:"); ok {
-		return prText{Title: strings.TrimSpace(title), Body: strings.TrimSpace(rest)}
+		return prText{Title: strings.TrimSpace(title), Body: trimPRBody(rest)}
 	}
-	return prText{Body: strings.TrimSpace(content)}
+	return prText{Body: trimPRBody(content)}
 }
 
 // readPRText reads the text that --body-file names. title, when set, replaces
@@ -1002,7 +1008,7 @@ func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
 	if json.Unmarshal(out, &current) != nil {
 		return
 	}
-	previous := prText{Title: strings.TrimSpace(current.Title), Body: strings.TrimSpace(strings.ReplaceAll(current.Body, "\r\n", "\n"))}
+	previous := prText{Title: strings.TrimSpace(current.Title), Body: trimPRBody(strings.ReplaceAll(current.Body, "\r\n", "\n"))}
 	if previous.Body == "" || previous == next {
 		return
 	}

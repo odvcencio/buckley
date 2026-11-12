@@ -387,7 +387,7 @@ buckley pr [OPTIONS]
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
 | `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
-| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. White space at both ends of the body is trimmed (line endings become LF); nothing else changes |
+| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. Spaces, tabs and line breaks at both ends of the body are trimmed and CRLF becomes LF; nothing else changes (a Unicode space such as U+00A0 is content and stays) |
 | `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
 | `--breaking <auto\|keep\|never>` | Breaking Changes section policy (default `auto`), the same rule as for `buckley commit`. See [Breaking changes](#breaking-changes) |
 | `--yes` | Skip the confirmation prompt |
@@ -667,12 +667,15 @@ The body keeps the template's shape:
    warning that counts them: the model never ticks, adds or removes a checkbox.
 3. **Fixed text.** The template's fixed text is written word for word, except
    that a blank line may be added or removed at the edge of a section, line
-   endings are normalized to LF, and the white space at the end of the body is
+   endings are normalized to LF, and the end of the body is
    trimmed. The start of a body made from a template is not trimmed when it is
-   generated; the first non-blank line of a template is at column 0 (see above),
-   so trimming the start, as `--body-file` does, can only remove blank lines.
-   Without a template, white space at both ends of the body is trimmed as
-   before. The guide comments of a section that received text
+   generated, and at the end spaces, tabs and line breaks are trimmed. The first
+   non-blank line of a template is at column 0 (see above), so trimming the
+   start with the same set, as `--body-file` does, can only remove blank lines.
+   One definition of edge white space applies to every trim of a body: spaces,
+   tabs and line breaks. A Unicode space such as U+00A0 is content and is never
+   trimmed from a body made from a template. Without a template, white space at
+   both ends of the body is trimmed as before. The guide comments of a section that received text
    are left out; a section that received nothing stays as the template has it.
    (Removing a comment can change how the parser reads the lines around it; the
    final check reports a heading that appears this way.)

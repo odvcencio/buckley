@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/buckley/pkg/oneshot/commands"
 )
 
 func TestFormatAndParsePRText_RoundTrip(t *testing.T) {
@@ -30,6 +32,37 @@ func TestFormatAndParsePRText_RoundTrip(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.Body, "## Summary") || !strings.Contains(got.Body, "- [ ] A  \n- [X] B") {
 		t.Errorf("headings or checkbox lines changed: %q", got.Body)
+	}
+
+	// Review of #478, round fourteen: a Unicode space is content. Two templates
+	// pass the first-line guard and have a body whose first or last line holds a
+	// no-break space. After the round trip the body is the same string, so its
+	// top-level headings and checkbox lines are the same.
+	for name, tc := range map[string]struct {
+		template string
+		pr       commands.PRResult
+	}{
+		"no-break space before a heading-looking first line":  {"\u00a0## Example\n\n## Summary\n<!-- Describe the change. -->\n", commands.PRResult{Sections: map[string]string{"summary": "Change"}}},
+		"no-break space after a final underline-looking line": {"## Summary\n<!-- describe -->\n\n## Not verified\n<!-- verification -->\n\n## Details\nExample\n---\u00a0\n", commands.PRResult{Sections: map[string]string{"summary": "Change"}}},
+	} {
+		tmpl := commands.ParsePRTemplate(tc.template)
+		if why := tmpl.Unreadable(); why != "" {
+			t.Fatalf("%s: the template is refused: %s", name, why)
+		}
+		body, _ := tc.pr.BodyWithWarnings(commands.PRBodyOptions{Template: tmpl, StateNotVerified: true})
+		if !strings.Contains(body, "\u00a0") {
+			t.Fatalf("%s: the body lost the no-break space before the round trip: %q", name, body)
+		}
+		if got := parsePRText(formatPRText(prText{Title: "add: x", Body: body})); got.Body != body {
+			t.Errorf("%s: round trip changed the body\nbefore %q\nafter  %q", name, body, got.Body)
+		}
+		if got := parsePRText(formatPRText(prText{Body: body})); got.Body != body {
+			t.Errorf("%s: a body-only file changed the body: %q", name, got.Body)
+		}
+	}
+	// CRLF becomes LF, an internal lone CR stays.
+	if got := parsePRText("Title: t\r\n\r\nA\rB\r\nC\r\n"); got.Body != "A\rB\nC" {
+		t.Errorf("CRLF text body = %q", got.Body)
 	}
 
 	if got := parsePRText("Title:  spaced title  \r\n\r\nBody with CRLF.\r\n"); got != (prText{Title: "spaced title", Body: "Body with CRLF."}) {
@@ -201,5 +234,43 @@ func TestRunPRCommand_TextFilesResolveFromTheLaunchDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.work, "copy.md")); err == nil {
 		t.Error("--output was written into the -C target")
+	}
+}
+
+// The exact body that reaches the forge command: a template whose first line
+// starts with a no-break space gives a body that keeps it, through --output and
+// --body-file.
+func TestRunPRCommand_BodyFileKeepsAUnicodeSpaceAtTheStart(t *testing.T) {
+	r := newPRRepo(t)
+	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", "\u00a0## Example\n\n## Summary\n<!-- Describe the change. -->\n")
+	runGitIn(t, r.work, "push", "-q", "origin", "main")
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubPRModelRecordingTool(t, `{"action":"add","title":"feature file","section_summary":"Change"}`)
+	file := filepath.Join(t.TempDir(), "pr.md")
+	var err error
+	captureStdout(t, func() {
+		err = runPRCommand([]string{"--dry-run", "--cost=false", "--head", "feature", "--output", file})
+	})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	saved, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wantBody, _ := strings.Cut(strings.TrimRight(string(saved), "\n"), "\n\n")
+	if !strings.HasPrefix(wantBody, "\u00a0## Example\n\n## Summary\n\nChange") {
+		t.Fatalf("the saved body = %q", wantBody)
+	}
+	stubGh(t)
+	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	captureStdout(t, func() { err = runPRCommand([]string{"--yes", "--head", "feature", "--body-file", file}) })
+	if err != nil {
+		t.Fatalf("posting --body-file: %v", err)
+	}
+	if body := ghBodyArg(t, g, "pr create"); body != wantBody {
+		t.Errorf("the body handed to the forge command =\n%q\nwant\n%q", body, wantBody)
 	}
 }

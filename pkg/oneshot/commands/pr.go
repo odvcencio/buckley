@@ -153,6 +153,13 @@ type PRBodyOptions struct {
 	Template *PRTemplate
 }
 
+// BodyEdgeWhitespace is the white space that is trimmed at the end of a body made
+// from a pull request template, and at both ends of a body that is read back
+// from a saved file (--body-file): spaces, tabs and line breaks, nothing else.
+// A Unicode space (U+00A0) is content: it can be what keeps "## x" a paragraph
+// or "---" text, so no code may trim it from a body.
+const BodyEdgeWhitespace = " \t\r\n"
+
 // Body generates the PR body in markdown format.
 //
 // Free-text bullets are sanitized for stray GitHub close directives and
@@ -352,7 +359,7 @@ func (pr PRResult) BodyWithWarnings(opts PRBodyOptions) (string, []BodyWarning) 
 		// With a template nothing is trimmed at the start of the body: the
 		// indentation of its first line can be what makes a block code. Only
 		// the end is trimmed.
-		body = strings.TrimRight(b.String(), " \t\r\n")
+		body = strings.TrimRight(b.String(), BodyEdgeWhitespace)
 		// The check covers the whole body, Buckley's own sections included, in
 		// every layout.
 		warnings = append(warnings, opts.Template.finalBodyWarnings(body, opts.Sections)...)
