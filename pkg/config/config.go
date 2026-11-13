@@ -519,6 +519,11 @@ type OneshotModeConfig struct {
 	MaxElapsed      time.Duration `yaml:"max_elapsed"`
 	MaxOutputTokens int           `yaml:"max_output_tokens"`
 	BudgetUSD       float64       `yaml:"budget_usd"`
+
+	// AnswerReserve controls whether a -p run turns a reasoning effort into a
+	// reasoning budget that leaves room for the answer: "auto" (the default)
+	// or "off" (send the effort word unchanged).
+	AnswerReserve string `yaml:"answer_reserve"`
 }
 
 // RLMConfig controls Buckley's coordinator–worker runtime. The historical

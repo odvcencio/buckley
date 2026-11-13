@@ -162,6 +162,8 @@ type startupOptions struct {
 	budgetUSD       float64
 	taskIntent      agentloop.TaskIntent
 	taskIntentSet   bool
+	effort          string // --effort for -p
+	effortSet       bool
 	persist         bool
 	codeMode        bool
 	plainModeSet    bool
@@ -181,6 +183,7 @@ const (
 	startupPendingReadRoot
 	startupPendingCap
 	startupPendingTaskIntent
+	startupPendingEffort
 )
 
 type startupFlagState struct {
@@ -342,6 +345,7 @@ func main() {
 		Caps:          oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD, Set: opts.capFlags},
 		CodeMode:      opts.codeMode,
 		Limits:        acpLoopLimits{TaskIntent: opts.taskIntent, Persist: opts.persist},
+		Effort:        opts.effort,
 	}
 	// Handle one-shot prompt mode (-p flag)
 	if promptFlag != "" {
@@ -373,6 +377,10 @@ func main() {
 	}
 	if opts.toolsSet {
 		fmt.Fprintln(os.Stderr, "Error: --tools is only supported with -p or piped one-shot input")
+		os.Exit(2)
+	}
+	if opts.effortSet {
+		fmt.Fprintln(os.Stderr, "Error: --effort before a command is only supported with -p or piped one-shot input")
 		os.Exit(2)
 	}
 
@@ -916,7 +924,9 @@ func printHelp() {
 	fmt.Println("  --allow-shell                    Offer run_shell to a one-shot mutation run in a trusted project (or name it in --tools)")
 	fmt.Println("  --max-tool-calls <n>             Cap one-shot tool calls (default: no cap)")
 	fmt.Println("  --max-elapsed <duration>         Cap one-shot wall time, e.g. 90m (default: no cap)")
-	fmt.Println("  --max-output-tokens <n>          Cap tokens per model response (default: no cap)")
+	fmt.Println("  --effort <level>                 Reasoning effort for -p: off, minimal, low, medium, high, xhigh, max")
+	fmt.Println("                                   (also BUCKLEY_EFFORT_PROMPT, then BUCKLEY_ONESHOT_EFFORT); keeps room for the answer")
+	fmt.Println("  --max-output-tokens <n>          Cap tokens per model response (default: no cap; 8192 while --budget is set)")
 	fmt.Println("  --budget <usd>                   Cap one-shot model spend (default: no cap)")
 	fmt.Println("  --read-root <path>               Let read-only tools read this directory or file (repeatable; also tools.read_roots)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
@@ -1247,7 +1257,7 @@ func printBashCompletion() {
 
     case "${prev}" in
         buckley)
-            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent --task-intent --tools" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${commands} --help --version --tui --plain --code-mode --quiet --no-color --config --agent --task-intent --tools --effort" -- "${cur}") )
             return 0
             ;;
         batch)
@@ -1367,6 +1377,7 @@ _buckley() {
         '--agent[Load a buckley.agent/v1 runtime profile]:agent spec:_files' \
         '--task-intent[One-shot result contract]:intent:(unknown read_only mutation)' \
         '--tools[Offer comma-separated one-shot model tools]:tool names:' \
+        '--effort[Reasoning effort for -p]:effort:(off minimal low medium high xhigh max)' \
         '-q[Suppress non-essential output]' \
         '--quiet[Suppress non-essential output]' \
         '--no-color[Disable colored output]' \
@@ -1735,6 +1746,10 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (boo
 			return true, fmt.Errorf("--read-root requires a path")
 		}
 		opts.readRoots = append(opts.readRoots, strings.TrimSpace(arg))
+	case startupPendingEffort:
+		if err := opts.setEffort(arg); err != nil {
+			return true, err
+		}
 	case startupPendingTaskIntent:
 		if strings.TrimSpace(arg) == "" {
 			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
@@ -1833,6 +1848,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 			return false, nil
 		}
 		s.pending = startupPendingTaskIntent
+	case "--effort":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending = startupPendingEffort
 	default:
 		return s.consumeStartupValueFlag(opts, arg, beforeCommand)
 	}
@@ -1868,6 +1888,9 @@ func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg str
 	}
 	if strings.HasPrefix(arg, "--tools=") && beforeCommand {
 		return true, opts.addTools(strings.TrimPrefix(arg, "--tools="))
+	}
+	if strings.HasPrefix(arg, "--effort=") && beforeCommand {
+		return true, opts.setEffort(strings.TrimPrefix(arg, "--effort="))
 	}
 	if strings.HasPrefix(arg, "--task-intent=") && beforeCommand {
 		raw := strings.TrimPrefix(arg, "--task-intent=")
@@ -1905,6 +1928,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("--read-root requires a path")
 	case startupPendingTaskIntent:
 		return fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
+	case startupPendingEffort:
+		return fmt.Errorf("--effort requires a value: %s", strings.Join(promptEffortValues, ", "))
 	}
 	if s.modelFlagSeen && strings.TrimSpace(opts.modelOverride) == "" {
 		return fmt.Errorf("--model requires a value")
@@ -1915,6 +1940,22 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 	if opts.toolsSet && len(opts.args) > 0 {
 		return fmt.Errorf("--tools is only supported with -p or piped one-shot input")
 	}
+	if opts.effortSet && len(opts.args) > 0 {
+		return fmt.Errorf("--effort before a command is only supported with -p or piped one-shot input; pass it after the command name (for example: buckley %s --effort %s)", opts.args[0], opts.effort)
+	}
+	return nil
+}
+
+// setEffort records the --effort value for a -p run.
+func (opts *startupOptions) setEffort(raw string) error {
+	effort, err := normalizePromptEffort(raw)
+	if err != nil {
+		return err
+	}
+	if effort == "" {
+		return fmt.Errorf("--effort requires a value: %s", strings.Join(promptEffortValues, ", "))
+	}
+	opts.effort, opts.effortSet = effort, true
 	return nil
 }
 
