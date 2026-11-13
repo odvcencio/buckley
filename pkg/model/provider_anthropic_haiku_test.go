@@ -80,3 +80,63 @@ func TestAnthropicProvider_CacheUsageAndBoundedPricing(t *testing.T) {
 		t.Fatal("admitted inconsistent cache usage")
 	}
 }
+
+func TestAnthropicProvider_SystemCachePrefix(t *testing.T) {
+	const modelID = "anthropic/claude-haiku-5-5"
+	const joined = `"shared setup\n\nchanging instructions"`
+	for _, tc := range []struct {
+		name           string
+		enabled        bool
+		systemMessages int
+		control        *CacheControl
+		wantSystem     string
+	}{
+		{name: "disabled", wantSystem: joined},
+		{name: "automatic only", enabled: true, wantSystem: joined},
+		{name: "explicit top-level control", control: &CacheControl{Type: "ephemeral"}, wantSystem: joined},
+		{
+			name:           "stable prefix with dynamic suffix",
+			enabled:        true,
+			systemMessages: 1,
+			wantSystem:     `[{"type":"text","text":"shared setup","cache_control":{"type":"ephemeral"}},{"type":"text","text":"\n\nchanging instructions"}]`,
+		},
+		{
+			name:           "prefix clamped to available system messages",
+			enabled:        true,
+			systemMessages: 3,
+			control:        &CacheControl{Type: "ephemeral", TTL: "1h"},
+			wantSystem:     `[{"type":"text","text":"shared setup\n\nchanging instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newCostBoundedTestManager("anthropic", ModelInfo{ID: modelID})
+			mgr.config.PromptCache.Enabled = tc.enabled
+			mgr.config.PromptCache.SystemMessages = tc.systemMessages
+			req, err := mgr.NormalizeCostBoundedRequest(ChatRequest{
+				Model:        modelID,
+				MaxTokens:    128,
+				CacheControl: tc.control,
+				Messages: []Message{
+					{Role: "system", Content: "shared setup"},
+					{Role: "system", Content: " "},
+					{Role: "user", Content: "new task"},
+					{Role: "system", Content: "changing instructions"},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire, err := (&AnthropicProvider{}).toAnthropicRequest(req, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			system, err := json.Marshal(wire.System)
+			if err != nil || string(system) != tc.wantSystem {
+				t.Fatalf("system = %s, err = %v, want %s", system, err, tc.wantSystem)
+			}
+			if (wire.CacheControl != nil) != (tc.enabled || tc.control != nil) {
+				t.Fatalf("unexpected automatic cache control: %+v", wire.CacheControl)
+			}
+		})
+	}
+}
