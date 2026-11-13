@@ -148,6 +148,12 @@ func TestManagerNormalizeCostBoundedRequest_PinsOpenRouterAndPreflightsWireTrans
 	if !reflect.DeepEqual(normalized.Transforms, []string{"middle-out"}) {
 		t.Fatalf("preflight transforms = %v, want middle-out", normalized.Transforms)
 	}
+	if normalized.Usage == nil || !normalized.Usage.Include {
+		t.Fatalf("normalized Usage = %+v, want OpenRouter inline usage requested", normalized.Usage)
+	}
+	if original.Usage != nil {
+		t.Fatalf("normalization mutated the caller's Usage: %+v", original.Usage)
+	}
 	twice, err := mgr.NormalizeCostBoundedRequest(normalized)
 	if err != nil {
 		t.Fatalf("second NormalizeCostBoundedRequest: %v", err)

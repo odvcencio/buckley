@@ -88,6 +88,14 @@ func applyOneShotCaps(limits acpLoopLimits, cfg *config.Config, caps oneShotCaps
 
 func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store *storage.Store, projectContext *projectcontext.ProjectContext, opts oneShotOptions) int {
 	limits := applyOneShotCaps(opts.Limits, cfg, opts.Caps)
+	usageSummary := &oneShotUsageSummary{}
+	limits.usageSummary = usageSummary
+	usageStart := time.Now()
+	// Every exit prints one usage line. The loop's result callback prints it
+	// with the real numbers; this covers exits before the loop ran.
+	defer func() {
+		printOneShotUsage(os.Stderr, usageSummary, oneShotUsageInputs{ceilingUSD: limits.MaxCostUSD, elapsed: time.Since(usageStart)})
+	}()
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	stopReason := ""
@@ -426,6 +434,23 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 				fmt.Fprintf(os.Stderr, "Usage detail: cache_read_tokens=%d cache_write_tokens=%d thinking_tokens=%d estimated_cost_usd=%.6f\n", reads, result.Usage.CacheWriteTokens, thinking, estimate)
 			}
 		}
+	}
+	previousOnResult := limits.OnResult
+	limits.OnResult = func(result *agentloop.Result) {
+		if previousOnResult != nil {
+			previousOnResult(result)
+		}
+		printOneShotUsage(os.Stderr, usageSummary, oneShotUsageInputs{
+			result:     result,
+			ceilingUSD: limits.MaxCostUSD,
+			elapsed:    time.Since(usageStart),
+			listCost: func(usage model.Usage) (float64, error) {
+				if mgr == nil {
+					return 0, fmt.Errorf("no model manager")
+				}
+				return mgr.CalculateCost(resolvedModel, usage)
+			},
+		})
 	}
 	runCtx = withACPReplaySafeStream(runCtx)
 	responseText, err := runACPLoopWithLimits(runCtx, cfg, mgr, conv, registry, skillState, engine, resolvedModel, cwd, limits.ParentSessionID, nil, nil, newOneShotProgressStream(os.Stderr, cwd), limits)

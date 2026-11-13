@@ -1206,6 +1206,9 @@ type acpLoopLimits struct {
 	ParentSessionID         string
 	ChildContract           bool
 	TaskIntent              agentloop.TaskIntent
+	// usageSummary is set only by one-shot mode (nil for editor sessions). The
+	// model-call closure records every response into it.
+	usageSummary *oneShotUsageSummary
 }
 
 // runACPLoopWithStepCap is the internal one-shot variant that applies a
@@ -1605,6 +1608,9 @@ func newACPLoopController(
 		turn, err := streamACPTurnWithDelivery(ctx, mgr, req, modelStream, deferModelDelivery)
 		state.currentObservedToolDelta = turn.ObservedToolDelta
 		resp := buildACPStreamChatResponse(req, turn)
+		if acpStreamTurnHasMaterial(turn) || err == nil {
+			limits.usageSummary.record(resp, turn.Usage)
+		}
 		usageForUpdate := turn.Usage
 		if usageForUpdate == nil && resp.Usage.Estimated {
 			estimated := resp.Usage
@@ -2187,7 +2193,26 @@ func isUsageTrackingUnavailableError(err error) bool {
 const (
 	acpPostFinishDrainLimit      = 64
 	acpRequiredUsageTrailerGrace = 250 * time.Millisecond
+	// acpCostBoundedUsageGrace is the longer wait for OpenRouter's inline
+	// usage record (request field usage.include). The record can follow the
+	// finish chunk by hundreds of milliseconds; losing it forces a charge by
+	// reservation. The wait ends as soon as the stream closes.
+	acpCostBoundedUsageGrace = 2 * time.Second
 )
+
+// acpRequestRequiresUsage reports whether the request asks the provider for a
+// usage record that the stream reader should wait for after the finish chunk.
+func acpRequestRequiresUsage(req model.ChatRequest) bool {
+	return (req.StreamOptions != nil && req.StreamOptions.IncludeUsage) ||
+		(req.Usage != nil && req.Usage.Include)
+}
+
+func acpRequiredUsageGrace(req model.ChatRequest) time.Duration {
+	if req.Usage != nil && req.Usage.Include {
+		return acpCostBoundedUsageGrace
+	}
+	return acpRequiredUsageTrailerGrace
+}
 
 func drainACPStreamTurn(ctx context.Context, req model.ChatRequest, chunks <-chan model.StreamChunk, errs <-chan error, stream acp.StreamFunc, deferDelivery bool) (acpStreamTurn, error) {
 	acc := model.NewStreamAccumulator()
@@ -2291,8 +2316,8 @@ func drainACPStreamTurn(ctx context.Context, req model.ChatRequest, chunks <-cha
 				// arrives, so an optional or absent trailer never stalls normal turns.
 				var requiredUsageTimer *time.Timer
 				var requiredUsageC <-chan time.Time
-				if req.StreamOptions != nil && req.StreamOptions.IncludeUsage && acc.Usage() == nil {
-					requiredUsageTimer = time.NewTimer(acpRequiredUsageTrailerGrace)
+				if acpRequestRequiresUsage(req) && acc.Usage() == nil {
+					requiredUsageTimer = time.NewTimer(acpRequiredUsageGrace(req))
 					requiredUsageC = requiredUsageTimer.C
 					defer requiredUsageTimer.Stop()
 				}
@@ -2718,6 +2743,12 @@ func buildACPChatRequestForRoute(cfg *config.Config, mgr *model.Manager, engine 
 		req.Reasoning = resolveACPRequestReasoningForRoute(cfg, mgr, engine, route, limits.ProtocolReasoning)
 	} else {
 		req.Reasoning = resolveACPRequestReasoning(cfg, mgr, engine, modelID, limits.ProtocolReasoning)
+	}
+	if limits.usageSummary != nil && req.Route.ProviderID == "openrouter" {
+		// One-shot mode wants the provider's usage record even without a
+		// ceiling, so the stream reader waits for it. The client sets the same
+		// field at dispatch, so the wire request does not change.
+		req.Usage = &model.UsageRequestOptions{Include: true}
 	}
 	req.Messages = conversation.CompactModelMessagesForRequest(req.Messages, req, contextWindow)
 	return req
