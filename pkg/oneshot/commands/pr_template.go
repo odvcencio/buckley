@@ -970,8 +970,31 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	return res
 }
 
+// suppliedCheckboxIdentity identifies a template task before section and order
+// checks. The longest matching label wins, so an annotated short label cannot
+// consume a longer template item, even when that item belongs to another section.
+func suppliedCheckboxIdentity(line string, labels []string) string {
+	line = strings.TrimSpace(line)
+	longest := ""
+	for _, label := range labels {
+		if len(label) > len(longest) && strings.HasPrefix(line, label) {
+			longest = label
+		}
+	}
+	if longest == "" {
+		return ""
+	}
+	suffix := line[len(longest):]
+	const separator = " — "
+	if suffix == "" || (strings.HasPrefix(suffix, separator) && strings.TrimSpace(suffix[len(separator):]) != "") {
+		return longest
+	}
+	return ""
+}
+
 // ValidateSuppliedBody checks that a saved body retains the template's headings
-// and checkbox lines. It does not rewrite the body; extra author material is allowed.
+// and checkbox lines. A checkbox can add an explanation after “ — ”.
+// It does not rewrite the body; extra author material is allowed.
 func (t *PRTemplate) ValidateSuppliedBody(body string) error {
 	if t == nil {
 		return nil
@@ -1009,6 +1032,15 @@ func (t *PRTemplate) ValidateSuppliedBody(body string) error {
 	}
 	matches := make([]int, len(t.Sections))
 	want := t.boxRecords()
+	labels := make([]string, 0, len(want))
+	for _, record := range want {
+		labels = append(labels, strings.TrimSpace(record.Line))
+	}
+	identities := make([]string, len(d.Tasks))
+	for i, task := range d.Tasks {
+		line := boxLine(d.Lines[task.Line], task.MarkAt-d.lineStart[task.Line])
+		identities[i] = suppliedCheckboxIdentity(line, labels)
+	}
 	var lastCheckbox error
 	check := func() bool {
 		for section := -1; section < len(t.Sections); section++ {
@@ -1045,8 +1077,7 @@ func (t *PRTemplate) ValidateSuppliedBody(body string) error {
 					if task.Line >= end {
 						break
 					}
-					line := boxLine(d.Lines[task.Line], task.MarkAt-d.lineStart[task.Line])
-					if strings.TrimSpace(line) == strings.TrimSpace(record.Line) {
+					if identities[pos-1] == strings.TrimSpace(record.Line) {
 						found = true
 						break
 					}
