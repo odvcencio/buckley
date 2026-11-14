@@ -969,3 +969,130 @@ func (pr PRResult) templateBody(t *PRTemplate, author []AuthorSection, notVerifi
 	res.Body = strings.TrimRight(b.String(), "\n")
 	return res
 }
+
+// ValidateSuppliedBody checks that a saved body retains the template's headings
+// and checkbox lines. It does not rewrite the body; extra author material is allowed.
+func (t *PRTemplate) ValidateSuppliedBody(body string) error {
+	if t == nil {
+		return nil
+	}
+	if why := t.Unreadable(); why != "" {
+		return fmt.Errorf("template cannot be read: %s", why)
+	}
+	d := readMarkdown(body)
+	if len(d.Problems) != 0 {
+		return fmt.Errorf("body cannot be read: %s", strings.Join(d.Problems, "; "))
+	}
+	if len(d.Underlines) > 0 {
+		return fmt.Errorf("%s", underlineProblem(d.Underlines[0]))
+	}
+	have := map[string]int{}
+	for _, f := range t.foreign {
+		have[f.Name]++
+	}
+	for _, f := range d.Foreign {
+		if have[f.Name]--; have[f.Name] < 0 {
+			return fmt.Errorf("body has %s at line %d, read differently by GitHub", f.Name, f.Line+1)
+		}
+	}
+	for _, h := range d.Hazards {
+		if h.Unclosed {
+			return fmt.Errorf("body has unclosed HTML comment at line %d", h.Line+1)
+		}
+		if !h.Unclosed && (len(t.Sections) == 0 || h.Level <= t.deepestLevel()) {
+			return fmt.Errorf("body has raw HTML heading at line %d", h.Line+1)
+		}
+	}
+	heads := d.topHeadings()
+	if len(t.Sections) > 128 {
+		return fmt.Errorf("template has too many headings to validate")
+	}
+	matches := make([]int, len(t.Sections))
+	want := t.boxRecords()
+	var lastCheckbox error
+	check := func() bool {
+		for section := -1; section < len(t.Sections); section++ {
+			start, end := 0, len(d.Lines)
+			if section == -1 {
+				if len(matches) > 0 {
+					end = heads[matches[0]].Start
+				}
+			} else {
+				h := heads[matches[section]]
+				start = h.Start + 1
+				if section+1 < len(matches) {
+					end = heads[matches[section+1]].Start
+				}
+				for _, next := range heads[matches[section]+1:] {
+					if next.Level <= h.Level && next.Start < end {
+						end = next.Start
+						break
+					}
+				}
+			}
+			pos := 0
+			for _, record := range want {
+				if record.Section != section {
+					continue
+				}
+				found := false
+				for pos < len(d.Tasks) {
+					task := d.Tasks[pos]
+					pos++
+					if task.Line < start {
+						continue
+					}
+					if task.Line >= end {
+						break
+					}
+					line := boxLine(d.Lines[task.Line], task.MarkAt-d.lineStart[task.Line])
+					if strings.TrimSpace(line) == strings.TrimSpace(record.Line) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					lastCheckbox = fmt.Errorf("missing template checkbox %q under %q", strings.TrimSpace(record.Line), record.Where)
+					return false
+				}
+			}
+		}
+		return true
+	}
+	const maxCandidates = 4096
+	visited := 0
+	var search func(int, int) bool
+	search = func(section, at int) bool {
+		visited++
+		if visited > maxCandidates {
+			return false
+		}
+		if section == len(t.Sections) {
+			return check()
+		}
+		want := t.Sections[section]
+		for i := at; i < len(heads); i++ {
+			if heads[i].Level != want.Level || headingKey(heads[i].Text) != headingKey(want.Heading) {
+				continue
+			}
+			matches[section] = i
+			if search(section+1, i+1) {
+				return true
+			}
+			if visited > maxCandidates {
+				return false
+			}
+		}
+		return false
+	}
+	if search(0, 0) {
+		return nil
+	}
+	if visited > maxCandidates {
+		return fmt.Errorf("template heading matching exceeded the validation limit")
+	}
+	if lastCheckbox != nil {
+		return lastCheckbox
+	}
+	return fmt.Errorf("missing template heading")
+}

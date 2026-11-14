@@ -387,7 +387,7 @@ buckley pr [OPTIONS]
 |------|-------------|
 | `--dry-run` | Show generated PR without creating |
 | `--output <file>` | Also write the title and body to `<file>`, in the form `--body-file` reads. With `--dry-run` this saves the text for review |
-| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. Spaces, tabs and line breaks at both ends of the body are trimmed and CRLF becomes LF; nothing else changes (a Unicode space such as U+00A0 is content and stays) |
+| `--body-file <file>` | Post `<file>` without a model call. A first line `Title: ...` is the title; the rest is the body. Spaces, tabs and line breaks at both ends of the body are trimmed and CRLF becomes LF; nothing else changes (a Unicode space such as U+00A0 is content and stays). By default, the body must retain the template headings and checklist items; extra author sections and checklist items are allowed |
 | `--title <text>` | Use this title instead of the generated one or the one in `--body-file` |
 | `--breaking <auto\|keep\|never>` | Breaking Changes section policy (default `auto`), the same rule as for `buckley commit`. See [Breaking changes](#breaking-changes) |
 | `--yes` | Skip the confirmation prompt |
@@ -402,7 +402,7 @@ buckley pr [OPTIONS]
 | `--verbose` | Show the context audit and the model's reasoning |
 | `--cost=false` | Do not print the token and cost lines |
 | `--context-file <path>` | Author notes for the PR; repeatable, oldest first. See [Author notes](#author-notes) |
-| `--template=false` | Keep Buckley's own sections when the repository has a pull request template. See [Pull request template](#pull-request-template) |
+| `--template=false` | Skip repository template enforcement for `--body-file`, or keep Buckley's own generated sections. See [Pull request template](#pull-request-template) |
 | `--strict` | Fail, and create nothing, when the generated text states a decision or a number that has no source (a command that has no source only warns), when the body is out of the pull request template's shape, or when an author checkbox line or section has no place. Default: warn. See [Checks against the sources](#checks-against-the-sources) |
 | `--model <id>` | Override the PR model |
 | `--backend <api\|codex\|claude>` | Select the one-shot backend |
@@ -834,7 +834,7 @@ retargeted; `--no-update` refuses any open PR for the head. Before an update
 replaces the title and body of an open PR, `buckley pr` tries to save the text
 it replaces under the git directory as `buckley/pr-<number>-<time>-<random>.md`
 (the random part keeps two saves in one second apart) and stderr names the
-file; `buckley pr --yes --body-file <that file>` puts it back. When the copy
+file; `buckley pr --yes --template=false --body-file <that file>` puts it back even if the template has changed. When the copy
 cannot be written, a warning says so and the update goes on without a copy. If `gh pr create`
 prints no PR URL, `buckley pr` fails instead of labeling a PR it cannot name.
 
