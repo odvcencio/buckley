@@ -460,3 +460,44 @@ func TestRunPRCommand_IndentedFirstLineStopsGeneration(t *testing.T) {
 		})
 	}
 }
+
+func TestRunPRCommand_SavedBodyTemplateGuard(t *testing.T) {
+	r := newPRRepo(t)
+	commitTemplate(t, r, ".github/PULL_REQUEST_TEMPLATE.md", testPRTemplate)
+	runGitIn(t, r.work, "push", "-q", "origin", "main")
+	r.commit(t, "feature", "f.txt")
+	r.park(t)
+	stubPRDependencies(t, func() error { return nil })
+	stubGh(t)
+	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	file := filepath.Join(t.TempDir(), "body.md")
+	valid := "## What does this PR do?\n\nText\n\n## Correctness\n\n- [x] Focused package or unit tests ran for the touched behavior\n- [ ] Documented anything intentionally left unvalidated in this PR\n\n## Extra\n- [ ] Extra test"
+	if err := os.WriteFile(file, []byte("Title: test title\n\n"+valid+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	captureStdout(t, func() { err = runPRCommand([]string{"--yes", "--head", "feature", "--body-file", file}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ghBodyArg(t, g, "pr create"); got != valid {
+		t.Fatalf("body changed: %q", got)
+	}
+	if err := os.WriteFile(file, []byte("Title: test title\n\nOld body\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() { err = runPRCommand([]string{"--yes", "--head", "feature", "--body-file", file}) })
+	if err == nil || !strings.Contains(err.Error(), "missing template heading") {
+		t.Fatalf("expected template rejection, got %v", err)
+	}
+	g = installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
+	captureStdout(t, func() {
+		err = runPRCommand([]string{"--yes", "--head", "feature", "--body-file", file, "--template=false"})
+	})
+	if err != nil {
+		t.Fatalf("restore bypass: %v", err)
+	}
+	if got := ghBodyArg(t, g, "pr create"); got != "Old body" {
+		t.Fatalf("restore changed body: %q", got)
+	}
+}

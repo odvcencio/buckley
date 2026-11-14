@@ -121,7 +121,7 @@ func parsePRCommandOptions(args []string) (prCommandOptions, error) {
 	title := fs.String("title", "", "use this PR title instead of the generated one or the one in --body-file")
 	output := fs.String("output", "", "also write the title and body to this file, in the form --body-file reads; with --dry-run this saves the text for review")
 	bodyFile := fs.String("body-file", "", "post this file as it is, without a model call: a first line \"Title: ...\" is the title and the rest is the body (the form --output writes)")
-	template := fs.Bool("template", true, "write the body in the repository's pull request template when it has one (.github/PULL_REQUEST_TEMPLATE.md, read from the base branch); --template=false keeps Buckley's own sections")
+	template := fs.Bool("template", true, "use the repository pull request template for generated text and check its headings and checklists in --body-file; --template=false skips both")
 	strict := fs.Bool("strict", false, "fail, and create nothing, when the generated text states a decision or a number that the notes, commits and diff do not contain (default: warn)")
 	requireVerification := fs.Bool("require-verification", false, "label the PR buckbot:verify-required so Buckbot needs a receipt or passing CI before it reviews")
 	requireReceipt := fs.Bool("require-receipt", false, "label the PR buckbot:verify-receipt (receipt only)")
@@ -270,6 +270,38 @@ func loadPRTemplate(plan *prPlan) *commands.PRTemplate {
 	return nil
 }
 
+// loadPRTemplateForBody refuses oversized templates rather than silently
+// bypassing validation. The lookup order matches generated-body handling.
+func loadPRTemplateForBody(plan *prPlan) (*commands.PRTemplate, error) {
+	for _, ref := range []string{plan.Base.Ref, plan.Head.Ref} {
+		if ref == "" {
+			continue
+		}
+		for _, path := range prTemplatePaths {
+			entry, err := gitOutputRaw("ls-tree", "--full-tree", "--name-only", ref, "--", path)
+			if err != nil {
+				return nil, fmt.Errorf("inspect template at %s: %w", ref, err)
+			}
+			if strings.TrimSpace(entry) == "" {
+				continue
+			}
+			text, err := gitOutputRaw("show", ref+":"+path)
+			if err != nil {
+				return nil, fmt.Errorf("read template %s:%s: %w", ref, path, err)
+			}
+			if len(text) > prTemplateMaxBytes {
+				return nil, fmt.Errorf("template %s:%s exceeds %d bytes", ref, path, prTemplateMaxBytes)
+			}
+			tmpl := commands.ParsePRTemplate(text)
+			if tmpl != nil {
+				tmpl.Source = ref + ":" + path
+			}
+			return tmpl, nil
+		}
+	}
+	return nil, nil
+}
+
 // prContextOpts derives the git-diff gathering options for a PR run: a
 // PR-scale byte budget (diffsignal.PRDiffBudget by default, overridable via
 // --diff-budget) and PR-specific ranking (source first, tests next,
@@ -328,6 +360,16 @@ func runPRCommand(args []string) error {
 	var text prText
 	if opts.bodyFile != "" {
 		text, err = readPRText(opts.bodyFile, opts.title)
+		if err == nil && opts.template {
+			var tmpl *commands.PRTemplate
+			tmpl, err = loadPRTemplateForBody(plan)
+			if err == nil {
+				err = tmpl.ValidateSuppliedBody(text.Body)
+			}
+			if err != nil {
+				err = fmt.Errorf("body does not satisfy the pull request template: %w; fix the body or use --template=false", err)
+			}
+		}
 		if err == nil {
 			printPR(nil, text, plan)
 		}
@@ -341,7 +383,11 @@ func runPRCommand(args []string) error {
 		if err := os.WriteFile(opts.output, []byte(formatPRText(text)), 0o644); err != nil {
 			return fmt.Errorf("write --output %s: %w", opts.output, err)
 		}
-		fmt.Fprintf(os.Stderr, "PR text written to %s; post it as it is with --body-file %s\n", opts.output, opts.output)
+		if opts.template {
+			fmt.Fprintf(os.Stderr, "PR text written to %s; post it as it is with --body-file %s\n", opts.output, opts.output)
+		} else {
+			fmt.Fprintf(os.Stderr, "PR text written to %s; post it as it is with --template=false --body-file %s\n", opts.output, opts.output)
+		}
 	}
 	if opts.dryRun {
 		return nil
@@ -1037,7 +1083,7 @@ func keepPreviousPRText(run ghCommandRunner, url string, next prText) {
 		prWarnf("could not save the current text of %s (%v); it is replaced without a copy", url, err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "The PR's previous title and body are saved in %s; to put them back: buckley pr --yes --body-file %s\n", path, path)
+	fmt.Fprintf(os.Stderr, "The PR's previous title and body are saved in %s; to put them back: buckley pr --yes --template=false --body-file %s\n", path, path)
 }
 
 // updatePR regenerates the existing open PR's title and body in place,
