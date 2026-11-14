@@ -471,7 +471,7 @@ func TestRunPRCommand_SavedBodyTemplateGuard(t *testing.T) {
 	stubGh(t)
 	g := installFakeGh(t, "[]", "https://github.com/o/r/pull/12\n")
 	file := filepath.Join(t.TempDir(), "body.md")
-	valid := "## What does this PR do?\n\nText\n\n## Correctness\n\n- [x] Focused package or unit tests ran for the touched behavior\n- [ ] Documented anything intentionally left unvalidated in this PR\n\n## Extra\n- [ ] Extra test"
+	valid := "## What does this PR do?\n\nText\n\n## Correctness\n\n- [x] Focused package or unit tests ran for the touched behavior — passed\n- [ ] Documented anything intentionally left unvalidated in this PR — pending\n\n## Extra\n- [ ] Extra test"
 	if err := os.WriteFile(file, []byte("Title: test title\n\n"+valid+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
