@@ -33,6 +33,12 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 			req.Models = nil
 			req.Provider = cloneAnyMap(req.Provider)
 			req.Provider["allow_fallbacks"] = false
+			// Ask for the inline usage record now so the caller knows it must
+			// wait for it. The client sets the same field at dispatch, so the
+			// wire request does not change.
+			if req.Usage == nil {
+				req.Usage = &UsageRequestOptions{Include: true}
+			}
 		}
 	case "openai":
 		// Both OpenAI Chat Completions and Responses accept the modern

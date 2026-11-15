@@ -202,6 +202,42 @@ func TestDrainACPStreamTurn_WaitsForDelayedRequiredUsageTrailer(t *testing.T) {
 	}
 }
 
+func TestDrainACPStreamTurn_WaitsForDelayedOpenRouterUsageTrailer(t *testing.T) {
+	finish := "stop"
+	usage := &model.Usage{PromptTokens: 11, CompletionTokens: 4, TotalTokens: 15}
+	chunks := make(chan model.StreamChunk, 2)
+	chunks <- model.StreamChunk{Choices: []model.StreamChoice{{
+		Delta:        model.MessageDelta{Content: "answer"},
+		FinishReason: &finish,
+	}}}
+	errs := make(chan error)
+
+	var once sync.Once
+	callback := func(acp.SessionUpdate) error {
+		once.Do(func() {
+			go func() {
+				// Longer than the 250 ms grace of a stream_options request.
+				time.Sleep(400 * time.Millisecond)
+				chunks <- model.StreamChunk{Usage: usage}
+				close(chunks)
+				close(errs)
+			}()
+		})
+		return nil
+	}
+
+	turn, err := drainACPStreamTurn(context.Background(), model.ChatRequest{
+		Model: "vendor/model",
+		Usage: &model.UsageRequestOptions{Include: true},
+	}, chunks, errs, callback, false)
+	if err != nil {
+		t.Fatalf("drainACPStreamTurn: %v", err)
+	}
+	if turn.Usage == nil || *turn.Usage != *usage {
+		t.Fatalf("usage = %+v, want delayed OpenRouter usage %+v", turn.Usage, usage)
+	}
+}
+
 func TestDrainACPStreamTurn_RequiredUsageTrailerGraceIsBounded(t *testing.T) {
 	finish := "stop"
 	chunks := make(chan model.StreamChunk, 1)
