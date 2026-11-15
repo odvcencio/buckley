@@ -365,6 +365,8 @@ func DefaultConfig() *Config {
 		Oneshot: OneshotModeConfig{
 			Mode:       DefaultOneshotMode,
 			DataPolicy: DefaultOneshotDataPolicy,
+
+			AnswerReserve: "auto",
 		},
 	}
 	applyDefaultRuntimeConfig(cfg)

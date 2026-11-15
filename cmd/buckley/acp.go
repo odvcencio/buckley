@@ -1187,6 +1187,10 @@ type acpLoopLimits struct {
 	FinalizationInstruction string
 	StepCap                 int
 	MaxOutputTokens         int
+	// answerReserve turns a reasoning effort into a reasoning budget that
+	// leaves room for the answer (see applyOneShotAnswerReserve). Set only by
+	// one-shot mode.
+	answerReserve           bool
 	ProtocolReasoning       *model.ReasoningConfig
 	MaxToolCalls            int
 	MaxModelRequests        int
@@ -1702,7 +1706,13 @@ func newACPLoopController(
 		controllerConfig.CostForUsage = func(usage model.Usage) (float64, error) {
 			return mgr.CalculateBoundedCost(modelID, usage)
 		}
-		controllerConfig.NormalizeCostBoundedRequest = mgr.NormalizeCostBoundedRequest
+		controllerConfig.NormalizeCostBoundedRequest = func(req model.ChatRequest) (model.ChatRequest, error) {
+			// Only here is the final output cap known, so the answer reserve is
+			// computed from it. A second call finds no effort left and returns
+			// the request unchanged, which the cost guard requires.
+			req = applyOneShotAnswerReserve(req, state.route.ProviderID, limits.answerReserve)
+			return mgr.NormalizeCostBoundedRequest(req)
+		}
 	}
 	return agentloop.NewController(controllerConfig)
 }
@@ -2716,6 +2726,11 @@ func buildACPChatRequestForRoute(cfg *config.Config, mgr *model.Manager, engine 
 	}
 	if hasRoute {
 		req.Reasoning = resolveACPRequestReasoningForRoute(cfg, mgr, engine, route, limits.ProtocolReasoning)
+		if limits.MaxCostUSD <= 0 {
+			// With a ceiling the cost guard applies the reserve to each
+			// candidate output cap instead (see newACPLoopController).
+			req = applyOneShotAnswerReserve(req, route.ProviderID, limits.answerReserve)
+		}
 	} else {
 		req.Reasoning = resolveACPRequestReasoning(cfg, mgr, engine, modelID, limits.ProtocolReasoning)
 	}

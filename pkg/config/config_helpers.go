@@ -61,6 +61,15 @@ func (c *Config) OneshotDataPolicy() string {
 	return normalizeMode(c.Oneshot.DataPolicy, DefaultOneshotDataPolicy)
 }
 
+// OneshotAnswerReserveEnabled reports whether -p keeps an answer reserve when
+// a reasoning effort is in force. Empty and "auto" enable it; "off" disables it.
+func (c *Config) OneshotAnswerReserveEnabled() bool {
+	if c == nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(c.Oneshot.AnswerReserve), "off")
+}
+
 func normalizeMode(mode, fallback string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
