@@ -273,7 +273,24 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	}
 
 	if len(systemParts) > 0 {
-		anthReq.System = strings.Join(systemParts, "\n\n")
+		if cache := req.PromptCache; req.CacheControl != nil && cache != nil && cache.Enabled && cache.SystemMessages > 0 {
+			// Keep shared setup reachable as the automatic breakpoint advances.
+			prefixCount := min(cache.SystemMessages, len(systemParts))
+			blocks := []ContentPart{{
+				Type:         "text",
+				Text:         strings.Join(systemParts[:prefixCount], "\n\n"),
+				CacheControl: req.CacheControl,
+			}}
+			if prefixCount < len(systemParts) {
+				blocks = append(blocks, ContentPart{
+					Type: "text",
+					Text: "\n\n" + strings.Join(systemParts[prefixCount:], "\n\n"),
+				})
+			}
+			anthReq.System = blocks
+		} else {
+			anthReq.System = strings.Join(systemParts, "\n\n")
+		}
 	}
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
 		anthReq.Tools = toAnthropicTools(req.Tools)
@@ -286,7 +303,7 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
 	Model        string                   `json:"model"`
-	System       string                   `json:"system,omitempty"`
+	System       any                      `json:"system,omitempty"` // string or []ContentPart
 	Messages     []anthropicMessage       `json:"messages"`
 	MaxTokens    int                      `json:"max_tokens"`
 	Temperature  float64                  `json:"temperature,omitempty"`
