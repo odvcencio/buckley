@@ -396,6 +396,8 @@ an explicit inspection/verification ceiling. The monetary and tool-call caps
 are independent. Project reviews also have no hard model-turn or exploration
 ceiling by default; the ordinary outer timeout, synthesis reserve, verification,
 and governor safety controls still apply.
+On short deadlines, the agent's synthesis reserve can use at most three
+quarters of its initial time budget, leaving time to gather evidence.
 
 Child runs use an explicit execution contract. `step_cap`, `max_tool_calls`,
 `max_model_requests`, `max_elapsed_seconds`, `max_cost_usd`, and

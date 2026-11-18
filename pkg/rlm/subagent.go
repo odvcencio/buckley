@@ -719,7 +719,15 @@ func (a *SubAgent) shouldSynthesize(ctx context.Context, iteration, maxIteration
 	if !ok {
 		return false
 	}
-	return time.Until(deadline) <= a.synthesisLead
+	return !time.Now().Before(a.synthesisDeadline(deadline, startedAt))
+}
+
+func (a *SubAgent) synthesisDeadline(deadline, startedAt time.Time) time.Time {
+	// A fixed reserve can consume a short request's entire budget. Leave
+	// at least a quarter of the initial window for evidence gathering.
+	budget := max(0, deadline.Sub(startedAt))
+	reserve := min(a.synthesisLead, budget-budget/4)
+	return deadline.Add(-reserve)
 }
 
 func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) (context.Context, context.CancelFunc) {
@@ -733,7 +741,7 @@ func (a *SubAgent) explorationContext(ctx context.Context, startedAt time.Time) 
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	toolDeadline := deadline.Add(-a.synthesisLead)
+	toolDeadline := a.synthesisDeadline(deadline, startedAt)
 	if a.explorationTimeout > 0 {
 		explorationDeadline := startedAt.Add(a.explorationTimeout)
 		if explorationDeadline.Before(toolDeadline) {

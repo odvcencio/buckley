@@ -370,6 +370,30 @@ func TestSubAgentToolDeadlinePreservesSynthesisWindow(t *testing.T) {
 	}
 }
 
+func TestSubAgentToolDeadlineLeavesTimeForInspectionOnShortRuns(t *testing.T) {
+	agent := &SubAgent{adaptive: true, synthesisLead: 90 * time.Second}
+	startedAt := time.Now()
+	deadline := startedAt.Add(20 * time.Second)
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+
+	if agent.shouldSynthesize(ctx, 0, 0, startedAt) {
+		t.Fatal("short review started in synthesis before offering inspection tools")
+	}
+	exploration, stop := agent.explorationContext(ctx, startedAt)
+	defer stop()
+	if got, _ := exploration.Deadline(); !got.Equal(startedAt.Add(5 * time.Second)) {
+		t.Fatalf("short review inspection deadline = %v, want five seconds after start", got)
+	}
+
+	startedAt = deadline.Add(-time.Minute)
+	nearCtx, cancelNear := context.WithDeadline(t.Context(), time.Now().Add(5*time.Second))
+	defer cancelNear()
+	if !agent.shouldSynthesize(nearCtx, 1, 0, startedAt) {
+		t.Fatal("review continued exploring after its synthesis window began")
+	}
+}
+
 func TestSubAgentToolDeadlineHonorsConfiguredReviewReserve(t *testing.T) {
 	agent := &SubAgent{
 		adaptive:      true,
