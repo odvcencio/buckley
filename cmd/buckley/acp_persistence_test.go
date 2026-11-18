@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"m31labs.dev/buckley/pkg/acp"
+	"m31labs.dev/buckley/pkg/config"
 	"m31labs.dev/buckley/pkg/conversation"
 	"m31labs.dev/buckley/pkg/model"
 	"m31labs.dev/buckley/pkg/storage"
@@ -22,6 +23,13 @@ func TestACPSessionLoad_RestoresTranscriptAndToolOutcome(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	session := &acp.AgentSession{ID: "test-session", CreatedAt: time.Now(), WorkingDirectory: t.TempDir()}
 	if err := createACPSession(store, session, ""); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Models.Execution = "openai/gpt-4o"
+	cfg.Models.Curated = []string{"openai/gpt-4o", "openai/gpt-4o-mini"}
+	const selectedModel = "openai/gpt-4o-mini"
+	if _, err := applyACPSetModelConfigOption(cfg, nil, store, session, acp.ConfigOptionValue{ValueID: selectedModel}); err != nil {
 		t.Fatal(err)
 	}
 	conv := conversation.New(session.ID)
@@ -64,6 +72,11 @@ func TestACPSessionLoad_RestoresTranscriptAndToolOutcome(t *testing.T) {
 	loaded, err = loadACPSession(t.Context(), reopened, acp.LoadSessionParams{SessionID: session.ID, Cwd: session.WorkingDirectory}, record)
 	if err != nil || loaded == nil || loaded.ID != session.ID {
 		t.Fatalf("stored session: session=%v err=%v", loaded, err)
+	}
+	modes := buildACPModelModes(cfg, nil, loaded)
+	options := buildACPModelConfigOptions(cfg, nil, loaded)
+	if loaded.Mode != acpModePrefix+selectedModel || modes.CurrentModeID != loaded.Mode || options[0].CurrentValue != selectedModel {
+		t.Fatalf("restored model selection: mode=%q modes=%+v options=%+v", loaded.Mode, modes, options)
 	}
 	if len(updates) != 4 ||
 		updates[0].SessionUpdate != acp.SessionUpdateUserMessageChunk ||

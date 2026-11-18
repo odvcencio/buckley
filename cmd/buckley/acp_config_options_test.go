@@ -89,7 +89,7 @@ func TestApplyACPSetModelConfigOption_UpdatesSessionMode(t *testing.T) {
 	cfg.Models.Curated = []string{"openai/gpt-4o", "anthropic/claude"}
 
 	session := &acp.AgentSession{Mode: "normal"}
-	options, err := applyACPSetModelConfigOption(cfg, nil, session, acp.ConfigOptionValue{ValueID: "anthropic/claude"})
+	options, err := applyACPSetModelConfigOption(cfg, nil, nil, session, acp.ConfigOptionValue{ValueID: "anthropic/claude"})
 	if err != nil {
 		t.Fatalf("applyACPSetModelConfigOption: %v", err)
 	}
@@ -98,7 +98,10 @@ func TestApplyACPSetModelConfigOption_UpdatesSessionMode(t *testing.T) {
 	if session.Mode != wantMode {
 		t.Fatalf("session.Mode = %q, want %q", session.Mode, wantMode)
 	}
-	if len(options) != 1 || options[0].CurrentValue != "anthropic/claude" {
+	if session.Modes == nil || session.Modes.CurrentModeID != wantMode {
+		t.Fatalf("session.Modes = %+v, want current mode %q", session.Modes, wantMode)
+	}
+	if len(options) != 2 || options[0].CurrentValue != "anthropic/claude" || options[1].ID != acpTaskIntentConfigID {
 		t.Fatalf("options = %+v, want currentValue anthropic/claude", options)
 	}
 
@@ -116,7 +119,7 @@ func TestApplyACPSetModelConfigOption_RejectsEmptyValue(t *testing.T) {
 	cfg.Models.Curated = []string{"openai/gpt-4o"}
 	session := &acp.AgentSession{Mode: "normal"}
 
-	if _, err := applyACPSetModelConfigOption(cfg, nil, session, acp.ConfigOptionValue{}); err == nil {
+	if _, err := applyACPSetModelConfigOption(cfg, nil, nil, session, acp.ConfigOptionValue{}); err == nil {
 		t.Fatal("expected an error for an empty model value id")
 	}
 	if session.Mode != "normal" {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -134,7 +135,14 @@ func runACPCommand(args []string) error {
 			return session, err
 		},
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
-			return buildACPModelModes(cfg, mgr), nil
+			return buildACPModelModes(cfg, mgr, session), nil
+		},
+		OnSetMode: func(ctx context.Context, session *acp.AgentSession, modeID string) ([]acp.SessionConfigOption, error) {
+			modelID, ok := strings.CutPrefix(modeID, acpModePrefix)
+			if !ok {
+				return nil, fmt.Errorf("invalid model mode %q", modeID)
+			}
+			return applyACPSetModelConfigOption(cfg, mgr, store, session, acp.ConfigOptionValue{ValueID: modelID})
 		},
 		// S8: models are also exposed as a session config option
 		// (category "model") alongside the existing modes advertisement --
@@ -151,7 +159,7 @@ func runACPCommand(args []string) error {
 		OnSetConfigOption: func(ctx context.Context, session *acp.AgentSession, configID string, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
 			switch configID {
 			case acpModelConfigID:
-				return applyACPSetModelConfigOption(cfg, mgr, session, value)
+				return applyACPSetModelConfigOption(cfg, mgr, store, session, value)
 			case acpTaskIntentConfigID:
 				if err := applyACPSetTaskIntentConfigOption(session, value); err != nil {
 					return nil, err
@@ -286,7 +294,6 @@ func makePromptHandler(
 			agent = *agentRef
 		}
 
-		modelOverride := resolveACPModelOverride(cfg, mgr, session.Mode)
 		// S6: create_skill (reachable as a tool call inside runACPLoop) is
 		// the only thing that changes the set of available commands
 		// mid-session; a before/after count catches it without threading
@@ -301,13 +308,23 @@ func makePromptHandler(
 		// On incomplete turns, however, retained public text can return after
 		// buffered delivery was discarded; stream that text only when the
 		// loop's delivery metadata says this candidate was not attempted.
-		taskIntent, intentErr := consumeACPNextTaskIntent(session)
+		var mode string
+		var taskIntent agentloop.TaskIntent
+		var intentErr error
+		session.WithSettings(func(s *acp.AgentSession) {
+			mode = s.Mode
+			taskIntent, intentErr = consumeACPNextTaskIntent(s)
+			if intentErr == nil && taskIntent != agentloop.UnknownIntent {
+				s.ConfigOptions = buildACPSessionConfigOptions(cfg, mgr, s)
+				if stream != nil {
+					stream(acp.NewConfigOptionUpdate(s.ConfigOptions))
+				}
+			}
+		})
 		if intentErr != nil {
 			return nil, intentErr
 		}
-		if taskIntent != agentloop.UnknownIntent && stream != nil {
-			stream(acp.NewConfigOptionUpdate(buildACPSessionConfigOptions(cfg, mgr, session)))
-		}
+		modelOverride := resolveACPModelOverride(cfg, mgr, mode)
 		turnID := state.nextLifecycleTurnID()
 		text, err := runACPLoopWithLimits(ctx, cfg, mgr, state.conv, state.registry, state.skillState, state.engine, modelOverride, state.workDir, session.ID, agent, logf, stream, acpLoopLimits{
 			LifecycleObserver:  lifecycleObserver,
@@ -841,8 +858,8 @@ func formatACPSkillActivationResult(name string, data map[string]any) string {
 	return fmt.Sprintf("Skill %q activated.", name)
 }
 
-func buildACPModelModes(cfg *config.Config, mgr *model.Manager) *acp.SessionModeState {
-	curated := curatedModelIDs(cfg, mgr)
+func buildACPModelModes(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) *acp.SessionModeState {
+	curated, selected := acpSessionModelIDs(cfg, mgr, session)
 	if len(curated) == 0 {
 		return nil
 	}
@@ -875,11 +892,26 @@ func buildACPModelModes(cfg *config.Config, mgr *model.Manager) *acp.SessionMode
 		return nil
 	}
 
-	current := modes[0].ID
 	return &acp.SessionModeState{
-		CurrentModeID:  current,
+		CurrentModeID:  acpModePrefix + selected,
 		AvailableModes: modes,
 	}
+}
+
+func acpSessionModelIDs(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) ([]string, string) {
+	ids := curatedModelIDs(cfg, mgr)
+	if session != nil && strings.HasPrefix(session.Mode, acpModePrefix) {
+		if selected := resolveACPModelOverride(cfg, mgr, session.Mode); selected != "" {
+			if !slices.Contains(ids, selected) {
+				ids = append(ids, selected)
+			}
+			return ids, selected
+		}
+	}
+	if len(ids) == 0 {
+		return nil, ""
+	}
+	return ids, ids[0]
 }
 
 func curatedModelIDs(cfg *config.Config, mgr *model.Manager) []string {
@@ -1050,7 +1082,7 @@ func applyACPSetTaskIntentConfigOption(session *acp.AgentSession, value acp.Conf
 // source of truth for "which model is active", so a config-option-only
 // client (CodeCompanion) and a modes-only client never disagree.
 func buildACPModelConfigOptions(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession) []acp.SessionConfigOption {
-	curated := curatedModelIDs(cfg, mgr)
+	curated, current := acpSessionModelIDs(cfg, mgr, session)
 	if len(curated) == 0 {
 		return nil
 	}
@@ -1076,18 +1108,6 @@ func buildACPModelConfigOptions(cfg *config.Config, mgr *model.Manager, session 
 		return nil
 	}
 
-	// Only trust session.Mode as a model selection when it actually carries
-	// the "model:" prefix -- resolveACPModelOverride treats any other
-	// non-empty, non-"default" string as a literal model override, and
-	// AgentSession's own zero-state default ("normal") is neither empty
-	// nor "default", so it must never reach that path.
-	current := options[0].Value
-	if session != nil && strings.HasPrefix(session.Mode, acpModePrefix) {
-		if override := resolveACPModelOverride(cfg, mgr, session.Mode); override != "" {
-			current = override
-		}
-	}
-
 	return []acp.SessionConfigOption{acp.NewModelConfigOption(acpModelConfigID, "Model", current, options)}
 }
 
@@ -1097,7 +1117,7 @@ func buildACPModelConfigOptions(cfg *config.Config, mgr *model.Manager, session 
 // resolveACPModelOverride reads for every turn -- so the change takes
 // effect immediately regardless of which selector (modes or config
 // options) the client uses.
-func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, session *acp.AgentSession, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
+func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, store *storage.Store, session *acp.AgentSession, value acp.ConfigOptionValue) ([]acp.SessionConfigOption, error) {
 	modelID := strings.TrimSpace(value.ValueID)
 	if modelID == "" {
 		return nil, fmt.Errorf("model config option requires a value id")
@@ -1106,9 +1126,15 @@ func applyACPSetModelConfigOption(cfg *config.Config, mgr *model.Manager, sessio
 		return nil, fmt.Errorf("unknown model %q", modelID)
 	}
 	if session != nil {
+		if store != nil {
+			if err := store.UpdateSessionModel(session.ID, modelID); err != nil {
+				return nil, fmt.Errorf("save ACP model selection: %w", err)
+			}
+		}
 		session.Mode = acpModePrefix + modelID
+		session.Modes = buildACPModelModes(cfg, mgr, session)
 	}
-	return buildACPModelConfigOptions(cfg, mgr, session), nil
+	return buildACPSessionConfigOptions(cfg, mgr, session), nil
 }
 
 // acpLoopState carries the per-prompt-turn state the Controller hooks

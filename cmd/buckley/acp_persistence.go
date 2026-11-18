@@ -98,7 +98,11 @@ func loadACPSession(ctx context.Context, store *storage.Store, params acp.LoadSe
 			return nil, err
 		}
 	}
-	return &acp.AgentSession{ID: saved.ID, CreatedAt: saved.CreatedAt, WorkingDirectory: workspace, McpServers: params.McpServers}, nil
+	session := &acp.AgentSession{ID: saved.ID, CreatedAt: saved.CreatedAt, WorkingDirectory: workspace, McpServers: params.McpServers}
+	if saved.Model != "" {
+		session.Mode = acpModePrefix + saved.Model
+	}
+	return session, nil
 }
 
 func persistACPTurn(store *storage.Store, conv *conversation.Conversation, start int) error {

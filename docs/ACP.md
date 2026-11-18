@@ -25,7 +25,8 @@ private diagnostic log. The stdio agent supports:
 
 New ACP sessions are saved to Buckley's local database. A client can load a
 session after restart using its original session ID and workspace directory.
-Loading replays saved conversation messages and tool results. The client
+Loading replays saved conversation messages and tool results and restores an
+explicitly selected model when it is available. The client
 supplies MCP servers again in the load request, and new tool calls receive
 their own permission decisions. Buckley keeps those decisions in its local
 tool audit log.

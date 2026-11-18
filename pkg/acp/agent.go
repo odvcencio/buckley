@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type Agent struct {
 
 // AgentSession represents an active conversation session.
 type AgentSession struct {
+	settingsMu       sync.Mutex
 	ID               string
 	CreatedAt        time.Time
 	WorkingDirectory string
@@ -55,6 +57,13 @@ type AgentSession struct {
 	// configId against the known set, the same way Modes backs
 	// handleSessionSetMode.
 	ConfigOptions []SessionConfigOption
+}
+
+// WithSettings serializes access to settings shared by prompts and selectors.
+func (s *AgentSession) WithSettings(use func(*AgentSession)) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	use(s)
 }
 
 // AgentHandlers are callbacks that connect ACP to Buckley's internals.
@@ -86,6 +95,10 @@ type AgentHandlers struct {
 
 	// OnSessionModes provides the session mode list for the client.
 	OnSessionModes func(ctx context.Context, session *AgentSession) (*SessionModeState, error)
+
+	// OnSetMode applies a validated mode selection and returns any updated
+	// config options to publish with it.
+	OnSetMode func(ctx context.Context, session *AgentSession, modeID string) ([]SessionConfigOption, error)
 
 	// OnSessionConfigOptions provides the session's initial config options
 	// (S8) -- e.g. a model picker -- returned from session/new and
@@ -278,11 +291,12 @@ func (a *Agent) handleSessionNew(ctx context.Context, req *Request) {
 		}
 	}
 	a.initializeSessionOptions(ctx, session)
+	result := NewSessionResult{SessionID: session.ID, Modes: session.Modes, ConfigOptions: session.ConfigOptions}
 	a.sessionsMu.Lock()
 	a.sessions[session.ID] = session
 	a.sessionsMu.Unlock()
 
-	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: session.Modes, ConfigOptions: session.ConfigOptions})
+	_ = a.transport.SendResponse(req.ID, result)
 	a.sendSessionCommands(ctx, session)
 }
 
@@ -369,9 +383,9 @@ func (a *Agent) handleSessionLoad(ctx context.Context, req *Request) {
 		return
 	}
 
-	a.sessionsMu.RLock()
+	session.settingsMu.Lock()
+	defer session.settingsMu.Unlock()
 	result := LoadSessionResult{Modes: session.Modes, ConfigOptions: session.ConfigOptions}
-	a.sessionsMu.RUnlock()
 	_ = a.transport.SendResponse(req.ID, result)
 }
 
@@ -459,40 +473,47 @@ func (a *Agent) handleSessionSetMode(ctx context.Context, req *Request) {
 		return
 	}
 
-	a.sessionsMu.Lock()
+	a.sessionsMu.RLock()
 	session, exists := a.sessions[params.SessionID]
-	if exists {
-		if session.Modes != nil && len(session.Modes.AvailableModes) > 0 {
-			valid := false
-			for _, mode := range session.Modes.AvailableModes {
-				if mode.ID == params.ModeID {
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				a.sessionsMu.Unlock()
-				_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Unknown mode", params.ModeID)
-				return
-			}
-		}
-		session.Mode = params.ModeID
-		if session.Modes != nil {
-			session.Modes.CurrentModeID = params.ModeID
-		}
-	}
-	a.sessionsMu.Unlock()
-
+	a.sessionsMu.RUnlock()
 	if !exists {
 		_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
 		return
 	}
 
+	session.settingsMu.Lock()
+	defer session.settingsMu.Unlock()
+	if session.Modes != nil && len(session.Modes.AvailableModes) > 0 {
+		valid := slices.ContainsFunc(session.Modes.AvailableModes, func(mode SessionMode) bool { return mode.ID == params.ModeID })
+		if !valid {
+			_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Unknown mode", params.ModeID)
+			return
+		}
+	}
+	var options []SessionConfigOption
+	if a.handlers.OnSetMode != nil {
+		options, err = a.handlers.OnSetMode(ctx, session, params.ModeID)
+		if err != nil {
+			_ = a.transport.SendError(req.ID, ErrCodeInternal, "Set mode failed", nil)
+			return
+		}
+		session.ConfigOptions = options
+	}
+	session.Mode = params.ModeID
+	if session.Modes != nil && session.Modes.CurrentModeID != params.ModeID {
+		modes := *session.Modes
+		modes.CurrentModeID = params.ModeID
+		session.Modes = &modes
+	}
 	_ = a.transport.SendResponse(req.ID, SetModeResult{})
-	if exists {
+	_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
+		SessionID: params.SessionID,
+		Update:    NewCurrentModeUpdate(params.ModeID),
+	})
+	if options != nil {
 		_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
 			SessionID: params.SessionID,
-			Update:    NewCurrentModeUpdate(params.ModeID),
+			Update:    NewConfigOptionUpdate(options),
 		})
 	}
 }
@@ -529,21 +550,26 @@ func (a *Agent) handleSessionSetConfigOption(ctx context.Context, req *Request) 
 		return
 	}
 
+	session.settingsMu.Lock()
+	defer session.settingsMu.Unlock()
+	oldMode := session.Mode
 	options, err := a.handlers.OnSetConfigOption(ctx, session, params.ConfigID, value)
 	if err != nil {
 		_ = a.transport.SendError(req.ID, ErrCodeInvalidParams, "Set config option failed", nil)
 		return
 	}
-
-	a.sessionsMu.Lock()
 	session.ConfigOptions = options
-	a.sessionsMu.Unlock()
-
 	_ = a.transport.SendResponse(req.ID, SetConfigOptionResult{ConfigOptions: options})
 	_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
 		SessionID: params.SessionID,
 		Update:    NewConfigOptionUpdate(options),
 	})
+	if session.Mode != oldMode {
+		_ = a.transport.SendNotification("session/update", SessionUpdateNotification{
+			SessionID: params.SessionID,
+			Update:    NewCurrentModeUpdate(session.Mode),
+		})
+	}
 }
 
 // handleSessionCancel cancels an active prompt.
