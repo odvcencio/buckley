@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -165,6 +166,9 @@ func TestCodexCLIProvider_WorkspacePreparationFailureCleansUp(t *testing.T) {
 		t.Run(fmt.Sprintf("empty_%v", empty), func(t *testing.T) {
 			provider := NewCodexCLIProvider(config.CodexConfig{}, config.SandboxConfig{}, config.ApprovalConfig{})
 			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			snapshot, err := NewReviewSnapshot(ReviewSnapshotHead, root, root, strings.Repeat("1", 40), nil)
 			if err != nil {
 				t.Fatal(err)

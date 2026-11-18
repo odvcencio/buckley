@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -18,6 +19,9 @@ const (
 	maxOutputBytes = 128 * 1024
 	// maxSourceBytes bounds the program source.
 	maxSourceBytes = 256 * 1024
+	// Keep one byte for the terminator on Unix platforms with a
+	// 104-byte sockaddr_un.sun_path field.
+	maxPortableUnixSocketPath = 103
 )
 
 // Result is one program run's outcome.
@@ -131,7 +135,18 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := broker.Start(filepath.Join(scratch, "caps.sock")); err != nil {
+	socketPath := filepath.Join(scratch, "caps.sock")
+	if len(socketPath) > maxPortableUnixSocketPath && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+		// Keep the build in the configured scratch root and put just the
+		// capability endpoint in a private directory with a short pathname.
+		socketDir, err := os.MkdirTemp("/tmp", "buckley-caps-")
+		if err != nil {
+			return Result{}, fmt.Errorf("execmode: short socket directory: %w", err)
+		}
+		defer os.Remove(socketDir)
+		socketPath = filepath.Join(socketDir, "caps.sock")
+	}
+	if err := broker.Start(socketPath); err != nil {
 		return Result{}, err
 	}
 	defer broker.Close()
@@ -143,7 +158,7 @@ func (r *Runner) Run(ctx context.Context, source string) (Result, error) {
 	var cmd *exec.Cmd
 	switch {
 	case r.isolation == IsolationBwrap:
-		argv, err := sandboxArgv(scratch, goCache)
+		argv, err := sandboxArgv(scratch, goCache, socketPath)
 		if err != nil {
 			return Result{}, err
 		}

@@ -207,8 +207,10 @@ func (p *CodexCLIProvider) ChatCompletion(ctx context.Context, req ChatRequest) 
 		return codexResumeArgs(args, resumeThread)
 	}
 	args := buildArgs(threadID)
-	chatPrompt := buildCodexChatPrompt(req.Messages)
-	if threadID != "" {
+	var chatPrompt string
+	if threadID == "" {
+		chatPrompt = buildCodexChatPrompt(req.Messages)
+	} else {
 		chatPrompt = buildCodexResumePrompt(req.Messages)
 	}
 	if req.ReviewSnapshot != nil {
@@ -553,8 +555,11 @@ func ReviewWorkspaceRepositoryRoot(ctx context.Context, workDir string) (string,
 		return "", fmt.Errorf("materialized review working directory is invalid")
 	}
 	for {
-		if info, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil && info.IsDir() {
-			return filepath.Clean(dir), nil
+		gitDir := filepath.Join(dir, ".git")
+		if head, err := os.Stat(filepath.Join(gitDir, "HEAD")); err == nil && head.Mode().IsRegular() {
+			if objects, err := os.Stat(filepath.Join(gitDir, "objects")); err == nil && objects.IsDir() {
+				return dir, nil
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

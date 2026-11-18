@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -66,9 +67,9 @@ func resolveGOROOT() string {
 // deny-by-default: read-only system directories for the dynamic loader
 // and toolchain, the scratch module and shared build cache read-write,
 // a private /tmp and /proc and /dev — and nothing else. --unshare-all
-// removes network, pid, ipc, and user namespaces; the caps socket keeps
-// working because unix sockets are files and the scratch bind carries it.
-func sandboxArgv(scratch, goCache string) ([]string, error) {
+// removes network, pid, ipc, and user namespaces. Bind the capability socket
+// explicitly when the host needed a separate short path.
+func sandboxArgv(scratch, goCache, socketPath string) ([]string, error) {
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
 		return nil, fmt.Errorf("execmode: bwrap not found: %w", err)
@@ -97,5 +98,8 @@ func sandboxArgv(scratch, goCache string) ([]string, error) {
 		"--bind", goCache, goCache,
 		"--chdir", scratch,
 	)
+	if filepath.Dir(socketPath) != scratch {
+		argv = append(argv, "--ro-bind", socketPath, socketPath)
+	}
 	return append(argv, "go", "run", "."), nil
 }

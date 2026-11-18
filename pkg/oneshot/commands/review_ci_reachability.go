@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,10 @@ const maxPRGoTestFiles = 32
 
 const (
 	buckleyCITestScriptSHA256 = "689e4d66670f6091f441e9f31095219f602a81c99d79c2662a3f7d76c54a5d74"
-	buckleyCIWorkflowSHA256   = "e1556b2688783110439606468f2f7ecf2149292d39040dc3c0ffd4b2916e7859"
+	// The Test job runs the same test script in both workflows. The current
+	// workflow pins Go 1.27.3 in setup-go rather than reading go.mod.
+	buckleyCIWorkflowSHA256       = "d8f82efd8c9d840f7aaffb2ed9ac11a03592548f4e188c6592a414653e23e395"
+	buckleyCIWorkflowLegacySHA256 = "e1556b2688783110439606468f2f7ecf2149292d39040dc3c0ffd4b2916e7859"
 )
 
 type requiredCheckLink struct {
@@ -173,16 +177,16 @@ func readPRCIMergeCommit(run prCommandRunner, pr *PRInfo) (string, error) {
 func verifyPRCIContract(run prCommandRunner, pr *PRInfo, mergeSHA string) error {
 	for _, item := range []struct {
 		path string
-		sha  string
+		shas []string
 	}{
-		{"scripts/test.sh", buckleyCITestScriptSHA256},
-		{".github/workflows/ci.yml", buckleyCIWorkflowSHA256},
+		{"scripts/test.sh", []string{buckleyCITestScriptSHA256}},
+		{".github/workflows/ci.yml", []string{buckleyCIWorkflowSHA256, buckleyCIWorkflowLegacySHA256}},
 	} {
 		content, err := readPRSnapshotRawFile(run, pr, mergeSHA, item.path)
 		if err != nil {
 			return fmt.Errorf("read CI contract %s: %w", item.path, err)
 		}
-		if got := fmt.Sprintf("%x", sha256.Sum256([]byte(content))); got != item.sha {
+		if got := fmt.Sprintf("%x", sha256.Sum256([]byte(content))); !slices.Contains(item.shas, got) {
 			return fmt.Errorf("CI contract %s differs from the verified Go test command", item.path)
 		}
 	}

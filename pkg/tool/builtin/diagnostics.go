@@ -66,7 +66,8 @@ func postEditDiagnostics(absPath string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), postEditDiagnosticsTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", os.DevNull, ".")
+	// This compile probe discards its output and needs no revision metadata.
+	cmd := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", os.DevNull, ".")
 	cmd.Dir = packageDir
 	output, err := cmd.CombinedOutput()
 	if err == nil {

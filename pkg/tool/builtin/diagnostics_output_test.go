@@ -54,7 +54,7 @@ func TestPostEditDiagnostics_PreservesMainPackageFiles(t *testing.T) {
 				if err := os.WriteFile(path, []byte("package main\nfunc main() { println(\"prior build\") }\n"), 0644); err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command("go", "build", "-o", filepath.Join(dir, outputName), ".")
+				cmd := exec.Command("go", "build", "-buildvcs=false", "-o", filepath.Join(dir, outputName), ".")
 				cmd.Dir = dir
 				if output, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("build original executable: %v %s", err, output)
