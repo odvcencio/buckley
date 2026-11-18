@@ -29,12 +29,12 @@ var validTaskStages = map[string]struct{}{
 }
 
 type reviewerAgent interface {
-	Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error)
+	reviewWithContext(context.Context, *Task, *BuilderResult) (*ReviewResult, error)
 	SetPersonaProvider(provider *personality.PersonaProvider)
 }
 
 type verifierAgent interface {
-	VerifyOutcomes(task *Task, result *VerifyResult) error
+	verifyOutcomes(context.Context, *Task, *VerifyResult) error
 }
 
 type Executor struct {
@@ -169,6 +169,13 @@ func (e *Executor) SetContext(ctx context.Context) {
 	e.ctx, e.cancel = context.WithCancel(ctx)
 }
 
+func (e *Executor) executionContext() context.Context {
+	if e.ctx == nil {
+		return context.Background()
+	}
+	return e.ctx
+}
+
 // Cancel stops any in-flight execution.
 func (e *Executor) Cancel() {
 	if e.cancel != nil {
@@ -237,6 +244,9 @@ func (e *Executor) executeTaskLocal(task *Task) error {
 	var verifyResult *VerifyResult
 
 	for _, phase := range e.taskPhases {
+		if err := e.executionContext().Err(); err != nil {
+			return e.failExecution(exec, task, verifyResult, err)
+		}
 		switch phase.Stage {
 		case "builder":
 			builderResult, err = e.runBuilderPhase(task)
@@ -267,6 +277,9 @@ func (e *Executor) executeTaskLocal(task *Task) error {
 		}
 	}
 
+	if err := e.executionContext().Err(); err != nil {
+		return e.failExecution(exec, task, verifyResult, err)
+	}
 	return e.completeExecution(exec, task, verifyResult)
 }
 
@@ -328,14 +341,14 @@ func (e *Executor) runBuilderPhase(task *Task) (*BuilderResult, error) {
 func (e *Executor) runVerificationPhase(task *Task) (*VerifyResult, error) {
 	e.sendProgress("🔍 Verifying outcomes for %q", task.Title)
 	verifyResult := &VerifyResult{}
-	if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
+	if err := e.verifier.verifyOutcomes(e.executionContext(), task, verifyResult); err != nil {
 		e.sendProgress("⚠️ Verification errors for %q: %v", task.Title, err)
 		if err := e.handleError(task, err); err != nil {
 			return verifyResult, err
 		}
 		// Self-heal succeeded; refresh verification results for downstream reporting.
 		verifyResult = &VerifyResult{}
-		if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
+		if err := e.verifier.verifyOutcomes(e.executionContext(), task, verifyResult); err != nil {
 			e.sendProgress("⚠️ Verification errors after self-heal for %q: %v", task.Title, err)
 			return verifyResult, err
 		}
@@ -406,7 +419,7 @@ func (e *Executor) runBuilder(task *Task) (*BuilderResult, error) {
 		return nil, fmt.Errorf("builder agent not initialized")
 	}
 
-	result, err := e.builder.Build(task)
+	result, err := e.builder.build(e.executionContext(), task)
 	if err != nil {
 		return nil, err
 	}
@@ -578,8 +591,11 @@ func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
 		if e.workflow != nil {
 			e.workflow.SetActiveAgent("Reviewer")
 		}
-		result, err := e.reviewer.Review(task, builderResult)
+		result, err := e.reviewer.reviewWithContext(e.executionContext(), task, builderResult)
 		if err != nil {
+			if ctxErr := e.executionContext().Err(); ctxErr != nil {
+				return ctxErr
+			}
 			var incomplete *IncompleteReviewError
 			if errors.As(err, &incomplete) {
 				return err
@@ -610,13 +626,13 @@ func (e *Executor) review(task *Task, builderResult *BuilderResult) error {
 		}
 
 		verifyResult := &VerifyResult{}
-		if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
+		if err := e.verifier.verifyOutcomes(e.executionContext(), task, verifyResult); err != nil {
 			if err := e.handleError(task, err); err != nil {
 				return fmt.Errorf("verification failed after review fixes: %w", err)
 			}
 			// Self-heal succeeded; re-run verification to populate results.
 			verifyResult = &VerifyResult{}
-			if err := e.verifier.VerifyOutcomes(task, verifyResult); err != nil {
+			if err := e.verifier.verifyOutcomes(e.executionContext(), task, verifyResult); err != nil {
 				return fmt.Errorf("verification failed after review fixes: %w", err)
 			}
 		}
@@ -660,6 +676,9 @@ func (e *Executor) sendProgress(format string, args ...any) {
 }
 
 func (e *Executor) handleError(task *Task, err error) error {
+	if ctxErr := e.executionContext().Err(); ctxErr != nil {
+		return ctxErr
+	}
 	if e.retryCount >= e.maxRetries {
 		return fmt.Errorf("max retries exceeded: %w", err)
 	}
@@ -713,7 +732,7 @@ func (e *Executor) handleError(task *Task, err error) error {
 	if e.builder == nil {
 		return fmt.Errorf("builder agent not initialized")
 	}
-	if _, applyErr := e.builder.ApplyImplementation(task, fix, "self_heal"); applyErr != nil {
+	if _, applyErr := e.builder.applyImplementation(e.executionContext(), task, fix, "self_heal"); applyErr != nil {
 		return fmt.Errorf("failed to apply fix: %w", applyErr)
 	}
 
@@ -725,7 +744,7 @@ func (e *Executor) handleError(task *Task, err error) error {
 
 	// Retry verification
 	verifyResult := &VerifyResult{}
-	if verifyErr := e.verifier.VerifyOutcomes(task, verifyResult); verifyErr != nil {
+	if verifyErr := e.verifier.verifyOutcomes(e.executionContext(), task, verifyResult); verifyErr != nil {
 		return e.handleError(task, verifyErr)
 	}
 	if !verifyResult.Passed {
@@ -760,7 +779,7 @@ func (e *Executor) analyzeAndFix(task *Task, err error) (string, error) {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
-	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
+	resp, err := e.modelClient.ChatCompletion(e.executionContext(), req)
 	if err != nil {
 		if resp != nil {
 			return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), firstRepairFinishReason(resp), err)
@@ -790,7 +809,7 @@ func (e *Executor) applyReviewFixes(task *Task, review *ReviewResult) (*BuilderR
 		return nil, err
 	}
 
-	files, err := e.builder.ApplyImplementation(task, fix, "review_fix")
+	files, err := e.builder.applyImplementation(e.executionContext(), task, fix, "review_fix")
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +853,7 @@ func (e *Executor) generateReviewFix(task *Task, review *ReviewResult) (string, 
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
-	resp, err := e.modelClient.ChatCompletion(context.Background(), req)
+	resp, err := e.modelClient.ChatCompletion(e.executionContext(), req)
 	if err != nil {
 		if resp != nil {
 			return "", NewIncompleteRepairError(publicRepairDraftFromResponse(resp), firstRepairFinishReason(resp), err)
@@ -1090,7 +1109,7 @@ func (e *Executor) executeTaskInBatch(task *Task) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	ctx, cancel := context.WithTimeout(e.executionContext(), 2*time.Hour)
 	defer cancel()
 
 	result, err := e.batchCoordinator.DispatchTask(ctx, e.plan, task)

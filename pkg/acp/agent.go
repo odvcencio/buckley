@@ -59,6 +59,9 @@ type AgentSession struct {
 
 // AgentHandlers are callbacks that connect ACP to Buckley's internals.
 type AgentHandlers struct {
+	OnSessionNew  func(context.Context, *AgentSession) error
+	OnSessionLoad func(context.Context, LoadSessionParams, StreamFunc) (*AgentSession, error)
+
 	// OnPrompt is called when the user sends a prompt.
 	// It should stream responses back using the StreamFunc.
 	OnPrompt func(ctx context.Context, session *AgentSession, content []ContentBlock, stream StreamFunc) (*PromptResult, error)
@@ -232,7 +235,7 @@ func (a *Agent) handleInitialize(ctx context.Context, req *Request) {
 			Title:   &title,
 		},
 		AgentCapabilities: AgentCapabilities{
-			LoadSession: false,
+			LoadSession: a.handlers.OnSessionLoad != nil,
 			McpCapabilities: McpCapabilities{
 				HTTP: false,
 				SSE:  false,
@@ -268,37 +271,38 @@ func (a *Agent) handleSessionNew(ctx context.Context, req *Request) {
 		McpServers:       params.McpServers,
 	}
 
+	if a.handlers.OnSessionNew != nil {
+		if err := a.handlers.OnSessionNew(ctx, session); err != nil {
+			_ = a.transport.SendError(req.ID, ErrCodeInternal, "Could not create session", nil)
+			return
+		}
+	}
+	a.initializeSessionOptions(ctx, session)
 	a.sessionsMu.Lock()
 	a.sessions[session.ID] = session
 	a.sessionsMu.Unlock()
 
-	var modes *SessionModeState
+	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: session.Modes, ConfigOptions: session.ConfigOptions})
+	a.sendSessionCommands(ctx, session)
+}
+
+func (a *Agent) initializeSessionOptions(ctx context.Context, session *AgentSession) {
 	if a.handlers.OnSessionModes != nil {
 		if state, err := a.handlers.OnSessionModes(ctx, session); err == nil {
-			modes = state
+			session.Modes = state
+			if state != nil && state.CurrentModeID != "" {
+				session.Mode = state.CurrentModeID
+			}
 		}
 	}
-	if modes != nil {
-		session.Modes = modes
-		if modes.CurrentModeID != "" {
-			session.Mode = modes.CurrentModeID
-		}
-	}
-
-	var configOptions []SessionConfigOption
 	if a.handlers.OnSessionConfigOptions != nil {
 		if options, err := a.handlers.OnSessionConfigOptions(ctx, session); err == nil {
-			configOptions = options
+			session.ConfigOptions = options
 		}
 	}
-	if len(configOptions) > 0 {
-		a.sessionsMu.Lock()
-		session.ConfigOptions = configOptions
-		a.sessionsMu.Unlock()
-	}
+}
 
-	_ = a.transport.SendResponse(req.ID, NewSessionResult{SessionID: session.ID, Modes: modes, ConfigOptions: configOptions})
-
+func (a *Agent) sendSessionCommands(ctx context.Context, session *AgentSession) {
 	// S6: available_commands_update has no equivalent field on
 	// NewSessionResult (unlike modes/configOptions) -- the ACP schema only
 	// ever delivers it as a session/update notification, so it must be
@@ -325,12 +329,57 @@ func (a *Agent) handleSessionLoad(ctx context.Context, req *Request) {
 	session, exists := a.sessions[params.SessionID]
 	a.sessionsMu.RUnlock()
 
+	if a.handlers.OnSessionLoad != nil {
+		a.activePromptsMu.Lock()
+		if a.activePrompts[params.SessionID] != nil {
+			a.activePromptsMu.Unlock()
+			_ = a.transport.SendError(req.ID, ErrCodeInvalidRequest, "Session is busy", nil)
+			return
+		}
+		loadCtx, cancel := context.WithCancel(ctx)
+		a.activePrompts[params.SessionID] = cancel
+		a.activePromptsMu.Unlock()
+		release := sync.OnceFunc(func() { a.finishPrompt(params.SessionID, cancel) })
+		defer release()
+
+		loaded, err := a.handlers.OnSessionLoad(loadCtx, *params, func(update SessionUpdate) error {
+			return a.transport.SendNotification("session/update", SessionUpdateNotification{SessionID: params.SessionID, Update: update})
+		})
+		if err != nil {
+			_ = a.transport.SendError(req.ID, ErrCodeInternal, "Could not load session", nil)
+			return
+		}
+		if loaded == nil {
+			_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found in workspace", nil)
+			return
+		}
+		if !exists {
+			a.initializeSessionOptions(ctx, loaded)
+			session = loaded
+			a.sessionsMu.Lock()
+			a.sessions[session.ID] = session
+			a.sessionsMu.Unlock()
+		}
+		exists = true
+		release()
+	}
+
 	if !exists {
 		_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
 		return
 	}
 
-	_ = a.transport.SendResponse(req.ID, LoadSessionResult{Modes: session.Modes, ConfigOptions: session.ConfigOptions})
+	a.sessionsMu.RLock()
+	result := LoadSessionResult{Modes: session.Modes, ConfigOptions: session.ConfigOptions}
+	a.sessionsMu.RUnlock()
+	_ = a.transport.SendResponse(req.ID, result)
+}
+
+func (a *Agent) finishPrompt(id string, cancel context.CancelFunc) {
+	a.activePromptsMu.Lock()
+	delete(a.activePrompts, id)
+	a.activePromptsMu.Unlock()
+	cancel()
 }
 
 // handleSessionPrompt handles a user prompt.
@@ -349,19 +398,27 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, req *Request) {
 		_ = a.transport.SendError(req.ID, ErrCodeSessionNotFound, "Session not found", params.SessionID)
 		return
 	}
+	if ctx.Err() == context.Canceled {
+		_ = a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
+		return
+	}
 
 	// Create cancellable context for this prompt
 	promptCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	a.activePromptsMu.Lock()
+	if a.activePrompts[params.SessionID] != nil {
+		a.activePromptsMu.Unlock()
+		cancel()
+		_ = a.transport.SendError(req.ID, ErrCodeInvalidRequest, "Session is busy", nil)
+		return
+	}
 	a.activePrompts[params.SessionID] = cancel
 	a.activePromptsMu.Unlock()
 
 	defer func() {
-		a.activePromptsMu.Lock()
-		delete(a.activePrompts, params.SessionID)
-		a.activePromptsMu.Unlock()
+		if cancel != nil {
+			a.finishPrompt(params.SessionID, cancel)
+		}
 	}()
 
 	// Stream function to send updates
@@ -379,11 +436,14 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, req *Request) {
 	}
 
 	result, err := a.handlers.OnPrompt(promptCtx, session, params.Prompt, streamFunc)
+	cancelled := promptCtx.Err() == context.Canceled
+	a.finishPrompt(params.SessionID, cancel)
+	cancel = nil
+	if cancelled {
+		_ = a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
+		return
+	}
 	if err != nil {
-		if promptCtx.Err() == context.Canceled {
-			_ = a.transport.SendResponse(req.ID, PromptResult{StopReason: "cancelled"})
-			return
-		}
 		_ = a.transport.SendError(req.ID, ErrCodeInternal, "Prompt failed", nil)
 		return
 	}

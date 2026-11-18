@@ -20,6 +20,7 @@ import (
 	"m31labs.dev/buckley/pkg/skill"
 	"m31labs.dev/buckley/pkg/telemetry"
 	"m31labs.dev/buckley/pkg/tool"
+	"m31labs.dev/buckley/pkg/tool/builtin"
 )
 
 // ContextEnricher produces an optional code-intelligence section for LLM prompts.
@@ -146,6 +147,13 @@ func (a *BuilderAgent) SetEnricher(fn ContextEnricher) {
 
 // Build generates and applies an implementation for the provided task.
 func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
+	return a.build(context.Background(), task)
+}
+
+func (a *BuilderAgent) build(ctx context.Context, task *Task) (*BuilderResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	a.logEvent(task.ID, builderEventStart, map[string]string{
 		"title": task.Title,
@@ -162,7 +170,7 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 		defer a.workflow.SetActiveAgent(prevAgent)
 	}
 
-	impl, err := a.generateImplementation(task)
+	impl, err := a.generateImplementation(ctx, task)
 	if err != nil {
 		a.logFailure(task.ID, "generation", err)
 		a.sendProgress("⚠️ Builder failed to generate implementation for %q: %v", task.Title, err)
@@ -171,6 +179,9 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 			"error": err.Error(),
 		})
 		return nil, fmt.Errorf("builder failed to generate implementation: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	a.sendProgress("🧠 Draft ready for %q", task.Title)
 
@@ -194,7 +205,7 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 	var applied []BuilderFile
 	if len(files) > 0 {
 		a.sendProgress("📁 Applying %d file(s) for %q", len(files), task.Title)
-		applied, err = a.applyFiles(task, files, "primary")
+		applied, err = a.applyFiles(ctx, task, files, "primary")
 		if err != nil {
 			a.logFailure(task.ID, "apply", err)
 			a.sendProgress("⚠️ Failed to apply changes for %q: %v", task.Title, err)
@@ -237,6 +248,13 @@ func (a *BuilderAgent) Build(task *Task) (*BuilderResult, error) {
 
 // ApplyImplementation applies an implementation (often from self-healing) and records telemetry.
 func (a *BuilderAgent) ApplyImplementation(task *Task, implementation string, source string) ([]BuilderFile, error) {
+	return a.applyImplementation(context.Background(), task, implementation, source)
+}
+
+func (a *BuilderAgent) applyImplementation(ctx context.Context, task *Task, implementation string, source string) ([]BuilderFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	a.logEvent(task.ID, builderEventApplyStart, map[string]string{
 		"source": source,
 	})
@@ -261,7 +279,7 @@ func (a *BuilderAgent) ApplyImplementation(task *Task, implementation string, so
 	// Allow tasks with no file changes (e.g., analysis, command execution only)
 	var applied []BuilderFile
 	if len(files) > 0 {
-		applied, err = a.applyFiles(task, files, source)
+		applied, err = a.applyFiles(ctx, task, files, source)
 		if err != nil {
 			a.sendProgress("⚠️ Failed to apply %s implementation for %q: %v", source, task.Title, err)
 			a.emitBuilderEvent(task, telemetry.EventBuilderFailed, map[string]any{
@@ -310,12 +328,12 @@ func (a *BuilderAgent) emitBuilderEvent(task *Task, eventType telemetry.EventTyp
 	a.workflow.EmitBuilderEvent(task, eventType, details)
 }
 
-func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
+func (a *BuilderAgent) generateImplementation(ctx context.Context, task *Task) (string, error) {
 	prompt := buildImplementationPrompt(task)
 
 	// Append GTS code intelligence if available
 	if a.enricher != nil {
-		if section := a.enricher(context.Background(), "implementation", task.Files); section != "" {
+		if section := a.enricher(ctx, "implementation", task.Files); section != "" {
 			prompt += "\n\n" + section
 		}
 	}
@@ -398,11 +416,10 @@ func (a *BuilderAgent) generateImplementation(task *Task) (string, error) {
 	}
 
 	// Use streaming to handle tool calls
-	return a.generateWithToolsWithRoute(req, task, routePolicy)
+	return a.generateWithToolsWithRoute(ctx, req, task, routePolicy)
 }
 
-func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *Task, routePolicy *builderRoutePolicy) (string, error) {
-	ctx := context.Background()
+func (a *BuilderAgent) generateWithToolsWithRoute(ctx context.Context, req model.ChatRequest, task *Task, routePolicy *builderRoutePolicy) (string, error) {
 	const maxIterations = 10 // Prevent infinite loops
 	messages := req.Messages
 	if req.SessionID == "" {
@@ -506,6 +523,9 @@ func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *T
 
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
 		for _, tc := range calls {
+			if err := ctx.Err(); err != nil {
+				return outcomes, err
+			}
 			if !tool.IsToolAllowed(tc.Function.Name, allowedTools) {
 				outcomes = append(outcomes, agentloop.ToolOutcome{
 					Content: fmt.Sprintf("Error: tool %s not allowed by active skills", tc.Function.Name),
@@ -514,7 +534,7 @@ func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *T
 				})
 				continue
 			}
-			result, err := a.executeToolCall(tc, task)
+			result, err := a.executeToolCall(ctx, tc, task)
 			success := err == nil
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
@@ -586,7 +606,7 @@ func (a *BuilderAgent) generateWithToolsWithRoute(req model.ChatRequest, task *T
 	return model.ExtractTextContent(result.Message.Content)
 }
 
-func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, error) {
+func (a *BuilderAgent) executeToolCall(ctx context.Context, tc model.ToolCall, task *Task) (string, error) {
 	// Parse arguments
 	params, err := tool.DecodeArguments(tc.Function.Arguments)
 	if err != nil {
@@ -608,20 +628,20 @@ func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, e
 	}
 
 	// Get and execute the tool
-	tool, exists := a.toolRegistry.Get(tc.Function.Name)
+	registered, exists := a.toolRegistry.Get(tc.Function.Name)
 	if !exists {
 		return "", fmt.Errorf("tool not found: %s", tc.Function.Name)
 	}
 
 	// Authorize tool call (checks for risky operations like sudo)
 	if a.workflow != nil {
-		if err := a.workflow.AuthorizeToolCall(tool, params); err != nil {
+		if err := a.workflow.AuthorizeToolCall(registered, params); err != nil {
 			return "", fmt.Errorf("tool authorization failed: %w", err)
 		}
 	}
 
 	start := time.Now()
-	result, err := tool.Execute(params)
+	result, err := executeBuilderTool(ctx, registered, params)
 	elapsed := time.Since(start).Milliseconds()
 
 	// Log result
@@ -655,7 +675,17 @@ func (a *BuilderAgent) executeToolCall(tc model.ToolCall, task *Task) (string, e
 	return "", fmt.Errorf("tool execution failed: %s", result.Error)
 }
 
-func (a *BuilderAgent) applyFiles(task *Task, files map[string]string, source string) ([]BuilderFile, error) {
+func executeBuilderTool(ctx context.Context, registered tool.Tool, params map[string]any) (*builtin.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := registered.(tool.ContextTool); ok {
+		return contextual.ExecuteWithContext(ctx, params)
+	}
+	return registered.Execute(params)
+}
+
+func (a *BuilderAgent) applyFiles(ctx context.Context, task *Task, files map[string]string, source string) ([]BuilderFile, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no file changes found in implementation")
 	}
@@ -668,6 +698,9 @@ func (a *BuilderAgent) applyFiles(task *Task, files map[string]string, source st
 	applied := make([]BuilderFile, 0, len(files))
 
 	for path, content := range files {
+		if err := ctx.Err(); err != nil {
+			return applied, err
+		}
 		params := map[string]any{
 			"path":    path,
 			"content": content,
@@ -694,7 +727,7 @@ func (a *BuilderAgent) applyFiles(task *Task, files map[string]string, source st
 				return nil, err
 			}
 		}
-		result, err := writeTool.Execute(params)
+		result, err := executeBuilderTool(ctx, writeTool, params)
 		end := time.Now()
 		if a.workflow != nil {
 			a.workflow.RecordToolCall(writeTool, params, result, start, end)

@@ -79,7 +79,7 @@ type StreamQueryParams struct {
 	Query string `json:"query"`
 }
 
-// StreamQueryResult represents initial result for buckley/streamQuery method
+// StreamQueryResult identifies the completed buckley/streamQuery stream.
 type StreamQueryResult struct {
 	StreamID string `json:"streamId"`
 	AgentID  string `json:"agentId"`
@@ -87,9 +87,10 @@ type StreamQueryResult struct {
 
 // StreamChunkNotification represents a streaming chunk notification
 type StreamChunkNotification struct {
-	StreamID string `json:"streamId"`
-	Chunk    string `json:"chunk"`
-	Done     bool   `json:"done"`
+	StreamID  string           `json:"streamId"`
+	RequestID *json.RawMessage `json:"requestId"`
+	Chunk     string           `json:"chunk"`
+	Done      bool             `json:"done"`
 }
 
 // CancelParams represents parameters for $/cancelRequest

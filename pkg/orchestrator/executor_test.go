@@ -172,7 +172,7 @@ func TestExecutor_VerifyOutcomes(t *testing.T) {
 	// Create a task and verify outcomes
 	task := &plan.Tasks[0]
 	verifyResult := &VerifyResult{}
-	err := executor.verifier.VerifyOutcomes(task, verifyResult)
+	err := executor.verifier.verifyOutcomes(t.Context(), task, verifyResult)
 
 	if err != nil {
 		t.Logf("VerifyOutcomes error (may be expected): %v", err)

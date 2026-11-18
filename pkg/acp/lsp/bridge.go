@@ -1,7 +1,6 @@
 package lsp
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -277,41 +276,6 @@ func (b *Bridge) Exit(ctx context.Context) error {
 	return nil
 }
 
-// ServeStdio starts the LSP server on stdio
-func (b *Bridge) ServeStdio(ctx context.Context, reader io.Reader, writer io.Writer) error {
-	bufReader, ok := reader.(*bufio.Reader)
-	if !ok {
-		bufReader = bufio.NewReader(reader)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Read message
-		msg, err := ReadMessage(bufReader)
-		if err != nil {
-			if err == io.EOF {
-				return nil // Clean shutdown
-			}
-			return fmt.Errorf("failed to read message: %w", err)
-		}
-
-		// Handle message
-		response := b.HandleMessage(ctx, msg)
-
-		// Write response (if any)
-		if response != nil {
-			if err := WriteMessage(writer, response); err != nil {
-				return fmt.Errorf("failed to write response: %w", err)
-			}
-		}
-	}
-}
-
 // buildServerCapabilities constructs LSP server capabilities
 func (b *Bridge) buildServerCapabilities() ServerCapabilities {
 	return ServerCapabilities{
@@ -414,6 +378,10 @@ type StreamCallback func(chunk string, done bool) error
 
 // HandleStreamQuery processes a streaming query
 func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback StreamCallback) (string, error) {
+	return b.handleStreamQuery(ctx, query, ulid.Make().String(), callback)
+}
+
+func (b *Bridge) handleStreamQuery(ctx context.Context, query, streamID string, callback StreamCallback) (string, error) {
 	b.mu.RLock()
 	if !b.initialized {
 		b.mu.RUnlock()
@@ -432,9 +400,6 @@ func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback S
 	if strings.TrimSpace(query) == "" {
 		return "", fmt.Errorf("query cannot be empty")
 	}
-
-	// Generate stream ID
-	streamID := ulid.Make().String()
 
 	// Create cancellable context
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -470,9 +435,7 @@ func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback S
 	for {
 		event, err := stream.Recv()
 		if err == io.EOF {
-			// Stream completed successfully
-			callback("", true)
-			break
+			return streamID, callback("", true)
 		}
 		if err != nil {
 			if incomplete, ok := bridgePartialError(err, string(errStreamQueryIncomplete)); ok {
@@ -487,7 +450,6 @@ func (b *Bridge) HandleStreamQuery(ctx context.Context, query string, callback S
 		}
 	}
 
-	return streamID, nil
 }
 
 // CancelStream cancels an active stream by ID

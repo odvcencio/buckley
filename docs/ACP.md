@@ -15,7 +15,7 @@ buckley acp
 Use `--workdir <path>` to select the repository and `--log <path>` for a
 private diagnostic log. The stdio agent supports:
 
-- session creation, prompting, cancellation, and per-session conversation state;
+- session creation, prompting, cancellation, and loading saved conversations;
 - streamed answer and reasoning chunks, usage updates, and tool-call status;
 - model selection through ACP modes and session configuration options;
 - skill discovery and activation through the editor's command palette;
@@ -23,9 +23,19 @@ private diagnostic log. The stdio agent supports:
 - client permission requests for governed tool calls, with Buckley's local risk
   policy as a bounded fallback when the client cannot answer.
 
-Buckley advertises only capabilities it implements. Durable session loading,
-image/audio prompts, and HTTP/SSE MCP servers are not advertised by the stdio
-agent.
+New ACP sessions are saved to Buckley's local database. A client can load a
+session after restart using its original session ID and workspace directory.
+Loading replays saved conversation messages and tool results. The client
+supplies MCP servers again in the load request, and new tool calls receive
+their own permission decisions. Buckley keeps those decisions in its local
+tool audit log.
+
+### T3 Code
+
+Add a local ACP command under **Settings → Providers → Add provider → Show
+more**. Set the executable to `buckley` and add `acp` as its argument.
+Install Buckley and configure its model provider on the machine that runs the
+T3 Code server.
 
 ## Optional gRPC coordinator
 
@@ -54,11 +64,16 @@ An LSP-only editor can launch:
 buckley lsp --coordinator 127.0.0.1:50051 --agent-id editor
 ```
 
-The bridge speaks LSP JSON-RPC over stdio and forwards its implemented custom
-`buckley/textQuery` request to the coordinator. The bridge package also exposes
-coordinator-backed streaming, inline-completion, edit, and editor-state APIs to
-integrations that call those APIs directly; the stdio command does not
-advertise unimplemented standard LSP capabilities.
+The bridge speaks LSP JSON-RPC over stdio. Send `buckley/textQuery` with a
+`query` string for one response. Send `buckley/streamQuery` to receive
+`buckley/streamChunk` notifications while the coordinator works. Each
+notification carries the original `requestId`, its `streamId`, the chunk text,
+and a `done` flag. The final response identifies the completed stream.
+Use the standard `$/cancelRequest` notification with the original request ID
+to stop either query.
+
+The bridge package also exposes coordinator-backed inline-completion, edit,
+and editor-state APIs for integrations that call the package directly.
 
 ## Editor setup
 

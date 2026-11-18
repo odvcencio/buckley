@@ -194,13 +194,21 @@ func NewOrchestrator(store *storage.Store, mgr ModelClient, registry *tool.Regis
 
 // PlanFeature creates a feature plan
 func (o *Orchestrator) PlanFeature(featureName, description string) (*Plan, error) {
-	plan, err := o.planner.GeneratePlan(featureName, description)
+	return o.PlanFeatureContext(context.Background(), featureName, description)
+}
+
+// PlanFeatureContext creates a plan within the caller's lifetime.
+func (o *Orchestrator) PlanFeatureContext(ctx context.Context, featureName, description string) (*Plan, error) {
+	plan, err := o.planner.generatePlan(ctx, featureName, description)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate plan: %w", err)
 	}
 
 	if o.workflow != nil {
 		o.workflow.EnrichPlan(plan)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Save plan
@@ -242,12 +250,16 @@ func (o *Orchestrator) ListPlans() ([]Plan, error) {
 
 // ExecutePlan executes the current plan
 func (o *Orchestrator) ExecutePlan() error {
+	return o.ExecutePlanContext(context.Background())
+}
+
+// ExecutePlanContext executes the current plan within the caller's lifetime.
+func (o *Orchestrator) ExecutePlanContext(ctx context.Context) error {
 	if o.currentPlan == nil {
 		return fmt.Errorf("no plan loaded")
 	}
 
 	// Create executor with cancelable context
-	ctx := context.Background()
 	if o.cancelPlan != nil {
 		o.cancelPlan() // cancel any previous run
 	}

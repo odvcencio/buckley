@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -240,6 +241,120 @@ func TestACPServerSendMessageClassicPlanErrorUsesSafeStatus(t *testing.T) {
 	}
 	if provider.calls.Load() != 1 {
 		t.Fatalf("provider calls = %d, want one planner attempt", provider.calls.Load())
+	}
+}
+
+func TestACPServerClassicPlanningStopsOnCallerCancellation(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			started, stopped := make(chan struct{}), make(chan struct{})
+			release := make(chan struct{})
+			provider := &partialServerProvider{
+				chat: func(ctx context.Context, _ model.ChatRequest) (*model.ChatResponse, error) {
+					close(started)
+					select {
+					case <-ctx.Done():
+						close(stopped)
+						return nil, ctx.Err()
+					case <-release:
+						return nil, fmt.Errorf("test released blocked provider")
+					}
+				},
+			}
+			srv := newClassicPartialServer(t, provider)
+			client, cleanup := newPartialBufconnClient(t, srv)
+			defer cleanup()
+			defer close(release)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				if stream {
+					response, err := client.StreamTask(ctx, &acppb.TaskStreamRequest{AgentId: "zed", TaskId: "classic-cancel", Query: "plan"})
+					if err == nil {
+						for err == nil {
+							_, err = response.Recv()
+						}
+					}
+					done <- err
+					return
+				}
+				_, err := client.SendMessage(ctx, &acppb.SendMessageRequest{
+					AgentId: "zed", Message: &acppb.Message{Role: "user", Content: "plan"},
+				})
+				done <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("planning did not reach the provider")
+			}
+			cancel()
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Fatal("provider kept planning after the editor cancelled")
+			}
+			if err := <-done; status.Code(err) != codes.Canceled {
+				t.Fatalf("RPC error = %v, want cancellation", err)
+			}
+		})
+	}
+}
+
+func TestACPServerClassicBuilderDiscardsDraftAfterCancellation(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "late-draft.txt")
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	provider := &partialServerProvider{
+		chat: func(ctx context.Context, req model.ChatRequest) (*model.ChatResponse, error) {
+			var text string
+			if strings.Contains(model.ExtractTextContentOrEmpty(req.Messages[len(req.Messages)-1].Content), "Create an implementation plan") {
+				text = `{"description":"fixture","tasks":[{"id":"task-1","title":"Inspect fixture","type":"analysis"}]}`
+			} else {
+				close(started)
+				select {
+				case <-ctx.Done():
+				case <-release:
+					return nil, fmt.Errorf("test released blocked provider")
+				}
+				text = fmt.Sprintf("```filepath:%s\nlate draft\n```", target)
+			}
+			return &model.ChatResponse{
+				Model: "gpt-5.4", Choices: []model.Choice{{
+					Message: model.Message{Role: "assistant", Content: text}, FinishReason: "stop",
+				}},
+			}, nil
+		},
+	}
+	srv := newClassicPartialServer(t, provider)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.SendMessage(ctx, &acppb.SendMessageRequest{
+			AgentId: "editor", Message: &acppb.Message{Role: "user", Content: "Inspect fixture"},
+		})
+		done <- err
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("execution returned before reaching the builder: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("execution did not reach the builder")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.Canceled {
+			t.Fatalf("late builder result = %v, want cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("builder kept running after cancellation")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("cancelled builder wrote its late draft: %v", err)
 	}
 }
 

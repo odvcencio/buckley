@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -276,7 +277,7 @@ type approvingReviewer struct {
 	called bool
 }
 
-func (a *approvingReviewer) Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+func (a *approvingReviewer) reviewWithContext(_ context.Context, task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
 	a.called = true
 	return &ReviewResult{Approved: true, Summary: "lgtm"}, nil
 }

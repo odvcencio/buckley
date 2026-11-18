@@ -499,7 +499,7 @@ func TestVerifier_RunVerificationStep(t *testing.T) {
 	result := &VerifyResult{}
 
 	// Test a simple command that should succeed
-	err := verifier.runVerificationStep("echo test", result)
+	err := verifier.runVerificationStep(t.Context(), "echo test", result)
 
 	if err != nil {
 		t.Errorf("runVerificationStep failed for simple echo command: %v", err)

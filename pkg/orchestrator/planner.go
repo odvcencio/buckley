@@ -199,6 +199,13 @@ func (p *Planner) resolveReasoningEffort(phase string) string {
 }
 
 func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
+	return p.generatePlan(context.Background(), featureName, description)
+}
+
+func (p *Planner) generatePlan(reqCtx context.Context, featureName, description string) (*Plan, error) {
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
 	// Validate inputs
 	if featureName == "" {
 		return nil, fmt.Errorf("feature name cannot be empty")
@@ -217,16 +224,14 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 
 	// 2. Create planning prompt (augment with index context if available)
 	p.sendProgress("📚 Querying project index for related files…")
-	indexHints := p.lookupIndexContext(description, 5)
+	indexHints := p.lookupIndexContext(reqCtx, description, 5)
 	if trimmed := strings.TrimSpace(indexHints); trimmed != "" {
 		lines := strings.Count(trimmed, "\n") + 1
 		p.sendProgress("📚 Found %d relevant files from the index", lines)
 	}
 	prompt := p.buildPlanningPrompt(featureName, description, ctx, indexHints)
 
-	// 3. Call planning model (no timeout - let it run as long as needed)
-	reqCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// 3. Call the planning model within the caller's lifetime.
 	p.sendProgress("🤖 Asking %s to draft the plan…", safeModelName(planningModel))
 
 	systemPrompt := p.systemPrompt
@@ -252,6 +257,9 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 		req.Reasoning = &model.ReasoningConfig{Effort: effort}
 	}
 
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
 	resp, err := p.modelClient.ChatCompletion(reqCtx, req)
 	if err != nil {
 		if resp != nil {
@@ -285,7 +293,10 @@ func (p *Planner) GeneratePlan(featureName, description string) (*Plan, error) {
 		return nil, fmt.Errorf("plan must have at least one task")
 	}
 
-	p.enrichTasksWithIndex(plan)
+	p.enrichTasksWithIndex(reqCtx, plan)
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
 	p.sendProgress("✅ Draft plan ready with %d tasks", len(plan.Tasks))
 
 	plan.Context = ctx
@@ -406,11 +417,11 @@ func (p *Planner) buildPlanningPrompt(featureName, description string, ctx PlanC
 	return b.String()
 }
 
-func (p *Planner) lookupIndexContext(query string, limit int) string {
+func (p *Planner) lookupIndexContext(parent context.Context, query string, limit int) string {
 	if p.store == nil || strings.TrimSpace(query) == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	files, err := p.store.SearchFiles(ctx, query, "", limit)
@@ -439,15 +450,18 @@ func truncateSummary(text string, max int) string {
 	return text[:max-3] + "..."
 }
 
-func (p *Planner) enrichTasksWithIndex(plan *Plan) {
+func (p *Planner) enrichTasksWithIndex(parent context.Context, plan *Plan) {
 	if p.store == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 
 	for i := range plan.Tasks {
+		if ctx.Err() != nil {
+			return
+		}
 		task := &plan.Tasks[i]
 		if len(task.Files) > 0 {
 			continue

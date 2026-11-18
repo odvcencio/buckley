@@ -123,6 +123,16 @@ func runACPCommand(args []string) error {
 	defer closeACPSessions()
 
 	agent = acp.NewAgent("Buckley", version, acp.AgentHandlers{
+		OnSessionNew: func(ctx context.Context, session *acp.AgentSession) error {
+			return createACPSession(store, session, cwd)
+		},
+		OnSessionLoad: func(ctx context.Context, params acp.LoadSessionParams, stream acp.StreamFunc) (*acp.AgentSession, error) {
+			session, err := loadACPSession(ctx, store, params, stream)
+			if session != nil {
+				logf("loaded ACP session %s", session.ID)
+			}
+			return session, err
+		},
 		OnSessionModes: func(ctx context.Context, session *acp.AgentSession) (*acp.SessionModeState, error) {
 			return buildACPModelModes(cfg, mgr), nil
 		},
@@ -235,23 +245,33 @@ func makePromptHandler(
 	sessions := make(map[string]*acpSessionState)
 	var sessionsMu sync.Mutex
 
-	handler = func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (*acp.PromptResult, error) {
+	handler = func(ctx context.Context, session *acp.AgentSession, content []acp.ContentBlock, stream acp.StreamFunc) (result *acp.PromptResult, promptErr error) {
 		prompt := extractACPPrompt(content)
 		if strings.TrimSpace(prompt) == "" {
 			return nil, fmt.Errorf("empty prompt")
 		}
 		logf("prompt: %s", truncate(prompt, 100))
 
-		state := getACPSessionState(ctx, &sessionsMu, sessions, session, projectContext, cfg, defaultWorkDir, logf)
+		state, err := getACPSessionState(ctx, &sessionsMu, sessions, session, store, projectContext, cfg, defaultWorkDir, logf)
+		if err != nil {
+			return nil, err
+		}
 		state.mu.Lock()
 		defer state.mu.Unlock()
 
-		state.conv.AddUserMessage(prompt)
-		if store != nil {
-			if err := state.conv.SaveMessage(store, state.conv.Messages[len(state.conv.Messages)-1]); err != nil {
-				logf("save user message warning: %v", err)
-			}
+		if store != nil && strings.HasPrefix(session.ID, acpSessionPrefix) {
+			ctx = context.WithValue(ctx, acpApprovalStoreKey{}, store)
+			start := len(state.conv.Messages)
+			defer func() {
+				if err := persistACPTurn(store, state.conv, start); err != nil {
+					state.conv.Messages = state.conv.Messages[:start]
+					state.conv.UpdateTokenCount()
+					logf("save ACP turn: %v", err)
+					promptErr = errors.Join(promptErr, err)
+				}
+			}()
 		}
+		state.conv.AddUserMessage(prompt)
 
 		if handled, responseText := handleACPUserSkillCommand(prompt, state); handled {
 			if responseText != "" {
@@ -481,19 +501,17 @@ func getACPSessionState(
 	mu *sync.Mutex,
 	sessions map[string]*acpSessionState,
 	session *acp.AgentSession,
+	store *storage.Store,
 	projectContext *projectcontext.ProjectContext,
 	cfg *config.Config,
 	defaultWorkDir string,
 	logf func(string, ...interface{}),
-) *acpSessionState {
-	if mu == nil || sessions == nil {
-		return nil
-	}
+) (*acpSessionState, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	if state, ok := sessions[session.ID]; ok {
-		return state
+		return state, nil
 	}
 
 	workDir := strings.TrimSpace(session.WorkingDirectory)
@@ -502,6 +520,11 @@ func getACPSessionState(
 	}
 
 	conv := conversation.New(session.ID)
+	if store != nil && strings.HasPrefix(session.ID, acpSessionPrefix) {
+		if err := conv.LoadFromStorage(store); err != nil {
+			return nil, fmt.Errorf("restore ACP conversation: %w", err)
+		}
+	}
 	skills := skill.NewRegistry()
 	if err := skills.LoadAll(); err != nil && logf != nil {
 		logf("load skills warning: %v", err)
@@ -550,7 +573,10 @@ func getACPSessionState(
 		}
 	}
 
+	history := conv.Messages
+	conv.Messages = nil
 	conv.AddSystemMessage(buildACPSystemPrompt(projectContext, workDir, skills, engine, "", hyphaeProjectKnowledgeContext(cfg, workDir)))
+	conv.Messages = append(conv.Messages, history...)
 
 	state := &acpSessionState{
 		conv:               conv,
@@ -563,7 +589,7 @@ func getACPSessionState(
 		mcpManager:         mcpManager,
 	}
 	sessions[session.ID] = state
-	return state
+	return state, nil
 }
 
 // attachACPMcpServers spawns and bridges the stdio MCP servers a client
@@ -3103,6 +3129,20 @@ func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, 
 	if impact == tool.ImpactReadOnly {
 		return true, ""
 	}
+	decide := func(allowed bool, reason, status, source string) (bool, string) {
+		if store, ok := ctx.Value(acpApprovalStoreKey{}).(*storage.Store); ok {
+			input, _ := json.Marshal(map[string]string{"tool_call_id": tc.ID})
+			err := store.LogToolExecution(&storage.ToolAuditEntry{
+				SessionID: sessionID, ToolName: tc.Function.Name, ToolInput: string(input),
+				Decision: status, DecidedBy: source, ExecutedAt: time.Now(),
+			})
+			if err != nil {
+				logf("record ACP approval: %v", err)
+				return false, "could not record ACP permission decision"
+			}
+		}
+		return allowed, reason
+	}
 
 	if agent != nil {
 		toolCall := acp.ToolCallUpdate{
@@ -3116,17 +3156,17 @@ func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, 
 		outcome, err := agent.RequestClientPermission(ctx, sessionID, toolCall, acpPermissionOptions, timeout)
 		if err == nil {
 			if outcome.Outcome == acp.RequestPermissionOutcomeCancelled {
-				return false, "permission request cancelled by client"
+				return decide(false, "permission request cancelled by client", "rejected", "acp_client")
 			}
 			if outcome.OptionID == "allow" {
-				return true, ""
+				return decide(true, "", "approved", "acp_client")
 			}
-			return false, "denied by user"
+			return decide(false, "denied by user", "rejected", "acp_client")
 		}
 		if ctx.Err() != nil {
 			// The prompt turn itself was cancelled (e.g. session/cancel) --
 			// stop the tool call, do not fall back to auto-approval.
-			return false, "prompt cancelled before permission was granted"
+			return decide(false, "prompt cancelled before permission was granted", "rejected", "acp_client")
 		}
 		if logf != nil {
 			logf("session/request_permission failed for %s: %v; falling back to default risk policy", tc.Function.Name, err)
@@ -3135,9 +3175,9 @@ func requestACPToolPermissionWithTimeout(ctx context.Context, agent *acp.Agent, 
 
 	risk := acpRiskLabel(impact)
 	if !acpFallbackPermissionDecision(risk) {
-		return false, fmt.Sprintf("denied by default risk policy (%s risk, no client response)", risk)
+		return decide(false, fmt.Sprintf("denied by default risk policy (%s risk, no client response)", risk), "rejected", "buckley_policy")
 	}
-	return true, ""
+	return decide(true, "", "auto", "buckley_policy")
 }
 
 func parseACPToolParams(raw string) (map[string]any, error) {

@@ -624,5 +624,5 @@ func TestFileWithinPlannedScope(t *testing.T) {
 
 // generateWithTools is a test helper that runs the builder loop without a route policy.
 func (a *BuilderAgent) generateWithTools(req model.ChatRequest, task *Task) (string, error) {
-	return a.generateWithToolsWithRoute(req, task, nil)
+	return a.generateWithToolsWithRoute(context.Background(), req, task, nil)
 }

@@ -520,6 +520,13 @@ func NewVerifier(registry *tool.Registry) *Verifier {
 
 // VerifyOutcomes validates that execution produced expected results
 func (verifier *Verifier) VerifyOutcomes(task *Task, result *VerifyResult) error {
+	return verifier.verifyOutcomes(context.Background(), task, result)
+}
+
+func (verifier *Verifier) verifyOutcomes(ctx context.Context, task *Task, result *VerifyResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 1. Verify files were created/modified (skip for analysis/validation tasks)
 	if task.Type == TaskTypeImplementation {
 		if err := verifier.verifyFiles(task, result); err != nil {
@@ -528,7 +535,7 @@ func (verifier *Verifier) VerifyOutcomes(task *Task, result *VerifyResult) error
 	}
 
 	// 2. Run verification steps
-	if err := verifier.runVerificationSteps(task, result); err != nil {
+	if err := verifier.runVerificationSteps(ctx, task, result); err != nil {
 		result.Passed = false
 		result.Errors = append(result.Errors, fmt.Sprintf("Verification failed: %v", err))
 		return err
@@ -536,14 +543,14 @@ func (verifier *Verifier) VerifyOutcomes(task *Task, result *VerifyResult) error
 
 	// 3. Run automated tests (primarily for validation tasks)
 	if task.Type == TaskTypeValidation || task.Type == "" {
-		if err := verifier.runTests(task, result); err != nil {
+		if err := verifier.runTests(ctx, task, result); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Tests: %v", err))
 		}
 	}
 
 	// 4. Check code quality thresholds (for implementation tasks)
 	if task.Type == TaskTypeImplementation || task.Type == "" {
-		if err := verifier.checkQuality(task, result); err != nil {
+		if err := verifier.checkQuality(ctx, task, result); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Quality: %v", err))
 		}
 	}
@@ -551,6 +558,10 @@ func (verifier *Verifier) VerifyOutcomes(task *Task, result *VerifyResult) error
 	// 5. Collect artifacts
 	verifier.collectArtifacts(task, result)
 
+	if err := ctx.Err(); err != nil {
+		result.Passed = false
+		return err
+	}
 	if len(result.Errors) == 0 {
 		result.Passed = true
 	}
@@ -588,24 +599,27 @@ func (verifier *Verifier) verifyFiles(task *Task, result *VerifyResult) error {
 }
 
 // runVerificationSteps executes verification steps from task
-func (verifier *Verifier) runVerificationSteps(task *Task, result *VerifyResult) error {
+func (verifier *Verifier) runVerificationSteps(ctx context.Context, task *Task, result *VerifyResult) error {
 	for _, verification := range task.Verification {
-		if err := verifier.runVerificationStep(verification, result); err != nil {
-			return fmt.Errorf("verification step failed: %s: %v", verification, err)
+		if err := verifier.runVerificationStep(ctx, verification, result); err != nil {
+			return fmt.Errorf("verification step failed: %s: %w", verification, err)
 		}
 	}
 	return nil
 }
 
 // runVerificationStep executes a single verification step
-func (verifier *Verifier) runVerificationStep(verification string, result *VerifyResult) error {
+func (verifier *Verifier) runVerificationStep(parent context.Context, verification string, result *VerifyResult) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	cmd := verifier.buildCommand(verification)
 	if cmd == "" {
 		return nil // Skip if no command can be inferred
 	}
 
 	// Run with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
 	parts := strings.Fields(cmd)
@@ -617,6 +631,9 @@ func (verifier *Verifier) runVerificationStep(verification string, result *Verif
 	}
 
 	output, err := c.CombinedOutput()
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("verification timed out")
@@ -666,7 +683,7 @@ func (verifier *Verifier) buildCommand(verification string) string {
 }
 
 // runTests automatically runs appropriate tests for the project
-func (verifier *Verifier) runTests(task *Task, result *VerifyResult) error {
+func (verifier *Verifier) runTests(ctx context.Context, task *Task, result *VerifyResult) error {
 	// Don't run tests if task already includes test verification
 	for _, v := range task.Verification {
 		if strings.Contains(strings.ToLower(v), "test") {
@@ -676,7 +693,7 @@ func (verifier *Verifier) runTests(task *Task, result *VerifyResult) error {
 
 	testCommands := verifier.detectTestCommands()
 	for _, cmd := range testCommands {
-		if err := verifier.runVerificationStep(cmd, result); err != nil {
+		if err := verifier.runVerificationStep(ctx, cmd, result); err != nil {
 			result.Warnings = append(result.Warnings, err.Error())
 		}
 	}
@@ -698,11 +715,11 @@ func (verifier *Verifier) detectTestCommands() []string {
 }
 
 // checkQuality runs code quality checks
-func (verifier *Verifier) checkQuality(task *Task, result *VerifyResult) error {
+func (verifier *Verifier) checkQuality(ctx context.Context, task *Task, result *VerifyResult) error {
 	// Run linter if available
 	linterCommands := verifier.detectLinterCommands()
 	for _, cmd := range linterCommands {
-		if err := verifier.runVerificationStep(cmd, result); err != nil {
+		if err := verifier.runVerificationStep(ctx, cmd, result); err != nil {
 			// Lint warnings are just warnings, not errors
 			result.Warnings = append(result.Warnings, err.Error())
 		}

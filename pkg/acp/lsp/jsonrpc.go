@@ -33,11 +33,12 @@ type JSONRPCError struct {
 
 // JSON-RPC error codes
 const (
-	ParseError     = -32700
-	InvalidRequest = -32600
-	MethodNotFound = -32601
-	InvalidParams  = -32602
-	InternalError  = -32603
+	ParseError       = -32700
+	InvalidRequest   = -32600
+	MethodNotFound   = -32601
+	InvalidParams    = -32602
+	InternalError    = -32603
+	RequestCancelled = -32800
 )
 
 // ReadMessage reads a JSON-RPC message from the reader
@@ -182,19 +183,7 @@ func (b *Bridge) handleRequest(ctx context.Context, msg *JSONRPCMessage) *JSONRP
 
 		responseText, err := b.HandleTextQuery(ctx, params.Query)
 		if err != nil {
-			var incomplete *partialresult.IncompleteError
-			if errors.As(err, &incomplete) {
-				response.Error = &JSONRPCError{
-					Code:    InternalError,
-					Message: incomplete.Error(),
-					Data:    marshalPartialResultErrorData(incomplete.Result),
-				}
-				return response
-			}
-			response.Error = &JSONRPCError{
-				Code:    InternalError,
-				Message: "request failed: coordinator error",
-			}
+			response.Error = editorQueryError(ctx, err)
 			return response
 		}
 
@@ -229,6 +218,20 @@ func (b *Bridge) handleRequest(ctx context.Context, msg *JSONRPCMessage) *JSONRP
 		}
 	}
 
+	return response
+}
+
+func editorQueryError(ctx context.Context, err error) *JSONRPCError {
+	response := &JSONRPCError{Code: InternalError, Message: "request failed: coordinator error"}
+	var incomplete *partialresult.IncompleteError
+	if errors.As(err, &incomplete) {
+		response.Message = incomplete.Error()
+		response.Data = marshalPartialResultErrorData(incomplete.Result)
+	}
+	if ctx.Err() == context.Canceled {
+		response.Code = RequestCancelled
+		response.Message = "request cancelled"
+	}
 	return response
 }
 
@@ -271,14 +274,5 @@ func (b *Bridge) handleNotification(ctx context.Context, msg *JSONRPCMessage) {
 		b.Initialized(ctx)
 	case "exit":
 		b.Exit(ctx)
-	case "$/cancelRequest":
-		var params CancelParams
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return
-		}
-		// Extract stream ID from the cancelled request
-		// This is a simplified implementation
-		// In production, you'd track request ID -> stream ID mapping
-		// Silently ignore unknown notifications per JSON-RPC spec
 	}
 }

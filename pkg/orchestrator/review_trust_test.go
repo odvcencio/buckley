@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 
 type failingReviewer struct{}
 
-func (f *failingReviewer) Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+func (f *failingReviewer) reviewWithContext(_ context.Context, task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
 	return nil, errors.New("boom")
 }
 
@@ -18,7 +19,7 @@ func (f *failingReviewer) SetPersonaProvider(provider *personality.PersonaProvid
 
 type incompleteReviewer struct{}
 
-func (r *incompleteReviewer) Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+func (r *incompleteReviewer) reviewWithContext(_ context.Context, task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
 	return nil, NewIncompleteReviewError("public draft", "length", errors.New("raw provider sentinel"))
 }
 

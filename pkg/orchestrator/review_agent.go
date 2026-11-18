@@ -187,6 +187,13 @@ func (a *ReviewAgent) resolveReasoningEffort() string {
 
 // Review runs the review loop for a single task implementation.
 func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+	return a.reviewWithContext(context.Background(), task, builderResult)
+}
+
+func (a *ReviewAgent) reviewWithContext(ctx context.Context, task *Task, builderResult *BuilderResult) (*ReviewResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if a == nil {
 		return nil, fmt.Errorf("review agent not initialized")
 	}
@@ -212,7 +219,7 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 		}
 	}
 	systemPrompt := prompts.ReviewPrompt(time.Now(), personaProfile)
-	reqCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	req := model.ChatRequest{
@@ -264,6 +271,9 @@ func (a *ReviewAgent) Review(task *Task, builderResult *BuilderResult) (*ReviewR
 	if err != nil {
 		a.logFailure(task.ID, err)
 		return nil, fmt.Errorf("failed to parse review response: %w", err)
+	}
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

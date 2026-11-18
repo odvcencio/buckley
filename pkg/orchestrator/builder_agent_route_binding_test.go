@@ -96,7 +96,7 @@ func TestBuilderRouteBinding_ToollessRouteOmitsToolsAndRejectsSurpriseCall(t *te
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), client, probe)
 
-	_, err := agent.generateImplementation(&Task{ID: "task-toolless", Title: "toolless", Description: "do not modify"})
+	_, err := agent.generateImplementation(t.Context(), &Task{ID: "task-toolless", Title: "toolless", Description: "do not modify"})
 	var incomplete *agentloop.IncompleteTurnError
 	if !errors.As(err, &incomplete) || incomplete.Code != "unoffered_tool_call" {
 		t.Fatalf("error = %v, want unoffered_tool_call incomplete result", err)
@@ -147,7 +147,7 @@ func TestBuilderRouteBinding_ToollessUnsupportedToolsErrorDoesNotRetry(t *testin
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), client, probe)
 
-	_, err := agent.generateImplementation(&Task{ID: "task-toolless-error", Title: "toolless error", Description: "return the provider error"})
+	_, err := agent.generateImplementation(t.Context(), &Task{ID: "task-toolless-error", Title: "toolless error", Description: "return the provider error"})
 	if err == nil || !strings.Contains(err.Error(), "does not support tools") {
 		t.Fatalf("error = %v, want original unsupported-tools failure", err)
 	}
@@ -189,7 +189,7 @@ func TestBuilderRouteBinding_HookDriftStopsBeforeProviderDispatch(t *testing.T) 
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), mgr, probe)
 
-	_, err := agent.generateImplementation(&Task{ID: "task-drift", Title: "drift", Description: "no provider call"})
+	_, err := agent.generateImplementation(t.Context(), &Task{ID: "task-drift", Title: "drift", Description: "no provider call"})
 	if err == nil || !strings.Contains(err.Error(), "model route changed before dispatch") {
 		t.Fatalf("error = %v, want route drift before dispatch", err)
 	}
@@ -225,7 +225,7 @@ func TestBuilderRouteBinding_CapableRouteOffersToolsAndExecutesOnce(t *testing.T
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), mgr, probe)
 
-	out, err := agent.generateImplementation(&Task{ID: "task-capable", Title: "capable", Description: "execute exactly once"})
+	out, err := agent.generateImplementation(t.Context(), &Task{ID: "task-capable", Title: "capable", Description: "execute exactly once"})
 	if err != nil {
 		t.Fatalf("generateImplementation: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestBuilderRouteBinding_CapableUnsupportedToolsRetryPinsRouteAndRejectsSurp
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), client, probe)
 
-	_, err := agent.generateImplementation(&Task{ID: "task-capable-retry", Title: "capable retry", Description: "retry without tools"})
+	_, err := agent.generateImplementation(t.Context(), &Task{ID: "task-capable-retry", Title: "capable retry", Description: "retry without tools"})
 	var incomplete *agentloop.IncompleteTurnError
 	if !errors.As(err, &incomplete) || incomplete.Code != "unoffered_tool_call" {
 		t.Fatalf("error = %v, want unoffered_tool_call from retry response", err)
@@ -335,7 +335,7 @@ func TestBuilderRouteBinding_CapableUnsupportedToolsRetryDriftStopsBeforeSecondP
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), client, probe)
 
-	_, err := agent.generateImplementation(&Task{ID: "task-capable-retry-drift", Title: "capable retry drift", Description: "stop before retry I/O"})
+	_, err := agent.generateImplementation(t.Context(), &Task{ID: "task-capable-retry-drift", Title: "capable retry drift", Description: "stop before retry I/O"})
 	if err == nil || !strings.Contains(err.Error(), "model route changed before dispatch") {
 		t.Fatalf("error = %v, want retry route drift failure", err)
 	}
@@ -375,7 +375,7 @@ func TestBuilderRouteBinding_UnknownRouteRemainsToolEligible(t *testing.T) {
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(builderRouteBindingConfig(), client, probe)
 
-	out, err := agent.generateImplementation(&Task{ID: "task-unknown", Title: "unknown", Description: "keep tools eligible"})
+	out, err := agent.generateImplementation(t.Context(), &Task{ID: "task-unknown", Title: "unknown", Description: "keep tools eligible"})
 	if err != nil {
 		t.Fatalf("generateImplementation: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestBuilderRouteBinding_LegacyMockFallbackUsesGenericDispatch(t *testing.T)
 	cfg.Models.Execution = "legacy-alias"
 	probe := &builderRouteProbeTool{name: "modify_probe"}
 	agent := newBuilderRouteBindingAgent(cfg, client, probe)
-	out, err := agent.generateImplementation(&Task{ID: "task-legacy", Title: "legacy", Description: "generic fallback"})
+	out, err := agent.generateImplementation(t.Context(), &Task{ID: "task-legacy", Title: "legacy", Description: "generic fallback"})
 	if err != nil {
 		t.Fatalf("generateImplementation: %v", err)
 	}

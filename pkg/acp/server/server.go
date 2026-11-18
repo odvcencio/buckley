@@ -463,10 +463,10 @@ func (s *Server) SendMessage(ctx context.Context, req *acppb.SendMessageRequest)
 
 	featureName := fmt.Sprintf("acp-send-%s", sessionID)
 	desc := req.Message.Content
-	if _, err := orch.PlanFeature(featureName, desc); err != nil {
+	if _, err := orch.PlanFeatureContext(ctx, featureName, desc); err != nil {
 		return nil, acpSafeStatusError("execution", err)
 	}
-	if err := orch.ExecutePlan(); err != nil {
+	if err := orch.ExecutePlanContext(ctx); err != nil {
 		return nil, acpSafeStatusError("execution", err)
 	}
 
@@ -595,16 +595,14 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 	}
 	defer cleanup()
 
-	// Support cancel by listening to stream.Context().Done()
-	ctx, cancel := context.WithCancel(stream.Context())
-	defer cancel()
+	ctx := stream.Context()
 
 	featureName := fmt.Sprintf("acp-%s", req.TaskId)
 	if strings.TrimSpace(featureName) == "" {
 		featureName = "acp-task"
 	}
 
-	if _, err := orch.PlanFeature(featureName, req.Query); err != nil {
+	if _, err := orch.PlanFeatureContext(ctx, featureName, req.Query); err != nil {
 		if sendErr := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); sendErr != nil {
 			return sendErr
 		}
@@ -615,25 +613,11 @@ func (s *Server) StreamTask(req *acppb.TaskStreamRequest, stream acppb.AgentComm
 		return err
 	}
 
-	execDone := make(chan error, 1)
-	go func() {
-		execDone <- orch.ExecutePlan()
-	}()
-
-	select {
-	case <-ctx.Done():
-		orch.Cancel() // propagate cancel to orchestrator
-		if err := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); err != nil {
-			return err
+	if err := orch.ExecutePlanContext(ctx); err != nil {
+		if sendErr := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); sendErr != nil {
+			return sendErr
 		}
-		return acpSafeStatusError("execution", ctx.Err())
-	case err := <-execDone:
-		if err != nil {
-			if sendErr := stream.Send(acpClassicIncompleteTaskEvent(req.TaskId)); sendErr != nil {
-				return sendErr
-			}
-			return acpSafeStatusError("execution", err)
-		}
+		return acpSafeStatusError("execution", err)
 	}
 
 	if err := stream.Send(&acppb.TaskEvent{TaskId: req.TaskId, Message: "✅ Task completed"}); err != nil {
