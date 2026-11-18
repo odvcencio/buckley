@@ -80,12 +80,15 @@ Dapr activities are delivered at least once. Buckley's step journal prevents
 re-execution after a result has been durably recorded. One ambiguous window
 still exists for a modifying or destructive tool: the worker can crash after
 the external effect succeeds but before its result receipt is stored. A retry
-cannot prove whether that effect happened and may repeat it.
+cannot prove whether that effect happened. Buckley leaves the dispatched step
+unresolved until its outcome can be established.
 
-Until effect-aware reconciliation and adapter idempotency keys are complete,
-do not describe Dapr execution as exactly-once. Keep approval gates enabled for
-non-idempotent tools, prefer tools with their own idempotency support, and use
-`buckley goal audit` to inspect an interrupted modifying step before resuming.
+The local `write_file` builtin records the expected before-and-after content
+digests for eligible single-file writes. After an interruption, use
+`buckley goal recover-write <run-id> <step-id>` to seal the tool receipt when
+the current file matches the intended result. This command only reads the
+workspace. Different content leaves the step unresolved. The tool receipt
+does not resolve a separate ambiguous whole-turn receipt.
 
 ## Sidecar or emulator
 

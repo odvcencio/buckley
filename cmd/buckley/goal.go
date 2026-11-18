@@ -39,7 +39,7 @@ import (
 // UX arrives with G9; this surface creates and inspects goals.
 func runGoalCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: buckley goal <preflight|start|status|list|report|run|audit|replay|approve> [flags]")
+		return errors.New("usage: buckley goal <preflight|start|status|list|report|run|audit|replay|recover-write|approve> [flags]")
 	}
 	switch args[0] {
 	case "preflight":
@@ -58,12 +58,14 @@ func runGoalCommand(args []string) error {
 		return runGoalAudit(args[1:])
 	case "replay":
 		return runGoalReplay(args[1:])
+	case "recover-write":
+		return runGoalRecoverWrite(args[1:])
 	case "approve":
 		return runGoalApprove(args[1:])
 	case "worker":
 		return runGoalWorker(args[1:])
 	default:
-		return fmt.Errorf("unknown goal subcommand %q (want preflight, start, status, list, report, run, audit, replay, approve, or worker)", args[0])
+		return fmt.Errorf("unknown goal subcommand %q (want preflight, start, status, list, report, run, audit, replay, recover-write, approve, or worker)", args[0])
 	}
 }
 

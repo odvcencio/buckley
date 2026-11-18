@@ -52,7 +52,7 @@ func (e *restartEngine) RunTurn(_ context.Context, task goalloop.TaskContext) (g
 	if strings.HasSuffix(task.TurnID, "/turn-000") {
 		return goalloop.TurnOutcome{Rounds: 1, StateChanged: true, Summary: "first turn"}, nil
 	}
-	return goalloop.TurnOutcome{Rounds: 1, Completed: true, CompletedEvidenceID: evidenceID, Summary: "done"}, nil
+	return verifiedIntegrationTurn(evidenceID, "done"), nil
 }
 
 func (e *restartEngine) turnCalls(turnSuffix string) int {
@@ -157,14 +157,37 @@ func (p staticPlanner) Decompose(context.Context, goalloop.Goal) ([]goalloop.Tas
 	return p.specs, nil
 }
 
-type completingEngine struct{ calls int }
+type completingEngine struct {
+	calls               int
+	completedEvidenceID string
+}
 
 func (e *completingEngine) RunTurn(_ context.Context, _ goalloop.TaskContext) (goalloop.TurnOutcome, error) {
 	e.calls++
 	if e.calls == 1 {
 		return goalloop.TurnOutcome{Rounds: 1, StateChanged: true, Summary: "first turn"}, nil
 	}
-	return goalloop.TurnOutcome{Rounds: 1, Completed: true, CompletedEvidenceID: "ev_it", Summary: "done"}, nil
+	return verifiedIntegrationTurn(e.completedEvidenceID, "done"), nil
+}
+
+func verifiedIntegrationTurn(evidenceID, summary string) goalloop.TurnOutcome {
+	return goalloop.TurnOutcome{
+		Rounds: 1, Completed: true, CompletedEvidenceID: evidenceID, Summary: summary,
+		CompletionEvidence: taskstate.CompletionEvidenceState{
+			Version:             taskstate.NewCompletionEvidenceState().Version,
+			StateChangeObserved: true, VerificationStatus: taskstate.VerificationPass,
+			VerificationEvidenceID: evidenceID,
+		},
+	}
+}
+
+func integrationVerificationEvidence(t *testing.T, ctx context.Context, store evidence.Store) string {
+	t.Helper()
+	obj, err := store.Put(ctx, evidence.Object{Kind: evidence.KindTestOutput, MediaType: "text/plain", InlineBody: []byte("PASS: scripted workspace verification")})
+	if err != nil {
+		t.Fatalf("store verification evidence: %v", err)
+	}
+	return obj.ID
 }
 
 // resumableGenerationEngine forces one bounded-yield generation, then
@@ -258,7 +281,7 @@ func (e *resumableGenerationEngine) RunTurn(_ context.Context, task goalloop.Tas
 	if call == 1 {
 		return goalloop.TurnOutcome{Rounds: 1, StateChanged: true, Summary: "checkpoint for next generation"}, nil
 	}
-	return goalloop.TurnOutcome{Rounds: 1, Completed: true, CompletedEvidenceID: evidenceID, Summary: "resumed generation completed"}, nil
+	return verifiedIntegrationTurn(evidenceID, "resumed generation completed"), nil
 }
 
 func (e *resumableGenerationEngine) recordedCalls() []goalloop.TaskContext {
@@ -384,7 +407,9 @@ func TestDaprBackend_GoalCompletes(t *testing.T) {
 	endpoint := integrationEndpoint(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	loop, _, ledger, intake, specs := newIntegrationGoal(t, ctx, &completingEngine{}, "integration goal", nil)
+	engine := &completingEngine{}
+	loop, ev, ledger, intake, specs := newIntegrationGoal(t, ctx, engine, "integration goal", nil)
+	engine.completedEvidenceID = integrationVerificationEvidence(t, ctx, ev)
 
 	backend, err := dapr.New(endpoint)
 	if err != nil {
@@ -441,11 +466,7 @@ func TestDaprBackend_IncompleteGenerationResumesAndCompletes(t *testing.T) {
 		Fuses: agentloop.Fuses{ModelRequests: 1},
 	}
 	loop, ev, ledger, intake, specs := newIntegrationGoalWithProgress(t, ctx, engine, "resumable generation goal", nil, progress)
-	completed, err := ev.Put(ctx, evidence.Object{Kind: evidence.KindCheckpoint, MediaType: "text/plain", InlineBody: []byte("resumed generation completion evidence")})
-	if err != nil {
-		t.Fatalf("store completion evidence: %v", err)
-	}
-	engine.completedEvidenceID = completed.ID
+	engine.completedEvidenceID = integrationVerificationEvidence(t, ctx, ev)
 
 	backend, err := dapr.New(endpoint)
 	if err != nil {
@@ -561,11 +582,7 @@ func TestDaprBackend_WorkerRestartResumesWithoutReexecution(t *testing.T) {
 	defer cancel()
 	engine := newRestartEngine()
 	loop, ev, ledger, intake, specs := newIntegrationGoal(t, ctx, engine, "restart goal", nil)
-	completed, err := ev.Put(ctx, evidence.Object{Kind: evidence.KindCheckpoint, MediaType: "text/plain", InlineBody: []byte("restart acceptance completion evidence")})
-	if err != nil {
-		t.Fatalf("store completion evidence: %v", err)
-	}
-	engine.completedEvidenceID = completed.ID
+	engine.completedEvidenceID = integrationVerificationEvidence(t, ctx, ev)
 	sink := newRestartReceiptSink()
 	ledger.SetRalphSink(sink)
 	runner := newIntegrationRunner(t, loop, intake, specs)
@@ -1223,7 +1240,9 @@ func TestDaprBackend_ResolverServesGoalFromLedger(t *testing.T) {
 	endpoint := integrationEndpoint(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	loop, _, _, intake, _ := newIntegrationGoal(t, ctx, &completingEngine{}, "resolver goal", nil)
+	engine := &completingEngine{}
+	loop, ev, _, intake, _ := newIntegrationGoal(t, ctx, engine, "resolver goal", nil)
+	engine.completedEvidenceID = integrationVerificationEvidence(t, ctx, ev)
 	resolver := goalrunner.NewResolver(func(ctx context.Context, runID string) (*goalrunner.Runner, error) {
 		goal, specs, err := loop.LoadGoal(ctx, runID)
 		if err != nil {

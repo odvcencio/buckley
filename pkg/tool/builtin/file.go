@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -397,6 +398,10 @@ func (t *WriteFileTool) Parameters() ParameterSchema {
 }
 
 func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
+	return t.ExecuteWithContext(context.Background(), params)
+}
+
+func (t *WriteFileTool) ExecuteWithContext(ctx context.Context, params map[string]any) (*Result, error) {
 	path, ok := params["path"].(string)
 	if !ok {
 		return &Result{
@@ -426,6 +431,15 @@ func (t *WriteFileTool) Execute(params map[string]any) (*Result, error) {
 			Success: false,
 			Error:   err.Error(),
 		}, nil
+	}
+
+	if record, ok := ctx.Value(writeFileIntentKey{}).(func(context.Context, WriteFileIntent) error); ok {
+		intent, supported := prepareWriteFileIntent(t.workDir, absPath, content)
+		if supported {
+			if err := record(ctx, intent); err != nil {
+				return nil, fmt.Errorf("record write intent: %w", err)
+			}
+		}
 	}
 
 	// Create parent directory if it doesn't exist

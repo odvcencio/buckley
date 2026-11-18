@@ -273,13 +273,19 @@ func (e *goalTurnEngine) RunTurn(ctx context.Context, task goalloop.TaskContext)
 		}
 		return resp, err
 	})
-	dispatch := agentloop.ToolDispatcherFunc(func(ctx context.Context, calls []model.ToolCall) ([]agentloop.ToolOutcome, error) {
+	dispatch := agentloop.ContextualToolDispatcherFunc(func(ctx context.Context, calls []agentloop.ToolDispatchCall) ([]agentloop.ToolOutcome, error) {
 		outcomes := make([]agentloop.ToolOutcome, 0, len(calls))
 		for _, call := range calls {
 			if ctx.Err() != nil {
 				return outcomes, ctx.Err()
 			}
-			outcomes = append(outcomes, e.dispatchGoalTool(ctx, task, call, state))
+			toolCtx := ctx
+			if call.Call.Function.Name == "write_file" && e.stepJournal != nil && e.evidence != nil {
+				toolCtx = builtin.WithWriteFileIntent(ctx, func(ctx context.Context, intent builtin.WriteFileIntent) error {
+					return recordGoalWriteIntent(ctx, e.stepJournal, e.evidence, call.RunID, call.StepID, intent)
+				})
+			}
+			outcomes = append(outcomes, e.dispatchGoalTool(toolCtx, task, call.Call, state))
 		}
 		return outcomes, nil
 	})

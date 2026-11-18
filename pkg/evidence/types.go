@@ -25,6 +25,7 @@ const (
 	KindModelRequest    Kind = "model_request"
 	KindModelResponse   Kind = "model_response"
 	KindToolRequest     Kind = "tool_request"
+	KindToolIntent      Kind = "tool_intent"
 	KindToolResult      Kind = "tool_result"
 	KindCommandOutput   Kind = "command_output"
 	KindTestOutput      Kind = "test_output"

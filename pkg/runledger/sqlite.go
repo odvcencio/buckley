@@ -728,12 +728,22 @@ func (s *SQLiteStore) FailStep(ctx context.Context, runID, stepID, failure strin
 
 // CompleteStepAttempt implements BlockingStepJournal.
 func (s *SQLiteStore) CompleteStepAttempt(ctx context.Context, step ExecutionStep, outputEvidenceID, outputDigest string, completedAt time.Time) error {
-	return s.transitionStep(ctx, step, StepCompleted, "", outputEvidenceID, outputDigest, completedAt)
+	return s.transitionStep(ctx, step, StepStarted, StepCompleted, "", outputEvidenceID, outputDigest, completedAt)
+}
+
+// ReconcileToolStep seals a dispatched tool step after the caller has
+// independently verified the external result.
+func (s *SQLiteStore) ReconcileToolStep(ctx context.Context, step ExecutionStep, outputEvidenceID, outputDigest string, at time.Time) error {
+	if step.Kind != "tool" || step.DispatchState != StepDispatchDispatched ||
+		(step.Status != StepStarted && step.Status != StepBlocked) || outputEvidenceID == "" || outputDigest == "" {
+		return fmt.Errorf("runledger: reconciliation requires a dispatched tool step and output evidence")
+	}
+	return s.transitionStep(ctx, step, step.Status, StepCompleted, "", outputEvidenceID, outputDigest, at)
 }
 
 // FailStepAttempt implements BlockingStepJournal.
 func (s *SQLiteStore) FailStepAttempt(ctx context.Context, step ExecutionStep, failure string, completedAt time.Time) error {
-	return s.transitionStep(ctx, step, StepFailed, failure, "", "", completedAt)
+	return s.transitionStep(ctx, step, StepStarted, StepFailed, failure, "", "", completedAt)
 }
 
 // BlockStep implements BlockingStepJournal.
@@ -741,7 +751,7 @@ func (s *SQLiteStore) BlockStep(ctx context.Context, step ExecutionStep, failure
 	if strings.TrimSpace(failure) == "" {
 		return fmt.Errorf("runledger: failure is required to block an execution step")
 	}
-	return s.transitionStep(ctx, step, StepBlocked, failure, outputEvidenceID, outputDigest, completedAt)
+	return s.transitionStep(ctx, step, StepStarted, StepBlocked, failure, outputEvidenceID, outputDigest, completedAt)
 }
 
 // MarkStepDispatched implements DispatchStepJournal.
@@ -823,7 +833,7 @@ func (s *SQLiteStore) ReclaimStep(ctx context.Context, step ExecutionStep, recla
 	return step, nil
 }
 
-func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, status, failure, outputEvidenceID, outputDigest string, completedAt time.Time) error {
+func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, fromStatus, status, failure, outputEvidenceID, outputDigest string, completedAt time.Time) error {
 	if step.RunID == "" || step.StepID == "" {
 		return fmt.Errorf("runledger: run_id and step_id are required for an execution step transition")
 	}
@@ -841,7 +851,11 @@ func (s *SQLiteStore) transitionStep(ctx context.Context, step ExecutionStep, st
 		SET status = ?, output_evidence_id = ?, output_digest = ?, error_text = ?, completed_at = ?
 		WHERE run_id = ? AND step_id = ? AND status = ? AND attempt = ? AND claim_generation = ?`
 	args := []any{status, nullableStr(outputEvidenceID), nullableStr(outputDigest), nullableStr(failure), sqliteTimestamp(completedAt),
-		step.RunID, step.StepID, StepStarted, step.Attempt, step.ClaimGeneration}
+		step.RunID, step.StepID, fromStatus, step.Attempt, step.ClaimGeneration}
+	if step.DispatchState == StepDispatchDispatched && status == StepCompleted {
+		query += ` AND dispatch_state = ?`
+		args = append(args, StepDispatchDispatched)
+	}
 	if status == StepFailed {
 		query += ` AND dispatch_state = ?`
 		args = append(args, StepDispatchClaimed)
