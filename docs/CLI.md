@@ -78,6 +78,18 @@ buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Is the grammar 
 buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Which rules need lookahead?"
 ```
 
+A context file can also be a PNG, JPEG or WebP image, found by its extension or its
+bytes, of at most 3.75 MB. Each image goes to the model as an image in the same
+cached prefix, in the order given:
+
+```bash
+buckley -m openai/gpt-6.2-astra --context-file title.png --context-file menu.png \
+  -p "Critique the hierarchy of each screen in one line."
+```
+
+A spend cap (`--budget`) does not admit image input, because Buckley cannot count
+image tokens before the request.
+
 Unless quiet mode is on, every one-shot prints a `Usage detail:` line on stderr with input, output, cache-read
 and cache-write tokens and the estimated cost, capped or not.
 

@@ -399,6 +399,8 @@ type anthropicContent struct {
 	Input     map[string]any `json:"input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   any            `json:"content,omitempty"`
+	// Source is an image block's data.
+	Source *anthropicImageSource `json:"source,omitempty"`
 	// CacheControl ends a cached prefix at this block.
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 	raw          json.RawMessage
@@ -599,15 +601,20 @@ func anthropicMessageContent(msg Message) ([]anthropicContent, error) {
 }
 
 func anthropicTextBlocks(content any) []anthropicContent {
-	if parts, ok := content.([]ContentPart); ok && contentHasCacheControl(parts) {
-		// Keep each part its own block so a cache breakpoint ends exactly
-		// where the stable prefix ends.
+	if parts, ok := content.([]ContentPart); ok && (contentHasCacheControl(parts) || contentHasImage(parts)) {
+		// Keep each part its own block so images reach the model and a cache
+		// breakpoint ends exactly where the stable prefix ends.
 		var blocks []anthropicContent
 		for _, part := range parts {
-			if (part.Type != "" && part.Type != "text") || part.Text == "" {
+			var block anthropicContent
+			switch {
+			case part.ImageURL != nil && part.ImageURL.URL != "":
+				block = anthropicContent{Type: "image", Source: anthropicImageSourceFor(part.ImageURL.URL)}
+			case (part.Type == "" || part.Type == "text") && part.Text != "":
+				block = anthropicContent{Type: "text", Text: part.Text}
+			default:
 				continue
 			}
-			block := anthropicContent{Type: "text", Text: part.Text}
 			if part.CacheControl != nil {
 				control := *part.CacheControl
 				block.CacheControl = &control
@@ -646,4 +653,35 @@ func toStreamDelta(msg Message) MessageDelta {
 		})
 	}
 	return delta
+}
+
+// anthropicImageSource is the source of an Anthropic image block: base64
+// data with its media type, or a URL.
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// anthropicImageSourceFor turns an image_url (a data: URL or a web URL) into
+// an Anthropic image source.
+func anthropicImageSourceFor(url string) *anthropicImageSource {
+	if rest, ok := strings.CutPrefix(url, "data:"); ok {
+		if meta, data, ok := strings.Cut(rest, ","); ok {
+			if mediaType, ok := strings.CutSuffix(meta, ";base64"); ok {
+				return &anthropicImageSource{Type: "base64", MediaType: mediaType, Data: data}
+			}
+		}
+	}
+	return &anthropicImageSource{Type: "url", URL: url}
+}
+
+func contentHasImage(parts []ContentPart) bool {
+	for _, part := range parts {
+		if part.ImageURL != nil && part.ImageURL.URL != "" {
+			return true
+		}
+	}
+	return false
 }

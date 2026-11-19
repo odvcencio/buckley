@@ -305,3 +305,102 @@ func TestOpenAICacheWritesArePriced(t *testing.T) {
 		t.Fatalf("bounded = %v, %v; want %v", bounded, err, want)
 	}
 }
+
+// imageContextRequest is a one-shot request with two screenshots in the
+// cached prefix, as --context-file builds it.
+func imageContextRequest(model, question string) ChatRequest {
+	return ChatRequest{
+		Model: model,
+		Messages: []Message{
+			{Role: "system", Content: "You are Buckley."},
+			{Role: "user", Content: []ContentPart{
+				{Type: "text", Text: "Context files.\n<context_image path=\"a.png\" type=\"image/png\">\n"},
+				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/png;base64,QUFBQQ=="}},
+				{Type: "text", Text: "</context_image>\n<context_image path=\"b.webp\" type=\"image/webp\">\n"},
+				{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/webp;base64,QkJCQg=="}},
+				{Type: "text", Text: "</context_image>\nEnd of the context files.\n", CacheBreakpoint: true},
+				{Type: "text", Text: question},
+			}},
+		},
+		PromptCache: &PromptCache{Enabled: true},
+	}
+}
+
+func TestAnthropicContextImagesAreBase64BlocksUnderTheBreakpoint(t *testing.T) {
+	mgr := &Manager{config: &config.Config{}}
+	provider := NewAnthropicProvider("test", "", false)
+	wire := func(question string) []byte {
+		anthReq, err := provider.toAnthropicRequest(mgr.applyPromptCache(imageContextRequest("anthropic/claude-fable-5-2", question), "anthropic"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(anthReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	first, second := wire("Describe each screen."), wire("Which screen is darker?")
+	var decoded struct {
+		Messages []struct {
+			Content []struct {
+				Type         string          `json:"type"`
+				Text         string          `json:"text"`
+				Source       json.RawMessage `json:"source"`
+				CacheControl json.RawMessage `json:"cache_control"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(first, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	for _, block := range decoded.Messages[0].Content {
+		types = append(types, block.Type)
+	}
+	if strings.Join(types, ",") != "text,image,text,image,text,text" {
+		t.Fatalf("block types = %v", types)
+	}
+	content := decoded.Messages[0].Content
+	if string(content[1].Source) != `{"type":"base64","media_type":"image/png","data":"QUFBQQ=="}` ||
+		string(content[3].Source) != `{"type":"base64","media_type":"image/webp","data":"QkJCQg=="}` {
+		t.Fatalf("image sources = %s / %s", content[1].Source, content[3].Source)
+	}
+	if content[4].CacheControl == nil || content[5].CacheControl != nil || content[1].CacheControl != nil {
+		t.Fatal("want the breakpoint after the images, on the closing text only")
+	}
+	end := bytes.Index(first, []byte(`"cache_control":{"type":"ephemeral"}},{"type":"text","text":"Describe`))
+	if end < 0 || !bytes.Equal(first[:end], second[:end]) {
+		t.Fatalf("the prefix through the images differs between questions")
+	}
+}
+
+func TestOpenAIContextImagesAreDataURLsUnderTheBreakpoint(t *testing.T) {
+	mgr := &Manager{config: &config.Config{}}
+	first := mgr.applyPromptCache(imageContextRequest("openai/gpt-6.2-astra", "Describe each screen."), "openai")
+	second := mgr.applyPromptCache(imageContextRequest("openai/gpt-6.2-astra", "Which screen is darker?"), "openai")
+	if first.PromptCacheKey != second.PromptCacheKey {
+		t.Fatal("the same images got different cache keys")
+	}
+	changed := imageContextRequest("openai/gpt-6.2-astra", "Describe each screen.")
+	changed.Messages[1].Content.([]ContentPart)[1].ImageURL = &ImageURL{URL: "data:image/png;base64,Q0NDQw=="}
+	if mgr.applyPromptCache(changed, "openai").PromptCacheKey == first.PromptCacheKey {
+		t.Fatal("a different image kept the same cache key")
+	}
+	data, err := json.Marshal(first.Messages[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,QUFBQQ=="}}`,
+		`{"type":"image_url","image_url":{"url":"data:image/webp;base64,QkJCQg=="}}`,
+		`"text":"\u003c/context_image\u003e\nEnd of the context files.\n","prompt_cache_breakpoint":{"mode":"explicit"}}`,
+	} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("OpenAI message lacks %s:\n%s", want, data)
+		}
+	}
+	if bytes.Count(data, []byte("prompt_cache_breakpoint")) != 1 {
+		t.Fatalf("want one breakpoint, after the images:\n%s", data)
+	}
+}

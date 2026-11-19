@@ -403,15 +403,15 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		systemPrompt += "\n\n" + agentloop.PersistenceInstruction
 	}
 	conv.AddSystemMessage(systemPrompt)
-	contextBlock, err := loadOneShotContextFiles(cwd, opts.ContextFiles)
+	contextParts, err := loadOneShotContextFiles(cwd, opts.ContextFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
-	if contextBlock == "" {
+	if len(contextParts) == 0 {
 		conv.AddUserMessage(prompt)
 	} else {
-		conv.AppendMessage(oneShotContextMessage(contextBlock, prompt))
+		conv.AppendMessage(oneShotContextMessage(contextParts, prompt))
 		limits.PromptCache = oneShotContextPromptCache(mgr, resolvedModel, limits.MaxCostUSD, os.Stderr)
 	}
 

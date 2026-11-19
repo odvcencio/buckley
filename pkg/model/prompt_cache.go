@@ -279,6 +279,9 @@ func stablePrefixCacheKey(model string, messages []Message) string {
 				break
 			}
 			hash.Write([]byte(part.Text))
+			if part.ImageURL != nil {
+				hash.Write([]byte(part.ImageURL.URL))
+			}
 			hash.Write([]byte{0})
 		}
 	}

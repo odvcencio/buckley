@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -24,6 +28,15 @@ func TestParseStartupOptionsContextFiles(t *testing.T) {
 	}
 }
 
+// contextText joins the text of context parts.
+func contextText(parts []model.ContentPart) string {
+	var b strings.Builder
+	for _, part := range parts {
+		b.WriteString(part.Text)
+	}
+	return b.String()
+}
+
 func TestOneShotContextFilesFormTheSamePrefixOnEveryRun(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "spec.md"), []byte("# Spec\nrule one\n"), 0o600); err != nil {
@@ -41,14 +54,18 @@ func TestOneShotContextFilesFormTheSamePrefixOnEveryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second {
-		t.Fatalf("two runs with the same files differ:\n%s\n%s", first, second)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("two runs with the same files differ:\n%#v\n%#v", first, second)
 	}
-	if strings.Index(first, `path="spec.md"`) > strings.Index(first, `path="notes.txt"`) {
+	if len(first) != 1 || !first[0].CacheBreakpoint {
+		t.Fatalf("text files = %#v, want one text part marked as the stable prefix", first)
+	}
+	text := contextText(first)
+	if strings.Index(text, `path="spec.md"`) > strings.Index(text, `path="notes.txt"`) {
 		t.Fatal("files are not in the order given")
 	}
-	if !strings.Contains(first, "no trailing newline\n</context_file>") {
-		t.Fatalf("file end not closed on its own line:\n%s", first)
+	if !strings.Contains(text, "no trailing newline\n</context_file>") {
+		t.Fatalf("file end not closed on its own line:\n%s", text)
 	}
 
 	// Two questions about the same files: the marked context part is the
@@ -65,8 +82,112 @@ func TestOneShotContextFilesFormTheSamePrefixOnEveryRun(t *testing.T) {
 	if _, err := loadOneShotContextFiles(dir, []string{"missing.md"}); err == nil || !strings.Contains(err.Error(), "missing.md") {
 		t.Fatalf("missing file error = %v", err)
 	}
-	if block, err := loadOneShotContextFiles(dir, nil); err != nil || block != "" {
-		t.Fatalf("no files = %q, %v; want empty", block, err)
+	if parts, err := loadOneShotContextFiles(dir, nil); err != nil || parts != nil {
+		t.Fatalf("no files = %#v, %v; want none", parts, err)
+	}
+}
+
+// testPNG encodes a small solid PNG.
+func testPNG(t *testing.T, shade uint8) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 3))
+	for i := range img.Pix {
+		img.Pix[i] = shade
+	}
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func TestOneShotContextFilesCarryImagesInOrder(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string][]byte{
+		"title.png": testPNG(t, 10),
+		// A WebP header is enough for content sniffing.
+		"menu.webp": append([]byte("RIFF\x00\x00\x00\x00WEBPVP8 "), make([]byte, 16)...),
+		// An image without an image extension is found by its bytes.
+		"capture":  testPNG(t, 200),
+		"notes.md": []byte("menu notes\n"),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := []string{"title.png", "notes.md", "menu.webp", "capture"}
+	first, err := loadOneShotContextFiles(dir, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := loadOneShotContextFiles(dir, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("two runs with the same images differ")
+	}
+	var images []string
+	for _, part := range first {
+		if part.ImageURL != nil {
+			images = append(images, part.ImageURL.URL[:strings.Index(part.ImageURL.URL, ",")])
+		}
+	}
+	want := []string{"data:image/png;base64", "data:image/webp;base64", "data:image/png;base64"}
+	if !reflect.DeepEqual(images, want) {
+		t.Fatalf("images = %v, want %v in the order given", images, want)
+	}
+	if got := first[0].Text; !strings.Contains(got, `<context_image path="title.png" type="image/png">`) {
+		t.Fatalf("first part = %q, want the label before the first image", got)
+	}
+	last := first[len(first)-1]
+	if !last.CacheBreakpoint || last.ImageURL != nil || last.Text == "" {
+		t.Fatalf("last part = %#v, want text marked as the end of the stable prefix", last)
+	}
+	for _, part := range first[:len(first)-1] {
+		if part.CacheBreakpoint {
+			t.Fatal("a part before the end is marked as the end of the prefix")
+		}
+		if part.ImageURL == nil && part.Text == "" {
+			t.Fatal("an empty text part would be rejected by Anthropic")
+		}
+	}
+	if !strings.Contains(contextText(first), "menu notes") {
+		t.Fatal("the text file between images is missing")
+	}
+	data, _ := base64.StdEncoding.DecodeString(strings.SplitN(first[1].ImageURL.URL, ",", 2)[1])
+	if !bytes.Equal(data, files["title.png"]) {
+		t.Fatal("the first image's bytes changed")
+	}
+}
+
+func TestOneShotContextFilesRejectBadImages(t *testing.T) {
+	dir := t.TempDir()
+	big := append(testPNG(t, 1), make([]byte, maxContextImageBytes)...)
+	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+	for name, data := range map[string][]byte{
+		"huge.png":  big,
+		"fake.png":  []byte("plain text with an image name"),
+		"anim.gif":  gif,
+		"blob.bin":  {0xff, 0xfe, 0x00, 0x01, 0x80},
+		"photo.jpg": {0x00, 0x01, 0x02},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, want := range map[string]string{
+		"huge.png":  "the limit is 3.75 MB per image",
+		"fake.png":  "is named as an image but is not a PNG, JPEG or WebP image",
+		"anim.gif":  "is image/gif; images must be PNG, JPEG or WebP",
+		"blob.bin":  "neither UTF-8 text nor a PNG, JPEG or WebP image",
+		"photo.jpg": "is named as an image",
+	} {
+		_, err := loadOneShotContextFiles(dir, []string{name})
+		if err == nil || !strings.Contains(err.Error(), "--context-file "+name) || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error = %v, want the file named and %q", name, err, want)
+		}
 	}
 }
 
