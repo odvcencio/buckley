@@ -385,6 +385,13 @@ type OpenAICompatibleConfig struct {
 type ModelPricingOverride struct {
 	InputPerMillion  float64 `yaml:"input_per_million"`
 	OutputPerMillion float64 `yaml:"output_per_million"`
+	// Cache prices, optional. With a read and a write price set, --budget
+	// admits requests that use prompt caching and prices cache reads and
+	// writes instead of refusing them. cache_write_1h_per_million is the
+	// Anthropic 1-hour write price, needed only with prompt_cache.retention 1h.
+	CacheReadPerMillion    float64 `yaml:"cache_read_per_million,omitempty"`
+	CacheWritePerMillion   float64 `yaml:"cache_write_per_million,omitempty"`
+	CacheWrite1hPerMillion float64 `yaml:"cache_write_1h_per_million,omitempty"`
 }
 
 // LiteLLMConfig is the deprecated name for OpenAICompatibleConfig.

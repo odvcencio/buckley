@@ -1,7 +1,10 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -153,6 +156,131 @@ func cloneContentParts(parts []ContentPart) []ContentPart {
 			cache := *part.CacheControl
 			out[i].CacheControl = &cache
 		}
+		if part.PromptCacheBreakpoint != nil {
+			breakpoint := *part.PromptCacheBreakpoint
+			out[i].PromptCacheBreakpoint = &breakpoint
+		}
 	}
 	return out
+}
+
+// applyCacheBreakpoints puts marker on every content part marked as the end of
+// a stable prefix (ContentPart.CacheBreakpoint) that has no cache marker yet.
+// It copies what it changes and leaves the caller's messages untouched.
+func applyCacheBreakpoints(messages []Message, marker *CacheControl) []Message {
+	return markCacheBreakpoints(messages, func(part *ContentPart) {
+		if part.CacheControl == nil {
+			control := *marker
+			part.CacheControl = &control
+		}
+	})
+}
+
+// applyOpenAICacheBreakpoints puts an explicit OpenAI breakpoint on every
+// content part marked as the end of a stable prefix. Without one, GPT-5.6 and
+// later place their only breakpoint after the newest user message, so a new
+// question after the same context files never reads the cache.
+func applyOpenAICacheBreakpoints(messages []Message) []Message {
+	return markCacheBreakpoints(messages, func(part *ContentPart) {
+		if part.PromptCacheBreakpoint == nil {
+			part.PromptCacheBreakpoint = &PromptCacheBreakpoint{Mode: "explicit"}
+		}
+	})
+}
+
+// openAIExplicitCacheBreakpoints reports whether an OpenAI model accepts
+// explicit cache breakpoints: the GPT-5.6 family and later.
+func openAIExplicitCacheBreakpoints(model string) bool {
+	name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "openai/"))
+	if !strings.HasPrefix(name, "gpt-") {
+		return false
+	}
+	version := strings.TrimPrefix(name, "gpt-")
+	if i := strings.IndexFunc(version, func(r rune) bool { return (r < '0' || r > '9') && r != '.' }); i >= 0 {
+		version = version[:i]
+	}
+	majorText, minorText, _ := strings.Cut(version, ".")
+	major, err := strconv.Atoi(majorText)
+	if err != nil {
+		return false
+	}
+	minor, _ := strconv.Atoi(minorText)
+	return major > 5 || (major == 5 && minor >= 6)
+}
+
+// markCacheBreakpoints applies mark to a copy of every content part marked
+// CacheBreakpoint and returns messages that share nothing changed with the
+// caller's.
+func markCacheBreakpoints(messages []Message, mark func(*ContentPart)) []Message {
+	var out []Message
+	for i, msg := range messages {
+		parts, ok := msg.Content.([]ContentPart)
+		if !ok {
+			continue
+		}
+		var updated []ContentPart
+		for j, part := range parts {
+			if !part.CacheBreakpoint {
+				continue
+			}
+			if updated == nil {
+				updated = cloneContentParts(parts)
+			}
+			mark(&updated[j])
+		}
+		if updated == nil {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), messages...)
+		}
+		out[i].Content = updated
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
+// stablePrefixCacheKey derives an OpenAI prompt_cache_key from the stable
+// prefix of a request: the model, every system message before the first
+// other message, and each content part up to the last part marked
+// CacheBreakpoint. Requests with the same system prompt and the same context
+// files get the same key whatever question follows.
+func stablePrefixCacheKey(model string, messages []Message) string {
+	lastMarked, lastPart := -1, -1
+	for i, msg := range messages {
+		if parts, ok := msg.Content.([]ContentPart); ok {
+			for j, part := range parts {
+				if part.CacheBreakpoint {
+					lastMarked, lastPart = i, j
+				}
+			}
+		}
+	}
+	hash := sha256.New()
+	hash.Write([]byte(model))
+	hash.Write([]byte{0})
+	for i, msg := range messages {
+		if i > lastMarked && msg.Role != "system" {
+			break
+		}
+		hash.Write([]byte(msg.Role))
+		hash.Write([]byte{0})
+		parts, ok := msg.Content.([]ContentPart)
+		if !ok {
+			hash.Write([]byte(messageContentToText(msg.Content)))
+			hash.Write([]byte{0})
+			continue
+		}
+		for j, part := range parts {
+			if i == lastMarked && j > lastPart {
+				// Parts after the last marker vary per request.
+				break
+			}
+			hash.Write([]byte(part.Text))
+			hash.Write([]byte{0})
+		}
+	}
+	return "buckley-" + hex.EncodeToString(hash.Sum(nil))[:32]
 }

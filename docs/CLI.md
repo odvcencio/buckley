@@ -68,6 +68,19 @@ buckley --task-intent read_only \
   > plan.md
 ```
 
+To ask about a large document, pass it with `--context-file PATH` (repeatable).
+Buckley puts the files before the question in the order given and marks them as a
+cached prefix, so a second question about the same files reads the provider's
+prompt cache instead of paying for the files again:
+
+```bash
+buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Is the grammar ambiguous?"
+buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Which rules need lookahead?"
+```
+
+Unless quiet mode is on, every one-shot prints a `Usage detail:` line on stderr with input, output, cache-read
+and cache-write tokens and the estimated cost, capped or not.
+
 One-shot runs have no tool-call, elapsed-time, output-token or cost cap unless you
 ask for one. Read-only intent keeps its no-edit contract and instruction but adds no
 limit, so a model that reads widely and thinks for a long time can finish. Set caps

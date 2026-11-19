@@ -51,7 +51,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Fable 5.2",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 8.0, Completion: 40.0},
+		Pricing:             ModelPricing{Prompt: 8.0, Completion: 40.0, CacheRead: 0.20, CacheWrite: 10.0, CacheWrite1h: 16.0},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -61,7 +61,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Fable 5.1",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 10.0, Completion: 50.0},
+		Pricing:             ModelPricing{Prompt: 10.0, Completion: 50.0, CacheRead: 0.25, CacheWrite: 12.5, CacheWrite1h: 20.0},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -71,7 +71,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Sonnet 5.5",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 2.0, Completion: 10.0},
+		Pricing:             ModelPricing{Prompt: 2.0, Completion: 10.0, CacheRead: 0.10, CacheWrite: 2.5, CacheWrite1h: 4.0},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -81,7 +81,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Haiku 5.5",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 0.10, Completion: 0.50},
+		Pricing:             ModelPricing{Prompt: 0.10, Completion: 0.50, CacheRead: 0.01, CacheWrite: 0.125, CacheWrite1h: 0.20},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -91,7 +91,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Opus 5.5",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 4.0, Completion: 20.0},
+		Pricing:             ModelPricing{Prompt: 4.0, Completion: 20.0, CacheRead: 0.20, CacheWrite: 5.0, CacheWrite1h: 8.0},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -341,7 +341,18 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	}
 
 	if len(systemParts) > 0 {
-		anthReq.System = strings.Join(systemParts, "\n\n")
+		system := strings.Join(systemParts, "\n\n")
+		if req.PromptCache != nil && req.PromptCache.Enabled {
+			// A breakpoint on the system prompt caches the tools and system
+			// prompt together, whatever follows them.
+			anthReq.System = []anthropicContent{{
+				Type:         "text",
+				Text:         system,
+				CacheControl: &CacheControl{Type: promptCacheControlType, TTL: req.PromptCache.TTL},
+			}}
+		} else {
+			anthReq.System = system
+		}
 	}
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
 		anthReq.Tools = toAnthropicTools(req.Tools)
@@ -354,7 +365,7 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
 	Model        string                   `json:"model"`
-	System       string                   `json:"system,omitempty"`
+	System       any                      `json:"system,omitempty"` // a string, or text blocks with cache_control
 	Messages     []anthropicMessage       `json:"messages"`
 	MaxTokens    int                      `json:"max_tokens"`
 	Temperature  float64                  `json:"temperature,omitempty"`
@@ -388,7 +399,9 @@ type anthropicContent struct {
 	Input     map[string]any `json:"input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   any            `json:"content,omitempty"`
-	raw       json.RawMessage
+	// CacheControl ends a cached prefix at this block.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	raw          json.RawMessage
 }
 
 // Keep the complete native block, including empty thinking and unknown fields.
@@ -586,6 +599,23 @@ func anthropicMessageContent(msg Message) ([]anthropicContent, error) {
 }
 
 func anthropicTextBlocks(content any) []anthropicContent {
+	if parts, ok := content.([]ContentPart); ok && contentHasCacheControl(parts) {
+		// Keep each part its own block so a cache breakpoint ends exactly
+		// where the stable prefix ends.
+		var blocks []anthropicContent
+		for _, part := range parts {
+			if (part.Type != "" && part.Type != "text") || part.Text == "" {
+				continue
+			}
+			block := anthropicContent{Type: "text", Text: part.Text}
+			if part.CacheControl != nil {
+				control := *part.CacheControl
+				block.CacheControl = &control
+			}
+			blocks = append(blocks, block)
+		}
+		return blocks
+	}
 	text := strings.TrimSpace(messageContentToText(content))
 	if text == "" {
 		return nil

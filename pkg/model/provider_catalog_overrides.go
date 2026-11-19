@@ -46,13 +46,32 @@ func (o catalogOverrides) price(id string) (config.ModelPricingOverride, bool) {
 	return p, ok
 }
 
-// withPrice applies a configured price to one entry.
+// withPrice applies a configured price to one entry. A configured price with
+// no cache prices keeps the catalog's cache prices; one that sets any cache
+// price replaces all three.
 func (o catalogOverrides) withPrice(info ModelInfo) ModelInfo {
 	if p, ok := o.price(info.ID); ok {
-		info.Pricing = ModelPricing{Prompt: p.InputPerMillion, Completion: p.OutputPerMillion}
+		pricing := pricingFromOverride(p)
+		if p.CacheReadPerMillion == 0 && p.CacheWritePerMillion == 0 && p.CacheWrite1hPerMillion == 0 {
+			pricing.CacheRead = info.Pricing.CacheRead
+			pricing.CacheWrite = info.Pricing.CacheWrite
+			pricing.CacheWrite1h = info.Pricing.CacheWrite1h
+		}
+		info.Pricing = pricing
 		info.PricingKnown = true
 	}
 	return info
+}
+
+// pricingFromOverride converts an operator-configured price to ModelPricing.
+func pricingFromOverride(p config.ModelPricingOverride) ModelPricing {
+	return ModelPricing{
+		Prompt:       p.InputPerMillion,
+		Completion:   p.OutputPerMillion,
+		CacheRead:    p.CacheReadPerMillion,
+		CacheWrite:   p.CacheWritePerMillion,
+		CacheWrite1h: p.CacheWrite1hPerMillion,
+	}
 }
 
 // apply returns the static catalog with configured prices and the configured

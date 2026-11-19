@@ -1206,6 +1206,9 @@ type acpLoopLimits struct {
 	ParentSessionID         string
 	ChildContract           bool
 	TaskIntent              agentloop.TaskIntent
+
+	// PromptCache turns on prompt caching for every request of the run.
+	PromptCache *model.PromptCache
 }
 
 // runACPLoopWithStepCap is the internal one-shot variant that applies a
@@ -2689,6 +2692,19 @@ func buildACPChatRequestForRoute(cfg *config.Config, mgr *model.Manager, engine 
 	hasRoute := strings.TrimSpace(route.SelectedModel) != "" && strings.TrimSpace(route.ProviderID) != ""
 	if hasRoute {
 		req.Route = route
+	}
+	if limits.PromptCache != nil {
+		cache := *limits.PromptCache
+		req.PromptCache = &cache
+	}
+	providerID := route.ProviderID
+	if !hasRoute && mgr != nil {
+		providerID = mgr.ProviderIDForModel(modelID)
+	}
+	if providerID == "openai" {
+		// OpenAI streams omit usage unless asked. Ask on every run so the
+		// usage line reports billed tokens and cache reads, capped or not.
+		req.StreamOptions = &model.StreamOptions{IncludeUsage: true}
 	}
 	if turn.UseTools {
 		req.Tools = turn.Tools

@@ -34,12 +34,21 @@ func TestAnthropicProvider_HaikuEffortAndDisabledThinking(t *testing.T) {
 func TestManagerCalculateBoundedCost_HaikuUsesHigherTierCeiling(t *testing.T) {
 	id := "anthropic/claude-haiku-5-5"
 	mgr := newCostBoundedTestManager("anthropic", ModelInfo{ID: id, Pricing: ModelPricing{Prompt: 0.1, Completion: 0.5}})
+	// An invoice with no cache activity: the higher tier's input price.
 	got, err := mgr.CalculateBoundedCost(id, Usage{PromptTokens: 100000, CompletionTokens: 2000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(got-0.105) > 1e-12 {
-		t.Fatalf("bounded cost = %v, want cache-write/higher-tier ceiling $0.105", got)
+	if math.Abs(got-0.055) > 1e-12 {
+		t.Fatalf("bounded cost = %v, want higher-tier ceiling $0.055", got)
+	}
+	// An admission bound: every input token may be a 5-minute cache write.
+	got, err = mgr.CalculateBoundedCost(id, Usage{PromptTokens: 100000, CompletionTokens: 2000, AdmissionBound: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-0.0675) > 1e-12 {
+		t.Fatalf("admission bound = %v, want cache-write/higher-tier ceiling $0.0675", got)
 	}
 }
 

@@ -249,8 +249,10 @@ func validatePromptCache(c *Config) error {
 		return fmt.Errorf("prompt_cache.tail_messages must be >= 0")
 	}
 	retention := strings.ToLower(strings.TrimSpace(c.PromptCache.Retention))
-	if retention != "" && retention != "in-memory" && retention != "24h" {
-		return fmt.Errorf("prompt_cache.retention must be in-memory or 24h")
+	switch retention {
+	case "", "in-memory", "24h", "5m", "1h":
+	default:
+		return fmt.Errorf("prompt_cache.retention must be in-memory, 24h, 5m or 1h")
 	}
 	return nil
 }

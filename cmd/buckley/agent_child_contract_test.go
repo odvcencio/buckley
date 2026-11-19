@@ -437,12 +437,14 @@ func TestRunACPLoopWithLimits_PropagatesMaxOutputTokensAcrossRounds(t *testing.T
 		mu.Lock()
 		round := len(requestMaxTokens) + 1
 		var request struct {
-			MaxTokens int `json:"max_tokens"`
+			MaxTokens           int `json:"max_tokens"`
+			MaxCompletionTokens int `json:"max_completion_tokens"`
 		}
 		if err != nil || json.Unmarshal(body, &request) != nil {
 			requestMaxTokens = append(requestMaxTokens, -1)
 		} else {
-			requestMaxTokens = append(requestMaxTokens, request.MaxTokens)
+			// OpenAI requests carry the limit as max_completion_tokens.
+			requestMaxTokens = append(requestMaxTokens, max(request.MaxTokens, request.MaxCompletionTokens))
 		}
 		mu.Unlock()
 

@@ -11,9 +11,10 @@ import (
 func TestAnthropicCatalogListsFableAndSonnetWithPrices(t *testing.T) {
 	p := &AnthropicProvider{}
 	for id, want := range map[string]ModelPricing{
-		"anthropic/claude-fable-5-2":  {Prompt: 8, Completion: 40},
-		"anthropic/claude-fable-5-1":  {Prompt: 10, Completion: 50},
-		"anthropic/claude-sonnet-5-5": {Prompt: 2, Completion: 10},
+		"anthropic/claude-fable-5-2":  {Prompt: 8, Completion: 40, CacheRead: 0.20, CacheWrite: 10, CacheWrite1h: 16},
+		"anthropic/claude-fable-5-1":  {Prompt: 10, Completion: 50, CacheRead: 0.25, CacheWrite: 12.5, CacheWrite1h: 20},
+		"anthropic/claude-sonnet-5-5": {Prompt: 2, Completion: 10, CacheRead: 0.10, CacheWrite: 2.5, CacheWrite1h: 4},
+		"anthropic/claude-opus-5-5":   {Prompt: 4, Completion: 20, CacheRead: 0.20, CacheWrite: 5, CacheWrite1h: 8},
 	} {
 		info, err := p.GetModelInfo(id)
 		if err != nil {

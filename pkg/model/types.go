@@ -88,6 +88,20 @@ type ContentPart struct {
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 	// CacheControl is used by providers that support prompt caching.
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	// CacheBreakpoint marks the end of a stable prefix, such as one-shot
+	// context files. It never enters provider JSON: when prompt caching is on,
+	// Manager turns it into the selected provider's cache marker (Anthropic
+	// cache_control) or into the OpenAI prompt_cache_key.
+	CacheBreakpoint bool `json:"-"`
+	// PromptCacheBreakpoint is OpenAI's explicit cache breakpoint (GPT-5.6
+	// and later). Manager sets it from CacheBreakpoint for those models only.
+	PromptCacheBreakpoint *PromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+}
+
+// PromptCacheBreakpoint ends an OpenAI cached prefix at a content part.
+type PromptCacheBreakpoint struct {
+	Mode string `json:"mode"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 // ImageURL represents an image URL in a content part
@@ -128,6 +142,9 @@ type PromptCache struct {
 	Enabled        bool
 	SystemMessages int
 	TailMessages   int
+	// TTL is the Anthropic cache lifetime for explicit breakpoints: "" for
+	// the 5-minute default, or "1h".
+	TTL string
 }
 
 // StreamOptions controls provider streaming metadata. It is populated only
@@ -556,6 +573,11 @@ type Usage struct {
 	// provider did not return usage. Estimated usage is useful for context and
 	// telemetry, but must not be treated as an authoritative provider invoice.
 	Estimated bool `json:"estimated,omitempty"`
+	// AdmissionBound marks counts built to admit a request under a spend cap
+	// before dispatch, not a provider invoice. A cost-bounded pricer charges
+	// input it cannot see as read or written at the costliest cache-write
+	// price, because the provider may write any of it to the cache.
+	AdmissionBound bool `json:"-"`
 	// Cost is OpenRouter's own inline-reported charge for this generation in
 	// USD, present only when the request set Usage.Include=true (C7). On a
 	// BYOK (bring-your-own-key) call this is OpenRouter's fee alone -- often
@@ -597,6 +619,18 @@ func (u Usage) TotalCostUSD() (float64, bool) {
 
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// CacheWriteTokens is OpenAI's count of input written to the prompt
+	// cache (GPT-5.6 and later). Anthropic writes go in Usage.CacheWriteTokens.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+}
+
+// CacheWrites returns the input tokens written to the prompt cache, as either
+// provider reports them.
+func (u Usage) CacheWrites() int {
+	if u.CacheWriteTokens == 0 && u.PromptTokensDetails != nil {
+		return u.PromptTokensDetails.CacheWriteTokens
+	}
+	return u.CacheWriteTokens
 }
 
 type CompletionTokenDetails struct {
@@ -617,6 +651,7 @@ func AddUsage(total Usage, next Usage) Usage {
 			total.PromptTokensDetails = &PromptTokensDetails{}
 		}
 		total.PromptTokensDetails.CachedTokens += next.PromptTokensDetails.CachedTokens
+		total.PromptTokensDetails.CacheWriteTokens += next.PromptTokensDetails.CacheWriteTokens
 	}
 	if next.CompletionTokenDetails != nil {
 		if total.CompletionTokenDetails == nil {
@@ -965,6 +1000,12 @@ func estimateContentPartBytes(part ContentPart) int {
 	}
 	if part.CacheControl != nil {
 		n += jsonKeyValueBytes("cache_control", estimateCacheControlBytes(*part.CacheControl))
+		fields++
+	}
+	if part.PromptCacheBreakpoint != nil {
+		// Same shape as cache_control: {"mode":"...","ttl":"..."}.
+		bp := *part.PromptCacheBreakpoint
+		n += jsonKeyValueBytes("prompt_cache_breakpoint", estimateCacheControlBytes(CacheControl{Type: bp.Mode, TTL: bp.TTL}))
 		fields++
 	}
 	if fields > 1 {
@@ -1523,6 +1564,13 @@ type Architecture struct {
 type ModelPricing struct {
 	Prompt     float64 `json:"prompt"`     // Per 1M tokens
 	Completion float64 `json:"completion"` // Per 1M tokens
+	// Cache prices per 1M tokens: reads, writes with the default lifetime
+	// (Anthropic 5 minutes), and Anthropic 1-hour writes. Zero means unknown.
+	// They come from the native catalogs and providers.<name>.pricing, never
+	// from provider JSON.
+	CacheRead    float64 `json:"-"`
+	CacheWrite   float64 `json:"-"`
+	CacheWrite1h float64 `json:"-"`
 }
 
 // UnmarshalJSON handles string or number pricing values from the API

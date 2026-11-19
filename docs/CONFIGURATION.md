@@ -642,15 +642,40 @@ prompt_cache:
   system_messages: 2
   tail_messages: 8
   key: "project-cache-key"
-  retention: "24h" # in-memory | 24h
+  retention: "24h" # in-memory | 24h | 5m | 1h
 ```
 
 **Selection & behavior:**
 - If `providers` is empty, caching applies to any provider that supports it.
 - `openrouter` and `openai_compatible` trim messages to the last `system_messages` + `tail_messages` for compatible caching.
 - `openai` uses `prompt_cache_key` and `prompt_cache_retention` (no message trimming).
-- Native Anthropic caching supports Claude Haiku 5.5 and Opus 5.5, including
-  cache usage in budgeted runs.
+- `openai` on GPT-5.6 and later also gets an explicit breakpoint after one-shot
+  `--context-file` text, and a derived `prompt_cache_key` when `key` is unset.
+- Native Anthropic caching puts a breakpoint on the system prompt and after
+  one-shot `--context-file` text, plus automatic caching for the conversation
+  tail on Claude 5 models. `retention: 1h` (or `24h`) selects the 1-hour cache
+  lifetime for those breakpoints; anything else uses 5 minutes.
+- `buckley -p --context-file` turns caching on for that run even when
+  `enabled` is false.
+- A `--budget` run can use caching when the model has cache-read and
+  cache-write prices: the built-in Claude 5 entries carry them, and
+  `providers.<name>.pricing` sets them for other models. The cap prices cache
+  reads and writes; input whose cache state the provider does not report is
+  charged at the write price. Without cache prices a budgeted run is refused
+  with the missing key named, and a budgeted one-shot with context files runs
+  uncached instead.
+
+```yaml
+providers:
+  openai:
+    pricing:
+      gpt-6.2-astra:
+        input_per_million: 8.0
+        output_per_million: 40.0
+        cache_read_per_million: 0.40
+        cache_write_per_million: 10.0
+        # cache_write_1h_per_million: Anthropic 1-hour writes, for retention 1h
+```
 - Per-request `prompt_cache` settings override config defaults.
 
 ### diagnostics

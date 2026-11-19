@@ -50,9 +50,10 @@ type acpStreamRequestCapture struct {
 func (c *acpStreamRequestCapture) add(t *testing.T, r *http.Request) {
 	t.Helper()
 	var wire struct {
-		MaxTokens  int              `json:"max_tokens"`
-		Tools      []map[string]any `json:"tools"`
-		ToolChoice string           `json:"tool_choice"`
+		MaxTokens           int              `json:"max_tokens"`
+		MaxCompletionTokens int              `json:"max_completion_tokens"`
+		Tools               []map[string]any `json:"tools"`
+		ToolChoice          string           `json:"tool_choice"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
 		t.Errorf("decode streamed request: %v", err)
@@ -60,7 +61,8 @@ func (c *acpStreamRequestCapture) add(t *testing.T, r *http.Request) {
 	}
 	c.mu.Lock()
 	c.requests = append(c.requests, acpCapturedStreamRequest{
-		MaxTokens:  wire.MaxTokens,
+		// OpenAI requests carry the output limit as max_completion_tokens.
+		MaxTokens:  max(wire.MaxTokens, wire.MaxCompletionTokens),
 		ToolCount:  len(wire.Tools),
 		ToolChoice: wire.ToolChoice,
 	})

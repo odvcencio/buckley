@@ -15,9 +15,10 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 		return req, err
 	}
 	req.Model = selectedModel
-	_, _, nativeCachePriced := nativeAnthropicPricing(selectedModel, 1000000)
-	if source, active := m.costBoundedPromptCacheSource(req, providerID); active && !(providerID == "anthropic" && nativeCachePriced) {
-		return req, fmt.Errorf("cost-bounded requests cannot use prompt caching (%s): authoritative cache-write pricing is unavailable", source)
+	if source, active := m.costBoundedPromptCacheSource(req, providerID); active {
+		if err := m.costBoundedCachePricing(selectedModel, providerID); err != nil {
+			return req, fmt.Errorf("cost-bounded requests cannot use prompt caching (%s): %w", source, err)
+		}
 	}
 
 	allowance, err := costBoundedOutputAllowance(req)
@@ -87,6 +88,14 @@ func (m *Manager) NormalizeCostBoundedRequest(req ChatRequest) (ChatRequest, err
 // CalculateBoundedCost calculates usage cost only when the selected provider's
 // pricing is complete enough to enforce a real dollar bound. Ordinary cost
 // reporting remains available through CalculateCost.
+//
+// Cache reads are charged at the cache-read price and cache writes at the
+// write price for their lifetime. A request is refused only when it reports
+// cache writes and the model has no write price. Input the provider did not
+// report as read or written is charged at the input price, except in two
+// cases where it might have been written without a count: an admission bound
+// (Usage.AdmissionBound), and a provider that does not report writes (all but
+// Anthropic). There it is charged at the costliest known write price.
 func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, error) {
 	selectedModel, providerID, err := m.costBoundedRoute(modelID)
 	if err != nil {
@@ -104,15 +113,9 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 	if err != nil {
 		return 0, fmt.Errorf("cost-bounded pricing unavailable for %s: %w", modelID, err)
 	}
-	pricing := info.Pricing
-	_, _, nativeCachePriced := nativeAnthropicPricing(selectedModel, 1000000)
-	if providerID == "anthropic" && nativeCachePriced {
-		// Reserve the higher context tier and most expensive cache-write TTL.
-		// Cache hits can reduce billed cost without weakening admission limits.
-		pricing, _, _ = nativeAnthropicPricing(selectedModel, 1000000)
-		pricing.Prompt *= 2
-	}
-	if !finiteNonNegative(pricing.Prompt) || !finiteNonNegative(pricing.Completion) {
+	pricing := boundedPricing(selectedModel, providerID, info.Pricing)
+	if !finiteNonNegative(pricing.Prompt) || !finiteNonNegative(pricing.Completion) ||
+		!finiteNonNegative(pricing.CacheRead) || !finiteNonNegative(pricing.CacheWrite) || !finiteNonNegative(pricing.CacheWrite1h) {
 		return 0, fmt.Errorf("cost-bounded pricing invalid for %s", modelID)
 	}
 	if pricing.Prompt == 0 || pricing.Completion == 0 {
@@ -124,47 +127,131 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		// unavailable. It is provider-agnostic: any provider whose pricing
 		// semantics are understood by the switch above may assert it.
 		if !info.PricingKnown {
-			return 0, fmt.Errorf("cost-bounded pricing unavailable for %s: zero price is not authoritative", modelID)
+			return 0, fmt.Errorf("cost-bounded pricing unavailable for %s: zero price is not authoritative; %s, or drop --budget to run uncapped", modelID, cachePriceHint(providerID, selectedModel, "input_per_million and output_per_million"))
 		}
 	}
 	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 {
 		return 0, fmt.Errorf("cost-bounded usage invalid for %s: token counts must be non-negative", modelID)
 	}
-	if providerID == "anthropic" && nativeCachePriced {
-		reads := 0
-		if usage.PromptTokensDetails != nil {
-			reads = usage.PromptTokensDetails.CachedTokens
-		}
-		if reads < 0 || usage.CacheWriteTokens < 0 || usage.CacheWrite1hTokens < 0 || reads > usage.PromptTokens || usage.CacheWriteTokens > usage.PromptTokens-reads || usage.CacheWrite1hTokens > usage.CacheWriteTokens {
-			return 0, fmt.Errorf("cost-bounded Anthropic cache usage is inconsistent for %s", modelID)
-		}
+	reads := 0
+	if usage.PromptTokensDetails != nil {
+		reads = usage.PromptTokensDetails.CachedTokens
+	}
+	usage.CacheWriteTokens = usage.CacheWrites()
+	if reads < 0 || usage.CacheWriteTokens < 0 || usage.CacheWrite1hTokens < 0 || reads > usage.PromptTokens ||
+		usage.CacheWriteTokens > usage.PromptTokens-reads || usage.CacheWrite1hTokens > usage.CacheWriteTokens {
+		return 0, fmt.Errorf("cost-bounded cache usage is inconsistent for %s", modelID)
 	}
 	if usage.Estimated {
 		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: locally estimated token counts are not authoritative", modelID)
 	}
-	if usage.CacheWriteTokens != 0 && !(providerID == "anthropic" && nativeCachePriced) {
-		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: authoritative cache-write pricing is unavailable", modelID)
-	}
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
 		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: provider reported no token counts", modelID)
 	}
+	shortWrites := usage.CacheWriteTokens - usage.CacheWrite1hTokens
+	if shortWrites > 0 && pricing.CacheWrite == 0 {
+		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: no cache-write price; %s", modelID, cachePriceHint(providerID, selectedModel, "cache_write_per_million"))
+	}
+	if usage.CacheWrite1hTokens > 0 && pricing.CacheWrite1h == 0 {
+		return 0, fmt.Errorf("cost-bounded usage unavailable for %s: no 1-hour cache-write price; %s", modelID, cachePriceHint(providerID, selectedModel, "cache_write_1h_per_million"))
+	}
 
-	return (float64(usage.PromptTokens)/1_000_000)*pricing.Prompt +
-		(float64(usage.CompletionTokens)/1_000_000)*pricing.Completion, nil
+	readPrice := pricing.CacheRead
+	if readPrice == 0 {
+		// Without a read price a cache read costs at most the input price.
+		readPrice = pricing.Prompt
+	}
+	plainPrice := pricing.Prompt
+	if usage.AdmissionBound || providerID != "anthropic" {
+		plainPrice = max(plainPrice, pricing.CacheWrite)
+		if usage.AdmissionBound && m.promptCacheTTL(nil) == "1h" {
+			plainPrice = max(plainPrice, pricing.CacheWrite1h)
+		}
+	}
+	plain := usage.PromptTokens - reads - usage.CacheWriteTokens
+	return (float64(plain)*plainPrice +
+		float64(reads)*readPrice +
+		float64(shortWrites)*pricing.CacheWrite +
+		float64(usage.CacheWrite1hTokens)*pricing.CacheWrite1h +
+		float64(usage.CompletionTokens)*pricing.Completion) / 1_000_000, nil
 }
 
-func nativeAnthropicPricing(modelID string, promptTokens int) (ModelPricing, float64, bool) {
+// costBoundedCachePricing returns an error naming the missing price when a
+// capped request cannot use prompt caching on this model.
+func (m *Manager) costBoundedCachePricing(selectedModel, providerID string) error {
+	info, err := m.GetModelInfo(selectedModel)
+	if err != nil {
+		return fmt.Errorf("model pricing unavailable: %w", err)
+	}
+	pricing := boundedPricing(selectedModel, providerID, info.Pricing)
+	missing := ""
+	switch {
+	case pricing.CacheRead <= 0:
+		missing = "cache_read_per_million"
+	case pricing.CacheWrite <= 0:
+		missing = "cache_write_per_million"
+	case m.promptCacheTTL(nil) == "1h" && pricing.CacheWrite1h <= 0:
+		missing = "cache_write_1h_per_million"
+	}
+	if missing == "" {
+		return nil
+	}
+	return fmt.Errorf("%s has no %s price; %s, or drop --budget to run uncapped", selectedModel, strings.ReplaceAll(strings.TrimSuffix(missing, "_per_million"), "_", " "), cachePriceHint(providerID, selectedModel, missing))
+}
+
+// CachePricingKnown reports whether a spend cap can price prompt caching on
+// this model: it has cache-read and cache-write prices.
+func (m *Manager) CachePricingKnown(modelID string) bool {
+	selectedModel, providerID, err := m.costBoundedRoute(modelID)
+	if err != nil {
+		return false
+	}
+	return m.costBoundedCachePricing(selectedModel, providerID) == nil
+}
+
+// cachePriceHint names the config key that sets a missing cache price.
+func cachePriceHint(providerID, selectedModel, key string) string {
+	switch providerID {
+	case "anthropic", "openai", "openai_compatible", "litellm":
+		name := strings.TrimPrefix(selectedModel, providerID+"/")
+		return fmt.Sprintf("set providers.%s.pricing.%s.%s in the config", providerID, name, key)
+	default:
+		return fmt.Sprintf("provider %s publishes no cache price Buckley can read", providerID)
+	}
+}
+
+// boundedPricing returns the prices a spend cap uses. Anthropic models with a
+// long-prompt price tier use the higher tier.
+func boundedPricing(selectedModel, providerID string, catalog ModelPricing) ModelPricing {
+	if providerID == "anthropic" {
+		if tier, ok := nativeAnthropicPricing(selectedModel, 1000000); ok && tier.Prompt >= catalog.Prompt {
+			return tier
+		}
+	}
+	return catalog
+}
+
+// nativeAnthropicPricing returns the price tier for Anthropic models whose
+// price depends on prompt length, with cache prices: reads at the model's
+// read multiplier, 5-minute writes at 1.25x and 1-hour writes at 2x input.
+func nativeAnthropicPricing(modelID string, promptTokens int) (ModelPricing, bool) {
+	var pricing ModelPricing
+	read := 0.1
 	switch normalizeModelForProvider(modelID, "anthropic") {
 	case "claude-haiku-5-5":
+		pricing = ModelPricing{Prompt: 0.10, Completion: 0.50}
 		if promptTokens > 100000 {
-			return ModelPricing{Prompt: 0.50, Completion: 2.50}, 0.1, true
+			pricing = ModelPricing{Prompt: 0.50, Completion: 2.50}
 		}
-		return ModelPricing{Prompt: 0.10, Completion: 0.50}, 0.1, true
 	case "claude-opus-5-5":
-		return ModelPricing{Prompt: 4, Completion: 20}, 0.05, true
+		pricing, read = ModelPricing{Prompt: 4, Completion: 20}, 0.05
 	default:
-		return ModelPricing{}, 0, false
+		return ModelPricing{}, false
 	}
+	pricing.CacheRead = pricing.Prompt * read
+	pricing.CacheWrite = pricing.Prompt * 1.25
+	pricing.CacheWrite1h = pricing.Prompt * 2
+	return pricing, true
 }
 
 func (m *Manager) costBoundedPromptCacheSource(req ChatRequest, providerID string) (string, bool) {
