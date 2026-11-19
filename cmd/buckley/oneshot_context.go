@@ -165,11 +165,52 @@ func oneShotUsageLine(mgr *model.Manager, modelID string, result *agentloop.Resu
 			estimate = fmt.Sprintf("%.6f", cost)
 		}
 	}
+	billing := ""
+	if mgr != nil {
+		// Name the provider the request was dispatched to, not the catalog
+		// that lists the model.
+		if route, err := mgr.ResolveModelRoute(modelID); err == nil {
+			billing = " " + oneShotBilling(route.ProviderID, route.SelectedModel, result.Usage)
+		}
+	}
 	source := "provider"
 	if result.Usage.Estimated {
 		// The provider sent no usage for at least one request.
 		source = "local_estimate"
 	}
-	fmt.Fprintf(&b, "Usage detail: requests=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_write_1h_tokens=%d thinking_tokens=%d estimated_cost_usd=%s usage_source=%s\n", result.ModelRequests, result.Usage.PromptTokens, result.Usage.CompletionTokens, reads, result.Usage.CacheWrites(), result.Usage.CacheWrite1hTokens, thinking, estimate, source)
+	fmt.Fprintf(&b, "Usage detail: requests=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_write_1h_tokens=%d thinking_tokens=%d estimated_cost_usd=%s%s usage_source=%s\n", result.ModelRequests, result.Usage.PromptTokens, result.Usage.CompletionTokens, reads, result.Usage.CacheWrites(), result.Usage.CacheWrite1hTokens, thinking, estimate, billing, source)
 	return b.String()
+}
+
+// oneShotBilling says who pays for a run and what the provider reported.
+// OpenRouter reports its own charge as usage.cost. On a bring-your-own-key
+// (BYOK) call that is only OpenRouter's fee, is_byok is true, and the upstream
+// provider's charge to the key's account is cost_details.upstream_inference_cost
+// (openrouter.ai/docs/use-cases/usage-accounting).
+func oneShotBilling(providerID, modelID string, usage model.Usage) string {
+	format := func(value float64, known bool) string {
+		if !known {
+			return "unknown"
+		}
+		return fmt.Sprintf("%.6f", value)
+	}
+	if providerID != "openrouter" {
+		if providerID == "" {
+			return "billed_to=unknown"
+		}
+		return "billed_to=" + providerID
+	}
+	fee, feeKnown := 0.0, usage.Cost != nil
+	if feeKnown {
+		fee = *usage.Cost
+	}
+	if usage.IsBYOK {
+		upstream, upstreamKnown := 0.0, usage.CostDetails != nil
+		if upstreamKnown {
+			upstream = usage.CostDetails.UpstreamInferenceCost
+		}
+		owner, _, _ := strings.Cut(strings.TrimPrefix(modelID, "openrouter/"), "/")
+		return fmt.Sprintf("billed_to=%s(byok) upstream_cost_usd=%s openrouter_fee_usd=%s", owner, format(upstream, upstreamKnown), format(fee, feeKnown))
+	}
+	return fmt.Sprintf("billed_to=openrouter provider_cost_usd=%s", format(fee, feeKnown))
 }

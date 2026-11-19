@@ -913,7 +913,22 @@ func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatReque
 		if _, claude5 := claudeRequestRules(normalizeModelForProvider(req.Model, "anthropic")); claude5 && req.CacheControl == nil {
 			req.CacheControl = &CacheControl{Type: promptCacheControlType}
 		}
-	case "openrouter", "openai_compatible", "litellm":
+	case "openrouter":
+		// OpenRouter passes cache_control on content parts to the upstream
+		// provider (openrouter.ai/docs/features/prompt-caching). Claude takes
+		// up to four breakpoints and a 1-hour TTL, so the system prompt gets
+		// one too. Gemini uses only the last breakpoint, with a fixed
+		// 5-minute TTL, so it gets one plain breakpoint after the context.
+		marker := &CacheControl{Type: promptCacheControlType}
+		if strings.HasPrefix(req.Model, "anthropic/") {
+			marker.TTL = cache.TTL
+			req.Messages = applyLeadingSystemCacheBreakpoint(req.Messages, marker)
+		}
+		req.Messages = applyCacheBreakpoints(req.Messages, marker)
+		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
+			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
+		}
+	case "openai_compatible", "litellm":
 		req.Messages = applyCacheBreakpoints(req.Messages, &CacheControl{Type: promptCacheControlType})
 		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
 			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)

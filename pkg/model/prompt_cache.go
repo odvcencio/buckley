@@ -287,3 +287,28 @@ func stablePrefixCacheKey(model string, messages []Message) string {
 	}
 	return "buckley-" + hex.EncodeToString(hash.Sum(nil))[:32]
 }
+
+// applyLeadingSystemCacheBreakpoint marks the last of the leading system
+// messages with marker, so the tools and system prompt form a cached prefix of
+// their own. It copies what it changes.
+func applyLeadingSystemCacheBreakpoint(messages []Message, marker *CacheControl) []Message {
+	last := -1
+	for i, msg := range messages {
+		if msg.Role != "system" {
+			break
+		}
+		last = i
+	}
+	if last < 0 {
+		return messages
+	}
+	parts, ok := coerceContentParts(messages[last].Content)
+	if !ok || len(parts) == 0 || parts[len(parts)-1].CacheControl != nil {
+		return messages
+	}
+	control := *marker
+	parts[len(parts)-1].CacheControl = &control
+	out := append([]Message(nil), messages...)
+	out[last].Content = parts
+	return out
+}

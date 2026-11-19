@@ -169,11 +169,35 @@ func (m *Manager) CalculateBoundedCost(modelID string, usage Usage) (float64, er
 		}
 	}
 	plain := usage.PromptTokens - reads - usage.CacheWriteTokens
-	return (float64(plain)*plainPrice +
+	cost := (float64(plain)*plainPrice +
 		float64(reads)*readPrice +
 		float64(shortWrites)*pricing.CacheWrite +
 		float64(usage.CacheWrite1hTokens)*pricing.CacheWrite1h +
-		float64(usage.CompletionTokens)*pricing.Completion) / 1_000_000, nil
+		float64(usage.CompletionTokens)*pricing.Completion) / 1_000_000
+	if reported, ok := reportedOpenRouterCost(providerID, usage); ok && !usage.AdmissionBound {
+		// OpenRouter's own charge is the invoice; the cap keeps the larger
+		// figure in case the report leaves something out.
+		cost = max(cost, reported)
+	}
+	return cost, nil
+}
+
+// reportedOpenRouterCost returns the total OpenRouter reported for a call:
+// its own charge, plus the upstream provider's charge on a BYOK call. A BYOK
+// call that does not report the upstream charge has no usable total, because
+// usage.cost is then only OpenRouter's fee.
+func reportedOpenRouterCost(providerID string, usage Usage) (float64, bool) {
+	if providerID != "openrouter" || usage.Cost == nil {
+		return 0, false
+	}
+	if usage.IsBYOK && (usage.CostDetails == nil || usage.CostDetails.UpstreamInferenceCost <= 0) {
+		return 0, false
+	}
+	total, ok := usage.TotalCostUSD()
+	if !ok || !finiteNonNegative(total) {
+		return 0, false
+	}
+	return total, true
 }
 
 // costBoundedCachePricing returns an error naming the missing price when a

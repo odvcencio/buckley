@@ -655,6 +655,13 @@ prompt_cache:
   one-shot `--context-file` text, plus automatic caching for the conversation
   tail on Claude 5 models. `retention: 1h` (or `24h`) selects the 1-hour cache
   lifetime for those breakpoints; anything else uses 5 minutes.
+- `openrouter` puts `cache_control` after one-shot `--context-file` content.
+  Claude models (`anthropic/...`) also get one on the system prompt and the
+  `retention: 1h` lifetime; Gemini models get a single plain breakpoint,
+  because OpenRouter uses only the last one for Gemini. Cache prices come from
+  OpenRouter's model list (`input_cache_read`, `input_cache_write`); a write
+  price below the input price is Gemini's storage charge and is added to the
+  input price.
 - `buckley -p --context-file` turns caching on for that run even when
   `enabled` is false.
 - A `--budget` run can use caching when the model has cache-read and

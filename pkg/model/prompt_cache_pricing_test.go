@@ -404,3 +404,101 @@ func TestOpenAIContextImagesAreDataURLsUnderTheBreakpoint(t *testing.T) {
 		t.Fatalf("want one breakpoint, after the images:\n%s", data)
 	}
 }
+
+func TestOpenRouterCatalogCachePrices(t *testing.T) {
+	var gemini, claude ModelPricing
+	// google/gemini-4-neon on the public models endpoint, 19 Nov 2026: the
+	// write price is Gemini's storage charge, billed on top of input.
+	if err := json.Unmarshal([]byte(`{"prompt":"0.000003","completion":"0.000015","input_cache_read":"0.00000015","input_cache_write":"0.0000000833333333333333"}`), &gemini); err != nil {
+		t.Fatal(err)
+	}
+	if !closeTo(gemini.Prompt, 3) || !closeTo(gemini.Completion, 15) || !closeTo(gemini.CacheRead, 0.15) || math.Abs(gemini.CacheWrite-3.0833333) > 1e-6 {
+		t.Fatalf("gemini pricing = %#v", gemini)
+	}
+	// An Anthropic model lists the full 5-minute write price.
+	if err := json.Unmarshal([]byte(`{"prompt":"0.000008","completion":"0.00004","input_cache_read":"0.0000002","input_cache_write":"0.00001"}`), &claude); err != nil {
+		t.Fatal(err)
+	}
+	if !closeTo(claude.CacheRead, 0.2) || !closeTo(claude.CacheWrite, 10) {
+		t.Fatalf("claude pricing = %#v", claude)
+	}
+}
+
+func TestOpenRouterBreakpointsFollowTheUpstreamModel(t *testing.T) {
+	mgr := &Manager{config: &config.Config{PromptCache: config.PromptCacheConfig{Retention: "1h"}}}
+	count := func(req ChatRequest) (int, []string) {
+		data, err := json.Marshal(req.Messages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ttls []string
+		for _, msg := range req.Messages {
+			parts, _ := msg.Content.([]ContentPart)
+			for _, part := range parts {
+				if part.CacheControl != nil {
+					ttls = append(ttls, part.CacheControl.TTL)
+				}
+			}
+		}
+		return bytes.Count(data, []byte(`"cache_control"`)), ttls
+	}
+
+	// Gemini: OpenRouter uses only the last breakpoint, with a fixed TTL.
+	gemini := mgr.applyPromptCache(imageContextRequest("google/gemini-4-neon", "q"), "openrouter")
+	if n, ttls := count(gemini); n != 1 || ttls[0] != "" {
+		t.Fatalf("gemini breakpoints = %d %v, want one with no ttl", n, ttls)
+	}
+	if parts := gemini.Messages[1].Content.([]ContentPart); parts[4].CacheControl == nil {
+		t.Fatal("gemini breakpoint is not after the images")
+	}
+	if _, ok := gemini.Messages[0].Content.(string); !ok {
+		t.Fatal("gemini system prompt was rewritten")
+	}
+
+	// Claude through OpenRouter: the system prompt and the context, 1-hour.
+	claude := mgr.applyPromptCache(imageContextRequest("anthropic/claude-fable-5-2", "q"), "openrouter")
+	if n, ttls := count(claude); n != 2 || ttls[0] != "1h" || ttls[1] != "1h" {
+		t.Fatalf("claude breakpoints = %d %v, want two with ttl 1h", n, ttls)
+	}
+	original := imageContextRequest("anthropic/claude-fable-5-2", "q")
+	mgr.applyPromptCache(original, "openrouter")
+	if _, ok := original.Messages[0].Content.(string); !ok {
+		t.Fatal("applyPromptCache changed the caller's system message")
+	}
+
+	// The same files give the same bytes whatever the question.
+	a, _ := json.Marshal(mgr.applyPromptCache(imageContextRequest("google/gemini-4-neon", "first"), "openrouter").Messages[1].Content.([]ContentPart)[:5])
+	b, _ := json.Marshal(mgr.applyPromptCache(imageContextRequest("google/gemini-4-neon", "second"), "openrouter").Messages[1].Content.([]ContentPart)[:5])
+	if !bytes.Equal(a, b) {
+		t.Fatal("the cached prefix differs between questions")
+	}
+}
+
+func TestAddUsageSumsReportedCost(t *testing.T) {
+	cost := func(v float64) *float64 { return &v }
+	total := AddUsage(Usage{}, Usage{PromptTokens: 1, Cost: cost(0.01), CostDetails: &UsageCostDetails{UpstreamInferenceCost: 0.02}, PromptTokensDetails: &PromptTokensDetails{CacheWriteTokens: 5}})
+	total = AddUsage(total, Usage{PromptTokens: 1, Cost: cost(0.03), IsBYOK: true, CostDetails: &UsageCostDetails{UpstreamInferenceCost: 0.04}, PromptTokensDetails: &PromptTokensDetails{CacheWriteTokens: 7}})
+	if total.Cost == nil || !closeTo(*total.Cost, 0.04) || !closeTo(total.CostDetails.UpstreamInferenceCost, 0.06) || !total.IsBYOK || total.CacheWrites() != 12 {
+		t.Fatalf("total = %#v", total)
+	}
+}
+
+func TestCalculateBoundedCostKeepsOpenRouterReportedCost(t *testing.T) {
+	cost := func(v float64) *float64 { return &v }
+	mgr := newCostBoundedTestManager("openrouter", ModelInfo{ID: "google/gemini-4-neon", Pricing: ModelPricing{Prompt: 3, Completion: 15}, PricingKnown: true})
+	usage := Usage{PromptTokens: 1_000_000, CompletionTokens: 0}
+	// A report above Buckley's figure wins; one below does not lower the cap.
+	usage.Cost = cost(4)
+	if got, err := mgr.CalculateBoundedCost("google/gemini-4-neon", usage); err != nil || !closeTo(got, 4) {
+		t.Fatalf("reported higher: %v, %v", got, err)
+	}
+	usage.Cost = cost(1)
+	if got, err := mgr.CalculateBoundedCost("google/gemini-4-neon", usage); err != nil || !closeTo(got, 3) {
+		t.Fatalf("reported lower: %v, %v", got, err)
+	}
+	// A BYOK report without the upstream charge is only OpenRouter's fee.
+	usage.Cost, usage.IsBYOK = cost(0.0001), true
+	if _, ok := reportedOpenRouterCost("openrouter", usage); ok {
+		t.Fatal("a BYOK fee alone was taken as the total")
+	}
+}

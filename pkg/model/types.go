@@ -646,6 +646,21 @@ func AddUsage(total Usage, next Usage) Usage {
 	total.CacheWriteTokens += next.CacheWriteTokens
 	total.CacheWrite1hTokens += next.CacheWrite1hTokens
 	total.Estimated = total.Estimated || next.Estimated
+	total.IsBYOK = total.IsBYOK || next.IsBYOK
+	if next.Cost != nil {
+		cost := *next.Cost
+		if total.Cost != nil {
+			cost += *total.Cost
+		}
+		total.Cost = &cost
+	}
+	if next.CostDetails != nil {
+		details := *next.CostDetails
+		if total.CostDetails != nil {
+			details.UpstreamInferenceCost += total.CostDetails.UpstreamInferenceCost
+		}
+		total.CostDetails = &details
+	}
 	if next.PromptTokensDetails != nil {
 		if total.PromptTokensDetails == nil {
 			total.PromptTokensDetails = &PromptTokensDetails{}
@@ -1579,11 +1594,26 @@ func (p *ModelPricing) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Prompt     any `json:"prompt"`
 		Completion any `json:"completion"`
+		CacheRead  any `json:"input_cache_read"`
+		CacheWrite any `json:"input_cache_write"`
 	}
 
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	defer func() {
+		// OpenRouter lists cache prices per token too. A write price below the
+		// input price is Gemini's cache storage charge, billed on top of the
+		// input price for a 5-minute explicit write
+		// (openrouter.ai/docs/features/prompt-caching), so the write costs
+		// both. Anthropic and OpenAI list the full write price.
+		p.CacheRead = openRouterPerMillion(raw.CacheRead)
+		if write := openRouterPerMillion(raw.CacheWrite); write > 0 && write < p.Prompt {
+			p.CacheWrite = p.Prompt + write
+		} else {
+			p.CacheWrite = write
+		}
+	}()
 
 	// Convert prompt price
 	// OpenRouter API returns pricing in "per token" format (e.g., 0.0000006)
@@ -1612,6 +1642,26 @@ func (p *ModelPricing) UnmarshalJSON(data []byte) error {
 	}
 
 	return nil
+}
+
+// openRouterPerMillion converts an OpenRouter per-token price (a string or a
+// number) to dollars per million tokens. It returns 0 when the price is absent
+// or unreadable.
+func openRouterPerMillion(value any) float64 {
+	switch v := value.(type) {
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			return 0
+		}
+		return f * 1_000_000
+	case float64:
+		if v < 0 {
+			return 0
+		}
+		return v * 1_000_000
+	}
+	return 0
 }
 
 // ErrorResponse represents an API error response

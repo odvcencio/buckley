@@ -91,7 +91,12 @@ A spend cap (`--budget`) does not admit image input, because Buckley cannot coun
 image tokens before the request.
 
 Unless quiet mode is on, every one-shot prints a `Usage detail:` line on stderr with input, output, cache-read
-and cache-write tokens and the estimated cost, capped or not.
+and cache-write tokens and the estimated cost, capped or not. It also says who pays:
+`billed_to=anthropic` or `billed_to=openai` for a direct call, `billed_to=openrouter` with
+OpenRouter's reported `provider_cost_usd`, or, for a bring-your-own-key call through
+OpenRouter, `billed_to=openai(byok)` with the upstream provider's charge and OpenRouter's
+fee shown apart. Select an OpenRouter route with the `openrouter/` prefix, for example
+`-m openrouter/google/gemini-4-neon`.
 
 One-shot runs have no tool-call, elapsed-time, output-token or cost cap unless you
 ask for one. Read-only intent keeps its no-edit contract and instruction but adds no

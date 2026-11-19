@@ -230,3 +230,24 @@ func TestOneShotUsageLineIsPrintedWithoutABudget(t *testing.T) {
 		t.Fatal("capped run lacks its budget line")
 	}
 }
+
+func TestOneShotBillingNamesWhoPays(t *testing.T) {
+	cost := func(v float64) *float64 { return &v }
+	for _, tt := range []struct {
+		provider, model string
+		usage           model.Usage
+		want            string
+	}{
+		{"anthropic", "anthropic/claude-fable-5-2", model.Usage{}, "billed_to=anthropic"},
+		{"openai", "openai/gpt-6.2-astra", model.Usage{}, "billed_to=openai"},
+		{"openrouter", "openrouter/google/gemini-4-neon", model.Usage{Cost: cost(0.0399)}, "billed_to=openrouter provider_cost_usd=0.039900"},
+		{"openrouter", "openrouter/google/gemini-4-neon", model.Usage{}, "billed_to=openrouter provider_cost_usd=unknown"},
+		{"openrouter", "openrouter/openai/gpt-6.2-sol", model.Usage{Cost: cost(0.0001), IsBYOK: true, CostDetails: &model.UsageCostDetails{UpstreamInferenceCost: 0.0014}},
+			"billed_to=openai(byok) upstream_cost_usd=0.001400 openrouter_fee_usd=0.000100"},
+		{"openrouter", "openai/gpt-6.2-sol", model.Usage{IsBYOK: true}, "billed_to=openai(byok) upstream_cost_usd=unknown openrouter_fee_usd=unknown"},
+	} {
+		if got := oneShotBilling(tt.provider, tt.model, tt.usage); got != tt.want {
+			t.Errorf("%s %s: %q, want %q", tt.provider, tt.model, got, tt.want)
+		}
+	}
+}
