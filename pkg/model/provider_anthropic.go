@@ -11,6 +11,30 @@ import (
 
 const anthropicBaseURL = "https://api.anthropic.com"
 
+// claudeRule is what a Claude 5 model accepts beyond the shared request shape.
+type claudeRule struct {
+	name               string
+	canDisableThinking bool // thinking: {type: "disabled"} is accepted
+	canForceTool       bool // a forced tool_choice is accepted
+}
+
+// claudeRules lists the Claude 5 models whose thinking is adaptive and
+// whose sampling parameters are rejected. Fable and Opus 5.5 always think;
+// Sonnet 5.5 returns a 400 for thinking disabled; Haiku 5.5 accepts it. Fable,
+// Opus 5.5 and Sonnet 5.5 return a 400 for a forced tool_choice.
+var claudeRules = map[string]claudeRule{
+	"claude-fable-5-2":  {name: "Claude Fable 5.2"},
+	"claude-fable-5-1":  {name: "Claude Fable 5.1"},
+	"claude-opus-5-5":   {name: "Claude Opus 5.5"},
+	"claude-sonnet-5-5": {name: "Claude Sonnet 5.5"},
+	"claude-haiku-5-5":  {name: "Claude Haiku 5.5", canDisableThinking: true, canForceTool: true},
+}
+
+func claudeRequestRules(model string) (claudeRule, bool) {
+	rule, ok := claudeRules[model]
+	return rule, ok
+}
+
 // AnthropicProvider calls the Claude Messages API.
 type AnthropicProvider struct {
 	apiKey     string
@@ -18,9 +42,40 @@ type AnthropicProvider struct {
 	httpClient *http.Client
 	transport  *ProviderTransport
 	version    string
+	overrides  catalogOverrides
 }
 
 var anthropicModels = []ModelInfo{
+	{
+		ID:                  "anthropic/claude-fable-5-2",
+		Name:                "Claude Fable 5.2",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 8.0, Completion: 40.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
+		ID:                  "anthropic/claude-fable-5-1",
+		Name:                "Claude Fable 5.1",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 10.0, Completion: 50.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
+		ID:                  "anthropic/claude-sonnet-5-5",
+		Name:                "Claude Sonnet 5.5",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 2.0, Completion: 10.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
 	{
 		ID:                  "anthropic/claude-haiku-5-5",
 		Name:                "Claude Haiku 5.5",
@@ -115,14 +170,26 @@ func (p *AnthropicProvider) ID() string {
 	return "anthropic"
 }
 
-// FetchCatalog returns static catalog entries.
-func (p *AnthropicProvider) FetchCatalog() (*ModelCatalog, error) {
-	return &ModelCatalog{Data: anthropicModels}, nil
+// catalog is the configured overrides, named for this provider even when the
+// provider was built without a config.
+func (p *AnthropicProvider) catalog() catalogOverrides {
+	o := p.overrides
+	o.prefix = "anthropic/"
+	return o
 }
 
-// GetModelInfo looks up metadata by ID.
+// FetchCatalog returns static catalog entries, with configured models and
+// prices.
+func (p *AnthropicProvider) FetchCatalog() (*ModelCatalog, error) {
+	return &ModelCatalog{Data: p.catalog().apply(anthropicModels)}, nil
+}
+
+// GetModelInfo looks up metadata by ID, bare or qualified.
 func (p *AnthropicProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
-	if info, ok := anthropicModelIndex[modelID]; ok {
+	if strings.Contains(modelID, "/") && !strings.HasPrefix(modelID, "anthropic/") {
+		return nil, fmt.Errorf("anthropic model not found: %s", modelID)
+	}
+	if info, ok := p.catalog().lookup(anthropicModels, anthropicModelIndex, modelID); ok {
 		return &info, nil
 	}
 	return nil, fmt.Errorf("anthropic model not found: %s", modelID)
@@ -209,12 +276,13 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	if anthReq.MaxTokens == 0 {
 		anthReq.MaxTokens = 4096
 	}
-	if anthReq.Model == "claude-opus-5-5" || anthReq.Model == "claude-haiku-5-5" {
+	if rule, ok := claudeRequestRules(anthReq.Model); ok {
+		// Claude 5 models think adaptively and reject sampling parameters.
 		anthReq.Temperature = 0
 		if req.Reasoning != nil {
 			if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
-				if anthReq.Model == "claude-opus-5-5" {
-					return nil, fmt.Errorf("anthropic: Claude Opus 5.5 cannot disable thinking; select a lower effort")
+				if !rule.canDisableThinking {
+					return nil, fmt.Errorf("anthropic: %s cannot disable thinking; select a lower effort", rule.name)
 				}
 				anthReq.Thinking = &anthropicThinkingConfig{Type: "disabled"}
 			}
@@ -227,8 +295,8 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 				}
 			}
 		}
-		if anthReq.Model == "claude-opus-5-5" && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
-			return nil, fmt.Errorf("anthropic: Claude Opus 5.5 requires automatic tool choice")
+		if !rule.canForceTool && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			return nil, fmt.Errorf("anthropic: %s requires automatic tool choice", rule.name)
 		}
 	}
 

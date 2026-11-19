@@ -44,11 +44,13 @@ func providerFactory(cfg *config.Config) (map[string]Provider, error) {
 	// opts into the native OpenAI API.
 	if shouldRegisterOpenAIProvider(cfg) {
 		provider := NewOpenAIProvider(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.BaseURL, networkLogsEnabled)
+		provider.overrides = newCatalogOverrides("openai", cfg.Providers.OpenAI)
 		providers["openai"] = provider
 	}
 
 	if cfg.Providers.Anthropic.Enabled && cfg.Providers.Anthropic.APIKey != "" {
 		provider := NewAnthropicProvider(cfg.Providers.Anthropic.APIKey, cfg.Providers.Anthropic.BaseURL, networkLogsEnabled)
+		provider.overrides = newCatalogOverrides("anthropic", cfg.Providers.Anthropic)
 		providers["anthropic"] = provider
 	}
 

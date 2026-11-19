@@ -17,6 +17,7 @@ type OpenAIProvider struct {
 	baseURL    string
 	httpClient *http.Client
 	transport  *ProviderTransport
+	overrides  catalogOverrides
 }
 
 // openAIModels enumerates a curated subset of models with pricing/context info.
@@ -148,9 +149,17 @@ func (p *OpenAIProvider) ID() string {
 	return "openai"
 }
 
+// catalog is the configured overrides, named for this provider even when the
+// provider was built without a config.
+func (p *OpenAIProvider) catalog() catalogOverrides {
+	o := p.overrides
+	o.prefix = "openai/"
+	return o
+}
+
 // FetchCatalog returns the curated catalog.
 func (p *OpenAIProvider) FetchCatalog() (*ModelCatalog, error) {
-	return &ModelCatalog{Data: openAIModels}, nil
+	return &ModelCatalog{Data: p.catalog().apply(openAIModels)}, nil
 }
 
 // GetModelInfo returns static metadata for a given model.
@@ -158,16 +167,13 @@ func (p *OpenAIProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
 	if strings.TrimSpace(modelID) == "" {
 		return nil, fmt.Errorf("openai model not found: %s", modelID)
 	}
-	if info, ok := openAIModelIndex[modelID]; ok {
+	if info, ok := p.catalog().lookup(openAIModels, openAIModelIndex, modelID); ok && (strings.HasPrefix(modelID, "openai/") || !strings.Contains(modelID, "/")) {
 		return &info, nil
 	}
-	if !strings.Contains(modelID, "/") {
-		if info, ok := openAIModelIndex["openai/"+modelID]; ok {
-			return &info, nil
-		}
-	}
-	// Forward-compatible fallback: unknown IDs stay usable with minimal metadata.
-	return &ModelInfo{ID: modelID, Name: modelID}, nil
+	// Forward-compatible fallback: unknown IDs stay usable with minimal
+	// metadata, and with a configured price when there is one.
+	info := p.catalog().withPrice(ModelInfo{ID: modelID, Name: modelID})
+	return &info, nil
 }
 
 // ChatCompletion executes a completion request via OpenAI.
@@ -208,9 +214,24 @@ func (p *OpenAIProvider) setAuthHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 }
 
+// openAIChatLimits moves an output limit set as max_tokens to
+// max_completion_tokens. OpenAI's Chat Completions API deprecated max_tokens,
+// and its reasoning models reject it ("Unsupported parameter: 'max_tokens'");
+// every current chat model accepts max_completion_tokens.
+func openAIChatLimits(req ChatRequest) ChatRequest {
+	if req.MaxTokens > 0 {
+		if req.MaxCompletionTokens <= 0 {
+			req.MaxCompletionTokens = req.MaxTokens
+		}
+		req.MaxTokens = 0
+	}
+	return req
+}
+
 func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	// session_id is an OpenRouter extension, not an OpenAI request field.
 	req.SessionID = ""
+	req = openAIChatLimits(req)
 	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders)
 	if err != nil {
 		return nil, err
@@ -228,5 +249,6 @@ func (p *OpenAIProvider) invoke(ctx context.Context, req ChatRequest) (*ChatResp
 
 func (p *OpenAIProvider) invokeStream(ctx context.Context, req ChatRequest, chunkChan chan<- StreamChunk) error {
 	req.SessionID = ""
+	req = openAIChatLimits(req)
 	return p.transport.Stream(ctx, p.httpClient, "POST", p.baseURL+"/chat/completions", req, p.setAuthHeaders, chunkChan)
 }

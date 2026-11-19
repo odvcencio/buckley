@@ -346,6 +346,14 @@ type ProviderSettings struct {
 	// cannot route it to an endpoint that bills OpenRouter credits instead of
 	// the operator's key. Only providers.openrouter reads this field.
 	BYOKProviders map[string]string `yaml:"byok_providers,omitempty"`
+	// Models names models the provider's built-in catalog does not list yet,
+	// bare ("claude-fable-5-2") or qualified ("anthropic/claude-fable-5-2").
+	// Pricing asserts per-million-token USD prices by the same names; a
+	// configured price is authoritative, so --budget and other cost-bounded
+	// requests admit the model. Only providers.openai and providers.anthropic
+	// read these fields.
+	Models  []string                        `yaml:"models,omitempty"`
+	Pricing map[string]ModelPricingOverride `yaml:"pricing,omitempty"`
 }
 
 // OpenAICompatibleConfig configures an OpenAI-compatible API provider.
