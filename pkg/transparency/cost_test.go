@@ -374,10 +374,14 @@ func TestCostUnknownForUsageCachedInputMirrorsReasoningPattern(t *testing.T) {
 		}
 	})
 
-	t.Run("distinct cached rate configured: unknown (rate would be silently ignored)", func(t *testing.T) {
+	t.Run("distinct cached rate configured: known and priced at the cached rate", func(t *testing.T) {
 		pricing := ModelPricing{InputPerMillion: 0.06, OutputPerMillion: 0.24, CachedInputPerMillion: 0.015}
-		if !CostUnknownForUsage(tokens, pricing) {
-			t.Fatalf("CostUnknownForUsage = false, want true: a distinct cached rate exists that Calculate cannot apply from ReportedCachedInput alone")
+		if CostUnknownForUsage(tokens, pricing) {
+			t.Fatalf("CostUnknownForUsage = true, want false: Calculate applies the cached rate to ReportedCachedInput")
+		}
+		want := (float64(31_704-31_488)*0.06 + float64(31_488)*0.015) / 1_000_000
+		if got := pricing.Calculate(tokens); got < want-1e-12 || got > want+1e-12 {
+			t.Fatalf("Calculate = %v, want %v", got, want)
 		}
 	})
 

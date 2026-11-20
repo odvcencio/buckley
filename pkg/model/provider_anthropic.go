@@ -202,17 +202,71 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 		return nil, err
 	}
 
-	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	anthropicResp, err := p.send(ctx, anthReq)
 	if err != nil {
 		return nil, err
 	}
+	if anthReq.requiredTool != "" && !anthropicResp.calledTool(anthReq.requiredTool) {
+		// The model answered in text although the caller required a tool.
+		// Show it its answer and ask once more for the tool call.
+		first := anthropicResp
+		anthReq.Messages = append(anthReq.Messages,
+			anthropicMessage{Role: "assistant", Content: first.Content},
+			anthropicMessage{Role: "user", Content: []anthropicContent{{Type: "text", Text: forcedToolInstruction(anthReq.requiredTool) + " Call it now."}}},
+		)
+		anthropicResp, err = p.send(ctx, anthReq)
+		if err != nil {
+			return nil, err
+		}
+		anthropicResp.Usage = first.Usage.plus(anthropicResp.Usage)
+		if !anthropicResp.calledTool(anthReq.requiredTool) {
+			return nil, fmt.Errorf("anthropic: %s did not call the required tool after a retry", anthReq.Model)
+		}
+	}
+	return anthropicResp.toChatResponse()
+}
 
+func (p *AnthropicProvider) send(ctx context.Context, anthReq *anthropicRequest) (anthropicResponse, error) {
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	if err != nil {
+		return anthropicResponse{}, err
+	}
 	var anthropicResp anthropicResponse
 	if err := json.Unmarshal(data, &anthropicResp); err != nil {
-		return nil, fmt.Errorf("decode anthropic response: %w", err)
+		return anthropicResponse{}, fmt.Errorf("decode anthropic response: %w", err)
 	}
+	return anthropicResp, nil
+}
 
-	return anthropicResp.toChatResponse()
+// forcedToolInstruction asks for a tool call in words, for models that
+// reject a forced tool_choice.
+func forcedToolInstruction(choice string) string {
+	if choice == "required" {
+		return "Respond only by calling one of the provided tools with complete arguments. Do not reply with text alone."
+	}
+	return fmt.Sprintf("Respond only by calling the %s tool with complete arguments. Do not reply with text alone.", choice)
+}
+
+// calledTool reports whether the response holds a call that satisfies a
+// forced tool_choice: any tool for "required", else the named tool.
+func (a anthropicResponse) calledTool(choice string) bool {
+	for _, c := range a.Content {
+		if c.Type == "tool_use" && (choice == "required" || c.Name == choice) {
+			return true
+		}
+	}
+	return false
+}
+
+// plus adds two responses' token counts, for a request sent twice.
+func (u anthropicUsage) plus(next anthropicUsage) anthropicUsage {
+	u.InputTokens += next.InputTokens
+	u.OutputTokens += next.OutputTokens
+	u.CacheReadTokens += next.CacheReadTokens
+	u.CacheWriteTokens += next.CacheWriteTokens
+	u.CacheCreation.OneHourTokens += next.CacheCreation.OneHourTokens
+	u.OutputDetails.ThinkingTokens += next.OutputDetails.ThinkingTokens
+	return u
 }
 
 func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
@@ -276,9 +330,24 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	if anthReq.MaxTokens == 0 {
 		anthReq.MaxTokens = 4096
 	}
+	forcedTool := ""
 	if rule, ok := claudeRequestRules(anthReq.Model); ok {
 		// Claude 5 models think adaptively and reject sampling parameters.
 		anthReq.Temperature = 0
+		if !rule.canForceTool && len(req.Tools) > 0 && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			// These models return a 400 for a forced tool_choice. Ask for the
+			// tool in the system prompt instead, send tool_choice auto, and let
+			// ChatCompletion retry once when no tool call comes back.
+			forcedTool = req.ToolChoice
+			req.ToolChoice = "auto"
+			if req.Reasoning != nil && req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled && !rule.canDisableThinking {
+				// Callers turn thinking off only because some models cannot
+				// think and answer a forced tool call; auto tool choice can.
+				reasoning := *req.Reasoning
+				reasoning.Enabled = nil
+				req.Reasoning = &reasoning
+			}
+		}
 		if req.Reasoning != nil {
 			if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
 				if !rule.canDisableThinking {
@@ -296,6 +365,7 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 			}
 		}
 		if !rule.canForceTool && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			// A forced tool_choice with no tools to choose from.
 			return nil, fmt.Errorf("anthropic: %s requires automatic tool choice", rule.name)
 		}
 	}
@@ -340,6 +410,10 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 		}
 	}
 
+	if forcedTool != "" {
+		anthReq.requiredTool = forcedTool
+		systemParts = append(systemParts, forcedToolInstruction(forcedTool))
+	}
 	if len(systemParts) > 0 {
 		system := strings.Join(systemParts, "\n\n")
 		if req.PromptCache != nil && req.PromptCache.Enabled {
@@ -376,6 +450,9 @@ type anthropicRequest struct {
 	OutputConfig *anthropicOutputConfig   `json:"output_config,omitempty"`
 	Thinking     *anthropicThinkingConfig `json:"thinking,omitempty"`
 	CacheControl *CacheControl            `json:"cache_control,omitempty"`
+	// requiredTool is the forced tool_choice ("required" or a tool name) that
+	// was sent as auto because the model rejects forced tool use.
+	requiredTool string
 }
 
 type anthropicThinkingConfig struct {

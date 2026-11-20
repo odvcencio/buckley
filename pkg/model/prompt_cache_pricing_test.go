@@ -502,3 +502,24 @@ func TestCalculateBoundedCostKeepsOpenRouterReportedCost(t *testing.T) {
 		t.Fatal("a BYOK fee alone was taken as the total")
 	}
 }
+
+func TestOpenAICatalogPricesTheGPT6Family(t *testing.T) {
+	// developers.openai.com/api/docs/pricing, Standard tier, 20 Nov 2026.
+	for id, want := range map[string]ModelPricing{
+		"openai/gpt-6.2-sol":   {Prompt: 2, Completion: 10, CacheRead: 0.10, CacheWrite: 2.5},
+		"openai/gpt-6.2-astra": {Prompt: 8, Completion: 40, CacheRead: 0.40, CacheWrite: 10},
+		"openai/gpt-6.1-terra": {Prompt: 1, Completion: 5, CacheRead: 0.05, CacheWrite: 1.25},
+		"openai/gpt-6.1-sol":   {Prompt: 2, Completion: 10, CacheRead: 0.10, CacheWrite: 2.5},
+		"openai/gpt-6-sol":     {Prompt: 2, Completion: 10, CacheRead: 0.20, CacheWrite: 2.5},
+		"openai/gpt-6-astra":   {Prompt: 10, Completion: 50, CacheRead: 1, CacheWrite: 12.5},
+		"openai/gpt-6-luna":    {Prompt: 0.10, Completion: 0.50, CacheRead: 0.01, CacheWrite: 0.125},
+	} {
+		info, err := (&OpenAIProvider{}).GetModelInfo(strings.TrimPrefix(id, "openai/"))
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if info.ID != id || info.Pricing != want || !info.PricingKnown {
+			t.Errorf("%s: %s %#v known %v, want %#v", id, info.ID, info.Pricing, info.PricingKnown, want)
+		}
+	}
+}

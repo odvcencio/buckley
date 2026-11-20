@@ -125,7 +125,7 @@ func TestFormatTraceCostLineLabelsUnknownCost(t *testing.T) {
 	trace := &transparency.Trace{CostUnknown: true}
 	summary := transparency.CostSummary{SessionCost: 0.25, SessionCostUnknown: true}
 	got := formatTraceCostLine(trace, summary)
-	if !strings.Contains(got, "Cost: unknown") || !strings.Contains(got, "$0.2500 + unknown") {
+	if !strings.Contains(got, "Cost: price unconfirmed") || !strings.Contains(got, "$0.2500 + unknown") {
 		t.Fatalf("cost line = %q, want unknown cost with known subtotal", got)
 	}
 	if strings.Contains(got, "$0.0000") {
@@ -138,7 +138,7 @@ func TestFormatTraceCostLineLabelsMixedKnownAndUnknownCost(t *testing.T) {
 	summary := transparency.CostSummary{SessionCost: 0.5, SessionCostUnknown: true}
 	got := formatTraceCostLine(trace, summary)
 	for _, want := range []string{
-		"Cost: unknown ($0.1234 known subtotal)",
+		"Cost: price unconfirmed ($0.1234 known subtotal)",
 		"Session known subtotal: $0.5000 + unknown",
 	} {
 		if !strings.Contains(got, want) {
@@ -159,7 +159,7 @@ func TestFormatTraceErrorUsageLineDoesNotAssertStillChargedWhenUnknown(t *testin
 		Tokens:      transparency.TokenUsage{Input: 1, Output: 2, Unclassified: 3},
 		CostUnknown: true,
 	})
-	if got != "Tokens used: 6 · Cost: unknown" {
+	if got != "Tokens used: 6 · Cost: price unconfirmed" {
 		t.Fatalf("error usage line = %q, want unknown cost", got)
 	}
 	if strings.Contains(got, "still charged") {
@@ -173,7 +173,7 @@ func TestFormatTraceErrorUsageLineShowsMixedKnownSubtotal(t *testing.T) {
 		Cost:        0.1234,
 		CostUnknown: true,
 	})
-	if got != "Tokens used: 42 · Cost: unknown ($0.1234 known subtotal)" {
+	if got != "Tokens used: 42 · Cost: price unconfirmed ($0.1234 known subtotal)" {
 		t.Fatalf("error usage line = %q, want mixed unknown cost", got)
 	}
 	if strings.Contains(got, "still charged") {
@@ -223,7 +223,7 @@ func TestPrintCostLabelsUnknownTraceAndUnclassifiedTokens(t *testing.T) {
 	got := captureTermOut(t, func() { printCost(trace, ledger) })
 	for _, want := range []string{
 		"42 unclassified",
-		"Cost: unknown ($0.1234 known subtotal)",
+		"Cost: price unconfirmed ($0.1234 known subtotal)",
 		"Session known subtotal: $0.5000 + unknown",
 	} {
 		if !strings.Contains(got, want) {
@@ -283,7 +283,7 @@ func TestPrintReviewCostUsesSessionTokensAndUnknownSubtotal(t *testing.T) {
 	got := captureTermOut(t, func() { printReviewCost(trace, ledger) })
 	for _, want := range []string{
 		"42 unclassified",
-		"Cost: unknown ($0.1234 known subtotal)",
+		"Cost: price unconfirmed ($0.1234 known subtotal)",
 		"Session known subtotal: $0.5000 + unknown",
 	} {
 		if !strings.Contains(got, want) {
@@ -328,7 +328,7 @@ func TestPrintErrorUnknownCostDoesNotSayStillCharged(t *testing.T) {
 	for _, want := range []string{
 		"boom",
 		"Tokens used: 6",
-		"Cost: unknown ($0.1234 known subtotal)",
+		"Cost: price unconfirmed ($0.1234 known subtotal)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("printError output = %q, want %q", got, want)

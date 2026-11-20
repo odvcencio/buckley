@@ -354,6 +354,20 @@ func clearTestTierCostCaps(cfg *Config) {
 		tier.MaxCostPerMillion = 0
 		cfg.Tiers[weight] = tier
 	}
+	preferChatCompletionsTiers(cfg)
+}
+
+// preferChatCompletionsTiers routes every tier to a Chat Completions model.
+// The fixtures answer in the Chat Completions shape, and the OpenAI catalog
+// also lists GPT-6 models, whose tool requests go to the Responses API.
+func preferChatCompletionsTiers(cfg *Config) {
+	if cfg.Tiers == nil {
+		cfg.Tiers = DefaultTiers()
+	}
+	for weight, tier := range cfg.Tiers {
+		tier.Models = append([]string{"openai/gpt-4o", "openai/gpt-5.5"}, tier.Models...)
+		cfg.Tiers[weight] = tier
+	}
 }
 
 func coordinatorDelegateResponse(id string, args map[string]any) string {

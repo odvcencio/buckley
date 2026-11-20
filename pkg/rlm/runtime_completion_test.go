@@ -292,6 +292,7 @@ func newCompletionTestRuntime(t *testing.T, server *httptest.Server, configure f
 	t.Helper()
 	mgr := newCoordinatorTestManager(t, server)
 	cfg := DefaultConfig()
+	preferChatCompletionsTiers(&cfg)
 	if configure != nil {
 		configure(&cfg)
 	}

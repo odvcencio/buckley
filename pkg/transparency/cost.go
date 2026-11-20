@@ -161,17 +161,15 @@ func CostUnknownForUsage(tokens TokenUsage, pricing ModelPricing) bool {
 		if *tokens.ReportedCachedInput < 0 || *tokens.ReportedCachedInput > tokens.Input {
 			return true
 		}
-		// Mirrors the ReportedReasoning rule above: only mark unknown when a
-		// distinct cached rate exists that Calculate cannot apply (it prices
-		// off the additive CachedInput field, not ReportedCachedInput). When
-		// no cached rate is configured for the model, Calculate already
-		// prices every input token at the uniform input rate, which is a
-		// safe (if imprecise, never negative) known cost.
-		if *tokens.ReportedCachedInput > 0 && pricing.CachedInputPerMillion > 0 {
+		// Calculate prices reported cache reads at the cached rate when one
+		// is known, and at the input rate otherwise (a safe, never
+		// negative, known cost). Both mixed with additive CachedInput would
+		// double-count.
+		if *tokens.ReportedCachedInput > 0 && tokens.CachedInput > 0 {
 			return true
 		}
 	}
-	if tokens.ReportedCacheWrite > 0 {
+	if tokens.ReportedCacheWrite > 0 && pricing.CacheWritePerMillion == 0 {
 		return true
 	}
 	return false
@@ -363,12 +361,28 @@ type ModelPricing struct {
 
 	// CachedInputPerMillion is the cost for cached input tokens
 	CachedInputPerMillion float64
+
+	// CacheWritePerMillion is the cost for input tokens written to the
+	// prompt cache (Anthropic 5-minute writes, OpenAI 30-minute writes).
+	CacheWritePerMillion float64
 }
 
 // Calculate computes the cost for given token usage.
 func (mp ModelPricing) Calculate(usage TokenUsage) float64 {
-	inputCost := float64(usage.Input-usage.CachedInput) * mp.InputPerMillion / 1_000_000
-	cachedCost := float64(usage.CachedInput) * mp.CachedInputPerMillion / 1_000_000
+	// Provider-reported cache reads and writes are subsets of Input. They
+	// are priced at their own rates when those rates are known; otherwise
+	// they stay in Input at the input rate.
+	cached := usage.CachedInput
+	if cached == 0 && usage.ReportedCachedInput != nil && mp.CachedInputPerMillion > 0 {
+		cached = *usage.ReportedCachedInput
+	}
+	writes := 0
+	if mp.CacheWritePerMillion > 0 {
+		writes = min(usage.ReportedCacheWrite, max(usage.Input-cached, 0))
+	}
+	inputCost := float64(usage.Input-cached-writes) * mp.InputPerMillion / 1_000_000
+	cachedCost := float64(cached) * mp.CachedInputPerMillion / 1_000_000
+	writeCost := float64(writes) * mp.CacheWritePerMillion / 1_000_000
 	outputCost := float64(usage.Output) * mp.OutputPerMillion / 1_000_000
 
 	reasoningCost := float64(0)
@@ -379,5 +393,5 @@ func (mp ModelPricing) Calculate(usage TokenUsage) float64 {
 		outputCost += float64(usage.Reasoning) * mp.OutputPerMillion / 1_000_000
 	}
 
-	return inputCost + cachedCost + outputCost + reasoningCost
+	return inputCost + cachedCost + writeCost + outputCost + reasoningCost
 }

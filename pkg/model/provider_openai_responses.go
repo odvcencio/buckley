@@ -49,7 +49,8 @@ type openAIResponsesUsage struct {
 	OutputTokens       int `json:"output_tokens"`
 	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails struct {
-		CachedTokens int `json:"cached_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
@@ -360,13 +361,20 @@ func openAIResponseMessageContent(msg Message) any {
 			switch part.Type {
 			case "text":
 				if part.Text != "" {
-					parts = append(parts, map[string]any{"type": "input_text", "text": part.Text})
+					text := map[string]any{"type": "input_text", "text": part.Text}
+					if part.PromptCacheBreakpoint != nil {
+						text["prompt_cache_breakpoint"] = part.PromptCacheBreakpoint
+					}
+					parts = append(parts, text)
 				}
 			case "image_url":
 				if part.ImageURL != nil && part.ImageURL.URL != "" {
 					image := map[string]any{"type": "input_image", "image_url": part.ImageURL.URL}
 					if part.ImageURL.Detail != "" {
 						image["detail"] = part.ImageURL.Detail
+					}
+					if part.PromptCacheBreakpoint != nil {
+						image["prompt_cache_breakpoint"] = part.PromptCacheBreakpoint
 					}
 					parts = append(parts, image)
 				}
@@ -484,7 +492,8 @@ func translateOpenAIResponse(response *openAIResponsesResponse) (*ChatResponse, 
 		CompletionTokens: response.Usage.OutputTokens,
 		TotalTokens:      response.Usage.TotalTokens,
 		PromptTokensDetails: &PromptTokensDetails{
-			CachedTokens: response.Usage.InputTokensDetails.CachedTokens,
+			CachedTokens:     response.Usage.InputTokensDetails.CachedTokens,
+			CacheWriteTokens: response.Usage.InputTokensDetails.CacheWriteTokens,
 		},
 		CompletionTokenDetails: &CompletionTokenDetails{
 			ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
@@ -506,4 +515,56 @@ func translateOpenAIResponse(response *openAIResponsesResponse) (*ChatResponse, 
 		}},
 		Usage: usage,
 	}, nil
+}
+
+// openAIUsesResponses reports whether a request must go to the Responses
+// API: a pro-mode model (reasoning.mode is a Responses field), or a GPT-6
+// model with tools, because GPT-6 models refuse function tools on Chat
+// Completions at every reasoning effort ("Function tools with
+// reasoning_effort are not supported for gpt-6.2-sol in
+// /v1/chat/completions. To use function tools, use /v1/responses", and
+// 'none' is not an accepted effort).
+func openAIUsesResponses(req ChatRequest) bool {
+	if _, pro := openAIProModel(normalizeModelForProvider(req.Model, "openai")); pro {
+		return true
+	}
+	return len(req.Tools) > 0 && openAIModelMajor(req.Model) >= 6
+}
+
+// chatCompletionViaResponses sends one stateless Responses API turn and
+// returns it as a chat completion. Reasoning models reject temperature on
+// the Responses API, so it is not sent to them.
+func (p *OpenAIProvider) chatCompletionViaResponses(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	input, err := openAIResponseInputItems(req.Messages)
+	if err != nil {
+		return nil, err
+	}
+	base, pro := openAIProModel(normalizeModelForProvider(req.Model, "openai"))
+	req.Model = base
+	if openAIReasoningModel(req.Model) {
+		req.Temperature = 0
+	}
+	if req.Reasoning != nil && req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
+		req.Reasoning = nil
+	}
+	apiReq, err := openAIResponseRequest(req, input)
+	if err != nil {
+		return nil, err
+	}
+	if pro {
+		if apiReq.Reasoning == nil {
+			apiReq.Reasoning = map[string]any{}
+		}
+		apiReq.Reasoning["mode"] = "pro"
+	}
+	apiResp, err := p.invokeResponse(ctx, apiReq)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := translateOpenAIResponse(apiResp)
+	if err != nil {
+		return nil, err
+	}
+	resp.ExecutionIdentity = observedExecutionIdentity(resp.ID, resp.Model, nil)
+	return resp, nil
 }
