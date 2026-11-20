@@ -196,8 +196,10 @@ func resolveOneshotToolPricing(route model.ModelRoute, mgr *model.Manager) (tran
 		return transparency.ModelPricing{}, true
 	}
 	return transparency.ModelPricing{
-		InputPerMillion:  info.Pricing.Prompt,
-		OutputPerMillion: info.Pricing.Completion,
+		InputPerMillion:       info.Pricing.Prompt,
+		OutputPerMillion:      info.Pricing.Completion,
+		CachedInputPerMillion: info.Pricing.CacheRead,
+		CacheWritePerMillion:  info.Pricing.CacheWrite,
 	}, false
 }
 

@@ -13,7 +13,7 @@ func FromUsage(usage model.Usage) transparency.TokenUsage {
 		Input:              usage.PromptTokens,
 		Output:             usage.CompletionTokens,
 		ReportedTotal:      usage.TotalTokens,
-		ReportedCacheWrite: usage.CacheWriteTokens,
+		ReportedCacheWrite: usage.CacheWrites(),
 		Estimated:          usage.Estimated,
 	}
 	if usage.CompletionTokenDetails != nil {

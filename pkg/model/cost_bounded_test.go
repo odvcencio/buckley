@@ -235,7 +235,7 @@ func TestManagerNormalizeCostBoundedRequest_RejectsPromptCaching(t *testing.T) {
 			tt.mutate(mgr, &req)
 
 			_, err := mgr.NormalizeCostBoundedRequest(req)
-			if err == nil || !strings.Contains(err.Error(), "authoritative cache-write pricing is unavailable") {
+			if err == nil || !strings.Contains(err.Error(), "cannot use prompt caching") || !strings.Contains(err.Error(), "no cache read price") {
 				t.Fatalf("error = %v, want explicit prompt-cache pricing rejection", err)
 			}
 		})
@@ -339,7 +339,7 @@ func TestManagerCalculateBoundedCost_RequiresAuthoritativePricingAndUsage(t *tes
 			providerID: "openai",
 			info:       positive,
 			usage:      Usage{PromptTokens: 10, CompletionTokens: 2, CacheWriteTokens: 5},
-			wantErr:    "cache-write pricing is unavailable",
+			wantErr:    "no cache-write price",
 		},
 		{
 			name:       "invalid pricing",

@@ -15,8 +15,8 @@ func TestCostProvenance_Display(t *testing.T) {
 		want    string
 		charged bool
 	}{
-		{"unknown", transparency.Trace{CostUnknown: true}, transparency.CostSummary{SessionCostUnknown: true}, "Cost: unknown · Session known subtotal: $0.0000 + unknown", false},
-		{"mixed", transparency.Trace{Cost: 2, CostUnknown: true}, transparency.CostSummary{SessionCost: 5, SessionCostUnknown: true}, "Cost: unknown ($2.0000 known subtotal) · Session known subtotal: $5.0000 + unknown", false},
+		{"unknown", transparency.Trace{CostUnknown: true}, transparency.CostSummary{SessionCostUnknown: true}, "Cost: price unconfirmed · Session known subtotal: $0.0000 + unknown", false},
+		{"mixed", transparency.Trace{Cost: 2, CostUnknown: true}, transparency.CostSummary{SessionCost: 5, SessionCostUnknown: true}, "Cost: price unconfirmed ($2.0000 known subtotal) · Session known subtotal: $5.0000 + unknown", false},
 		{"known-zero", transparency.Trace{}, transparency.CostSummary{}, "Cost: $0.0000 · Session: $0.0000", true},
 		{"known", transparency.Trace{Cost: 2}, transparency.CostSummary{SessionCost: 5}, "Cost: $2.0000 · Session: $5.0000", true},
 		{

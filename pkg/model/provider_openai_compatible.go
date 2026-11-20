@@ -379,10 +379,7 @@ func (p *OpenAICompatibleProvider) applyPricingOverrides(models []ModelInfo) []M
 		if !ok {
 			continue
 		}
-		models[i].Pricing = ModelPricing{
-			Prompt:     override.InputPerMillion,
-			Completion: override.OutputPerMillion,
-		}
+		models[i].Pricing = pricingFromOverride(override)
 		models[i].PricingKnown = true
 	}
 	return models

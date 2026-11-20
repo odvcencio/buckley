@@ -32,6 +32,7 @@ type oneShotOptions struct {
 	ModelOverride string
 	AllowedTools  []string
 	ReadRoots     []string // --read-root paths, added to tools.read_roots
+	ContextFiles  []string // --context-file paths, placed before the question in this order
 	AllowShell    bool     // --allow-shell
 	Caps          oneShotCaps
 	CodeMode      bool
@@ -402,28 +403,28 @@ func executeOneShot(prompt string, cfg *config.Config, mgr *model.Manager, store
 		systemPrompt += "\n\n" + agentloop.PersistenceInstruction
 	}
 	conv.AddSystemMessage(systemPrompt)
-	conv.AddUserMessage(prompt)
+	contextParts, err := loadOneShotContextFiles(cwd, opts.ContextFiles)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	if len(contextParts) == 0 {
+		conv.AddUserMessage(prompt)
+	} else {
+		conv.AppendMessage(oneShotContextMessage(contextParts, prompt))
+		limits.PromptCache = oneShotContextPromptCache(mgr, resolvedModel, limits.MaxCostUSD, os.Stderr)
+	}
 
 	var cancel context.CancelFunc
 	if limits.MaxElapsedSeconds > 0 {
 		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(limits.MaxElapsedSeconds)*time.Second)
 		defer cancel()
 	}
-	if limits.MaxCostUSD > 0 && !quietMode {
+	if !quietMode {
+		// Spend stays visible on every run, capped or not.
 		limits.OnResult = func(result *agentloop.Result) {
-			if result == nil {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "Budgeted run: requests=%d tools=%d input_tokens=%d output_tokens=%d accounted_cost_usd=%.6f ceiling_usd=%.6f\n", result.ModelRequests, result.ToolCalls, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.CostUSD, limits.MaxCostUSD)
-			reads, thinking := 0, 0
-			if result.Usage.PromptTokensDetails != nil {
-				reads = result.Usage.PromptTokensDetails.CachedTokens
-			}
-			if result.Usage.CompletionTokenDetails != nil {
-				thinking = result.Usage.CompletionTokenDetails.ReasoningTokens
-			}
-			if estimate, err := mgr.CalculateCost(resolvedModel, result.Usage); err == nil {
-				fmt.Fprintf(os.Stderr, "Usage detail: cache_read_tokens=%d cache_write_tokens=%d thinking_tokens=%d estimated_cost_usd=%.6f\n", reads, result.Usage.CacheWriteTokens, thinking, estimate)
+			if line := oneShotUsageLine(mgr, resolvedModel, result, limits.MaxCostUSD); line != "" {
+				fmt.Fprint(os.Stderr, line)
 			}
 		}
 	}

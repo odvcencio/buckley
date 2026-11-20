@@ -896,26 +896,83 @@ func (m *Manager) applyPromptCache(req ChatRequest, providerID string) ChatReque
 	if !cacheEnabled {
 		return req
 	}
+	copied := *cache
+	cache = &copied
+	if cache.TTL == "" {
+		cache.TTL = m.promptCacheTTL(nil)
+	}
+	req.PromptCache = cache
 
 	switch providerID {
 	case "anthropic":
-		if _, _, priced := nativeAnthropicPricing(req.Model, 0); priced && req.CacheControl == nil {
+		// Explicit breakpoints (the system prompt, in the provider adapter, and
+		// each marked stable prefix here) give a shared prefix a read point
+		// that a varying question after it cannot invalidate. The automatic
+		// top-level breakpoint caches the growing conversation tail.
+		req.Messages = applyCacheBreakpoints(req.Messages, &CacheControl{Type: promptCacheControlType, TTL: cache.TTL})
+		if _, claude5 := claudeRequestRules(normalizeModelForProvider(req.Model, "anthropic")); claude5 && req.CacheControl == nil {
 			req.CacheControl = &CacheControl{Type: promptCacheControlType}
 		}
-	case "openrouter", "openai_compatible", "litellm":
+	case "openrouter":
+		// OpenRouter passes cache_control on content parts to the upstream
+		// provider (openrouter.ai/docs/features/prompt-caching). Claude takes
+		// up to four breakpoints and a 1-hour TTL, so the system prompt gets
+		// one too. Gemini uses only the last breakpoint, with a fixed
+		// 5-minute TTL, so it gets one plain breakpoint after the context.
+		marker := &CacheControl{Type: promptCacheControlType}
+		if strings.HasPrefix(req.Model, "anthropic/") {
+			marker.TTL = cache.TTL
+			req.Messages = applyLeadingSystemCacheBreakpoint(req.Messages, marker)
+		}
+		req.Messages = applyCacheBreakpoints(req.Messages, marker)
+		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
+			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
+		}
+	case "openai_compatible", "litellm":
+		req.Messages = applyCacheBreakpoints(req.Messages, &CacheControl{Type: promptCacheControlType})
 		if cache.SystemMessages > 0 || cache.TailMessages > 0 {
 			req.Messages = applyOpenAICompatiblePromptCache(req.Messages, cache)
 		}
 	case "openai":
+		// OpenAI caches long prefixes on its own; the key routes requests
+		// that share a prefix to the same cache.
 		if req.PromptCacheKey == "" {
 			req.PromptCacheKey = strings.TrimSpace(cfg.Key)
 		}
+		if req.PromptCacheKey == "" {
+			req.PromptCacheKey = stablePrefixCacheKey(req.Model, req.Messages)
+		}
+		if openAIExplicitCacheBreakpoints(req.Model) {
+			req.Messages = applyOpenAICacheBreakpoints(req.Messages)
+		}
 		if req.PromptCacheRetention == "" {
-			req.PromptCacheRetention = strings.TrimSpace(cfg.Retention)
+			switch retention := strings.TrimSpace(cfg.Retention); retention {
+			case "5m", "1h":
+				// Anthropic lifetimes; OpenAI keeps its default.
+			default:
+				req.PromptCacheRetention = retention
+			}
 		}
 	}
 
 	return req
+}
+
+// promptCacheTTL returns the Anthropic lifetime for explicit cache
+// breakpoints: "1h" when prompt_cache.retention asks for 1h or 24h, otherwise
+// "" (the 5-minute default).
+func (m *Manager) promptCacheTTL(req *ChatRequest) string {
+	if req != nil && req.PromptCache != nil && req.PromptCache.TTL != "" {
+		return req.PromptCache.TTL
+	}
+	if m == nil || m.config == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(m.config.PromptCache.Retention)) {
+	case "1h", "24h":
+		return "1h"
+	}
+	return ""
 }
 
 func containsString(values []string, target string) bool {
@@ -1322,20 +1379,43 @@ func (m *Manager) GetContextLengthForRoute(route ModelRoute) (int, error) {
 	return info.ContextLength, nil
 }
 
-// CalculateCost calculates the cost of an API call
+// CalculateCost estimates the cost of an API call. Cache reads and writes are
+// charged at the model's cache prices when it has them; otherwise every input
+// token is charged at the input price.
 func (m *Manager) CalculateCost(modelID string, usage Usage) (float64, error) {
-	if m.ProviderIDForModel(modelID) == "anthropic" {
-		if pricing, readMultiplier, ok := nativeAnthropicPricing(modelID, usage.PromptTokens); ok {
-			reads := 0
-			if usage.PromptTokensDetails != nil {
-				reads = usage.PromptTokensDetails.CachedTokens
-			}
-			plain := max(0, usage.PromptTokens-reads-usage.CacheWriteTokens)
-			shortWrites := max(0, usage.CacheWriteTokens-usage.CacheWrite1hTokens)
-			return (float64(plain)+float64(reads)*readMultiplier+float64(shortWrites)*1.25+float64(usage.CacheWrite1hTokens)*2)*pricing.Prompt/1_000_000 + float64(usage.CompletionTokens)*pricing.Completion/1_000_000, nil
+	var pricing ModelPricing
+	if tier, ok := nativeAnthropicPricing(modelID, usage.PromptTokens); ok && m.ProviderIDForModel(modelID) == "anthropic" {
+		pricing = tier
+	} else {
+		catalog, err := m.GetPricing(modelID)
+		if err != nil {
+			return 0, err
 		}
+		pricing = *catalog
 	}
-	return m.CalculateCostFromTokens(modelID, usage.PromptTokens, usage.CompletionTokens)
+	reads := 0
+	if usage.PromptTokensDetails != nil {
+		reads = usage.PromptTokensDetails.CachedTokens
+	}
+	readPrice := pricing.CacheRead
+	if readPrice == 0 {
+		readPrice = pricing.Prompt
+	}
+	shortWritePrice, longWritePrice := pricing.CacheWrite, pricing.CacheWrite1h
+	if shortWritePrice == 0 {
+		shortWritePrice = pricing.Prompt
+	}
+	if longWritePrice == 0 {
+		longWritePrice = shortWritePrice
+	}
+	writes := usage.CacheWrites()
+	plain := max(0, usage.PromptTokens-reads-writes)
+	shortWrites := max(0, writes-usage.CacheWrite1hTokens)
+	return (float64(plain)*pricing.Prompt +
+		float64(reads)*readPrice +
+		float64(shortWrites)*shortWritePrice +
+		float64(usage.CacheWrite1hTokens)*longWritePrice +
+		float64(usage.CompletionTokens)*pricing.Completion) / 1_000_000, nil
 }
 
 // CalculateCostFromTokens calculates cost from token counts

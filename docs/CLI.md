@@ -68,6 +68,36 @@ buckley --task-intent read_only \
   > plan.md
 ```
 
+To ask about a large document, pass it with `--context-file PATH` (repeatable).
+Buckley puts the files before the question in the order given and marks them as a
+cached prefix, so a second question about the same files reads the provider's
+prompt cache instead of paying for the files again:
+
+```bash
+buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Is the grammar ambiguous?"
+buckley -m anthropic/claude-fable-5-2 --context-file spec.md -p "Which rules need lookahead?"
+```
+
+A context file can also be a PNG, JPEG or WebP image, found by its extension or its
+bytes, of at most 3.75 MB. Each image goes to the model as an image in the same
+cached prefix, in the order given:
+
+```bash
+buckley -m openai/gpt-6.2-astra --context-file title.png --context-file menu.png \
+  -p "Critique the hierarchy of each screen in one line."
+```
+
+A spend cap (`--budget`) does not admit image input, because Buckley cannot count
+image tokens before the request.
+
+Unless quiet mode is on, every one-shot prints a `Usage detail:` line on stderr with input, output, cache-read
+and cache-write tokens and the estimated cost, capped or not. It also says who pays:
+`billed_to=anthropic` or `billed_to=openai` for a direct call, `billed_to=openrouter` with
+OpenRouter's reported `provider_cost_usd`, or, for a bring-your-own-key call through
+OpenRouter, `billed_to=openai(byok)` with the upstream provider's charge and OpenRouter's
+fee shown apart. Select an OpenRouter route with the `openrouter/` prefix, for example
+`-m openrouter/google/gemini-4-neon`.
+
 One-shot runs have no tool-call, elapsed-time, output-token or cost cap unless you
 ask for one. Read-only intent keeps its no-edit contract and instruction but adds no
 limit, so a model that reads widely and thinks for a long time can finish. Set caps

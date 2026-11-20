@@ -153,6 +153,7 @@ type startupOptions struct {
 	tools            []string
 	toolsSet         bool
 	readRoots        []string // --read-root paths, repeatable
+	contextFiles     []string // --context-file paths, repeatable, in order
 	allowShell       bool     // --allow-shell
 	// Optional one-shot caps; zero means no cap.
 	capFlags        map[string]bool
@@ -179,6 +180,7 @@ const (
 	startupPendingAgent
 	startupPendingTools
 	startupPendingReadRoot
+	startupPendingContextFile
 	startupPendingCap
 	startupPendingTaskIntent
 )
@@ -338,6 +340,7 @@ func main() {
 		ModelOverride: modelOverrideFlag,
 		AllowedTools:  opts.tools,
 		ReadRoots:     opts.readRoots,
+		ContextFiles:  opts.contextFiles,
 		AllowShell:    opts.allowShell,
 		Caps:          oneShotCaps{MaxToolCalls: opts.maxToolCalls, MaxElapsed: opts.maxElapsed, MaxOutputTokens: opts.maxOutputTokens, BudgetUSD: opts.budgetUSD, Set: opts.capFlags},
 		CodeMode:      opts.codeMode,
@@ -920,6 +923,8 @@ func printHelp() {
 	fmt.Println("  --budget <usd>                   Cap one-shot model spend (default: no cap)")
 	fmt.Println("  --read-root <path>               Let read-only tools read this directory or file (repeatable; also tools.read_roots)")
 	fmt.Println("                                   Approval rules and required protocol tools still apply")
+	fmt.Println("  --context-file <path>            Put a file before the one-shot question, in the order given (repeatable)")
+	fmt.Println("                                   The files form a prompt-cached prefix, so a second question about them reads the cache")
 	fmt.Println("  --encoding json|toon             Set serialization format")
 	fmt.Println("  --json                           Shortcut for --encoding json")
 	fmt.Println("  -v, --version                    Show version information")
@@ -1735,6 +1740,11 @@ func (s *startupFlagState) consumePending(opts *startupOptions, arg string) (boo
 			return true, fmt.Errorf("--read-root requires a path")
 		}
 		opts.readRoots = append(opts.readRoots, strings.TrimSpace(arg))
+	case startupPendingContextFile:
+		if strings.TrimSpace(arg) == "" {
+			return true, fmt.Errorf("--context-file requires a path")
+		}
+		opts.contextFiles = append(opts.contextFiles, strings.TrimSpace(arg))
 	case startupPendingTaskIntent:
 		if strings.TrimSpace(arg) == "" {
 			return true, fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
@@ -1828,6 +1838,11 @@ func (s *startupFlagState) consumeStartupFlag(opts *startupOptions, arg string, 
 			return false, nil
 		}
 		s.pending = startupPendingReadRoot
+	case "--context-file":
+		if !beforeCommand {
+			return false, nil
+		}
+		s.pending = startupPendingContextFile
 	case "--task-intent":
 		if !beforeCommand {
 			return false, nil
@@ -1858,6 +1873,14 @@ func (s *startupFlagState) consumeStartupValueFlag(opts *startupOptions, arg str
 		if strings.HasPrefix(arg, name+"=") && beforeCommand {
 			return true, opts.setCap(name, strings.TrimPrefix(arg, name+"="))
 		}
+	}
+	if strings.HasPrefix(arg, "--context-file=") && beforeCommand {
+		path := strings.TrimSpace(strings.TrimPrefix(arg, "--context-file="))
+		if path == "" {
+			return true, fmt.Errorf("--context-file requires a path")
+		}
+		opts.contextFiles = append(opts.contextFiles, path)
+		return true, nil
 	}
 	if strings.HasPrefix(arg, "--read-root=") && beforeCommand {
 		if strings.TrimSpace(strings.TrimPrefix(arg, "--read-root=")) == "" {
@@ -1903,6 +1926,8 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 		return fmt.Errorf("%s requires a value", s.capFlag)
 	case startupPendingReadRoot:
 		return fmt.Errorf("--read-root requires a path")
+	case startupPendingContextFile:
+		return fmt.Errorf("--context-file requires a path")
 	case startupPendingTaskIntent:
 		return fmt.Errorf("--task-intent requires a value: unknown, read_only, or mutation")
 	}
@@ -1911,6 +1936,9 @@ func (s startupFlagState) validate(opts *startupOptions) error {
 	}
 	if s.agentFlagSeen && strings.TrimSpace(opts.agentPath) == "" {
 		return fmt.Errorf("--agent requires a path")
+	}
+	if len(opts.contextFiles) > 0 && len(opts.args) > 0 {
+		return fmt.Errorf("--context-file is only supported with -p or piped one-shot input")
 	}
 	if opts.toolsSet && len(opts.args) > 0 {
 		return fmt.Errorf("--tools is only supported with -p or piped one-shot input")

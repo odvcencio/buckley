@@ -11,6 +11,30 @@ import (
 
 const anthropicBaseURL = "https://api.anthropic.com"
 
+// claudeRule is what a Claude 5 model accepts beyond the shared request shape.
+type claudeRule struct {
+	name               string
+	canDisableThinking bool // thinking: {type: "disabled"} is accepted
+	canForceTool       bool // a forced tool_choice is accepted
+}
+
+// claudeRules lists the Claude 5 models whose thinking is adaptive and
+// whose sampling parameters are rejected. Fable and Opus 5.5 always think;
+// Sonnet 5.5 returns a 400 for thinking disabled; Haiku 5.5 accepts it. Fable,
+// Opus 5.5 and Sonnet 5.5 return a 400 for a forced tool_choice.
+var claudeRules = map[string]claudeRule{
+	"claude-fable-5-2":  {name: "Claude Fable 5.2"},
+	"claude-fable-5-1":  {name: "Claude Fable 5.1"},
+	"claude-opus-5-5":   {name: "Claude Opus 5.5"},
+	"claude-sonnet-5-5": {name: "Claude Sonnet 5.5"},
+	"claude-haiku-5-5":  {name: "Claude Haiku 5.5", canDisableThinking: true, canForceTool: true},
+}
+
+func claudeRequestRules(model string) (claudeRule, bool) {
+	rule, ok := claudeRules[model]
+	return rule, ok
+}
+
 // AnthropicProvider calls the Claude Messages API.
 type AnthropicProvider struct {
 	apiKey     string
@@ -18,15 +42,46 @@ type AnthropicProvider struct {
 	httpClient *http.Client
 	transport  *ProviderTransport
 	version    string
+	overrides  catalogOverrides
 }
 
 var anthropicModels = []ModelInfo{
+	{
+		ID:                  "anthropic/claude-fable-5-2",
+		Name:                "Claude Fable 5.2",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 8.0, Completion: 40.0, CacheRead: 0.20, CacheWrite: 10.0, CacheWrite1h: 16.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
+		ID:                  "anthropic/claude-fable-5-1",
+		Name:                "Claude Fable 5.1",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 10.0, Completion: 50.0, CacheRead: 0.25, CacheWrite: 12.5, CacheWrite1h: 20.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
+	{
+		ID:                  "anthropic/claude-sonnet-5-5",
+		Name:                "Claude Sonnet 5.5",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 128000,
+		Pricing:             ModelPricing{Prompt: 2.0, Completion: 10.0, CacheRead: 0.10, CacheWrite: 2.5, CacheWrite1h: 4.0},
+		PricingKnown:        true,
+		Architecture:        Architecture{Modality: "text+image"},
+		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
+	},
 	{
 		ID:                  "anthropic/claude-haiku-5-5",
 		Name:                "Claude Haiku 5.5",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 0.10, Completion: 0.50},
+		Pricing:             ModelPricing{Prompt: 0.10, Completion: 0.50, CacheRead: 0.01, CacheWrite: 0.125, CacheWrite1h: 0.20},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -36,7 +91,7 @@ var anthropicModels = []ModelInfo{
 		Name:                "Claude Opus 5.5",
 		ContextLength:       1000000,
 		MaxCompletionTokens: 128000,
-		Pricing:             ModelPricing{Prompt: 4.0, Completion: 20.0},
+		Pricing:             ModelPricing{Prompt: 4.0, Completion: 20.0, CacheRead: 0.20, CacheWrite: 5.0, CacheWrite1h: 8.0},
 		PricingKnown:        true,
 		Architecture:        Architecture{Modality: "text+image"},
 		SupportedParameters: []string{"tools", "tool_choice", "reasoning"},
@@ -115,14 +170,26 @@ func (p *AnthropicProvider) ID() string {
 	return "anthropic"
 }
 
-// FetchCatalog returns static catalog entries.
-func (p *AnthropicProvider) FetchCatalog() (*ModelCatalog, error) {
-	return &ModelCatalog{Data: anthropicModels}, nil
+// catalog is the configured overrides, named for this provider even when the
+// provider was built without a config.
+func (p *AnthropicProvider) catalog() catalogOverrides {
+	o := p.overrides
+	o.prefix = "anthropic/"
+	return o
 }
 
-// GetModelInfo looks up metadata by ID.
+// FetchCatalog returns static catalog entries, with configured models and
+// prices.
+func (p *AnthropicProvider) FetchCatalog() (*ModelCatalog, error) {
+	return &ModelCatalog{Data: p.catalog().apply(anthropicModels)}, nil
+}
+
+// GetModelInfo looks up metadata by ID, bare or qualified.
 func (p *AnthropicProvider) GetModelInfo(modelID string) (*ModelInfo, error) {
-	if info, ok := anthropicModelIndex[modelID]; ok {
+	if strings.Contains(modelID, "/") && !strings.HasPrefix(modelID, "anthropic/") {
+		return nil, fmt.Errorf("anthropic model not found: %s", modelID)
+	}
+	if info, ok := p.catalog().lookup(anthropicModels, anthropicModelIndex, modelID); ok {
 		return &info, nil
 	}
 	return nil, fmt.Errorf("anthropic model not found: %s", modelID)
@@ -135,17 +202,71 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 		return nil, err
 	}
 
-	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	anthropicResp, err := p.send(ctx, anthReq)
 	if err != nil {
 		return nil, err
 	}
+	if anthReq.requiredTool != "" && !anthropicResp.calledTool(anthReq.requiredTool) {
+		// The model answered in text although the caller required a tool.
+		// Show it its answer and ask once more for the tool call.
+		first := anthropicResp
+		anthReq.Messages = append(anthReq.Messages,
+			anthropicMessage{Role: "assistant", Content: first.Content},
+			anthropicMessage{Role: "user", Content: []anthropicContent{{Type: "text", Text: forcedToolInstruction(anthReq.requiredTool) + " Call it now."}}},
+		)
+		anthropicResp, err = p.send(ctx, anthReq)
+		if err != nil {
+			return nil, err
+		}
+		anthropicResp.Usage = first.Usage.plus(anthropicResp.Usage)
+		if !anthropicResp.calledTool(anthReq.requiredTool) {
+			return nil, fmt.Errorf("anthropic: %s did not call the required tool after a retry", anthReq.Model)
+		}
+	}
+	return anthropicResp.toChatResponse()
+}
 
+func (p *AnthropicProvider) send(ctx context.Context, anthReq *anthropicRequest) (anthropicResponse, error) {
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	if err != nil {
+		return anthropicResponse{}, err
+	}
 	var anthropicResp anthropicResponse
 	if err := json.Unmarshal(data, &anthropicResp); err != nil {
-		return nil, fmt.Errorf("decode anthropic response: %w", err)
+		return anthropicResponse{}, fmt.Errorf("decode anthropic response: %w", err)
 	}
+	return anthropicResp, nil
+}
 
-	return anthropicResp.toChatResponse()
+// forcedToolInstruction asks for a tool call in words, for models that
+// reject a forced tool_choice.
+func forcedToolInstruction(choice string) string {
+	if choice == "required" {
+		return "Respond only by calling one of the provided tools with complete arguments. Do not reply with text alone."
+	}
+	return fmt.Sprintf("Respond only by calling the %s tool with complete arguments. Do not reply with text alone.", choice)
+}
+
+// calledTool reports whether the response holds a call that satisfies a
+// forced tool_choice: any tool for "required", else the named tool.
+func (a anthropicResponse) calledTool(choice string) bool {
+	for _, c := range a.Content {
+		if c.Type == "tool_use" && (choice == "required" || c.Name == choice) {
+			return true
+		}
+	}
+	return false
+}
+
+// plus adds two responses' token counts, for a request sent twice.
+func (u anthropicUsage) plus(next anthropicUsage) anthropicUsage {
+	u.InputTokens += next.InputTokens
+	u.OutputTokens += next.OutputTokens
+	u.CacheReadTokens += next.CacheReadTokens
+	u.CacheWriteTokens += next.CacheWriteTokens
+	u.CacheCreation.OneHourTokens += next.CacheCreation.OneHourTokens
+	u.OutputDetails.ThinkingTokens += next.OutputDetails.ThinkingTokens
+	return u
 }
 
 func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
@@ -209,12 +330,28 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 	if anthReq.MaxTokens == 0 {
 		anthReq.MaxTokens = 4096
 	}
-	if anthReq.Model == "claude-opus-5-5" || anthReq.Model == "claude-haiku-5-5" {
+	forcedTool := ""
+	if rule, ok := claudeRequestRules(anthReq.Model); ok {
+		// Claude 5 models think adaptively and reject sampling parameters.
 		anthReq.Temperature = 0
+		if !rule.canForceTool && len(req.Tools) > 0 && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			// These models return a 400 for a forced tool_choice. Ask for the
+			// tool in the system prompt instead, send tool_choice auto, and let
+			// ChatCompletion retry once when no tool call comes back.
+			forcedTool = req.ToolChoice
+			req.ToolChoice = "auto"
+			if req.Reasoning != nil && req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled && !rule.canDisableThinking {
+				// Callers turn thinking off only because some models cannot
+				// think and answer a forced tool call; auto tool choice can.
+				reasoning := *req.Reasoning
+				reasoning.Enabled = nil
+				req.Reasoning = &reasoning
+			}
+		}
 		if req.Reasoning != nil {
 			if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
-				if anthReq.Model == "claude-opus-5-5" {
-					return nil, fmt.Errorf("anthropic: Claude Opus 5.5 cannot disable thinking; select a lower effort")
+				if !rule.canDisableThinking {
+					return nil, fmt.Errorf("anthropic: %s cannot disable thinking; select a lower effort", rule.name)
 				}
 				anthReq.Thinking = &anthropicThinkingConfig{Type: "disabled"}
 			}
@@ -227,8 +364,9 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 				}
 			}
 		}
-		if anthReq.Model == "claude-opus-5-5" && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
-			return nil, fmt.Errorf("anthropic: Claude Opus 5.5 requires automatic tool choice")
+		if !rule.canForceTool && req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none" {
+			// A forced tool_choice with no tools to choose from.
+			return nil, fmt.Errorf("anthropic: %s requires automatic tool choice", rule.name)
 		}
 	}
 
@@ -272,8 +410,23 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 		}
 	}
 
+	if forcedTool != "" {
+		anthReq.requiredTool = forcedTool
+		systemParts = append(systemParts, forcedToolInstruction(forcedTool))
+	}
 	if len(systemParts) > 0 {
-		anthReq.System = strings.Join(systemParts, "\n\n")
+		system := strings.Join(systemParts, "\n\n")
+		if req.PromptCache != nil && req.PromptCache.Enabled {
+			// A breakpoint on the system prompt caches the tools and system
+			// prompt together, whatever follows them.
+			anthReq.System = []anthropicContent{{
+				Type:         "text",
+				Text:         system,
+				CacheControl: &CacheControl{Type: promptCacheControlType, TTL: req.PromptCache.TTL},
+			}}
+		} else {
+			anthReq.System = system
+		}
 	}
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
 		anthReq.Tools = toAnthropicTools(req.Tools)
@@ -286,7 +439,7 @@ func (p *AnthropicProvider) toAnthropicRequest(req ChatRequest, stream bool) (*a
 // anthropicRequest maps to Anthropics messages payload.
 type anthropicRequest struct {
 	Model        string                   `json:"model"`
-	System       string                   `json:"system,omitempty"`
+	System       any                      `json:"system,omitempty"` // a string, or text blocks with cache_control
 	Messages     []anthropicMessage       `json:"messages"`
 	MaxTokens    int                      `json:"max_tokens"`
 	Temperature  float64                  `json:"temperature,omitempty"`
@@ -297,6 +450,9 @@ type anthropicRequest struct {
 	OutputConfig *anthropicOutputConfig   `json:"output_config,omitempty"`
 	Thinking     *anthropicThinkingConfig `json:"thinking,omitempty"`
 	CacheControl *CacheControl            `json:"cache_control,omitempty"`
+	// requiredTool is the forced tool_choice ("required" or a tool name) that
+	// was sent as auto because the model rejects forced tool use.
+	requiredTool string
 }
 
 type anthropicThinkingConfig struct {
@@ -320,7 +476,11 @@ type anthropicContent struct {
 	Input     map[string]any `json:"input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   any            `json:"content,omitempty"`
-	raw       json.RawMessage
+	// Source is an image block's data.
+	Source *anthropicImageSource `json:"source,omitempty"`
+	// CacheControl ends a cached prefix at this block.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	raw          json.RawMessage
 }
 
 // Keep the complete native block, including empty thinking and unknown fields.
@@ -518,6 +678,28 @@ func anthropicMessageContent(msg Message) ([]anthropicContent, error) {
 }
 
 func anthropicTextBlocks(content any) []anthropicContent {
+	if parts, ok := content.([]ContentPart); ok && (contentHasCacheControl(parts) || contentHasImage(parts)) {
+		// Keep each part its own block so images reach the model and a cache
+		// breakpoint ends exactly where the stable prefix ends.
+		var blocks []anthropicContent
+		for _, part := range parts {
+			var block anthropicContent
+			switch {
+			case part.ImageURL != nil && part.ImageURL.URL != "":
+				block = anthropicContent{Type: "image", Source: anthropicImageSourceFor(part.ImageURL.URL)}
+			case (part.Type == "" || part.Type == "text") && part.Text != "":
+				block = anthropicContent{Type: "text", Text: part.Text}
+			default:
+				continue
+			}
+			if part.CacheControl != nil {
+				control := *part.CacheControl
+				block.CacheControl = &control
+			}
+			blocks = append(blocks, block)
+		}
+		return blocks
+	}
 	text := strings.TrimSpace(messageContentToText(content))
 	if text == "" {
 		return nil
@@ -548,4 +730,35 @@ func toStreamDelta(msg Message) MessageDelta {
 		})
 	}
 	return delta
+}
+
+// anthropicImageSource is the source of an Anthropic image block: base64
+// data with its media type, or a URL.
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// anthropicImageSourceFor turns an image_url (a data: URL or a web URL) into
+// an Anthropic image source.
+func anthropicImageSourceFor(url string) *anthropicImageSource {
+	if rest, ok := strings.CutPrefix(url, "data:"); ok {
+		if meta, data, ok := strings.Cut(rest, ","); ok {
+			if mediaType, ok := strings.CutSuffix(meta, ";base64"); ok {
+				return &anthropicImageSource{Type: "base64", MediaType: mediaType, Data: data}
+			}
+		}
+	}
+	return &anthropicImageSource{Type: "url", URL: url}
+}
+
+func contentHasImage(parts []ContentPart) bool {
+	for _, part := range parts {
+		if part.ImageURL != nil && part.ImageURL.URL != "" {
+			return true
+		}
+	}
+	return false
 }

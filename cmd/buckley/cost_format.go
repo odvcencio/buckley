@@ -102,9 +102,10 @@ func traceCostAmount(trace *transparency.Trace) string {
 func formatTraceCost(trace *transparency.Trace) string {
 	if trace.CostUnknown {
 		if trace.Cost > 0 {
-			return fmt.Sprintf("Cost: unknown ($%.4f known subtotal)", trace.Cost)
+			return fmt.Sprintf("Cost: price unconfirmed ($%.4f known subtotal)", trace.Cost)
 		}
-		return "Cost: unknown"
+		// No price from a primary source, so no number is printed.
+		return "Cost: price unconfirmed"
 	}
 	return "Cost: " + traceCostAmount(trace)
 }

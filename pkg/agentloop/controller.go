@@ -2091,6 +2091,8 @@ func (c *Controller) priceCostBoundedCandidate(base model.ChatRequest, allowance
 			PromptTokens:     inputTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      inputTokens + completionTokens,
+			// The provider may write any of this input to its prompt cache.
+			AdmissionBound: true,
 		}
 		cost, priceErr := c.priceUsage(usage)
 		if priceErr != nil {
