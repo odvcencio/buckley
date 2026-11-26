@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"m31labs.dev/buckley/pkg/config"
@@ -142,5 +143,59 @@ func TestCycleRecentModel_SwitchesToNextEntry(t *testing.T) {
 
 	if ctrl.modelOverride != "openai/gpt-4o" {
 		t.Fatalf("modelOverride = %q, want openai/gpt-4o", ctrl.modelOverride)
+	}
+}
+
+func TestSetReasoningEffort_AppliesAndValidates(t *testing.T) {
+	tests := []struct {
+		name        string
+		start       string
+		args        []string
+		wantEffort  string
+		wantVariant bool
+		wantHeader  string
+		wantMessage string
+	}{
+		{name: "sets level", start: "medium", args: []string{"HIGH"}, wantEffort: "high", wantHeader: "effort high", wantMessage: "set to high"},
+		{name: "rejects off", start: "medium", args: []string{"off"}, wantEffort: "medium", wantVariant: true, wantMessage: "Unknown effort"},
+		{name: "auto clears header", start: "high", args: []string{"auto"}, wantEffort: "auto", wantHeader: "", wantMessage: "set to auto"},
+		{name: "rejects unknown", start: "medium", args: []string{"turbo"}, wantEffort: "medium", wantVariant: true, wantMessage: "Unknown effort"},
+		{name: "shows current", start: "low", wantEffort: "low", wantVariant: true, wantMessage: "Reasoning effort: low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl, app := newVariantTestController(t)
+			ctrl.cfg.Models.Reasoning = tt.start
+			ctrl.modelVariant = "balanced"
+
+			ctrl.setReasoningEffort(tt.args)
+
+			if ctrl.cfg.Models.Reasoning != tt.wantEffort {
+				t.Fatalf("Reasoning = %q, want %q", ctrl.cfg.Models.Reasoning, tt.wantEffort)
+			}
+			if got := ctrl.modelVariant == "balanced"; got != tt.wantVariant {
+				t.Fatalf("variant kept = %v, want %v", got, tt.wantVariant)
+			}
+			if !tt.wantVariant {
+				select {
+				case msg := <-app.messages:
+					variant, ok := msg.(ModelVariantMsg)
+					if !ok || variant.Name != tt.wantHeader {
+						t.Fatalf("header message = %#v, want ModelVariantMsg %q", msg, tt.wantHeader)
+					}
+				default:
+					t.Fatal("expected a header update")
+				}
+			}
+			select {
+			case msg := <-app.messages:
+				add, ok := msg.(AddMessageMsg)
+				if !ok || !strings.Contains(add.Content, tt.wantMessage) {
+					t.Fatalf("message = %#v, want it to contain %q", msg, tt.wantMessage)
+				}
+			default:
+				t.Fatal("expected a system message")
+			}
+		})
 	}
 }

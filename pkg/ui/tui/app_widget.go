@@ -652,6 +652,7 @@ func (a *WidgetApp) showSlashCommandPalette() {
 		{ID: "/prev", Label: "/prev", Description: "Switch to previous session"},
 		{ID: "/model", Label: "/model", Description: "Select execution model"},
 		{ID: "/model curate", Label: "/model curate", Description: "Curate models for ACP/editor pickers"},
+		{ID: "/effort ", Label: "/effort", Description: "Show or set reasoning effort"},
 		{ID: "/plans", Label: "/plans", Description: "List saved plans"},
 		{ID: "/config", Label: "/config", Description: "Show config summary"},
 		{ID: "/help", Label: "/help", Description: "Show available commands"},

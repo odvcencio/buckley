@@ -759,6 +759,9 @@ func (c *Controller) handleCommand(text string) {
 			c.showLiveModelPicker()
 		}
 
+	case "/effort", "/reasoning":
+		c.setReasoningEffort(parts[1:])
+
 	case "/tokens", "/context", "/usage", "/status":
 		c.showContextReport()
 
@@ -828,6 +831,7 @@ func (c *Controller) handleCommand(text string) {
   /next, /n            - Switch to next session
   /prev, /p            - Switch to previous session
   /model [id]          - Pick or set the execution model
+  /effort [level]      - Show or set reasoning effort (auto, low, medium, high, xhigh, max)
   /model curate        - Curate models for ACP/editor pickers
   /skill [name|list]   - List or activate a skill
   /plans               - List saved plans
