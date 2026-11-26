@@ -264,3 +264,60 @@ func TestAnthropicProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
 		t.Fatalf("apiErr = %#v", apiErr)
 	}
 }
+
+func TestAnthropicProvider_ChatCompletion_DropsStaleThinkingBlocks(t *testing.T) {
+	const staleSignatureError = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: Invalid signature in thinking block. The block is bound to a different conversation. Remove the block, or set thinking.block_binding.prefix_mismatch_behavior to \"drop_block\"."}}`
+	var bodies []anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body anthropicRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, staleSignatureError)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"msg_2","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	signed := func(text string) []ReasoningDetail {
+		return []ReasoningDetail{{
+			Type:   "reasoning.encrypted",
+			Format: anthropicContentFormat,
+			Data:   `[{"type":"thinking","thinking":"t","signature":"sig"},{"type":"text","text":"` + text + `"}]`,
+		}}
+	}
+	provider := NewAnthropicProvider("test-key", server.URL, false)
+	provider.httpClient = server.Client()
+
+	resp, err := provider.ChatCompletion(context.Background(), ChatRequest{
+		Model: "anthropic/claude-opus-5-5",
+		Messages: []Message{
+			{Role: "user", Content: "one"},
+			{Role: "assistant", Content: "first", ReasoningDetails: signed("first")},
+			{Role: "user", Content: "two"},
+			{Role: "assistant", Content: "second", ReasoningDetails: signed("second")},
+			{Role: "user", Content: "three"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v, want stale thinking dropped and retried", err)
+	}
+	if got := messageContentToText(resp.Choices[0].Message.Content); got != "ok" {
+		t.Fatalf("content = %q, want ok", got)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	retry := bodies[1].Messages
+	if retry[1].Content[0].Type != "thinking" {
+		t.Fatalf("message 1 = %#v, want thinking before the reported index kept", retry[1].Content)
+	}
+	if len(retry[3].Content) != 1 || retry[3].Content[0].Type != "text" || retry[3].Content[0].Text != "second" {
+		t.Fatalf("message 3 = %#v, want only the text block", retry[3].Content)
+	}
+}

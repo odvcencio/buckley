@@ -3,8 +3,11 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -126,6 +129,12 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	}
 
 	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	if from, stale := staleThinkingMessageIndex(err); stale {
+		// Signed thinking is bound to the exact prior conversation; once
+		// history is rewritten the API asks for the block to be removed.
+		dropThinkingBlocks(anthReq.Messages, from)
+		data, err = p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +145,44 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 	}
 
 	return anthropicResp.toChatResponse()
+}
+
+var staleThinkingMessagePattern = regexp.MustCompile(`messages\.(\d+)\.content`)
+
+// staleThinkingMessageIndex reports whether err rejects a replayed thinking
+// signature, and the first message index it names (0 when none is named).
+func staleThinkingMessageIndex(err error) (int, bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(apiErr.Message, "Invalid signature in thinking block") {
+		return 0, false
+	}
+	match := staleThinkingMessagePattern.FindStringSubmatch(apiErr.Message)
+	if match == nil {
+		return 0, true
+	}
+	index, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return 0, true
+	}
+	return index, true
+}
+
+// dropThinkingBlocks removes thinking blocks from messages[from:]. Later
+// signatures are bound to the same stale prefix as the rejected one.
+func dropThinkingBlocks(messages []anthropicMessage, from int) {
+	for i := min(from, len(messages)); i < len(messages); i++ {
+		var kept []anthropicContent
+		for _, block := range messages[i].Content {
+			if block.Type != "thinking" && block.Type != "redacted_thinking" {
+				kept = append(kept, block)
+			}
+		}
+		if len(kept) == 0 {
+			kept = []anthropicContent{{Type: "text", Text: "(no visible response)"}}
+		}
+		messages[i].Content = kept
+	}
 }
 
 func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
