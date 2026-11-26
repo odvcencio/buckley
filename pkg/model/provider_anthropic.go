@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -227,7 +228,21 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatRequest)
 }
 
 func (p *AnthropicProvider) send(ctx context.Context, anthReq *anthropicRequest) (anthropicResponse, error) {
-	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, p.setAuthHeaders)
+	anthReq.bindThinking()
+	setHeaders := func(r *http.Request) {
+		p.setAuthHeaders(r)
+		if anthReq.Thinking != nil && anthReq.Thinking.BlockBinding != nil {
+			r.Header.Add("anthropic-beta", anthropicThinkingBindingBeta)
+		}
+	}
+	data, err := p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, setHeaders)
+	if isStaleThinkingError(err) {
+		// Signed thinking is bound to the exact prior conversation and the
+		// API names only one stale block per rejection, so replay none.
+		dropThinkingBlocks(anthReq.Messages)
+		anthReq.bindThinking()
+		data, err = p.transport.Do(ctx, p.httpClient, "POST", p.baseURL+"/v1/messages", anthReq, setHeaders)
+	}
 	if err != nil {
 		return anthropicResponse{}, err
 	}
@@ -267,6 +282,32 @@ func (u anthropicUsage) plus(next anthropicUsage) anthropicUsage {
 	u.CacheCreation.OneHourTokens += next.CacheCreation.OneHourTokens
 	u.OutputDetails.ThinkingTokens += next.OutputDetails.ThinkingTokens
 	return u
+}
+
+// isStaleThinkingError reports whether err rejects a replayed thinking
+// signature bound to a different conversation prefix.
+func isStaleThinkingError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(apiErr.Message, "Invalid signature in thinking block") ||
+		strings.Contains(apiErr.Message, "prefix_mismatch_behavior")
+}
+
+func dropThinkingBlocks(messages []anthropicMessage) {
+	for i := range messages {
+		var kept []anthropicContent
+		for _, block := range messages[i].Content {
+			if block.Type != "thinking" && block.Type != "redacted_thinking" {
+				kept = append(kept, block)
+			}
+		}
+		if len(kept) == 0 {
+			kept = []anthropicContent{{Type: "text", Text: "(no visible response)"}}
+		}
+		messages[i].Content = kept
+	}
 }
 
 func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
@@ -455,8 +496,44 @@ type anthropicRequest struct {
 	requiredTool string
 }
 
+const anthropicThinkingBindingBeta = "thinking-binding-controls-2026-08-01"
+
 type anthropicThinkingConfig struct {
-	Type string `json:"type"`
+	Type         string                 `json:"type,omitempty"`
+	BlockBinding *anthropicBlockBinding `json:"block_binding,omitempty"`
+}
+
+type anthropicBlockBinding struct {
+	PrefixMismatchBehavior string `json:"prefix_mismatch_behavior"`
+}
+
+// bindThinking asks the API to drop replayed thinking whose signature is bound
+// to a different prefix, as resumed or compacted history can shift it.
+func (r *anthropicRequest) bindThinking() {
+	if replaysThinking(r.Messages) {
+		if r.Thinking == nil {
+			r.Thinking = &anthropicThinkingConfig{}
+		}
+		r.Thinking.BlockBinding = &anthropicBlockBinding{PrefixMismatchBehavior: "drop_block"}
+		return
+	}
+	if r.Thinking != nil {
+		r.Thinking.BlockBinding = nil
+		if r.Thinking.Type == "" {
+			r.Thinking = nil
+		}
+	}
+}
+
+func replaysThinking(messages []anthropicMessage) bool {
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.Type == "thinking" || block.Type == "redacted_thinking" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type anthropicOutputConfig struct {
