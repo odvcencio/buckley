@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -263,19 +264,26 @@ func TestAnthropicProvider_ChatCompletionSurfacesStructuredError(t *testing.T) {
 }
 
 func TestAnthropicProvider_ChatCompletion_DropsStaleThinkingBlocks(t *testing.T) {
-	const staleSignatureError = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: Invalid signature in thinking block. The block is bound to a different conversation. Remove the block, or set thinking.block_binding.prefix_mismatch_behavior to \"drop_block\"."}}`
+	// The API names one stale block per rejection, not necessarily the
+	// earliest, so the retry must not replay any signed thinking.
 	var bodies []anthropicRequest
+	var betas []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body anthropicRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		bodies = append(bodies, body)
+		betas = append(betas, r.Header.Get("anthropic-beta"))
 		w.Header().Set("Content-Type", "application/json")
-		if len(bodies) == 1 {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, staleSignatureError)
-			return
+		for i := len(body.Messages) - 1; i >= 0; i-- {
+			for _, block := range body.Messages[i].Content {
+				if block.Type == "thinking" {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.%d.content.0: Invalid signature in thinking block. The block is bound to a different conversation. Remove the block, or set thinking.block_binding.prefix_mismatch_behavior to \"drop_block\"."}}`, i)
+					return
+				}
+			}
 		}
 		_, _ = io.WriteString(w, `{"id":"msg_2","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
@@ -311,10 +319,102 @@ func TestAnthropicProvider_ChatCompletion_DropsStaleThinkingBlocks(t *testing.T)
 		t.Fatalf("requests = %d, want 2", len(bodies))
 	}
 	retry := bodies[1].Messages
-	if retry[1].Content[0].Type != "thinking" {
-		t.Fatalf("message 1 = %#v, want thinking before the reported index kept", retry[1].Content)
+	for _, i := range []int{1, 3} {
+		if len(retry[i].Content) != 1 || retry[i].Content[0].Type != "text" {
+			t.Fatalf("message %d = %#v, want only the text block", i, retry[i].Content)
+		}
 	}
-	if len(retry[3].Content) != 1 || retry[3].Content[0].Type != "text" || retry[3].Content[0].Text != "second" {
-		t.Fatalf("message 3 = %#v, want only the text block", retry[3].Content)
+	if bodies[1].Thinking != nil || betas[1] != "" {
+		t.Fatalf("retry thinking = %#v, anthropic-beta = %q; want no binding controls without replayed thinking", bodies[1].Thinking, betas[1])
+	}
+}
+
+func TestAnthropicProvider_ChatCompletion_ThinkingBindingControls(t *testing.T) {
+	signed := []ReasoningDetail{{
+		Type:   "reasoning.encrypted",
+		Format: anthropicContentFormat,
+		Data:   `[{"type":"thinking","thinking":"t","signature":"sig"},{"type":"text","text":"first"}]`,
+	}}
+	tests := []struct {
+		name     string
+		messages []Message
+		want     bool
+	}{
+		{name: "replayed thinking", want: true, messages: []Message{
+			{Role: "user", Content: "one"},
+			{Role: "assistant", Content: "first", ReasoningDetails: signed},
+			{Role: "user", Content: "two"},
+		}},
+		{name: "no thinking", want: false, messages: []Message{{Role: "user", Content: "one"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var beta string
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				beta = r.Header.Get("anthropic-beta")
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"msg","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			t.Cleanup(server.Close)
+			provider := NewAnthropicProvider("test-key", server.URL, false)
+			provider.httpClient = server.Client()
+
+			if _, err := provider.ChatCompletion(context.Background(), ChatRequest{
+				Model: "anthropic/claude-opus-5-5", Messages: tt.messages,
+			}); err != nil {
+				t.Fatalf("ChatCompletion() error = %v", err)
+			}
+			thinking, hasThinking := body["thinking"].(map[string]any)
+			if hasThinking != tt.want || (beta == anthropicThinkingBindingBeta) != tt.want {
+				t.Fatalf("thinking = %#v, anthropic-beta = %q, want controls %v", body["thinking"], beta, tt.want)
+			}
+			if tt.want {
+				binding, _ := thinking["block_binding"].(map[string]any)
+				if binding["prefix_mismatch_behavior"] != "drop_block" {
+					t.Fatalf("block_binding = %#v, want drop_block", thinking["block_binding"])
+				}
+			}
+		})
+	}
+}
+
+func TestIsStaleThinkingError_PrefixMismatchMessage(t *testing.T) {
+	err := &APIError{StatusCode: http.StatusBadRequest, Message: `messages.5.content.0: The block is bound to a different conversation. Remove the block, or set thinking.block_binding.prefix_mismatch_behavior to "drop_block". That setting requires the thinking-binding-controls-2026-08-01 value in the anthropic-beta header.`}
+	if !isStaleThinkingError(err) {
+		t.Fatal("isStaleThinkingError() = false, want true")
+	}
+}
+
+func TestAnthropicRequest_BindThinking(t *testing.T) {
+	thinking := []anthropicMessage{{Role: "assistant", Content: []anthropicContent{{Type: "thinking"}}}}
+	plain := []anthropicMessage{{Role: "user", Content: []anthropicContent{{Type: "text", Text: "hi"}}}}
+	bound := func() *anthropicThinkingConfig {
+		return &anthropicThinkingConfig{BlockBinding: &anthropicBlockBinding{PrefixMismatchBehavior: "drop_block"}}
+	}
+	tests := []struct {
+		name     string
+		req      anthropicRequest
+		wantBind bool
+		wantNil  bool
+	}{
+		{name: "thinking without config", req: anthropicRequest{Messages: thinking}, wantBind: true},
+		{name: "no thinking without config", req: anthropicRequest{Messages: plain}, wantNil: true},
+		{name: "binding cleared after drop", req: anthropicRequest{Messages: plain, Thinking: bound()}, wantNil: true},
+		{name: "disabled kept after drop", req: anthropicRequest{Messages: plain, Thinking: &anthropicThinkingConfig{Type: "disabled", BlockBinding: &anthropicBlockBinding{}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.req.bindThinking()
+			if tt.wantNil != (tt.req.Thinking == nil) {
+				t.Fatalf("Thinking = %#v, want nil %v", tt.req.Thinking, tt.wantNil)
+			}
+			if tt.req.Thinking != nil && (tt.req.Thinking.BlockBinding != nil) != tt.wantBind {
+				t.Fatalf("BlockBinding = %#v, want bound %v", tt.req.Thinking.BlockBinding, tt.wantBind)
+			}
+		})
 	}
 }
