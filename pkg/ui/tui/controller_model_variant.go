@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"m31labs.dev/buckley/pkg/conversation"
@@ -75,4 +76,41 @@ func (c *Controller) rememberRecentModel(modelID string) {
 		filtered = filtered[:maxRecentModels]
 	}
 	c.recentModels = filtered
+}
+
+// reasoningEfforts lists the values accepted by /effort, lowest first.
+var reasoningEfforts = []string{"auto", "low", "medium", "high", "xhigh", "max"}
+
+// setReasoningEffort applies an explicit effort for subsequent turns. It
+// replaces any variant preset, since the user is now choosing effort directly.
+func (c *Controller) setReasoningEffort(args []string) {
+	if len(args) == 0 {
+		c.mu.Lock()
+		current := "auto"
+		if c.cfg != nil && strings.TrimSpace(c.cfg.Models.Reasoning) != "" {
+			current = c.cfg.Models.Reasoning
+		}
+		c.mu.Unlock()
+		c.app.AddMessage(fmt.Sprintf("Reasoning effort: %s. Usage: /effort <%s>", current, strings.Join(reasoningEfforts, "|")), "system")
+		return
+	}
+	effort := strings.ToLower(strings.TrimSpace(args[0]))
+	if !slices.Contains(reasoningEfforts, effort) {
+		c.app.AddMessage(fmt.Sprintf("Unknown effort %q. Choose one of: %s", args[0], strings.Join(reasoningEfforts, ", ")), "system")
+		return
+	}
+
+	c.mu.Lock()
+	if c.cfg != nil {
+		c.cfg.Models.Reasoning = effort
+	}
+	c.modelVariant = ""
+	c.mu.Unlock()
+
+	label := ""
+	if effort != "auto" {
+		label = "effort " + effort
+	}
+	c.app.SetModelVariant(label)
+	c.app.AddMessage(fmt.Sprintf("Reasoning effort set to %s for this session.", effort), "system")
 }
